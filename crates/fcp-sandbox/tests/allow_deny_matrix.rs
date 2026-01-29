@@ -199,11 +199,13 @@ mod default_deny {
         let result = guard.check_ip_constraints(ip, &constraints);
 
         assert!(result.is_err());
-        if let Err(EgressError::Denied { code, .. }) = result {
-            assert_eq!(code, DenyReason::LocalhostDenied);
-        } else {
-            panic!("expected LocalhostDenied");
-        }
+        assert!(matches!(
+            result,
+            Err(EgressError::Denied {
+                code: DenyReason::LocalhostDenied,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -1249,10 +1251,7 @@ mod edge_cases {
 
         let result = guard.evaluate(&request, &constraints);
         assert!(result.is_err());
-        match result {
-            Err(EgressError::InvalidUrl(_)) => {}
-            _ => panic!("expected InvalidUrl error"),
-        }
+        assert!(matches!(result, Err(EgressError::InvalidUrl(_))));
     }
 
     #[test]

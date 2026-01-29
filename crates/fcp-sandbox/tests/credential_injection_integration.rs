@@ -272,15 +272,13 @@ mod http_injection {
         let result = injector.inject_http("cred-nonexistent", &mut headers);
 
         assert!(result.is_err());
-        match result {
-            Err(EgressError::CredentialError(msg)) => {
-                assert!(msg.contains("not found"));
-                // IMPORTANT: Error message MUST NOT contain actual secret material
-                assert!(!msg.contains("secret"));
-                assert!(!msg.contains("token"));
-                assert!(!msg.contains("password"));
-            }
-            _ => panic!("expected CredentialError"),
+        assert!(matches!(result, Err(EgressError::CredentialError(_))));
+        if let Err(EgressError::CredentialError(msg)) = result {
+            assert!(msg.contains("not found"));
+            // IMPORTANT: Error message MUST NOT contain actual secret material
+            assert!(!msg.contains("secret"));
+            assert!(!msg.contains("token"));
+            assert!(!msg.contains("password"));
         }
     }
 
@@ -418,11 +416,9 @@ mod capability_gating {
         let result = injector.is_authorized("cred-nonexistent", "op.fetch", &credential_allow);
 
         assert!(result.is_err());
-        match result {
-            Err(EgressError::CredentialError(msg)) => {
-                assert!(msg.contains("not found"));
-            }
-            _ => panic!("expected CredentialError"),
+        assert!(matches!(result, Err(EgressError::CredentialError(_))));
+        if let Err(EgressError::CredentialError(msg)) = result {
+            assert!(msg.contains("not found"));
         }
     }
 }
@@ -608,12 +604,13 @@ mod integration {
             &credential_allow,
         );
 
-        match result {
-            Err(EgressError::Denied { code, .. }) => {
-                assert_eq!(code, DenyReason::CredentialNotAuthorized);
-            }
-            _ => panic!("expected CredentialNotAuthorized"),
-        }
+        assert!(matches!(
+            result,
+            Err(EgressError::Denied {
+                code: DenyReason::CredentialNotAuthorized,
+                ..
+            })
+        ));
     }
 
     /// Simulates denial when host doesn't match credential's `host_allow`.
@@ -642,12 +639,13 @@ mod integration {
             &["cred-api-bearer".into()],
         );
 
-        match result {
-            Err(EgressError::Denied { code, .. }) => {
-                assert_eq!(code, DenyReason::CredentialHostNotAllowed);
-            }
-            _ => panic!("expected CredentialHostNotAllowed"),
-        }
+        assert!(matches!(
+            result,
+            Err(EgressError::Denied {
+                code: DenyReason::CredentialHostNotAllowed,
+                ..
+            })
+        ));
     }
 
     /// Proves that requests without credentials still work.
@@ -715,14 +713,17 @@ mod structured_logging {
         let result = guard.evaluate(&request, &constraints);
 
         // Verify we get a Denied error with the correct reason code
-        match result {
-            Err(EgressError::Denied { code, reason }) => {
-                assert_eq!(code, DenyReason::HostNotAllowed);
-                assert!(reason.contains("evil.com"));
-                // This code would be serialized to structured logs as:
-                // {"event": "egress_denied", "reason_code": "host_not_allowed", ...}
-            }
-            _ => panic!("expected Denied error"),
+        assert!(matches!(
+            result,
+            Err(EgressError::Denied {
+                code: DenyReason::HostNotAllowed,
+                ..
+            })
+        ));
+        if let Err(EgressError::Denied { reason, .. }) = result {
+            assert!(reason.contains("evil.com"));
+            // This code would be serialized to structured logs as:
+            // {"event": "egress_denied", "reason_code": "host_not_allowed", ...}
         }
     }
 
@@ -751,12 +752,13 @@ mod structured_logging {
 
         let result = guard.check_ip_constraints("127.0.0.1".parse().unwrap(), &constraints);
 
-        match result {
-            Err(EgressError::Denied { code, .. }) => {
-                assert_eq!(code, DenyReason::LocalhostDenied);
-            }
-            _ => panic!("expected Denied error"),
-        }
+        assert!(matches!(
+            result,
+            Err(EgressError::Denied {
+                code: DenyReason::LocalhostDenied,
+                ..
+            })
+        ));
     }
 }
 

@@ -7,6 +7,7 @@
 //! - Network blocking verification
 //! - Platform-specific sandbox availability
 
+use std::net::Shutdown;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
@@ -426,7 +427,9 @@ mod linux_apply_integration {
         }
 
         // Attempt direct network access; seccomp should kill the process.
-        let _ = std::net::TcpStream::connect("1.1.1.1:80");
+        if let Ok(stream) = std::net::TcpStream::connect("1.1.1.1:80") {
+            let _ = stream.shutdown(Shutdown::Both);
+        }
 
         // If we made it here, sandbox did not block as expected.
         std::process::exit(1);

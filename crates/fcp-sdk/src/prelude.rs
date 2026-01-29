@@ -79,7 +79,10 @@ pub use crate::{
 };
 
 // Formatting helpers
-pub use crate::{FormatError, FormatMode, Formatter, RenderResult};
+pub use crate::{
+    ErrorClass, FormatError, FormatMode, Formatter, RenderResult, classify_error_message,
+    is_parse_error_message,
+};
 
 // External crates commonly needed
 pub use serde::{Deserialize, Serialize};

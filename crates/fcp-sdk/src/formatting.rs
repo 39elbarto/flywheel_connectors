@@ -68,6 +68,15 @@ impl Formatter {
         )
     }
 
+    /// Force plaintext fallback for a given mode, stripping markup where possible.
+    #[must_use]
+    pub fn render_plaintext_fallback(input: &str, mode: FormatMode) -> RenderResult {
+        RenderResult {
+            rendered: fallback_plaintext(input, mode),
+            parse_mode_used: None,
+        }
+    }
+
     fn render(input: &str, mode: FormatMode) -> Result<String, FormatError> {
         match mode {
             FormatMode::Plain => Ok(escape_control_chars(input)),
@@ -81,6 +90,70 @@ impl Formatter {
             }
         }
     }
+}
+
+/// High-level classification for external service errors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorClass {
+    /// Message formatting or parsing failed (safe to fallback to plaintext).
+    ParseError,
+    /// Rate limit exceeded; retry should be delayed.
+    RateLimit,
+    /// Transient failure (timeouts, network issues).
+    Transient,
+    /// Non-retryable failure.
+    Terminal,
+}
+
+/// Classify a free-form error message into a high-level category.
+#[must_use]
+pub fn classify_error_message(message: &str) -> ErrorClass {
+    let lower = message.to_lowercase();
+
+    if is_parse_error_message(&lower) {
+        return ErrorClass::ParseError;
+    }
+
+    if lower.contains("rate limit")
+        || lower.contains("rate-limit")
+        || lower.contains("too many requests")
+        || lower.contains("retry after")
+        || lower.contains("http 429")
+    {
+        return ErrorClass::RateLimit;
+    }
+
+    if lower.contains("timeout")
+        || lower.contains("timed out")
+        || lower.contains("temporarily")
+        || lower.contains("temporary")
+        || lower.contains("unavailable")
+        || lower.contains("connection reset")
+        || lower.contains("connection refused")
+        || lower.contains("network error")
+        || lower.contains("http 502")
+        || lower.contains("http 503")
+        || lower.contains("http 504")
+    {
+        return ErrorClass::Transient;
+    }
+
+    ErrorClass::Terminal
+}
+
+/// Returns true if a message indicates a formatting/markup parse failure.
+#[must_use]
+pub fn is_parse_error_message(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    is_parse_error_message_lower(&lower)
+}
+
+fn is_parse_error_message_lower(lower: &str) -> bool {
+    lower.contains("can't parse entities")
+        || lower.contains("parse entities")
+        || lower.contains("find end of the entity")
+        || (lower.contains("markdown") && lower.contains("parse"))
+        || lower.contains("invalid markdown")
 }
 
 fn validate_html(input: &str) -> Result<(), FormatError> {

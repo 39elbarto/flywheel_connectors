@@ -161,7 +161,10 @@ pub mod runtime;
 pub mod streaming;
 
 /// Formatting helpers with safe fallback behavior.
-pub use formatting::{FormatError, FormatMode, Formatter, RenderResult};
+pub use formatting::{
+    ErrorClass, FormatError, FormatMode, Formatter, RenderResult, classify_error_message,
+    is_parse_error_message,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Schema validation helpers

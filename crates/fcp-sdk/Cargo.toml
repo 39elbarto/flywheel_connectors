@@ -29,3 +29,5 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 fcp-cbor = { path = "../fcp-cbor" }
 semver = { workspace = true }
+reqwest = { workspace = true }
+wiremock = { workspace = true }

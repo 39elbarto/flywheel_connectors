@@ -2,6 +2,25 @@
 //!
 //! Provides a small, deterministic policy for translating retry decisions into
 //! concrete delays (including Retry-After hints).
+//!
+//! # Example
+//!
+//! ```ignore
+//! use fcp_sdk::retry::{map_external_error, RetryPolicy};
+//!
+//! let attempt = 0;
+//! let (decision, _err) = map_external_error(
+//!     "example-service",
+//!     Some(503),
+//!     "Service Unavailable",
+//!     None,
+//! );
+//!
+//! let policy = RetryPolicy::new().with_jitter_enabled(false);
+//! if let Some(delay) = policy.next_delay(attempt, decision, None) {
+//!     // sleep for delay, then retry
+//! }
+//! ```
 
 use std::time::Duration;
 

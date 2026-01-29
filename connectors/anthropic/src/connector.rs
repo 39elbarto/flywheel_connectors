@@ -738,11 +738,15 @@ mod tests {
             .await;
 
         assert!(result.is_err());
-        match result.unwrap_err() {
+        let err = result.unwrap_err();
+        match err {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("messages"));
             }
-            e => panic!("Unexpected error: {:?}", e),
+            _ => assert!(
+                false,
+                "Expected InvalidRequest for missing messages, got: {err:?}"
+            ),
         }
     }
 

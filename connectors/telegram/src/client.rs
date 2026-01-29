@@ -462,12 +462,10 @@ mod tests {
         let result = client.get_me().await;
         assert!(result.is_err());
         let err = result.unwrap_err();
-        match err {
-            TelegramError::Api { code, description } => {
-                assert_eq!(code, 401);
-                assert_eq!(description, "Unauthorized");
-            }
-            _ => panic!("Expected Api error, got {err:?}"),
+        assert!(matches!(err, TelegramError::Api { .. }));
+        if let TelegramError::Api { code, description } = err {
+            assert_eq!(code, 401);
+            assert_eq!(description, "Unauthorized");
         }
     }
 
@@ -555,11 +553,9 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.is_retryable());
-        match err {
-            TelegramError::Api { code, .. } => {
-                assert_eq!(code, 429);
-            }
-            _ => panic!("Expected Api error"),
+        assert!(matches!(err, TelegramError::Api { .. }));
+        if let TelegramError::Api { code, .. } = err {
+            assert_eq!(code, 429);
         }
     }
 

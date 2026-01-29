@@ -336,11 +336,26 @@ impl TwitterConnector {
         let config = self.config.as_ref().ok_or(FcpError::NotConfigured)?;
 
         // Start stream if not already active
-        let mut stream_active = self.stream_active.write().await;
-        if !*stream_active {
+        let should_start = {
+            let mut active = self.stream_active.write().await;
+            if *active {
+                false
+            } else {
+                *active = true;
+                true
+            }
+        };
+
+        if should_start {
             let stream = FilteredStream::new(config.clone()).map_err(|e| e.to_fcp_error())?;
 
-            let mut event_rx = stream.connect().await.map_err(|e| e.to_fcp_error())?;
+            let mut event_rx = match stream.connect().await {
+                Ok(rx) => rx,
+                Err(err) => {
+                    *self.stream_active.write().await = false;
+                    return Err(err.to_fcp_error());
+                }
+            };
 
             let event_tx = self.event_tx.clone();
             let stream_active_flag = self.stream_active.clone();
@@ -387,8 +402,6 @@ impl TwitterConnector {
                 let mut active = stream_active_flag.write().await;
                 *active = false;
             });
-
-            *stream_active = true;
         }
 
         self.stream_subscribers.fetch_add(1, Ordering::Relaxed);

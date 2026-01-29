@@ -1344,7 +1344,8 @@ mod tests {
                     message
                 );
             }
-            _ => panic!(
+            _ => assert!(
+                false,
                 "Expected InvalidRequest error for content too long, got: {:?}",
                 err
             ),
@@ -1369,11 +1370,9 @@ mod tests {
         // Validation happens before config check, so we get InvalidRequest
         assert!(result.is_err());
         let err = result.unwrap_err();
-        match err {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("content") || message.contains("embeds"));
-            }
-            _ => panic!("Expected InvalidRequest error, got: {:?}", err),
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+        if let FcpError::InvalidRequest { message, .. } = err {
+            assert!(message.contains("content") || message.contains("embeds"));
         }
     }
 
@@ -1425,7 +1424,11 @@ mod tests {
                     message
                 );
             }
-            _ => panic!("Expected InvalidRequest for embed limit, got: {:?}", err),
+            _ => assert!(
+                false,
+                "Expected InvalidRequest for embed limit, got: {:?}",
+                err
+            ),
         }
     }
 }

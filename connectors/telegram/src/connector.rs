@@ -98,7 +98,15 @@ impl TelegramConnector {
             });
         }
 
-        let token = config.token.clone().unwrap();
+        let token = match config.token.clone() {
+            Some(token) => token,
+            None => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1004,
+                    message: "Missing required 'token' in configuration".into(),
+                });
+            }
+        };
         let mut client = TelegramClient::new(&token).map_err(|e| FcpError::Internal {
             message: format!("Failed to create HTTP client: {e}"),
         })?;
@@ -1021,13 +1029,11 @@ mod tests {
 
         assert!(result.is_err());
         let err = result.unwrap_err();
-        match err {
-            FcpError::InvalidRequest { code, message } => {
-                assert_eq!(code, 1004);
-                assert!(message.contains("4096"));
-                assert!(message.contains("character limit"));
-            }
-            _ => panic!("Expected InvalidRequest error, got: {:?}", err),
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+        if let FcpError::InvalidRequest { code, message } = err {
+            assert_eq!(code, 1004);
+            assert!(message.contains("4096"));
+            assert!(message.contains("character limit"));
         }
     }
 
@@ -1069,7 +1075,7 @@ mod tests {
         match result {
             Ok(_) => {}                          // Success is fine (if we mocked it)
             Err(FcpError::External { .. }) => {} // External error means it tried to send -> validation passed
-            Err(e) => panic!("Expected success or external error, got: {:?}", e),
+            Err(e) => assert!(matches!(e, FcpError::External { .. })),
         }
     }
 
@@ -1152,11 +1158,9 @@ mod tests {
 
         assert!(result.is_err());
         let err = result.unwrap_err();
-        match err {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("text"));
-            }
-            _ => panic!("Expected InvalidRequest error, got: {:?}", err),
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+        if let FcpError::InvalidRequest { message, .. } = err {
+            assert!(message.contains("text"));
         }
     }
 
@@ -1178,11 +1182,9 @@ mod tests {
 
         assert!(result.is_err());
         let err = result.unwrap_err();
-        match err {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("chat_id"));
-            }
-            _ => panic!("Expected InvalidRequest error, got: {:?}", err),
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+        if let FcpError::InvalidRequest { message, .. } = err {
+            assert!(message.contains("chat_id"));
         }
     }
 

@@ -5,6 +5,9 @@
 
 use std::time::Duration;
 
+use crate::FcpError;
+use crate::formatting::{ErrorClass, classify_error_message};
+
 /// High-level retry decision for an operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetryDecision {
@@ -16,6 +19,23 @@ pub enum RetryDecision {
     After(Duration),
     /// Do not retry.
     Terminal,
+}
+
+impl RetryDecision {
+    /// Returns true if this decision permits a retry.
+    #[must_use]
+    pub const fn is_retryable(self) -> bool {
+        !matches!(self, Self::Terminal)
+    }
+
+    /// Returns an explicit retry-after duration, if present.
+    #[must_use]
+    pub const fn retry_after(self) -> Option<Duration> {
+        match self {
+            Self::After(delay) => Some(delay),
+            _ => None,
+        }
+    }
 }
 
 /// Policy for translating retry decisions into delays.
@@ -135,6 +155,61 @@ impl RetryPolicy {
             }
         }
     }
+}
+
+/// Default retry-after for rate limiting when no hint is provided (30s).
+pub const DEFAULT_RATE_LIMIT_RETRY_AFTER: Duration = Duration::from_secs(30);
+
+/// Classify an HTTP status code into a retry decision.
+#[must_use]
+pub fn decision_from_http_status(status: u16, retry_after: Option<Duration>) -> RetryDecision {
+    match status {
+        429 => RetryDecision::After(retry_after.unwrap_or(DEFAULT_RATE_LIMIT_RETRY_AFTER)),
+        408 | 425 => RetryDecision::Backoff,
+        500..=599 => RetryDecision::Backoff,
+        _ => RetryDecision::Terminal,
+    }
+}
+
+/// Classify a free-form error message into a retry decision.
+#[must_use]
+pub fn decision_from_error_message(message: &str) -> RetryDecision {
+    match classify_error_message(message) {
+        ErrorClass::RateLimit => RetryDecision::Backoff,
+        ErrorClass::Transient => RetryDecision::Backoff,
+        ErrorClass::ParseError | ErrorClass::Terminal => RetryDecision::Terminal,
+    }
+}
+
+/// Map an external error into a retry decision and standardized FCP error.
+#[must_use]
+pub fn map_external_error(
+    service: impl Into<String>,
+    status_code: Option<u16>,
+    message: impl Into<String>,
+    retry_after: Option<Duration>,
+) -> (RetryDecision, FcpError) {
+    let service = service.into();
+    let message = message.into();
+    let decision = status_code
+        .map(|code| decision_from_http_status(code, retry_after))
+        .unwrap_or_else(|| decision_from_error_message(&message));
+
+    let fcp_error = match status_code {
+        Some(429) => FcpError::RateLimited {
+            retry_after_ms: duration_to_ms(retry_after.unwrap_or(DEFAULT_RATE_LIMIT_RETRY_AFTER)),
+            violation: None,
+        },
+        _ => FcpError::External {
+            service,
+            message,
+            status_code,
+            retryable: decision.is_retryable(),
+            retry_after: retry_after.or(decision.retry_after()),
+        },
+    };
+
+    (decision, fcp_error)
 }
 
 fn duration_to_ms(duration: Duration) -> u64 {

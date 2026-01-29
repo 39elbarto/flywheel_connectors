@@ -193,27 +193,8 @@ impl TelegramClient {
             message_thread_id: options.message_thread_id,
         };
 
-        match self
-            .request("POST", "sendMessage", Some(&request), None)
+        self.request("POST", "sendMessage", Some(&request), None)
             .await
-        {
-            Ok(msg) => Ok(msg),
-            Err(TelegramError::Api { code, description }) => {
-                // Check for parse errors and retry without parse mode
-                if is_parse_error(&description) && request.parse_mode.is_some() {
-                    warn!("Parse mode error, retrying without formatting");
-                    let retry_request = SendMessageRequest {
-                        parse_mode: None,
-                        ..request
-                    };
-                    return self
-                        .request("POST", "sendMessage", Some(&retry_request), None)
-                        .await;
-                }
-                Err(TelegramError::Api { code, description })
-            }
-            Err(e) => Err(e),
-        }
     }
 
     /// Get file information for downloading.
@@ -395,14 +376,6 @@ fn normalize_chat_id(id: &str) -> Result<String, TelegramError> {
     )))
 }
 
-/// Check if an error message indicates a parse mode error.
-fn is_parse_error(description: &str) -> bool {
-    let lower = description.to_lowercase();
-    lower.contains("can't parse entities")
-        || lower.contains("parse entities")
-        || lower.contains("find end of the entity")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -436,15 +409,6 @@ mod tests {
         assert!(normalize_chat_id("---").is_err()); // Invalid numeric
         assert!(normalize_chat_id("1-2-3").is_err()); // Invalid numeric
         assert!(normalize_chat_id("-").is_err()); // Just a dash
-    }
-
-    #[test]
-    fn test_is_parse_error() {
-        assert!(is_parse_error("can't parse entities"));
-        assert!(is_parse_error("Can't Parse Entities: some detail"));
-        assert!(is_parse_error("find end of the entity starting"));
-        assert!(!is_parse_error("some other error"));
-        assert!(!is_parse_error(""));
     }
 
     // Helper to create a mock server with a test client

@@ -6,7 +6,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use fcp_core::*;
-use fcp_sdk::{Limits, validate_input_with_limits, validate_output_with_limits};
+use fcp_sdk::{
+    ErrorClass, FormatMode, Formatter, Limits, classify_error_message, validate_input_with_limits,
+    validate_output_with_limits,
+};
 use serde_json::json;
 use tokio::sync::{RwLock, broadcast};
 use tracing::{error, info, warn};
@@ -560,28 +563,67 @@ impl TelegramConnector {
         // Now check that we're configured
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
 
+        let requested_mode = match input.get("parse_mode").and_then(|v| v.as_str()) {
+            Some("HTML") => FormatMode::Html,
+            Some("MarkdownV2") => FormatMode::MarkdownV2,
+            None => FormatMode::Plain,
+            Some(_) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Unsupported parse_mode".into(),
+                });
+            }
+        };
+
+        let render = Formatter::render_with_fallback(text, requested_mode);
+
         let mut options = SendMessageOptions::default();
-        if let Some(mode) = input.get("parse_mode").and_then(|v| v.as_str()) {
-            options.parse_mode = Some(mode.into());
-        }
+        options.parse_mode = render
+            .parse_mode_used
+            .and_then(|mode| mode.as_parse_mode().map(|value| value.to_string()));
         if let Some(reply_to) = input.get("reply_to_message_id").and_then(|v| v.as_i64()) {
             options.reply_to_message_id = Some(reply_to);
         }
 
-        let message =
-            client
-                .send_message(chat_id, text, options)
-                .await
-                .map_err(|e: TelegramError| FcpError::External {
-                    service: "telegram".into(),
-                    message: e.to_string(),
-                    status_code: match &e {
-                        TelegramError::Api { code, .. } => u16::try_from(*code).ok(),
-                        _ => None,
-                    },
-                    retryable: e.is_retryable(),
-                    retry_after: None,
-                })?;
+        let map_external = |e: TelegramError| FcpError::External {
+            service: "telegram".into(),
+            message: e.to_string(),
+            status_code: match &e {
+                TelegramError::Api { code, .. } => u16::try_from(*code).ok(),
+                _ => None,
+            },
+            retryable: e.is_retryable(),
+            retry_after: None,
+        };
+
+        let message = match client
+            .send_message(chat_id.clone(), render.rendered, options.clone())
+            .await
+        {
+            Ok(message) => message,
+            Err(err) => {
+                if options.parse_mode.is_some() {
+                    if let TelegramError::Api { description, .. } = &err {
+                        if classify_error_message(description) == ErrorClass::ParseError {
+                            warn!(
+                                parse_mode = ?requested_mode,
+                                "Telegram parse error, retrying with plaintext fallback"
+                            );
+                            let fallback =
+                                Formatter::render_plaintext_fallback(text, requested_mode);
+                            let mut fallback_options = options.clone();
+                            fallback_options.parse_mode = None;
+                            return client
+                                .send_message(chat_id, fallback.rendered, fallback_options)
+                                .await
+                                .map_err(map_external);
+                        }
+                    }
+                }
+
+                return Err(map_external(err));
+            }
+        };
 
         let response = json!({
             "message_id": message.message_id,
@@ -896,7 +938,7 @@ mod tests {
         fcp_core::CapabilityToken { raw: cose }
     }
 
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{body_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     async fn setup_connector_with_token(
@@ -1029,6 +1071,64 @@ mod tests {
             Err(FcpError::External { .. }) => {} // External error means it tried to send -> validation passed
             Err(e) => panic!("Expected success or external error, got: {:?}", e),
         }
+    }
+
+    #[tokio::test]
+    async fn test_send_message_parse_error_falls_back() {
+        let (connector, token, server) = setup_connector_with_token("telegram.send_message").await;
+
+        Mock::given(method("POST"))
+            .and(path("/botdummy_token/sendMessage"))
+            .and(body_json(serde_json::json!({
+                "chat_id": "123456789",
+                "text": "<b>Hello</b>",
+                "parse_mode": "HTML"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": false,
+                "error_code": 400,
+                "description": "Bad Request: can't parse entities"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/botdummy_token/sendMessage"))
+            .and(body_json(serde_json::json!({
+                "chat_id": "123456789",
+                "text": "Hello"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": {
+                    "message_id": 55,
+                    "chat": { "id": 123456789, "type": "private", "first_name": "Test" },
+                    "date": 1234567890,
+                    "text": "Hello"
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let input = serde_json::json!({
+            "chat_id": "123456789",
+            "text": "<b>Hello</b>",
+            "parse_mode": "HTML"
+        });
+
+        let result = connector
+            .handle_invoke(serde_json::json!({
+                "operation": "telegram.send_message",
+                "input": input,
+                "capability_token": token
+            }))
+            .await;
+
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        assert_eq!(response.get("message_id").and_then(|v| v.as_i64()), Some(55));
     }
 
     #[tokio::test]

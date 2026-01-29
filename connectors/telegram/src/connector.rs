@@ -1128,7 +1128,10 @@ mod tests {
 
         assert!(result.is_ok());
         let response = result.unwrap();
-        assert_eq!(response.get("message_id").and_then(|v| v.as_i64()), Some(55));
+        assert_eq!(
+            response.get("message_id").and_then(|v| v.as_i64()),
+            Some(55)
+        );
     }
 
     #[tokio::test]

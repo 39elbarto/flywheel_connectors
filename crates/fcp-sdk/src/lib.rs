@@ -157,6 +157,7 @@ pub use fcp_manifest::{
 pub mod formatting;
 pub mod prelude;
 pub mod ratelimit;
+pub mod retry;
 pub mod runtime;
 pub mod streaming;
 
@@ -165,6 +166,9 @@ pub use formatting::{
     ErrorClass, FormatError, FormatMode, Formatter, RenderResult, classify_error_message,
     is_parse_error_message,
 };
+
+/// Retry policy helpers.
+pub use retry::{RetryDecision, RetryPolicy};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Schema validation helpers

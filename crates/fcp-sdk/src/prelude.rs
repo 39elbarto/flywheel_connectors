@@ -84,6 +84,9 @@ pub use crate::{
     is_parse_error_message,
 };
 
+// Retry helpers
+pub use crate::{RetryDecision, RetryPolicy};
+
 // External crates commonly needed
 pub use serde::{Deserialize, Serialize};
 pub use serde_json::json;

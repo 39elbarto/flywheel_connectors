@@ -293,6 +293,13 @@ fn scaffold_connector(
     let workspace_root = find_workspace_root()?;
     let base_path = workspace_root.join(&crate_path);
 
+    if base_path.exists() {
+        anyhow::bail!(
+            "connector directory already exists: {}",
+            base_path.display()
+        );
+    }
+
     let mut files_created = Vec::new();
 
     // Generate all files

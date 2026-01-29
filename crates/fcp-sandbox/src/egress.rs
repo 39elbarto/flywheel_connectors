@@ -595,10 +595,7 @@ impl EgressGuard {
                 let suffix = &pattern[1..]; // ".example.com"
                 if host.ends_with(suffix) && host.len() > suffix.len() {
                     // Ensure there's actually a subdomain (not just "example.com")
-                    let prefix = &host[..host.len() - suffix.len()];
-                    if !prefix.contains('.') {
-                        return true;
-                    }
+                    return true;
                 }
             } else if pattern == host {
                 return true;

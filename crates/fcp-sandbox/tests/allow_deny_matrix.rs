@@ -525,10 +525,9 @@ mod allow_list {
         let guard = EgressGuard::new();
         let constraints = strict_constraints();
 
-        // *.trusted.com should match a.b.trusted.com only at one level
-        // This tests the wildcard matching behavior
+        // *.trusted.com should match any subdomain depth under trusted.com
         let request = EgressRequest::Http(EgressHttpRequest {
-            url: "https://deep.trusted.com/path".into(),
+            url: "https://deep.sub.trusted.com/path".into(),
             method: "GET".into(),
             headers: vec![],
             body: None,
@@ -536,7 +535,6 @@ mod allow_list {
         });
 
         let result = guard.evaluate(&request, &constraints);
-        // *.trusted.com matches single-level subdomains
         assert!(result.is_ok());
     }
 

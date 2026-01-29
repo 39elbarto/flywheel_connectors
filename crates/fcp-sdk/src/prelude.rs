@@ -78,6 +78,9 @@ pub use crate::{
     validate_input_with_limits, validate_json_schema, validate_output, validate_output_with_limits,
 };
 
+// Formatting helpers
+pub use crate::{FormatError, FormatMode, Formatter, RenderResult};
+
 // External crates commonly needed
 pub use serde::{Deserialize, Serialize};
 pub use serde_json::json;

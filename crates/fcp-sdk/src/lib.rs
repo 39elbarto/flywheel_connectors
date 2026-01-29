@@ -154,10 +154,14 @@ pub use fcp_manifest::{
 // SDK-specific modules
 // ─────────────────────────────────────────────────────────────────────────────
 
+pub mod formatting;
 pub mod prelude;
 pub mod ratelimit;
 pub mod runtime;
 pub mod streaming;
+
+/// Formatting helpers with safe fallback behavior.
+pub use formatting::{FormatError, FormatMode, Formatter, RenderResult};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Schema validation helpers

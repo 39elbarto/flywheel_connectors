@@ -165,8 +165,7 @@ pub const DEFAULT_RATE_LIMIT_RETRY_AFTER: Duration = Duration::from_secs(30);
 pub fn decision_from_http_status(status: u16, retry_after: Option<Duration>) -> RetryDecision {
     match status {
         429 => RetryDecision::After(retry_after.unwrap_or(DEFAULT_RATE_LIMIT_RETRY_AFTER)),
-        408 | 425 => RetryDecision::Backoff,
-        500..=599 => RetryDecision::Backoff,
+        408 | 425 | 500..=599 => RetryDecision::Backoff,
         _ => RetryDecision::Terminal,
     }
 }
@@ -175,8 +174,7 @@ pub fn decision_from_http_status(status: u16, retry_after: Option<Duration>) -> 
 #[must_use]
 pub fn decision_from_error_message(message: &str) -> RetryDecision {
     match classify_error_message(message) {
-        ErrorClass::RateLimit => RetryDecision::Backoff,
-        ErrorClass::Transient => RetryDecision::Backoff,
+        ErrorClass::RateLimit | ErrorClass::Transient => RetryDecision::Backoff,
         ErrorClass::ParseError | ErrorClass::Terminal => RetryDecision::Terminal,
     }
 }
@@ -191,9 +189,10 @@ pub fn map_external_error(
 ) -> (RetryDecision, FcpError) {
     let service = service.into();
     let message = message.into();
-    let decision = status_code
-        .map(|code| decision_from_http_status(code, retry_after))
-        .unwrap_or_else(|| decision_from_error_message(&message));
+    let decision = status_code.map_or_else(
+        || decision_from_error_message(&message),
+        |code| decision_from_http_status(code, retry_after),
+    );
 
     let fcp_error = match status_code {
         Some(429) => FcpError::RateLimited {
@@ -205,7 +204,7 @@ pub fn map_external_error(
             message,
             status_code,
             retryable: decision.is_retryable(),
-            retry_after: retry_after.or(decision.retry_after()),
+            retry_after: retry_after.or_else(|| decision.retry_after()),
         },
     };
 

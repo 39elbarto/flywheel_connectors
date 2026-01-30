@@ -240,6 +240,7 @@ impl ConnectorSuite {
                 expect_audit_event: false,
                 expect_receipt: false,
                 expected_reason_code: Some(reason_code.into()),
+                rate_limit_pool: None,
             },
         }
     }
@@ -286,6 +287,8 @@ pub struct InvokeExpectations {
     pub expect_receipt: bool,
     /// Expected reason code when denial occurs.
     pub expected_reason_code: Option<String>,
+    /// Expected rate limit pool name for throttled invokes.
+    pub rate_limit_pool: Option<String>,
 }
 
 /// Runner for connector E2E suites.
@@ -699,6 +702,9 @@ fn log_invoke_result(
     let mut receipt_id: Option<String> = None;
     let mut audit_event_id: Option<String> = None;
     let mut decision_receipt_id: Option<String> = None;
+    let rate_limit_pool = expectations.rate_limit_pool.clone();
+    let mut rate_limit_remaining: Option<u32> = None;
+    let mut rate_limit_reset_at: Option<u64> = None;
 
     match &result.result {
         Ok(resp) => {
@@ -765,6 +771,31 @@ fn log_invoke_result(
         }
     }
 
+    if let Some(details) = error_details.as_ref() {
+        if let Some(violation) = details.get("throttle_violation") {
+            let limit_value = violation
+                .get("limit_value")
+                .and_then(serde_json::Value::as_u64);
+            let current_value = violation
+                .get("current_value")
+                .and_then(serde_json::Value::as_u64);
+            if let (Some(limit_value), Some(current_value)) = (limit_value, current_value) {
+                let remaining = limit_value.saturating_sub(current_value);
+                rate_limit_remaining = Some(u32::try_from(remaining).unwrap_or(u32::MAX));
+            }
+
+            let timestamp_ms = violation
+                .get("timestamp_ms")
+                .and_then(serde_json::Value::as_u64);
+            let retry_after_ms = violation
+                .get("retry_after_ms")
+                .and_then(serde_json::Value::as_u64);
+            if let (Some(timestamp_ms), Some(retry_after_ms)) = (timestamp_ms, retry_after_ms) {
+                rate_limit_reset_at = Some((timestamp_ms + retry_after_ms) / 1000);
+            }
+        }
+    }
+
     if let Some(expected_reason_code) = expectations.expected_reason_code.as_ref() {
         if reason_code.as_deref() != Some(expected_reason_code.as_str()) {
             passed = false;
@@ -800,6 +831,9 @@ fn log_invoke_result(
             "error_details": error_details,
             "retryable": retryable,
             "retry_after_ms": retry_after_ms,
+            "rate_limit_pool": rate_limit_pool,
+            "rate_limit_remaining": rate_limit_remaining,
+            "rate_limit_reset_at": rate_limit_reset_at,
             "receipt_id": receipt_id,
             "audit_event_id": audit_event_id,
             "decision_receipt_id": decision_receipt_id,
@@ -913,9 +947,10 @@ fn log_introspection(
 mod tests {
     use super::*;
     use fcp_core::{
-        AgentHint, BaseConnector, CapabilityId, CapabilityToken, ConnectorId, EventCaps,
-        HandshakeResponse, HealthSnapshot, InstanceId, InvokeResponse, ObjectId, OperationId,
-        OperationInfo, RiskLevel, SafetyTier, SessionId, ZoneId,
+        AgentHint, BaseConnector, CapabilityId, CapabilityToken, ConnectorId, EventCaps, FcpError,
+        HandshakeResponse, HealthSnapshot, InstanceId, InvokeResponse, LimitType, ObjectId,
+        OperationId, OperationInfo, RateLimit, RiskLevel, SafetyTier, SessionId, ThrottleViolation,
+        ThrottleViolationInput, ZoneId,
     };
     use fcp_manifest::ConnectorManifest;
     use fcp_testkit::MockApiServer;
@@ -994,25 +1029,52 @@ mod tests {
 
         fn introspect(&self) -> Introspection {
             Introspection {
-                operations: vec![OperationInfo {
-                    id: OperationId::from_static("dummy.echo"),
-                    summary: "Echo".to_string(),
-                    description: None,
-                    input_schema: serde_json::json!({"type": "object"}),
-                    output_schema: serde_json::json!({"type": "object"}),
-                    capability: CapabilityId::from_static("dummy.echo"),
-                    risk_level: RiskLevel::Low,
-                    safety_tier: SafetyTier::Safe,
-                    idempotency: fcp_core::IdempotencyClass::None,
-                    ai_hints: AgentHint {
-                        when_to_use: "echo".to_string(),
-                        common_mistakes: vec![],
-                        examples: vec![],
-                        related: vec![],
+                operations: vec![
+                    OperationInfo {
+                        id: OperationId::from_static("dummy.echo"),
+                        summary: "Echo".to_string(),
+                        description: None,
+                        input_schema: serde_json::json!({"type": "object"}),
+                        output_schema: serde_json::json!({"type": "object"}),
+                        capability: CapabilityId::from_static("dummy.echo"),
+                        risk_level: RiskLevel::Low,
+                        safety_tier: SafetyTier::Safe,
+                        idempotency: fcp_core::IdempotencyClass::None,
+                        ai_hints: AgentHint {
+                            when_to_use: "echo".to_string(),
+                            common_mistakes: vec![],
+                            examples: vec![],
+                            related: vec![],
+                        },
+                        rate_limit: None,
+                        requires_approval: None,
                     },
-                    rate_limit: None,
-                    requires_approval: None,
-                }],
+                    OperationInfo {
+                        id: OperationId::from_static("dummy.rate_limited"),
+                        summary: "Rate limited".to_string(),
+                        description: None,
+                        input_schema: serde_json::json!({"type": "object"}),
+                        output_schema: serde_json::json!({"type": "object"}),
+                        capability: CapabilityId::from_static("dummy.rate_limited"),
+                        risk_level: RiskLevel::Low,
+                        safety_tier: SafetyTier::Safe,
+                        idempotency: fcp_core::IdempotencyClass::None,
+                        ai_hints: AgentHint {
+                            when_to_use: "rate limited".to_string(),
+                            common_mistakes: vec![],
+                            examples: vec![],
+                            related: vec![],
+                        },
+                        rate_limit: Some(RateLimit {
+                            max: 100,
+                            per_ms: 60_000,
+                            burst: None,
+                            scope: None,
+                            pool_name: Some("test_pool".to_string()),
+                        }),
+                        requires_approval: None,
+                    },
+                ],
                 events: vec![],
                 resource_types: vec![],
                 auth_caps: None,
@@ -1034,6 +1096,19 @@ mod tests {
                     },
                 )
                 .with_decision_receipt_id(ObjectId::from_unscoped_bytes(b"decision"))),
+                "dummy.rate_limited" => Err(FcpError::RateLimited {
+                    retry_after_ms: 30_000,
+                    violation: Some(Box::new(ThrottleViolation::new(ThrottleViolationInput {
+                        timestamp_ms: 1_700_000_000_000,
+                        zone_id: ZoneId::work(),
+                        connector_id: Some(self.id().clone()),
+                        operation_id: Some(req.operation.clone()),
+                        limit_type: LimitType::Rpm,
+                        limit_value: 100,
+                        current_value: 120,
+                        retry_after_ms: 30_000,
+                    }))),
+                }),
                 _ => Err(FcpError::Unauthorized {
                     code: 2101,
                     message: "Missing capability".to_string(),
@@ -1150,6 +1225,72 @@ mod tests {
         assert_eq!(
             invoke_entry.context.get("decision_receipt_id"),
             Some(&serde_json::json!(expected_receipt))
+        );
+    }
+
+    #[tokio::test]
+    async fn logs_rate_limit_metadata_from_throttle_violation() {
+        let mut connector = DummyConnector::new();
+        let invoke = InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: fcp_core::RequestId::from("req-rate"),
+            connector_id: ConnectorId::from_static("fcp.dummy:request_response:0.1.0"),
+            operation: OperationId::from_static("dummy.rate_limited"),
+            zone_id: ZoneId::work(),
+            input: serde_json::json!({}),
+            capability_token: CapabilityToken::test_token(),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: vec![],
+        };
+        let suite = ConnectorSuite {
+            test_name: "rate_limited_invoke".to_string(),
+            config: serde_json::json!({}),
+            handshake: test_handshake(),
+            invoke: Some(invoke),
+            invoke_expectations: InvokeExpectations {
+                expect_error: true,
+                expect_decision_receipt: false,
+                expect_audit_event: false,
+                expect_receipt: false,
+                expected_reason_code: Some("FCP-3002".to_string()),
+                rate_limit_pool: Some("test_pool".to_string()),
+            },
+        };
+
+        let mut runner = E2eRunner::new("fcp-e2e");
+        let report = runner
+            .run_connector_suite(&mut connector, suite)
+            .await
+            .expect("suite runs");
+
+        assert!(report.passed, "rate limit suite should pass when error expected");
+        let invoke_entry = report
+            .logs
+            .iter()
+            .find(|entry| entry.context.get("operation") == Some(&serde_json::json!("invoke")))
+            .expect("invoke log entry");
+
+        assert_eq!(
+            invoke_entry.context.get("rate_limit_pool"),
+            Some(&serde_json::json!("test_pool"))
+        );
+        assert_eq!(
+            invoke_entry.context.get("rate_limit_remaining"),
+            Some(&serde_json::json!(0))
+        );
+        assert_eq!(
+            invoke_entry.context.get("rate_limit_reset_at"),
+            Some(&serde_json::json!(1_700_000_030_u64))
+        );
+        assert_eq!(
+            invoke_entry.context.get("retry_after_ms"),
+            Some(&serde_json::json!(30_000_u64))
         );
     }
 
@@ -1394,6 +1535,7 @@ mod tests {
         assert!(!suite.invoke_expectations.expect_audit_event);
         assert!(!suite.invoke_expectations.expect_receipt);
         assert!(suite.invoke_expectations.expected_reason_code.is_none());
+        assert!(suite.invoke_expectations.rate_limit_pool.is_none());
     }
 
     #[test]
@@ -1436,6 +1578,7 @@ mod tests {
         assert!(!defaults.expect_audit_event);
         assert!(!defaults.expect_receipt);
         assert!(defaults.expected_reason_code.is_none());
+        assert!(defaults.rate_limit_pool.is_none());
     }
 
     #[test]
@@ -1602,6 +1745,7 @@ mod tests {
                 expect_audit_event: false,
                 expect_receipt: false,
                 expected_reason_code: None,
+                rate_limit_pool: None,
             },
         };
 

@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://flywheel.dev/schemas/fcp-e2e-log-1.schema.json",
-  "title": "FCP2 E2E Log Entry",
-  "description": "Canonical JSONL schema for E2E logs across harnesses and scripts.",
+  "$id": "https://flywheel.dev/schemas/fcp-e2e-log-2.schema.json",
+  "title": "FCP2 E2E Log Entry (v2)",
+  "description": "Canonical JSONL schema for versioned E2E logs.",
   "anyOf": [
     { "$ref": "#/$defs/conformance_entry" },
     { "$ref": "#/$defs/fcp_e2e_entry" },
@@ -35,7 +35,7 @@
     },
     "log_version": {
       "type": "string",
-      "enum": ["v1"]
+      "enum": ["v2"]
     },
     "artifacts": {
       "type": "array",
@@ -55,6 +55,7 @@
       "additionalProperties": false,
       "required": [
         "timestamp",
+        "log_version",
         "real_time",
         "node_id",
         "test_name",
@@ -80,6 +81,7 @@
       "additionalProperties": false,
       "required": [
         "timestamp",
+        "log_version",
         "test_name",
         "module",
         "phase",
@@ -110,6 +112,7 @@
       "additionalProperties": false,
       "required": [
         "timestamp",
+        "log_version",
         "script",
         "step",
         "correlation_id",

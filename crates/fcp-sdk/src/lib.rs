@@ -75,6 +75,7 @@ pub use fcp_core::{
     CorrelationId,
     // Cost and availability
     CostEstimate,
+    CostEstimateConfidence,
     CurrencyCost,
     CursorState,
     // Error types

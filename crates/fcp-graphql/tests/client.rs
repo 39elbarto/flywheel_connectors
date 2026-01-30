@@ -748,8 +748,8 @@ async fn paginate_cursor_limit_exceeded() {
     );
     ctx.assert_eq(
         counter.load(Ordering::SeqCst),
-        2_usize,
-        "expected two page fetches",
+        1_usize,
+        "expected one page fetch",
     );
     ctx.finalize("pass", Some(serde_json::json!({"limit": 2})));
 }
@@ -824,8 +824,8 @@ async fn paginate_offset_limit_exceeded() {
     );
     ctx.assert_eq(
         counter.load(Ordering::SeqCst),
-        2_usize,
-        "expected two page fetches",
+        1_usize,
+        "expected one page fetch",
     );
     ctx.finalize("pass", Some(serde_json::json!({"limit": 2})));
 }

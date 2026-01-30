@@ -143,10 +143,10 @@ pub struct SymbolRequestHandler {
     policy: SymbolRequestPolicy,
     /// Active transfers (object_id -> transfer state).
     active_transfers: HashMap<ObjectId, TransferState>,
-    /// Completed transfers awaiting SymbolAck.
-    completed_awaiting_ack: HashSet<ObjectId>,
-    /// Completed transfers (SymbolAck received).
-    completed_transfers: HashSet<ObjectId>,
+    /// Completed transfers awaiting SymbolAck (object_id -> timestamp_ms).
+    completed_awaiting_ack: HashMap<ObjectId, u64>,
+    /// Completed transfers (SymbolAck received) (object_id -> timestamp_ms).
+    completed_transfers: HashMap<ObjectId, u64>,
 }
 
 /// Policy for symbol request handling.
@@ -162,6 +162,8 @@ pub struct SymbolRequestPolicy {
     pub require_proof_of_need_above: u32,
     /// Whether to allow unauthenticated requests at all.
     pub allow_unauthenticated: bool,
+    /// Timeout for stale transfer state in milliseconds (default: 1 hour).
+    pub transfer_state_ttl_ms: u64,
 }
 
 impl Default for SymbolRequestPolicy {
@@ -172,6 +174,7 @@ impl Default for SymbolRequestPolicy {
             min_bootstrap_symbols: DEFAULT_MIN_BOOTSTRAP_SYMBOLS,
             require_proof_of_need_above: 100, // Require hints for large requests
             allow_unauthenticated: true,      // Zone can override
+            transfer_state_ttl_ms: 3_600_000, // 1 hour
         }
     }
 }
@@ -190,6 +193,8 @@ struct TransferState {
     last_status: Option<DecodeStatusSummary>,
     /// Whether we've been told to stop.
     stopped: bool,
+    /// Last activity timestamp (ms).
+    last_activity: u64,
 }
 
 /// Summary of a decode status for tracking.
@@ -211,8 +216,8 @@ impl SymbolRequestHandler {
         Self {
             policy,
             active_transfers: HashMap::new(),
-            completed_awaiting_ack: HashSet::new(),
-            completed_transfers: HashSet::new(),
+            completed_awaiting_ack: HashMap::new(),
+            completed_transfers: HashMap::new(),
         }
     }
 
@@ -323,7 +328,7 @@ impl SymbolRequestHandler {
     /// Process a decode status update from a peer.
     ///
     /// Updates transfer state based on receiver feedback.
-    pub fn process_decode_status(&mut self, status: &DecodeStatus) {
+    pub fn process_decode_status(&mut self, status: &DecodeStatus, now_ms: u64) {
         let summary = DecodeStatusSummary {
             received_unique: status.received_unique,
             needed: status.needed,
@@ -336,11 +341,13 @@ impl SymbolRequestHandler {
                 received = status.received_unique,
                 "decode complete, awaiting SymbolAck"
             );
-            self.completed_awaiting_ack.insert(status.object_id.clone());
+            self.completed_awaiting_ack
+                .insert(status.object_id.clone(), now_ms);
         }
 
         if let Some(state) = self.active_transfers.get_mut(&status.object_id) {
             state.last_status = Some(summary);
+            state.last_activity = now_ms;
             if status.complete {
                 state.stopped = true;
             }
@@ -352,6 +359,7 @@ impl SymbolRequestHandler {
         &mut self,
         request: &SymbolRequest,
         sent_esis: impl IntoIterator<Item = u32>,
+        now_ms: u64,
     ) {
         let state = self
             .active_transfers
@@ -362,8 +370,10 @@ impl SymbolRequestHandler {
                 sent_esis: HashSet::new(),
                 last_status: None,
                 stopped: false,
+                last_activity: now_ms,
             });
 
+        state.last_activity = now_ms;
         state.total_needed = state.total_needed.max(request.max_symbols);
         state.sent_esis.extend(sent_esis);
     }
@@ -371,7 +381,7 @@ impl SymbolRequestHandler {
     /// Process a symbol acknowledgment (stop condition).
     ///
     /// Stops sending symbols for the acknowledged object.
-    pub fn process_symbol_ack(&mut self, ack: &SymbolAck) {
+    pub fn process_symbol_ack(&mut self, ack: &SymbolAck, now_ms: u64) {
         info!(
             object_id = %hex::encode(ack.object_id.as_bytes()),
             reason = ?ack.reason,
@@ -380,10 +390,11 @@ impl SymbolRequestHandler {
         );
 
         self.completed_awaiting_ack.remove(&ack.object_id);
-        self.completed_transfers.insert(ack.object_id);
+        self.completed_transfers.insert(ack.object_id, now_ms);
 
         if let Some(state) = self.active_transfers.get_mut(&ack.object_id) {
             state.stopped = true;
+            state.last_activity = now_ms;
         }
 
         // Can clean up transfer state
@@ -393,12 +404,51 @@ impl SymbolRequestHandler {
     /// Check if a transfer should stop.
     #[must_use]
     pub fn should_stop(&self, object_id: &ObjectId) -> bool {
-        if self.completed_transfers.contains(object_id) {
+        if self.completed_transfers.contains_key(object_id) {
             return true;
         }
         self.active_transfers
             .get(object_id)
             .is_some_and(|s| s.stopped)
+    }
+
+    /// Prune stale transfer state.
+    ///
+    /// Removes active and completed transfers that have exceeded the TTL.
+    /// Returns the count of removed entries (active + completed).
+    pub fn prune_stale_state(&mut self, now_ms: u64) -> usize {
+        let ttl = self.policy.transfer_state_ttl_ms;
+        let expired_threshold = now_ms.saturating_sub(ttl);
+        let mut removed = 0;
+
+        self.active_transfers.retain(|_, state| {
+            let keep = state.last_activity >= expired_threshold;
+            if !keep {
+                removed += 1;
+            }
+            keep
+        });
+
+        self.completed_awaiting_ack.retain(|_, timestamp| {
+            let keep = *timestamp >= expired_threshold;
+            if !keep {
+                removed += 1;
+            }
+            keep
+        });
+
+        self.completed_transfers.retain(|_, timestamp| {
+            let keep = *timestamp >= expired_threshold;
+            if !keep {
+                removed += 1;
+            }
+            keep
+        });
+
+        if removed > 0 {
+            debug!(removed, "pruned stale transfer state");
+        }
+        removed
     }
 
     /// Get the policy.
@@ -460,7 +510,11 @@ impl TargetedRepairEngine {
             None => return vec![],
         };
 
-        let limit = request.max_response_symbols as usize;
+        let limit = request
+            .max_response_symbols
+            .saturating_add(1)
+            .try_into()
+            .unwrap_or(usize::MAX);
 
         // If we have a missing hint, prioritize those
         if let Some(ref hints) = request.request.missing_hint {
@@ -845,7 +899,7 @@ mod tests {
             500,
         );
 
-        handler.process_symbol_ack(&ack);
+        handler.process_symbol_ack(&ack, 0);
 
         // Transfer state should be removed
         assert_eq!(handler.active_transfer_count(), 0);
@@ -882,13 +936,42 @@ mod tests {
     }
 
     #[test]
+    fn response_builder_marks_bounded_when_request_limit_hits() {
+        let mut engine = TargetedRepairEngine::new();
+        let object_id = ObjectId::from_bytes([0x11; 32]);
+        let zone_id = test_zone_id();
+
+        engine.register_available(object_id.clone(), 0..100);
+
+        let request = ValidatedRequest {
+            request: test_symbol_request(10, None),
+            is_authenticated: true,
+            max_response_symbols: 10,
+            has_proof_of_need: false,
+        };
+
+        let response = SymbolResponseBuilder::new(
+            object_id,
+            zone_id,
+            ZoneKeyId::from_bytes([0x22; 8]),
+            request.max_response_symbols,
+        )
+        .add_from_repair_engine(&engine, &request, &HashSet::new())
+        .build(100);
+
+        assert_eq!(response.symbol_count(), 10);
+        assert!(response.was_bounded);
+        assert!(!response.is_final);
+    }
+
+    #[test]
     fn decode_status_complete_stops_transfer() {
         let mut handler = SymbolRequestHandler::with_default_policy();
         let object_id = ObjectId::from_bytes([0x11; 32]);
 
         // Start a transfer
         let request = test_symbol_request(50, None);
-        handler.track_transfer(&request, 0..10);
+        handler.track_transfer(&request, 0..10, 0);
         assert_eq!(handler.active_transfer_count(), 1);
 
         // Process decode status marking transfer complete
@@ -904,7 +987,7 @@ mod tests {
             missing_hint: None,
             signature: fcp_crypto::Ed25519Signature::from_bytes(&[0u8; 64]),
         };
-        handler.process_decode_status(&status);
+        handler.process_decode_status(&status, 0);
 
         // Transfer should be stopped
         assert!(handler.should_stop(&object_id));
@@ -915,11 +998,11 @@ mod tests {
         let mut handler = SymbolRequestHandler::with_default_policy();
         let request = test_symbol_request(100, None);
 
-        handler.track_transfer(&request, 0..5);
+        handler.track_transfer(&request, 0..5, 0);
         assert_eq!(handler.active_transfer_count(), 1);
 
         // Track more symbols for the same object
-        handler.track_transfer(&request, 5..10);
+        handler.track_transfer(&request, 5..10, 0);
         assert_eq!(handler.active_transfer_count(), 1); // Same transfer
     }
 
@@ -933,7 +1016,7 @@ mod tests {
 
         // Start tracking then ack
         let request = test_symbol_request(50, None);
-        handler.track_transfer(&request, 0..5);
+        handler.track_transfer(&request, 0..5, 0);
 
         let ack = SymbolAck::new(
             test_object_header(),
@@ -944,7 +1027,7 @@ mod tests {
             SymbolAckReason::Complete,
             5,
         );
-        handler.process_symbol_ack(&ack);
+        handler.process_symbol_ack(&ack, 0);
 
         // Should stop and be fully cleaned up
         assert!(handler.should_stop(&object_id));

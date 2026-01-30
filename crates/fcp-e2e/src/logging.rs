@@ -29,6 +29,9 @@ impl AssertionsSummary {
 pub struct E2eLogEntry {
     /// RFC3339 timestamp (UTC).
     pub timestamp: DateTime<Utc>,
+    /// Log schema version.
+    #[serde(default = "default_log_version")]
+    pub log_version: String,
     /// Log level (info, warn, error).
     pub level: String,
     /// Test name.
@@ -66,6 +69,7 @@ impl E2eLogEntry {
     ) -> Self {
         Self {
             timestamp: Utc::now(),
+            log_version: default_log_version(),
             level: level.into(),
             test_name: test_name.into(),
             module: module.into(),
@@ -88,6 +92,10 @@ impl E2eLogEntry {
         })?;
         validate_log_entry_value(&value)
     }
+}
+
+fn default_log_version() -> String {
+    "v1".to_string()
 }
 
 /// Logger that collects E2E log entries in memory.

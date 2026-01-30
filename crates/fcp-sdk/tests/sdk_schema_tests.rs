@@ -1212,6 +1212,7 @@ mod cost_estimate_tests {
             estimated_duration_ms: Some(500),
             estimated_bytes: Some(1024),
             currency: None,
+            confidence: None,
         };
 
         assert_eq!(cost.api_credits, Some(10));
@@ -1230,11 +1231,13 @@ mod cost_estimate_tests {
                 amount_cents: 1, // 1 cent = $0.01
                 currency_code: "USD".to_string(),
             }),
+            confidence: Some(CostEstimateConfidence::Low),
         };
 
         assert!(cost.currency.is_some());
         let currency = cost.currency.unwrap();
         assert_eq!(currency.currency_code, "USD");
+        assert_eq!(cost.confidence, Some(CostEstimateConfidence::Low));
     }
 
     #[test]
@@ -1244,6 +1247,7 @@ mod cost_estimate_tests {
             estimated_duration_ms: Some(500),
             estimated_bytes: Some(1024),
             currency: None,
+            confidence: None,
         };
 
         let json_str = serde_json::to_string(&cost).unwrap();

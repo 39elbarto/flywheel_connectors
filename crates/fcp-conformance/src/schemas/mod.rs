@@ -38,6 +38,8 @@ pub const FZPF_V01_SCHEMA: &str = include_str!("FZPF_v0.1.schema.json");
 
 /// The E2E harness JSONL log schema (v1).
 pub const E2E_LOG_V1_SCHEMA: &str = include_str!("E2E_Log_v1.schema.json");
+/// The E2E harness JSONL log schema (v2).
+pub const E2E_LOG_V2_SCHEMA: &str = include_str!("E2E_Log_v2.schema.json");
 
 /// Schema validation error for conformance helpers.
 #[derive(Debug, Clone)]
@@ -68,13 +70,39 @@ fn compile_schema(schema_str: &str) -> Result<Validator, SchemaValidationError> 
         .map_err(|err| SchemaValidationError::new(format!("schema compile failed: {err}")))
 }
 
-/// Validate a single E2E log entry (JSON object) against the v1 schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum E2eLogVersion {
+    V1,
+    V2,
+}
+
+fn detect_log_version(value: &Value) -> Result<E2eLogVersion, SchemaValidationError> {
+    match value.get("log_version") {
+        None => Ok(E2eLogVersion::V1),
+        Some(Value::String(version)) => match version.as_str() {
+            "v1" => Ok(E2eLogVersion::V1),
+            "v2" => Ok(E2eLogVersion::V2),
+            other => Err(SchemaValidationError::new(format!(
+                "unknown log_version `{other}`"
+            ))),
+        },
+        Some(other) => Err(SchemaValidationError::new(format!(
+            "log_version must be a string, got {other}"
+        ))),
+    }
+}
+
+/// Validate a single E2E log entry (JSON object) against the versioned schema.
 ///
 /// # Errors
 ///
 /// Returns `SchemaValidationError` if validation fails.
 pub fn validate_e2e_log_entry(value: &Value) -> Result<(), SchemaValidationError> {
-    let validator = compile_schema(E2E_LOG_V1_SCHEMA)?;
+    let version = detect_log_version(value)?;
+    let validator = match version {
+        E2eLogVersion::V1 => compile_schema(E2E_LOG_V1_SCHEMA)?,
+        E2eLogVersion::V2 => compile_schema(E2E_LOG_V2_SCHEMA)?,
+    };
     validator
         .validate(value)
         .map_err(|err| SchemaValidationError::new(err.to_string()))
@@ -86,7 +114,8 @@ pub fn validate_e2e_log_entry(value: &Value) -> Result<(), SchemaValidationError
 ///
 /// Returns `SchemaValidationError` if any line is invalid JSON or fails schema validation.
 pub fn validate_e2e_log_jsonl(input: &str) -> Result<(), SchemaValidationError> {
-    let validator = compile_schema(E2E_LOG_V1_SCHEMA)?;
+    let validator_v1 = compile_schema(E2E_LOG_V1_SCHEMA)?;
+    let validator_v2 = compile_schema(E2E_LOG_V2_SCHEMA)?;
     for (idx, line) in input.lines().enumerate() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -95,6 +124,11 @@ pub fn validate_e2e_log_jsonl(input: &str) -> Result<(), SchemaValidationError> 
         let value: Value = serde_json::from_str(trimmed).map_err(|err| {
             SchemaValidationError::new(format!("line {}: invalid JSON: {err}", idx + 1))
         })?;
+        let version = detect_log_version(&value)?;
+        let validator = match version {
+            E2eLogVersion::V1 => &validator_v1,
+            E2eLogVersion::V2 => &validator_v2,
+        };
         if let Err(err) = validator.validate(&value) {
             return Err(SchemaValidationError::new(format!(
                 "line {}: {}",

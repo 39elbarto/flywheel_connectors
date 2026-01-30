@@ -81,8 +81,7 @@ impl EgressExplainHarness {
     }
 
     fn emit_log(&mut self, phase: &str, result: &str, context: &serde_json::Value) {
-        let duration_ms = u64::try_from(self.start_time.elapsed().as_millis())
-            .unwrap_or(u64::MAX);
+        let duration_ms = u64::try_from(self.start_time.elapsed().as_millis()).unwrap_or(u64::MAX);
         let entry = json!({
             "timestamp": Utc::now().to_rfc3339(),
             "log_version": LOG_VERSION,
@@ -121,18 +120,12 @@ impl EgressExplainHarness {
         let cli_result: Option<CliResult> = serde_json::from_str(&stdout).ok();
 
         let actual_allowed = cli_result.as_ref().is_some_and(|r| r.allowed);
-        let actual_reason = cli_result
-            .as_ref()
-            .and_then(|r| r.reason_code.clone());
+        let actual_reason = cli_result.as_ref().and_then(|r| r.reason_code.clone());
 
         let allowed_match = actual_allowed == scenario.expect_allowed;
         let reason_match = scenario
             .expect_reason
-            .is_none_or(|expected| {
-            actual_reason
-                .as_ref()
-                .is_some_and(|r| r.contains(expected))
-        });
+            .is_none_or(|expected| actual_reason.as_ref().is_some_and(|r| r.contains(expected)));
 
         let success = allowed_match && reason_match;
         if success {
@@ -282,8 +275,7 @@ total_timeout_ms = 60000
 max_response_bytes = 10485760
 "#;
     let mut file = NamedTempFile::new().expect("create temp file");
-    file.write_all(manifest.as_bytes())
-        .expect("write manifest");
+    file.write_all(manifest.as_bytes()).expect("write manifest");
     file.flush().expect("flush manifest");
     file
 }
@@ -399,8 +391,10 @@ fn e2e_egress_explain_scenarios() {
     ));
 
     // Run scenarios
-    let mut harness =
-        EgressExplainHarness::new("e2e_egress_explain_scenarios", manifest.path().to_path_buf());
+    let mut harness = EgressExplainHarness::new(
+        "e2e_egress_explain_scenarios",
+        manifest.path().to_path_buf(),
+    );
 
     harness.emit_log(
         "setup",

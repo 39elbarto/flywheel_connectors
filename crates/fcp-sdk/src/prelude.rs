@@ -25,7 +25,10 @@ pub use crate::{
 };
 
 // Cost and availability
-pub use crate::{CostEstimate, CurrencyCost, ResourceAvailability, UsageMetric, UsageMetricKind};
+pub use crate::{
+    CostEstimate, CostEstimateConfidence, CurrencyCost, ResourceAvailability, UsageMetric,
+    UsageMetricKind,
+};
 
 // Rate limits
 pub use crate::{

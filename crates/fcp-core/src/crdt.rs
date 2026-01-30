@@ -278,9 +278,16 @@ impl PnCounter {
 
     #[must_use]
     pub fn value(&self) -> i64 {
-        let pos = i64::try_from(self.positive.value()).unwrap_or(i64::MAX);
-        let neg = i64::try_from(self.negative.value()).unwrap_or(i64::MAX);
-        pos.saturating_sub(neg)
+        // Use i128 to capture the full range of difference before clamping
+        let pos = i128::from(self.positive.value());
+        let neg = i128::from(self.negative.value());
+        let diff = pos - neg;
+
+        match i64::try_from(diff) {
+            Ok(value) => value,
+            Err(_) if diff.is_negative() => i64::MIN,
+            Err(_) => i64::MAX,
+        }
     }
 
     pub fn merge(&mut self, other: &Self) {
@@ -812,5 +819,30 @@ mod tests {
         let snapshot = counter.clone();
         counter.merge(&snapshot);
         assert_eq!(counter, snapshot);
+    }
+
+    #[test]
+    fn pn_counter_large_values_precision() {
+        let mut counter = PnCounter::default();
+        // Increment by large amount > i64::MAX
+        let huge = (i64::MAX as u64) + 1000;
+        counter.increment(actor("A"), huge);
+
+        // Decrement by large amount > i64::MAX
+        let huge_less = huge - 5;
+        counter.decrement(actor("B"), huge_less);
+
+        // Old logic:
+        // pos = i64::MAX (saturated)
+        // neg = i64::MAX (saturated)
+        // result = 0
+
+        // New logic:
+        // pos = huge
+        // neg = huge - 5
+        // diff = 5
+        // result = 5
+
+        assert_eq!(counter.value(), 5);
     }
 }

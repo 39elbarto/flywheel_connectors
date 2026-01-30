@@ -272,7 +272,7 @@ mod meshnode {
             signature: fcp_crypto::Ed25519Signature::from_bytes(&[0u8; 64]),
         };
 
-        node.handle_decode_status(&status);
+        node.handle_decode_status(&status, 0);
 
         let err = node
             .handle_symbol_request(request, &NodeId::new("peer-1"), true, 0)
@@ -349,7 +349,7 @@ mod meshnode {
             4,
         );
 
-        node.handle_symbol_ack(&ack);
+        node.handle_symbol_ack(&ack, 0);
 
         let err = node
             .handle_symbol_request(request, &NodeId::new("peer-1"), true, 0)

@@ -404,6 +404,7 @@ mod cost_estimate_vectors {
                 amount_cents: 100,
                 currency_code: "USD".to_string(),
             }),
+            confidence: Some(CostEstimateConfidence::Medium),
         };
         let actual = serde_json::to_value(&estimate).unwrap();
 
@@ -411,6 +412,10 @@ mod cost_estimate_vectors {
         assert!(actual.is_object());
         assert!(
             actual.get("api_credits").is_some() || actual.get("estimated_duration_ms").is_some()
+        );
+        assert_eq!(
+            actual.get("confidence"),
+            Some(&serde_json::Value::String("medium".to_string()))
         );
     }
 }

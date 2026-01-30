@@ -1,7 +1,7 @@
 //! E2E scenarios for log schema migration and validation.
 //!
 //! Per bd-ycmu: Generate v1 logs, migrate to v2, validate both.
-//! Persists JSONL artifacts and validates with fcp_conformance schema.
+//! Persists JSONL artifacts and validates with `fcp_conformance` schema.
 
 use std::fs::{self, File};
 use std::io::Write as _;
@@ -200,6 +200,7 @@ fn migrate_v1_to_v2(entry: &serde_json::Value) -> serde_json::Value {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn e2e_log_migration_scenario() {
     let correlation_base = format!("mig-{}", Uuid::new_v4());
 
@@ -280,26 +281,29 @@ fn e2e_log_migration_scenario() {
         .join("\n");
 
     let v1_implicit_result = validate_e2e_log_jsonl(&v1_implicit_jsonl);
-    if v1_implicit_result.is_ok() {
-        harness.passed += 1;
-        harness.emit_log(
-            "assert",
-            "pass",
-            &json!({
-                "assertion": "v1_implicit_validation",
-                "description": "v1 entries without log_version validate as v1"
-            }),
-        );
-    } else {
-        harness.failed += 1;
-        harness.emit_log(
-            "assert",
-            "fail",
-            &json!({
-                "assertion": "v1_implicit_validation",
-                "error": v1_implicit_result.unwrap_err().to_string()
-            }),
-        );
+    match v1_implicit_result {
+        Ok(()) => {
+            harness.passed += 1;
+            harness.emit_log(
+                "assert",
+                "pass",
+                &json!({
+                    "assertion": "v1_implicit_validation",
+                    "description": "v1 entries without log_version validate as v1"
+                }),
+            );
+        }
+        Err(err) => {
+            harness.failed += 1;
+            harness.emit_log(
+                "assert",
+                "fail",
+                &json!({
+                    "assertion": "v1_implicit_validation",
+                    "error": err.to_string()
+                }),
+            );
+        }
     }
 
     // Phase 4: Validate v1 explicit entries
@@ -310,26 +314,29 @@ fn e2e_log_migration_scenario() {
         .join("\n");
 
     let v1_explicit_result = validate_e2e_log_jsonl(&v1_explicit_jsonl);
-    if v1_explicit_result.is_ok() {
-        harness.passed += 1;
-        harness.emit_log(
-            "assert",
-            "pass",
-            &json!({
-                "assertion": "v1_explicit_validation",
-                "description": "v1 entries with explicit log_version validate"
-            }),
-        );
-    } else {
-        harness.failed += 1;
-        harness.emit_log(
-            "assert",
-            "fail",
-            &json!({
-                "assertion": "v1_explicit_validation",
-                "error": v1_explicit_result.unwrap_err().to_string()
-            }),
-        );
+    match v1_explicit_result {
+        Ok(()) => {
+            harness.passed += 1;
+            harness.emit_log(
+                "assert",
+                "pass",
+                &json!({
+                    "assertion": "v1_explicit_validation",
+                    "description": "v1 entries with explicit log_version validate"
+                }),
+            );
+        }
+        Err(err) => {
+            harness.failed += 1;
+            harness.emit_log(
+                "assert",
+                "fail",
+                &json!({
+                    "assertion": "v1_explicit_validation",
+                    "error": err.to_string()
+                }),
+            );
+        }
     }
 
     // Phase 5: Validate v2 entries
@@ -340,26 +347,29 @@ fn e2e_log_migration_scenario() {
         .join("\n");
 
     let v2_result = validate_e2e_log_jsonl(&v2_jsonl);
-    if v2_result.is_ok() {
-        harness.passed += 1;
-        harness.emit_log(
-            "assert",
-            "pass",
-            &json!({
-                "assertion": "v2_validation",
-                "description": "v2 entries with explicit log_version validate"
-            }),
-        );
-    } else {
-        harness.failed += 1;
-        harness.emit_log(
-            "assert",
-            "fail",
-            &json!({
-                "assertion": "v2_validation",
-                "error": v2_result.unwrap_err().to_string()
-            }),
-        );
+    match v2_result {
+        Ok(()) => {
+            harness.passed += 1;
+            harness.emit_log(
+                "assert",
+                "pass",
+                &json!({
+                    "assertion": "v2_validation",
+                    "description": "v2 entries with explicit log_version validate"
+                }),
+            );
+        }
+        Err(err) => {
+            harness.failed += 1;
+            harness.emit_log(
+                "assert",
+                "fail",
+                &json!({
+                    "assertion": "v2_validation",
+                    "error": err.to_string()
+                }),
+            );
+        }
     }
 
     // Phase 6: Validate migrated entries (should now be v2)
@@ -370,26 +380,29 @@ fn e2e_log_migration_scenario() {
         .join("\n");
 
     let migrated_result = validate_e2e_log_jsonl(&migrated_jsonl);
-    if migrated_result.is_ok() {
-        harness.passed += 1;
-        harness.emit_log(
-            "assert",
-            "pass",
-            &json!({
-                "assertion": "migrated_validation",
-                "description": "Migrated v1→v2 entries validate as v2"
-            }),
-        );
-    } else {
-        harness.failed += 1;
-        harness.emit_log(
-            "assert",
-            "fail",
-            &json!({
-                "assertion": "migrated_validation",
-                "error": migrated_result.unwrap_err().to_string()
-            }),
-        );
+    match migrated_result {
+        Ok(()) => {
+            harness.passed += 1;
+            harness.emit_log(
+                "assert",
+                "pass",
+                &json!({
+                    "assertion": "migrated_validation",
+                    "description": "Migrated v1→v2 entries validate as v2"
+                }),
+            );
+        }
+        Err(err) => {
+            harness.failed += 1;
+            harness.emit_log(
+                "assert",
+                "fail",
+                &json!({
+                    "assertion": "migrated_validation",
+                    "error": err.to_string()
+                }),
+            );
+        }
     }
 
     // Phase 7: Validate mixed version JSONL
@@ -408,27 +421,30 @@ fn e2e_log_migration_scenario() {
         .join("\n");
 
     let mixed_result = validate_e2e_log_jsonl(&mixed_jsonl);
-    if mixed_result.is_ok() {
-        harness.passed += 1;
-        harness.emit_log(
-            "assert",
-            "pass",
-            &json!({
-                "assertion": "mixed_version_validation",
-                "description": "Mixed v1/v2 JSONL validates correctly",
-                "entry_count": mixed.len()
-            }),
-        );
-    } else {
-        harness.failed += 1;
-        harness.emit_log(
-            "assert",
-            "fail",
-            &json!({
-                "assertion": "mixed_version_validation",
-                "error": mixed_result.unwrap_err().to_string()
-            }),
-        );
+    match mixed_result {
+        Ok(()) => {
+            harness.passed += 1;
+            harness.emit_log(
+                "assert",
+                "pass",
+                &json!({
+                    "assertion": "mixed_version_validation",
+                    "description": "Mixed v1/v2 JSONL validates correctly",
+                    "entry_count": mixed.len()
+                }),
+            );
+        }
+        Err(err) => {
+            harness.failed += 1;
+            harness.emit_log(
+                "assert",
+                "fail",
+                &json!({
+                    "assertion": "mixed_version_validation",
+                    "error": err.to_string()
+                }),
+            );
+        }
     }
 
     // Finalize and write logs

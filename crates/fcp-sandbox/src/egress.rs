@@ -244,6 +244,28 @@ pub fn canonicalize_hostname(hostname: &str) -> Result<String, EgressError> {
     Ok(canonical)
 }
 
+fn canonicalize_host_pattern(pattern: &str) -> Option<String> {
+    if pattern.is_empty() {
+        return None;
+    }
+
+    let (wildcard, raw) = pattern
+        .strip_prefix("*.")
+        .map_or((false, pattern), |rest| (true, rest));
+
+    let canonical = if raw.parse::<IpAddr>().is_ok() {
+        raw.to_string()
+    } else {
+        canonicalize_hostname(raw).ok()?
+    };
+
+    if wildcard {
+        Some(format!("*.{canonical}"))
+    } else {
+        Some(canonical)
+    }
+}
+
 /// Check if a hostname is canonical (already in FCP2 canonical form).
 #[must_use]
 pub fn is_hostname_canonical(hostname: &str) -> bool {
@@ -590,14 +612,17 @@ impl EgressGuard {
 
         // Check hostname allow list
         for pattern in &constraints.host_allow {
-            if pattern.starts_with("*.") {
+            let Some(canonical_pattern) = canonicalize_host_pattern(pattern) else {
+                continue;
+            };
+            if canonical_pattern.starts_with("*.") {
                 // Wildcard match: *.example.com matches sub.example.com
-                let suffix = &pattern[1..]; // ".example.com"
+                let suffix = &canonical_pattern[1..]; // ".example.com"
                 if host.ends_with(suffix) && host.len() > suffix.len() {
                     // Ensure there's actually a subdomain (not just "example.com")
                     return true;
                 }
-            } else if pattern == host {
+            } else if canonical_pattern == host {
                 return true;
             }
         }

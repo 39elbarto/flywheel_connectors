@@ -1698,10 +1698,12 @@ dependencies = [
  "fcp-manifest",
  "fcp-raptorq",
  "fcp-registry",
+ "fcp-sandbox",
  "fcp-store",
  "fcp-testkit",
  "hex",
  "insta",
+ "ipnet",
  "predicates",
  "semver",
  "serde",
@@ -1713,6 +1715,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
 ]
 

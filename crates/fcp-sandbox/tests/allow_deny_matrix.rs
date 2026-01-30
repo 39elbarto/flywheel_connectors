@@ -523,6 +523,26 @@ mod allow_list {
     }
 
     #[test]
+    fn test_uppercase_allowlist_pattern_matches() {
+        let guard = EgressGuard::new();
+        let mut constraints = permissive_constraints();
+        constraints.host_allow = vec!["API.EXAMPLE.COM".into()];
+        constraints.port_allow = vec![443];
+
+        let request = EgressRequest::Http(EgressHttpRequest {
+            url: "https://api.example.com/v1/data".into(),
+            method: "GET".into(),
+            headers: vec![],
+            body: None,
+            credential_id: None,
+        });
+
+        let decision = guard.evaluate(&request, &constraints).unwrap();
+        assert!(decision.allowed);
+        assert_eq!(decision.canonical_host, "api.example.com");
+    }
+
+    #[test]
     fn test_deep_subdomain_wildcard_allowed() {
         let guard = EgressGuard::new();
         let constraints = strict_constraints();

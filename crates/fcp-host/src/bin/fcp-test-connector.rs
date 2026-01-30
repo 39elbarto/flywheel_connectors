@@ -13,8 +13,8 @@ use std::time::Instant;
 use fcp_core::{
     AgentHint, ApprovalMode, CapabilityId, ConnectorId, EventCaps, FcpError, HandshakeRequest,
     HandshakeResponse, HealthSnapshot, HealthState, IdempotencyClass, Introspection, InvokeRequest,
-    InvokeResponse, ObjectId, OperationId, OperationInfo, RiskLevel, SafetyTier, SessionId,
-    ShutdownRequest, SimulateRequest, SimulateResponse,
+    InvokeResponse, ObjectId, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport,
+    SessionId, ShutdownRequest, SimulateRequest, SimulateResponse,
 };
 use serde_json::json;
 
@@ -83,6 +83,13 @@ impl TestConnector {
 
         serde_json::to_value(snapshot).map_err(|err| FcpError::Internal {
             message: format!("Failed to serialize health snapshot: {err}"),
+        })
+    }
+
+    fn handle_self_check(&self) -> Result<serde_json::Value, FcpError> {
+        let report = SelfCheckReport::ok();
+        serde_json::to_value(report).map_err(|err| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {err}"),
         })
     }
 
@@ -199,6 +206,7 @@ fn handle_message(connector: &mut TestConnector, message: &str) -> serde_json::V
         "configure" => connector.handle_configure(params),
         "handshake" => connector.handle_handshake(params),
         "health" => connector.handle_health(),
+        "self_check" => connector.handle_self_check(),
         "introspect" => connector.handle_introspect(),
         "invoke" => connector.handle_invoke(params),
         "simulate" => connector.handle_simulate(params),

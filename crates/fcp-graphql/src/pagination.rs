@@ -75,19 +75,32 @@ where
     Fut: Future<Output = Result<CursorPage<T>, GraphqlClientError>>,
 {
     let mut out = Vec::new();
+    let max_items = limit.map(|limit| limit.max_items);
     loop {
+        if let Some(max_items) = max_items {
+            if out.len() >= max_items {
+                return Err(PaginationError::LimitExceeded(
+                    "page limit reached".to_string(),
+                ));
+            }
+        }
+
         let page = fetch_page(cursor.clone()).await?;
-        let remaining = limit.map(|limit| limit.max_items.saturating_sub(out.len()));
+        let remaining = max_items.map(|max_items| max_items.saturating_sub(out.len()));
         if let Some(remaining) = remaining {
             if remaining == 0 {
                 return Err(PaginationError::LimitExceeded(
                     "page limit reached".to_string(),
                 ));
             }
-            out.extend(page.items.into_iter().take(remaining));
-        } else {
-            out.extend(page.items);
+            if page.items.len() > remaining {
+                out.extend(page.items.into_iter().take(remaining));
+                return Err(PaginationError::LimitExceeded(
+                    "page limit reached".to_string(),
+                ));
+            }
         }
+        out.extend(page.items);
 
         if !page.page_info.has_next_page {
             break;
@@ -112,19 +125,32 @@ where
     Fut: Future<Output = Result<OffsetPage<T>, GraphqlClientError>>,
 {
     let mut out = Vec::new();
+    let max_items = limit.map(|limit| limit.max_items);
     loop {
+        if let Some(max_items) = max_items {
+            if out.len() >= max_items {
+                return Err(PaginationError::LimitExceeded(
+                    "page limit reached".to_string(),
+                ));
+            }
+        }
+
         let page = fetch_page(offset).await?;
-        let remaining = limit.map(|limit| limit.max_items.saturating_sub(out.len()));
+        let remaining = max_items.map(|max_items| max_items.saturating_sub(out.len()));
         if let Some(remaining) = remaining {
             if remaining == 0 {
                 return Err(PaginationError::LimitExceeded(
                     "page limit reached".to_string(),
                 ));
             }
-            out.extend(page.items.into_iter().take(remaining));
-        } else {
-            out.extend(page.items);
+            if page.items.len() > remaining {
+                out.extend(page.items.into_iter().take(remaining));
+                return Err(PaginationError::LimitExceeded(
+                    "page limit reached".to_string(),
+                ));
+            }
         }
+        out.extend(page.items);
 
         match page.next_offset {
             Some(next) => offset = next,

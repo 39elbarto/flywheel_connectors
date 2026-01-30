@@ -107,6 +107,12 @@ impl SubprocessConnector {
             .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
     }
 
+    async fn self_check(&self) -> std::io::Result<SelfCheckReport> {
+        let result = self.rpc("self_check", json!({})).await?;
+        serde_json::from_value(result)
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
+    }
+
     async fn invoke(&self, request: InvokeRequest) -> std::io::Result<InvokeResponse> {
         let params = serde_json::to_value(request)
             .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
@@ -205,8 +211,8 @@ impl ConnectorRegistry for SubprocessRegistry {
     }
 
     async fn self_check(&self, id: &ConnectorId) -> Option<SelfCheckReport> {
-        self.connectors.get(id)?;
-        Some(SelfCheckReport::ok())
+        let connector = self.connectors.get(id)?;
+        connector.self_check().await.ok()
     }
 
     fn version(&self) -> u64 {
@@ -302,6 +308,15 @@ async fn host_discovery_with_subprocess_connectors() -> Result<(), Box<dyn std::
             .receipt_id
             .as_ref()
             .map(|id| id.to_string()),
+    }));
+
+    let self_check = endpoint.self_check(&connector_a_id).await?;
+    assert_eq!(self_check.report.status, fcp_core::SelfCheckStatus::Ok);
+    logs.push(json!({
+        "step": "self_check",
+        "correlation_id": CorrelationId::new().to_string(),
+        "connector_id": connector_a_id.as_str(),
+        "status": format!("{:?}", self_check.report.status),
     }));
 
     for entry in &logs {

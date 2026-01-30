@@ -113,17 +113,42 @@ impl RateLimiter {
         // We need to lock both to update atomically
         let mut last = self.last_refill.write();
         let mut tokens = self.tokens.write();
+        self.refill_locked(&mut last, &mut tokens);
 
+        if *tokens > 0 {
+            *tokens -= 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn available(&self) -> u32 {
+        if self.max_tokens == 0 {
+            return 0;
+        }
+
+        let mut last = self.last_refill.write();
+        let mut tokens = self.tokens.write();
+        self.refill_locked(&mut last, &mut tokens);
+        *tokens
+    }
+
+    fn refill_locked(&self, last: &mut std::time::Instant, tokens: &mut u32) {
         let now = std::time::Instant::now();
         let elapsed = now.duration_since(*last);
-        let nanos_per_token = 60_000_000_000 / u64::from(self.max_tokens);
 
-        // Add tokens based on elapsed time
+        let nanos_per_token = 60_000_000_000u64 / u64::from(self.max_tokens);
+        if nanos_per_token == 0 {
+            *tokens = self.max_tokens;
+            *last = now;
+            return;
+        }
+
         if let Some(new_tokens) = (elapsed.as_nanos() as u64).checked_div(nanos_per_token) {
             if new_tokens > 0 {
                 // Determine new token count, capped at max
-                let current = *tokens;
-                let updated = current.saturating_add(u32::try_from(new_tokens).unwrap_or(u32::MAX));
+                let updated = tokens.saturating_add(u32::try_from(new_tokens).unwrap_or(u32::MAX));
 
                 if updated >= self.max_tokens {
                     *tokens = self.max_tokens;
@@ -139,17 +164,6 @@ impl RateLimiter {
             *tokens = self.max_tokens;
             *last = now;
         }
-
-        if *tokens > 0 {
-            *tokens -= 1;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn available(&self) -> u32 {
-        *self.tokens.read()
     }
 }
 

@@ -226,7 +226,7 @@ pub struct MeshNode {
     local_profile: Option<DeviceProfile>,
     local_symbols: HashSet<ObjectId>,
     local_leases: Vec<HeldLease>,
-    sent_symbols: HashMap<ObjectId, HashSet<u32>>,
+    sent_symbols: HashMap<ObjectId, (u64, HashSet<u32>)>,
     metrics: MeshNodeMetrics,
 }
 
@@ -486,9 +486,13 @@ impl MeshNode {
         &mut self,
         zone_id: &ZoneId,
         object_id: &ObjectId,
-        admission: ObjectAdmissionClass,
+        mut admission: ObjectAdmissionClass,
         now_ms: u64,
     ) -> bool {
+        if self.quarantine_store.contains(object_id) {
+            admission = ObjectAdmissionClass::Quarantined;
+        }
+
         let added = self
             .gossip
             .announce_object(zone_id, object_id, admission, now_ms / 1000);
@@ -504,9 +508,13 @@ impl MeshNode {
         zone_id: &ZoneId,
         object_id: &ObjectId,
         esi: u32,
-        admission: ObjectAdmissionClass,
+        mut admission: ObjectAdmissionClass,
         now_ms: u64,
     ) -> bool {
+        if self.quarantine_store.contains(object_id) {
+            admission = ObjectAdmissionClass::Quarantined;
+        }
+
         let added = self
             .gossip
             .announce_symbol(zone_id, object_id, esi, admission, now_ms / 1000);
@@ -605,10 +613,13 @@ impl MeshNode {
         let mut engine = TargetedRepairEngine::new();
         engine.register_available(request.object_id, available.iter().copied());
 
-        let already_sent = self
+        let sent_entry = self
             .sent_symbols
             .entry(request.object_id)
-            .or_insert_with(HashSet::new);
+            .or_insert_with(|| (now_ms, HashSet::new()));
+
+        sent_entry.0 = now_ms; // Update timestamp
+        let already_sent = &mut sent_entry.1;
 
         let builder = SymbolResponseBuilder::new(
             request.object_id,
@@ -630,7 +641,7 @@ impl MeshNode {
 
         already_sent.extend(response.symbol_esis.iter().copied());
         self.symbol_requests
-            .track_transfer(&request, response.symbol_esis.iter().copied());
+            .track_transfer(&request, response.symbol_esis.iter().copied(), now_ms);
         self.symbol_metrics
             .record_symbols_sent(response.symbol_count(), request.missing_hint.is_some());
 
@@ -638,15 +649,38 @@ impl MeshNode {
     }
 
     /// Apply a decode status update (targeted repair feedback).
-    pub fn handle_decode_status(&mut self, status: &DecodeStatus) {
-        self.symbol_requests.process_decode_status(status);
+    pub fn handle_decode_status(&mut self, status: &DecodeStatus, now_ms: u64) {
+        self.symbol_requests.process_decode_status(status, now_ms);
     }
 
     /// Apply a SymbolAck and stop further sends.
-    pub fn handle_symbol_ack(&mut self, ack: &SymbolAck) {
-        self.symbol_requests.process_symbol_ack(ack);
+    pub fn handle_symbol_ack(&mut self, ack: &SymbolAck, now_ms: u64) {
+        self.symbol_requests.process_symbol_ack(ack, now_ms);
         self.symbol_metrics.record_ack();
         self.sent_symbols.remove(&ack.object_id);
+    }
+
+    /// Prune stale state (transfers, sent_symbols).
+    /// Returns total items pruned.
+    pub fn prune_stale_state(&mut self, now_ms: u64) -> usize {
+        let mut pruned = 0;
+
+        // Prune symbol requests
+        pruned += self.symbol_requests.prune_stale_state(now_ms);
+
+        // Prune sent_symbols (using same TTL from policy)
+        let ttl = self.symbol_requests.policy().transfer_state_ttl_ms;
+        let expired_threshold = now_ms.saturating_sub(ttl);
+
+        let initial_len = self.sent_symbols.len();
+        self.sent_symbols
+            .retain(|_, (ts, _)| *ts >= expired_threshold);
+        pruned += initial_len - self.sent_symbols.len();
+
+        if pruned > 0 {
+            debug!(pruned, "pruned stale mesh node state");
+        }
+        pruned
     }
 
     /// Encode a control-plane envelope for degraded transport.
@@ -1014,7 +1048,7 @@ mod tests {
         };
 
         // Should not panic
-        node.handle_decode_status(&status);
+        node.handle_decode_status(&status, 1000);
     }
 
     #[test]
@@ -1032,7 +1066,7 @@ mod tests {
             5,
         );
 
-        node.handle_symbol_ack(&ack);
+        node.handle_symbol_ack(&ack, 1000);
         assert_eq!(node.metrics().symbol_requests.acks_received, 1);
     }
 

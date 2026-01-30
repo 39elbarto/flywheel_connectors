@@ -727,6 +727,9 @@ fcp doctor --zone z:private
 # Show offline availability SLOs and symbol coverage by placement policy
 fcp repair status --zone z:work
 
+# Fix manifest interface hash + lint defaults
+fcp manifest fix ./connectors/myconnector/manifest.toml --check
+
 # Tail audit events (per zone) with trace correlation
 fcp audit tail --zone z:owner
 ```

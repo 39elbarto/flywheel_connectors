@@ -309,7 +309,7 @@ pub struct ResponseMetadata {
 }
 
 /// Invoke response status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InvokeStatus {
     /// Request completed successfully.
@@ -998,7 +998,7 @@ impl CurrencyCost {
 }
 
 /// Usage metric kind for actual execution telemetry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UsageMetricKind {
     /// API credits or tokens consumed.

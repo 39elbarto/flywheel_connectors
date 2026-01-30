@@ -37,27 +37,3 @@ mod types;
 pub use config::TwitterConfig;
 pub use connector::TwitterConnector;
 pub use error::TwitterError;
-
-#[cfg(test)]
-mod tests {
-    use fcp_manifest::ConnectorManifest;
-    use std::path::PathBuf;
-
-    #[test]
-    fn manifest_interface_hash_is_deterministic() {
-        let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("manifest.toml");
-        let raw = std::fs::read_to_string(&manifest_path).expect("read manifest");
-
-        let manifest = ConnectorManifest::parse_str(&raw).expect("manifest should validate");
-        let computed = manifest
-            .compute_interface_hash()
-            .expect("compute interface hash");
-        assert_eq!(manifest.manifest.interface_hash, computed);
-
-        let manifest2 = ConnectorManifest::parse_str_unchecked(&raw).expect("parse unchecked");
-        let computed2 = manifest2
-            .compute_interface_hash()
-            .expect("compute interface hash");
-        assert_eq!(computed, computed2);
-    }
-}

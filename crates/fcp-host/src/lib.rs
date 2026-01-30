@@ -13,8 +13,10 @@
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
 #![allow(clippy::module_name_repetitions)]
 
+mod budget;
 mod discovery;
 mod error;
 
+pub use budget::*;
 pub use discovery::*;
 pub use error::*;

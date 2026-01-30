@@ -273,6 +273,7 @@ fn base_zone_policy(zone: ZoneId) -> ZonePolicyObject {
         capability_ceiling: Vec::new(),
         transport_policy: ZoneTransportPolicy::default(),
         decision_receipts: fcp_core::DecisionReceiptPolicy::default(),
+        usage_budget: None,
         requires_posture: None,
     }
 }

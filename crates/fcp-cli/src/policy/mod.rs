@@ -608,6 +608,7 @@ fn default_zone_policy(invoke: &InvokeRequest) -> ZonePolicyObject {
         capability_ceiling: Vec::new(),
         transport_policy: fcp_core::ZoneTransportPolicy::default(),
         decision_receipts: DecisionReceiptPolicy::default(),
+        usage_budget: None,
         requires_posture: None,
     }
 }

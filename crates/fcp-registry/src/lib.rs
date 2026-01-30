@@ -1194,6 +1194,7 @@ sig = "{sig}"
             capability_ceiling,
             transport_policy: ZoneTransportPolicy::default(),
             decision_receipts: DecisionReceiptPolicy::default(),
+            usage_budget: None,
             requires_posture: None,
         }
     }

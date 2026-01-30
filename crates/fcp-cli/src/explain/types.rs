@@ -204,6 +204,7 @@ pub fn reason_code_description(code: &str) -> &'static str {
         "FCP-6001" => "Resource not found",
         "FCP-6002" => "Resource exhausted",
         "FCP-6003" => "Conflict - concurrent modification",
+        "FCP-6004" => "Usage budget exceeded",
 
         // External service errors (FCP-7xxx)
         "FCP-7001" => "External service error",

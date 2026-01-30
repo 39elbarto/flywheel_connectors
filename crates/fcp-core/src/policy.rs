@@ -1254,6 +1254,7 @@ mod tests {
                 allow_funnel: true,
             },
             decision_receipts: DecisionReceiptPolicy::default(),
+            usage_budget: None,
             requires_posture: None,
         }
     }
@@ -1413,6 +1414,28 @@ mod tests {
         let back: DecisionReceiptPolicy = serde_json::from_str(&json).unwrap();
         assert!(back.emit_on_allow);
         assert!(!back.emit_on_deny);
+    }
+
+    // ── UsageBudgetPolicy ──────────────────────────────────────────────────
+
+    #[test]
+    fn usage_budget_policy_serde_roundtrip() {
+        let policy = UsageBudgetPolicy {
+            enforcement: BudgetEnforcement::Warn,
+            budgets: vec![UsageBudgetLimit {
+                metric: UsageMetricKind::Tokens,
+                limit: 1000,
+                window_seconds: 60,
+            }],
+        };
+
+        let json = serde_json::to_string(&policy).unwrap();
+        let back: UsageBudgetPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.enforcement, BudgetEnforcement::Warn);
+        assert_eq!(back.budgets.len(), 1);
+        assert_eq!(back.budgets[0].metric, UsageMetricKind::Tokens);
+        assert_eq!(back.budgets[0].limit, 1000);
+        assert_eq!(back.budgets[0].window_seconds, 60);
     }
 
     // ── PolicyPattern ──────────────────────────────────────────────────────

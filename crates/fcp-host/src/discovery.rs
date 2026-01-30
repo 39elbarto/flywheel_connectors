@@ -16,6 +16,7 @@ use chrono::{DateTime, Utc};
 use fcp_core::{
     AgentHint, ApprovalMode, CapabilityId, ConnectorHealth, ConnectorId, IdempotencyClass,
     Introspection, OperationInfo, RateLimitDeclarations, RiskLevel, SafetyTier, SelfCheckReport,
+    UsageBudgetSnapshot,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
@@ -417,6 +418,10 @@ pub struct PreflightResponse {
     /// Estimated cost (if available).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub estimated_cost: Option<EstimatedCost>,
+
+    /// Usage budget snapshot (if available).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget_status: Option<UsageBudgetSnapshot>,
 }
 
 impl PreflightResponse {
@@ -429,6 +434,7 @@ impl PreflightResponse {
             missing_capabilities: Vec::new(),
             rate_limit: None,
             estimated_cost: None,
+            budget_status: None,
         }
     }
 
@@ -441,6 +447,7 @@ impl PreflightResponse {
             missing_capabilities: vec![],
             rate_limit: None,
             estimated_cost: None,
+            budget_status: None,
         }
     }
 }
@@ -1539,6 +1546,10 @@ mod tests {
 
     #[test]
     fn preflight_response_serialization_roundtrip() {
+        use fcp_core::{
+            BudgetEnforcement, BudgetStatus, UsageBudgetUsage, UsageMetricKind, ZoneId,
+        };
+
         let mut resp = PreflightResponse::denied("rate limited");
         resp.missing_capabilities = vec!["cap.send".to_string()];
         resp.rate_limit = Some(PreflightRateLimit {
@@ -1550,6 +1561,20 @@ mod tests {
             api_calls: Some(1),
             tokens: None,
             cost_cents: Some(10),
+        });
+        resp.budget_status = Some(UsageBudgetSnapshot {
+            zone_id: ZoneId::work(),
+            enforcement: BudgetEnforcement::Warn,
+            budgets: vec![UsageBudgetUsage {
+                metric: UsageMetricKind::Tokens,
+                used: 1500,
+                limit: 2000,
+                remaining: 500,
+                window_started_at: 1_700_000_000,
+                window_resets_at: 1_700_000_060,
+                status: BudgetStatus::Ok,
+            }],
+            updated_at: 1_700_000_020,
         });
 
         let json = serde_json::to_string(&resp).unwrap();

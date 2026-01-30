@@ -196,6 +196,7 @@ fn create_test_receipt(
         idempotency_key: idempotency_key.map(String::from),
         outcome_object_ids: outcome_ids,
         resource_object_ids: vec![],
+        usage_metrics: None,
         executed_at: 1_704_067_300,
         executed_by: test_node("executor-node"),
         signature: test_signature(),

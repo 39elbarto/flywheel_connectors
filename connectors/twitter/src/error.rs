@@ -137,3 +137,86 @@ impl TwitterError {
 
 /// Result type for Twitter operations.
 pub type TwitterResult<T> = Result<T, TwitterError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fcp_core::FcpError;
+
+    #[test]
+    fn test_api_error_maps_to_capability_denied() {
+        let err = TwitterError::Api {
+            status: 403,
+            message: "forbidden".into(),
+            error_code: None,
+            retry_after: None,
+        };
+
+        let fcp = err.to_fcp_error();
+        assert!(matches!(
+            fcp,
+            FcpError::CapabilityDenied {
+                capability,
+                reason
+            } if capability == "twitter.api" && reason == "forbidden"
+        ));
+    }
+
+    #[test]
+    fn test_api_error_maps_to_unauthorized() {
+        let err = TwitterError::Api {
+            status: 401,
+            message: "unauthorized".into(),
+            error_code: None,
+            retry_after: None,
+        };
+
+        let fcp = err.to_fcp_error();
+        assert!(matches!(
+            fcp,
+            FcpError::Unauthorized { code: 2001, message }
+                if message == "unauthorized"
+        ));
+    }
+
+    #[test]
+    fn test_api_error_maps_to_rate_limited() {
+        let err = TwitterError::Api {
+            status: 429,
+            message: "rate limited".into(),
+            error_code: None,
+            retry_after: Some(5),
+        };
+
+        let fcp = err.to_fcp_error();
+        assert!(matches!(
+            fcp,
+            FcpError::RateLimited {
+                retry_after_ms: 5000,
+                violation: None
+            }
+        ));
+    }
+
+    #[test]
+    fn test_api_error_maps_to_external() {
+        let err = TwitterError::Api {
+            status: 500,
+            message: "server error".into(),
+            error_code: None,
+            retry_after: None,
+        };
+
+        let fcp = err.to_fcp_error();
+        assert!(matches!(
+            fcp,
+            FcpError::External {
+                service,
+                message,
+                status_code: Some(500),
+                retryable: true,
+                retry_after: None
+            } if service == "twitter" && message == "server error"
+        ));
+    }
+}

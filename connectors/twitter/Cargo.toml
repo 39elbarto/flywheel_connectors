@@ -40,5 +40,7 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+fcp-manifest = { path = "../../crates/fcp-manifest" }
+fcp-testkit = { path = "../../crates/fcp-testkit" }
 wiremock.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

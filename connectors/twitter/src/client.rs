@@ -610,6 +610,7 @@ impl TwitterApiClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fcp_testkit::LogCapture;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{header_exists, method, path},
@@ -803,5 +804,49 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err, TwitterError::Api { status: 401, .. }));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_logs_redact_credentials_and_tweet_text() {
+        let capture = LogCapture::new();
+        let _guard = capture.install_json_with_filter("debug");
+        tracing::debug!("log_capture_ready");
+
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/2/tweets"))
+            .and(header_exists("Authorization"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "id": "1234567890",
+                    "text": "Hello, Twitter!"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let config = test_config(&mock_server);
+        let client = TwitterApiClient::new(&config).unwrap();
+
+        let secret_tweet = "TopSecretTweet";
+        let request = CreateTweetRequest {
+            text: Some(secret_tweet.into()),
+            ..Default::default()
+        };
+
+        let _ = client.create_tweet(&request).await.unwrap();
+
+        let logs = capture.jsonl();
+        assert!(
+            logs.contains("log_capture_ready"),
+            "expected debug logs to be captured"
+        );
+        assert!(!logs.contains("test_consumer_key"));
+        assert!(!logs.contains("test_consumer_secret"));
+        assert!(!logs.contains("test_access_token"));
+        assert!(!logs.contains("test_access_token_secret"));
+        assert!(!logs.contains("test_bearer_token"));
+        assert!(!logs.contains(secret_tweet));
     }
 }

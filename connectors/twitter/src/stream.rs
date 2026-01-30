@@ -157,7 +157,7 @@ async fn process_stream(
         let chunk: Bytes = chunk_result?;
 
         // Handle empty chunks (heartbeats)
-        if chunk.is_empty() || (chunk.len() == 2 && chunk[..] == b"\r\n"[..]) {
+        if is_heartbeat_chunk(&chunk) {
             debug!("Received heartbeat");
             if event_tx.send(StreamEvent::Heartbeat).await.is_err() {
                 return Ok(());
@@ -173,43 +173,61 @@ async fn process_stream(
             let line: Vec<u8> = buffer.drain(..=newline_pos).collect();
             let line_str = String::from_utf8_lossy(&line).trim().to_string();
 
-            if line_str.is_empty() {
-                continue;
-            }
-
-            // Parse as JSON
-            match serde_json::from_str::<StreamTweet>(&line_str) {
-                Ok(tweet) => {
-                    debug!(tweet_id = %tweet.data.id, "Received stream tweet");
-                    if event_tx.send(StreamEvent::Tweet(tweet)).await.is_err() {
+            match parse_stream_line(&line_str) {
+                Ok(Some(event)) => {
+                    if let StreamEvent::Tweet(tweet) = &event {
+                        debug!(tweet_id = %tweet.data.id, "Received stream tweet");
+                    }
+                    if event_tx.send(event).await.is_err() {
                         return Ok(());
                     }
                 }
+                Ok(None) => {}
                 Err(e) => {
                     // Could be an error response or malformed data
                     warn!(error = %e, data = %line_str, "Failed to parse stream data");
-
-                    // Try to parse as error
-                    if let Ok(error) = serde_json::from_str::<serde_json::Value>(&line_str) {
-                        if error.get("errors").is_some() || error.get("title").is_some() {
-                            let msg = error
-                                .get("detail")
-                                .or_else(|| error.get("title"))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("Unknown stream error")
-                                .to_string();
-
-                            if event_tx.send(StreamEvent::Error(msg)).await.is_err() {
-                                return Ok(());
-                            }
-                        }
-                    }
                 }
             }
         }
     }
 
     Ok(())
+}
+
+fn parse_stream_line(line_str: &str) -> Result<Option<StreamEvent>, serde_json::Error> {
+    if line_str.is_empty() {
+        return Ok(None);
+    }
+
+    match serde_json::from_str::<StreamTweet>(line_str) {
+        Ok(tweet) => Ok(Some(StreamEvent::Tweet(tweet))),
+        Err(err) => {
+            if let Some(msg) = extract_stream_error(line_str) {
+                return Ok(Some(StreamEvent::Error(msg)));
+            }
+            Err(err)
+        }
+    }
+}
+
+fn extract_stream_error(line_str: &str) -> Option<String> {
+    let error = serde_json::from_str::<serde_json::Value>(line_str).ok()?;
+    if error.get("errors").is_some() || error.get("title").is_some() {
+        Some(
+            error
+                .get("detail")
+                .or_else(|| error.get("title"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("Unknown stream error")
+                .to_string(),
+        )
+    } else {
+        None
+    }
+}
+
+fn is_heartbeat_chunk(chunk: &Bytes) -> bool {
+    chunk.is_empty() || (chunk.len() == 2 && chunk[..] == b"\r\n"[..])
 }
 
 #[cfg(test)]
@@ -255,5 +273,50 @@ mod tests {
 
         let result = FilteredStream::new(config);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_stream_line_tweet() {
+        let payload = serde_json::json!({
+            "data": {
+                "id": "123",
+                "text": "hello"
+            }
+        })
+        .to_string();
+
+        let event = parse_stream_line(&payload).unwrap();
+        let tweet = match event {
+            Some(StreamEvent::Tweet(tweet)) => tweet,
+            other => panic!("expected tweet event, got {other:?}"),
+        };
+
+        assert_eq!(tweet.data.id, "123");
+        assert_eq!(tweet.data.text, "hello");
+    }
+
+    #[test]
+    fn test_parse_stream_line_error() {
+        let payload = serde_json::json!({
+            "title": "Unauthorized",
+            "detail": "bad token"
+        })
+        .to_string();
+
+        let event = parse_stream_line(&payload).unwrap();
+        assert!(matches!(event, Some(StreamEvent::Error(msg)) if msg == "bad token"));
+    }
+
+    #[test]
+    fn test_parse_stream_line_invalid_json() {
+        let payload = "not-json";
+        assert!(parse_stream_line(payload).is_err());
+    }
+
+    #[test]
+    fn test_is_heartbeat_chunk() {
+        assert!(is_heartbeat_chunk(&Bytes::from("")));
+        assert!(is_heartbeat_chunk(&Bytes::from("\r\n")));
+        assert!(!is_heartbeat_chunk(&Bytes::from("data")));
     }
 }

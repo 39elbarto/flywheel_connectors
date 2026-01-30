@@ -164,3 +164,107 @@ fn connector_info_json_includes_capabilities() {
     capture.push_line(&log.to_string());
     capture.validate_jsonl().expect("structured log");
 }
+
+#[test]
+fn connector_introspect_json_includes_rate_limits() {
+    let capture = LogCapture::new();
+    let correlation_id = format!("connector-introspect-rate-limits-{}", std::process::id());
+
+    let payload = run_fcp(&["connector", "introspect", "fcp.twitter:social:v1", "--json"]);
+    let rate_limits = payload
+        .get("rate_limits")
+        .and_then(Value::as_object)
+        .expect("rate_limits object");
+    let pools = rate_limits
+        .get("limits")
+        .and_then(Value::as_array)
+        .expect("rate_limits.limits array");
+    assert!(
+        pools
+            .iter()
+            .any(|pool| { pool.get("id").and_then(Value::as_str) == Some("twitter_api") }),
+        "expected twitter_api pool"
+    );
+
+    let tool_pool_map = rate_limits
+        .get("tool_pool_map")
+        .and_then(Value::as_object)
+        .expect("tool_pool_map object");
+    let timeline_pools = tool_pool_map
+        .get("twitter.get_timeline")
+        .and_then(Value::as_array)
+        .expect("twitter.get_timeline pools");
+    assert!(
+        timeline_pools
+            .iter()
+            .any(|pool| pool.as_str() == Some("twitter_api")),
+        "expected twitter.get_timeline to map to twitter_api pool"
+    );
+
+    let log = serde_json::json!({
+        "timestamp": Utc::now().to_rfc3339(),
+        "level": "info",
+        "test_name": "connector_introspect_json_includes_rate_limits",
+        "module": "fcp-cli::connector",
+        "phase": "verify",
+        "correlation_id": correlation_id,
+        "result": "pass",
+        "duration_ms": 0,
+        "assertions": { "passed": 2, "failed": 0 },
+        "details": { "pools": pools.len() }
+    });
+    capture.push_line(&log.to_string());
+    capture.validate_jsonl().expect("structured log");
+}
+
+#[test]
+fn connector_info_json_includes_rate_limits() {
+    let capture = LogCapture::new();
+    let correlation_id = format!("connector-info-rate-limits-{}", std::process::id());
+
+    let payload = run_fcp(&["connector", "info", "fcp.twitter:social:v1", "--json"]);
+    let rate_limits = payload
+        .get("rate_limits")
+        .and_then(Value::as_object)
+        .expect("rate_limits object");
+    let pools = rate_limits
+        .get("limits")
+        .and_then(Value::as_array)
+        .expect("rate_limits.limits array");
+    assert!(
+        pools
+            .iter()
+            .any(|pool| { pool.get("id").and_then(Value::as_str) == Some("twitter_api") }),
+        "expected twitter_api pool"
+    );
+
+    let tool_pool_map = rate_limits
+        .get("tool_pool_map")
+        .and_then(Value::as_object)
+        .expect("tool_pool_map object");
+    let timeline_pools = tool_pool_map
+        .get("twitter.get_timeline")
+        .and_then(Value::as_array)
+        .expect("twitter.get_timeline pools");
+    assert!(
+        timeline_pools
+            .iter()
+            .any(|pool| pool.as_str() == Some("twitter_api")),
+        "expected twitter.get_timeline to map to twitter_api pool"
+    );
+
+    let log = serde_json::json!({
+        "timestamp": Utc::now().to_rfc3339(),
+        "level": "info",
+        "test_name": "connector_info_json_includes_rate_limits",
+        "module": "fcp-cli::connector",
+        "phase": "verify",
+        "correlation_id": correlation_id,
+        "result": "pass",
+        "duration_ms": 0,
+        "assertions": { "passed": 2, "failed": 0 },
+        "details": { "pools": pools.len() }
+    });
+    capture.push_line(&log.to_string());
+    capture.validate_jsonl().expect("structured log");
+}

@@ -90,7 +90,7 @@ impl PolicySimulationHarness {
 
         match &result {
             Ok(receipt) => {
-                self.emit_log(
+                self.emit_log_with_result(
                     "simulate",
                     "policy_simulated",
                     &json!({
@@ -101,6 +101,9 @@ impl PolicySimulationHarness {
                             .collect::<Vec<_>>(),
                         "duration_ms": duration_ms,
                     }),
+                    "pass",
+                    duration_ms,
+                    LogAssertions::none(),
                 );
 
                 Ok(SimulationResult {
@@ -111,13 +114,16 @@ impl PolicySimulationHarness {
                 })
             }
             Err(err) => {
-                self.emit_log(
+                self.emit_log_with_result(
                     "simulate",
                     "policy_simulation_error",
                     &json!({
                         "error": err.to_string(),
                         "duration_ms": duration_ms,
                     }),
+                    "fail",
+                    duration_ms,
+                    LogAssertions::new(0, 1),
                 );
                 Err(fcp_core::PolicySimulationError::MissingClaim { claim: "error" })
             }
@@ -133,7 +139,7 @@ impl PolicySimulationHarness {
     ) {
         let matches = result.decision == expected_decision && result.reason_code == expected_reason;
 
-        self.emit_log(
+        self.emit_log_with_result(
             "assert",
             "simulation_comparison",
             &json!({
@@ -145,6 +151,9 @@ impl PolicySimulationHarness {
                 "evidence_ids": result.evidence_ids,
                 "result": if matches { "pass" } else { "fail" },
             }),
+            if matches { "pass" } else { "fail" },
+            0,
+            LogAssertions::from_match(matches),
         );
 
         assert_eq!(result.decision, expected_decision, "decision mismatch");
@@ -152,21 +161,46 @@ impl PolicySimulationHarness {
     }
 
     fn emit_log(&self, phase: &str, event_type: &str, context: &serde_json::Value) {
+        self.emit_log_with_result(phase, event_type, context, "pass", 0, LogAssertions::none());
+    }
+
+    fn emit_log_with_result(
+        &self,
+        phase: &str,
+        event_type: &str,
+        context: &serde_json::Value,
+        result: &str,
+        duration_ms: u64,
+        assertions: LogAssertions,
+    ) {
         let entry = json!({
             "timestamp": Utc::now().to_rfc3339(),
             "test_name": self.test_name,
             "module": "fcp-cli",
             "phase": phase,
             "correlation_id": self.correlation_id,
-            "event_type": event_type,
-            "context": context,
+            "result": result,
+            "duration_ms": duration_ms,
+            "assertions": {
+                "passed": assertions.passed,
+                "failed": assertions.failed,
+            },
+            "context": {
+                "event_type": event_type,
+                "payload": context,
+            },
         });
         self.log_capture
-            .push_line(&serde_json::to_string(&entry).expect("serialize log entry"));
+            .push_value(&entry)
+            .expect("serialize log entry");
     }
 
     fn jsonl(&self) -> String {
         self.log_capture.jsonl()
+    }
+
+    fn assert_logs_valid(&self) {
+        self.log_capture.assert_valid();
     }
 }
 
@@ -177,6 +211,32 @@ struct SimulationResult {
     reason_code: String,
     evidence_count: usize,
     evidence_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LogAssertions {
+    passed: u64,
+    failed: u64,
+}
+
+impl LogAssertions {
+    const fn new(passed: u64, failed: u64) -> Self {
+        Self { passed, failed }
+    }
+
+    const fn none() -> Self {
+        Self {
+            passed: 0,
+            failed: 0,
+        }
+    }
+
+    fn from_match(matches: bool) -> Self {
+        Self {
+            passed: u64::from(matches),
+            failed: u64::from(!matches),
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -812,4 +872,137 @@ fn e2e_harness_zone_mismatch_error() {
     );
 
     harness.stop();
+}
+
+/// E2E rollback scenario: diff + rollback plan restores previous policy state.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn e2e_policy_rollback_plan_restores_previous_state() {
+    let mut harness =
+        PolicySimulationHarness::new("e2e_policy_rollback_plan_restores_previous_state");
+    harness.start();
+
+    let zone = ZoneId::work();
+    let before = base_zone_policy(zone.clone());
+    let mut after = before.clone();
+    after.capability_allow.push(PolicyPattern {
+        pattern: "cap.test.read".to_string(),
+    });
+    after.transport_policy.allow_derp = true;
+
+    harness.emit_log(
+        "execute",
+        "policy_change_applied",
+        &json!({
+            "zone_id": zone.to_string(),
+            "changes": ["capability_allow:+cap.test.read", "transport_policy.allow_derp:true"],
+        }),
+    );
+
+    let temp_path = |name: &str, ext: &str| -> std::path::PathBuf {
+        let mut path = std::env::temp_dir();
+        let suffix = Uuid::new_v4();
+        path.push(format!("fcp_policy_{name}_{suffix}.{ext}"));
+        path
+    };
+
+    let before_path = temp_path("before", "json");
+    let after_path = temp_path("after", "json");
+
+    std::fs::write(
+        &before_path,
+        serde_json::to_string_pretty(&before).expect("serialize before policy"),
+    )
+    .expect("write before policy");
+    std::fs::write(
+        &after_path,
+        serde_json::to_string_pretty(&after).expect("serialize after policy"),
+    )
+    .expect("write after policy");
+
+    let diff_start = std::time::Instant::now();
+    let diff_output = assert_cmd::Command::new(env!("CARGO_BIN_EXE_fcp"))
+        .args([
+            "policy",
+            "diff",
+            "--before",
+            before_path.to_string_lossy().as_ref(),
+            "--after",
+            after_path.to_string_lossy().as_ref(),
+            "--json",
+        ])
+        .env("RUST_LOG", "error")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    #[allow(clippy::cast_possible_truncation)]
+    let diff_duration_ms = diff_start.elapsed().as_millis() as u64;
+    let diff_payload: serde_json::Value =
+        serde_json::from_slice(&diff_output).expect("parse diff payload");
+
+    harness.emit_log_with_result(
+        "execute",
+        "policy_diff_generated",
+        &json!({
+            "previous_policy_id": diff_payload["previous_policy_id"],
+            "current_policy_id": diff_payload["current_policy_id"],
+            "zone_id": diff_payload["zone_id"],
+        }),
+        "pass",
+        diff_duration_ms,
+        LogAssertions::none(),
+    );
+
+    let rollback_start = std::time::Instant::now();
+    let rollback_output = assert_cmd::Command::new(env!("CARGO_BIN_EXE_fcp"))
+        .args([
+            "policy",
+            "rollback",
+            "--plan",
+            "--current",
+            after_path.to_string_lossy().as_ref(),
+            "--previous",
+            before_path.to_string_lossy().as_ref(),
+            "--json",
+        ])
+        .env("RUST_LOG", "error")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    #[allow(clippy::cast_possible_truncation)]
+    let rollback_duration_ms = rollback_start.elapsed().as_millis() as u64;
+    let rollback_payload: serde_json::Value =
+        serde_json::from_slice(&rollback_output).expect("parse rollback payload");
+
+    assert_eq!(rollback_payload["plan_type"], "rollback");
+    assert_eq!(rollback_payload["policy_type"], "zone_policy");
+    assert_eq!(
+        rollback_payload["previous_policy_id"],
+        diff_payload["previous_policy_id"]
+    );
+    assert_eq!(
+        rollback_payload["current_policy_id"],
+        diff_payload["current_policy_id"]
+    );
+    assert_eq!(rollback_payload["zone_id"], diff_payload["zone_id"]);
+
+    harness.emit_log_with_result(
+        "verify",
+        "policy_rollback_plan_generated",
+        &json!({
+            "previous_policy_id": rollback_payload["previous_policy_id"],
+            "current_policy_id": rollback_payload["current_policy_id"],
+            "plan_type": rollback_payload["plan_type"],
+        }),
+        "pass",
+        rollback_duration_ms,
+        LogAssertions::new(1, 0),
+    );
+
+    harness.stop();
+    harness.assert_logs_valid();
 }

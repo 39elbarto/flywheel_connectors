@@ -1312,4 +1312,364 @@ mod tests {
         assert!(!response.allowed);
         assert_eq!(response.reason.as_deref(), Some("policy denied"));
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Combined filter tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn filter_matches_combined_category_and_risk() {
+        let filter = DiscoveryFilter {
+            category: Some("messaging".to_string()),
+            max_risk: Some(SafetyTier::Risky),
+            health: None,
+        };
+
+        // Matches both category and risk
+        let safe_msg = make_summary(
+            "test",
+            "sm",
+            "v1",
+            vec!["messaging"],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        assert!(filter.matches(&safe_msg));
+
+        // Right category, too risky
+        let dangerous_msg = make_summary(
+            "test",
+            "dm",
+            "v1",
+            vec!["messaging"],
+            SafetyTier::Dangerous,
+            ConnectorHealth::healthy(),
+        );
+        assert!(!filter.matches(&dangerous_msg));
+
+        // Wrong category, right risk
+        let safe_storage = make_summary(
+            "test",
+            "ss",
+            "v1",
+            vec!["storage"],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        assert!(!filter.matches(&safe_storage));
+    }
+
+    #[test]
+    fn filter_matches_all_three_dimensions() {
+        let filter = DiscoveryFilter {
+            category: Some("ai".to_string()),
+            max_risk: Some(SafetyTier::Risky),
+            health: Some(HealthFilter::Available),
+        };
+
+        // Matches all
+        let good = make_summary(
+            "test",
+            "g",
+            "v1",
+            vec!["ai"],
+            SafetyTier::Risky,
+            ConnectorHealth::healthy(),
+        );
+        assert!(filter.matches(&good));
+
+        // Matches category + risk, but unavailable
+        let down = make_summary(
+            "test",
+            "dn",
+            "v1",
+            vec!["ai"],
+            SafetyTier::Safe,
+            ConnectorHealth::unavailable("down"),
+        );
+        assert!(!filter.matches(&down));
+
+        // Degraded counts as available
+        let degraded = make_summary(
+            "test",
+            "dg",
+            "v1",
+            vec!["ai"],
+            SafetyTier::Safe,
+            ConnectorHealth::degraded("slow"),
+        );
+        assert!(filter.matches(&degraded));
+    }
+
+    #[test]
+    fn filter_health_degraded_only_matches_degraded() {
+        let filter = DiscoveryFilter {
+            health: Some(HealthFilter::Degraded),
+            ..Default::default()
+        };
+
+        let healthy = make_summary(
+            "test",
+            "hh",
+            "v1",
+            vec![],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        let degraded = make_summary(
+            "test",
+            "dd",
+            "v1",
+            vec![],
+            SafetyTier::Safe,
+            ConnectorHealth::degraded("slow"),
+        );
+
+        assert!(!filter.matches(&healthy));
+        assert!(filter.matches(&degraded));
+    }
+
+    #[test]
+    fn filter_health_all_matches_everything() {
+        let filter = DiscoveryFilter {
+            health: Some(HealthFilter::All),
+            ..Default::default()
+        };
+
+        let healthy = make_summary(
+            "test",
+            "ah",
+            "v1",
+            vec![],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        let degraded = make_summary(
+            "test",
+            "ad",
+            "v1",
+            vec![],
+            SafetyTier::Safe,
+            ConnectorHealth::degraded("slow"),
+        );
+        let unavailable = make_summary(
+            "test",
+            "au",
+            "v1",
+            vec![],
+            SafetyTier::Safe,
+            ConnectorHealth::unavailable("down"),
+        );
+
+        assert!(filter.matches(&healthy));
+        assert!(filter.matches(&degraded));
+        assert!(filter.matches(&unavailable));
+    }
+
+    #[test]
+    fn filter_category_with_multi_category_connector() {
+        let filter = DiscoveryFilter {
+            category: Some("ai".to_string()),
+            ..Default::default()
+        };
+
+        let multi = make_summary(
+            "test",
+            "mc",
+            "v1",
+            vec!["messaging", "ai", "knowledge"],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        assert!(filter.matches(&multi));
+
+        let no_match = make_summary(
+            "test",
+            "nm",
+            "v1",
+            vec!["messaging", "storage"],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        assert!(!filter.matches(&no_match));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // PreflightResponse populated fields
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn preflight_response_with_missing_capabilities() {
+        let mut resp = PreflightResponse::denied("missing caps");
+        resp.missing_capabilities = vec!["cap.read".to_string(), "cap.write".to_string()];
+
+        assert!(!resp.allowed);
+        assert_eq!(resp.missing_capabilities.len(), 2);
+        assert!(resp.missing_capabilities.contains(&"cap.read".to_string()));
+    }
+
+    #[test]
+    fn preflight_response_with_rate_limit() {
+        let mut resp = PreflightResponse::denied("rate limited");
+        resp.rate_limit = Some(PreflightRateLimit {
+            limited: true,
+            remaining: 0,
+            reset_at: Some(Utc::now()),
+        });
+
+        assert!(resp.rate_limit.as_ref().unwrap().limited);
+        assert_eq!(resp.rate_limit.as_ref().unwrap().remaining, 0);
+        assert!(resp.rate_limit.as_ref().unwrap().reset_at.is_some());
+    }
+
+    #[test]
+    fn preflight_response_with_estimated_cost() {
+        let mut resp = PreflightResponse::allowed();
+        resp.estimated_cost = Some(EstimatedCost {
+            api_calls: Some(3),
+            tokens: Some(1500),
+            cost_cents: Some(2),
+        });
+
+        let cost = resp.estimated_cost.as_ref().unwrap();
+        assert_eq!(cost.api_calls, Some(3));
+        assert_eq!(cost.tokens, Some(1500));
+        assert_eq!(cost.cost_cents, Some(2));
+    }
+
+    #[test]
+    fn preflight_response_serialization_roundtrip() {
+        let mut resp = PreflightResponse::denied("rate limited");
+        resp.missing_capabilities = vec!["cap.send".to_string()];
+        resp.rate_limit = Some(PreflightRateLimit {
+            limited: true,
+            remaining: 5,
+            reset_at: None,
+        });
+        resp.estimated_cost = Some(EstimatedCost {
+            api_calls: Some(1),
+            tokens: None,
+            cost_cents: Some(10),
+        });
+
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: PreflightResponse = serde_json::from_str(&json).unwrap();
+
+        assert!(!parsed.allowed);
+        assert_eq!(parsed.reason.as_deref(), Some("rate limited"));
+        assert_eq!(parsed.missing_capabilities, vec!["cap.send"]);
+        assert!(parsed.rate_limit.as_ref().unwrap().limited);
+        assert_eq!(parsed.rate_limit.as_ref().unwrap().remaining, 5);
+        assert_eq!(parsed.estimated_cost.as_ref().unwrap().api_calls, Some(1));
+        assert!(parsed.estimated_cost.as_ref().unwrap().tokens.is_none());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // EstimatedCost + HostHealth serialization
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn estimated_cost_partial_fields() {
+        let cost = EstimatedCost {
+            api_calls: None,
+            tokens: Some(500),
+            cost_cents: None,
+        };
+
+        let json = serde_json::to_string(&cost).unwrap();
+        let parsed: EstimatedCost = serde_json::from_str(&json).unwrap();
+        assert!(parsed.api_calls.is_none());
+        assert_eq!(parsed.tokens, Some(500));
+        assert!(parsed.cost_cents.is_none());
+    }
+
+    #[test]
+    fn host_health_response_serialization() {
+        let response = HostHealthResponse {
+            status: HostHealthStatus::Degraded,
+            connectors: HashMap::new(),
+            uptime_seconds: 3600,
+            active_connections: 5,
+            timestamp: Utc::now(),
+        };
+
+        let json = serde_json::to_string(&response).unwrap();
+        let parsed: HostHealthResponse = serde_json::from_str(&json).unwrap();
+
+        assert!(matches!(parsed.status, HostHealthStatus::Degraded));
+        assert_eq!(parsed.uptime_seconds, 3600);
+        assert_eq!(parsed.active_connections, 5);
+    }
+
+    #[test]
+    fn host_health_status_serialization() {
+        for status in [
+            HostHealthStatus::Healthy,
+            HostHealthStatus::Degraded,
+            HostHealthStatus::Unhealthy,
+        ] {
+            let json = serde_json::to_string(&status).unwrap();
+            let parsed: HostHealthStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                std::mem::discriminant(&parsed),
+                std::mem::discriminant(&status)
+            );
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Endpoint: discover with strict filter returns empty
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn discovery_endpoint_discover_all_filtered_out() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let summary = make_summary(
+            "test",
+            "only",
+            "v1",
+            vec!["storage"],
+            SafetyTier::Dangerous,
+            ConnectorHealth::healthy(),
+        );
+        let registry = CountingRegistry::new(vec![summary], Arc::clone(&calls));
+        let endpoint = DiscoveryEndpoint::new(Arc::new(registry), Arc::new(AllowPolicy));
+
+        // Filter that excludes everything: wrong category + too strict risk
+        let filter = DiscoveryFilter {
+            category: Some("messaging".to_string()),
+            max_risk: Some(SafetyTier::Safe),
+            health: None,
+        };
+
+        let response = endpoint.discover(Some(filter)).await;
+        assert!(response.connectors.is_empty());
+        assert_eq!(response.registry_version, 1);
+    }
+
+    #[tokio::test]
+    async fn discovery_endpoint_discover_no_filter_returns_all() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let s1 = make_summary(
+            "a",
+            "first",
+            "v1",
+            vec!["ai"],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        let s2 = make_summary(
+            "b",
+            "second",
+            "v1",
+            vec!["storage"],
+            SafetyTier::Dangerous,
+            ConnectorHealth::degraded("slow"),
+        );
+        let registry = CountingRegistry::new(vec![s1, s2], Arc::clone(&calls));
+        let endpoint = DiscoveryEndpoint::new(Arc::new(registry), Arc::new(AllowPolicy));
+
+        let response = endpoint.discover(None).await;
+        assert_eq!(response.connectors.len(), 2);
+    }
 }

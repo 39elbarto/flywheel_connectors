@@ -1260,4 +1260,420 @@ mod tests {
         assert_eq!(report.reports.len(), 2);
         assert!(!report.logs.is_empty());
     }
+
+    #[test]
+    fn scan_log_empty_input() {
+        let report = scan_log_jsonl("");
+        assert_eq!(report.total_lines, 0);
+        assert!(report.findings.is_empty());
+        assert_eq!(report.error_count, 0);
+        assert_eq!(report.warn_count, 0);
+    }
+
+    #[test]
+    fn scan_log_clean_jsonl() {
+        let input = "{\"msg\":\"hello\"}\n{\"msg\":\"world\"}";
+        let report = scan_log_jsonl(input);
+        assert_eq!(report.total_lines, 2);
+        assert!(report.findings.is_empty());
+        assert_eq!(report.error_count, 0);
+        assert_eq!(report.warn_count, 0);
+    }
+
+    #[test]
+    fn e2e_error_display() {
+        let e = E2eError::Connector("test failure".to_string());
+        assert_eq!(e.to_string(), "connector error: test failure");
+    }
+
+    #[test]
+    fn e2e_report_to_json_lines_empty_logs() {
+        let report = E2eReport {
+            test_name: "empty".to_string(),
+            passed: true,
+            duration_ms: 0,
+            logs: vec![],
+        };
+        assert_eq!(report.to_json_lines(), "");
+    }
+
+    #[test]
+    fn e2e_report_to_json_lines_with_entries() {
+        let entry = E2eLogEntry::new(
+            "info",
+            "test1",
+            "mod1",
+            "setup",
+            "corr-1",
+            "pass",
+            10,
+            AssertionsSummary::new(1, 0),
+            serde_json::json!({}),
+        );
+        let report = E2eReport {
+            test_name: "with_entries".to_string(),
+            passed: true,
+            duration_ms: 10,
+            logs: vec![entry],
+        };
+        let lines = report.to_json_lines();
+        assert!(!lines.is_empty());
+        let parsed: serde_json::Value = serde_json::from_str(&lines).expect("valid JSON");
+        assert_eq!(
+            parsed.get("test_name").and_then(|v| v.as_str()),
+            Some("test1")
+        );
+    }
+
+    #[test]
+    fn e2e_report_serde_roundtrip() {
+        let report = E2eReport {
+            test_name: "roundtrip".to_string(),
+            passed: true,
+            duration_ms: 42,
+            logs: vec![],
+        };
+        let json = serde_json::to_string(&report).expect("serialize");
+        let back: E2eReport = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.test_name, "roundtrip");
+        assert!(back.passed);
+        assert_eq!(back.duration_ms, 42);
+        assert!(back.logs.is_empty());
+    }
+
+    #[test]
+    fn e2e_batch_report_serde_roundtrip() {
+        let batch = E2eBatchReport {
+            passed: false,
+            duration_ms: 100,
+            reports: vec![],
+            logs: vec![],
+        };
+        let json = serde_json::to_string(&batch).expect("serialize");
+        let back: E2eBatchReport = serde_json::from_str(&json).expect("deserialize");
+        assert!(!back.passed);
+        assert_eq!(back.duration_ms, 100);
+    }
+
+    #[test]
+    fn e2e_batch_report_to_json_lines() {
+        let entry = E2eLogEntry::new(
+            "info",
+            "batch_test",
+            "mod",
+            "teardown",
+            "corr-2",
+            "pass",
+            5,
+            AssertionsSummary::new(2, 0),
+            serde_json::json!({}),
+        );
+        let batch = E2eBatchReport {
+            passed: true,
+            duration_ms: 5,
+            reports: vec![],
+            logs: vec![entry],
+        };
+        let lines = batch.to_json_lines();
+        assert!(!lines.is_empty());
+        let parsed: serde_json::Value = serde_json::from_str(&lines).expect("valid JSON");
+        assert_eq!(
+            parsed.get("test_name").and_then(|v| v.as_str()),
+            Some("batch_test")
+        );
+    }
+
+    #[test]
+    fn connector_suite_minimal_defaults() {
+        let suite = ConnectorSuite::minimal("test_minimal", test_handshake());
+        assert_eq!(suite.test_name, "test_minimal");
+        assert_eq!(suite.config, serde_json::json!({}));
+        assert!(suite.invoke.is_none());
+        assert!(!suite.invoke_expectations.expect_error);
+        assert!(!suite.invoke_expectations.expect_decision_receipt);
+        assert!(!suite.invoke_expectations.expect_audit_event);
+        assert!(!suite.invoke_expectations.expect_receipt);
+        assert!(suite.invoke_expectations.expected_reason_code.is_none());
+    }
+
+    #[test]
+    fn connector_suite_default_deny_expectations() {
+        let invoke = InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: fcp_core::RequestId::from("req-deny"),
+            connector_id: ConnectorId::from_static("fcp.dummy:request_response:0.1.0"),
+            operation: OperationId::from_static("dummy.denied"),
+            zone_id: ZoneId::work(),
+            input: serde_json::json!({}),
+            capability_token: CapabilityToken::test_token(),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: vec![],
+        };
+        let suite = ConnectorSuite::default_deny("deny_test", test_handshake(), invoke, "DENY-001");
+        assert_eq!(suite.test_name, "deny_test");
+        assert!(suite.invoke.is_some());
+        assert!(suite.invoke_expectations.expect_error);
+        assert!(suite.invoke_expectations.expect_decision_receipt);
+        assert!(!suite.invoke_expectations.expect_audit_event);
+        assert!(!suite.invoke_expectations.expect_receipt);
+        assert_eq!(
+            suite.invoke_expectations.expected_reason_code.as_deref(),
+            Some("DENY-001")
+        );
+    }
+
+    #[test]
+    fn invoke_expectations_default_all_false() {
+        let defaults = InvokeExpectations::default();
+        assert!(!defaults.expect_error);
+        assert!(!defaults.expect_decision_receipt);
+        assert!(!defaults.expect_audit_event);
+        assert!(!defaults.expect_receipt);
+        assert!(defaults.expected_reason_code.is_none());
+    }
+
+    #[test]
+    fn summarize_findings_empty() {
+        let findings: Vec<ComplianceFinding> = vec![];
+        let (passed, failed, skipped) = summarize_findings(&findings);
+        assert_eq!(passed, 0);
+        assert_eq!(failed, 0);
+        assert_eq!(skipped, 0);
+    }
+
+    #[test]
+    fn summarize_findings_mixed() {
+        let findings = vec![
+            ComplianceFinding {
+                check: "check1".to_string(),
+                status: CheckStatus::Pass,
+                message: "ok".to_string(),
+            },
+            ComplianceFinding {
+                check: "check2".to_string(),
+                status: CheckStatus::Fail,
+                message: "bad".to_string(),
+            },
+            ComplianceFinding {
+                check: "check3".to_string(),
+                status: CheckStatus::Skipped,
+                message: "skipped".to_string(),
+            },
+            ComplianceFinding {
+                check: "check4".to_string(),
+                status: CheckStatus::Pass,
+                message: "ok2".to_string(),
+            },
+        ];
+        let (passed, failed, skipped) = summarize_findings(&findings);
+        assert_eq!(passed, 2);
+        assert_eq!(failed, 1);
+        assert_eq!(skipped, 1);
+    }
+
+    #[test]
+    fn findings_to_json_empty() {
+        let findings: Vec<ComplianceFinding> = vec![];
+        let json = findings_to_json(&findings);
+        assert!(json.is_empty());
+    }
+
+    #[test]
+    fn findings_to_json_mixed_statuses() {
+        let findings = vec![
+            ComplianceFinding {
+                check: "check_pass".to_string(),
+                status: CheckStatus::Pass,
+                message: "passed".to_string(),
+            },
+            ComplianceFinding {
+                check: "check_fail".to_string(),
+                status: CheckStatus::Fail,
+                message: "failed".to_string(),
+            },
+            ComplianceFinding {
+                check: "check_skip".to_string(),
+                status: CheckStatus::Skipped,
+                message: "skipped".to_string(),
+            },
+        ];
+        let json = findings_to_json(&findings);
+        assert_eq!(json.len(), 3);
+        assert_eq!(json[0].get("status").and_then(|v| v.as_str()), Some("pass"));
+        assert_eq!(
+            json[0].get("check").and_then(|v| v.as_str()),
+            Some("check_pass")
+        );
+        assert_eq!(json[1].get("status").and_then(|v| v.as_str()), Some("fail"));
+        assert_eq!(
+            json[2].get("status").and_then(|v| v.as_str()),
+            Some("skipped")
+        );
+    }
+
+    #[test]
+    fn log_scan_report_serde_roundtrip() {
+        let report = LogScanReport {
+            total_lines: 10,
+            findings: vec![LogScanReportFinding {
+                line: 3,
+                rule_id: "test_rule".to_string(),
+                severity: "error".to_string(),
+                json_path: Some("$.token".to_string()),
+                context_redacted: "<redacted>".to_string(),
+            }],
+            error_count: 1,
+            warn_count: 0,
+        };
+        let json = serde_json::to_string(&report).expect("serialize");
+        let back: LogScanReport = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.total_lines, 10);
+        assert_eq!(back.findings.len(), 1);
+        assert_eq!(back.findings[0].rule_id, "test_rule");
+        assert_eq!(back.error_count, 1);
+    }
+
+    #[test]
+    fn log_scan_report_finding_serde_roundtrip() {
+        let finding = LogScanReportFinding {
+            line: 7,
+            rule_id: "AWS_KEY".to_string(),
+            severity: "warn".to_string(),
+            json_path: None,
+            context_redacted: "found <redacted> in config".to_string(),
+        };
+        let json = serde_json::to_string(&finding).expect("serialize");
+        let back: LogScanReportFinding = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.line, 7);
+        assert_eq!(back.rule_id, "AWS_KEY");
+        assert!(back.json_path.is_none());
+    }
+
+    #[test]
+    fn runner_interop_suite_produces_report() {
+        let mut runner = E2eRunner::new("fcp-e2e");
+        let report = runner.run_interop_suite("interop_test");
+        assert_eq!(report.test_name, "interop_test");
+        assert!(!report.logs.is_empty());
+    }
+
+    #[test]
+    fn compliance_suite_new_constructor() {
+        let dynamic = DynamicSuite::minimal(test_handshake());
+        let suite = ComplianceSuite::new("compliance_test", "manifest_content", dynamic);
+        assert_eq!(suite.test_name, "compliance_test");
+        assert_eq!(suite.manifest_toml, "manifest_content");
+    }
+
+    #[tokio::test]
+    async fn runs_echo_invoke_suite() {
+        let mut connector = DummyConnector::new();
+        let invoke = InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: fcp_core::RequestId::from("req-echo"),
+            connector_id: ConnectorId::from_static("fcp.dummy:request_response:0.1.0"),
+            operation: OperationId::from_static("dummy.echo"),
+            zone_id: ZoneId::work(),
+            input: serde_json::json!({"message": "hello"}),
+            capability_token: CapabilityToken::test_token(),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: vec![],
+        };
+        let suite = ConnectorSuite {
+            test_name: "echo_invoke".to_string(),
+            config: serde_json::json!({}),
+            handshake: test_handshake(),
+            invoke: Some(invoke),
+            invoke_expectations: InvokeExpectations {
+                expect_error: false,
+                expect_decision_receipt: false,
+                expect_audit_event: false,
+                expect_receipt: false,
+                expected_reason_code: None,
+            },
+        };
+
+        let mut runner = E2eRunner::new("fcp-e2e");
+        let report = runner
+            .run_connector_suite(&mut connector, suite)
+            .await
+            .expect("suite runs");
+        assert!(report.passed, "echo invoke suite should pass");
+        let invoke_entry = report
+            .logs
+            .iter()
+            .find(|entry| entry.context.get("operation") == Some(&serde_json::json!("invoke")))
+            .expect("invoke log entry");
+        assert_eq!(invoke_entry.result, "pass");
+    }
+
+    #[tokio::test]
+    async fn batch_report_aggregates_pass_status() {
+        let mut connector = DummyConnector::new();
+        let suites = vec![
+            ConnectorSuite::minimal("suite_a", test_handshake()),
+            ConnectorSuite::minimal("suite_b", test_handshake()),
+            ConnectorSuite::minimal("suite_c", test_handshake()),
+        ];
+
+        let mut runner = E2eRunner::new("fcp-e2e");
+        let report = runner
+            .run_connector_suites(&mut connector, suites)
+            .await
+            .expect("batch runs");
+
+        assert!(report.passed);
+        assert_eq!(report.reports.len(), 3);
+        // duration_ms is u64, always non-negative; just verify it was set
+        for r in &report.reports {
+            assert!(r.passed);
+        }
+    }
+
+    #[test]
+    fn scan_log_jsonl_counts_nonempty_lines() {
+        let input = "{\"a\":1}\n\n{\"b\":2}\n\n\n{\"c\":3}";
+        let report = scan_log_jsonl(input);
+        assert_eq!(report.total_lines, 3);
+    }
+
+    #[test]
+    fn e2e_report_multiple_log_entries_json_lines() {
+        let entries: Vec<E2eLogEntry> = (0_u64..3)
+            .map(|i| {
+                E2eLogEntry::new(
+                    "info",
+                    format!("test_{i}"),
+                    "mod",
+                    "verify",
+                    format!("corr-{i}"),
+                    "pass",
+                    i,
+                    AssertionsSummary::new(1, 0),
+                    serde_json::json!({}),
+                )
+            })
+            .collect();
+        let report = E2eReport {
+            test_name: "multi".to_string(),
+            passed: true,
+            duration_ms: 10,
+            logs: entries,
+        };
+        let lines = report.to_json_lines();
+        let count = lines.split('\n').count();
+        assert_eq!(count, 3);
+    }
 }

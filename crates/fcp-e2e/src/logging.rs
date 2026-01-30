@@ -259,4 +259,274 @@ mod tests {
         });
         assert!(validate_log_entry_value(&entry).is_err());
     }
+
+    #[test]
+    fn should_redact_key_matches_sensitive() {
+        assert!(super::should_redact_key("access_token"));
+        assert!(super::should_redact_key("refresh_token"));
+        assert!(super::should_redact_key("api_key"));
+        assert!(super::should_redact_key("apikey"));
+        assert!(super::should_redact_key("client_secret"));
+        assert!(super::should_redact_key("password"));
+        assert!(super::should_redact_key("secret"));
+        assert!(super::should_redact_key("token"));
+    }
+
+    #[test]
+    fn should_redact_key_case_insensitive() {
+        assert!(super::should_redact_key("API_KEY"));
+        assert!(super::should_redact_key("AccessToken"));
+        assert!(super::should_redact_key("CLIENT_SECRET"));
+        assert!(super::should_redact_key("Password"));
+    }
+
+    #[test]
+    fn should_redact_key_normal_keys_not_matched() {
+        assert!(!super::should_redact_key("name"));
+        assert!(!super::should_redact_key("status"));
+        assert!(!super::should_redact_key("zone_id"));
+        assert!(!super::should_redact_key("module"));
+        assert!(!super::should_redact_key("correlation_id"));
+    }
+
+    #[test]
+    fn redact_secrets_redacts_sensitive_keys() {
+        let input = json!({
+            "access_token": "bearer-xyz",
+            "name": "test"
+        });
+        let redacted = super::redact_secrets(&input);
+        assert_eq!(
+            redacted.get("access_token").and_then(|v| v.as_str()),
+            Some("redacted")
+        );
+        assert_eq!(redacted.get("name").and_then(|v| v.as_str()), Some("test"));
+    }
+
+    #[test]
+    fn redact_secrets_handles_nested_objects() {
+        let input = json!({
+            "auth": {
+                "client_secret": "s3cr3t",
+                "client_id": "my-app"
+            }
+        });
+        let redacted = super::redact_secrets(&input);
+        let auth = redacted.get("auth").expect("auth key");
+        assert_eq!(
+            auth.get("client_secret").and_then(|v| v.as_str()),
+            Some("redacted")
+        );
+        assert_eq!(
+            auth.get("client_id").and_then(|v| v.as_str()),
+            Some("my-app")
+        );
+    }
+
+    #[test]
+    fn redact_secrets_handles_arrays() {
+        let input = json!([
+            {"password": "pass1", "user": "alice"},
+            {"password": "pass2", "user": "bob"}
+        ]);
+        let redacted = super::redact_secrets(&input);
+        let arr = redacted.as_array().expect("array");
+        assert_eq!(
+            arr[0].get("password").and_then(|v| v.as_str()),
+            Some("redacted")
+        );
+        assert_eq!(arr[0].get("user").and_then(|v| v.as_str()), Some("alice"));
+        assert_eq!(
+            arr[1].get("password").and_then(|v| v.as_str()),
+            Some("redacted")
+        );
+    }
+
+    #[test]
+    fn redact_secrets_scalar_passthrough() {
+        assert_eq!(super::redact_secrets(&json!("hello")), json!("hello"));
+        assert_eq!(super::redact_secrets(&json!(42)), json!(42));
+        assert_eq!(super::redact_secrets(&json!(true)), json!(true));
+        assert_eq!(super::redact_secrets(&json!(null)), json!(null));
+    }
+
+    #[test]
+    fn logger_new_is_empty() {
+        let logger = super::E2eLogger::new();
+        assert!(logger.entries().is_empty());
+    }
+
+    #[test]
+    fn logger_push_and_entries() {
+        let mut logger = super::E2eLogger::new();
+        let entry = E2eLogEntry::new(
+            "info",
+            "test",
+            "mod",
+            "setup",
+            "corr-1",
+            "pass",
+            5,
+            AssertionsSummary::new(1, 0),
+            json!({}),
+        );
+        logger.push(entry);
+        assert_eq!(logger.entries().len(), 1);
+        assert_eq!(logger.entries()[0].test_name, "test");
+    }
+
+    #[test]
+    fn logger_drain_clears_entries() {
+        let mut logger = super::E2eLogger::new();
+        logger.push(E2eLogEntry::new(
+            "info",
+            "t1",
+            "m",
+            "setup",
+            "c1",
+            "pass",
+            1,
+            AssertionsSummary::new(1, 0),
+            json!({}),
+        ));
+        logger.push(E2eLogEntry::new(
+            "error",
+            "t2",
+            "m",
+            "verify",
+            "c2",
+            "fail",
+            2,
+            AssertionsSummary::new(0, 1),
+            json!({}),
+        ));
+        let drained = logger.drain();
+        assert_eq!(drained.len(), 2);
+        assert!(logger.entries().is_empty());
+    }
+
+    #[test]
+    fn logger_to_json_lines() {
+        let mut logger = super::E2eLogger::new();
+        logger.push(E2eLogEntry::new(
+            "info",
+            "test1",
+            "mod1",
+            "setup",
+            "corr-1",
+            "pass",
+            10,
+            AssertionsSummary::new(1, 0),
+            json!({}),
+        ));
+        logger.push(E2eLogEntry::new(
+            "warn",
+            "test2",
+            "mod2",
+            "verify",
+            "corr-2",
+            "fail",
+            20,
+            AssertionsSummary::new(0, 1),
+            json!({}),
+        ));
+        let lines = logger.to_json_lines();
+        let parts: Vec<&str> = lines.split('\n').collect();
+        assert_eq!(parts.len(), 2);
+        let first: serde_json::Value = serde_json::from_str(parts[0]).expect("valid JSON");
+        assert_eq!(
+            first.get("test_name").and_then(|v| v.as_str()),
+            Some("test1")
+        );
+    }
+
+    #[test]
+    fn assertions_summary_serde_roundtrip() {
+        let summary = AssertionsSummary::new(5, 2);
+        let json_str = serde_json::to_string(&summary).expect("serialize");
+        let back: AssertionsSummary = serde_json::from_str(&json_str).expect("deserialize");
+        assert_eq!(back.passed, 5);
+        assert_eq!(back.failed, 2);
+    }
+
+    #[test]
+    fn log_entry_serde_roundtrip() {
+        let entry = E2eLogEntry::new(
+            "info",
+            "serde_test",
+            "fcp-e2e",
+            "execute",
+            "00000000-0000-4000-8000-000000000000",
+            "pass",
+            42,
+            AssertionsSummary::new(3, 1),
+            json!({"zone_id": "z:work"}),
+        );
+        let json_str = serde_json::to_string(&entry).expect("serialize");
+        let back: E2eLogEntry = serde_json::from_str(&json_str).expect("deserialize");
+        assert_eq!(back.test_name, "serde_test");
+        assert_eq!(back.level, "info");
+        assert_eq!(back.phase, "execute");
+        assert_eq!(back.result, "pass");
+        assert_eq!(back.duration_ms, 42);
+        assert_eq!(back.assertions.passed, 3);
+        assert_eq!(back.assertions.failed, 1);
+    }
+
+    #[test]
+    fn log_schema_error_display_variants() {
+        let e1 = super::LogSchemaError::InvalidJson {
+            message: "bad json".to_string(),
+        };
+        assert_eq!(e1.to_string(), "invalid json: bad json");
+
+        let e2 = super::LogSchemaError::MissingField { field: "timestamp" };
+        assert_eq!(e2.to_string(), "missing required field: timestamp");
+
+        let e3 = super::LogSchemaError::InvalidField {
+            field: "level",
+            message: "must be info|warn|error".to_string(),
+        };
+        assert_eq!(
+            e3.to_string(),
+            "invalid field level: must be info|warn|error"
+        );
+    }
+
+    #[test]
+    fn log_entry_redacts_context_secrets() {
+        let entry = E2eLogEntry::new(
+            "info",
+            "redact_test",
+            "fcp-e2e",
+            "setup",
+            "corr-redact",
+            "pass",
+            0,
+            AssertionsSummary::new(1, 0),
+            json!({"access_token": "secret-value", "zone_id": "z:work"}),
+        );
+        assert_eq!(
+            entry.context.get("access_token").and_then(|v| v.as_str()),
+            Some("redacted")
+        );
+        assert_eq!(
+            entry.context.get("zone_id").and_then(|v| v.as_str()),
+            Some("z:work")
+        );
+    }
+
+    #[test]
+    fn logger_default_matches_new() {
+        let default_logger = super::E2eLogger::default();
+        let new_logger = super::E2eLogger::new();
+        assert_eq!(default_logger.entries().len(), new_logger.entries().len());
+    }
+
+    #[test]
+    fn assertions_summary_zero_counts() {
+        let summary = AssertionsSummary::new(0, 0);
+        assert_eq!(summary.passed, 0);
+        assert_eq!(summary.failed, 0);
+    }
 }

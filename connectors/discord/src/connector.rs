@@ -54,6 +54,7 @@ pub struct DiscordConnector {
 
 impl DiscordConnector {
     /// Create a new Discord connector.
+    #[must_use] 
     pub fn new() -> Self {
         let (event_tx, _) = broadcast::channel(1000);
 
@@ -193,14 +194,11 @@ impl DiscordConnector {
 
     /// Handle health check.
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
-        let api_client = match &self.api_client {
-            Some(c) => c,
-            None => {
-                return Ok(json!({
-                    "status": "not_configured",
-                    "uptime_ms": self.start_time.elapsed().as_millis() as u64
-                }));
-            }
+        let Some(api_client) = &self.api_client else {
+            return Ok(json!({
+                "status": "not_configured",
+                "uptime_ms": self.start_time.elapsed().as_millis() as u64
+            }));
         };
 
         // Check if we can reach Discord
@@ -604,15 +602,13 @@ impl DiscordConnector {
                             size += e
                                 .get("title")
                                 .and_then(|v| v.as_str())
-                                .map(|s| s.len())
-                                .unwrap_or(0);
+                                .map_or(0, str::len);
 
                             // Description
                             size += e
                                 .get("description")
                                 .and_then(|v| v.as_str())
-                                .map(|s| s.len())
-                                .unwrap_or(0);
+                                .map_or(0, str::len);
 
                             // Fields
                             if let Some(fields) = e.get("fields").and_then(|v| v.as_array()) {
@@ -620,13 +616,11 @@ impl DiscordConnector {
                                     size += field
                                         .get("name")
                                         .and_then(|v| v.as_str())
-                                        .map(|s| s.len())
-                                        .unwrap_or(0);
+                                        .map_or(0, str::len);
                                     size += field
                                         .get("value")
                                         .and_then(|v| v.as_str())
-                                        .map(|s| s.len())
-                                        .unwrap_or(0);
+                                        .map_or(0, str::len);
                                 }
                             }
 
@@ -635,8 +629,7 @@ impl DiscordConnector {
                                 size += footer
                                     .get("text")
                                     .and_then(|v| v.as_str())
-                                    .map(|s| s.len())
-                                    .unwrap_or(0);
+                                    .map_or(0, str::len);
                             }
 
                             // Author
@@ -644,8 +637,7 @@ impl DiscordConnector {
                                 size += author
                                     .get("name")
                                     .and_then(|v| v.as_str())
-                                    .map(|s| s.len())
-                                    .unwrap_or(0);
+                                    .map_or(0, str::len);
                             }
 
                             size
@@ -685,12 +677,12 @@ impl DiscordConnector {
             params
                 .get("operation")
                 .and_then(|v| v.as_str())
-                .ok_or(FcpError::InvalidRequest {
+                .ok_or_else(|| FcpError::InvalidRequest {
                     code: 1003,
                     message: "Missing operation".into(),
                 })?;
 
-        let input = params.get("input").cloned().unwrap_or(json!({}));
+        let input = params.get("input").cloned().unwrap_or_else(|| json!({}));
 
         // Early validation: Check input structure and limits before capability token
         // This prevents wasting resources on capability verification for invalid requests
@@ -699,7 +691,7 @@ impl DiscordConnector {
         // Extract and verify capability token
         let token_value = params
             .get("capability_token")
-            .ok_or(FcpError::InvalidRequest {
+            .ok_or_else(|| FcpError::InvalidRequest {
                 code: 1003,
                 message: "Missing capability_token".into(),
             })?;
@@ -749,12 +741,14 @@ impl DiscordConnector {
     }
 
     async fn invoke_send_message(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        const MAX_CONTENT_LENGTH: usize = 2000;
+
         // Validate input first (before checking api) for better error messages
         let channel_id =
             input
                 .get("channel_id")
                 .and_then(|v| v.as_str())
-                .ok_or(FcpError::InvalidRequest {
+                .ok_or_else(|| FcpError::InvalidRequest {
                     code: 1003,
                     message: "Missing channel_id".into(),
                 })?;
@@ -774,7 +768,6 @@ impl DiscordConnector {
         }
 
         // Validate message content length (Discord limit: 2000 characters)
-        const MAX_CONTENT_LENGTH: usize = 2000;
         if let Some(content) = content {
             if content.len() > MAX_CONTENT_LENGTH {
                 return Err(FcpError::InvalidRequest {
@@ -871,12 +864,14 @@ impl DiscordConnector {
     }
 
     async fn invoke_edit_message(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        const MAX_CONTENT_LENGTH: usize = 2000;
+
         // Validate input first (before checking api) for better error messages
         let channel_id =
             input
                 .get("channel_id")
                 .and_then(|v| v.as_str())
-                .ok_or(FcpError::InvalidRequest {
+                .ok_or_else(|| FcpError::InvalidRequest {
                     code: 1003,
                     message: "Missing channel_id".into(),
                 })?;
@@ -885,7 +880,7 @@ impl DiscordConnector {
             input
                 .get("message_id")
                 .and_then(|v| v.as_str())
-                .ok_or(FcpError::InvalidRequest {
+                .ok_or_else(|| FcpError::InvalidRequest {
                     code: 1003,
                     message: "Missing message_id".into(),
                 })?;
@@ -896,7 +891,6 @@ impl DiscordConnector {
             .and_then(|v| serde_json::from_value(v.clone()).ok());
 
         // Validate message content length (Discord limit: 2000 characters)
-        const MAX_CONTENT_LENGTH: usize = 2000;
         if let Some(content) = content {
             if content.len() > MAX_CONTENT_LENGTH {
                 return Err(FcpError::InvalidRequest {
@@ -1001,7 +995,7 @@ impl DiscordConnector {
             input
                 .get("channel_id")
                 .and_then(|v| v.as_str())
-                .ok_or(FcpError::InvalidRequest {
+                .ok_or_else(|| FcpError::InvalidRequest {
                     code: 1003,
                     message: "Missing channel_id".into(),
                 })?;
@@ -1010,7 +1004,7 @@ impl DiscordConnector {
             input
                 .get("message_id")
                 .and_then(|v| v.as_str())
-                .ok_or(FcpError::InvalidRequest {
+                .ok_or_else(|| FcpError::InvalidRequest {
                     code: 1003,
                     message: "Missing message_id".into(),
                 })?;
@@ -1034,7 +1028,7 @@ impl DiscordConnector {
             input
                 .get("channel_id")
                 .and_then(|v| v.as_str())
-                .ok_or(FcpError::InvalidRequest {
+                .ok_or_else(|| FcpError::InvalidRequest {
                     code: 1003,
                     message: "Missing channel_id".into(),
                 })?;
@@ -1063,7 +1057,7 @@ impl DiscordConnector {
             input
                 .get("guild_id")
                 .and_then(|v| v.as_str())
-                .ok_or(FcpError::InvalidRequest {
+                .ok_or_else(|| FcpError::InvalidRequest {
                     code: 1003,
                     message: "Missing guild_id".into(),
                 })?;
@@ -1095,7 +1089,7 @@ impl DiscordConnector {
             input
                 .get("channel_id")
                 .and_then(|v| v.as_str())
-                .ok_or(FcpError::InvalidRequest {
+                .ok_or_else(|| FcpError::InvalidRequest {
                     code: 1003,
                     message: "Missing channel_id".into(),
                 })?;
@@ -1246,7 +1240,7 @@ impl Default for DiscordConnector {
     }
 }
 
-/// Convert a Discord gateway event to an FCP EventEnvelope.
+/// Convert a Discord gateway event to an FCP `EventEnvelope`.
 fn gateway_event_to_fcp(
     event: &GatewayEvent,
     connector_id: &ConnectorId,
@@ -1411,14 +1405,12 @@ mod tests {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(
                     message.contains("character limit"),
-                    "Expected content length error, got: {}",
-                    message
+                    "Expected content length error, got: {message}"
                 );
             }
             _ => assert!(
                 false,
-                "Expected InvalidRequest error for content too long, got: {:?}",
-                err
+                "Expected InvalidRequest error for content too long, got: {err:?}"
             ),
         }
     }
@@ -1491,14 +1483,12 @@ mod tests {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(
                     message.contains("Total embed character count"),
-                    "Got: {}",
-                    message
+                    "Got: {message}"
                 );
             }
             _ => assert!(
                 false,
-                "Expected InvalidRequest for embed limit, got: {:?}",
-                err
+                "Expected InvalidRequest for embed limit, got: {err:?}"
             ),
         }
     }

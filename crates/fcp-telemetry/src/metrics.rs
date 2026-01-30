@@ -614,7 +614,7 @@ mod tests {
 
     #[test]
     fn test_histogram_with_very_small_duration() {
-        record_histogram("tiny_duration", 0.000001, &[("test", "microsecond")]);
+        record_histogram("tiny_duration", 0.000_001, &[("test", "microsecond")]);
     }
 
     #[test]

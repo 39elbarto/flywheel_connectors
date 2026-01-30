@@ -126,7 +126,7 @@ async fn connect_stream(url: &str, bearer_token: &str) -> TwitterResult<reqwest:
 
     let response = client
         .get(url)
-        .header("Authorization", format!("Bearer {}", bearer_token))
+        .header("Authorization", format!("Bearer {bearer_token}"))
         .send()
         .await?;
 
@@ -194,7 +194,7 @@ async fn process_stream(
                         if error.get("errors").is_some() || error.get("title").is_some() {
                             let msg = error
                                 .get("detail")
-                                .or(error.get("title"))
+                                .or_else(|| error.get("title"))
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("Unknown stream error")
                                 .to_string();

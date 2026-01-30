@@ -23,15 +23,15 @@ pub struct TwitterConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bearer_token: Option<String>,
 
-    /// Base URL for the Twitter API v2 (default: https://api.twitter.com)
+    /// Base URL for the Twitter API v2 (default: <https://api.twitter.com>)
     #[serde(default = "default_api_url")]
     pub api_url: String,
 
-    /// Upload URL for media (default: https://upload.twitter.com)
+    /// Upload URL for media (default: <https://upload.twitter.com>)
     #[serde(default = "default_upload_url")]
     pub upload_url: String,
 
-    /// Stream URL for filtered stream (default: https://stream.twitter.com)
+    /// Stream URL for filtered stream (default: <https://stream.twitter.com>)
     #[serde(default = "default_stream_url")]
     pub stream_url: String,
 
@@ -56,7 +56,7 @@ fn default_stream_url() -> String {
     "https://api.twitter.com".into()
 }
 
-fn default_timeout() -> Duration {
+const fn default_timeout() -> Duration {
     Duration::from_secs(30)
 }
 
@@ -100,19 +100,19 @@ pub struct RetryConfig {
     pub jitter: f64,
 }
 
-fn default_max_attempts() -> u32 {
+const fn default_max_attempts() -> u32 {
     3
 }
 
-fn default_initial_delay_ms() -> u64 {
+const fn default_initial_delay_ms() -> u64 {
     1000
 }
 
-fn default_max_delay_ms() -> u64 {
+const fn default_max_delay_ms() -> u64 {
     60_000
 }
 
-fn default_jitter() -> f64 {
+const fn default_jitter() -> f64 {
     0.1
 }
 

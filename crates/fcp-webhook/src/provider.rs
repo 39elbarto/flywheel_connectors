@@ -320,8 +320,7 @@ impl LinearWebhook {
         let event_id = payload
             .get("webhookId")
             .and_then(Value::as_str)
-            .map(ToString::to_string)
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            .map_or_else(|| uuid::Uuid::new_v4().to_string(), ToString::to_string);
 
         let event_type = payload
             .get("type")

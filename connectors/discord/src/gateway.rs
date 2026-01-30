@@ -55,17 +55,17 @@ impl TryFrom<i32> for GatewayOpcode {
 
     fn try_from(value: i32) -> Result<Self, Self::Error> {
         match value {
-            0 => Ok(GatewayOpcode::Dispatch),
-            1 => Ok(GatewayOpcode::Heartbeat),
-            2 => Ok(GatewayOpcode::Identify),
-            3 => Ok(GatewayOpcode::PresenceUpdate),
-            4 => Ok(GatewayOpcode::VoiceStateUpdate),
-            6 => Ok(GatewayOpcode::Resume),
-            7 => Ok(GatewayOpcode::Reconnect),
-            8 => Ok(GatewayOpcode::RequestGuildMembers),
-            9 => Ok(GatewayOpcode::InvalidSession),
-            10 => Ok(GatewayOpcode::Hello),
-            11 => Ok(GatewayOpcode::HeartbeatAck),
+            0 => Ok(Self::Dispatch),
+            1 => Ok(Self::Heartbeat),
+            2 => Ok(Self::Identify),
+            3 => Ok(Self::PresenceUpdate),
+            4 => Ok(Self::VoiceStateUpdate),
+            6 => Ok(Self::Resume),
+            7 => Ok(Self::Reconnect),
+            8 => Ok(Self::RequestGuildMembers),
+            9 => Ok(Self::InvalidSession),
+            10 => Ok(Self::Hello),
+            11 => Ok(Self::HeartbeatAck),
             _ => Err(()),
         }
     }
@@ -142,7 +142,7 @@ impl GatewayConnection {
             api_client.get_gateway().await?
         };
 
-        let ws_url = format!("{}/?v=10&encoding=json", gateway_url);
+        let ws_url = format!("{gateway_url}/?v=10&encoding=json");
         info!(
             url = %ws_url,
             resuming = state_snapshot.session_id.is_some(),
@@ -165,21 +165,13 @@ impl GatewayConnection {
 }
 
 #[derive(Clone, Debug)]
+#[derive(Default)]
 struct GatewayState {
     session_id: Option<String>,
     resume_url: Option<String>,
     sequence: Option<u64>,
 }
 
-impl Default for GatewayState {
-    fn default() -> Self {
-        Self {
-            session_id: None,
-            resume_url: None,
-            sequence: None,
-        }
-    }
-}
 
 /// Handle for a single gateway connection attempt.
 pub struct GatewayStream {

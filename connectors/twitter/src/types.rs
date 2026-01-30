@@ -183,7 +183,7 @@ pub struct Tweet {
 /// Referenced tweet (retweet, quote, reply).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReferencedTweet {
-    /// Reference type: "retweeted", "quoted", "replied_to"
+    /// Reference type: "retweeted", "quoted", "`replied_to`"
     #[serde(rename = "type")]
     pub ref_type: String,
 
@@ -508,7 +508,7 @@ pub struct Media {
     /// Media key
     pub media_key: String,
 
-    /// Media type: "photo", "video", "animated_gif"
+    /// Media type: "photo", "video", "`animated_gif`"
     #[serde(rename = "type")]
     pub media_type: String,
 

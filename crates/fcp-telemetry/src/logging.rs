@@ -470,7 +470,7 @@ mod tests {
     fn test_redact_numeric_sensitive_values() {
         let value = json!({
             "password": 12345,  // Numeric password (bad practice but possible)
-            "token": 999999,
+            "token": 999_999,
             "user_id": 42
         });
 

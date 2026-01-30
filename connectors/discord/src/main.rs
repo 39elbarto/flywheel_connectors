@@ -80,7 +80,7 @@ async fn handle_message(connector: &mut DiscordConnector, message: &str) -> serd
     let params = request
         .get("params")
         .cloned()
-        .unwrap_or(serde_json::json!({}));
+        .unwrap_or_else(|| serde_json::json!({}));
 
     let result = match method {
         "configure" => connector.handle_configure(params).await,

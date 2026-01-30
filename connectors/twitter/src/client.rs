@@ -116,10 +116,10 @@ impl TwitterApiClient {
             } else {
                 let query = params
                     .iter()
-                    .map(|(k, v)| format!("{}={}", k, v))
+                    .map(|(k, v)| format!("{k}={v}"))
                     .collect::<Vec<_>>()
                     .join("&");
-                format!("{}?{}", url, query)
+                format!("{url}?{query}")
             };
 
             // Generate OAuth signature
@@ -203,7 +203,7 @@ impl TwitterApiClient {
                 _ => self.client.get(&url),
             };
 
-            req = req.header("Authorization", format!("Bearer {}", bearer));
+            req = req.header("Authorization", format!("Bearer {bearer}"));
 
             if let Some(b) = body {
                 req = req.json(b);
@@ -264,8 +264,7 @@ impl TwitterApiClient {
         if status == StatusCode::TOO_MANY_REQUESTS {
             let retry_after = rate_limit
                 .time_until_reset()
-                .map(|d| d.as_secs())
-                .unwrap_or(60);
+                .map_or(60, |d| d.as_secs());
 
             return Err(TwitterError::RateLimited { retry_after });
         }
@@ -334,7 +333,7 @@ impl TwitterApiClient {
             "id,name,username,description,profile_image_url,verified,created_at,public_metrics"
                 .to_string(),
         )];
-        self.get_with_params(&format!("/2/users/{}", user_id), &params)
+        self.get_with_params(&format!("/2/users/{user_id}"), &params)
             .await
     }
 
@@ -348,7 +347,7 @@ impl TwitterApiClient {
             "id,name,username,description,profile_image_url,verified,created_at,public_metrics"
                 .to_string(),
         )];
-        self.get_with_params(&format!("/2/users/by/username/{}", username), &params)
+        self.get_with_params(&format!("/2/users/by/username/{username}"), &params)
             .await
     }
 
@@ -375,7 +374,7 @@ impl TwitterApiClient {
                 "media_key,type,url,preview_image_url".to_string(),
             ),
         ];
-        self.get_with_params(&format!("/2/tweets/{}", tweet_id), &params)
+        self.get_with_params(&format!("/2/tweets/{tweet_id}"), &params)
             .await
     }
 
@@ -409,7 +408,7 @@ impl TwitterApiClient {
 
     /// Delete a tweet.
     pub async fn delete_tweet(&self, tweet_id: &str) -> TwitterResult<DeleteTweetResponse> {
-        self.delete(&format!("/2/tweets/{}", tweet_id)).await
+        self.delete(&format!("/2/tweets/{tweet_id}")).await
     }
 
     /// Get user's timeline.
@@ -433,7 +432,7 @@ impl TwitterApiClient {
             params.push(("pagination_token".to_string(), token.to_string()));
         }
 
-        self.get_with_params(&format!("/2/users/{}/tweets", user_id), &params)
+        self.get_with_params(&format!("/2/users/{user_id}/tweets"), &params)
             .await
     }
 
@@ -463,7 +462,7 @@ impl TwitterApiClient {
             params.push(("pagination_token".to_string(), token.to_string()));
         }
 
-        self.get_with_params(&format!("/2/users/{}/mentions", user_id), &params)
+        self.get_with_params(&format!("/2/users/{user_id}/mentions"), &params)
             .await
     }
 
@@ -550,15 +549,15 @@ impl TwitterApiClient {
         &self,
         rules: &[StreamRule],
     ) -> TwitterResult<StreamRulesResponse> {
-        let bearer = self
-            .bearer_token
-            .as_ref()
-            .ok_or_else(|| TwitterError::Config("Bearer token required for stream rules".into()))?;
-
         #[derive(serde::Serialize)]
         struct AddRulesRequest<'a> {
             add: &'a [StreamRule],
         }
+
+        let bearer = self
+            .bearer_token
+            .as_ref()
+            .ok_or_else(|| TwitterError::Config("Bearer token required for stream rules".into()))?;
 
         let body = AddRulesRequest { add: rules };
         self.request_bearer("POST", "/2/tweets/search/stream/rules", Some(&body), bearer)
@@ -570,11 +569,6 @@ impl TwitterApiClient {
         &self,
         rule_ids: &[&str],
     ) -> TwitterResult<StreamRulesResponse> {
-        let bearer = self
-            .bearer_token
-            .as_ref()
-            .ok_or_else(|| TwitterError::Config("Bearer token required for stream rules".into()))?;
-
         #[derive(serde::Serialize)]
         struct DeleteRulesRequest<'a> {
             delete: DeleteIds<'a>,
@@ -584,6 +578,11 @@ impl TwitterApiClient {
         struct DeleteIds<'a> {
             ids: &'a [&'a str],
         }
+
+        let bearer = self
+            .bearer_token
+            .as_ref()
+            .ok_or_else(|| TwitterError::Config("Bearer token required for stream rules".into()))?;
 
         let body = DeleteRulesRequest {
             delete: DeleteIds { ids: rule_ids },

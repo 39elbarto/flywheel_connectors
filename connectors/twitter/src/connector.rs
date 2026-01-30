@@ -160,7 +160,7 @@ impl TwitterConnector {
         })?;
 
         info!(username = %user.username, user_id = %user.id, "Authenticated as user");
-        self.authenticated_user = Some(user.clone());
+        self.authenticated_user = Some(user);
 
         // Set up verifier
         self.verifier = Some(CapabilityVerifier::new(
@@ -276,7 +276,7 @@ impl TwitterConnector {
 
     /// Handle the invoke method.
     #[instrument(skip(self, params))]
-    pub async fn handle_invoke(&mut self, params: Value) -> Result<Value, FcpError> {
+    pub async fn handle_invoke(&self, params: Value) -> Result<Value, FcpError> {
         let operation = params
             .get("operation")
             .and_then(|v| v.as_str())
@@ -285,14 +285,14 @@ impl TwitterConnector {
                 message: "Missing 'operation' field".into(),
             })?;
 
-        let args = params.get("args").cloned().unwrap_or(json!({}));
+        let args = params.get("args").cloned().unwrap_or_else(|| json!({}));
 
         debug!(operation = %operation, "Invoking Twitter operation");
 
         // Extract and verify capability token
         let token_value = params
             .get("capability_token")
-            .ok_or(FcpError::InvalidRequest {
+            .ok_or_else(|| FcpError::InvalidRequest {
                 code: 1003,
                 message: "Missing capability_token".into(),
             })?;
@@ -486,8 +486,10 @@ impl TwitterConnector {
         }
 
         // Mark stream as inactive
-        let mut stream_active = self.stream_active.write().await;
-        *stream_active = false;
+        {
+            let mut stream_active = self.stream_active.write().await;
+            *stream_active = false;
+        }
 
         self.base.set_handshaken(false);
 
@@ -637,7 +639,7 @@ impl TwitterConnector {
             query: query.to_string(),
             max_results: args
                 .get("max_results")
-                .and_then(|v| v.as_u64())
+                .and_then(serde_json::Value::as_u64)
                 .map(|v| v as u32),
             next_token: args
                 .get("next_token")
@@ -790,7 +792,7 @@ impl TwitterConnector {
 
         let max_results = args
             .get("max_results")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .map(|v| v as u32);
         let pagination_token = args.get("pagination_token").and_then(|v| v.as_str());
 
@@ -823,7 +825,7 @@ impl TwitterConnector {
 
         let max_results = args
             .get("max_results")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .map(|v| v as u32);
         let pagination_token = args.get("pagination_token").and_then(|v| v.as_str());
 

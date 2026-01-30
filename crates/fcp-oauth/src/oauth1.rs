@@ -210,8 +210,7 @@ impl OAuth1Client {
     ) -> OAuthResult<String> {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs().to_string())
-            .unwrap_or_else(|_| "0".to_string());
+            .map_or_else(|_| "0".to_string(), |d| d.as_secs().to_string());
 
         let nonce = generate_nonce();
 
@@ -334,8 +333,7 @@ fn parse_request_token(body: &str) -> OAuthResult<RequestToken> {
 
     let callback_confirmed = params
         .get("oauth_callback_confirmed")
-        .map(|v| v == "true")
-        .unwrap_or(false);
+        .is_some_and(|v| v == "true");
 
     Ok(RequestToken {
         token,
@@ -377,12 +375,13 @@ fn generate_nonce() -> String {
 
 /// Percent-encode a string per RFC 3986.
 fn percent_encode(s: &str) -> String {
+    use std::fmt::Write;
     let mut result = String::new();
     for byte in s.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
             result.push(byte as char);
         } else {
-            result.push_str(&format!("%{byte:02X}"));
+            let _ = write!(result, "%{byte:02X}");
         }
     }
     result

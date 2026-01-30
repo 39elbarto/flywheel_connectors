@@ -104,6 +104,12 @@ impl DiscordApiClient {
 
             match result {
                 Ok(response) => {
+                    #[derive(Deserialize)]
+                    struct DiscordApiError {
+                        code: Option<i32>,
+                        message: Option<String>,
+                    }
+
                     let status = response.status();
 
                     // Handle rate limiting
@@ -134,19 +140,14 @@ impl DiscordApiClient {
 
                     // Try to parse error from body
                     let bytes = response.bytes().await?;
-                    #[derive(Deserialize)]
-                    struct DiscordApiError {
-                        code: Option<i32>,
-                        message: Option<String>,
-                    }
                     let error: DiscordApiError =
-                        serde_json::from_slice(&bytes).unwrap_or(DiscordApiError {
-                            code: Some(status.as_u16() as i32),
+                        serde_json::from_slice(&bytes).unwrap_or_else(|_| DiscordApiError {
+                            code: Some(i32::from(status.as_u16())),
                             message: Some(String::from_utf8_lossy(&bytes).into_owned()),
                         });
 
                     let err = DiscordError::Api {
-                        code: error.code.unwrap_or(status.as_u16() as i32),
+                        code: error.code.unwrap_or_else(|| i32::from(status.as_u16())),
                         message: error.message.unwrap_or_else(|| "Unknown error".into()),
                         retry_after: None,
                     };
@@ -272,14 +273,14 @@ impl DiscordApiClient {
             }
 
             let error: DiscordApiError =
-                serde_json::from_slice(&bytes).unwrap_or(DiscordApiError {
-                    code: Some(status.as_u16() as i32),
+                serde_json::from_slice(&bytes).unwrap_or_else(|_| DiscordApiError {
+                    code: Some(i32::from(status.as_u16())),
                     message: Some(String::from_utf8_lossy(&bytes).into_owned()),
                     retry_after: None,
                 });
 
             Err(DiscordError::Api {
-                code: error.code.unwrap_or(status.as_u16() as i32),
+                code: error.code.unwrap_or_else(|| i32::from(status.as_u16())),
                 message: error.message.unwrap_or_else(|| "Unknown error".into()),
                 retry_after: error.retry_after,
             })

@@ -7,6 +7,74 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+/// MTU-safe defaults from `FCP_Specification_V2.md`.
+pub const DEFAULT_MAX_DATAGRAM_BYTES: u16 = 1200;
+
+/// Default symbols per FCPS frame (single-symbol frames are safest for MTU).
+pub const DEFAULT_SYMBOLS_PER_FRAME: u16 = 1;
+
+const FCPS_HEADER_LEN: u16 = 114;
+const SYMBOL_RECORD_OVERHEAD: u16 = 22;
+
+/// `RaptorQ` path profile for preset selection.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RaptorQPathProfile {
+    /// LAN (direct) transport.
+    Lan,
+    /// DERP / relay transport.
+    Derp,
+}
+
+/// Preset inputs for auto-tuning symbol size and repair ratio.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct RaptorQPreset {
+    /// Path profile.
+    pub profile: RaptorQPathProfile,
+    /// Max datagram bytes allowed for FCPS frames.
+    pub max_datagram_bytes: u16,
+    /// Symbols per FCPS frame.
+    pub symbols_per_frame: u16,
+    /// Preferred symbol size (clamped to MTU-safe max).
+    pub preferred_symbol_size: u16,
+    /// Repair ratio in basis points.
+    pub repair_ratio_bps: u16,
+}
+
+impl RaptorQPreset {
+    /// MTU-safe preset for LAN paths (defaults to spec-safe limits).
+    #[must_use]
+    pub const fn lan() -> Self {
+        Self {
+            profile: RaptorQPathProfile::Lan,
+            max_datagram_bytes: DEFAULT_MAX_DATAGRAM_BYTES,
+            symbols_per_frame: DEFAULT_SYMBOLS_PER_FRAME,
+            preferred_symbol_size: 1024,
+            repair_ratio_bps: 500,
+        }
+    }
+
+    /// MTU-safe preset for DERP paths (defaults to spec-safe limits).
+    #[must_use]
+    pub const fn derp() -> Self {
+        Self {
+            profile: RaptorQPathProfile::Derp,
+            max_datagram_bytes: DEFAULT_MAX_DATAGRAM_BYTES,
+            symbols_per_frame: DEFAULT_SYMBOLS_PER_FRAME,
+            preferred_symbol_size: 1024,
+            repair_ratio_bps: 500,
+        }
+    }
+
+    /// Get preset by path profile.
+    #[must_use]
+    pub const fn for_profile(profile: RaptorQPathProfile) -> Self {
+        match profile {
+            RaptorQPathProfile::Lan => Self::lan(),
+            RaptorQPathProfile::Derp => Self::derp(),
+        }
+    }
+}
+
 /// `RaptorQ` configuration (NORMATIVE).
 ///
 /// Controls symbol size, repair ratio, object size limits, decode timeouts,
@@ -96,6 +164,53 @@ impl RaptorQConfig {
             return 0;
         }
         payload_len.div_ceil(self.chunk_size as usize)
+    }
+
+    /// Compute an MTU-safe symbol size for the given datagram limit.
+    ///
+    /// Returns `None` if inputs are invalid (e.g., `symbols_per_frame` = 0 or MTU too small).
+    #[must_use]
+    pub fn mtu_safe_symbol_size(max_datagram_bytes: u16, symbols_per_frame: u16) -> Option<u16> {
+        if symbols_per_frame == 0 {
+            return None;
+        }
+
+        let max_payload =
+            u32::from(max_datagram_bytes).checked_sub(u32::from(FCPS_HEADER_LEN))?;
+        let per_symbol = max_payload / u32::from(symbols_per_frame);
+        if per_symbol <= u32::from(SYMBOL_RECORD_OVERHEAD) {
+            return None;
+        }
+        let symbol_size = per_symbol - u32::from(SYMBOL_RECORD_OVERHEAD);
+        u16::try_from(symbol_size).ok()
+    }
+
+    /// Create a config from a preset, clamping symbol size to MTU-safe limits.
+    #[must_use]
+    pub fn from_preset(preset: RaptorQPreset) -> Option<Self> {
+        let max_symbol =
+            Self::mtu_safe_symbol_size(preset.max_datagram_bytes, preset.symbols_per_frame)?;
+        let symbol_size = preset.preferred_symbol_size.min(max_symbol);
+        Some(Self {
+            symbol_size,
+            repair_ratio_bps: preset.repair_ratio_bps,
+            ..Default::default()
+        })
+    }
+
+    /// Clamp the configured symbol size to MTU-safe limits.
+    ///
+    /// Returns the adjusted symbol size or `None` if inputs are invalid.
+    pub fn bound_symbol_size(
+        &mut self,
+        max_datagram_bytes: u16,
+        symbols_per_frame: u16,
+    ) -> Option<u16> {
+        let max_symbol = Self::mtu_safe_symbol_size(max_datagram_bytes, symbols_per_frame)?;
+        if self.symbol_size > max_symbol {
+            self.symbol_size = max_symbol;
+        }
+        Some(self.symbol_size)
     }
 }
 
@@ -220,5 +335,50 @@ mod tests {
         // 2048 byte symbols
         assert_eq!(config.source_symbols(2048), 1);
         assert_eq!(config.source_symbols(2049), 2);
+    }
+
+    #[test]
+    fn mtu_safe_symbol_size_default_limit() {
+        let safe = RaptorQConfig::mtu_safe_symbol_size(1200, 1).expect("safe symbol size");
+        assert_eq!(safe, 1064);
+    }
+
+    #[test]
+    fn mtu_safe_symbol_size_multiple_symbols() {
+        let safe = RaptorQConfig::mtu_safe_symbol_size(1200, 2).expect("safe symbol size");
+        assert_eq!(safe, 521);
+    }
+
+    #[test]
+    fn mtu_safe_symbol_size_invalid_inputs() {
+        assert!(RaptorQConfig::mtu_safe_symbol_size(1200, 0).is_none());
+        assert!(RaptorQConfig::mtu_safe_symbol_size(100, 1).is_none());
+    }
+
+    #[test]
+    fn from_preset_clamps_preferred_symbol_size() {
+        let preset = RaptorQPreset {
+            profile: RaptorQPathProfile::Lan,
+            max_datagram_bytes: 1200,
+            symbols_per_frame: 1,
+            preferred_symbol_size: 2048,
+            repair_ratio_bps: 500,
+        };
+        let config = RaptorQConfig::from_preset(preset).expect("preset config");
+        assert_eq!(config.symbol_size, 1064);
+        assert_eq!(config.repair_ratio_bps, 500);
+    }
+
+    #[test]
+    fn bound_symbol_size_clamps_override() {
+        let mut config = RaptorQConfig {
+            symbol_size: 2048,
+            ..Default::default()
+        };
+        let adjusted = config
+            .bound_symbol_size(1200, 1)
+            .expect("bounded symbol size");
+        assert_eq!(adjusted, 1064);
+        assert_eq!(config.symbol_size, 1064);
     }
 }

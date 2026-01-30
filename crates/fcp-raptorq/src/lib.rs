@@ -35,7 +35,7 @@ mod error;
 mod golden;
 
 pub use chunk::{ChunkedObjectManifest, RawChunk};
-pub use config::RaptorQConfig;
+pub use config::{RaptorQConfig, RaptorQPathProfile, RaptorQPreset};
 pub use decode::{DecodeAdmissionController, DecodePermit, RaptorQDecoder};
 pub use encode::{EncodingDecision, RaptorQEncoder};
 pub use envelope::SymbolEnvelope;

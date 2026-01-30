@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:c0c168e061aa053e9981d578f5c6003f8f992ddef0310852bc885b468d729d9f"
+interface_hash = "blake3-256:fcp.interface.v2:ed36328e5236c5c014c011cf944ae882fd51f4ff07107bed1c4927eb27298cfd"
 
 [connector]
 id = "fcp.twitter"
@@ -47,7 +47,7 @@ forbidden = [
     "storage.state",
 ]
 
-[provides.operations.stream_rules_add]
+[provides.operations."twitter.stream.rules.add"]
 description = "Add filter rules to the tweet stream"
 capability = "twitter.stream"
 risk_level = "medium"
@@ -55,45 +55,45 @@ safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "none"
 
-[provides.operations.stream_rules_add.rate_limit]
+[provides.operations."twitter.stream.rules.add".rate_limit]
 max = 450
 per_ms = 900000
 
-[provides.operations.stream_rules_add.input_schema]
+[provides.operations."twitter.stream.rules.add".input_schema]
 required = ["rules"]
 type = "object"
 
-[provides.operations.stream_rules_add.input_schema.properties.rules]
+[provides.operations."twitter.stream.rules.add".input_schema.properties.rules]
 description = "Array of filter rules to add"
 maxItems = 25
 type = "array"
 
-[provides.operations.stream_rules_add.input_schema.properties.rules.items]
+[provides.operations."twitter.stream.rules.add".input_schema.properties.rules.items]
 type = "object"
 
-[provides.operations.stream_rules_add.input_schema.properties.rules.items.properties.tag]
+[provides.operations."twitter.stream.rules.add".input_schema.properties.rules.items.properties.tag]
 description = "Optional label for the rule"
 type = "string"
 
-[provides.operations.stream_rules_add.input_schema.properties.rules.items.properties.value]
+[provides.operations."twitter.stream.rules.add".input_schema.properties.rules.items.properties.value]
 description = "Filter rule (Twitter filter syntax)"
 maxLength = 512
 type = "string"
 
-[provides.operations.stream_rules_add.output_schema]
+[provides.operations."twitter.stream.rules.add".output_schema]
 required = []
 type = "object"
 
-[provides.operations.stream_rules_add.output_schema.properties.errors]
+[provides.operations."twitter.stream.rules.add".output_schema.properties.errors]
 type = "array"
 
-[provides.operations.stream_rules_add.output_schema.properties.meta]
+[provides.operations."twitter.stream.rules.add".output_schema.properties.meta]
 type = "object"
 
-[provides.operations.stream_rules_add.output_schema.properties.rules]
+[provides.operations."twitter.stream.rules.add".output_schema.properties.rules]
 type = "array"
 
-[provides.operations.stream_rules_add.network_constraints]
+[provides.operations."twitter.stream.rules.add".network_constraints]
 host_allow = [
     "api.twitter.com",
     "api.x.com",
@@ -115,7 +115,7 @@ connect_timeout_ms = 10000
 total_timeout_ms = 30000
 max_response_bytes = 1048576
 
-[provides.operations.stream_rules_add.ai_hints]
+[provides.operations."twitter.stream.rules.add".ai_hints]
 when_to_use = "Add rules to filter the real-time tweet stream."
 common_mistakes = [
     "Invalid filter syntax.",
@@ -123,11 +123,11 @@ common_mistakes = [
 ]
 examples = ['{"rules": [{"value": "from:TwitterDev", "tag": "dev_tweets"}]}']
 related = [
-    "twitter.stream_rules_list",
-    "twitter.stream_rules_delete",
+    "twitter.stream.rules.list",
+    "twitter.stream.rules.delete",
 ]
 
-[provides.operations.stream_rules_delete]
+[provides.operations."twitter.stream.rules.delete"]
 description = "Delete filter rules from the tweet stream"
 capability = "twitter.stream"
 risk_level = "medium"
@@ -135,32 +135,32 @@ safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "strict"
 
-[provides.operations.stream_rules_delete.rate_limit]
+[provides.operations."twitter.stream.rules.delete".rate_limit]
 max = 450
 per_ms = 900000
 
-[provides.operations.stream_rules_delete.input_schema]
+[provides.operations."twitter.stream.rules.delete".input_schema]
 required = ["ids"]
 type = "object"
 
-[provides.operations.stream_rules_delete.input_schema.properties.ids]
+[provides.operations."twitter.stream.rules.delete".input_schema.properties.ids]
 description = "Array of rule IDs to delete"
 type = "array"
 
-[provides.operations.stream_rules_delete.input_schema.properties.ids.items]
+[provides.operations."twitter.stream.rules.delete".input_schema.properties.ids.items]
 type = "string"
 
-[provides.operations.stream_rules_delete.output_schema]
+[provides.operations."twitter.stream.rules.delete".output_schema]
 required = []
 type = "object"
 
-[provides.operations.stream_rules_delete.output_schema.properties.errors]
+[provides.operations."twitter.stream.rules.delete".output_schema.properties.errors]
 type = "array"
 
-[provides.operations.stream_rules_delete.output_schema.properties.meta]
+[provides.operations."twitter.stream.rules.delete".output_schema.properties.meta]
 type = "object"
 
-[provides.operations.stream_rules_delete.network_constraints]
+[provides.operations."twitter.stream.rules.delete".network_constraints]
 host_allow = [
     "api.twitter.com",
     "api.x.com",
@@ -182,16 +182,16 @@ connect_timeout_ms = 10000
 total_timeout_ms = 30000
 max_response_bytes = 1048576
 
-[provides.operations.stream_rules_delete.ai_hints]
+[provides.operations."twitter.stream.rules.delete".ai_hints]
 when_to_use = "Remove filter rules from the tweet stream."
 common_mistakes = ["Using rule value instead of rule ID."]
 examples = ['{"ids": ["1234567890"]}']
 related = [
-    "twitter.stream_rules_list",
-    "twitter.stream_rules_add",
+    "twitter.stream.rules.list",
+    "twitter.stream.rules.add",
 ]
 
-[provides.operations.stream_rules_list]
+[provides.operations."twitter.stream.rules.list"]
 description = "List active filtered stream rules"
 capability = "twitter.stream"
 risk_level = "low"
@@ -199,34 +199,34 @@ safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
 
-[provides.operations.stream_rules_list.rate_limit]
+[provides.operations."twitter.stream.rules.list".rate_limit]
 max = 450
 per_ms = 900000
 
-[provides.operations.stream_rules_list.input_schema]
+[provides.operations."twitter.stream.rules.list".input_schema]
 required = []
 type = "object"
 
-[provides.operations.stream_rules_list.output_schema]
+[provides.operations."twitter.stream.rules.list".output_schema]
 required = []
 type = "object"
 
-[provides.operations.stream_rules_list.output_schema.properties.rules]
+[provides.operations."twitter.stream.rules.list".output_schema.properties.rules]
 type = "array"
 
-[provides.operations.stream_rules_list.output_schema.properties.rules.items]
+[provides.operations."twitter.stream.rules.list".output_schema.properties.rules.items]
 type = "object"
 
-[provides.operations.stream_rules_list.output_schema.properties.rules.items.properties.id]
+[provides.operations."twitter.stream.rules.list".output_schema.properties.rules.items.properties.id]
 type = "string"
 
-[provides.operations.stream_rules_list.output_schema.properties.rules.items.properties.tag]
+[provides.operations."twitter.stream.rules.list".output_schema.properties.rules.items.properties.tag]
 type = "string"
 
-[provides.operations.stream_rules_list.output_schema.properties.rules.items.properties.value]
+[provides.operations."twitter.stream.rules.list".output_schema.properties.rules.items.properties.value]
 type = "string"
 
-[provides.operations.stream_rules_list.network_constraints]
+[provides.operations."twitter.stream.rules.list".network_constraints]
 host_allow = [
     "api.twitter.com",
     "api.x.com",
@@ -248,16 +248,16 @@ connect_timeout_ms = 10000
 total_timeout_ms = 30000
 max_response_bytes = 1048576
 
-[provides.operations.stream_rules_list.ai_hints]
+[provides.operations."twitter.stream.rules.list".ai_hints]
 when_to_use = "View current filter rules for the tweet stream."
 common_mistakes = []
 examples = ["{}"]
 related = [
-    "twitter.stream_rules_add",
-    "twitter.stream_rules_delete",
+    "twitter.stream.rules.add",
+    "twitter.stream.rules.delete",
 ]
 
-[provides.operations.tweet_create]
+[provides.operations."twitter.tweet.create"]
 description = "Post a new tweet (max 280 characters)"
 capability = "twitter.write"
 risk_level = "high"
@@ -265,35 +265,35 @@ safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "none"
 
-[provides.operations.tweet_create.rate_limit]
+[provides.operations."twitter.tweet.create".rate_limit]
 max = 200
 per_ms = 86400000
 
-[provides.operations.tweet_create.input_schema]
+[provides.operations."twitter.tweet.create".input_schema]
 required = ["text"]
 type = "object"
 
-[provides.operations.tweet_create.input_schema.properties.text]
+[provides.operations."twitter.tweet.create".input_schema.properties.text]
 description = "Tweet text content (max 280 characters)"
 maxLength = 280
 minLength = 1
 type = "string"
 
-[provides.operations.tweet_create.output_schema]
+[provides.operations."twitter.tweet.create".output_schema]
 required = ["tweet"]
 type = "object"
 
-[provides.operations.tweet_create.output_schema.properties.tweet]
+[provides.operations."twitter.tweet.create".output_schema.properties.tweet]
 type = "object"
 
-[provides.operations.tweet_create.output_schema.properties.tweet.properties.id]
+[provides.operations."twitter.tweet.create".output_schema.properties.tweet.properties.id]
 description = "Created tweet ID"
 type = "string"
 
-[provides.operations.tweet_create.output_schema.properties.tweet.properties.text]
+[provides.operations."twitter.tweet.create".output_schema.properties.tweet.properties.text]
 type = "string"
 
-[provides.operations.tweet_create.network_constraints]
+[provides.operations."twitter.tweet.create".network_constraints]
 host_allow = [
     "api.twitter.com",
     "api.x.com",
@@ -315,7 +315,7 @@ connect_timeout_ms = 10000
 total_timeout_ms = 30000
 max_response_bytes = 1048576
 
-[provides.operations.tweet_create.ai_hints]
+[provides.operations."twitter.tweet.create".ai_hints]
 when_to_use = "Post a new public tweet. This is visible to all followers."
 common_mistakes = [
     "Exceeding 280 character limit.",
@@ -323,11 +323,11 @@ common_mistakes = [
 ]
 examples = ['{"text": "Hello from FCP!"}']
 related = [
-    "twitter.tweet_reply",
-    "twitter.tweet_delete",
+    "twitter.tweet.reply",
+    "twitter.tweet.delete",
 ]
 
-[provides.operations.tweet_delete]
+[provides.operations."twitter.tweet.delete"]
 description = "Delete a tweet (irreversible)"
 capability = "twitter.delete"
 risk_level = "high"
@@ -335,28 +335,28 @@ safety_tier = "dangerous"
 requires_approval = "interactive"
 idempotency = "strict"
 
-[provides.operations.tweet_delete.rate_limit]
+[provides.operations."twitter.tweet.delete".rate_limit]
 max = 50
 per_ms = 900000
 
-[provides.operations.tweet_delete.input_schema]
+[provides.operations."twitter.tweet.delete".input_schema]
 required = ["tweet_id"]
 type = "object"
 
-[provides.operations.tweet_delete.input_schema.properties.tweet_id]
+[provides.operations."twitter.tweet.delete".input_schema.properties.tweet_id]
 description = "Tweet ID to delete"
 pattern = "^[0-9]+$"
 type = "string"
 
-[provides.operations.tweet_delete.output_schema]
+[provides.operations."twitter.tweet.delete".output_schema]
 required = ["deleted"]
 type = "object"
 
-[provides.operations.tweet_delete.output_schema.properties.deleted]
+[provides.operations."twitter.tweet.delete".output_schema.properties.deleted]
 description = "Whether the tweet was deleted"
 type = "boolean"
 
-[provides.operations.tweet_delete.network_constraints]
+[provides.operations."twitter.tweet.delete".network_constraints]
 host_allow = [
     "api.twitter.com",
     "api.x.com",
@@ -378,16 +378,16 @@ connect_timeout_ms = 10000
 total_timeout_ms = 30000
 max_response_bytes = 1048576
 
-[provides.operations.tweet_delete.ai_hints]
+[provides.operations."twitter.tweet.delete".ai_hints]
 when_to_use = "Permanently delete a tweet. This cannot be undone."
 common_mistakes = [
     "Deleting wrong tweet - always verify the tweet_id.",
     "Can only delete your own tweets.",
 ]
 examples = ['{"tweet_id": "1234567890123456789"}']
-related = ["twitter.tweet_get"]
+related = ["twitter.tweet.get"]
 
-[provides.operations.tweet_get]
+[provides.operations."twitter.tweet.get"]
 description = "Get a single tweet by its ID"
 capability = "twitter.read"
 risk_level = "low"
@@ -395,36 +395,36 @@ safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
 
-[provides.operations.tweet_get.rate_limit]
+[provides.operations."twitter.tweet.get".rate_limit]
 max = 300
 per_ms = 900000
 
-[provides.operations.tweet_get.input_schema]
+[provides.operations."twitter.tweet.get".input_schema]
 required = ["tweet_id"]
 type = "object"
 
-[provides.operations.tweet_get.input_schema.properties.tweet_id]
+[provides.operations."twitter.tweet.get".input_schema.properties.tweet_id]
 description = "Tweet ID (numeric string)"
 pattern = "^[0-9]+$"
 type = "string"
 
-[provides.operations.tweet_get.output_schema]
+[provides.operations."twitter.tweet.get".output_schema]
 required = ["tweet"]
 type = "object"
 
-[provides.operations.tweet_get.output_schema.properties.tweet]
+[provides.operations."twitter.tweet.get".output_schema.properties.tweet]
 type = "object"
 
-[provides.operations.tweet_get.output_schema.properties.tweet.properties.author_id]
+[provides.operations."twitter.tweet.get".output_schema.properties.tweet.properties.author_id]
 type = "string"
 
-[provides.operations.tweet_get.output_schema.properties.tweet.properties.id]
+[provides.operations."twitter.tweet.get".output_schema.properties.tweet.properties.id]
 type = "string"
 
-[provides.operations.tweet_get.output_schema.properties.tweet.properties.text]
+[provides.operations."twitter.tweet.get".output_schema.properties.tweet.properties.text]
 type = "string"
 
-[provides.operations.tweet_get.network_constraints]
+[provides.operations."twitter.tweet.get".network_constraints]
 host_allow = [
     "api.twitter.com",
     "api.x.com",
@@ -446,16 +446,16 @@ connect_timeout_ms = 10000
 total_timeout_ms = 30000
 max_response_bytes = 1048576
 
-[provides.operations.tweet_get.ai_hints]
+[provides.operations."twitter.tweet.get".ai_hints]
 when_to_use = "Retrieve a specific tweet by its ID."
 common_mistakes = ["Using tweet URL instead of numeric ID."]
 examples = ['{"tweet_id": "1234567890123456789"}']
 related = [
-    "twitter.tweet_search",
-    "twitter.user_timeline",
+    "twitter.tweet.search",
+    "twitter.user.timeline",
 ]
 
-[provides.operations.tweet_reply]
+[provides.operations."twitter.tweet.reply"]
 description = "Reply to an existing tweet"
 capability = "twitter.write"
 risk_level = "high"
@@ -463,42 +463,42 @@ safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "none"
 
-[provides.operations.tweet_reply.rate_limit]
+[provides.operations."twitter.tweet.reply".rate_limit]
 max = 200
 per_ms = 86400000
 
-[provides.operations.tweet_reply.input_schema]
+[provides.operations."twitter.tweet.reply".input_schema]
 required = [
     "text",
     "reply_to",
 ]
 type = "object"
 
-[provides.operations.tweet_reply.input_schema.properties.reply_to]
+[provides.operations."twitter.tweet.reply".input_schema.properties.reply_to]
 description = "Tweet ID to reply to"
 pattern = "^[0-9]+$"
 type = "string"
 
-[provides.operations.tweet_reply.input_schema.properties.text]
+[provides.operations."twitter.tweet.reply".input_schema.properties.text]
 description = "Reply text content (max 280 characters)"
 maxLength = 280
 minLength = 1
 type = "string"
 
-[provides.operations.tweet_reply.output_schema]
+[provides.operations."twitter.tweet.reply".output_schema]
 required = ["tweet"]
 type = "object"
 
-[provides.operations.tweet_reply.output_schema.properties.tweet]
+[provides.operations."twitter.tweet.reply".output_schema.properties.tweet]
 type = "object"
 
-[provides.operations.tweet_reply.output_schema.properties.tweet.properties.id]
+[provides.operations."twitter.tweet.reply".output_schema.properties.tweet.properties.id]
 type = "string"
 
-[provides.operations.tweet_reply.output_schema.properties.tweet.properties.text]
+[provides.operations."twitter.tweet.reply".output_schema.properties.tweet.properties.text]
 type = "string"
 
-[provides.operations.tweet_reply.network_constraints]
+[provides.operations."twitter.tweet.reply".network_constraints]
 host_allow = [
     "api.twitter.com",
     "api.x.com",
@@ -520,7 +520,7 @@ connect_timeout_ms = 10000
 total_timeout_ms = 30000
 max_response_bytes = 1048576
 
-[provides.operations.tweet_reply.ai_hints]
+[provides.operations."twitter.tweet.reply".ai_hints]
 when_to_use = "Reply to an existing tweet. Creates a public reply in the thread."
 common_mistakes = [
     "Using tweet URL instead of numeric tweet ID.",
@@ -528,11 +528,11 @@ common_mistakes = [
 ]
 examples = ['{"text": "Great point!", "reply_to": "1234567890123456789"}']
 related = [
-    "twitter.tweet_create",
-    "twitter.tweet_get",
+    "twitter.tweet.create",
+    "twitter.tweet.get",
 ]
 
-[provides.operations.tweet_search]
+[provides.operations."twitter.tweet.search"]
 description = "Search recent tweets (last 7 days) matching a query"
 capability = "twitter.read"
 risk_level = "low"
@@ -540,35 +540,35 @@ safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
 
-[provides.operations.tweet_search.rate_limit]
+[provides.operations."twitter.tweet.search".rate_limit]
 max = 180
 per_ms = 900000
 
-[provides.operations.tweet_search.input_schema]
+[provides.operations."twitter.tweet.search".input_schema]
 required = ["query"]
 type = "object"
 
-[provides.operations.tweet_search.input_schema.properties.max_results]
+[provides.operations."twitter.tweet.search".input_schema.properties.max_results]
 default = 10
 description = "Maximum tweets to return (10-100)"
 maximum = 100
 minimum = 10
 type = "integer"
 
-[provides.operations.tweet_search.input_schema.properties.next_token]
+[provides.operations."twitter.tweet.search".input_schema.properties.next_token]
 description = "Pagination token for next page"
 type = "string"
 
-[provides.operations.tweet_search.input_schema.properties.query]
+[provides.operations."twitter.tweet.search".input_schema.properties.query]
 description = "Search query (Twitter search syntax supported)"
 maxLength = 512
 type = "string"
 
-[provides.operations.tweet_search.input_schema.properties.since_id]
+[provides.operations."twitter.tweet.search".input_schema.properties.since_id]
 description = "Return tweets after this tweet ID"
 type = "string"
 
-[provides.operations.tweet_search.input_schema.properties.sort_order]
+[provides.operations."twitter.tweet.search".input_schema.properties.sort_order]
 description = "Sort order: recency or relevancy"
 enum = [
     "recency",
@@ -576,26 +576,26 @@ enum = [
 ]
 type = "string"
 
-[provides.operations.tweet_search.output_schema]
+[provides.operations."twitter.tweet.search".output_schema]
 required = []
 type = "object"
 
-[provides.operations.tweet_search.output_schema.properties.meta]
+[provides.operations."twitter.tweet.search".output_schema.properties.meta]
 type = "object"
 
-[provides.operations.tweet_search.output_schema.properties.meta.properties.next_token]
+[provides.operations."twitter.tweet.search".output_schema.properties.meta.properties.next_token]
 type = "string"
 
-[provides.operations.tweet_search.output_schema.properties.meta.properties.result_count]
+[provides.operations."twitter.tweet.search".output_schema.properties.meta.properties.result_count]
 type = "integer"
 
-[provides.operations.tweet_search.output_schema.properties.tweets]
+[provides.operations."twitter.tweet.search".output_schema.properties.tweets]
 type = "array"
 
-[provides.operations.tweet_search.output_schema.properties.tweets.items]
+[provides.operations."twitter.tweet.search".output_schema.properties.tweets.items]
 type = "object"
 
-[provides.operations.tweet_search.network_constraints]
+[provides.operations."twitter.tweet.search".network_constraints]
 host_allow = [
     "api.twitter.com",
     "api.x.com",
@@ -617,7 +617,7 @@ connect_timeout_ms = 10000
 total_timeout_ms = 60000
 max_response_bytes = 10485760
 
-[provides.operations.tweet_search.ai_hints]
+[provides.operations."twitter.tweet.search".ai_hints]
 when_to_use = "Search for recent tweets. Only returns tweets from the last 7 days."
 common_mistakes = [
     "Expecting historical tweets beyond 7 days.",
@@ -628,11 +628,11 @@ examples = [
     '{"query": "#rust lang:en", "max_results": 25}',
 ]
 related = [
-    "twitter.user_timeline",
-    "twitter.tweet_get",
+    "twitter.user.timeline",
+    "twitter.tweet.get",
 ]
 
-[provides.operations.user_by_username]
+[provides.operations."twitter.user.by_username"]
 description = "Get a user's profile by their username (handle)"
 capability = "twitter.read"
 risk_level = "low"
@@ -640,27 +640,27 @@ safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
 
-[provides.operations.user_by_username.rate_limit]
+[provides.operations."twitter.user.by_username".rate_limit]
 max = 300
 per_ms = 900000
 
-[provides.operations.user_by_username.input_schema]
+[provides.operations."twitter.user.by_username".input_schema]
 required = ["username"]
 type = "object"
 
-[provides.operations.user_by_username.input_schema.properties.username]
+[provides.operations."twitter.user.by_username".input_schema.properties.username]
 description = "Twitter username/handle (with or without @)"
 pattern = "^@?[A-Za-z0-9_]{1,15}$"
 type = "string"
 
-[provides.operations.user_by_username.output_schema]
+[provides.operations."twitter.user.by_username".output_schema]
 required = ["user"]
 type = "object"
 
-[provides.operations.user_by_username.output_schema.properties.user]
+[provides.operations."twitter.user.by_username".output_schema.properties.user]
 type = "object"
 
-[provides.operations.user_by_username.network_constraints]
+[provides.operations."twitter.user.by_username".network_constraints]
 host_allow = [
     "api.twitter.com",
     "api.x.com",
@@ -682,7 +682,7 @@ connect_timeout_ms = 10000
 total_timeout_ms = 30000
 max_response_bytes = 1048576
 
-[provides.operations.user_by_username.ai_hints]
+[provides.operations."twitter.user.by_username".ai_hints]
 when_to_use = "Look up a user by their Twitter handle. The @ prefix is optional."
 common_mistakes = ["Forgetting this is case-insensitive."]
 examples = [
@@ -690,11 +690,11 @@ examples = [
     '{"username": "@TwitterDev"}',
 ]
 related = [
-    "twitter.user_get",
-    "twitter.user_timeline",
+    "twitter.user.get",
+    "twitter.user.timeline",
 ]
 
-[provides.operations.user_get]
+[provides.operations."twitter.user.get"]
 description = "Get a user's profile by their numeric user ID"
 capability = "twitter.read"
 risk_level = "low"
@@ -702,27 +702,27 @@ safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
 
-[provides.operations.user_get.rate_limit]
+[provides.operations."twitter.user.get".rate_limit]
 max = 300
 per_ms = 900000
 
-[provides.operations.user_get.input_schema]
+[provides.operations."twitter.user.get".input_schema]
 required = ["user_id"]
 type = "object"
 
-[provides.operations.user_get.input_schema.properties.user_id]
+[provides.operations."twitter.user.get".input_schema.properties.user_id]
 description = "Twitter user ID (numeric string)"
 pattern = "^[0-9]+$"
 type = "string"
 
-[provides.operations.user_get.output_schema]
+[provides.operations."twitter.user.get".output_schema]
 required = ["user"]
 type = "object"
 
-[provides.operations.user_get.output_schema.properties.user]
+[provides.operations."twitter.user.get".output_schema.properties.user]
 type = "object"
 
-[provides.operations.user_get.network_constraints]
+[provides.operations."twitter.user.get".network_constraints]
 host_allow = [
     "api.twitter.com",
     "api.x.com",
@@ -744,16 +744,16 @@ connect_timeout_ms = 10000
 total_timeout_ms = 30000
 max_response_bytes = 1048576
 
-[provides.operations.user_get.ai_hints]
-when_to_use = "Look up a user by their numeric ID. Use user_by_username if you have a handle."
+[provides.operations."twitter.user.get".ai_hints]
+when_to_use = "Look up a user by their numeric ID. Use twitter.user.by_username if you have a handle."
 common_mistakes = ["Passing username instead of numeric ID."]
 examples = ['{"user_id": "12345678901234567"}']
 related = [
-    "twitter.user_by_username",
-    "twitter.user_me",
+    "twitter.user.by_username",
+    "twitter.user.me",
 ]
 
-[provides.operations.user_me]
+[provides.operations."twitter.user.me"]
 description = "Get the authenticated user's profile information"
 capability = "twitter.read"
 risk_level = "low"
@@ -761,35 +761,35 @@ safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
 
-[provides.operations.user_me.rate_limit]
+[provides.operations."twitter.user.me".rate_limit]
 max = 75
 per_ms = 900000
 
-[provides.operations.user_me.input_schema]
+[provides.operations."twitter.user.me".input_schema]
 required = []
 type = "object"
 
-[provides.operations.user_me.output_schema]
+[provides.operations."twitter.user.me".output_schema]
 required = ["user"]
 type = "object"
 
-[provides.operations.user_me.output_schema.properties.user]
+[provides.operations."twitter.user.me".output_schema.properties.user]
 description = "Authenticated user object"
 type = "object"
 
-[provides.operations.user_me.output_schema.properties.user.properties.id]
+[provides.operations."twitter.user.me".output_schema.properties.user.properties.id]
 description = "User ID"
 type = "string"
 
-[provides.operations.user_me.output_schema.properties.user.properties.name]
+[provides.operations."twitter.user.me".output_schema.properties.user.properties.name]
 description = "Display name"
 type = "string"
 
-[provides.operations.user_me.output_schema.properties.user.properties.username]
+[provides.operations."twitter.user.me".output_schema.properties.user.properties.username]
 description = "Twitter handle (without @)"
 type = "string"
 
-[provides.operations.user_me.network_constraints]
+[provides.operations."twitter.user.me".network_constraints]
 host_allow = [
     "api.twitter.com",
     "api.x.com",
@@ -811,16 +811,16 @@ connect_timeout_ms = 10000
 total_timeout_ms = 30000
 max_response_bytes = 1048576
 
-[provides.operations.user_me.ai_hints]
+[provides.operations."twitter.user.me".ai_hints]
 when_to_use = "Get information about the currently authenticated user."
 common_mistakes = []
 examples = ["{}"]
 related = [
-    "twitter.user_get",
-    "twitter.user_by_username",
+    "twitter.user.get",
+    "twitter.user.by_username",
 ]
 
-[provides.operations.user_mentions]
+[provides.operations."twitter.user.mentions"]
 description = "Get tweets mentioning a user"
 capability = "twitter.read"
 risk_level = "low"
@@ -828,44 +828,44 @@ safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
 
-[provides.operations.user_mentions.rate_limit]
+[provides.operations."twitter.user.mentions".rate_limit]
 max = 180
 per_ms = 900000
 
-[provides.operations.user_mentions.input_schema]
+[provides.operations."twitter.user.mentions".input_schema]
 required = []
 type = "object"
 
-[provides.operations.user_mentions.input_schema.properties.max_results]
+[provides.operations."twitter.user.mentions".input_schema.properties.max_results]
 default = 10
 description = "Maximum mentions to return (5-100)"
 maximum = 100
 minimum = 5
 type = "integer"
 
-[provides.operations.user_mentions.input_schema.properties.pagination_token]
+[provides.operations."twitter.user.mentions".input_schema.properties.pagination_token]
 description = "Pagination token for next page"
 type = "string"
 
-[provides.operations.user_mentions.input_schema.properties.user_id]
+[provides.operations."twitter.user.mentions".input_schema.properties.user_id]
 description = "Twitter user ID (defaults to authenticated user)"
 pattern = "^[0-9]+$"
 type = "string"
 
-[provides.operations.user_mentions.output_schema]
+[provides.operations."twitter.user.mentions".output_schema]
 required = []
 type = "object"
 
-[provides.operations.user_mentions.output_schema.properties.meta]
+[provides.operations."twitter.user.mentions".output_schema.properties.meta]
 type = "object"
 
-[provides.operations.user_mentions.output_schema.properties.tweets]
+[provides.operations."twitter.user.mentions".output_schema.properties.tweets]
 type = "array"
 
-[provides.operations.user_mentions.output_schema.properties.tweets.items]
+[provides.operations."twitter.user.mentions".output_schema.properties.tweets.items]
 type = "object"
 
-[provides.operations.user_mentions.network_constraints]
+[provides.operations."twitter.user.mentions".network_constraints]
 host_allow = [
     "api.twitter.com",
     "api.x.com",
@@ -887,7 +887,7 @@ connect_timeout_ms = 10000
 total_timeout_ms = 30000
 max_response_bytes = 10485760
 
-[provides.operations.user_mentions.ai_hints]
+[provides.operations."twitter.user.mentions".ai_hints]
 when_to_use = "Get tweets that mention a user. Defaults to the authenticated user if no user_id provided."
 common_mistakes = []
 examples = [
@@ -895,11 +895,11 @@ examples = [
     '{"user_id": "12345678901234567", "max_results": 25}',
 ]
 related = [
-    "twitter.user_timeline",
-    "twitter.tweet_search",
+    "twitter.user.timeline",
+    "twitter.tweet.search",
 ]
 
-[provides.operations.user_timeline]
+[provides.operations."twitter.user.timeline"]
 description = "Get a user's recent tweets"
 capability = "twitter.read"
 risk_level = "low"
@@ -907,44 +907,44 @@ safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
 
-[provides.operations.user_timeline.rate_limit]
+[provides.operations."twitter.user.timeline".rate_limit]
 max = 1500
 per_ms = 900000
 
-[provides.operations.user_timeline.input_schema]
+[provides.operations."twitter.user.timeline".input_schema]
 required = ["user_id"]
 type = "object"
 
-[provides.operations.user_timeline.input_schema.properties.max_results]
+[provides.operations."twitter.user.timeline".input_schema.properties.max_results]
 default = 10
 description = "Maximum tweets to return (5-100)"
 maximum = 100
 minimum = 5
 type = "integer"
 
-[provides.operations.user_timeline.input_schema.properties.pagination_token]
+[provides.operations."twitter.user.timeline".input_schema.properties.pagination_token]
 description = "Pagination token for next page"
 type = "string"
 
-[provides.operations.user_timeline.input_schema.properties.user_id]
+[provides.operations."twitter.user.timeline".input_schema.properties.user_id]
 description = "Twitter user ID"
 pattern = "^[0-9]+$"
 type = "string"
 
-[provides.operations.user_timeline.output_schema]
+[provides.operations."twitter.user.timeline".output_schema]
 required = []
 type = "object"
 
-[provides.operations.user_timeline.output_schema.properties.meta]
+[provides.operations."twitter.user.timeline".output_schema.properties.meta]
 type = "object"
 
-[provides.operations.user_timeline.output_schema.properties.tweets]
+[provides.operations."twitter.user.timeline".output_schema.properties.tweets]
 type = "array"
 
-[provides.operations.user_timeline.output_schema.properties.tweets.items]
+[provides.operations."twitter.user.timeline".output_schema.properties.tweets.items]
 type = "object"
 
-[provides.operations.user_timeline.network_constraints]
+[provides.operations."twitter.user.timeline".network_constraints]
 host_allow = [
     "api.twitter.com",
     "api.x.com",
@@ -966,13 +966,13 @@ connect_timeout_ms = 10000
 total_timeout_ms = 30000
 max_response_bytes = 10485760
 
-[provides.operations.user_timeline.ai_hints]
-when_to_use = "Get a user's recent tweets. Use user_by_username first to get the user_id."
+[provides.operations."twitter.user.timeline".ai_hints]
+when_to_use = "Get a user's recent tweets. Use twitter.user.by_username first to get the user_id."
 common_mistakes = ["Passing username instead of numeric user_id."]
 examples = ['{"user_id": "12345678901234567", "max_results": 20}']
 related = [
-    "twitter.user_by_username",
-    "twitter.user_mentions",
+    "twitter.user.by_username",
+    "twitter.user.mentions",
 ]
 
 [sandbox]
@@ -1017,16 +1017,16 @@ burst = 50
 scope = "instance"
 
 [rate_limits.operation_pools]
-tweet_reply = ["twitter.write"]
-user_mentions = ["twitter.read"]
-stream_rules_delete = ["twitter.stream"]
-tweet_get = ["twitter.read"]
-user_timeline = ["twitter.read"]
-user_me = ["twitter.read"]
-user_get = ["twitter.read"]
-tweet_delete = ["twitter.delete"]
-tweet_search = ["twitter.read"]
-tweet_create = ["twitter.write"]
-stream_rules_list = ["twitter.stream"]
-stream_rules_add = ["twitter.stream"]
-user_by_username = ["twitter.read"]
+"twitter.stream.rules.add" = ["twitter.stream"]
+"twitter.stream.rules.delete" = ["twitter.stream"]
+"twitter.tweet.reply" = ["twitter.write"]
+"twitter.user.me" = ["twitter.read"]
+"twitter.user.get" = ["twitter.read"]
+"twitter.tweet.get" = ["twitter.read"]
+"twitter.user.by_username" = ["twitter.read"]
+"twitter.user.mentions" = ["twitter.read"]
+"twitter.tweet.create" = ["twitter.write"]
+"twitter.user.timeline" = ["twitter.read"]
+"twitter.tweet.search" = ["twitter.read"]
+"twitter.tweet.delete" = ["twitter.delete"]
+"twitter.stream.rules.list" = ["twitter.stream"]

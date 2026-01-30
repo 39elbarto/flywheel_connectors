@@ -2249,9 +2249,7 @@ mod tests {
         let mut session = InMemoryStreamingSession::new();
 
         let now = Instant::now();
-        let sent = now
-            .checked_sub(Duration::from_millis(25))
-            .unwrap_or(now);
+        let sent = now.checked_sub(Duration::from_millis(25)).unwrap_or(now);
         session.record_heartbeat_sent(sent);
         assert!(session.is_heartbeat_timeout(Duration::from_millis(10)));
 

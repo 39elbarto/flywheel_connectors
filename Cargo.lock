@@ -1719,6 +1719,7 @@ name = "fcp-conformance"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "ciborium",
  "clap",
  "fcp-cbor",
  "fcp-core",
@@ -2097,6 +2098,7 @@ dependencies = [
  "fcp-cbor",
  "fcp-core",
  "fcp-manifest",
+ "fcp-store",
  "futures-util",
  "jsonschema",
  "reqwest",
@@ -2232,6 +2234,7 @@ dependencies = [
  "fcp-conformance",
  "fcp-core",
  "fcp-sdk",
+ "fcp-store",
  "futures-util",
  "regex",
  "reqwest",

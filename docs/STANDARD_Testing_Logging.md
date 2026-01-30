@@ -104,7 +104,7 @@ tests/vectors/
 │   └── fcpc_frames.cbor
 ├── serialization/
 │   ├── deterministic_cbor.json
-│   └── schema_hash_vectors.json
+│   └── core_vectors.json
 └── revocation/
     ├── freshness_checks.json
     └── chain_integrity.json

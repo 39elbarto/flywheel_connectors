@@ -74,3 +74,100 @@ pub enum StreamError {
 
 /// Result type for streaming operations.
 pub type StreamResult<T> = Result<T, StreamError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connection_failed_display() {
+        let e = StreamError::ConnectionFailed("refused".into());
+        assert_eq!(e.to_string(), "Connection failed: refused");
+    }
+
+    #[test]
+    fn connection_closed_display() {
+        let e = StreamError::ConnectionClosed {
+            reason: "gone".into(),
+            code: Some(1001),
+        };
+        assert_eq!(e.to_string(), "Connection closed: gone");
+    }
+
+    #[test]
+    fn connection_closed_without_code() {
+        let e = StreamError::ConnectionClosed {
+            reason: "eof".into(),
+            code: None,
+        };
+        assert_eq!(e.to_string(), "Connection closed: eof");
+    }
+
+    #[test]
+    fn http_error_display() {
+        let e = StreamError::HttpError {
+            status: 404,
+            message: "Not Found".into(),
+        };
+        assert_eq!(e.to_string(), "HTTP error: 404 - Not Found");
+    }
+
+    #[test]
+    fn parse_error_display() {
+        let e = StreamError::ParseError("bad json".into());
+        assert_eq!(e.to_string(), "Parse error: bad json");
+    }
+
+    #[test]
+    fn timeout_display() {
+        let e = StreamError::Timeout(Duration::from_secs(5));
+        assert_eq!(e.to_string(), "Timeout after 5s");
+    }
+
+    #[test]
+    fn reconnect_limit_exceeded_display() {
+        let e = StreamError::ReconnectLimitExceeded { attempts: 10 };
+        assert_eq!(
+            e.to_string(),
+            "Reconnection limit exceeded after 10 attempts"
+        );
+    }
+
+    #[test]
+    fn buffer_overflow_display() {
+        let e = StreamError::BufferOverflow {
+            size: 2048,
+            limit: 1024,
+        };
+        assert_eq!(
+            e.to_string(),
+            "Buffer overflow: 2048 bytes exceeds limit of 1024"
+        );
+    }
+
+    #[test]
+    fn invalid_state_display() {
+        let e = StreamError::InvalidState("closed".into());
+        assert_eq!(e.to_string(), "Invalid state: closed");
+    }
+
+    #[test]
+    fn websocket_error_display() {
+        let e = StreamError::WebSocketError("protocol error".into());
+        assert_eq!(e.to_string(), "WebSocket error: protocol error");
+    }
+
+    #[test]
+    fn sse_error_display() {
+        let e = StreamError::SseError("invalid event".into());
+        assert_eq!(e.to_string(), "SSE error: invalid event");
+    }
+
+    #[test]
+    fn io_error_from() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "broken");
+        let stream_err: StreamError = io_err.into();
+        assert!(matches!(stream_err, StreamError::IoError(_)));
+        assert!(stream_err.to_string().contains("broken"));
+    }
+}

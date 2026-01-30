@@ -324,4 +324,84 @@ mod tests {
             Err(StreamError::ReconnectLimitExceeded { .. })
         ));
     }
+
+    // ── New tests ──
+
+    #[test]
+    fn test_reconnect_config_builder_chain() {
+        let config = ReconnectConfig::new()
+            .with_max_attempts(5)
+            .with_initial_delay(Duration::from_millis(100))
+            .with_max_delay(Duration::from_secs(10))
+            .with_backoff_multiplier(3.0)
+            .with_jitter(false);
+
+        assert_eq!(config.max_attempts, Some(5));
+        assert_eq!(config.initial_delay, Duration::from_millis(100));
+        assert_eq!(config.max_delay, Duration::from_secs(10));
+        assert!((config.backoff_multiplier - 3.0).abs() < f64::EPSILON);
+        assert!(!config.jitter);
+    }
+
+    #[test]
+    fn test_delay_with_jitter_bounded() {
+        let config = ReconnectConfig::new()
+            .with_initial_delay(Duration::from_secs(1))
+            .with_max_delay(Duration::from_secs(60))
+            .with_backoff_multiplier(2.0)
+            .with_jitter(true);
+
+        // With jitter (0.5x to 1.5x), attempt 0 base is 1s
+        let delay = config.delay_for_attempt(0);
+        assert!(delay >= Duration::from_millis(500));
+        assert!(delay <= Duration::from_millis(1500));
+    }
+
+    #[test]
+    fn test_delay_capped_at_max() {
+        let config = ReconnectConfig::new()
+            .with_initial_delay(Duration::from_secs(1))
+            .with_max_delay(Duration::from_secs(5))
+            .with_backoff_multiplier(10.0)
+            .with_jitter(false);
+
+        // attempt 2: 1 * 10^2 = 100s, capped at 5s
+        assert_eq!(config.delay_for_attempt(2), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn test_reconnect_handler_config_accessor() {
+        let config = ReconnectConfig::new().with_max_attempts(7);
+        let handler = ReconnectHandler::new(config);
+        assert_eq!(handler.config().max_attempts, Some(7));
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_reconnect_exhausted() {
+        let config = ReconnectConfig::new()
+            .with_max_attempts(0)
+            .with_initial_delay(Duration::from_millis(1));
+        let mut handler = ReconnectHandler::new(config);
+
+        let result = handler.wait_for_reconnect().await;
+        assert!(matches!(
+            result,
+            Err(StreamError::ReconnectLimitExceeded { attempts: 0 })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_reconnect_increments_attempts() {
+        let config = ReconnectConfig::new()
+            .with_max_attempts(3)
+            .with_initial_delay(Duration::from_millis(1))
+            .with_jitter(false);
+        let mut handler = ReconnectHandler::new(config);
+
+        assert_eq!(handler.attempts(), 0);
+        handler.wait_for_reconnect().await.unwrap();
+        assert_eq!(handler.attempts(), 1);
+        handler.wait_for_reconnect().await.unwrap();
+        assert_eq!(handler.attempts(), 2);
+    }
 }

@@ -18,6 +18,9 @@ use crate::TelemetryError;
 ///
 /// This starts an HTTP server on the specified port that exposes metrics
 /// in Prometheus exposition format at `/metrics`.
+///
+/// # Errors
+/// Returns `TelemetryError::MetricsInit` if the exporter cannot be started.
 pub fn init_prometheus_exporter(port: u16) -> Result<(), TelemetryError> {
     let addr: SocketAddr = ([0, 0, 0, 0], port).into();
 
@@ -34,7 +37,10 @@ pub fn init_prometheus_exporter(port: u16) -> Result<(), TelemetryError> {
 /// Initialize the OTLP trace exporter.
 ///
 /// This sets up OpenTelemetry trace export to an OTLP-compatible collector.
-pub async fn init_otlp_tracer(service_name: &str, endpoint: &str) -> Result<(), TelemetryError> {
+///
+/// # Errors
+/// Returns `TelemetryError::TracingInit` if the exporter cannot be initialized.
+pub fn init_otlp_tracer(service_name: &str, endpoint: &str) -> Result<(), TelemetryError> {
     let exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_tonic()
         .with_endpoint(endpoint)

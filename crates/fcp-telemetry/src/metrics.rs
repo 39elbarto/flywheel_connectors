@@ -115,7 +115,6 @@ pub fn increment_counter_by(name: &'static str, value: u64, labels: &[(&'static 
 }
 
 /// Get a counter handle for repeated operations.
-#[must_use]
 pub fn get_counter(name: &'static str, labels: &[(&'static str, &str)]) -> Counter {
     let labels: Vec<(&'static str, String)> =
         labels.iter().map(|(k, v)| (*k, v.to_string())).collect();
@@ -148,7 +147,6 @@ pub fn decrement_gauge(name: &'static str, value: f64, labels: &[(&'static str, 
 }
 
 /// Get a gauge handle for repeated operations.
-#[must_use]
 pub fn get_gauge(name: &'static str, labels: &[(&'static str, &str)]) -> Gauge {
     let labels: Vec<(&'static str, String)> =
         labels.iter().map(|(k, v)| (*k, v.to_string())).collect();
@@ -167,7 +165,6 @@ pub fn record_histogram(name: &'static str, value: f64, labels: &[(&'static str,
 }
 
 /// Get a histogram handle for repeated operations.
-#[must_use]
 pub fn get_histogram(name: &'static str, labels: &[(&'static str, &str)]) -> Histogram {
     let labels: Vec<(&'static str, String)> =
         labels.iter().map(|(k, v)| (*k, v.to_string())).collect();
@@ -205,7 +202,7 @@ impl Timer {
     /// Get elapsed time in milliseconds.
     #[must_use]
     pub fn elapsed_ms(&self) -> u64 {
-        self.start.elapsed().as_millis() as u64
+        u64::try_from(self.start.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
 
     /// Stop the timer and record to histogram.
@@ -214,6 +211,7 @@ impl Timer {
     }
 
     /// Stop and record, returning elapsed seconds.
+    #[must_use]
     pub fn stop_and_return(self) -> f64 {
         let elapsed = self.elapsed_seconds();
         self.stop();
@@ -368,14 +366,17 @@ pub fn record_symbol_coverage(
     max_node_fraction_bps: u16,
     diversity_bps: u32,
 ) {
+    let source_count_u32 = u32::try_from(distinct_nodes).unwrap_or(u32::MAX);
+    let source_count = f64::from(source_count_u32);
+
     set_gauge(
         "fcp_symbol_coverage_distinct_nodes",
-        distinct_nodes as f64,
+        source_count,
         &[("zone", zone_id)],
     );
     set_gauge(
         "fcp_symbol_source_count",
-        distinct_nodes as f64,
+        source_count,
         &[("zone", zone_id)],
     );
     set_gauge(

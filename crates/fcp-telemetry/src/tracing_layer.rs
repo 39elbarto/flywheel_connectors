@@ -3,6 +3,7 @@
 //! Provides W3C Trace Context compliant distributed tracing.
 
 use std::collections::HashMap;
+use std::hash::BuildHasher;
 
 use opentelemetry::{
     KeyValue, global,
@@ -16,13 +17,18 @@ pub const TRACESTATE_HEADER: &str = "tracestate";
 
 /// Extract trace context from headers (W3C Trace Context format).
 #[must_use]
-pub fn extract_trace_context(headers: &HashMap<String, String>) -> Option<TraceContext> {
+pub fn extract_trace_context<S: BuildHasher>(
+    headers: &HashMap<String, String, S>,
+) -> Option<TraceContext> {
     let traceparent = headers.get(TRACEPARENT_HEADER)?;
     TraceContext::from_traceparent(traceparent)
 }
 
 /// Inject trace context into headers.
-pub fn inject_trace_context(ctx: &TraceContext, headers: &mut HashMap<String, String>) {
+pub fn inject_trace_context<S: BuildHasher>(
+    ctx: &TraceContext,
+    headers: &mut HashMap<String, String, S>,
+) {
     headers.insert(TRACEPARENT_HEADER.to_string(), ctx.to_traceparent());
     if let Some(ref state) = ctx.trace_state {
         headers.insert(TRACESTATE_HEADER.to_string(), state.clone());
@@ -127,11 +133,11 @@ fn generate_trace_id() -> String {
 
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
 
     let random: u64 = rand::rng().random();
-    format!("{:016x}{:016x}", timestamp as u64, random)
+    let timestamp = u64::try_from(timestamp).unwrap_or(u64::MAX);
+    format!("{timestamp:016x}{random:016x}")
 }
 
 /// Generate a random span ID (16 hex chars).

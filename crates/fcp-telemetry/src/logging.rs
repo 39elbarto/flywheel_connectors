@@ -9,7 +9,10 @@ use tracing_subscriber::{
 use crate::{TelemetryConfig, TelemetryError};
 
 /// Initialize the logging subsystem.
-pub(crate) fn init_logging(config: &TelemetryConfig) -> Result<(), TelemetryError> {
+///
+/// # Errors
+/// Returns `TelemetryError::LoggingInit` if the subscriber cannot be installed.
+pub fn init_logging(config: &TelemetryConfig) -> Result<(), TelemetryError> {
     let env_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&config.log_level));
 

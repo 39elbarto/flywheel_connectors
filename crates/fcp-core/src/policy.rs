@@ -1399,7 +1399,9 @@ mod tests {
 
     #[test]
     fn policy_pattern_empty_matches_empty() {
-        let pat = PolicyPattern { pattern: String::new() };
+        let pat = PolicyPattern {
+            pattern: String::new(),
+        };
         assert!(pat.matches(""));
         assert!(!pat.matches("anything"));
     }
@@ -1694,7 +1696,10 @@ mod tests {
         input.revocation_fresh = false;
         let decision = engine.evaluate_invoke(&input);
         assert_eq!(decision.decision, Decision::Deny);
-        assert_eq!(decision.reason_code, DecisionReasonCode::RevocationStaleFrontier);
+        assert_eq!(
+            decision.reason_code,
+            DecisionReasonCode::RevocationStaleFrontier
+        );
     }
 
     #[test]
@@ -1706,93 +1711,143 @@ mod tests {
         input.checkpoint_fresh = false;
         let decision = engine.evaluate_invoke(&input);
         assert_eq!(decision.decision, Decision::Deny);
-        assert_eq!(decision.reason_code, DecisionReasonCode::CheckpointStaleFrontier);
+        assert_eq!(
+            decision.reason_code,
+            DecisionReasonCode::CheckpointStaleFrontier
+        );
     }
 
     #[test]
     fn engine_deny_transport_derp_forbidden() {
         let mut policy = minimal_zone_policy();
         policy.transport_policy.allow_derp = false;
-        let engine = PolicyEngine { zone_policy: policy };
+        let engine = PolicyEngine {
+            zone_policy: policy,
+        };
         let mut input = minimal_decision_input();
         input.transport = TransportMode::Derp;
         let decision = engine.evaluate_invoke(&input);
         assert_eq!(decision.decision, Decision::Deny);
-        assert_eq!(decision.reason_code, DecisionReasonCode::TransportDerpForbidden);
+        assert_eq!(
+            decision.reason_code,
+            DecisionReasonCode::TransportDerpForbidden
+        );
     }
 
     #[test]
     fn engine_deny_transport_funnel_forbidden() {
         let mut policy = minimal_zone_policy();
         policy.transport_policy.allow_funnel = false;
-        let engine = PolicyEngine { zone_policy: policy };
+        let engine = PolicyEngine {
+            zone_policy: policy,
+        };
         let mut input = minimal_decision_input();
         input.transport = TransportMode::Funnel;
         let decision = engine.evaluate_invoke(&input);
         assert_eq!(decision.decision, Decision::Deny);
-        assert_eq!(decision.reason_code, DecisionReasonCode::TransportFunnelForbidden);
+        assert_eq!(
+            decision.reason_code,
+            DecisionReasonCode::TransportFunnelForbidden
+        );
     }
 
     #[test]
     fn engine_deny_transport_lan_forbidden() {
         let mut policy = minimal_zone_policy();
         policy.transport_policy.allow_lan = false;
-        let engine = PolicyEngine { zone_policy: policy };
+        let engine = PolicyEngine {
+            zone_policy: policy,
+        };
         let input = minimal_decision_input();
         let decision = engine.evaluate_invoke(&input);
         assert_eq!(decision.decision, Decision::Deny);
-        assert_eq!(decision.reason_code, DecisionReasonCode::TransportLanForbidden);
+        assert_eq!(
+            decision.reason_code,
+            DecisionReasonCode::TransportLanForbidden
+        );
     }
 
     #[test]
     fn engine_deny_principal_on_deny_list() {
         let mut policy = minimal_zone_policy();
-        policy.principal_deny.push(PolicyPattern { pattern: "user:alice".into() });
-        let engine = PolicyEngine { zone_policy: policy };
+        policy.principal_deny.push(PolicyPattern {
+            pattern: "user:alice".into(),
+        });
+        let engine = PolicyEngine {
+            zone_policy: policy,
+        };
         let input = minimal_decision_input();
         let decision = engine.evaluate_invoke(&input);
         assert_eq!(decision.decision, Decision::Deny);
-        assert_eq!(decision.reason_code, DecisionReasonCode::ZonePolicyPrincipalDenied);
+        assert_eq!(
+            decision.reason_code,
+            DecisionReasonCode::ZonePolicyPrincipalDenied
+        );
     }
 
     #[test]
     fn engine_deny_connector_on_deny_list() {
         let mut policy = minimal_zone_policy();
-        policy.connector_deny.push(PolicyPattern { pattern: "test:conn:*".into() });
-        let engine = PolicyEngine { zone_policy: policy };
+        policy.connector_deny.push(PolicyPattern {
+            pattern: "test:conn:*".into(),
+        });
+        let engine = PolicyEngine {
+            zone_policy: policy,
+        };
         let input = minimal_decision_input();
         let decision = engine.evaluate_invoke(&input);
         assert_eq!(decision.decision, Decision::Deny);
-        assert_eq!(decision.reason_code, DecisionReasonCode::ZonePolicyConnectorDenied);
+        assert_eq!(
+            decision.reason_code,
+            DecisionReasonCode::ZonePolicyConnectorDenied
+        );
     }
 
     #[test]
     fn engine_deny_capability_on_deny_list() {
         let mut policy = minimal_zone_policy();
-        policy.capability_deny.push(PolicyPattern { pattern: "cap.*".into() });
-        let engine = PolicyEngine { zone_policy: policy };
+        policy.capability_deny.push(PolicyPattern {
+            pattern: "cap.*".into(),
+        });
+        let engine = PolicyEngine {
+            zone_policy: policy,
+        };
         let input = minimal_decision_input();
         let decision = engine.evaluate_invoke(&input);
         assert_eq!(decision.decision, Decision::Deny);
-        assert_eq!(decision.reason_code, DecisionReasonCode::ZonePolicyCapabilityDenied);
+        assert_eq!(
+            decision.reason_code,
+            DecisionReasonCode::ZonePolicyCapabilityDenied
+        );
     }
 
     #[test]
     fn engine_deny_principal_not_on_allow_list() {
         let mut policy = minimal_zone_policy();
-        policy.principal_allow.push(PolicyPattern { pattern: "user:bob".into() });
-        let engine = PolicyEngine { zone_policy: policy };
+        policy.principal_allow.push(PolicyPattern {
+            pattern: "user:bob".into(),
+        });
+        let engine = PolicyEngine {
+            zone_policy: policy,
+        };
         let input = minimal_decision_input();
         let decision = engine.evaluate_invoke(&input);
         assert_eq!(decision.decision, Decision::Deny);
-        assert_eq!(decision.reason_code, DecisionReasonCode::ZonePolicyPrincipalNotAllowed);
+        assert_eq!(
+            decision.reason_code,
+            DecisionReasonCode::ZonePolicyPrincipalNotAllowed
+        );
     }
 
     #[test]
     fn engine_allow_principal_on_allow_list() {
         let mut policy = minimal_zone_policy();
-        policy.principal_allow.push(PolicyPattern { pattern: "user:*".into() });
-        let engine = PolicyEngine { zone_policy: policy };
+        policy.principal_allow.push(PolicyPattern {
+            pattern: "user:*".into(),
+        });
+        let engine = PolicyEngine {
+            zone_policy: policy,
+        };
         let input = minimal_decision_input();
         let decision = engine.evaluate_invoke(&input);
         assert_eq!(decision.decision, Decision::Allow);
@@ -1801,41 +1856,66 @@ mod tests {
     #[test]
     fn engine_deny_connector_not_on_allow_list() {
         let mut policy = minimal_zone_policy();
-        policy.connector_allow.push(PolicyPattern { pattern: "other:conn:*".into() });
-        let engine = PolicyEngine { zone_policy: policy };
+        policy.connector_allow.push(PolicyPattern {
+            pattern: "other:conn:*".into(),
+        });
+        let engine = PolicyEngine {
+            zone_policy: policy,
+        };
         let input = minimal_decision_input();
         let decision = engine.evaluate_invoke(&input);
         assert_eq!(decision.decision, Decision::Deny);
-        assert_eq!(decision.reason_code, DecisionReasonCode::ZonePolicyConnectorNotAllowed);
+        assert_eq!(
+            decision.reason_code,
+            DecisionReasonCode::ZonePolicyConnectorNotAllowed
+        );
     }
 
     #[test]
     fn engine_deny_capability_not_on_allow_list() {
         let mut policy = minimal_zone_policy();
-        policy.capability_allow.push(PolicyPattern { pattern: "cap.other".into() });
-        let engine = PolicyEngine { zone_policy: policy };
+        policy.capability_allow.push(PolicyPattern {
+            pattern: "cap.other".into(),
+        });
+        let engine = PolicyEngine {
+            zone_policy: policy,
+        };
         let input = minimal_decision_input();
         let decision = engine.evaluate_invoke(&input);
         assert_eq!(decision.decision, Decision::Deny);
-        assert_eq!(decision.reason_code, DecisionReasonCode::ZonePolicyCapabilityNotAllowed);
+        assert_eq!(
+            decision.reason_code,
+            DecisionReasonCode::ZonePolicyCapabilityNotAllowed
+        );
     }
 
     #[test]
     fn engine_deny_capability_ceiling_blocks() {
         let mut policy = minimal_zone_policy();
-        policy.capability_ceiling.push(CapabilityId::new("cap.other").unwrap());
-        let engine = PolicyEngine { zone_policy: policy };
+        policy
+            .capability_ceiling
+            .push(CapabilityId::new("cap.other").unwrap());
+        let engine = PolicyEngine {
+            zone_policy: policy,
+        };
         let input = minimal_decision_input();
         let decision = engine.evaluate_invoke(&input);
         assert_eq!(decision.decision, Decision::Deny);
-        assert_eq!(decision.reason_code, DecisionReasonCode::CapabilityInsufficient);
+        assert_eq!(
+            decision.reason_code,
+            DecisionReasonCode::CapabilityInsufficient
+        );
     }
 
     #[test]
     fn engine_allow_capability_in_ceiling() {
         let mut policy = minimal_zone_policy();
-        policy.capability_ceiling.push(CapabilityId::new("cap.test").unwrap());
-        let engine = PolicyEngine { zone_policy: policy };
+        policy
+            .capability_ceiling
+            .push(CapabilityId::new("cap.test").unwrap());
+        let engine = PolicyEngine {
+            zone_policy: policy,
+        };
         let input = minimal_decision_input();
         let decision = engine.evaluate_invoke(&input);
         assert_eq!(decision.decision, Decision::Allow);
@@ -1851,7 +1931,10 @@ mod tests {
         input.provenance.taint_flags.insert(TaintFlag::PublicInput);
         let decision = engine.evaluate_invoke(&input);
         assert_eq!(decision.decision, Decision::Deny);
-        assert_eq!(decision.reason_code, DecisionReasonCode::TaintPublicInputDangerous);
+        assert_eq!(
+            decision.reason_code,
+            DecisionReasonCode::TaintPublicInputDangerous
+        );
     }
 
     #[test]
@@ -1861,10 +1944,16 @@ mod tests {
         };
         let mut input = minimal_decision_input();
         input.safety_tier = SafetyTier::Risky;
-        input.provenance.taint_flags.insert(TaintFlag::UnverifiedLink);
+        input
+            .provenance
+            .taint_flags
+            .insert(TaintFlag::UnverifiedLink);
         let decision = engine.evaluate_invoke(&input);
         assert_eq!(decision.decision, Decision::Deny);
-        assert_eq!(decision.reason_code, DecisionReasonCode::TaintUnverifiedLinkRisky);
+        assert_eq!(
+            decision.reason_code,
+            DecisionReasonCode::TaintUnverifiedLinkRisky
+        );
     }
 
     #[test]
@@ -1889,7 +1978,10 @@ mod tests {
         input.execution_approval_required = true;
         let decision = engine.evaluate_invoke(&input);
         assert_eq!(decision.decision, Decision::Deny);
-        assert_eq!(decision.reason_code, DecisionReasonCode::ApprovalMissingExecution);
+        assert_eq!(
+            decision.reason_code,
+            DecisionReasonCode::ApprovalMissingExecution
+        );
     }
 
     // ── check_transport (via PolicyEngine) ─────────────────────────────────
@@ -1902,9 +1994,18 @@ mod tests {
             allow_derp: false,
             allow_funnel: false,
         };
-        assert_eq!(check_transport(&policy, TransportMode::Lan), Some(DecisionReasonCode::TransportLanForbidden));
-        assert_eq!(check_transport(&policy, TransportMode::Derp), Some(DecisionReasonCode::TransportDerpForbidden));
-        assert_eq!(check_transport(&policy, TransportMode::Funnel), Some(DecisionReasonCode::TransportFunnelForbidden));
+        assert_eq!(
+            check_transport(&policy, TransportMode::Lan),
+            Some(DecisionReasonCode::TransportLanForbidden)
+        );
+        assert_eq!(
+            check_transport(&policy, TransportMode::Derp),
+            Some(DecisionReasonCode::TransportDerpForbidden)
+        );
+        assert_eq!(
+            check_transport(&policy, TransportMode::Funnel),
+            Some(DecisionReasonCode::TransportFunnelForbidden)
+        );
     }
 
     #[test]
@@ -1961,21 +2062,27 @@ mod tests {
     #[test]
     fn pattern_matches_double_wildcard() {
         // "**" is just two wildcards — matches anything
-        let pat = PolicyPattern { pattern: "**".into() };
+        let pat = PolicyPattern {
+            pattern: "**".into(),
+        };
         assert!(pat.matches("anything"));
         assert!(pat.matches(""));
     }
 
     #[test]
     fn pattern_matches_no_match_when_prefix_differs() {
-        let pat = PolicyPattern { pattern: "abc*".into() };
+        let pat = PolicyPattern {
+            pattern: "abc*".into(),
+        };
         assert!(pat.matches("abcdef"));
         assert!(!pat.matches("xabc"));
     }
 
     #[test]
     fn pattern_matches_no_match_when_suffix_differs() {
-        let pat = PolicyPattern { pattern: "*xyz".into() };
+        let pat = PolicyPattern {
+            pattern: "*xyz".into(),
+        };
         assert!(pat.matches("abcxyz"));
         assert!(!pat.matches("xyzabc"));
     }

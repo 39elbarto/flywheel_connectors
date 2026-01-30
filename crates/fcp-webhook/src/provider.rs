@@ -268,8 +268,7 @@ impl SlackWebhook {
         let event_id = payload
             .get("event_id")
             .and_then(Value::as_str)
-            .map(ToString::to_string)
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            .map_or_else(|| uuid::Uuid::new_v4().to_string(), ToString::to_string);
 
         let event_type = payload
             .get("type")
@@ -367,7 +366,7 @@ mod tests {
             .parse_stripe_signature("t=1234567890,v1=abc123")
             .unwrap();
 
-        assert_eq!(ts, 1234567890);
+        assert_eq!(ts, 1_234_567_890);
         assert_eq!(sig, "abc123");
     }
 

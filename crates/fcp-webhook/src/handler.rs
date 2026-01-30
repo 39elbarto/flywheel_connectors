@@ -158,8 +158,8 @@ impl<V: SignatureVerifier> WebhookHandler<V> {
         // Clean up old entries
         self.cleanup_seen_events();
 
-        let seen = self.seen_events.read();
-        if seen.contains_key(event_id) {
+        let is_replay = self.seen_events.read().contains_key(event_id);
+        if is_replay {
             return Err(WebhookError::ReplayDetected {
                 event_id: event_id.to_string(),
             });
@@ -186,14 +186,16 @@ impl<V: SignatureVerifier> WebhookHandler<V> {
         // Clean up old entries
         self.cleanup_seen_events();
 
-        let mut seen = self.seen_events.write();
-        if seen.contains_key(event_id) {
-            return Err(WebhookError::ReplayDetected {
-                event_id: event_id.to_string(),
-            });
-        }
+        {
+            let mut seen = self.seen_events.write();
+            if seen.contains_key(event_id) {
+                return Err(WebhookError::ReplayDetected {
+                    event_id: event_id.to_string(),
+                });
+            }
 
-        seen.insert(event_id.to_string(), Utc::now());
+            seen.insert(event_id.to_string(), Utc::now());
+        }
         Ok(())
     }
 
@@ -269,7 +271,7 @@ pub struct DeadLetterQueue {
 impl DeadLetterQueue {
     /// Create a new dead letter queue.
     #[must_use]
-    pub fn new(max_size: usize) -> Self {
+    pub const fn new(max_size: usize) -> Self {
         Self {
             events: RwLock::new(Vec::new()),
             max_size,

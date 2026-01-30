@@ -764,4 +764,416 @@ mod tests {
         assert!(version_gte("14", "14.0.0"));
         assert!(version_gte("14.2", "14.0"));
     }
+
+    // ── PostureAttributeKey ────────────────────────────────────────────────
+
+    #[test]
+    fn attribute_key_as_str_all_variants() {
+        assert_eq!(PostureAttributeKey::OsType.as_str(), "os_type");
+        assert_eq!(PostureAttributeKey::OsVersion.as_str(), "os_version");
+        assert_eq!(
+            PostureAttributeKey::DiskEncryption.as_str(),
+            "disk_encryption"
+        );
+        assert_eq!(
+            PostureAttributeKey::FirewallEnabled.as_str(),
+            "firewall_enabled"
+        );
+        assert_eq!(
+            PostureAttributeKey::ScreenLockEnabled.as_str(),
+            "screen_lock_enabled"
+        );
+        assert_eq!(
+            PostureAttributeKey::ScreenLockTimeout.as_str(),
+            "screen_lock_timeout"
+        );
+        assert_eq!(
+            PostureAttributeKey::AntivirusActive.as_str(),
+            "antivirus_active"
+        );
+        assert_eq!(
+            PostureAttributeKey::DeviceManaged.as_str(),
+            "device_managed"
+        );
+        assert_eq!(
+            PostureAttributeKey::SecureBootEnabled.as_str(),
+            "secure_boot_enabled"
+        );
+        assert_eq!(PostureAttributeKey::TpmPresent.as_str(), "tpm_present");
+    }
+
+    #[test]
+    fn attribute_key_custom_as_str() {
+        let key = PostureAttributeKey::Custom("my_custom_attr".into());
+        assert_eq!(key.as_str(), "my_custom_attr");
+    }
+
+    #[test]
+    fn attribute_key_serde_roundtrip() {
+        let key = PostureAttributeKey::DiskEncryption;
+        let json = serde_json::to_string(&key).unwrap();
+        let back: PostureAttributeKey = serde_json::from_str(&json).unwrap();
+        assert_eq!(key, back);
+    }
+
+    // ── PostureAttributeValue ──────────────────────────────────────────────
+
+    #[test]
+    fn attribute_value_as_bool_wrong_type() {
+        assert!(
+            PostureAttributeValue::String("true".into())
+                .as_bool()
+                .is_none()
+        );
+        assert!(PostureAttributeValue::Number(1).as_bool().is_none());
+    }
+
+    #[test]
+    fn attribute_value_as_str_wrong_type() {
+        assert!(PostureAttributeValue::Bool(true).as_str().is_none());
+        assert!(PostureAttributeValue::Number(42).as_str().is_none());
+    }
+
+    #[test]
+    fn attribute_value_as_number_wrong_type() {
+        assert!(PostureAttributeValue::Bool(true).as_number().is_none());
+        assert!(
+            PostureAttributeValue::String("42".into())
+                .as_number()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn attribute_value_serde_roundtrip_all_variants() {
+        let vals = [
+            PostureAttributeValue::Bool(true),
+            PostureAttributeValue::String("hello".into()),
+            PostureAttributeValue::Number(42),
+        ];
+        for val in &vals {
+            let json = serde_json::to_string(val).unwrap();
+            let back: PostureAttributeValue = serde_json::from_str(&json).unwrap();
+            assert_eq!(val, &back);
+        }
+    }
+
+    // ── PostureAttestation ─────────────────────────────────────────────────
+
+    #[test]
+    fn attestation_invalid_schema() {
+        let mut att = create_test_attestation();
+        att.schema = "wrong.schema".into();
+        assert!(!att.is_valid());
+        assert!(!att.is_expired()); // not expired, just wrong schema
+    }
+
+    #[test]
+    fn attestation_is_for_node() {
+        let att = create_test_attestation();
+        assert!(att.is_for_node(&NodeId::new("node-test")));
+        assert!(!att.is_for_node(&NodeId::new("node-other")));
+    }
+
+    #[test]
+    fn attestation_object_id_deterministic() {
+        let att = create_test_attestation();
+        let id1 = att.object_id();
+        let id2 = att.object_id();
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn attestation_get_attribute_missing() {
+        let att = create_test_attestation();
+        assert!(
+            att.get_attribute(&PostureAttributeKey::AntivirusActive)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn attestation_serde_roundtrip() {
+        let att = create_test_attestation();
+        let json = serde_json::to_string(&att).unwrap();
+        let back: PostureAttestation = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.schema, att.schema);
+        assert_eq!(back.attestation_id, att.attestation_id);
+        assert_eq!(back.verifier_id, att.verifier_id);
+    }
+
+    // ── PostureRequirement ─────────────────────────────────────────────────
+
+    #[test]
+    fn requirement_require_false_satisfied() {
+        let att = create_test_attestation();
+        // AntivirusActive is not in attestation → RequireFalse is satisfied (missing = not true)
+        let req = PostureRequirement::RequireFalse {
+            attribute: PostureAttributeKey::AntivirusActive,
+        };
+        assert!(req.is_satisfied_by(&att));
+    }
+
+    #[test]
+    fn requirement_require_false_fails_on_true() {
+        let att = create_test_attestation();
+        // DiskEncryption is true → RequireFalse should fail
+        let req = PostureRequirement::RequireFalse {
+            attribute: PostureAttributeKey::DiskEncryption,
+        };
+        assert!(!req.is_satisfied_by(&att));
+    }
+
+    #[test]
+    fn requirement_require_equal() {
+        let att = create_test_attestation();
+        let req = PostureRequirement::RequireEqual {
+            attribute: PostureAttributeKey::OsType,
+            value: "macos".into(),
+        };
+        assert!(req.is_satisfied_by(&att));
+
+        let req = PostureRequirement::RequireEqual {
+            attribute: PostureAttributeKey::OsType,
+            value: "windows".into(),
+        };
+        assert!(!req.is_satisfied_by(&att));
+    }
+
+    #[test]
+    fn requirement_min_value() {
+        let att = create_test_attestation();
+        // ScreenLockTimeout is 300
+        let req = PostureRequirement::RequireMinValue {
+            attribute: PostureAttributeKey::ScreenLockTimeout,
+            min_value: 200,
+        };
+        assert!(req.is_satisfied_by(&att));
+
+        let req = PostureRequirement::RequireMinValue {
+            attribute: PostureAttributeKey::ScreenLockTimeout,
+            min_value: 500,
+        };
+        assert!(!req.is_satisfied_by(&att));
+    }
+
+    #[test]
+    fn requirement_max_value() {
+        let att = create_test_attestation();
+        let req = PostureRequirement::RequireMaxValue {
+            attribute: PostureAttributeKey::ScreenLockTimeout,
+            max_value: 600,
+        };
+        assert!(req.is_satisfied_by(&att));
+
+        let req = PostureRequirement::RequireMaxValue {
+            attribute: PostureAttributeKey::ScreenLockTimeout,
+            max_value: 100,
+        };
+        assert!(!req.is_satisfied_by(&att));
+    }
+
+    #[test]
+    fn requirement_attribute_accessor() {
+        let req = PostureRequirement::RequireTrue {
+            attribute: PostureAttributeKey::TpmPresent,
+        };
+        assert_eq!(*req.attribute(), PostureAttributeKey::TpmPresent);
+
+        let req = PostureRequirement::RequireMaxValue {
+            attribute: PostureAttributeKey::ScreenLockTimeout,
+            max_value: 100,
+        };
+        assert_eq!(*req.attribute(), PostureAttributeKey::ScreenLockTimeout);
+    }
+
+    // ── PostureRequirements ────────────────────────────────────────────────
+
+    #[test]
+    fn requirements_is_empty() {
+        let empty = PostureRequirements::default();
+        assert!(empty.is_empty());
+
+        let non_empty = PostureRequirements::builder()
+            .require_disk_encryption(true)
+            .build();
+        assert!(!non_empty.is_empty());
+    }
+
+    #[test]
+    fn requirements_attestation_expired() {
+        let requirements = PostureRequirements::builder().build();
+        let mut att = create_test_attestation();
+        att.expires_at = Utc::now() - chrono::Duration::hours(1);
+        assert_eq!(
+            requirements.is_satisfied_by(&att),
+            PostureCheckResult::AttestationExpired,
+        );
+    }
+
+    #[test]
+    fn requirements_attestation_too_old() {
+        let requirements = PostureRequirements::builder()
+            .max_attestation_age_secs(60)
+            .build();
+        let mut att = create_test_attestation();
+        // Issued 2 hours ago but not yet expired
+        att.issued_at = Utc::now() - chrono::Duration::hours(2);
+        assert_eq!(
+            requirements.is_satisfied_by(&att),
+            PostureCheckResult::AttestationTooOld,
+        );
+    }
+
+    #[test]
+    fn requirements_requirement_not_met() {
+        let requirements = PostureRequirements::builder().require_tpm(true).build();
+        let att = create_test_attestation(); // no TpmPresent attribute
+        let result = requirements.is_satisfied_by(&att);
+        assert_eq!(
+            result,
+            PostureCheckResult::RequirementNotMet {
+                attribute: PostureAttributeKey::TpmPresent,
+            },
+        );
+    }
+
+    // ── PostureCheckResult ─────────────────────────────────────────────────
+
+    #[test]
+    fn check_result_is_satisfied() {
+        assert!(PostureCheckResult::Satisfied.is_satisfied());
+        assert!(!PostureCheckResult::AttestationExpired.is_satisfied());
+        assert!(!PostureCheckResult::AttestationTooOld.is_satisfied());
+        assert!(!PostureCheckResult::VerifierNotAllowed.is_satisfied());
+        assert!(
+            !PostureCheckResult::RequirementNotMet {
+                attribute: PostureAttributeKey::TpmPresent,
+            }
+            .is_satisfied()
+        );
+    }
+
+    // ── Builder coverage ───────────────────────────────────────────────────
+
+    #[test]
+    fn builder_require_firewall() {
+        let req = PostureRequirements::builder()
+            .require_firewall(true)
+            .build();
+        assert_eq!(req.requirements.len(), 1);
+        assert_eq!(
+            *req.requirements[0].attribute(),
+            PostureAttributeKey::FirewallEnabled
+        );
+    }
+
+    #[test]
+    fn builder_require_screen_lock() {
+        let req = PostureRequirements::builder()
+            .require_screen_lock(true)
+            .build();
+        assert_eq!(req.requirements.len(), 1);
+        assert_eq!(
+            *req.requirements[0].attribute(),
+            PostureAttributeKey::ScreenLockEnabled
+        );
+    }
+
+    #[test]
+    fn builder_require_os_type() {
+        let req = PostureRequirements::builder()
+            .require_os_type("linux")
+            .build();
+        assert_eq!(req.requirements.len(), 1);
+    }
+
+    #[test]
+    fn builder_require_device_managed() {
+        let req = PostureRequirements::builder()
+            .require_device_managed(true)
+            .build();
+        assert_eq!(req.requirements.len(), 1);
+        assert_eq!(
+            *req.requirements[0].attribute(),
+            PostureAttributeKey::DeviceManaged
+        );
+    }
+
+    #[test]
+    fn builder_require_secure_boot() {
+        let req = PostureRequirements::builder()
+            .require_secure_boot(true)
+            .build();
+        assert_eq!(req.requirements.len(), 1);
+        assert_eq!(
+            *req.requirements[0].attribute(),
+            PostureAttributeKey::SecureBootEnabled
+        );
+    }
+
+    #[test]
+    fn builder_false_flag_adds_nothing() {
+        let req = PostureRequirements::builder()
+            .require_disk_encryption(false)
+            .require_firewall(false)
+            .require_screen_lock(false)
+            .require_device_managed(false)
+            .require_secure_boot(false)
+            .require_tpm(false)
+            .build();
+        assert!(req.is_empty());
+    }
+
+    #[test]
+    fn builder_custom_requirement() {
+        let custom = PostureRequirement::RequireTrue {
+            attribute: PostureAttributeKey::Custom("custom_check".into()),
+        };
+        let req = PostureRequirements::builder().require(custom).build();
+        assert_eq!(req.requirements.len(), 1);
+    }
+
+    #[test]
+    fn builder_default_max_age() {
+        let req = PostureRequirements::builder().build();
+        assert_eq!(req.max_attestation_age_secs, 86400);
+    }
+
+    // ── version_gte edge cases ─────────────────────────────────────────────
+
+    #[test]
+    fn version_gte_equal_versions() {
+        assert!(version_gte("1.0.0", "1.0.0"));
+        assert!(version_gte("0.0.0", "0.0.0"));
+    }
+
+    #[test]
+    fn version_gte_single_component() {
+        assert!(version_gte("15", "14"));
+        assert!(!version_gte("13", "14"));
+        assert!(version_gte("14", "14"));
+    }
+
+    #[test]
+    fn version_gte_mismatched_depth() {
+        // "14" vs "14.0.0" — implicit zeros
+        assert!(version_gte("14", "14.0.0"));
+        assert!(version_gte("14.0.0", "14"));
+        // "14.1" > "14.0.0"
+        assert!(version_gte("14.1", "14.0.0"));
+    }
+
+    // ── PostureRequirement serde roundtrip ─────────────────────────────────
+
+    #[test]
+    fn posture_requirement_serde_roundtrip() {
+        let req = PostureRequirement::RequireMinVersion {
+            attribute: PostureAttributeKey::OsVersion,
+            min_version: "14.0".into(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: PostureRequirement = serde_json::from_str(&json).unwrap();
+        assert_eq!(*back.attribute(), PostureAttributeKey::OsVersion);
+    }
 }

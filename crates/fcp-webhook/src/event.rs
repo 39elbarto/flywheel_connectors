@@ -106,12 +106,10 @@ impl WebhookEvent {
             return true;
         }
 
-        if pattern.ends_with('*') {
-            let prefix = &pattern[..pattern.len() - 1];
-            self.event_type.starts_with(prefix)
-        } else {
-            self.event_type == pattern
-        }
+        pattern.strip_suffix('*').map_or_else(
+            || self.event_type == pattern,
+            |prefix| self.event_type.starts_with(prefix),
+        )
     }
 }
 
@@ -183,7 +181,7 @@ impl EventSubscription {
 
     /// Create a subscription for specific event types.
     #[must_use]
-    pub fn for_types(types: Vec<String>) -> Self {
+    pub const fn for_types(types: Vec<String>) -> Self {
         Self {
             event_types: types,
             provider: None,

@@ -277,4 +277,109 @@ mod tests {
         let sub = EventSubscription::all().with_provider("gitlab");
         assert!(!sub.matches(&event));
     }
+
+    // ── New tests ──
+
+    #[test]
+    fn test_event_new_defaults() {
+        let event = WebhookEvent::new("e1", "push", "github");
+        assert_eq!(event.id, "e1");
+        assert_eq!(event.event_type, "push");
+        assert_eq!(event.provider, "github");
+        assert_eq!(event.payload, Value::Null);
+        assert!(event.headers.is_empty());
+        assert_eq!(event.metadata.attempt, 0);
+    }
+
+    #[test]
+    fn test_event_header_case_insensitive() {
+        let mut headers = HashMap::new();
+        headers.insert("X-GitHub-Event".to_string(), "push".to_string());
+
+        let event = WebhookEvent::new("e1", "push", "github").with_headers(headers);
+
+        assert_eq!(event.header("x-github-event"), Some("push"));
+        assert_eq!(event.header("X-GITHUB-EVENT"), Some("push"));
+        assert_eq!(event.header("X-GitHub-Event"), Some("push"));
+        assert_eq!(event.header("nonexistent"), None);
+    }
+
+    #[test]
+    fn test_event_get_i64() {
+        let event = WebhookEvent::new("e1", "push", "github")
+            .with_payload(serde_json::json!({"count": 42}));
+        assert_eq!(event.get_i64("count"), Some(42));
+        assert_eq!(event.get_i64("missing"), None);
+    }
+
+    #[test]
+    fn test_event_get_str_missing() {
+        let event = WebhookEvent::new("e1", "push", "github")
+            .with_payload(serde_json::json!({"count": 42}));
+        // count is numeric, not a string
+        assert_eq!(event.get_str("count"), None);
+        assert_eq!(event.get_str("missing"), None);
+    }
+
+    #[test]
+    fn test_event_matches_type_exact_no_wildcard() {
+        let event = WebhookEvent::new("e1", "push", "github");
+        assert!(event.matches_type("push"));
+        assert!(!event.matches_type("pusher"));
+    }
+
+    #[test]
+    fn test_event_metadata_default() {
+        let meta = EventMetadata::default();
+        assert_eq!(meta.attempt, 0);
+        assert!(meta.first_attempt_at.is_none());
+        assert!(meta.last_attempt_at.is_none());
+        assert!(meta.next_retry_at.is_none());
+        assert_eq!(meta.status, DeliveryStatus::Pending);
+        assert!(meta.last_error.is_none());
+        assert!(meta.source_ip.is_none());
+        assert!(meta.custom.is_empty());
+    }
+
+    #[test]
+    fn test_delivery_status_serde() {
+        let statuses = vec![
+            (DeliveryStatus::Pending, "\"pending\""),
+            (DeliveryStatus::Delivered, "\"delivered\""),
+            (DeliveryStatus::Failed, "\"failed\""),
+            (DeliveryStatus::DeadLettered, "\"dead_lettered\""),
+        ];
+
+        for (status, expected) in statuses {
+            let json = serde_json::to_string(&status).unwrap();
+            assert_eq!(json, expected);
+            let roundtrip: DeliveryStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(roundtrip, status);
+        }
+    }
+
+    #[test]
+    fn test_subscription_default_is_all() {
+        let sub = EventSubscription::default();
+        let event = test_event();
+        assert!(sub.matches(&event));
+    }
+
+    #[test]
+    fn test_subscription_prefix_pattern() {
+        let sub = EventSubscription::for_types(vec!["issue.*".to_string()]);
+        let event = WebhookEvent::new("e1", "issue.opened", "github");
+        assert!(sub.matches(&event));
+    }
+
+    #[test]
+    fn test_event_serde_roundtrip() {
+        let event = test_event();
+        let json = serde_json::to_string(&event).unwrap();
+        let roundtrip: WebhookEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip.id, event.id);
+        assert_eq!(roundtrip.event_type, event.event_type);
+        assert_eq!(roundtrip.provider, event.provider);
+        assert_eq!(roundtrip.payload, event.payload);
+    }
 }

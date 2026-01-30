@@ -385,4 +385,103 @@ mod tests {
         assert_eq!(event.event_type, "Issue");
         assert_eq!(event.provider, "linear");
     }
+
+    // ── New tests ──
+
+    #[test]
+    fn test_webhook_provider_display() {
+        assert_eq!(WebhookProvider::GitHub.to_string(), "github");
+        assert_eq!(WebhookProvider::Stripe.to_string(), "stripe");
+        assert_eq!(WebhookProvider::Slack.to_string(), "slack");
+        assert_eq!(WebhookProvider::Linear.to_string(), "linear");
+        assert_eq!(WebhookProvider::Discord.to_string(), "discord");
+        assert_eq!(WebhookProvider::Custom.to_string(), "custom");
+    }
+
+    #[test]
+    fn test_github_missing_signature() {
+        let handler = GitHubWebhook::new("secret");
+        let headers = HashMap::new();
+        let result = handler.verify_and_parse(&headers, b"{}");
+        assert!(matches!(result, Err(WebhookError::MissingSignature(_))));
+    }
+
+    #[test]
+    fn test_github_invalid_signature() {
+        let handler = GitHubWebhook::new("secret");
+        let mut headers = HashMap::new();
+        headers.insert(
+            "x-hub-signature-256".to_string(),
+            "sha256=deadbeef".to_string(),
+        );
+        headers.insert("x-github-event".to_string(), "push".to_string());
+
+        let result = handler.verify_and_parse(&headers, b"{}");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_stripe_invalid_signature_format() {
+        let handler = StripeWebhook::new("secret");
+
+        let result = handler.parse_stripe_signature("invalid-format");
+        assert!(matches!(result, Err(WebhookError::InvalidPayload(_))));
+    }
+
+    #[test]
+    fn test_stripe_missing_v1() {
+        let handler = StripeWebhook::new("secret");
+
+        let result = handler.parse_stripe_signature("t=12345");
+        assert!(matches!(result, Err(WebhookError::InvalidPayload(_))));
+    }
+
+    #[test]
+    fn test_stripe_timestamp_tolerance() {
+        let handler =
+            StripeWebhook::new("secret").with_timestamp_tolerance(Duration::from_secs(60));
+
+        // A timestamp far in the past
+        let result = handler.validate_timestamp(1_000_000_000);
+        assert!(matches!(
+            result,
+            Err(WebhookError::TimestampValidation { .. })
+        ));
+
+        // Current timestamp should pass
+        let now = Utc::now().timestamp();
+        assert!(handler.validate_timestamp(now).is_ok());
+    }
+
+    #[test]
+    fn test_linear_missing_signature() {
+        let handler = LinearWebhook::new("secret");
+        let headers = HashMap::new();
+        let result = handler.verify_and_parse(&headers, b"{}");
+        assert!(matches!(result, Err(WebhookError::MissingSignature(_))));
+    }
+
+    #[test]
+    fn test_slack_webhook_construction() {
+        let handler = SlackWebhook::new("signing-secret");
+        let debug = format!("{handler:?}");
+        assert!(debug.contains("SlackWebhook"));
+    }
+
+    #[test]
+    fn test_slack_missing_signature() {
+        let handler = SlackWebhook::new("secret");
+        let headers = HashMap::new();
+        let result = handler.verify_and_parse(&headers, b"{}");
+        assert!(matches!(result, Err(WebhookError::MissingSignature(_))));
+    }
+
+    #[test]
+    fn test_slack_missing_timestamp() {
+        let handler = SlackWebhook::new("secret");
+        let mut headers = HashMap::new();
+        headers.insert("x-slack-signature".to_string(), "v0=abc".to_string());
+        let result = handler.verify_and_parse(&headers, b"{}");
+        assert!(matches!(result, Err(WebhookError::MissingSignature(_))));
+    }
 }

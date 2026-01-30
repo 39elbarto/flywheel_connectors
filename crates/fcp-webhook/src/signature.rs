@@ -258,4 +258,106 @@ mod tests {
 
         assert!(verifier.verify(payload, &sig_hex).is_ok());
     }
+
+    // ── New tests ──
+
+    #[test]
+    fn test_signature_algorithm_display() {
+        assert_eq!(SignatureAlgorithm::HmacSha256.to_string(), "HMAC-SHA256");
+        assert_eq!(SignatureAlgorithm::HmacSha1.to_string(), "HMAC-SHA1");
+        assert_eq!(SignatureAlgorithm::Ed25519.to_string(), "Ed25519");
+    }
+
+    #[test]
+    fn test_hmac_sha256_debug_redacts_secret() {
+        let v = HmacSha256Verifier::new("supersecret");
+        let debug = format!("{v:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("supersecret"));
+    }
+
+    #[test]
+    fn test_hmac_sha1_debug_redacts_secret() {
+        let v = HmacSha1Verifier::new("supersecret");
+        let debug = format!("{v:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("supersecret"));
+    }
+
+    #[test]
+    fn test_hmac_sha256_with_v1_prefix() {
+        let verifier = HmacSha256Verifier::new("secret");
+        let payload = b"test payload";
+        let signature = format!("v1={}", verifier.compute(payload));
+        assert!(verifier.verify(payload, &signature).is_ok());
+    }
+
+    #[test]
+    fn test_hmac_sha256_with_v0_prefix() {
+        let verifier = HmacSha256Verifier::new("secret");
+        let payload = b"test payload";
+        let signature = format!("v0={}", verifier.compute(payload));
+        assert!(verifier.verify(payload, &signature).is_ok());
+    }
+
+    #[test]
+    fn test_hmac_sha256_algorithm() {
+        let v = HmacSha256Verifier::new("secret");
+        assert_eq!(v.algorithm(), SignatureAlgorithm::HmacSha256);
+    }
+
+    #[test]
+    fn test_hmac_sha1_algorithm() {
+        let v = HmacSha1Verifier::new("secret");
+        assert_eq!(v.algorithm(), SignatureAlgorithm::HmacSha1);
+    }
+
+    #[test]
+    fn test_ed25519_algorithm() {
+        use ed25519_dalek::SigningKey;
+
+        let signing_key = SigningKey::from_bytes(&[
+            0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec,
+            0x2c, 0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03,
+            0x1c, 0xae, 0x7f, 0x60,
+        ]);
+        let v = Ed25519Verifier::from_bytes(&signing_key.verifying_key().to_bytes()).unwrap();
+        assert_eq!(v.algorithm(), SignatureAlgorithm::Ed25519);
+    }
+
+    #[test]
+    fn test_ed25519_from_hex() {
+        use ed25519_dalek::SigningKey;
+
+        let signing_key = SigningKey::from_bytes(&[
+            0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec,
+            0x2c, 0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03,
+            0x1c, 0xae, 0x7f, 0x60,
+        ]);
+        let hex_key = hex::encode(signing_key.verifying_key().to_bytes());
+        let v = Ed25519Verifier::from_hex(&hex_key);
+        assert!(v.is_ok());
+    }
+
+    #[test]
+    fn test_ed25519_from_hex_invalid() {
+        assert!(Ed25519Verifier::from_hex("not-hex").is_err());
+        // Valid hex but wrong length
+        assert!(Ed25519Verifier::from_hex("aabb").is_err());
+    }
+
+    #[test]
+    fn test_hmac_sha256_wrong_payload_fails() {
+        let verifier = HmacSha256Verifier::new("secret");
+        let sig = verifier.compute(b"original");
+        assert!(verifier.verify(b"tampered", &sig).is_err());
+    }
+
+    #[test]
+    fn test_hmac_sha1_with_sha1_prefix() {
+        let verifier = HmacSha1Verifier::new("secret");
+        let payload = b"test payload";
+        let signature = format!("sha1={}", verifier.compute(payload));
+        assert!(verifier.verify(payload, &signature).is_ok());
+    }
 }

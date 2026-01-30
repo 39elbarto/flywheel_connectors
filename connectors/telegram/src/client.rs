@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use reqwest::{Client, StatusCode};
 use serde::{Serialize, de::DeserializeOwned};
-use tracing::{debug, instrument, warn};
+use tracing::{instrument, warn};
 
 use crate::types::*;
 

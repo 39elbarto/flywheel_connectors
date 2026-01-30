@@ -8,7 +8,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
     config::TwitterConfig,

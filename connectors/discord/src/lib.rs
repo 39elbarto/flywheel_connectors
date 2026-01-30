@@ -13,6 +13,7 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
 #![allow(clippy::module_name_repetitions)]
+#![allow(dead_code)] // Connector API types/methods wired incrementally
 
 mod api;
 mod config;

@@ -4,6 +4,7 @@
 //! Provides access to GPT models with cost tracking and streaming support.
 
 #![forbid(unsafe_code)]
+#![allow(dead_code)] // Connector API types/methods wired incrementally
 
 use std::io::{BufRead, Write};
 

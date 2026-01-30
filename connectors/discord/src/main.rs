@@ -4,6 +4,7 @@
 //! Uses the Discord Gateway (WebSocket) for real-time events and REST API for operations.
 
 #![forbid(unsafe_code)]
+#![allow(dead_code)] // Connector API types/methods wired incrementally
 
 use std::io::{BufRead, Write};
 

@@ -4,6 +4,7 @@
 //! Uses Twitter API v2 for tweets, users, and streaming.
 
 #![forbid(unsafe_code)]
+#![allow(dead_code)] // Connector API types/methods wired incrementally
 
 use std::io::{BufRead, Write};
 

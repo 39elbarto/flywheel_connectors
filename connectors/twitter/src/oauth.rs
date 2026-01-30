@@ -6,7 +6,6 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use hmac::{Hmac, Mac};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
-use rand::Rng;
 use sha1::Sha1;
 
 use crate::config::TwitterConfig;

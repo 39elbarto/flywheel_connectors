@@ -8,6 +8,7 @@
 //! - `fcp explain` - Operation decision explanations
 //! - `fcp install` - Connector installation with verification
 //! - `fcp manifest` - Manifest repair and lint checks
+//! - `fcp net` - Egress policy debugging (`NetworkConstraints`)
 //! - `fcp policy` - Policy simulation and preflight checks
 //! - `fcp repair` - Coverage status and repair planning
 
@@ -21,6 +22,7 @@ mod doctor;
 mod explain;
 mod install;
 mod manifest;
+mod net;
 mod new;
 mod package;
 mod policy;
@@ -112,6 +114,9 @@ enum Commands {
     /// Generates a complete connector crate with manifest, source files,
     /// and test scaffolding. Runs compliance prechecks automatically.
     New(new::NewArgs),
+
+    /// Explain egress policy decisions for a URL.
+    Net(net::NetArgs),
 
     /// Package a connector for distribution.
     ///
@@ -278,6 +283,12 @@ fn main() -> Result<()> {
                 anyhow::bail!("--input-stdin is currently supported only for `fcp doctor`");
             }
             new::run(&args)
+        }
+        Commands::Net(args) => {
+            if cli.input_stdin {
+                anyhow::bail!("--input-stdin is currently supported only for `fcp doctor`");
+            }
+            net::run(args)
         }
         Commands::Package(args) => {
             if cli.input_stdin {

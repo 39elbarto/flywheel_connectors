@@ -22,7 +22,7 @@
 //! ```
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use fcp_cbor::SchemaId;
 use fcp_core::{
@@ -602,10 +602,10 @@ pub struct FakeStreamingSession {
     inner: InMemoryStreamingSession,
     /// Events received in this session.
     pub events: Vec<FakeStreamEvent>,
-    /// Whether persist was called.
-    pub persist_called: bool,
+    /// Whether persist was called (uses interior mutability for `&self`).
+    persist_called: AtomicBool,
     /// Whether restore was called.
-    pub restore_called: bool,
+    restore_called: bool,
 }
 
 impl FakeStreamingSession {
@@ -615,7 +615,7 @@ impl FakeStreamingSession {
         Self {
             inner: InMemoryStreamingSession::new(),
             events: Vec::new(),
-            persist_called: false,
+            persist_called: AtomicBool::new(false),
             restore_called: false,
         }
     }
@@ -630,6 +630,18 @@ impl FakeStreamingSession {
     #[must_use]
     pub fn event_count(&self) -> usize {
         self.events.len()
+    }
+
+    /// Check if persist was called.
+    #[must_use]
+    pub fn persist_called(&self) -> bool {
+        self.persist_called.load(Ordering::Relaxed)
+    }
+
+    /// Check if restore was called.
+    #[must_use]
+    pub const fn restore_called(&self) -> bool {
+        self.restore_called
     }
 }
 
@@ -685,12 +697,12 @@ impl StreamingSession for FakeStreamingSession {
     }
 
     fn persist(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // In a real connector, this would write to disk/database
+        self.persist_called.store(true, Ordering::Relaxed);
         Ok(())
     }
 
     fn restore(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // In a real connector, this would read from disk/database
+        self.restore_called = true;
         Ok(())
     }
 }
@@ -859,5 +871,22 @@ mod tests {
 
         session.clear_resume_token();
         assert!(session.resume_token().is_none());
+    }
+
+    #[test]
+    fn fake_streaming_session_persist_restore_tracking() {
+        let mut session = FakeStreamingSession::new();
+
+        // Initially both flags are false
+        assert!(!session.persist_called());
+        assert!(!session.restore_called());
+
+        // Call persist() and verify flag is set
+        session.persist().unwrap();
+        assert!(session.persist_called());
+
+        // Call restore() and verify flag is set
+        session.restore().unwrap();
+        assert!(session.restore_called());
     }
 }

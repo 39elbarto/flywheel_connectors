@@ -247,6 +247,7 @@ pub fn core_schema_registrations() -> Vec<SchemaRegistration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     struct TestStruct {
@@ -279,6 +280,17 @@ mod tests {
     }
 
     #[test]
+    fn schema_hash_differs_by_version() {
+        let schema_v1 = SchemaId::new("fcp.test", "GoldenStruct", Version::new(1, 0, 0));
+        let schema_v2 = SchemaId::new("fcp.test", "GoldenStruct", Version::new(1, 0, 1));
+
+        let hash1 = generate_schema_hash(&schema_v1);
+        let hash2 = generate_schema_hash(&schema_v2);
+
+        assert_ne!(hash1, hash2);
+    }
+
+    #[test]
     fn generate_vector_works() {
         let reg = SchemaRegistration::new(
             "fcp.test",
@@ -300,5 +312,36 @@ mod tests {
         assert_eq!(vector.schema_name, "GoldenStruct");
         assert_eq!(vector.payloads.len(), 1);
         assert!(!vector.expected_schema_hash.is_empty());
+    }
+
+    #[test]
+    fn vector_order_is_deterministic() {
+        let reg = SchemaRegistration::new(
+            "fcp.test",
+            "GoldenStruct",
+            Version::new(1, 0, 0),
+            "Test struct",
+        );
+        let samples = vec![(
+            "basic test".to_string(),
+            TestStruct {
+                id: 12345,
+                name: "test".into(),
+                active: true,
+            },
+        )];
+        let vector = generate_vector(&reg, &samples).unwrap();
+
+        let mut map_a = BTreeMap::new();
+        map_a.insert("b".to_string(), vector.clone());
+        map_a.insert("a".to_string(), vector.clone());
+
+        let mut map_b = BTreeMap::new();
+        map_b.insert("a".to_string(), vector.clone());
+        map_b.insert("b".to_string(), vector);
+
+        let json_a = serde_json::to_string_pretty(&map_a).unwrap();
+        let json_b = serde_json::to_string_pretty(&map_b).unwrap();
+        assert_eq!(json_a, json_b);
     }
 }

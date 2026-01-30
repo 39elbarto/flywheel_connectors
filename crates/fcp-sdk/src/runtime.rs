@@ -34,6 +34,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 
 #[cfg(feature = "cursor-store-object-store")]
 use fcp_cbor::CanonicalSerializer;
@@ -1243,6 +1244,297 @@ impl Default for HealthTracker {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// StreamingSupervisor
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Streaming supervisor errors (boxed trait object for flexibility).
+pub type StreamingError = Box<dyn std::error::Error + Send + Sync>;
+
+/// Handle for an active streaming connection.
+#[derive(Debug)]
+pub struct StreamingConnection<E> {
+    /// Stream of events emitted by the connection.
+    pub events: mpsc::Receiver<E>,
+    /// Join handle for the underlying stream task.
+    pub join_handle: tokio::task::JoinHandle<Result<(), StreamingError>>,
+}
+
+/// Statistics from a streaming supervisor run.
+#[derive(Debug, Clone, Default)]
+pub struct StreamingSupervisorStats {
+    /// Total number of connection attempts.
+    pub connection_attempts: u64,
+    /// Number of successful connections.
+    pub successful_connections: u64,
+    /// Number of failed connection attempts.
+    pub failed_connections: u64,
+    /// Number of events processed.
+    pub events_processed: u64,
+    /// Total time spent in backoff (milliseconds).
+    pub backoff_time_ms: u64,
+}
+
+/// Supervised streaming loop with backoff, health tracking, and session resumption.
+///
+/// The supervisor provides:
+/// - Connection lifecycle management with retry/backoff
+/// - Optional heartbeat timeout detection
+/// - Health state transitions based on success/failure patterns
+/// - Session persistence hooks for resume support
+#[derive(Debug)]
+pub struct StreamingSupervisor<S: StreamingSession> {
+    config: SupervisorConfig,
+    session: S,
+    health: HealthTracker,
+    stats: StreamingSupervisorStats,
+}
+
+impl<S: StreamingSession> StreamingSupervisor<S> {
+    /// Create a new streaming supervisor.
+    pub fn new(config: SupervisorConfig, session: S) -> Self {
+        Self {
+            config,
+            session,
+            health: HealthTracker::new(),
+            stats: StreamingSupervisorStats::default(),
+        }
+    }
+
+    /// Get a reference to the session.
+    pub const fn session(&self) -> &S {
+        &self.session
+    }
+
+    /// Get mutable access to the session.
+    pub const fn session_mut(&mut self) -> &mut S {
+        &mut self.session
+    }
+
+    /// Get the current health tracker.
+    pub const fn health(&self) -> &HealthTracker {
+        &self.health
+    }
+
+    /// Get the current statistics.
+    pub const fn stats(&self) -> &StreamingSupervisorStats {
+        &self.stats
+    }
+
+    /// Get the supervisor configuration.
+    pub const fn config(&self) -> &SupervisorConfig {
+        &self.config
+    }
+
+    fn compute_backoff_delay(&self, attempt: u32) -> Duration {
+        let jitter = (f64::from(attempt) * 0.1).fract();
+        let backoff = self.config.compute_backoff_with_jitter(attempt, jitter);
+        Duration::from_millis(backoff)
+    }
+
+    /// Run the streaming supervisor loop.
+    ///
+    /// # Arguments
+    ///
+    /// * `shutdown` - Watch channel receiver that signals shutdown when `true`
+    /// * `connect_fn` - Async function that establishes a streaming connection
+    /// * `handle_event` - Async function that handles incoming events
+    #[allow(clippy::too_many_lines)]
+    pub async fn run<E, ConnectF, ConnectFut, HandleF, HandleFut>(
+        &mut self,
+        mut shutdown: tokio::sync::watch::Receiver<bool>,
+        connect_fn: ConnectF,
+        mut handle_event: HandleF,
+    ) -> SupervisorOutcome
+    where
+        ConnectF: Fn(&mut S) -> ConnectFut,
+        ConnectFut: std::future::Future<Output = Result<StreamingConnection<E>, StreamingError>>,
+        HandleF: FnMut(E, &mut S) -> HandleFut,
+        HandleFut: std::future::Future<Output = Result<(), StreamingError>>,
+    {
+        let mut consecutive_failures: u32 = 0;
+
+        if let Err(e) = self.session.restore() {
+            tracing::warn!(error = %e, "Failed to restore streaming session state");
+        }
+
+        // Transition to healthy on start
+        self.health.record_success();
+        self.health.evaluate(&self.config);
+
+        loop {
+            if *shutdown.borrow() {
+                tracing::info!("Streaming supervisor received shutdown signal");
+                if let Err(e) = self.session.persist() {
+                    tracing::error!(error = %e, "Failed to persist session on shutdown");
+                }
+                return SupervisorOutcome::Shutdown;
+            }
+
+            self.stats.connection_attempts += 1;
+            let connection = match connect_fn(&mut self.session).await {
+                Ok(connection) => {
+                    self.stats.successful_connections += 1;
+                    consecutive_failures = 0;
+                    self.health.record_success();
+                    self.health.evaluate(&self.config);
+                    connection
+                }
+                Err(err) => {
+                    self.stats.failed_connections += 1;
+                    consecutive_failures = consecutive_failures.saturating_add(1);
+                    let message = err.to_string();
+
+                    self.health.record_failure(&message);
+                    self.health.evaluate(&self.config);
+
+                    tracing::warn!(
+                        error = %message,
+                        consecutive_failures,
+                        "Streaming connection attempt failed"
+                    );
+
+                    if consecutive_failures >= self.config.max_consecutive_failures {
+                        if let Err(e) = self.session.persist() {
+                            tracing::error!(error = %e, "Failed to persist session");
+                        }
+                        return SupervisorOutcome::MaxFailuresReached {
+                            failures: consecutive_failures,
+                        };
+                    }
+
+                    let delay = self.compute_backoff_delay(consecutive_failures - 1);
+                    self.stats.backoff_time_ms +=
+                        u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
+
+                    tokio::select! {
+                        () = tokio::time::sleep(delay) => {}
+                        _ = shutdown.changed() => {
+                            if *shutdown.borrow() {
+                                if let Err(e) = self.session.persist() {
+                                    tracing::error!(error = %e, "Failed to persist session on shutdown");
+                                }
+                                return SupervisorOutcome::Shutdown;
+                            }
+                        }
+                    }
+
+                    continue;
+                }
+            };
+
+            let mut events = connection.events;
+            let mut join_handle = connection.join_handle;
+            let mut heartbeat_interval =
+                self.config.heartbeat_interval().map(tokio::time::interval);
+
+            let mut exit_message = "stream ended".to_string();
+            let mut exit_fatal = false;
+
+            loop {
+                tokio::select! {
+                    _ = shutdown.changed() => {
+                        if *shutdown.borrow() {
+                            tracing::info!("Streaming supervisor received shutdown signal");
+                            join_handle.abort();
+                            if let Err(e) = self.session.persist() {
+                                tracing::error!(error = %e, "Failed to persist session on shutdown");
+                            }
+                            return SupervisorOutcome::Shutdown;
+                        }
+                    }
+                    maybe_event = events.recv() => {
+                        match maybe_event {
+                            Some(event) => {
+                                self.stats.events_processed += 1;
+                                if let Err(err) = handle_event(event, &mut self.session).await {
+                                    let message = err.to_string();
+                                    tracing::error!(error = %message, "Streaming event handler failed");
+                                    exit_message = message;
+                                    exit_fatal = true;
+                                    break;
+                                }
+                                self.health.record_success();
+                                self.health.evaluate(&self.config);
+                            }
+                            None => {
+                                break;
+                            }
+                        }
+                    }
+                    result = &mut join_handle => {
+                        match result {
+                            Ok(Ok(())) => {}
+                            Ok(Err(err)) => {
+                                exit_message = err.to_string();
+                            }
+                            Err(err) => {
+                                exit_message = err.to_string();
+                            }
+                        }
+                        break;
+                    }
+                    _ = async {
+                        if let Some(interval) = &mut heartbeat_interval {
+                            interval.tick().await;
+                        }
+                    }, if heartbeat_interval.is_some() => {
+                        if let Some(timeout) = self.config.heartbeat_timeout() {
+                            self.session.record_heartbeat_sent(Instant::now());
+                            if self.session.is_heartbeat_timeout(timeout) {
+                                exit_message = "heartbeat timeout".to_string();
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if exit_fatal {
+                self.health.transition(HealthTransition::ToUnhealthy {
+                    reason: exit_message.clone(),
+                });
+                join_handle.abort();
+                if let Err(e) = self.session.persist() {
+                    tracing::error!(error = %e, "Failed to persist session");
+                }
+                return SupervisorOutcome::FatalError {
+                    message: exit_message,
+                };
+            }
+
+            self.health.record_failure(&exit_message);
+            self.health.evaluate(&self.config);
+            join_handle.abort();
+
+            consecutive_failures = consecutive_failures.saturating_add(1);
+            if consecutive_failures >= self.config.max_consecutive_failures {
+                if let Err(e) = self.session.persist() {
+                    tracing::error!(error = %e, "Failed to persist session");
+                }
+                return SupervisorOutcome::MaxFailuresReached {
+                    failures: consecutive_failures,
+                };
+            }
+
+            let delay = self.compute_backoff_delay(consecutive_failures - 1);
+            self.stats.backoff_time_ms += u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
+
+            tokio::select! {
+                () = tokio::time::sleep(delay) => {}
+                _ = shutdown.changed() => {
+                    if *shutdown.borrow() {
+                        if let Err(e) = self.session.persist() {
+                            tracing::error!(error = %e, "Failed to persist session on shutdown");
+                        }
+                        return SupervisorOutcome::Shutdown;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // PollingSupervisor
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1622,6 +1914,11 @@ impl<C: PollingCursor> PollingSupervisor<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io;
+
+    fn boxed_err(message: &str) -> StreamingError {
+        Box::new(io::Error::new(io::ErrorKind::Other, message))
+    }
 
     #[test]
     fn supervisor_config_defaults() {
@@ -1778,6 +2075,84 @@ mod tests {
         // Ready -> Starting is always valid (reset)
         assert!(tracker.transition(HealthTransition::ToStarting));
         assert!(matches!(tracker.state(), HealthState::Starting));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // StreamingSupervisor tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn streaming_supervisor_shutdown_signal() {
+        let config = SupervisorConfig::default();
+        let session = InMemoryStreamingSession::new();
+        let mut supervisor = StreamingSupervisor::new(config, session);
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(true);
+        let _ = shutdown_tx;
+
+        let outcome = supervisor
+            .run::<i32, _, _, _, _>(
+                shutdown_rx,
+                |_session| async { Err(boxed_err("should not connect")) },
+                |_event, _session| async { Ok(()) },
+            )
+            .await;
+
+        assert!(matches!(outcome, SupervisorOutcome::Shutdown));
+    }
+
+    #[tokio::test]
+    async fn streaming_supervisor_max_failures() {
+        let config = SupervisorConfig::default()
+            .with_max_consecutive_failures(2)
+            .with_base_backoff_ms(1);
+        let session = InMemoryStreamingSession::new();
+        let mut supervisor = StreamingSupervisor::new(config, session);
+
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+        let outcome = supervisor
+            .run::<i32, _, _, _, _>(
+                shutdown_rx,
+                |_session| async { Err(boxed_err("connect failed")) },
+                |_event, _session| async { Ok(()) },
+            )
+            .await;
+
+        assert!(matches!(
+            outcome,
+            SupervisorOutcome::MaxFailuresReached { failures: 2 }
+        ));
+    }
+
+    #[tokio::test]
+    async fn streaming_supervisor_fatal_event_handler() {
+        let config = SupervisorConfig::default().with_base_backoff_ms(1);
+        let session = InMemoryStreamingSession::new();
+        let mut supervisor = StreamingSupervisor::new(config, session);
+
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+        let outcome = supervisor
+            .run(
+                shutdown_rx,
+                |_session| async {
+                    let (tx, rx) = mpsc::channel(1);
+                    let _ = tx.send(42).await;
+                    let join_handle = tokio::spawn(async { Ok(()) });
+                    Ok(StreamingConnection {
+                        events: rx,
+                        join_handle,
+                    })
+                },
+                |_event, _session| async { Err(boxed_err("handler failed")) },
+            )
+            .await;
+
+        assert!(matches!(
+            outcome,
+            SupervisorOutcome::FatalError { message } if message == "handler failed"
+        ));
     }
 
     // ─────────────────────────────────────────────────────────────────────────

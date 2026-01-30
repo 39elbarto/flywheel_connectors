@@ -162,23 +162,34 @@ struct VerificationResult {
     diffs: Vec<VectorDiff>,
 }
 
+/// Assertions summary for E2E logging.
+#[derive(Debug, Clone, Serialize)]
+struct LogAssertions {
+    passed: u64,
+    failed: u64,
+}
+
 /// Structured log entry for E2E logging per `STANDARD_Testing_Logging.md`.
 #[derive(Debug, Clone, Serialize)]
 struct LogEntry {
     timestamp: String,
-    level: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    level: Option<String>,
     test_name: String,
     module: String,
     phase: String,
     correlation_id: String,
+    result: String,
+    duration_ms: u64,
+    assertions: LogAssertions,
     #[serde(skip_serializing_if = "Option::is_none")]
-    message: Option<String>,
+    context: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    result: Option<String>,
+    artifacts: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    schemas_checked: Option<usize>,
+    error_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    diffs_found: Option<usize>,
+    details: Option<serde_json::Value>,
 }
 
 fn emit_log_entry(entry: &LogEntry, log_file: &mut Option<fs::File>) {
@@ -188,10 +199,53 @@ fn emit_log_entry(entry: &LogEntry, log_file: &mut Option<fs::File>) {
         let _ = writeln!(f, "{json}");
     }
     // Also emit to stderr for visibility
+    let message = entry
+        .details
+        .as_ref()
+        .and_then(|value| value.get("message"))
+        .and_then(|value| value.as_str())
+        .unwrap_or(&json);
     eprintln!(
         "[{}] {}",
-        entry.level.to_uppercase(),
-        entry.message.as_deref().unwrap_or(&json)
+        entry.level.as_deref().unwrap_or("info").to_uppercase(),
+        message
+    );
+}
+
+fn emit_schema_log(
+    log_file: &mut Option<fs::File>,
+    correlation_id: &str,
+    schema_id: &str,
+    schema_hash: &str,
+) {
+    if log_file.is_none() {
+        return;
+    }
+
+    emit_log_entry(
+        &LogEntry {
+            timestamp: Utc::now().to_rfc3339(),
+            level: Some("info".into()),
+            test_name: "schema_vector_generation".into(),
+            module: "fcp-conformance".into(),
+            phase: "generate".into(),
+            correlation_id: correlation_id.into(),
+            result: "pass".into(),
+            duration_ms: 0,
+            assertions: LogAssertions {
+                passed: 1,
+                failed: 0,
+            },
+            context: None,
+            artifacts: None,
+            error_code: None,
+            details: Some(serde_json::json!({
+                "schema_id": schema_id,
+                "schema_hash": schema_hash,
+                "message": "Generated schema vector"
+            })),
+        },
+        log_file,
     );
 }
 
@@ -375,15 +429,23 @@ fn verify_vectors(
     emit_log_entry(
         &LogEntry {
             timestamp: Utc::now().to_rfc3339(),
-            level: "info".into(),
+            level: Some("info".into()),
             test_name: "schema_vector_verification".into(),
             module: "fcp-conformance".into(),
             phase: "setup".into(),
             correlation_id: correlation_id.into(),
-            message: Some(format!("Loading baseline from {}", baseline_path.display())),
-            result: None,
-            schemas_checked: None,
-            diffs_found: None,
+            result: "pass".into(),
+            duration_ms: 0,
+            assertions: LogAssertions {
+                passed: 1,
+                failed: 0,
+            },
+            context: None,
+            artifacts: None,
+            error_code: None,
+            details: Some(serde_json::json!({
+                "message": format!("Loading baseline from {}", baseline_path.display())
+            })),
         },
         log_file,
     );
@@ -402,20 +464,29 @@ fn verify_vectors(
     emit_log_entry(
         &LogEntry {
             timestamp: Utc::now().to_rfc3339(),
-            level: "info".into(),
+            level: Some("info".into()),
             test_name: "schema_vector_verification".into(),
             module: "fcp-conformance".into(),
             phase: "execute".into(),
             correlation_id: correlation_id.into(),
-            message: Some("Regenerating vectors for comparison".into()),
-            result: None,
-            schemas_checked: None,
-            diffs_found: None,
+            result: "pass".into(),
+            duration_ms: 0,
+            assertions: LogAssertions {
+                passed: 1,
+                failed: 0,
+            },
+            context: None,
+            artifacts: None,
+            error_code: None,
+            details: Some(serde_json::json!({
+                "message": "Regenerating vectors for comparison"
+            })),
         },
         log_file,
     );
 
-    let generated = generate_all_vectors(schema_filter).map_err(|e| e.to_string())?;
+    let generated =
+        generate_all_vectors(schema_filter, log_file, correlation_id).map_err(|e| e.to_string())?;
 
     // Verify phase - compare
     let mut result = VerificationResult {
@@ -529,24 +600,32 @@ fn verify_vectors(
     emit_log_entry(
         &LogEntry {
             timestamp: Utc::now().to_rfc3339(),
-            level: if result.passed { "info" } else { "error" }.into(),
+            level: Some(if result.passed { "info" } else { "error" }.into()),
             test_name: "schema_vector_verification".into(),
             module: "fcp-conformance".into(),
             phase: "verify".into(),
             correlation_id: correlation_id.into(),
-            message: Some(if result.passed {
-                "All vectors match baseline".into()
-            } else {
-                format!(
-                    "Vector drift detected: {} diffs, {} missing, {} extra",
-                    result.diffs.len(),
-                    result.schemas_missing.len(),
-                    result.schemas_extra.len()
-                )
-            }),
-            result: Some(if result.passed { "pass" } else { "fail" }.into()),
-            schemas_checked: Some(result.schemas_checked),
-            diffs_found: Some(result.diffs.len()),
+            result: if result.passed { "pass" } else { "fail" }.into(),
+            duration_ms: 0,
+            assertions: LogAssertions {
+                passed: u64::from(result.passed),
+                failed: u64::from(!result.passed),
+            },
+            context: None,
+            artifacts: None,
+            error_code: None,
+            details: Some(serde_json::json!({
+                "message": if result.passed {
+                    "All vectors match baseline"
+                } else {
+                    "Vector drift detected"
+                },
+                "schemas_checked": result.schemas_checked,
+                "schemas_matched": result.schemas_matched,
+                "diffs_found": result.diffs.len(),
+                "schemas_missing": result.schemas_missing,
+                "schemas_extra": result.schemas_extra,
+            })),
         },
         log_file,
     );
@@ -623,6 +702,8 @@ fn generate_samples_for_schema(reg: &SchemaRegistration) -> Option<Vec<SampleCas
 /// Generate vectors for all core schemas.
 fn generate_all_vectors(
     schema_filter: Option<&str>,
+    log_file: &mut Option<fs::File>,
+    correlation_id: &str,
 ) -> Result<BTreeMap<String, GeneratedVector>, VecGenError> {
     let mut vectors = BTreeMap::new();
     let mut matched_filter = false;
@@ -639,6 +720,8 @@ fn generate_all_vectors(
         if let Some(samples) = generate_samples_for_schema(&reg) {
             let schema = reg.schema_id();
             let schema_hash = generate_schema_hash(&schema);
+            let schema_id = format!("{}:{}@{}", schema.namespace, schema.name, schema.version);
+            emit_schema_log(log_file, correlation_id, &schema_id, &schema_hash);
 
             let mut payloads = Vec::new();
             for sample in samples {
@@ -667,6 +750,8 @@ fn generate_all_vectors(
             // Generate schema hash only vector (no payloads)
             let schema = reg.schema_id();
             let schema_hash = generate_schema_hash(&schema);
+            let schema_id = format!("{}:{}@{}", schema.namespace, schema.name, schema.version);
+            emit_schema_log(log_file, correlation_id, &schema_id, &schema_hash);
             vectors.insert(
                 key,
                 GeneratedVector {
@@ -732,28 +817,33 @@ fn main() {
         return;
     }
 
+    // Open log file if specified
+    let mut log_file = args.log_jsonl.as_ref().and_then(|p| {
+        if let Some(parent) = p.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        fs::File::create(p).ok()
+    });
+
+    // Generate correlation ID
+    let correlation_id = format!(
+        "vecgen-{}-{}",
+        std::process::id(),
+        Utc::now().timestamp_millis()
+    );
+
     if args.verify {
-        let Some(baseline_path) = args.baseline.clone().or_else(default_baseline_path) else {
+        let Some(baseline_path) = args
+            .baseline
+            .as_ref()
+            .cloned()
+            .or_else(default_baseline_path)
+        else {
             eprintln!(
                 "Error: --baseline is required with --verify (default tests/vectors/serialization/core_vectors.json or .cbor not found)"
             );
             std::process::exit(1);
         };
-
-        // Open log file if specified
-        let mut log_file = args.log_jsonl.as_ref().and_then(|p| {
-            if let Some(parent) = p.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-            fs::File::create(p).ok()
-        });
-
-        // Generate correlation ID
-        let correlation_id = format!(
-            "vecgen-{}-{}",
-            std::process::id(),
-            Utc::now().timestamp_millis()
-        );
 
         match verify_vectors(
             &baseline_path,
@@ -812,13 +902,14 @@ fn main() {
 
     // Generate vectors
     eprintln!("Generating schema vectors...");
-    let vectors = match generate_all_vectors(schema_filter.as_deref()) {
-        Ok(vectors) => vectors,
-        Err(e) => {
-            eprintln!("Error: {e}");
-            std::process::exit(1);
-        }
-    };
+    let vectors =
+        match generate_all_vectors(schema_filter.as_deref(), &mut log_file, &correlation_id) {
+            Ok(vectors) => vectors,
+            Err(e) => {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+        };
 
     // Write output
     let output_file = match args.format {
@@ -853,4 +944,51 @@ fn main() {
     }
 
     eprintln!("Done.");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use fcp_testkit::LogCapture;
+    use serde_json::json;
+
+    #[test]
+    fn schema_log_entry_validates_against_e2e_schema() {
+        let schema_id = "fcp.core:CapabilityObject@1.0.0";
+        let schema_hash = "deadbeef";
+
+        let entry = LogEntry {
+            timestamp: Utc::now().to_rfc3339(),
+            level: Some("info".into()),
+            test_name: "schema_vector_generation".into(),
+            module: "fcp-conformance".into(),
+            phase: "generate".into(),
+            correlation_id: "test-correlation".into(),
+            result: "pass".into(),
+            duration_ms: 0,
+            assertions: LogAssertions {
+                passed: 1,
+                failed: 0,
+            },
+            context: None,
+            artifacts: None,
+            error_code: None,
+            details: Some(json!({
+                "schema_id": schema_id,
+                "schema_hash": schema_hash,
+                "message": "Generated schema vector"
+            })),
+        };
+
+        let value = serde_json::to_value(&entry).expect("serialize log entry");
+        assert_eq!(value["details"]["schema_id"], schema_id);
+        assert_eq!(value["details"]["schema_hash"], schema_hash);
+
+        let capture = LogCapture::new();
+        capture
+            .push_value(&value)
+            .expect("push log entry to capture");
+        capture.assert_valid();
+    }
 }

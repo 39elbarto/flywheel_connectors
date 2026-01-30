@@ -68,7 +68,8 @@ pub use crate::streaming::{
 pub use crate::runtime::{
     CursorLease, CursorStore, CursorStoreBackend, CursorStoreError, HealthTracker,
     HealthTransition, InMemoryCursorStoreBackend, InMemoryPollingCursor, InMemoryStreamingSession,
-    PollResult, PollingCursor, PollingSupervisor, PollingSupervisorStats, StreamingSession,
+    PollResult, PollingCursor, PollingSupervisor, PollingSupervisorStats, StreamingConnection,
+    StreamingError, StreamingSession, StreamingSupervisor, StreamingSupervisorStats,
     SupervisorConfig, SupervisorOutcome,
 };
 

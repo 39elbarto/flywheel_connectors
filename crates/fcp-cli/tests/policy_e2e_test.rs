@@ -216,6 +216,152 @@ fn base_zone_policy(zone: ZoneId) -> ZonePolicyObject {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CLI Diff / Rollback Tests (bd-23d7)
+// ─────────────────────────────────────────────────────────────────────────────
+
+mod cli {
+    use super::*;
+    use assert_cmd::Command;
+    use predicates::prelude::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn fcp_cmd() -> Command {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_fcp"));
+        cmd.env("RUST_LOG", "error");
+        cmd
+    }
+
+    fn temp_path(name: &str, ext: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        let suffix = Uuid::new_v4();
+        path.push(format!("fcp_policy_{name}_{suffix}.{ext}"));
+        path
+    }
+
+    #[test]
+    fn policy_diff_reports_added_and_transport_change() {
+        let zone = ZoneId::work();
+        let before = base_zone_policy(zone.clone());
+        let mut after = before.clone();
+
+        after.connector_allow.push(PolicyPattern {
+            pattern: "fcp.test:*".to_string(),
+        });
+        after.transport_policy.allow_derp = true;
+
+        let before_path = temp_path("before", "json");
+        let after_path = temp_path("after", "json");
+
+        fs::write(&before_path, serde_json::to_string_pretty(&before).unwrap())
+            .expect("write before policy");
+        fs::write(&after_path, serde_json::to_string_pretty(&after).unwrap())
+            .expect("write after policy");
+
+        let output = fcp_cmd()
+            .args([
+                "policy",
+                "diff",
+                "--before",
+                before_path.to_string_lossy().as_ref(),
+                "--after",
+                after_path.to_string_lossy().as_ref(),
+                "--json",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+
+        let payload: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(payload["policy_type"], "zone_policy");
+        assert!(
+            payload["added"]["connector_allow"]
+                .as_array()
+                .is_some_and(|arr| arr.iter().any(|v| v.as_str() == Some("fcp.test:*")))
+        );
+        assert_eq!(
+            payload["changed"]["transport_policy"]["after"]["allow_derp"],
+            true
+        );
+        assert!(payload["risk_flags"].as_array().is_some_and(|arr| {
+            arr.iter()
+                .any(|v| v.as_str() == Some("transport_derp_enabled"))
+        }));
+    }
+
+    #[test]
+    fn policy_rollback_plan_includes_previous_id() {
+        let zone = ZoneId::work();
+        let mut current = base_zone_policy(zone.clone());
+        let previous = base_zone_policy(zone);
+        current.capability_allow.push(PolicyPattern {
+            pattern: "cap.test.read".to_string(),
+        });
+
+        let current_path = temp_path("current", "json");
+        let previous_path = temp_path("previous", "json");
+
+        fs::write(
+            &current_path,
+            serde_json::to_string_pretty(&current).unwrap(),
+        )
+        .expect("write current policy");
+        fs::write(
+            &previous_path,
+            serde_json::to_string_pretty(&previous).unwrap(),
+        )
+        .expect("write previous policy");
+
+        let output = fcp_cmd()
+            .args([
+                "policy",
+                "rollback",
+                "--plan",
+                "--current",
+                current_path.to_string_lossy().as_ref(),
+                "--previous",
+                previous_path.to_string_lossy().as_ref(),
+                "--json",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+
+        let payload: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(payload["policy_type"], "zone_policy");
+        assert_eq!(payload["plan_type"], "rollback");
+        assert!(payload["current_policy_id"].as_str().is_some());
+        assert!(payload["previous_policy_id"].as_str().is_some());
+        assert_eq!(payload["zone_id"], "z:work");
+    }
+
+    #[test]
+    fn policy_rollback_requires_plan_flag() {
+        let zone = ZoneId::work();
+        let policy = base_zone_policy(zone);
+        let path = temp_path("policy", "json");
+        fs::write(&path, serde_json::to_string_pretty(&policy).unwrap()).expect("write policy");
+
+        fcp_cmd()
+            .args([
+                "policy",
+                "rollback",
+                "--current",
+                path.to_string_lossy().as_ref(),
+                "--previous",
+                path.to_string_lossy().as_ref(),
+            ])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("--plan"));
+    }
+}
+
 fn base_invoke(zone: ZoneId) -> InvokeRequest {
     InvokeRequest {
         r#type: "invoke".to_string(),

@@ -238,7 +238,7 @@ pub fn core_schema_registrations() -> Vec<SchemaRegistration> {
         SchemaRegistration::new(
             "fcp.stream",
             "EventEnvelope",
-            Version::new(1, 0, 0),
+            Version::new(1, 1, 0),
             "Streaming event wrapper",
         ),
     ]

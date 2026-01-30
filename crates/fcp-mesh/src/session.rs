@@ -275,4 +275,243 @@ mod tests {
 
         assert!(!session.verify_incoming(seq, frame, &bad_tag));
     }
+
+    #[test]
+    fn needs_rekey_time_based() {
+        let policy = SessionReplayPolicy {
+            max_reorder_window: 128,
+            rekey_after_frames: u64::MAX,
+            rekey_after_seconds: 3600,
+            rekey_after_bytes: u64::MAX,
+        };
+        let session = build_session(true, policy);
+
+        // Established at t=1000, rekey after 3600s
+        assert!(!session.needs_rekey(1_000)); // t=0 elapsed
+        assert!(!session.needs_rekey(4_599)); // 3599s elapsed
+        assert!(session.needs_rekey(4_600)); // 3600s elapsed (exact threshold)
+        assert!(session.needs_rekey(5_000)); // well past threshold
+    }
+
+    #[test]
+    fn needs_rekey_bytes_based() {
+        let policy = SessionReplayPolicy {
+            max_reorder_window: 128,
+            rekey_after_frames: u64::MAX,
+            rekey_after_seconds: u64::MAX,
+            rekey_after_bytes: 100,
+        };
+        let mut session = build_session(true, policy);
+
+        assert!(!session.needs_rekey(1_000));
+
+        // Send frames totaling >=100 bytes
+        for _ in 0..10 {
+            let _ = session.mac_outgoing(b"0123456789"); // 10 bytes each
+        }
+        // 10 frames * 10 bytes = 100 bytes
+        assert!(session.needs_rekey(1_000));
+    }
+
+    #[test]
+    fn needs_rekey_not_triggered_just_below_all_thresholds() {
+        let policy = SessionReplayPolicy {
+            max_reorder_window: 128,
+            rekey_after_frames: 10,
+            rekey_after_seconds: 3600,
+            rekey_after_bytes: 1000,
+        };
+        let mut session = build_session(true, policy);
+
+        // Send 9 frames of 100 bytes each (900 bytes total, 9 frames)
+        for _ in 0..9 {
+            let _ = session.mac_outgoing(&[0u8; 100]);
+        }
+
+        // 9 frames < 10, 900 bytes < 1000, 0s < 3600s
+        assert!(!session.needs_rekey(1_000));
+    }
+
+    #[test]
+    fn next_send_seq_starts_at_one_and_increments() {
+        let mut session = build_session(true, SessionReplayPolicy::default());
+
+        assert_eq!(session.next_send_seq(), 1);
+        assert_eq!(session.next_send_seq(), 2);
+        assert_eq!(session.next_send_seq(), 3);
+    }
+
+    #[test]
+    fn verify_incoming_rejects_seq_zero() {
+        let mut session = build_session(true, SessionReplayPolicy::default());
+        let frame = b"payload";
+
+        // Compute a valid MAC for seq=0
+        let tag = compute_session_mac(
+            SessionCryptoSuite::Suite1,
+            session.recv_mac_key(),
+            &session.session_id,
+            session.recv_direction(),
+            0,
+            frame,
+        )
+        .expect("mac");
+
+        // Should reject: seq=0 is explicitly forbidden
+        assert!(!session.verify_incoming(0, frame, &tag));
+    }
+
+    #[test]
+    fn mac_direction_initiator_uses_i2r_send_r2i_recv() {
+        let session = build_session(true, SessionReplayPolicy::default());
+
+        assert!(matches!(
+            session.send_direction(),
+            SessionDirection::InitiatorToResponder
+        ));
+        assert!(matches!(
+            session.recv_direction(),
+            SessionDirection::ResponderToInitiator
+        ));
+        // Send key should use I2R key material
+        assert_eq!(session.send_mac_key(), &[1u8; 32]); // k_mac_i2r
+        assert_eq!(session.recv_mac_key(), &[2u8; 32]); // k_mac_r2i
+    }
+
+    #[test]
+    fn mac_direction_responder_uses_r2i_send_i2r_recv() {
+        let session = build_session(false, SessionReplayPolicy::default());
+
+        assert!(matches!(
+            session.send_direction(),
+            SessionDirection::ResponderToInitiator
+        ));
+        assert!(matches!(
+            session.recv_direction(),
+            SessionDirection::InitiatorToResponder
+        ));
+        // Responder sends with R2I, receives with I2R
+        assert_eq!(session.send_mac_key(), &[2u8; 32]); // k_mac_r2i
+        assert_eq!(session.recv_mac_key(), &[1u8; 32]); // k_mac_i2r
+    }
+
+    #[test]
+    fn peer_session_symmetry_initiator_to_responder() {
+        let keys = SessionKeys {
+            k_mac_i2r: [1u8; 32],
+            k_mac_r2i: [2u8; 32],
+            k_ctx: [3u8; 32],
+        };
+        let session_id = MeshSessionId([7u8; 16]);
+        let policy = SessionReplayPolicy::default();
+
+        let mut initiator = MeshSession::new(
+            session_id,
+            NodeId::new("responder"),
+            SessionCryptoSuite::Suite1,
+            keys.clone(),
+            TransportLimits::default(),
+            true,
+            1_000,
+            policy.clone(),
+        );
+        let mut responder = MeshSession::new(
+            session_id,
+            NodeId::new("initiator"),
+            SessionCryptoSuite::Suite1,
+            keys,
+            TransportLimits::default(),
+            false,
+            1_000,
+            policy,
+        );
+
+        // Initiator sends a frame
+        let frame = b"hello from initiator";
+        let (seq, tag) = initiator.mac_outgoing(frame);
+
+        // Responder should accept it
+        assert!(responder.verify_incoming(seq, frame, &tag));
+
+        // Responder sends a frame
+        let frame2 = b"hello from responder";
+        let (seq2, tag2) = responder.mac_outgoing(frame2);
+
+        // Initiator should accept it
+        assert!(initiator.verify_incoming(seq2, frame2, &tag2));
+    }
+
+    #[test]
+    fn multiple_frames_increment_counters_correctly() {
+        let policy = SessionReplayPolicy {
+            max_reorder_window: 128,
+            rekey_after_frames: u64::MAX,
+            rekey_after_seconds: u64::MAX,
+            rekey_after_bytes: u64::MAX,
+        };
+        let mut session = build_session(true, policy);
+
+        // Send 5 frames of varying sizes
+        let _ = session.mac_outgoing(b"a"); // 1 byte
+        let _ = session.mac_outgoing(b"bb"); // 2 bytes
+        let _ = session.mac_outgoing(b"ccc"); // 3 bytes
+        let _ = session.mac_outgoing(b"dddd"); // 4 bytes
+        let _ = session.mac_outgoing(b"eeeee"); // 5 bytes
+
+        // frames_sent = 5, bytes_sent = 1+2+3+4+5 = 15
+        // send_seq = 5 (next will be 6)
+        assert_eq!(session.next_send_seq(), 6);
+    }
+
+    #[test]
+    fn out_of_order_reception_within_window() {
+        let mut session = build_session(true, SessionReplayPolicy::default());
+        let frame = b"payload";
+
+        // Generate MACs for seqs 1, 2, 3
+        let tags: Vec<_> = (1..=3u64)
+            .map(|seq| {
+                let tag = compute_session_mac(
+                    SessionCryptoSuite::Suite1,
+                    session.recv_mac_key(),
+                    &session.session_id,
+                    session.recv_direction(),
+                    seq,
+                    frame,
+                )
+                .expect("mac");
+                (seq, tag)
+            })
+            .collect();
+
+        // Receive out of order: 2, 3, 1
+        assert!(session.verify_incoming(tags[1].0, frame, &tags[1].1)); // seq=2
+        assert!(session.verify_incoming(tags[2].0, frame, &tags[2].1)); // seq=3
+        assert!(session.verify_incoming(tags[0].0, frame, &tags[0].1)); // seq=1
+
+        // All should be rejected on replay
+        assert!(!session.verify_incoming(tags[0].0, frame, &tags[0].1));
+        assert!(!session.verify_incoming(tags[1].0, frame, &tags[1].1));
+        assert!(!session.verify_incoming(tags[2].0, frame, &tags[2].1));
+    }
+
+    #[test]
+    fn tampered_frame_rejected_even_with_valid_seq() {
+        let mut session = build_session(true, SessionReplayPolicy::default());
+        let frame = b"original";
+        let seq = 1;
+
+        let tag = compute_session_mac(
+            SessionCryptoSuite::Suite1,
+            session.recv_mac_key(),
+            &session.session_id,
+            session.recv_direction(),
+            seq,
+            frame,
+        )
+        .expect("mac");
+
+        // Tamper with the frame content
+        assert!(!session.verify_incoming(seq, b"tampered", &tag));
+    }
 }

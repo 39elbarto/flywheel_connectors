@@ -734,3 +734,465 @@ impl MeshNode {
         &self.quarantine_store
     }
 }
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::device::DeviceProfileBuilder;
+    use crate::planner::{LeasePurpose, PlannerContext};
+    use fcp_core::{ObjectId, ZoneId, ZoneKeyId};
+    use fcp_protocol::session::{
+        MeshSessionId, SessionCryptoSuite, SessionKeys, SessionReplayPolicy, TransportLimits,
+    };
+    use fcp_protocol::{DecodeStatus, SymbolAck, SymbolAckReason};
+    use fcp_store::{
+        MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore, MemorySymbolStoreConfig,
+        ObjectAdmissionPolicy, QuarantineStore,
+    };
+
+    fn test_node(name: &str) -> MeshNode {
+        let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+        let symbol_store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig::default()));
+        let quarantine_store = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
+        MeshNode::new(
+            MeshNodeConfig::new(name).with_sender_instance_id(42),
+            object_store,
+            symbol_store,
+            quarantine_store,
+        )
+    }
+
+    fn test_device_profile(node_name: &str) -> DeviceProfile {
+        DeviceProfileBuilder::new(NodeId::new(node_name)).build()
+    }
+
+    fn test_session(peer_name: &str) -> MeshSession {
+        MeshSession::new(
+            MeshSessionId::new(),
+            NodeId::new(peer_name),
+            SessionCryptoSuite::Suite1,
+            SessionKeys {
+                k_mac_i2r: [1u8; 32],
+                k_mac_r2i: [2u8; 32],
+                k_ctx: [3u8; 32],
+            },
+            TransportLimits::default(),
+            true,
+            1000,
+            SessionReplayPolicy::default(),
+        )
+    }
+
+    fn test_object_header() -> fcp_core::ObjectHeader {
+        let zone_id = ZoneId::work();
+        fcp_core::ObjectHeader {
+            schema: fcp_cbor::SchemaId::new("fcp.test", "TestObj", semver::Version::new(1, 0, 0)),
+            zone_id: zone_id.clone(),
+            created_at: 0,
+            provenance: fcp_core::Provenance::new(zone_id),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        }
+    }
+
+    // ---- MeshNodeConfig builder tests ----
+
+    #[test]
+    fn config_new_sets_node_id() {
+        let config = MeshNodeConfig::new("test-node");
+        assert_eq!(config.node_id, "test-node");
+    }
+
+    #[test]
+    fn config_builder_methods_chain() {
+        let policy = AdmissionPolicy::default();
+        let gossip_config = GossipConfig::default();
+        let sym_policy = SymbolRequestPolicy::default();
+        let raptorq_config = RaptorQConfig::default();
+
+        let config = MeshNodeConfig::new("node-1")
+            .with_admission_policy(policy)
+            .with_gossip_config(gossip_config)
+            .with_symbol_request_policy(sym_policy)
+            .with_raptorq_config(raptorq_config)
+            .with_sender_instance_id(999);
+
+        assert_eq!(config.node_id, "node-1");
+        assert_eq!(config.sender_instance_id, 999);
+    }
+
+    // ---- Node identity tests ----
+
+    #[test]
+    fn local_node_id_matches_config() {
+        let node = test_node("my-node");
+        assert_eq!(node.local_node_id().as_str(), "my-node");
+    }
+
+    #[test]
+    fn local_tailscale_id_matches_config() {
+        let node = test_node("ts-node");
+        assert_eq!(node.local_tailscale_id().as_str(), "ts-node");
+    }
+
+    // ---- Peer management tests ----
+
+    #[test]
+    fn initial_peer_count_is_zero() {
+        let node = test_node("node-1");
+        assert_eq!(node.peer_count(), 0);
+    }
+
+    #[test]
+    fn update_peer_state_increments_count() {
+        let mut node = test_node("node-1");
+        let profile = test_device_profile("peer-1");
+
+        node.update_peer_state(NodeId::new("peer-1"), profile, HashSet::new(), vec![], 1000);
+        assert_eq!(node.peer_count(), 1);
+    }
+
+    #[test]
+    fn update_same_peer_does_not_duplicate() {
+        let mut node = test_node("node-1");
+        let profile = test_device_profile("peer-1");
+
+        node.update_peer_state(
+            NodeId::new("peer-1"),
+            profile.clone(),
+            HashSet::new(),
+            vec![],
+            1000,
+        );
+        node.update_peer_state(NodeId::new("peer-1"), profile, HashSet::new(), vec![], 2000);
+        assert_eq!(node.peer_count(), 1);
+    }
+
+    #[test]
+    fn multiple_peers_tracked_independently() {
+        let mut node = test_node("node-1");
+
+        for i in 0..3 {
+            let name = format!("peer-{i}");
+            let profile = test_device_profile(&name);
+            node.update_peer_state(NodeId::new(&name), profile, HashSet::new(), vec![], 1000);
+        }
+        assert_eq!(node.peer_count(), 3);
+    }
+
+    #[test]
+    fn remove_peer_decrements_count() {
+        let mut node = test_node("node-1");
+        let profile = test_device_profile("peer-1");
+
+        node.update_peer_state(NodeId::new("peer-1"), profile, HashSet::new(), vec![], 1000);
+        assert_eq!(node.peer_count(), 1);
+
+        node.remove_peer(&NodeId::new("peer-1"));
+        assert_eq!(node.peer_count(), 0);
+    }
+
+    #[test]
+    fn remove_nonexistent_peer_is_noop() {
+        let mut node = test_node("node-1");
+        node.remove_peer(&NodeId::new("ghost"));
+        assert_eq!(node.peer_count(), 0);
+    }
+
+    // ---- Local state tests ----
+
+    #[test]
+    fn update_local_state_sets_profile() {
+        let mut node = test_node("node-1");
+        let profile = test_device_profile("node-1");
+
+        node.update_local_state(profile, HashSet::new(), vec![]);
+        assert!(node.local_profile.is_some());
+    }
+
+    // ---- Session management tests ----
+
+    #[test]
+    fn no_session_means_not_authenticated() {
+        let node = test_node("node-1");
+        assert!(!node.is_peer_authenticated(&NodeId::new("peer-1")));
+    }
+
+    #[test]
+    fn register_session_authenticates_peer() {
+        let mut node = test_node("node-1");
+        let session = test_session("peer-1");
+
+        node.register_session(session, 1000);
+        assert!(node.is_peer_authenticated(&NodeId::new("peer-1")));
+    }
+
+    #[test]
+    fn remove_session_deauthenticates_peer() {
+        let mut node = test_node("node-1");
+        let session = test_session("peer-1");
+
+        node.register_session(session, 1000);
+        assert!(node.is_peer_authenticated(&NodeId::new("peer-1")));
+
+        node.remove_session(&NodeId::new("peer-1"), 2000);
+        assert!(!node.is_peer_authenticated(&NodeId::new("peer-1")));
+    }
+
+    // ---- Gossip delegation tests ----
+
+    #[test]
+    fn announce_object_increments_metric() {
+        let mut node = test_node("node-1");
+        let zone_id = ZoneId::work();
+        let object_id = ObjectId::from_bytes([0x11; 32]);
+
+        let added =
+            node.announce_object(&zone_id, &object_id, ObjectAdmissionClass::Admitted, 1000);
+        assert!(added);
+        assert_eq!(node.metrics().gossip_announcements, 1);
+    }
+
+    #[test]
+    fn announce_symbol_increments_metric() {
+        let mut node = test_node("node-1");
+        let zone_id = ZoneId::work();
+        let object_id = ObjectId::from_bytes([0x22; 32]);
+
+        let added = node.announce_symbol(
+            &zone_id,
+            &object_id,
+            0,
+            ObjectAdmissionClass::Admitted,
+            1000,
+        );
+        assert!(added);
+        assert_eq!(node.metrics().gossip_announcements, 1);
+    }
+
+    #[test]
+    fn quarantined_object_not_announced() {
+        let mut node = test_node("node-1");
+        let zone_id = ZoneId::work();
+        let object_id = ObjectId::from_bytes([0x33; 32]);
+
+        let added = node.announce_object(
+            &zone_id,
+            &object_id,
+            ObjectAdmissionClass::Quarantined,
+            1000,
+        );
+        // Quarantined objects must not be gossiped (NORMATIVE)
+        assert!(!added);
+        assert_eq!(node.metrics().gossip_announcements, 0);
+    }
+
+    // ---- Decode status / ack delegation tests ----
+
+    #[test]
+    fn handle_decode_status_delegates_to_handler() {
+        let mut node = test_node("node-1");
+        let object_id = ObjectId::from_bytes([0x44; 32]);
+
+        let status = DecodeStatus {
+            header: test_object_header(),
+            object_id,
+            zone_id: ZoneId::work(),
+            zone_key_id: ZoneKeyId::from_bytes([0x55; 8]),
+            epoch_id: 1,
+            received_unique: 10,
+            needed: 0,
+            complete: true,
+            missing_hint: None,
+            signature: fcp_crypto::Ed25519Signature::from_bytes(&[0u8; 64]),
+        };
+
+        // Should not panic
+        node.handle_decode_status(&status);
+    }
+
+    #[test]
+    fn handle_symbol_ack_increments_ack_metric() {
+        let mut node = test_node("node-1");
+        let object_id = ObjectId::from_bytes([0x66; 32]);
+
+        let ack = SymbolAck::new(
+            test_object_header(),
+            object_id,
+            ZoneId::work(),
+            ZoneKeyId::from_bytes([0x77; 8]),
+            1,
+            SymbolAckReason::Complete,
+            5,
+        );
+
+        node.handle_symbol_ack(&ack);
+        assert_eq!(node.metrics().symbol_requests.acks_received, 1);
+    }
+
+    // ---- Metrics tests ----
+
+    #[test]
+    fn initial_metrics_are_zero() {
+        let node = test_node("node-1");
+        let m = node.metrics();
+        assert_eq!(m.gossip_announcements, 0);
+        assert_eq!(m.gossip_updates, 0);
+        assert_eq!(m.peer_updates, 0);
+        assert_eq!(m.symbol_requests.acks_received, 0);
+    }
+
+    #[test]
+    fn peer_update_metric_increments() {
+        let mut node = test_node("node-1");
+        let profile = test_device_profile("peer-1");
+
+        node.update_peer_state(NodeId::new("peer-1"), profile, HashSet::new(), vec![], 1000);
+        assert_eq!(node.metrics().peer_updates, 1);
+    }
+
+    // ---- Planner integration tests ----
+
+    #[test]
+    fn build_planner_input_without_local_state_is_empty() {
+        let node = test_node("node-1");
+        let input = node.build_planner_input(1000);
+        assert!(input.nodes.is_empty());
+    }
+
+    #[test]
+    fn build_planner_input_includes_local_and_peers() {
+        let mut node = test_node("node-1");
+        let local_profile = test_device_profile("node-1");
+        let peer_profile = test_device_profile("peer-1");
+
+        node.update_local_state(local_profile, HashSet::new(), vec![]);
+        node.update_peer_state(
+            NodeId::new("peer-1"),
+            peer_profile,
+            HashSet::new(),
+            vec![],
+            1000,
+        );
+
+        let input = node.build_planner_input(2000);
+        assert_eq!(input.nodes.len(), 2);
+    }
+
+    #[test]
+    fn build_planner_input_includes_singleton_holder() {
+        let mut node = test_node("node-1");
+        let local_profile = test_device_profile("node-1");
+        let obj_id = ObjectId::from_bytes([0xAA; 32]);
+
+        let lease = HeldLease {
+            subject_id: obj_id,
+            purpose: LeasePurpose::SingletonWriter,
+            expires_at: 999_999, // Far future
+        };
+
+        node.update_local_state(local_profile, HashSet::new(), vec![lease]);
+
+        let input = node.build_planner_input(1000);
+        assert_eq!(input.nodes.len(), 1);
+        assert!(input.singleton_lease_holder.is_some());
+    }
+
+    #[test]
+    fn plan_execution_returns_candidates() {
+        use crate::device::{DeviceProfileBuilder, InstalledConnector};
+
+        let mut node = test_node("node-1");
+        let connector_id =
+            fcp_core::ConnectorId::new("fcp.test", "test", "v1").expect("valid connector id");
+        let installed = InstalledConnector::new(
+            connector_id.clone(),
+            "1.0.0",
+            ObjectId::from_bytes([0xBB; 32]),
+        );
+        let local_profile = DeviceProfileBuilder::new(NodeId::new("node-1"))
+            .add_connector(installed)
+            .build();
+
+        node.update_local_state(local_profile, HashSet::new(), vec![]);
+
+        let context = PlannerContext::new(connector_id);
+        let candidates = node.plan_execution(&context, 2000);
+        // Node has the required connector installed, should be a candidate
+        assert!(!candidates.is_empty());
+    }
+
+    // ---- Store accessor tests ----
+
+    #[test]
+    fn store_accessors_return_valid_refs() {
+        let node = test_node("node-1");
+        // Just verify the accessors don't panic and return the stores
+        let _ = node.object_store();
+        let _ = node.symbol_store();
+        let _ = node.quarantine_store();
+    }
+
+    // ---- Mutable accessor tests ----
+
+    #[test]
+    fn gossip_mut_and_admission_mut_accessible() {
+        let mut node = test_node("node-1");
+        // Should not panic - verifies mutable borrows work
+        let _ = node.gossip_mut();
+        let _ = node.admission_mut();
+    }
+
+    // ---- Error type coverage ----
+
+    #[test]
+    fn error_types_display_correctly() {
+        let err = MeshNodeEnforcementError::HolderProofRequired {
+            holder_node: "node-1".to_string(),
+        };
+        assert!(err.to_string().contains("holder proof required"));
+
+        let err = MeshNodeEnforcementError::HolderProofNodeMismatch {
+            expected: "node-1".to_string(),
+            actual: "node-2".to_string(),
+        };
+        assert!(err.to_string().contains("node mismatch"));
+
+        let err = MeshNodeEnforcementError::HolderProofInvalid;
+        assert!(err.to_string().contains("verification failed"));
+
+        let err = MeshNodeEnforcementError::HolderKeyMissing {
+            holder_node: "node-1".to_string(),
+        };
+        assert!(err.to_string().contains("key missing"));
+
+        let err = MeshNodeEnforcementError::MissingTokenJti;
+        assert!(err.to_string().contains("missing jti"));
+
+        let err = MeshNodeEnforcementError::TokenRevoked {
+            token_id: ObjectId::from_bytes([0x00; 32]),
+        };
+        assert!(err.to_string().contains("revoked"));
+    }
+
+    #[test]
+    fn mesh_node_error_variants_display() {
+        let admission_err = AdmissionError::ObjectQuarantined {
+            object_id: "test".to_string(),
+        };
+        let err = MeshNodeError::Admission(admission_err);
+        assert!(err.to_string().contains("admission rejected"));
+
+        let sym_err = SymbolRequestError::AlreadyComplete {
+            object_id: "test".to_string(),
+        };
+        let err = MeshNodeError::SymbolRequest(sym_err);
+        assert!(err.to_string().contains("symbol request error"));
+    }
+}

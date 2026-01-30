@@ -882,6 +882,158 @@ mod tests {
     }
 
     #[test]
+    fn decode_status_complete_stops_transfer() {
+        let mut handler = SymbolRequestHandler::with_default_policy();
+        let object_id = ObjectId::from_bytes([0x11; 32]);
+
+        // Start a transfer
+        let request = test_symbol_request(50, None);
+        handler.track_transfer(&request, 0..10);
+        assert_eq!(handler.active_transfer_count(), 1);
+
+        // Process decode status marking transfer complete
+        let status = DecodeStatus {
+            header: test_object_header(),
+            object_id: object_id.clone(),
+            zone_id: test_zone_id(),
+            zone_key_id: ZoneKeyId::from_bytes([0x22; 8]),
+            epoch_id: 1000,
+            received_unique: 50,
+            needed: 0,
+            complete: true,
+            missing_hint: None,
+            signature: fcp_crypto::Ed25519Signature::from_bytes(&[0u8; 64]),
+        };
+        handler.process_decode_status(&status);
+
+        // Transfer should be stopped
+        assert!(handler.should_stop(&object_id));
+    }
+
+    #[test]
+    fn track_transfer_accumulates_sent_esis() {
+        let mut handler = SymbolRequestHandler::with_default_policy();
+        let request = test_symbol_request(100, None);
+
+        handler.track_transfer(&request, 0..5);
+        assert_eq!(handler.active_transfer_count(), 1);
+
+        // Track more symbols for the same object
+        handler.track_transfer(&request, 5..10);
+        assert_eq!(handler.active_transfer_count(), 1); // Same transfer
+    }
+
+    #[test]
+    fn should_stop_after_ack() {
+        let mut handler = SymbolRequestHandler::with_default_policy();
+        let object_id = ObjectId::from_bytes([0x11; 32]);
+
+        // Initially not stopped
+        assert!(!handler.should_stop(&object_id));
+
+        // Start tracking then ack
+        let request = test_symbol_request(50, None);
+        handler.track_transfer(&request, 0..5);
+
+        let ack = SymbolAck::new(
+            test_object_header(),
+            object_id.clone(),
+            test_zone_id(),
+            ZoneKeyId::from_bytes([0x22; 8]),
+            1000,
+            SymbolAckReason::Complete,
+            5,
+        );
+        handler.process_symbol_ack(&ack);
+
+        // Should stop and be fully cleaned up
+        assert!(handler.should_stop(&object_id));
+        assert_eq!(handler.active_transfer_count(), 0);
+    }
+
+    #[test]
+    fn policy_disallow_unauthenticated_rejects() {
+        let policy = SymbolRequestPolicy {
+            allow_unauthenticated: false,
+            ..SymbolRequestPolicy::default()
+        };
+        let handler = SymbolRequestHandler::new(policy);
+        let mut admission = AdmissionController::with_default_policy();
+        let peer = NodeId::new("peer-no-auth");
+
+        let request = test_symbol_request(10, None);
+        let result = handler.validate_request(&request, false, &mut admission, &peer, 0, 64);
+        assert!(matches!(
+            result,
+            Err(SymbolRequestError::AdmissionRejected(_))
+        ));
+    }
+
+    #[test]
+    fn targeted_repair_remove_object() {
+        let mut engine = TargetedRepairEngine::new();
+        let object_id = ObjectId::from_bytes([0x11; 32]);
+
+        engine.register_available(object_id.clone(), 0..10);
+
+        let request = ValidatedRequest {
+            request: test_symbol_request(10, None),
+            is_authenticated: true,
+            max_response_symbols: 10,
+            has_proof_of_need: false,
+        };
+
+        // Should have symbols
+        let selected = engine.select_symbols(&request, &HashSet::new());
+        assert!(!selected.is_empty());
+
+        // Remove and verify gone
+        engine.remove_object(&object_id);
+        let selected = engine.select_symbols(&request, &HashSet::new());
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn response_builder_empty_availability() {
+        let engine = TargetedRepairEngine::new(); // No symbols registered
+        let object_id = ObjectId::from_bytes([0x11; 32]);
+
+        let request = ValidatedRequest {
+            request: test_symbol_request(50, None),
+            is_authenticated: true,
+            max_response_symbols: 50,
+            has_proof_of_need: false,
+        };
+
+        let response = SymbolResponseBuilder::new(
+            object_id,
+            test_zone_id(),
+            ZoneKeyId::from_bytes([0x22; 8]),
+            50,
+        )
+        .add_from_repair_engine(&engine, &request, &HashSet::new())
+        .build(0);
+
+        assert_eq!(response.symbol_count(), 0);
+        assert!(response.is_final);
+    }
+
+    #[test]
+    fn authenticated_request_bounded_by_request_max() {
+        let handler = SymbolRequestHandler::with_default_policy();
+        let mut admission = AdmissionController::with_default_policy();
+        let peer = NodeId::new("peer-bounded");
+
+        // Request max_symbols (50) < policy max (1000)
+        let request = test_symbol_request(50, None);
+        let result = handler.validate_request(&request, true, &mut admission, &peer, 0, 64);
+
+        let validated = result.unwrap();
+        // Should be bounded to the request's max, not the policy's max
+        assert_eq!(validated.max_response_symbols, 50);
+    }
+
+    #[test]
     fn metrics_tracking() {
         let mut metrics = SymbolRequestMetrics::default();
 

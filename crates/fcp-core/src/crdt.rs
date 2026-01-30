@@ -288,3 +288,529 @@ impl PnCounter {
         self.negative.merge(&other.negative);
     }
 }
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn actor(name: &str) -> CrdtActorId {
+        CrdtActorId::new(name)
+    }
+
+    fn tag(name: &str, nonce: u64) -> OrSetTag {
+        OrSetTag::new(actor(name), nonce)
+    }
+
+    // ---- CrdtActorId tests ----
+
+    #[test]
+    fn actor_id_display_and_conversions() {
+        let a = CrdtActorId::new("node-1");
+        assert_eq!(a.as_str(), "node-1");
+        assert_eq!(a.to_string(), "node-1");
+        assert_eq!(a.as_ref(), "node-1");
+
+        let b: CrdtActorId = "node-2".into();
+        assert_eq!(b.as_str(), "node-2");
+
+        let c: CrdtActorId = String::from("node-3").into();
+        assert_eq!(c.as_str(), "node-3");
+    }
+
+    #[test]
+    fn actor_id_from_tailscale_node_id() {
+        let ts = TailscaleNodeId::new("ts-node-1");
+        let a: CrdtActorId = ts.into();
+        assert_eq!(a.as_str(), "ts-node-1");
+
+        let ts2 = TailscaleNodeId::new("ts-node-2");
+        let b: CrdtActorId = (&ts2).into();
+        assert_eq!(b.as_str(), "ts-node-2");
+    }
+
+    #[test]
+    fn actor_id_ordering() {
+        let a = actor("aaa");
+        let b = actor("bbb");
+        assert!(a < b);
+        assert!(b > a);
+    }
+
+    // ---- LwwEntry tests ----
+
+    #[test]
+    fn lww_entry_higher_timestamp_wins() {
+        let newer = LwwEntry {
+            value: "new",
+            timestamp: 200,
+            actor: actor("A"),
+        };
+        let older = LwwEntry {
+            value: "old",
+            timestamp: 100,
+            actor: actor("A"),
+        };
+        assert!(newer.wins_over(&older));
+        assert!(!older.wins_over(&newer));
+    }
+
+    #[test]
+    fn lww_entry_same_timestamp_actor_tiebreak() {
+        let a = LwwEntry {
+            value: 1,
+            timestamp: 100,
+            actor: actor("aaa"),
+        };
+        let b = LwwEntry {
+            value: 2,
+            timestamp: 100,
+            actor: actor("bbb"),
+        };
+        // "bbb" > "aaa" lexicographically, so b wins
+        assert!(b.wins_over(&a));
+        assert!(!a.wins_over(&b));
+    }
+
+    #[test]
+    fn lww_entry_identical_neither_wins() {
+        let a = LwwEntry {
+            value: 1,
+            timestamp: 100,
+            actor: actor("same"),
+        };
+        let b = LwwEntry {
+            value: 1,
+            timestamp: 100,
+            actor: actor("same"),
+        };
+        // Neither wins over the other (equal)
+        assert!(!a.wins_over(&b));
+        assert!(!b.wins_over(&a));
+    }
+
+    // ---- LwwMap tests ----
+
+    #[test]
+    fn lww_map_insert_and_get() {
+        let mut map: LwwMap<String, i32> = LwwMap::default();
+        map.insert("key".to_string(), 42, 100, actor("A"));
+
+        let entry = map.get(&"key".to_string()).expect("key should exist");
+        assert_eq!(entry.value, 42);
+        assert_eq!(entry.timestamp, 100);
+    }
+
+    #[test]
+    fn lww_map_newer_overwrites_older() {
+        let mut map: LwwMap<String, i32> = LwwMap::default();
+        map.insert("k".to_string(), 1, 100, actor("A"));
+        map.insert("k".to_string(), 2, 200, actor("A"));
+
+        assert_eq!(map.get(&"k".to_string()).unwrap().value, 2);
+    }
+
+    #[test]
+    fn lww_map_older_does_not_overwrite_newer() {
+        let mut map: LwwMap<String, i32> = LwwMap::default();
+        map.insert("k".to_string(), 1, 200, actor("A"));
+        map.insert("k".to_string(), 2, 100, actor("A")); // older timestamp
+
+        assert_eq!(map.get(&"k".to_string()).unwrap().value, 1);
+    }
+
+    #[test]
+    fn lww_map_len_and_is_empty() {
+        let mut map: LwwMap<String, i32> = LwwMap::default();
+        assert!(map.is_empty());
+        assert_eq!(map.len(), 0);
+
+        map.insert("a".to_string(), 1, 100, actor("A"));
+        map.insert("b".to_string(), 2, 100, actor("A"));
+        assert_eq!(map.len(), 2);
+        assert!(!map.is_empty());
+    }
+
+    #[test]
+    fn lww_map_merge_takes_newer_values() {
+        let mut map1: LwwMap<String, i32> = LwwMap::default();
+        map1.insert("k".to_string(), 1, 100, actor("A"));
+
+        let mut map2: LwwMap<String, i32> = LwwMap::default();
+        map2.insert("k".to_string(), 2, 200, actor("B"));
+
+        map1.merge(&map2);
+        assert_eq!(map1.get(&"k".to_string()).unwrap().value, 2);
+    }
+
+    #[test]
+    fn lww_map_merge_keeps_newer_local() {
+        let mut map1: LwwMap<String, i32> = LwwMap::default();
+        map1.insert("k".to_string(), 1, 200, actor("A"));
+
+        let mut map2: LwwMap<String, i32> = LwwMap::default();
+        map2.insert("k".to_string(), 2, 100, actor("B"));
+
+        map1.merge(&map2);
+        assert_eq!(map1.get(&"k".to_string()).unwrap().value, 1);
+    }
+
+    #[test]
+    fn lww_map_merge_adds_new_keys() {
+        let mut map1: LwwMap<String, i32> = LwwMap::default();
+        map1.insert("a".to_string(), 1, 100, actor("A"));
+
+        let mut map2: LwwMap<String, i32> = LwwMap::default();
+        map2.insert("b".to_string(), 2, 100, actor("B"));
+
+        map1.merge(&map2);
+        assert_eq!(map1.len(), 2);
+        assert_eq!(map1.get(&"a".to_string()).unwrap().value, 1);
+        assert_eq!(map1.get(&"b".to_string()).unwrap().value, 2);
+    }
+
+    #[test]
+    fn lww_map_merge_is_commutative() {
+        let mut a: LwwMap<String, i32> = LwwMap::default();
+        a.insert("k".to_string(), 1, 100, actor("X"));
+
+        let mut b: LwwMap<String, i32> = LwwMap::default();
+        b.insert("k".to_string(), 2, 200, actor("Y"));
+
+        let mut ab = a.clone();
+        ab.merge(&b);
+
+        let mut ba = b.clone();
+        ba.merge(&a);
+
+        assert_eq!(
+            ab.get(&"k".to_string()).unwrap().value,
+            ba.get(&"k".to_string()).unwrap().value
+        );
+    }
+
+    #[test]
+    fn lww_map_merge_is_idempotent() {
+        let mut map: LwwMap<String, i32> = LwwMap::default();
+        map.insert("k".to_string(), 42, 100, actor("A"));
+
+        let snapshot = map.clone();
+        map.merge(&snapshot);
+        assert_eq!(map, snapshot);
+    }
+
+    // ---- OrSet tests ----
+
+    #[test]
+    fn or_set_add_and_contains() {
+        let mut set: OrSet<String> = OrSet::default();
+        assert!(!set.contains(&"x".to_string()));
+
+        set.add("x".to_string(), tag("A", 1));
+        assert!(set.contains(&"x".to_string()));
+    }
+
+    #[test]
+    fn or_set_remove_observed() {
+        let mut set: OrSet<String> = OrSet::default();
+        set.add("x".to_string(), tag("A", 1));
+        assert!(set.contains(&"x".to_string()));
+
+        set.remove_observed(&"x".to_string());
+        assert!(!set.contains(&"x".to_string()));
+    }
+
+    #[test]
+    fn or_set_add_after_remove_with_new_tag() {
+        let mut set: OrSet<String> = OrSet::default();
+        set.add("x".to_string(), tag("A", 1));
+        set.remove_observed(&"x".to_string());
+        assert!(!set.contains(&"x".to_string()));
+
+        // Re-add with a new unique tag
+        set.add("x".to_string(), tag("A", 2));
+        assert!(set.contains(&"x".to_string()));
+    }
+
+    #[test]
+    fn or_set_add_with_already_removed_tag_ignored() {
+        let mut set: OrSet<String> = OrSet::default();
+        set.add("x".to_string(), tag("A", 1));
+        set.remove_observed(&"x".to_string());
+
+        // Re-add with the SAME tag that was removed — should be ignored
+        set.add("x".to_string(), tag("A", 1));
+        assert!(!set.contains(&"x".to_string()));
+    }
+
+    #[test]
+    fn or_set_len_and_values() {
+        let mut set: OrSet<String> = OrSet::default();
+        set.add("a".to_string(), tag("A", 1));
+        set.add("b".to_string(), tag("A", 2));
+        set.add("c".to_string(), tag("A", 3));
+
+        assert_eq!(set.len(), 3);
+        assert!(!set.is_empty());
+
+        let mut vals = set.values();
+        vals.sort();
+        assert_eq!(vals, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn or_set_len_excludes_removed() {
+        let mut set: OrSet<String> = OrSet::default();
+        set.add("a".to_string(), tag("A", 1));
+        set.add("b".to_string(), tag("A", 2));
+        set.remove_observed(&"a".to_string());
+
+        assert_eq!(set.len(), 1);
+        assert_eq!(set.values(), vec!["b".to_string()]);
+    }
+
+    #[test]
+    fn or_set_merge_concurrent_add_add() {
+        let mut set1: OrSet<String> = OrSet::default();
+        set1.add("x".to_string(), tag("A", 1));
+
+        let mut set2: OrSet<String> = OrSet::default();
+        set2.add("x".to_string(), tag("B", 1));
+
+        set1.merge(&set2);
+        // Both adds preserved — element is present
+        assert!(set1.contains(&"x".to_string()));
+    }
+
+    #[test]
+    fn or_set_merge_concurrent_add_remove() {
+        // Actor A adds, actor B concurrently adds and removes
+        let mut set1: OrSet<String> = OrSet::default();
+        set1.add("x".to_string(), tag("A", 1));
+
+        let mut set2: OrSet<String> = OrSet::default();
+        set2.add("x".to_string(), tag("B", 1));
+        set2.remove_observed(&"x".to_string()); // removes tag B:1
+
+        set1.merge(&set2);
+        // A's add (tag A:1) was not in B's remove set, so element persists
+        assert!(set1.contains(&"x".to_string()));
+    }
+
+    #[test]
+    fn or_set_merge_both_removed() {
+        let mut set1: OrSet<String> = OrSet::default();
+        set1.add("x".to_string(), tag("A", 1));
+        set1.remove_observed(&"x".to_string());
+
+        let mut set2: OrSet<String> = OrSet::default();
+        set2.add("x".to_string(), tag("A", 1));
+        set2.remove_observed(&"x".to_string());
+
+        set1.merge(&set2);
+        assert!(!set1.contains(&"x".to_string()));
+    }
+
+    #[test]
+    fn or_set_merge_is_commutative() {
+        let mut a: OrSet<String> = OrSet::default();
+        a.add("x".to_string(), tag("A", 1));
+        a.add("y".to_string(), tag("A", 2));
+
+        let mut b: OrSet<String> = OrSet::default();
+        b.add("x".to_string(), tag("B", 1));
+        b.add("z".to_string(), tag("B", 2));
+
+        let mut ab = a.clone();
+        ab.merge(&b);
+        let mut ba = b.clone();
+        ba.merge(&a);
+
+        let mut vals_ab = ab.values();
+        vals_ab.sort();
+        let mut vals_ba = ba.values();
+        vals_ba.sort();
+        assert_eq!(vals_ab, vals_ba);
+    }
+
+    #[test]
+    fn or_set_merge_is_idempotent() {
+        let mut set: OrSet<String> = OrSet::default();
+        set.add("x".to_string(), tag("A", 1));
+        set.add("y".to_string(), tag("A", 2));
+
+        let snapshot = set.clone();
+        set.merge(&snapshot);
+        assert_eq!(set, snapshot);
+    }
+
+    // ---- GCounter tests ----
+
+    #[test]
+    fn gcounter_starts_at_zero() {
+        let counter = GCounter::default();
+        assert_eq!(counter.value(), 0);
+    }
+
+    #[test]
+    fn gcounter_increment_single_actor() {
+        let mut counter = GCounter::default();
+        counter.increment(actor("A"), 5);
+        assert_eq!(counter.value(), 5);
+
+        counter.increment(actor("A"), 3);
+        assert_eq!(counter.value(), 8);
+    }
+
+    #[test]
+    fn gcounter_increment_multiple_actors() {
+        let mut counter = GCounter::default();
+        counter.increment(actor("A"), 10);
+        counter.increment(actor("B"), 20);
+        counter.increment(actor("C"), 30);
+        assert_eq!(counter.value(), 60);
+    }
+
+    #[test]
+    fn gcounter_merge_takes_max_per_actor() {
+        let mut c1 = GCounter::default();
+        c1.increment(actor("A"), 10);
+        c1.increment(actor("B"), 5);
+
+        let mut c2 = GCounter::default();
+        c2.increment(actor("A"), 7); // lower than c1's A
+        c2.increment(actor("B"), 15); // higher than c1's B
+        c2.increment(actor("C"), 20); // new actor
+
+        c1.merge(&c2);
+        assert_eq!(*c1.counts.get(&actor("A")).unwrap(), 10); // max(10, 7)
+        assert_eq!(*c1.counts.get(&actor("B")).unwrap(), 15); // max(5, 15)
+        assert_eq!(*c1.counts.get(&actor("C")).unwrap(), 20); // new
+        assert_eq!(c1.value(), 45);
+    }
+
+    #[test]
+    fn gcounter_merge_is_commutative() {
+        let mut a = GCounter::default();
+        a.increment(actor("A"), 10);
+
+        let mut b = GCounter::default();
+        b.increment(actor("B"), 20);
+
+        let mut ab = a.clone();
+        ab.merge(&b);
+        let mut ba = b.clone();
+        ba.merge(&a);
+
+        assert_eq!(ab.value(), ba.value());
+    }
+
+    #[test]
+    fn gcounter_merge_is_idempotent() {
+        let mut counter = GCounter::default();
+        counter.increment(actor("A"), 10);
+
+        let snapshot = counter.clone();
+        counter.merge(&snapshot);
+        assert_eq!(counter, snapshot);
+    }
+
+    #[test]
+    fn gcounter_saturating_add() {
+        let mut counter = GCounter::default();
+        counter.increment(actor("A"), u64::MAX);
+        counter.increment(actor("A"), 1); // should saturate, not overflow
+        assert_eq!(*counter.counts.get(&actor("A")).unwrap(), u64::MAX);
+    }
+
+    #[test]
+    fn gcounter_value_saturating_sum() {
+        let mut counter = GCounter::default();
+        counter.increment(actor("A"), u64::MAX);
+        counter.increment(actor("B"), 1);
+        assert_eq!(counter.value(), u64::MAX); // saturating
+    }
+
+    // ---- PnCounter tests ----
+
+    #[test]
+    fn pn_counter_starts_at_zero() {
+        let counter = PnCounter::default();
+        assert_eq!(counter.value(), 0);
+    }
+
+    #[test]
+    fn pn_counter_increment_and_decrement() {
+        let mut counter = PnCounter::default();
+        counter.increment(actor("A"), 10);
+        assert_eq!(counter.value(), 10);
+
+        counter.decrement(actor("A"), 3);
+        assert_eq!(counter.value(), 7);
+    }
+
+    #[test]
+    fn pn_counter_can_go_negative() {
+        let mut counter = PnCounter::default();
+        counter.decrement(actor("A"), 5);
+        assert_eq!(counter.value(), -5);
+    }
+
+    #[test]
+    fn pn_counter_multiple_actors() {
+        let mut counter = PnCounter::default();
+        counter.increment(actor("A"), 100);
+        counter.decrement(actor("B"), 30);
+        counter.increment(actor("C"), 50);
+        counter.decrement(actor("A"), 20);
+        assert_eq!(counter.value(), 100); // 150 - 50
+    }
+
+    #[test]
+    fn pn_counter_merge() {
+        let mut c1 = PnCounter::default();
+        c1.increment(actor("A"), 10);
+        c1.decrement(actor("B"), 3);
+
+        let mut c2 = PnCounter::default();
+        c2.increment(actor("A"), 5);
+        c2.decrement(actor("C"), 2);
+
+        c1.merge(&c2);
+        // positive: A=max(10,5)=10
+        // negative: B=3, C=2
+        assert_eq!(c1.value(), 5); // 10 - (3+2)
+    }
+
+    #[test]
+    fn pn_counter_merge_is_commutative() {
+        let mut a = PnCounter::default();
+        a.increment(actor("X"), 10);
+        a.decrement(actor("Y"), 3);
+
+        let mut b = PnCounter::default();
+        b.increment(actor("Y"), 5);
+        b.decrement(actor("X"), 2);
+
+        let mut ab = a.clone();
+        ab.merge(&b);
+        let mut ba = b.clone();
+        ba.merge(&a);
+
+        assert_eq!(ab.value(), ba.value());
+    }
+
+    #[test]
+    fn pn_counter_merge_is_idempotent() {
+        let mut counter = PnCounter::default();
+        counter.increment(actor("A"), 10);
+        counter.decrement(actor("B"), 3);
+
+        let snapshot = counter.clone();
+        counter.merge(&snapshot);
+        assert_eq!(counter, snapshot);
+    }
+}

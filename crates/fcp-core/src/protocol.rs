@@ -857,6 +857,18 @@ impl SimulateResponse {
     }
 }
 
+/// Confidence label for cost estimates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CostEstimateConfidence {
+    /// Low confidence estimate (rough order-of-magnitude).
+    Low,
+    /// Medium confidence estimate (reasonable bounds).
+    Medium,
+    /// High confidence estimate (tight bounds, stable basis).
+    High,
+}
+
 /// Cost estimate for simulation (NORMATIVE when present).
 ///
 /// Per FCP Specification Section 9.4:
@@ -889,6 +901,10 @@ pub struct CostEstimate {
     /// pricing information. Do NOT embed volatile price tables.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub currency: Option<CurrencyCost>,
+
+    /// Confidence label for the estimate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<CostEstimateConfidence>,
 }
 
 impl CostEstimate {
@@ -900,6 +916,7 @@ impl CostEstimate {
             estimated_duration_ms: None,
             estimated_bytes: None,
             currency: None,
+            confidence: None,
         }
     }
 
@@ -911,6 +928,7 @@ impl CostEstimate {
             estimated_duration_ms: Some(duration_ms),
             estimated_bytes: None,
             currency: None,
+            confidence: None,
         }
     }
 
@@ -922,6 +940,7 @@ impl CostEstimate {
             estimated_duration_ms: None,
             estimated_bytes: Some(bytes),
             currency: None,
+            confidence: None,
         }
     }
 
@@ -950,6 +969,13 @@ impl CostEstimate {
     #[must_use]
     pub fn and_currency(mut self, currency: CurrencyCost) -> Self {
         self.currency = Some(currency);
+        self
+    }
+
+    /// Add a confidence label to the estimate.
+    #[must_use]
+    pub const fn and_confidence(mut self, confidence: CostEstimateConfidence) -> Self {
+        self.confidence = Some(confidence);
         self
     }
 }
@@ -2309,6 +2335,7 @@ mod tests {
         assert!(cost.estimated_duration_ms.is_none());
         assert!(cost.estimated_bytes.is_none());
         assert!(cost.currency.is_none());
+        assert!(cost.confidence.is_none());
     }
 
     #[test]
@@ -2316,12 +2343,14 @@ mod tests {
         let cost = CostEstimate::with_duration_ms(250);
         assert!(cost.api_credits.is_none());
         assert_eq!(cost.estimated_duration_ms, Some(250));
+        assert!(cost.confidence.is_none());
     }
 
     #[test]
     fn cost_estimate_with_bytes() {
         let cost = CostEstimate::with_bytes(8192);
         assert_eq!(cost.estimated_bytes, Some(8192));
+        assert!(cost.confidence.is_none());
     }
 
     #[test]
@@ -2329,12 +2358,14 @@ mod tests {
         let cost = CostEstimate::with_credits(100)
             .and_duration_ms(50)
             .and_bytes(1024)
-            .and_currency(CurrencyCost::usd_cents(5));
+            .and_currency(CurrencyCost::usd_cents(5))
+            .and_confidence(CostEstimateConfidence::High);
 
         assert_eq!(cost.api_credits, Some(100));
         assert_eq!(cost.estimated_duration_ms, Some(50));
         assert_eq!(cost.estimated_bytes, Some(1024));
         assert!(cost.currency.is_some());
+        assert_eq!(cost.confidence, Some(CostEstimateConfidence::High));
         let currency = cost.currency.unwrap();
         assert_eq!(currency.amount_cents, 5);
         assert_eq!(currency.currency_code, "USD");
@@ -2347,6 +2378,7 @@ mod tests {
         assert!(cost.estimated_duration_ms.is_none());
         assert!(cost.estimated_bytes.is_none());
         assert!(cost.currency.is_none());
+        assert!(cost.confidence.is_none());
     }
 
     #[test]
@@ -2354,7 +2386,8 @@ mod tests {
         let cost = CostEstimate::with_credits(1500)
             .and_duration_ms(300)
             .and_bytes(2048)
-            .and_currency(CurrencyCost::new(10, "EUR"));
+            .and_currency(CurrencyCost::new(10, "EUR"))
+            .and_confidence(CostEstimateConfidence::Medium);
 
         let json = serde_json::to_string(&cost).unwrap();
         let deserialized: CostEstimate = serde_json::from_str(&json).unwrap();
@@ -2363,6 +2396,10 @@ mod tests {
         assert_eq!(deserialized.estimated_duration_ms, Some(300));
         assert_eq!(deserialized.estimated_bytes, Some(2048));
         assert!(deserialized.currency.is_some());
+        assert_eq!(
+            deserialized.confidence,
+            Some(CostEstimateConfidence::Medium)
+        );
         let currency = deserialized.currency.unwrap();
         assert_eq!(currency.amount_cents, 10);
         assert_eq!(currency.currency_code, "EUR");

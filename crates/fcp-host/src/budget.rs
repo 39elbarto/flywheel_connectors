@@ -138,8 +138,54 @@ impl BudgetTracker {
         };
 
         let action = match (exceeded, policy.enforcement) {
-            (true, BudgetEnforcement::Deny) => BudgetAction::Deny,
-            (true, BudgetEnforcement::Warn) => BudgetAction::Warn,
+            (true, BudgetEnforcement::Deny) => {
+                let exceeded_budgets: Vec<_> = snapshot
+                    .budgets
+                    .iter()
+                    .filter(|b| b.status == BudgetStatus::Exceeded)
+                    .collect();
+                tracing::warn!(
+                    zone_id = %zone_id,
+                    action = "deny",
+                    exceeded_count = exceeded_budgets.len(),
+                    "budget exceeded"
+                );
+                for exceeded in exceeded_budgets {
+                    tracing::debug!(
+                        zone_id = %zone_id,
+                        metric = ?exceeded.metric,
+                        used = exceeded.used,
+                        limit = exceeded.limit,
+                        remaining = exceeded.remaining,
+                        "budget limit exceeded"
+                    );
+                }
+                BudgetAction::Deny
+            }
+            (true, BudgetEnforcement::Warn) => {
+                let exceeded_budgets: Vec<_> = snapshot
+                    .budgets
+                    .iter()
+                    .filter(|b| b.status == BudgetStatus::Exceeded)
+                    .collect();
+                tracing::warn!(
+                    zone_id = %zone_id,
+                    action = "warn",
+                    exceeded_count = exceeded_budgets.len(),
+                    "budget warning threshold exceeded"
+                );
+                for exceeded in exceeded_budgets {
+                    tracing::debug!(
+                        zone_id = %zone_id,
+                        metric = ?exceeded.metric,
+                        used = exceeded.used,
+                        limit = exceeded.limit,
+                        remaining = exceeded.remaining,
+                        "budget limit exceeded"
+                    );
+                }
+                BudgetAction::Warn
+            }
             (false, _) => BudgetAction::Allow,
         };
 
@@ -472,19 +518,19 @@ mod tests {
         assert_eq!(eval.action, BudgetAction::Deny);
 
         let error = eval.to_error().expect("expected FcpError::BudgetExceeded");
-        match error {
-            FcpError::BudgetExceeded {
-                metric,
-                used,
-                limit,
-                window_seconds,
-            } => {
-                assert_eq!(metric, UsageMetricKind::Requests);
-                assert_eq!(used, 15);
-                assert_eq!(limit, 10);
-                assert_eq!(window_seconds, 3600);
-            }
-            other => panic!("expected BudgetExceeded, got {other:?}"),
+        if let FcpError::BudgetExceeded {
+            metric,
+            used,
+            limit,
+            window_seconds,
+        } = error
+        {
+            assert_eq!(metric, UsageMetricKind::Requests);
+            assert_eq!(used, 15);
+            assert_eq!(limit, 10);
+            assert_eq!(window_seconds, 3600);
+        } else {
+            unreachable!("expected BudgetExceeded");
         }
     }
 
@@ -555,7 +601,7 @@ mod tests {
     #[test]
     fn budget_tracker_tracks_zones_independently() {
         let zone_work = ZoneId::work();
-        let zone_personal = ZoneId::personal();
+        let zone_private = ZoneId::private();
         let policy = UsageBudgetPolicy {
             enforcement: BudgetEnforcement::Deny,
             budgets: vec![UsageBudgetLimit {
@@ -572,20 +618,19 @@ mod tests {
         assert_eq!(eval_work.snapshot.budgets[0].used, 80);
         assert_eq!(eval_work.snapshot.zone_id, zone_work);
 
-        let eval_personal =
-            tracker.record_usage(&zone_personal, &policy, &[UsageMetric::tokens(50)]);
-        assert_eq!(eval_personal.action, BudgetAction::Allow);
-        assert_eq!(eval_personal.snapshot.budgets[0].used, 50);
-        assert_eq!(eval_personal.snapshot.zone_id, zone_personal);
+        let eval_private = tracker.record_usage(&zone_private, &policy, &[UsageMetric::tokens(50)]);
+        assert_eq!(eval_private.action, BudgetAction::Allow);
+        assert_eq!(eval_private.snapshot.budgets[0].used, 50);
+        assert_eq!(eval_private.snapshot.zone_id, zone_private);
 
         let eval_work2 = tracker.record_usage(&zone_work, &policy, &[UsageMetric::tokens(30)]);
         assert_eq!(eval_work2.action, BudgetAction::Deny);
         assert_eq!(eval_work2.snapshot.budgets[0].used, 110);
 
-        let eval_personal2 =
-            tracker.record_usage(&zone_personal, &policy, &[UsageMetric::tokens(30)]);
-        assert_eq!(eval_personal2.action, BudgetAction::Allow);
-        assert_eq!(eval_personal2.snapshot.budgets[0].used, 80);
+        let eval_private2 =
+            tracker.record_usage(&zone_private, &policy, &[UsageMetric::tokens(30)]);
+        assert_eq!(eval_private2.action, BudgetAction::Allow);
+        assert_eq!(eval_private2.snapshot.budgets[0].used, 80);
     }
 
     #[test]
@@ -601,7 +646,7 @@ mod tests {
         };
 
         let mut tracker = BudgetTracker::new();
-        tracker.record_usage(&zone, &policy, &[UsageMetric::tokens(45)]);
+        let _ = tracker.record_usage(&zone, &policy, &[UsageMetric::tokens(45)]);
 
         let snapshot = tracker.snapshot(&zone, &policy);
         assert_eq!(snapshot.zone_id, zone);
@@ -678,5 +723,77 @@ mod tests {
 
         assert_eq!(eval.snapshot.zone_id, zone);
         assert_eq!(eval.snapshot.enforcement, BudgetEnforcement::Warn);
+    }
+
+    #[test]
+    fn budget_deny_emits_structured_log_with_zone_id() {
+        use fcp_testkit::LogCapture;
+
+        let capture = LogCapture::new();
+        let _guard = capture.install_json_with_filter("warn");
+
+        let zone = ZoneId::work();
+        let policy = UsageBudgetPolicy {
+            enforcement: BudgetEnforcement::Deny,
+            budgets: vec![UsageBudgetLimit {
+                metric: UsageMetricKind::Tokens,
+                limit: 100,
+                window_seconds: 60,
+            }],
+        };
+
+        let mut tracker = BudgetTracker::new();
+        let eval = tracker.record_usage(&zone, &policy, &[UsageMetric::tokens(150)]);
+        assert_eq!(eval.action, BudgetAction::Deny);
+
+        let logs = capture.jsonl();
+        assert!(
+            logs.contains("budget exceeded"),
+            "expected 'budget exceeded' in logs, got: {logs}"
+        );
+        assert!(
+            logs.contains("zone_id"),
+            "expected 'zone_id' in logs, got: {logs}"
+        );
+        assert!(
+            logs.contains("deny"),
+            "expected 'deny' action in logs, got: {logs}"
+        );
+    }
+
+    #[test]
+    fn budget_warn_emits_structured_log_with_zone_id() {
+        use fcp_testkit::LogCapture;
+
+        let capture = LogCapture::new();
+        let _guard = capture.install_json_with_filter("warn");
+
+        let zone = ZoneId::work();
+        let policy = UsageBudgetPolicy {
+            enforcement: BudgetEnforcement::Warn,
+            budgets: vec![UsageBudgetLimit {
+                metric: UsageMetricKind::Tokens,
+                limit: 100,
+                window_seconds: 60,
+            }],
+        };
+
+        let mut tracker = BudgetTracker::new();
+        let eval = tracker.record_usage(&zone, &policy, &[UsageMetric::tokens(150)]);
+        assert_eq!(eval.action, BudgetAction::Warn);
+
+        let logs = capture.jsonl();
+        assert!(
+            logs.contains("budget warning threshold exceeded"),
+            "expected 'budget warning threshold exceeded' in logs, got: {logs}"
+        );
+        assert!(
+            logs.contains("zone_id"),
+            "expected 'zone_id' in logs, got: {logs}"
+        );
+        assert!(
+            logs.contains("warn"),
+            "expected 'warn' action in logs, got: {logs}"
+        );
     }
 }

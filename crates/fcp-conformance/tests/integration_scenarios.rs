@@ -40,23 +40,24 @@ use fcp_conformance::harness::{
     HarnessError, LogCollector, LogEntry, MockClock, SimulatedNetwork, TestHarness,
 };
 use fcp_tailscale::NodeId;
+use serde::Serialize;
 use serde_json::json;
 
-/// Correlation ID prefix for this test module.
-#[allow(dead_code)]
-const MODULE: &str = "fcp-conformance::integration_scenarios";
-
 /// Helper to emit a structured scenario log entry.
-#[allow(dead_code, clippy::needless_pass_by_value)]
-fn emit_scenario_log(
+fn emit_scenario_log<E: Serialize>(
     logs: &LogCollector,
     scenario: &str,
     phase: &str,
     nodes: &[&str],
     assertion: &str,
     result: &str,
-    evidence: serde_json::Value,
+    evidence: E,
 ) {
+    let evidence = serde_json::to_value(evidence).unwrap_or_else(|error| {
+        json!({
+            "error": error.to_string(),
+        })
+    });
     let entry = LogEntry::new(
         "harness",
         scenario,
@@ -117,9 +118,7 @@ async fn scenario_partition_heal_convergence() {
     harness.heal_partition();
 
     // Phase 3: Wait for convergence
-    let convergence_result = harness
-        .wait_for_convergence(Duration::from_secs(30))
-        .await;
+    let convergence_result = harness.wait_for_convergence(Duration::from_secs(30)).await;
 
     let result = if convergence_result.is_ok() {
         "pass"
@@ -842,7 +841,10 @@ fn simulated_network_respects_partitions() {
         to: node_a,
         payload: vec![7, 8, 9],
     };
-    assert!(network.send(0, msg), "message should be accepted after heal");
+    assert!(
+        network.send(0, msg),
+        "message should be accepted after heal"
+    );
     assert_eq!(network.pending_len(), 2);
 }
 
@@ -880,10 +882,12 @@ fn test_harness_node_lifecycle() {
 
     // Start all
     harness.start_all().expect("start all");
-    assert!(harness
-        .nodes
-        .iter()
-        .all(fcp_conformance::harness::TestMeshNode::is_running));
+    assert!(
+        harness
+            .nodes
+            .iter()
+            .all(fcp_conformance::harness::TestMeshNode::is_running)
+    );
 
     // Can't start already running node
     assert!(matches!(

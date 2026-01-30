@@ -2,9 +2,22 @@
 
 use std::time::Duration;
 
+use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use reqwest::{Client, Response, StatusCode};
 use serde::de::DeserializeOwned;
 use tracing::{debug, instrument, warn};
+
+/// Characters that must be percent-encoded in URL query strings.
+/// See RFC 3986 Section 2.2: <https://www.rfc-editor.org/rfc/rfc3986#section-2.2>
+const QUERY_ENCODE_SET: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'<')
+    .add(b'>')
+    .add(b'&')
+    .add(b'=')
+    .add(b'+');
 
 use crate::{
     config::{RateLimitInfo, TwitterConfig},
@@ -110,13 +123,16 @@ impl TwitterApiClient {
                 method, endpoint, "Making Twitter API request"
             );
 
-            // Build the full URL with query params for signing
+            // Build the full URL with query params for signing (URL-encode values)
             let full_url = if params.is_empty() {
                 url.clone()
             } else {
                 let query = params
                     .iter()
-                    .map(|(k, v)| format!("{k}={v}"))
+                    .map(|(k, v)| {
+                        let encoded_v = utf8_percent_encode(v, QUERY_ENCODE_SET);
+                        format!("{k}={encoded_v}")
+                    })
                     .collect::<Vec<_>>()
                     .join("&");
                 format!("{url}?{query}")

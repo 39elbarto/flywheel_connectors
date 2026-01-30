@@ -400,4 +400,152 @@ mod tests {
         store.remove("user1");
         assert!(!store.has_valid_token("user1"));
     }
+
+    // ── New tests ──
+
+    #[test]
+    fn test_token_response_serde_roundtrip() {
+        let resp = mock_token_response(Some(3600));
+        let json = serde_json::to_string(&resp).unwrap();
+        let roundtrip: TokenResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip.access_token, "test_access_token");
+        assert_eq!(roundtrip.token_type, "Bearer");
+        assert_eq!(roundtrip.expires_in, Some(3600));
+        assert_eq!(
+            roundtrip.refresh_token,
+            Some("test_refresh_token".to_string())
+        );
+    }
+
+    #[test]
+    fn test_token_no_expiry_is_not_expired() {
+        let tokens = OAuthTokens::from_response(mock_token_response(None));
+        assert!(!tokens.is_expired());
+    }
+
+    #[test]
+    fn test_token_no_expiry_does_not_need_refresh() {
+        let tokens = OAuthTokens::from_response(mock_token_response(None));
+        assert!(!tokens.needs_refresh());
+    }
+
+    #[test]
+    fn test_token_time_until_expiry() {
+        // Non-expired token should return Some
+        let tokens = OAuthTokens::from_response(mock_token_response(Some(3600)));
+        assert!(tokens.time_until_expiry().is_some());
+
+        // No expiry → None
+        let tokens = OAuthTokens::from_response(mock_token_response(None));
+        assert!(tokens.time_until_expiry().is_none());
+
+        // Expired → None
+        let tokens = OAuthTokens::from_response(mock_token_response(Some(0)));
+        assert!(tokens.time_until_expiry().is_none());
+    }
+
+    #[test]
+    fn test_token_id_token() {
+        let mut resp = mock_token_response(Some(3600));
+        resp.id_token = Some("id_tok_abc".into());
+        let tokens = OAuthTokens::from_response(resp);
+        assert_eq!(tokens.id_token(), Some("id_tok_abc"));
+    }
+
+    #[test]
+    fn test_token_update_from_response() {
+        let tokens = OAuthTokens::from_response(mock_token_response(Some(3600)));
+        let mut tokens = tokens;
+
+        let new_resp = TokenResponse {
+            access_token: "new_access".into(),
+            token_type: "Bearer".into(),
+            expires_in: Some(7200),
+            refresh_token: Some("new_refresh".into()),
+            scope: Some("read write admin".into()),
+            id_token: Some("new_id".into()),
+        };
+
+        tokens.update_from_response(new_resp);
+        assert_eq!(tokens.access_token(), "new_access");
+        assert_eq!(tokens.refresh_token(), Some("new_refresh"));
+        assert_eq!(tokens.scopes(), &["read", "write", "admin"]);
+        assert_eq!(tokens.id_token(), Some("new_id"));
+    }
+
+    #[test]
+    fn test_token_update_preserves_refresh_if_not_provided() {
+        let mut tokens = OAuthTokens::from_response(mock_token_response(Some(3600)));
+        assert_eq!(tokens.refresh_token(), Some("test_refresh_token"));
+
+        let new_resp = TokenResponse {
+            access_token: "new_access".into(),
+            token_type: "Bearer".into(),
+            expires_in: Some(3600),
+            refresh_token: None,
+            scope: None,
+            id_token: None,
+        };
+
+        tokens.update_from_response(new_resp);
+        assert_eq!(tokens.access_token(), "new_access");
+        // Original refresh token should be preserved
+        assert_eq!(tokens.refresh_token(), Some("test_refresh_token"));
+    }
+
+    #[test]
+    fn test_token_store_keys() {
+        let store = TokenStore::new();
+        store.store(
+            "user1",
+            OAuthTokens::from_response(mock_token_response(Some(3600))),
+        );
+        store.store(
+            "user2",
+            OAuthTokens::from_response(mock_token_response(Some(3600))),
+        );
+
+        let keys = store.keys();
+        assert_eq!(keys.len(), 2);
+        assert!(keys.contains(&"user1".to_string()));
+        assert!(keys.contains(&"user2".to_string()));
+    }
+
+    #[test]
+    fn test_token_store_clear() {
+        let store = TokenStore::new();
+        store.store(
+            "user1",
+            OAuthTokens::from_response(mock_token_response(Some(3600))),
+        );
+        store.clear();
+        assert!(store.keys().is_empty());
+    }
+
+    #[test]
+    fn test_token_store_update_nonexistent() {
+        let store = TokenStore::new();
+        let tokens = OAuthTokens::from_response(mock_token_response(Some(3600)));
+        let result = store.update("missing", tokens);
+        assert!(matches!(result, Err(OAuthError::TokenNotFound(_))));
+    }
+
+    #[test]
+    fn test_token_store_with_metadata() {
+        let store = TokenStore::new();
+        let tokens = OAuthTokens::from_response(mock_token_response(Some(3600)));
+        let mut metadata = HashMap::new();
+        metadata.insert("provider".to_string(), "github".to_string());
+
+        store.store_with_metadata("user1", tokens, metadata);
+
+        let (_, meta) = store.get_with_metadata("user1").unwrap();
+        assert_eq!(meta.get("provider"), Some(&"github".to_string()));
+    }
+
+    #[test]
+    fn test_token_store_default() {
+        let store = TokenStore::default();
+        assert!(store.keys().is_empty());
+    }
 }

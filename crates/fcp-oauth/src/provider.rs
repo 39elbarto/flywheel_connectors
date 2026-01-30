@@ -330,4 +330,76 @@ mod tests {
         );
         assert_eq!(config.token_url, "https://custom.auth.com/token");
     }
+
+    // ── New tests ──
+
+    #[test]
+    fn test_twitter_legacy_returns_none_for_oauth2() {
+        let config = OAuthProvider::TwitterLegacy.oauth2_config("id", "secret");
+        assert!(config.is_none());
+    }
+
+    #[test]
+    fn test_non_legacy_returns_none_for_oauth1() {
+        assert!(
+            OAuthProvider::Google
+                .oauth1_config("key", "secret")
+                .is_none()
+        );
+        assert!(
+            OAuthProvider::GitHub
+                .oauth1_config("key", "secret")
+                .is_none()
+        );
+        assert!(
+            OAuthProvider::Slack
+                .oauth1_config("key", "secret")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_all_oauth2_providers_have_urls() {
+        let providers = [
+            OAuthProvider::Google,
+            OAuthProvider::GitHub,
+            OAuthProvider::Twitter,
+            OAuthProvider::Slack,
+            OAuthProvider::Notion,
+            OAuthProvider::Linear,
+            OAuthProvider::Discord,
+            OAuthProvider::Spotify,
+            OAuthProvider::Microsoft,
+            OAuthProvider::Dropbox,
+        ];
+
+        for provider in providers {
+            let config = provider.oauth2_config("id", "secret");
+            assert!(
+                config.is_some(),
+                "Provider {provider:?} should return OAuth2 config"
+            );
+            let config = config.unwrap();
+            assert!(!config.authorization_url.is_empty());
+            assert!(!config.token_url.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_provider_endpoints_defaults() {
+        let endpoints = ProviderEndpoints::new(
+            "https://auth.example.com/authorize",
+            "https://auth.example.com/token",
+        );
+        assert!(endpoints.revocation_url.is_none());
+        assert!(endpoints.userinfo_url.is_none());
+    }
+
+    #[test]
+    fn test_pkce_required_providers() {
+        assert!(OAuthProvider::Google.requires_pkce());
+        assert!(OAuthProvider::Twitter.requires_pkce());
+        assert!(!OAuthProvider::GitHub.requires_pkce());
+        assert!(!OAuthProvider::Slack.requires_pkce());
+    }
 }

@@ -80,3 +80,104 @@ pub enum OAuthError {
 
 /// Result type for OAuth operations.
 pub type OAuthResult<T> = Result<T, OAuthError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_config_display() {
+        let e = OAuthError::InvalidConfig("bad".into());
+        assert_eq!(e.to_string(), "Invalid OAuth configuration: bad");
+    }
+
+    #[test]
+    fn state_mismatch_display() {
+        let e = OAuthError::StateMismatch {
+            expected: "abc".into(),
+            actual: "xyz".into(),
+        };
+        assert_eq!(e.to_string(), "OAuth state mismatch: expected abc, got xyz");
+    }
+
+    #[test]
+    fn authorization_error_display() {
+        let e = OAuthError::AuthorizationError {
+            error: "access_denied".into(),
+            description: "User denied".into(),
+            error_uri: None,
+        };
+        assert_eq!(
+            e.to_string(),
+            "Authorization error: access_denied - User denied"
+        );
+    }
+
+    #[test]
+    fn token_exchange_failed_display() {
+        let e = OAuthError::TokenExchangeFailed("bad code".into());
+        assert_eq!(e.to_string(), "Token exchange failed: bad code");
+    }
+
+    #[test]
+    fn refresh_failed_display() {
+        let e = OAuthError::RefreshFailed("expired".into());
+        assert_eq!(e.to_string(), "Token refresh failed: expired");
+    }
+
+    #[test]
+    fn token_expired_display() {
+        let e = OAuthError::TokenExpired(Duration::from_secs(60));
+        assert_eq!(e.to_string(), "Token expired 60s ago");
+    }
+
+    #[test]
+    fn no_refresh_token_display() {
+        let e = OAuthError::NoRefreshToken;
+        assert_eq!(e.to_string(), "No refresh token available");
+    }
+
+    #[test]
+    fn invalid_token_response_display() {
+        let e = OAuthError::InvalidTokenResponse("missing field".into());
+        assert_eq!(e.to_string(), "Invalid token response: missing field");
+    }
+
+    #[test]
+    fn signature_error_display() {
+        let e = OAuthError::SignatureError("bad key".into());
+        assert_eq!(e.to_string(), "OAuth 1.0a signature error: bad key");
+    }
+
+    #[test]
+    fn unsupported_provider_display() {
+        let e = OAuthError::UnsupportedProvider("myspace".into());
+        assert_eq!(e.to_string(), "Provider not supported: myspace");
+    }
+
+    #[test]
+    fn token_not_found_display() {
+        let e = OAuthError::TokenNotFound("user1".into());
+        assert_eq!(e.to_string(), "Token not found for key: user1");
+    }
+
+    #[test]
+    fn pkce_error_display() {
+        let e = OAuthError::PkceError("too short".into());
+        assert_eq!(e.to_string(), "PKCE error: too short");
+    }
+
+    #[test]
+    fn json_error_from() {
+        let json_err: Result<serde_json::Value, _> = serde_json::from_str("bad");
+        let e: OAuthError = json_err.unwrap_err().into();
+        assert!(matches!(e, OAuthError::JsonError(_)));
+    }
+
+    #[test]
+    fn url_error_from() {
+        let url_err = url::Url::parse("://bad").unwrap_err();
+        let e: OAuthError = url_err.into();
+        assert!(matches!(e, OAuthError::UrlError(_)));
+    }
+}

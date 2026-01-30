@@ -98,3 +98,54 @@ impl std::fmt::Display for ResponseMode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grant_type_display() {
+        assert_eq!(
+            GrantType::AuthorizationCode.to_string(),
+            "authorization_code"
+        );
+        assert_eq!(
+            GrantType::ClientCredentials.to_string(),
+            "client_credentials"
+        );
+        assert_eq!(GrantType::RefreshToken.to_string(), "refresh_token");
+        assert_eq!(
+            GrantType::DeviceCode.to_string(),
+            "urn:ietf:params:oauth:grant-type:device_code"
+        );
+    }
+
+    #[test]
+    fn grant_type_serde_roundtrip() {
+        let variants = vec![
+            (GrantType::AuthorizationCode, "\"authorization_code\""),
+            (GrantType::ClientCredentials, "\"client_credentials\""),
+            (GrantType::RefreshToken, "\"refresh_token\""),
+            (GrantType::DeviceCode, "\"device_code\""),
+        ];
+
+        for (grant, expected_json) in variants {
+            let json = serde_json::to_string(&grant).unwrap();
+            assert_eq!(json, expected_json);
+            let roundtrip: GrantType = serde_json::from_str(&json).unwrap();
+            assert_eq!(roundtrip, grant);
+        }
+    }
+
+    #[test]
+    fn response_mode_display() {
+        assert_eq!(ResponseMode::Query.to_string(), "query");
+        assert_eq!(ResponseMode::Fragment.to_string(), "fragment");
+        assert_eq!(ResponseMode::FormPost.to_string(), "form_post");
+    }
+
+    #[test]
+    fn response_mode_default_is_query() {
+        assert_eq!(ResponseMode::default(), ResponseMode::Query);
+    }
+}

@@ -593,4 +593,123 @@ mod tests {
         assert!(config.client_secret.is_none());
         assert!(config.use_pkce); // PKCE should be enabled by default for public clients
     }
+
+    // ── New tests ──
+
+    #[test]
+    fn test_auth_style_display() {
+        assert_eq!(AuthStyle::Basic.to_string(), "basic");
+        assert_eq!(AuthStyle::Post.to_string(), "post");
+    }
+
+    #[test]
+    fn test_auth_style_default_is_post() {
+        assert_eq!(AuthStyle::default(), AuthStyle::Post);
+    }
+
+    #[test]
+    fn test_oauth2_config_builder_chain() {
+        let config = OAuth2Config::new(
+            "id",
+            "secret",
+            "https://auth.example.com/authorize",
+            "https://auth.example.com/token",
+        )
+        .with_redirect_uri("https://localhost/callback")
+        .with_scopes(vec!["read".into(), "write".into()])
+        .with_pkce(false)
+        .with_pkce_method(PkceMethod::Plain)
+        .with_response_mode(ResponseMode::FormPost)
+        .with_auth_style(AuthStyle::Basic)
+        .with_auth_param("prompt", "consent")
+        .with_token_param("audience", "api")
+        .with_timeout(Duration::from_secs(60));
+
+        assert_eq!(
+            config.redirect_uri,
+            Some("https://localhost/callback".into())
+        );
+        assert_eq!(config.default_scopes, vec!["read", "write"]);
+        assert!(!config.use_pkce);
+        assert_eq!(config.pkce_method, PkceMethod::Plain);
+        assert_eq!(config.response_mode, ResponseMode::FormPost);
+        assert_eq!(config.auth_style, AuthStyle::Basic);
+        assert_eq!(
+            config.extra_auth_params.get("prompt"),
+            Some(&"consent".to_string())
+        );
+        assert_eq!(
+            config.extra_token_params.get("audience"),
+            Some(&"api".to_string())
+        );
+        assert_eq!(config.timeout, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn test_callback_from_query() {
+        let callback = AuthorizationCallback::from_query("code=abc&state=xyz").unwrap();
+        assert_eq!(callback.code, Some("abc".to_string()));
+        assert_eq!(callback.state, Some("xyz".to_string()));
+    }
+
+    #[test]
+    fn test_callback_from_url() {
+        let callback =
+            AuthorizationCallback::from_url("https://localhost/callback?code=abc&state=xyz")
+                .unwrap();
+        assert_eq!(callback.code, Some("abc".to_string()));
+        assert_eq!(callback.state, Some("xyz".to_string()));
+    }
+
+    #[test]
+    fn test_callback_missing_state() {
+        let callback = AuthorizationCallback {
+            code: Some("abc".into()),
+            state: None,
+            error: None,
+            error_description: None,
+            error_uri: None,
+        };
+        let result = callback.validate("expected");
+        assert!(matches!(result, Err(OAuthError::InvalidTokenResponse(_))));
+    }
+
+    #[test]
+    fn test_callback_missing_code() {
+        let callback = AuthorizationCallback {
+            code: None,
+            state: Some("state".into()),
+            error: None,
+            error_description: None,
+            error_uri: None,
+        };
+        let result = callback.validate("state");
+        assert!(matches!(result, Err(OAuthError::InvalidTokenResponse(_))));
+    }
+
+    #[test]
+    fn test_authorization_url_with_default_scopes() {
+        let config = test_config().with_scopes(vec!["profile".into()]);
+        let client = OAuth2Client::new(config).unwrap();
+
+        let (url, _) = client.authorization_url(&["email"]).unwrap();
+        // Should contain both default and requested scopes
+        assert!(url.contains("scope=profile+email"));
+    }
+
+    #[test]
+    fn test_authorization_url_with_form_post_response_mode() {
+        let config = test_config().with_response_mode(ResponseMode::FormPost);
+        let client = OAuth2Client::new(config).unwrap();
+
+        let (url, _) = client.authorization_url(&["read"]).unwrap();
+        assert!(url.contains("response_mode=form_post"));
+    }
+
+    #[test]
+    fn test_oauth2_client_config_accessor() {
+        let config = test_config();
+        let client = OAuth2Client::new(config).unwrap();
+        assert_eq!(client.config().client_id, "test_client_id");
+    }
 }

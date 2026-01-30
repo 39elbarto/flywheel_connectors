@@ -291,6 +291,18 @@ pub trait StreamingSession: Send + Sync {
     /// Get the timestamp of the last received heartbeat acknowledgment.
     fn last_heartbeat_ack(&self) -> Option<Instant>;
 
+    /// Current heartbeat sequence counter (sent).
+    #[must_use]
+    fn heartbeat_seq(&self) -> u64 {
+        0
+    }
+
+    /// Current heartbeat acknowledgment sequence counter.
+    #[must_use]
+    fn ack_seq(&self) -> u64 {
+        0
+    }
+
     /// Check if heartbeats have timed out.
     ///
     /// Returns `true` if the last ack is older than the configured timeout.
@@ -328,6 +340,8 @@ pub struct InMemoryStreamingSession {
     sequence: u64,
     last_heartbeat_sent: Option<Instant>,
     last_heartbeat_ack: Option<Instant>,
+    heartbeat_seq: u64,
+    ack_seq: u64,
 }
 
 impl InMemoryStreamingSession {
@@ -361,10 +375,12 @@ impl StreamingSession for InMemoryStreamingSession {
 
     fn record_heartbeat_sent(&mut self, at: Instant) {
         self.last_heartbeat_sent = Some(at);
+        self.heartbeat_seq = self.heartbeat_seq.saturating_add(1);
     }
 
     fn record_heartbeat_ack(&mut self, at: Instant) {
         self.last_heartbeat_ack = Some(at);
+        self.ack_seq = self.ack_seq.saturating_add(1);
     }
 
     fn last_heartbeat_sent(&self) -> Option<Instant> {
@@ -373,6 +389,14 @@ impl StreamingSession for InMemoryStreamingSession {
 
     fn last_heartbeat_ack(&self) -> Option<Instant> {
         self.last_heartbeat_ack
+    }
+
+    fn heartbeat_seq(&self) -> u64 {
+        self.heartbeat_seq
+    }
+
+    fn ack_seq(&self) -> u64 {
+        self.ack_seq
     }
 
     fn persist(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -1273,6 +1297,8 @@ pub struct StreamingSupervisorStats {
     pub events_processed: u64,
     /// Total time spent in backoff (milliseconds).
     pub backoff_time_ms: u64,
+    /// Heartbeat timeouts detected.
+    pub missed_heartbeats: u64,
 }
 
 /// Supervised streaming loop with backoff, health tracking, and session resumption.
@@ -1332,6 +1358,16 @@ impl<S: StreamingSession> StreamingSupervisor<S> {
         Duration::from_millis(backoff)
     }
 
+    fn health_log_fields(&self) -> (u64, u64, u64, u64) {
+        let reconnect_count = self.stats.connection_attempts.saturating_sub(1);
+        (
+            self.session.heartbeat_seq(),
+            self.session.ack_seq(),
+            self.stats.missed_heartbeats,
+            reconnect_count,
+        )
+    }
+
     /// Run the streaming supervisor loop.
     ///
     /// # Arguments
@@ -1355,7 +1391,16 @@ impl<S: StreamingSession> StreamingSupervisor<S> {
         let mut consecutive_failures: u32 = 0;
 
         if let Err(e) = self.session.restore() {
-            tracing::warn!(error = %e, "Failed to restore streaming session state");
+            let (heartbeat_seq, ack_seq, missed_heartbeats, reconnect_count) =
+                self.health_log_fields();
+            tracing::warn!(
+                error = %e,
+                heartbeat_seq,
+                ack_seq,
+                missed_heartbeats,
+                reconnect_count,
+                "Failed to restore streaming session state"
+            );
         }
 
         // Transition to healthy on start
@@ -1364,9 +1409,26 @@ impl<S: StreamingSession> StreamingSupervisor<S> {
 
         loop {
             if *shutdown.borrow() {
-                tracing::info!("Streaming supervisor received shutdown signal");
+                let (heartbeat_seq, ack_seq, missed_heartbeats, reconnect_count) =
+                    self.health_log_fields();
+                tracing::info!(
+                    heartbeat_seq,
+                    ack_seq,
+                    missed_heartbeats,
+                    reconnect_count,
+                    "Streaming supervisor received shutdown signal"
+                );
                 if let Err(e) = self.session.persist() {
-                    tracing::error!(error = %e, "Failed to persist session on shutdown");
+                    let (heartbeat_seq, ack_seq, missed_heartbeats, reconnect_count) =
+                        self.health_log_fields();
+                    tracing::error!(
+                        error = %e,
+                        heartbeat_seq,
+                        ack_seq,
+                        missed_heartbeats,
+                        reconnect_count,
+                        "Failed to persist session on shutdown"
+                    );
                 }
                 return SupervisorOutcome::Shutdown;
             }
@@ -1388,9 +1450,15 @@ impl<S: StreamingSession> StreamingSupervisor<S> {
                     self.health.record_failure(&message);
                     self.health.evaluate(&self.config);
 
+                    let (heartbeat_seq, ack_seq, missed_heartbeats, reconnect_count) =
+                        self.health_log_fields();
                     tracing::warn!(
                         error = %message,
                         consecutive_failures,
+                        heartbeat_seq,
+                        ack_seq,
+                        missed_heartbeats,
+                        reconnect_count,
                         "Streaming connection attempt failed"
                     );
 
@@ -1411,8 +1479,17 @@ impl<S: StreamingSession> StreamingSupervisor<S> {
                         () = tokio::time::sleep(delay) => {}
                         _ = shutdown.changed() => {
                             if *shutdown.borrow() {
+                                let (heartbeat_seq, ack_seq, missed_heartbeats, reconnect_count) =
+                                    self.health_log_fields();
                                 if let Err(e) = self.session.persist() {
-                                    tracing::error!(error = %e, "Failed to persist session on shutdown");
+                                    tracing::error!(
+                                        error = %e,
+                                        heartbeat_seq,
+                                        ack_seq,
+                                        missed_heartbeats,
+                                        reconnect_count,
+                                        "Failed to persist session on shutdown"
+                                    );
                                 }
                                 return SupervisorOutcome::Shutdown;
                             }
@@ -1435,10 +1512,27 @@ impl<S: StreamingSession> StreamingSupervisor<S> {
                 tokio::select! {
                     _ = shutdown.changed() => {
                         if *shutdown.borrow() {
-                            tracing::info!("Streaming supervisor received shutdown signal");
+                            let (heartbeat_seq, ack_seq, missed_heartbeats, reconnect_count) =
+                                self.health_log_fields();
+                            tracing::info!(
+                                heartbeat_seq,
+                                ack_seq,
+                                missed_heartbeats,
+                                reconnect_count,
+                                "Streaming supervisor received shutdown signal"
+                            );
                             join_handle.abort();
                             if let Err(e) = self.session.persist() {
-                                tracing::error!(error = %e, "Failed to persist session on shutdown");
+                                let (heartbeat_seq, ack_seq, missed_heartbeats, reconnect_count) =
+                                    self.health_log_fields();
+                                tracing::error!(
+                                    error = %e,
+                                    heartbeat_seq,
+                                    ack_seq,
+                                    missed_heartbeats,
+                                    reconnect_count,
+                                    "Failed to persist session on shutdown"
+                                );
                             }
                             return SupervisorOutcome::Shutdown;
                         }
@@ -1448,7 +1542,16 @@ impl<S: StreamingSession> StreamingSupervisor<S> {
                             self.stats.events_processed += 1;
                             if let Err(err) = handle_event(event, &mut self.session).await {
                                 let message = err.to_string();
-                                tracing::error!(error = %message, "Streaming event handler failed");
+                                let (heartbeat_seq, ack_seq, missed_heartbeats, reconnect_count) =
+                                    self.health_log_fields();
+                                tracing::error!(
+                                    error = %message,
+                                    heartbeat_seq,
+                                    ack_seq,
+                                    missed_heartbeats,
+                                    reconnect_count,
+                                    "Streaming event handler failed"
+                                );
                                 exit_message = message;
                                 exit_fatal = true;
                                 break;
@@ -1478,6 +1581,16 @@ impl<S: StreamingSession> StreamingSupervisor<S> {
                     }, if heartbeat_interval.is_some() => {
                         if let Some(timeout) = self.config.heartbeat_timeout() {
                             if self.session.is_heartbeat_timeout(timeout) {
+                                self.stats.missed_heartbeats = self.stats.missed_heartbeats.saturating_add(1);
+                                let (heartbeat_seq, ack_seq, missed_heartbeats, reconnect_count) =
+                                    self.health_log_fields();
+                                tracing::warn!(
+                                    heartbeat_seq,
+                                    ack_seq,
+                                    missed_heartbeats,
+                                    reconnect_count,
+                                    "Streaming heartbeat timeout"
+                                );
                                 exit_message = "heartbeat timeout".to_string();
                                 break;
                             }
@@ -1911,10 +2024,76 @@ impl<C: PollingCursor> PollingSupervisor<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io;
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
+    use tracing_subscriber::{EnvFilter, layer::SubscriberExt};
 
     fn boxed_err(message: &str) -> StreamingError {
         Box::new(io::Error::other(message))
+    }
+
+    #[derive(Clone, Default)]
+    #[allow(dead_code)]
+    struct LogCapture {
+        bytes: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl LogCapture {
+        #[allow(dead_code)]
+        fn install_json(&self, filter: EnvFilter) -> tracing::subscriber::DefaultGuard {
+            let layer = tracing_subscriber::fmt::layer()
+                .with_writer(self.clone())
+                .json()
+                .with_ansi(false)
+                .with_level(false)
+                .with_target(false)
+                .with_file(false)
+                .with_line_number(false)
+                .with_current_span(false)
+                .flatten_event(true);
+
+            let subscriber = tracing_subscriber::registry().with(filter).with(layer);
+            tracing::subscriber::set_default(subscriber)
+        }
+
+        #[allow(dead_code)]
+        fn jsonl(&self) -> String {
+            let guard = self
+                .bytes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            String::from_utf8_lossy(&guard).to_string()
+        }
+    }
+
+    #[allow(dead_code)]
+    struct LogCaptureWriter {
+        bytes: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for LogCaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.bytes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+        type Writer = LogCaptureWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            LogCaptureWriter {
+                bytes: Arc::clone(&self.bytes),
+            }
+        }
     }
 
     #[test]
@@ -1968,6 +2147,8 @@ mod tests {
         let mut session = InMemoryStreamingSession::new();
         assert!(session.resume_token().is_none());
         assert_eq!(session.sequence(), 0);
+        assert_eq!(session.heartbeat_seq(), 0);
+        assert_eq!(session.ack_seq(), 0);
 
         session.set_resume_token("token123".to_string());
         assert_eq!(session.resume_token(), Some("token123".to_string()));
@@ -1978,6 +2159,12 @@ mod tests {
 
         session.clear_resume_token();
         assert!(session.resume_token().is_none());
+
+        let now = Instant::now();
+        session.record_heartbeat_sent(now);
+        session.record_heartbeat_ack(now);
+        assert_eq!(session.heartbeat_seq(), 1);
+        assert_eq!(session.ack_seq(), 1);
     }
 
     #[test]
@@ -2150,6 +2337,73 @@ mod tests {
             outcome,
             SupervisorOutcome::FatalError { message } if message == "handler failed"
         ));
+    }
+
+    #[tokio::test]
+    async fn streaming_supervisor_heartbeat_timeout_transitions_and_logs() {
+        let config = SupervisorConfig {
+            heartbeat_interval_ms: 10,
+            heartbeat_timeout_multiplier: 1.1,
+            max_consecutive_failures: 1,
+            base_backoff_ms: 1,
+            jitter_enabled: false,
+            ..Default::default()
+        };
+
+        let session = InMemoryStreamingSession::new();
+        let mut supervisor = StreamingSupervisor::new(config, session);
+        supervisor
+            .session_mut()
+            .record_heartbeat_sent(Instant::now());
+
+        let capture = LogCapture::default();
+        let _guard = capture.install_json(EnvFilter::new("warn"));
+
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+        let outcome = supervisor
+            .run::<(), _, _, _, _>(
+                shutdown_rx,
+                |_session| async {
+                    let (tx, rx) = mpsc::channel(1);
+                    let join_handle = tokio::spawn(async move {
+                        let _tx = tx;
+                        std::future::pending::<Result<(), StreamingError>>().await
+                    });
+                    Ok(StreamingConnection {
+                        events: rx,
+                        join_handle,
+                    })
+                },
+                |_event, _session| async { Ok(()) },
+            )
+            .await;
+
+        assert!(matches!(
+            outcome,
+            SupervisorOutcome::MaxFailuresReached { failures: 1 }
+        ));
+        assert_eq!(supervisor.stats().missed_heartbeats, 1);
+        assert!(supervisor.health().is_unhealthy());
+
+        let logs = capture.jsonl();
+        let mut heartbeat_log = None;
+        for line in logs.lines() {
+            let value: serde_json::Value =
+                serde_json::from_str(line).expect("valid heartbeat log json");
+            if value.get("message").and_then(|message| message.as_str())
+                == Some("Streaming heartbeat timeout")
+            {
+                heartbeat_log = Some(value);
+                break;
+            }
+        }
+
+        let log = heartbeat_log.expect("missing heartbeat timeout log");
+        assert_eq!(log["heartbeat_seq"], 1);
+        assert_eq!(log["ack_seq"], 0);
+        assert_eq!(log["missed_heartbeats"], 1);
+        assert_eq!(log["reconnect_count"], 0);
     }
 
     // ─────────────────────────────────────────────────────────────────────────

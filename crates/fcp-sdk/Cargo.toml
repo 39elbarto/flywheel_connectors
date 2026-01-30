@@ -28,7 +28,7 @@ tracing.workspace = true
 cursor-store-object-store = ["dep:fcp-store", "dep:fcp-cbor", "dep:semver"]
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
 async-trait = { workspace = true }
 futures-util = { workspace = true }
 uuid = { workspace = true }
@@ -37,3 +37,4 @@ fcp-cbor = { path = "../fcp-cbor" }
 semver = { workspace = true }
 reqwest = { workspace = true }
 wiremock = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }

@@ -676,6 +676,14 @@ impl StreamingSession for FakeStreamingSession {
         self.inner.last_heartbeat_ack()
     }
 
+    fn heartbeat_seq(&self) -> u64 {
+        self.inner.heartbeat_seq()
+    }
+
+    fn ack_seq(&self) -> u64 {
+        self.inner.ack_seq()
+    }
+
     fn persist(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // In a real connector, this would write to disk/database
         Ok(())

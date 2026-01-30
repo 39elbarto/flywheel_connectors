@@ -29,8 +29,8 @@ fn emit_log(
         "result": result,
         "duration_ms": 0,
         "assertions": {
-            "passed": if result == "pass" { 1 } else { 0 },
-            "failed": if result == "fail" { 1 } else { 0 }
+            "passed": i32::from(result == "pass"),
+            "failed": i32::from(result == "fail")
         },
         "context": context
     });
@@ -122,12 +122,10 @@ total_timeout_ms = 60000
 max_response_bytes = 10485760
 "#;
     let mut file = NamedTempFile::new().expect("create temp file");
-    file.write_all(manifest.as_bytes())
-        .expect("write manifest");
+    file.write_all(manifest.as_bytes()).expect("write manifest");
     file.flush().expect("flush manifest");
     file
 }
-
 
 /// Helper to get the fcp command.
 fn fcp_cmd() -> assert_cmd::Command {
@@ -154,7 +152,11 @@ fn allowlist_success_allows_permitted_host() {
         .output()
         .expect("run command");
 
-    let result = if output.status.success() { "pass" } else { "fail" };
+    let result = if output.status.success() {
+        "pass"
+    } else {
+        "fail"
+    };
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     emit_log(
@@ -198,7 +200,11 @@ fn allowlist_denies_unlisted_host() {
         .expect("run command");
 
     // Exit code 1 expected for denied requests
-    let result = if !output.status.success() { "pass" } else { "fail" };
+    let result = if output.status.success() {
+        "fail"
+    } else {
+        "pass"
+    };
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     emit_log(
@@ -222,9 +228,11 @@ fn allowlist_denies_unlisted_host() {
     let report: serde_json::Value = serde_json::from_str(&stdout).expect("parse JSON output");
     assert_eq!(report["allowed"], false);
     assert_eq!(report["reason_code"], "host_not_allowed");
-    assert!(report["suggestion"]["field"]
-        .as_str()
-        .is_some_and(|f| f.contains("host_allow")));
+    assert!(
+        report["suggestion"]["field"]
+            .as_str()
+            .is_some_and(|f| f.contains("host_allow"))
+    );
 }
 
 #[test]
@@ -243,7 +251,11 @@ fn deny_localhost_blocks_loopback() {
         .output()
         .expect("run command");
 
-    let result = if !output.status.success() { "pass" } else { "fail" };
+    let result = if output.status.success() {
+        "fail"
+    } else {
+        "pass"
+    };
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
@@ -285,7 +297,11 @@ fn deny_ip_literal_blocks_direct_ip() {
         .output()
         .expect("run command");
 
-    let result = if !output.status.success() { "pass" } else { "fail" };
+    let result = if output.status.success() {
+        "fail"
+    } else {
+        "pass"
+    };
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
@@ -333,7 +349,11 @@ fn deny_private_cidr_blocks_rfc1918() {
         .output()
         .expect("run command");
 
-    let result = if !output.status.success() { "pass" } else { "fail" };
+    let result = if output.status.success() {
+        "fail"
+    } else {
+        "pass"
+    };
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
@@ -385,7 +405,11 @@ fn deny_private_cidr_blocks_10_network() {
         .output()
         .expect("run command");
 
-    let result = if !output.status.success() { "pass" } else { "fail" };
+    let result = if output.status.success() {
+        "fail"
+    } else {
+        "pass"
+    };
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
@@ -471,7 +495,11 @@ fn port_not_allowed_denied() {
         .output()
         .expect("run command");
 
-    let result = if !output.status.success() { "pass" } else { "fail" };
+    let result = if output.status.success() {
+        "fail"
+    } else {
+        "pass"
+    };
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     emit_log(

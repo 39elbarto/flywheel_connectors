@@ -416,11 +416,10 @@ mod tests {
         assert!(json.contains(r#""reason":"high latency""#));
 
         let parsed: HealthState = serde_json::from_str(&json).unwrap();
-        if let HealthState::Degraded { reason } = parsed {
-            assert_eq!(reason, "high latency");
-        } else {
-            panic!("expected Degraded state");
-        }
+        assert!(
+            matches!(&parsed, HealthState::Degraded { reason } if reason == "high latency"),
+            "expected Degraded state, got {parsed:?}"
+        );
     }
 
     #[test]
@@ -433,11 +432,10 @@ mod tests {
         assert!(json.contains(r#""reason":"connection failed""#));
 
         let parsed: HealthState = serde_json::from_str(&json).unwrap();
-        if let HealthState::Error { reason } = parsed {
-            assert_eq!(reason, "connection failed");
-        } else {
-            panic!("expected Error state");
-        }
+        assert!(
+            matches!(&parsed, HealthState::Error { reason } if reason == "connection failed"),
+            "expected Error state, got {parsed:?}"
+        );
     }
 
     #[test]
@@ -478,11 +476,11 @@ mod tests {
     fn health_snapshot_degraded() {
         let snapshot = HealthSnapshot::degraded("upstream slow");
 
-        if let HealthState::Degraded { reason } = &snapshot.status {
-            assert_eq!(reason, "upstream slow");
-        } else {
-            panic!("expected Degraded state");
-        }
+        assert!(
+            matches!(&snapshot.status, HealthState::Degraded { reason } if reason == "upstream slow"),
+            "expected Degraded state, got {:?}",
+            snapshot.status
+        );
         assert!(!snapshot.is_ready());
         assert!(snapshot.is_healthy());
     }
@@ -491,11 +489,11 @@ mod tests {
     fn health_snapshot_error() {
         let snapshot = HealthSnapshot::error("database down");
 
-        if let HealthState::Error { reason } = &snapshot.status {
-            assert_eq!(reason, "database down");
-        } else {
-            panic!("expected Error state");
-        }
+        assert!(
+            matches!(&snapshot.status, HealthState::Error { reason } if reason == "database down"),
+            "expected Error state, got {:?}",
+            snapshot.status
+        );
         assert!(!snapshot.is_ready());
         assert!(!snapshot.is_healthy());
     }
@@ -750,11 +748,10 @@ mod tests {
         assert!(!health.is_healthy());
         assert!(health.is_available());
 
-        if let ConnectorHealth::Degraded { reason } = &health {
-            assert_eq!(reason, "high latency");
-        } else {
-            panic!("expected Degraded variant");
-        }
+        assert!(
+            matches!(&health, ConnectorHealth::Degraded { reason } if reason == "high latency"),
+            "expected Degraded variant, got {health:?}"
+        );
     }
 
     #[test]
@@ -763,11 +760,10 @@ mod tests {
         assert!(!health.is_healthy());
         assert!(!health.is_available());
 
-        if let ConnectorHealth::Unavailable { reason, since: _ } = &health {
-            assert_eq!(reason, "connection refused");
-        } else {
-            panic!("expected Unavailable variant");
-        }
+        assert!(
+            matches!(&health, ConnectorHealth::Unavailable { reason, .. } if reason == "connection refused"),
+            "expected Unavailable variant, got {health:?}"
+        );
     }
 
     #[test]
@@ -821,11 +817,10 @@ mod tests {
         assert!(!health.is_healthy());
         assert!(health.is_available());
 
-        if let ConnectorHealth::Degraded { reason } = health {
-            assert_eq!(reason, "slow upstream");
-        } else {
-            panic!("expected Degraded variant");
-        }
+        assert!(
+            matches!(&health, ConnectorHealth::Degraded { reason } if reason == "slow upstream"),
+            "expected Degraded variant, got {health:?}"
+        );
     }
 
     #[test]
@@ -837,11 +832,10 @@ mod tests {
         assert!(!health.is_healthy());
         assert!(!health.is_available());
 
-        if let ConnectorHealth::Unavailable { reason, since: _ } = health {
-            assert_eq!(reason, "crash");
-        } else {
-            panic!("expected Unavailable variant");
-        }
+        assert!(
+            matches!(&health, ConnectorHealth::Unavailable { reason, .. } if reason == "crash"),
+            "expected Unavailable variant, got {health:?}"
+        );
     }
 
     #[test]

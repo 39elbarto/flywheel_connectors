@@ -3408,6 +3408,11 @@ mod tests {
         let parsed: ApprovalToken = serde_json::from_str(&json).expect("deserialization failed");
 
         assert_eq!(parsed.token_id, token.token_id);
+        assert!(
+            matches!(&parsed.scope, ApprovalScope::Execution(_)),
+            "Expected Execution scope, got {:?}",
+            parsed.scope
+        );
         if let ApprovalScope::Execution(exec) = &parsed.scope {
             assert_eq!(exec.connector_id, "fcp.test:connector:0.1.0");
             assert_eq!(exec.method_pattern, "test.invoke.*");
@@ -3415,8 +3420,6 @@ mod tests {
             assert!(exec.input_hash.is_some());
             assert_eq!(exec.input_constraints.len(), 1);
             assert_eq!(exec.input_constraints[0].pointer, "/action");
-        } else {
-            panic!("Expected Execution scope");
         }
 
         log_flow_test(
@@ -3514,6 +3517,11 @@ mod tests {
         };
 
         // Extract and validate scope
+        assert!(
+            matches!(&elevation_token.scope, ApprovalScope::Elevation(_)),
+            "Expected Elevation scope, got {:?}",
+            elevation_token.scope
+        );
         if let ApprovalScope::Elevation(scope) = &elevation_token.scope {
             // Target integrity should be Owner (highest)
             assert_eq!(scope.target_integrity, IntegrityLevel::Owner);
@@ -3521,8 +3529,6 @@ mod tests {
             assert_eq!(scope.original_provenance_id, prov_id);
             // Operation must be specified
             assert!(!scope.operation_id.is_empty());
-        } else {
-            panic!("Expected Elevation scope");
         }
 
         // Token must be valid (not expired, not future)
@@ -3562,6 +3568,14 @@ mod tests {
         };
 
         // Extract and validate scope
+        assert!(
+            matches!(
+                &declassification_token.scope,
+                ApprovalScope::Declassification(_)
+            ),
+            "Expected Declassification scope, got {:?}",
+            declassification_token.scope
+        );
         if let ApprovalScope::Declassification(scope) = &declassification_token.scope {
             // Zone flow must be from higher to lower confidentiality
             assert_eq!(scope.from_zone, ZoneId::private());
@@ -3571,8 +3585,6 @@ mod tests {
             // Object IDs must be specified
             assert!(!scope.object_ids.is_empty());
             assert_eq!(scope.object_ids, object_ids);
-        } else {
-            panic!("Expected Declassification scope");
         }
 
         // Token must be valid
@@ -3610,6 +3622,11 @@ mod tests {
             signature: None,
         };
 
+        assert!(
+            matches!(&elevation_token.scope, ApprovalScope::Elevation(_)),
+            "Expected Elevation scope, got {:?}",
+            elevation_token.scope
+        );
         if let ApprovalScope::Elevation(scope) = &elevation_token.scope {
             // Binding check: token's provenance_id must match actual provenance
             let matches_correct = scope.original_provenance_id == correct_prov_id;
@@ -3617,8 +3634,6 @@ mod tests {
 
             assert!(matches_correct, "Token should match correct provenance");
             assert!(!matches_wrong, "Token should NOT match wrong provenance");
-        } else {
-            panic!("Expected Elevation scope");
         }
 
         log_flow_test(
@@ -3653,6 +3668,14 @@ mod tests {
             signature: None,
         };
 
+        assert!(
+            matches!(
+                &declassification_token.scope,
+                ApprovalScope::Declassification(_)
+            ),
+            "Expected Declassification scope, got {:?}",
+            declassification_token.scope
+        );
         if let ApprovalScope::Declassification(scope) = &declassification_token.scope {
             // Binding check: object must be in authorized list
             let authorized_covered = scope.object_ids.contains(&authorized_object);
@@ -3663,8 +3686,6 @@ mod tests {
                 !unauthorized_covered,
                 "Unauthorized object should NOT be covered"
             );
-        } else {
-            panic!("Expected Declassification scope");
         }
 
         log_flow_test(

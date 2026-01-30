@@ -7,8 +7,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
-    BaseConnector, CapabilityGrant, CapabilityToken, CapabilityVerifier, ConnectorId, EventCaps,
-    FcpError, HandshakeRequest, HandshakeResponse, SessionId, SimulateRequest, SimulateResponse,
+    BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
+    EventCaps, FcpError, HandshakeRequest, HandshakeResponse, SessionId, SimulateRequest,
+    SimulateResponse,
 };
 use fcp_sdk::runtime::{
     InMemoryStreamingSession, StreamingConnection, StreamingError, StreamingSupervisor,
@@ -302,9 +303,14 @@ impl TwitterConnector {
                 message: format!("Invalid capability_token format: {e}"),
             })?;
 
-        let op_id = operation.parse().map_err(|_| FcpError::InvalidRequest {
+        let op_id: fcp_core::OperationId =
+            operation.parse().map_err(|_| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Invalid operation ID format".into(),
+            })?;
+        let cap_id: CapabilityId = operation.parse().map_err(|_| FcpError::InvalidRequest {
             code: 1003,
-            message: "Invalid operation ID format".into(),
+            message: "Invalid capability ID format".into(),
         })?;
 
         // Extract resource URIs
@@ -317,7 +323,7 @@ impl TwitterConnector {
         }
 
         if let Some(verifier) = &self.verifier {
-            verifier.verify(&token, &op_id, &resource_uris)?;
+            verifier.verify(&token, &cap_id, &op_id, &resource_uris)?;
         } else {
             return Err(FcpError::NotConfigured);
         }

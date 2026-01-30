@@ -732,12 +732,13 @@ mod tests {
         let result = cred.validate_host_policy(true);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        match err {
-            CredentialValidationError::HostNotAllowed { host, .. } => {
-                assert_eq!(host, "192.168.1.1");
-            }
-            _ => panic!("Expected HostNotAllowed error"),
-        }
+        assert!(
+            matches!(
+                &err,
+                CredentialValidationError::HostNotAllowed { host, .. } if host == "192.168.1.1"
+            ),
+            "Expected HostNotAllowed error, got {err:?}"
+        );
 
         // Should allow when reject_ip_literals is false
         assert!(cred.validate_host_policy(false).is_ok());

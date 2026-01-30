@@ -1012,11 +1012,10 @@ mod tests {
         let lease = create_test_lease(1);
         let response = LeaseResponse::Granted(Box::new(lease.clone()));
 
-        if let LeaseResponse::Granted(granted_lease) = response {
-            assert_eq!(granted_lease.lease_seq, lease.lease_seq);
-        } else {
-            panic!("Expected Granted variant");
-        }
+        assert!(
+            matches!(&response, LeaseResponse::Granted(l) if l.lease_seq == lease.lease_seq),
+            "Expected Granted variant, got {response:?}"
+        );
     }
 
     #[test]
@@ -1027,18 +1026,14 @@ mod tests {
             current_seq: 5,
         };
 
-        if let LeaseResponse::Denied {
-            current_holder,
-            expires_at,
-            current_seq,
-        } = response
-        {
-            assert_eq!(current_holder.as_str(), "holder");
-            assert_eq!(expires_at, 3000);
-            assert_eq!(current_seq, 5);
-        } else {
-            panic!("Expected Denied variant");
-        }
+        assert!(
+            matches!(
+                &response,
+                LeaseResponse::Denied { current_holder, expires_at, current_seq }
+                    if current_holder.as_str() == "holder" && *expires_at == 3000 && *current_seq == 5
+            ),
+            "Expected Denied variant, got {response:?}"
+        );
     }
 
     #[test]
@@ -1047,11 +1042,10 @@ mod tests {
             reason: "wrong zone".to_string(),
         };
 
-        if let LeaseResponse::Invalid { reason } = response {
-            assert_eq!(reason, "wrong zone");
-        } else {
-            panic!("Expected Invalid variant");
-        }
+        assert!(
+            matches!(&response, LeaseResponse::Invalid { reason } if reason == "wrong zone"),
+            "Expected Invalid variant, got {response:?}"
+        );
     }
 
     #[test]
@@ -1076,18 +1070,14 @@ mod tests {
         let json = serde_json::to_string(&response).unwrap();
         let deserialized: LeaseResponse = serde_json::from_str(&json).unwrap();
 
-        if let LeaseResponse::Denied {
-            current_holder,
-            expires_at,
-            current_seq,
-        } = deserialized
-        {
-            assert_eq!(current_holder.as_str(), "holder");
-            assert_eq!(expires_at, 5000);
-            assert_eq!(current_seq, 10);
-        } else {
-            panic!("Expected Denied variant after deserialization");
-        }
+        assert!(
+            matches!(
+                &deserialized,
+                LeaseResponse::Denied { current_holder, expires_at, current_seq }
+                    if current_holder.as_str() == "holder" && *expires_at == 5000 && *current_seq == 10
+            ),
+            "Expected Denied variant after deserialization, got {deserialized:?}"
+        );
     }
 
     #[test]
@@ -1099,11 +1089,10 @@ mod tests {
         let json = serde_json::to_string(&response).unwrap();
         let deserialized: LeaseResponse = serde_json::from_str(&json).unwrap();
 
-        if let LeaseResponse::Invalid { reason } = deserialized {
-            assert_eq!(reason, "test reason");
-        } else {
-            panic!("Expected Invalid variant after deserialization");
-        }
+        assert!(
+            matches!(&deserialized, LeaseResponse::Invalid { reason } if reason == "test reason"),
+            "Expected Invalid variant after deserialization, got {deserialized:?}"
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────

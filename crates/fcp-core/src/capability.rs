@@ -1753,12 +1753,13 @@ mod tests {
         assert!(result.is_err());
 
         let err = result.unwrap_err();
-        match err {
-            CredentialValidationError::NotInCredentialAllow { credential_id } => {
-                assert_eq!(credential_id, denied_cred);
-            }
-            _ => panic!("Expected NotInCredentialAllow error"),
-        }
+        assert!(
+            matches!(
+                &err,
+                CredentialValidationError::NotInCredentialAllow { credential_id } if *credential_id == denied_cred
+            ),
+            "Expected NotInCredentialAllow error, got {err:?}"
+        );
     }
 
     #[test]

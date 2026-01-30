@@ -378,9 +378,13 @@ impl OpenAIConnector {
             })?;
 
         // Verify token
-        let op_id = operation.parse().map_err(|_| FcpError::InvalidRequest {
+        let op_id: OperationId = operation.parse().map_err(|_| FcpError::InvalidRequest {
             code: 1003,
             message: "Invalid operation ID format".into(),
+        })?;
+        let cap_id: CapabilityId = operation.parse().map_err(|_| FcpError::InvalidRequest {
+            code: 1003,
+            message: "Invalid capability ID format".into(),
         })?;
 
         let mut resource_uris = Vec::new();
@@ -393,7 +397,7 @@ impl OpenAIConnector {
         }
 
         if let Some(verifier) = &self.verifier {
-            verifier.verify(&token, &op_id, &resource_uris)?;
+            verifier.verify(&token, &cap_id, &op_id, &resource_uris)?;
         } else {
             return Err(FcpError::NotConfigured);
         }

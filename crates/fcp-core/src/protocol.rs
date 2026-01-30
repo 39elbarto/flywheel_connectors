@@ -1577,13 +1577,14 @@ mod tests {
         let mut req = base_invoke_request();
         req.idempotency_key = Some("a".repeat(MAX_IDEMPOTENCY_KEY_LEN + 1));
         let err = req.validate_idempotency_key().unwrap_err();
-        match err {
-            InvokeValidationError::IdempotencyKeyTooLong { len, max } => {
-                assert_eq!(len, MAX_IDEMPOTENCY_KEY_LEN + 1);
-                assert_eq!(max, MAX_IDEMPOTENCY_KEY_LEN);
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
+        assert!(
+            matches!(
+                &err,
+                InvokeValidationError::IdempotencyKeyTooLong { len, max }
+                    if *len == MAX_IDEMPOTENCY_KEY_LEN + 1 && *max == MAX_IDEMPOTENCY_KEY_LEN
+            ),
+            "unexpected error: {err:?}"
+        );
     }
 
     #[test]
@@ -1657,12 +1658,14 @@ mod tests {
         assert_eq!(deserialized.status, InvokeStatus::Error);
         assert!(deserialized.result.is_none());
         assert!(deserialized.error.is_some());
-        match &deserialized.error {
-            Some(FcpError::CapabilityDenied { capability, .. }) => {
-                assert_eq!(capability, "gmail.send");
-            }
-            _ => panic!("Expected CapabilityDenied error"),
-        }
+        assert!(
+            matches!(
+                &deserialized.error,
+                Some(FcpError::CapabilityDenied { capability, .. }) if capability == "gmail.send"
+            ),
+            "Expected CapabilityDenied error, got {:?}",
+            deserialized.error
+        );
     }
 
     #[test]

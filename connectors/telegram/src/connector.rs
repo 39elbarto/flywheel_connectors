@@ -13,7 +13,7 @@ use fcp_sdk::{
 };
 use serde_json::json;
 use tokio::sync::{RwLock, broadcast, watch};
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use crate::client::{SendMessageOptions, TelegramClient, TelegramError};
 use crate::types::{GetUpdatesRequest, Message, Update, UpdateKind};
@@ -540,9 +540,13 @@ impl TelegramConnector {
             })?;
 
         // Verify token
-        let op_id = operation.parse().map_err(|_| FcpError::InvalidRequest {
+        let op_id: OperationId = operation.parse().map_err(|_| FcpError::InvalidRequest {
             code: 1003,
             message: "Invalid operation ID format".into(),
+        })?;
+        let cap_id: CapabilityId = operation.parse().map_err(|_| FcpError::InvalidRequest {
+            code: 1003,
+            message: "Invalid capability ID format".into(),
         })?;
 
         let mut resource_uris = Vec::new();
@@ -565,7 +569,7 @@ impl TelegramConnector {
         }
 
         if let Some(verifier) = &self.verifier {
-            verifier.verify(&token, &op_id, &resource_uris)?;
+            verifier.verify(&token, &cap_id, &op_id, &resource_uris)?;
         } else {
             return Err(FcpError::NotConfigured);
         }
@@ -669,6 +673,12 @@ impl TelegramConnector {
                             return client
                                 .send_message(chat_id, fallback.rendered, fallback_options)
                                 .await
+                                .map(|msg| {
+                                    json!({
+                                        "message_id": msg.message_id,
+                                        "chat_id": msg.chat.id
+                                    })
+                                })
                                 .map_err(map_external);
                         }
                     }

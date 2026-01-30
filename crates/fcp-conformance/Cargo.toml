@@ -19,6 +19,7 @@ semver.workspace = true
 chrono.workspace = true
 jsonschema.workspace = true
 clap = { workspace = true, features = ["derive"] }
+ciborium.workspace = true
 
 # FCP crates (for types and encoding)
 fcp-core = { path = "../fcp-core" }

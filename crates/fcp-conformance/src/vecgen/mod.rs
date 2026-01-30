@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use fcp_cbor::{CanonicalSerializer, SchemaId};
+use fcp_cbor::{CanonicalSerializer, SCHEMA_HASH_LEN, SchemaId};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 
@@ -22,7 +22,7 @@ pub struct VecGenError {
 }
 
 impl VecGenError {
-    fn new(msg: impl Into<String>) -> Self {
+    pub fn new(msg: impl Into<String>) -> Self {
         Self {
             message: msg.into(),
         }
@@ -122,7 +122,7 @@ pub fn serialize_to_canonical_cbor<T: Serialize>(
     let payload = CanonicalSerializer::serialize(value, schema)
         .map_err(|e| VecGenError::new(format!("serialization failed: {e}")))?;
 
-    let schema_hash_len = 32;
+    let schema_hash_len = SCHEMA_HASH_LEN;
     if payload.len() < schema_hash_len {
         return Err(VecGenError::new("payload too short"));
     }
@@ -218,14 +218,14 @@ pub fn core_schema_registrations() -> Vec<SchemaRegistration> {
             "Universal object header with provenance",
         ),
         SchemaRegistration::new(
-            "fcp.core",
-            "OperationIntent",
+            "fcp.operation",
+            "intent",
             Version::new(1, 0, 0),
             "Operation request with idempotency",
         ),
         SchemaRegistration::new(
-            "fcp.core",
-            "OperationReceipt",
+            "fcp.operation",
+            "receipt",
             Version::new(1, 0, 0),
             "Operation result receipt",
         ),
@@ -236,7 +236,7 @@ pub fn core_schema_registrations() -> Vec<SchemaRegistration> {
             "Audit chain event entry",
         ),
         SchemaRegistration::new(
-            "fcp.core",
+            "fcp.stream",
             "EventEnvelope",
             Version::new(1, 0, 0),
             "Streaming event wrapper",

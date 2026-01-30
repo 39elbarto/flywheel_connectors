@@ -147,6 +147,13 @@ impl CoverageEvaluation {
             return false;
         }
 
+        // Check source diversity requirement
+        if policy.min_source_diversity > 0
+            && self.distinct_nodes < policy.min_source_diversity as usize
+        {
+            return false;
+        }
+
         true
     }
 
@@ -193,6 +200,37 @@ impl CoverageEvaluation {
             CoverageHealth::Healthy
         } else {
             CoverageHealth::Degraded
+        }
+    }
+
+    /// Check if diversity requirements are met for reconstruction.
+    ///
+    /// Returns `true` if the object can be reconstructed while respecting the
+    /// `min_source_diversity` policy. When `min_source_diversity` is 0, this
+    /// only checks basic availability (`is_available`).
+    #[must_use]
+    pub const fn meets_diversity_for_reconstruction(
+        &self,
+        policy: &fcp_core::ObjectPlacementPolicy,
+    ) -> bool {
+        if !self.is_available {
+            return false;
+        }
+        if policy.min_source_diversity > 0
+            && self.distinct_nodes < policy.min_source_diversity as usize
+        {
+            return false;
+        }
+        true
+    }
+
+    /// Calculate how many additional source nodes are needed to meet diversity requirements.
+    #[must_use]
+    pub const fn diversity_deficit(&self, min_diversity: u8) -> u8 {
+        if min_diversity == 0 || self.distinct_nodes >= min_diversity as usize {
+            0
+        } else {
+            min_diversity - self.distinct_nodes as u8
         }
     }
 }
@@ -429,6 +467,7 @@ mod tests {
                     preferred_devices: vec![],
                     excluded_devices: vec![],
                     target_coverage_bps: 10000,
+                    min_source_diversity: 0,
                 };
 
                 assert!(eval.meets_policy(&policy));
@@ -461,6 +500,7 @@ mod tests {
                 preferred_devices: vec![],
                 excluded_devices: vec![],
                 target_coverage_bps: 10000,
+                min_source_diversity: 0,
             };
 
             assert!(!eval.meets_policy(&policy));
@@ -495,6 +535,7 @@ mod tests {
                 preferred_devices: vec![],
                 excluded_devices: vec![],
                 target_coverage_bps: 10000,
+                min_source_diversity: 0,
             };
 
             assert!(!eval.meets_policy(&policy));
@@ -558,6 +599,7 @@ mod tests {
                 preferred_devices: vec![],
                 excluded_devices: vec![],
                 target_coverage_bps: 10000,
+                min_source_diversity: 0,
             };
 
             let mut dist_unavailable = SymbolDistribution::new(10);
@@ -632,5 +674,151 @@ mod tests {
                 details: Some(json!({"remaining_nodes": dist.distinct_nodes()})),
             }
         });
+    }
+
+    #[test]
+    fn diversity_enforcement() {
+        run_store_test("diversity_enforcement", "verify", "placement", 4, || {
+            let object_id = test_object_id();
+
+            // Create distribution with enough symbols but only 1 node
+            let mut dist_single = SymbolDistribution::new(10);
+            for _ in 0..10 {
+                dist_single.add_symbol(1, 100);
+            }
+            let eval_single = CoverageEvaluation::from_distribution(object_id, &dist_single);
+
+            // Policy requiring 2 source nodes
+            let policy_diversity = fcp_core::ObjectPlacementPolicy {
+                min_nodes: 1,
+                max_node_fraction_bps: 10000,
+                preferred_devices: vec![],
+                excluded_devices: vec![],
+                target_coverage_bps: 10000,
+                min_source_diversity: 2,
+            };
+
+            // Should fail diversity check despite having enough symbols
+            assert!(eval_single.is_available);
+            assert!(!eval_single.meets_diversity_for_reconstruction(&policy_diversity));
+
+            // Create distribution with 2 nodes
+            let mut dist_diverse = SymbolDistribution::new(10);
+            for _ in 0..5 {
+                dist_diverse.add_symbol(1, 100);
+            }
+            for _ in 0..5 {
+                dist_diverse.add_symbol(2, 100);
+            }
+            let eval_diverse = CoverageEvaluation::from_distribution(object_id, &dist_diverse);
+
+            // Should pass diversity check
+            assert!(eval_diverse.meets_diversity_for_reconstruction(&policy_diversity));
+
+            StoreLogData {
+                object_id: Some(object_id),
+                symbol_count: Some(dist_diverse.total_symbols),
+                coverage_bps: Some(eval_diverse.coverage_bps),
+                nodes_holding: Some(nodes_from_distribution(&dist_diverse)),
+                details: Some(json!({
+                    "single_node_passes": eval_single.meets_diversity_for_reconstruction(&policy_diversity),
+                    "diverse_passes": eval_diverse.meets_diversity_for_reconstruction(&policy_diversity)
+                })),
+            }
+        });
+    }
+
+    #[test]
+    fn diversity_deficit_calculation() {
+        run_store_test(
+            "diversity_deficit_calculation",
+            "verify",
+            "placement",
+            4,
+            || {
+                let object_id = test_object_id();
+
+                let mut dist = SymbolDistribution::new(10);
+                dist.add_symbol(1, 100);
+                let eval = CoverageEvaluation::from_distribution(object_id, &dist);
+
+                // No requirement = no deficit
+                assert_eq!(eval.diversity_deficit(0), 0);
+
+                // Have 1 node, need 1 = no deficit
+                assert_eq!(eval.diversity_deficit(1), 0);
+
+                // Have 1 node, need 3 = deficit of 2
+                assert_eq!(eval.diversity_deficit(3), 2);
+
+                // Have 1 node, need 5 = deficit of 4
+                assert_eq!(eval.diversity_deficit(5), 4);
+
+                StoreLogData {
+                    object_id: Some(object_id),
+                    symbol_count: Some(dist.total_symbols),
+                    coverage_bps: Some(eval.coverage_bps),
+                    nodes_holding: Some(nodes_from_distribution(&dist)),
+                    details: Some(json!({
+                        "distinct_nodes": eval.distinct_nodes,
+                        "deficit_for_3": eval.diversity_deficit(3)
+                    })),
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn min_source_diversity_in_policy() {
+        run_store_test(
+            "min_source_diversity_in_policy",
+            "verify",
+            "placement",
+            2,
+            || {
+                let object_id = test_object_id();
+
+                // Distribution with 2 nodes, meeting min_nodes but not min_source_diversity
+                let mut dist = SymbolDistribution::new(10);
+                for _ in 0..5 {
+                    dist.add_symbol(1, 100);
+                }
+                for _ in 0..5 {
+                    dist.add_symbol(2, 100);
+                }
+                let eval = CoverageEvaluation::from_distribution(object_id, &dist);
+
+                // Policy: min_nodes=2, min_source_diversity=3
+                let policy = fcp_core::ObjectPlacementPolicy {
+                    min_nodes: 2,
+                    max_node_fraction_bps: 6000,
+                    preferred_devices: vec![],
+                    excluded_devices: vec![],
+                    target_coverage_bps: 10000,
+                    min_source_diversity: 3,
+                };
+
+                // Should fail meets_policy because of min_source_diversity
+                assert!(!eval.meets_policy(&policy));
+
+                // Same policy but with min_source_diversity=2
+                let policy_met = fcp_core::ObjectPlacementPolicy {
+                    min_source_diversity: 2,
+                    ..policy
+                };
+                assert!(eval.meets_policy(&policy_met));
+
+                StoreLogData {
+                    object_id: Some(object_id),
+                    symbol_count: Some(dist.total_symbols),
+                    coverage_bps: Some(eval.coverage_bps),
+                    nodes_holding: Some(nodes_from_distribution(&dist)),
+                    details: Some(json!({
+                        "distinct_nodes": eval.distinct_nodes,
+                        "policy_met": eval.meets_policy(&policy_met)
+                    })),
+                }
+            },
+        );
     }
 }

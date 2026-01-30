@@ -281,6 +281,7 @@ fn partial_loss_degrades_coverage() {
                 preferred_devices: vec![],
                 excluded_devices: vec![],
                 target_coverage_bps: 10000,
+                min_source_diversity: 0,
             };
             let health = eval_after.health(&policy);
             assert!(
@@ -463,6 +464,7 @@ fn repair_controller_drives_convergence() {
                 preferred_devices: vec![],
                 excluded_devices: vec![],
                 target_coverage_bps: 10000,
+                min_source_diversity: 0,
             };
 
             let controller = RepairController::new(RepairControllerConfig {
@@ -642,6 +644,7 @@ fn object_and_symbol_stores_coherent() {
                 preferred_devices: vec![],
                 excluded_devices: vec![],
                 target_coverage_bps: 10000,
+                min_source_diversity: 0,
             };
             assert!(eval.meets_policy(&policy), "meets placement policy");
 
@@ -737,6 +740,7 @@ fn multi_node_symbol_distribution() {
                 preferred_devices: vec![],
                 excluded_devices: vec![],
                 target_coverage_bps: 10000,
+                min_source_diversity: 0,
             };
             assert!(eval.meets_policy(&policy), "meets 3-node policy");
 

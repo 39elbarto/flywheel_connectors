@@ -176,6 +176,16 @@ pub trait SymbolStore: Send + Sync {
 
     /// Check if object can be reconstructed (has enough symbols).
     async fn can_reconstruct(&self, object_id: &ObjectId) -> bool;
+
+    /// Check if object can be reconstructed with diversity enforcement.
+    ///
+    /// Unlike `can_reconstruct`, this method also verifies that symbols come from
+    /// at least `min_source_diversity` distinct nodes when the policy requires it.
+    async fn can_reconstruct_with_policy(
+        &self,
+        object_id: &ObjectId,
+        policy: &fcp_core::ObjectPlacementPolicy,
+    ) -> bool;
 }
 
 /// Configuration for in-memory symbol store.
@@ -394,6 +404,20 @@ impl SymbolStore for MemorySymbolStore {
         if let Some(obj) = objects.get(object_id) {
             // RaptorQ needs K' ≈ K × 1.002 symbols, we approximate with K
             obj.symbols.len() as u32 >= obj.meta.source_symbols
+        } else {
+            false
+        }
+    }
+
+    async fn can_reconstruct_with_policy(
+        &self,
+        object_id: &ObjectId,
+        policy: &fcp_core::ObjectPlacementPolicy,
+    ) -> bool {
+        // Get distribution and evaluate against policy
+        if let Some(dist) = self.get_distribution(object_id).await {
+            let eval = crate::coverage::CoverageEvaluation::from_distribution(*object_id, &dist);
+            eval.meets_diversity_for_reconstruction(policy)
         } else {
             false
         }

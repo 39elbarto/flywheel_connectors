@@ -517,6 +517,7 @@ mod tests {
             preferred_devices: vec![],
             excluded_devices: vec![],
             target_coverage_bps: 10000, // 100%
+            min_source_diversity: 0,
         }
     }
 
@@ -809,6 +810,7 @@ mod tests {
                     preferred_devices: vec![],
                     excluded_devices: vec![],
                     target_coverage_bps: 10000,
+                    min_source_diversity: 0,
                 };
 
                 let controller = RepairController::new(RepairControllerConfig {
@@ -947,6 +949,7 @@ mod tests {
                     preferred_devices: vec![],
                     excluded_devices: vec![],
                     target_coverage_bps: 10000,
+                    min_source_diversity: 0,
                 };
 
                 let controller = RepairController::new(RepairControllerConfig {
@@ -1109,6 +1112,7 @@ mod tests {
                     preferred_devices: vec![],
                     excluded_devices: vec![],
                     target_coverage_bps: 10000,
+                    min_source_diversity: 0,
                 };
 
                 let controller = RepairController::new(RepairControllerConfig {

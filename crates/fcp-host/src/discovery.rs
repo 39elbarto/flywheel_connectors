@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use fcp_core::{
     AgentHint, ApprovalMode, CapabilityId, ConnectorHealth, ConnectorId, IdempotencyClass,
-    Introspection, OperationInfo, RateLimitDeclarations, RiskLevel, SafetyTier,
+    Introspection, OperationInfo, RateLimitDeclarations, RiskLevel, SafetyTier, SelfCheckReport,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
@@ -208,6 +208,19 @@ pub struct IntrospectionResponse {
 
     /// Full introspection data.
     pub introspection: Introspection,
+}
+
+/// Response from a connector self-check.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SelfCheckResponse {
+    /// Connector identifier.
+    pub connector_id: ConnectorId,
+
+    /// Self-check report from the connector.
+    pub report: SelfCheckReport,
+
+    /// Timestamp when the self-check was executed.
+    pub checked_at: DateTime<Utc>,
 }
 
 /// MCP-compatible tool descriptor.
@@ -548,6 +561,9 @@ pub trait ConnectorRegistry: Send + Sync {
     /// Get rate limit declarations for a connector.
     async fn get_rate_limits(&self, id: &ConnectorId) -> Option<RateLimitDeclarations>;
 
+    /// Run a connector self-check.
+    async fn self_check(&self, id: &ConnectorId) -> Option<SelfCheckReport>;
+
     /// Get the current registry version.
     fn version(&self) -> u64;
 }
@@ -655,6 +671,25 @@ where
         })
     }
 
+    /// Run a connector self-check (read-only).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HostError::ConnectorNotFound`] if the connector is missing.
+    pub async fn self_check(&self, connector_id: &ConnectorId) -> HostResult<SelfCheckResponse> {
+        let report = self
+            .registry
+            .self_check(connector_id)
+            .await
+            .ok_or_else(|| HostError::ConnectorNotFound(connector_id.to_string()))?;
+
+        Ok(SelfCheckResponse {
+            connector_id: connector_id.clone(),
+            report,
+            checked_at: Utc::now(),
+        })
+    }
+
     /// Preflight authorization check.
     pub async fn preflight(&self, request: PreflightRequest) -> PreflightResponse {
         self.policy_engine.evaluate_preflight(&request).await
@@ -734,6 +769,7 @@ impl DiscoveryCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fcp_core::SelfCheckStatus;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1104,6 +1140,10 @@ mod tests {
             None
         }
 
+        async fn self_check(&self, id: &ConnectorId) -> Option<SelfCheckReport> {
+            self.find(id).map(|_| SelfCheckReport::ok())
+        }
+
         fn version(&self) -> u64 {
             1
         }
@@ -1223,6 +1263,36 @@ mod tests {
 
         let response = endpoint.introspect(&summary.id).await.unwrap();
         assert_eq!(response.archetype, ConnectorArchetype::RequestResponse);
+    }
+
+    #[tokio::test]
+    async fn discovery_endpoint_self_check_missing_connector() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let registry = CountingRegistry::new(vec![], Arc::clone(&calls));
+        let endpoint = DiscoveryEndpoint::new(Arc::new(registry), Arc::new(AllowPolicy));
+        let id = ConnectorId::new("missing", "test", "v1").unwrap();
+
+        let err = endpoint.self_check(&id).await.unwrap_err();
+        assert!(matches!(err, HostError::ConnectorNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn discovery_endpoint_self_check_ok() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let summary = make_summary(
+            "self-check",
+            "test",
+            "v1",
+            vec!["test"],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        let registry = CountingRegistry::new(vec![summary.clone()], Arc::clone(&calls));
+        let endpoint = DiscoveryEndpoint::new(Arc::new(registry), Arc::new(AllowPolicy));
+
+        let response = endpoint.self_check(&summary.id).await.unwrap();
+        assert_eq!(response.connector_id, summary.id);
+        assert_eq!(response.report.status, SelfCheckStatus::Ok);
     }
 
     #[tokio::test]

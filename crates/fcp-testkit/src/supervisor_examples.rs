@@ -760,7 +760,7 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         // Run briefly then shutdown
-        let handle = tokio::spawn({ async move { connector.run(shutdown_rx).await } });
+        let handle = tokio::spawn(async move { connector.run(shutdown_rx).await });
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         shutdown_tx.send(true).unwrap();

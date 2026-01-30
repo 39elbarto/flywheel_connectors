@@ -40,9 +40,10 @@ use tokio::sync::mpsc;
 use fcp_cbor::CanonicalSerializer;
 use fcp_core::{
     ConnectorId, ConnectorStateObject, CursorState, HealthSnapshot, HealthState, InstanceId,
-    ObjectHeader, ObjectId, ObjectIdKey, RetentionClass, Signature, StorageMeta, StoredObject,
-    ZoneId,
+    ObjectHeader, ObjectId, Signature, ZoneId,
 };
+#[cfg(feature = "cursor-store-object-store")]
+use fcp_core::{ObjectIdKey, RetentionClass, StorageMeta, StoredObject};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SupervisorConfig

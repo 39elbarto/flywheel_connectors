@@ -1048,6 +1048,16 @@ impl CapabilitiesSection {
                 }
             }
         }
+        let exec_forbidden = self
+            .forbidden
+            .iter()
+            .any(|cap| cap.as_str() == "system.exec");
+        if !exec_forbidden {
+            return Err(ManifestError::Invalid {
+                field: "capabilities.forbidden",
+                message: "must include system.exec (default-deny execution)".into(),
+            });
+        }
         Ok(())
     }
 
@@ -2282,6 +2292,31 @@ deny_ptrace = true
 
         let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
         assert!(matches!(err, ManifestError::Invalid { .. }));
+    }
+
+    #[test]
+    fn rejects_missing_forbidden_system_exec() {
+        let _log = TestLog::new(
+            "rejects_missing_forbidden_system_exec",
+            "fcp-manifest",
+            Some("fcp.telegram"),
+            Some("2026.1.0"),
+            Some(4),
+        );
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let toml = test_manifest_toml(&placeholder)
+            .replace("forbidden = [\"system.exec\"]", "forbidden = []");
+
+        let unchecked = ConnectorManifest::parse_str_unchecked(&toml).expect("unchecked parse");
+        let hash = unchecked.compute_interface_hash().expect("compute hash");
+        let with_hash = test_manifest_toml(&hash.to_string())
+            .replace("forbidden = [\"system.exec\"]", "forbidden = []");
+
+        let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+        assert!(
+            matches!(err, ManifestError::Invalid { field, .. } if field == "capabilities.forbidden")
+        );
+        assert!(err.to_string().contains("system.exec"));
     }
 
     #[test]

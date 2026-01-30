@@ -122,7 +122,7 @@ forbidden = []
 [capabilities]
 required = ["network.dns"]
 optional = []
-forbidden = []
+forbidden = ["system.exec"]
 
 [provides.operations.test_op]
 description = "Test operation"
@@ -178,7 +178,7 @@ forbidden = []
 [capabilities]
 required = ["network.dns"]
 optional = []
-forbidden = []
+forbidden = ["system.exec"]
 
 [provides.operations.test_op]
 description = "Test"
@@ -233,7 +233,7 @@ forbidden = []
 [capabilities]
 required = ["network.dns"]
 optional = []
-forbidden = []
+forbidden = ["system.exec"]
 
 [provides.operations.test_op]
 description = "Test"
@@ -291,7 +291,7 @@ format = "native"
 [capabilities]
 required = ["network.dns"]
 optional = []
-forbidden = []
+forbidden = ["system.exec"]
 
 [provides.operations.test_op]
 description = "Test"
@@ -850,7 +850,7 @@ forbidden = []
 [capabilities]
 required = ["network.dns", "network.egress"]
 optional = []
-forbidden = []
+forbidden = ["system.exec"]
 
 [provides.operations.read_data]
 description = "Read data (low risk)"

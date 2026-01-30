@@ -7,7 +7,8 @@ use std::sync::Arc;
 
 use fcp_core::{
     CapabilityToken, ConnectorHealth, ConnectorId, CorrelationId, HandshakeRequest, HealthSnapshot,
-    Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId, RequestId, ZoneId,
+    Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId, RequestId,
+    SelfCheckReport, ZoneId,
 };
 use fcp_e2e::{AssertionsSummary, ConnectorProcessRunner, E2eLogEntry, E2eLogger};
 use fcp_host::{
@@ -201,6 +202,11 @@ impl ConnectorRegistry for SubprocessRegistry {
     async fn get_rate_limits(&self, id: &ConnectorId) -> Option<fcp_core::RateLimitDeclarations> {
         self.connectors.get(id)?;
         Some(fcp_core::RateLimitDeclarations::default())
+    }
+
+    async fn self_check(&self, id: &ConnectorId) -> Option<SelfCheckReport> {
+        self.connectors.get(id)?;
+        Some(SelfCheckReport::ok())
     }
 
     fn version(&self) -> u64 {

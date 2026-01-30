@@ -11,6 +11,7 @@ use chrono::Utc;
 use fcp_core::{
     AgentHint, ApprovalMode, CapabilityId, ConnectorHealth, ConnectorId, IdempotencyClass,
     Introspection, OperationId, OperationInfo, RateLimitDeclarations, RiskLevel, SafetyTier,
+    SelfCheckReport,
 };
 use fcp_host::{
     ConnectorArchetype, ConnectorRegistry, ConnectorSummary, DiscoveryEndpoint, PolicyEngine,
@@ -96,6 +97,10 @@ impl ConnectorRegistry for MockConnectorRegistry {
 
     async fn get_rate_limits(&self, id: &ConnectorId) -> Option<RateLimitDeclarations> {
         self.connectors.get(id).and_then(|c| c.rate_limits.clone())
+    }
+
+    async fn self_check(&self, id: &ConnectorId) -> Option<SelfCheckReport> {
+        self.connectors.get(id).map(|_| SelfCheckReport::ok())
     }
 
     fn version(&self) -> u64 {

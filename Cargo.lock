@@ -2010,10 +2010,12 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "bytes",
+ "chrono",
  "fcp-cbor",
  "fcp-core",
  "fcp-crypto",
  "fcp-tailscale",
+ "fcp-testkit",
  "rand 0.8.5",
  "raptorq",
  "serde",

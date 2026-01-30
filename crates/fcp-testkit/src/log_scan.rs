@@ -385,8 +385,8 @@ mod tests {
             let matched = findings.iter().any(|f| f.rule_id == rule_id);
             let result = if matched { "pass" } else { "fail" };
             let assertions = json!({
-                "passed": if matched { 1 } else { 0 },
-                "failed": if matched { 0 } else { 1 }
+                "passed": i32::from(matched),
+                "failed": i32::from(!matched)
             });
             let entry = json!({
                 "timestamp": Utc::now().to_rfc3339(),
@@ -425,8 +425,8 @@ mod tests {
             "result": if findings.is_empty() { "pass" } else { "fail" },
             "duration_ms": 0,
             "assertions": {
-                "passed": if findings.is_empty() { 1 } else { 0 },
-                "failed": if findings.is_empty() { 0 } else { 1 }
+                "passed": i32::from(findings.is_empty()),
+                "failed": i32::from(!findings.is_empty())
             },
             "context": {
                 "finding_count": findings.len()

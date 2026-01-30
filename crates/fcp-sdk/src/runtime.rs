@@ -2103,7 +2103,7 @@ mod tests {
     use super::*;
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
     use tracing_subscriber::{EnvFilter, layer::SubscriberExt};
 
     fn boxed_err(message: &str) -> StreamingError {
@@ -2242,6 +2242,18 @@ mod tests {
         session.record_heartbeat_ack(now);
         assert_eq!(session.heartbeat_seq(), 1);
         assert_eq!(session.ack_seq(), 1);
+    }
+
+    #[test]
+    fn streaming_session_heartbeat_timeout_logic() {
+        let mut session = InMemoryStreamingSession::new();
+
+        let sent = Instant::now() - Duration::from_millis(25);
+        session.record_heartbeat_sent(sent);
+        assert!(session.is_heartbeat_timeout(Duration::from_millis(10)));
+
+        session.record_heartbeat_ack(Instant::now());
+        assert!(!session.is_heartbeat_timeout(Duration::from_millis(10)));
     }
 
     #[test]

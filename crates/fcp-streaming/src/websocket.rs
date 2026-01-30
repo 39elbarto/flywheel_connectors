@@ -475,13 +475,12 @@ mod tests {
 
     #[test]
     fn test_ws_message_json() {
-        let msg = WsMessage::text(r#"{"key": "value"}"#);
-
         #[derive(serde::Deserialize)]
         struct Data {
             key: String,
         }
 
+        let msg = WsMessage::text(r#"{"key": "value"}"#);
         let data: Data = msg.json().unwrap();
         assert_eq!(data.key, "value");
     }

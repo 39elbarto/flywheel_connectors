@@ -176,6 +176,22 @@ pub fn validate_log_entry_value(value: &serde_json::Value) -> Result<(), LogSche
     })
 }
 
+fn should_redact_key(key: &str) -> bool {
+    let needle = key.to_ascii_lowercase();
+    [
+        "token",
+        "secret",
+        "password",
+        "api_key",
+        "apikey",
+        "access_token",
+        "refresh_token",
+        "client_secret",
+    ]
+    .iter()
+    .any(|s| needle.contains(s))
+}
+
 fn redact_secrets(value: &serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::Object(map) => {
@@ -243,20 +259,4 @@ mod tests {
         });
         assert!(validate_log_entry_value(&entry).is_err());
     }
-}
-
-fn should_redact_key(key: &str) -> bool {
-    let needle = key.to_ascii_lowercase();
-    [
-        "token",
-        "secret",
-        "password",
-        "api_key",
-        "apikey",
-        "access_token",
-        "refresh_token",
-        "client_secret",
-    ]
-    .iter()
-    .any(|s| needle.contains(s))
 }

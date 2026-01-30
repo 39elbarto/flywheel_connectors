@@ -538,13 +538,12 @@ mod tests {
 
     #[test]
     fn test_sse_event_json() {
-        let event = SseEvent::new(r#"{"message": "hello"}"#);
-
         #[derive(serde::Deserialize)]
         struct Data {
             message: String,
         }
 
+        let event = SseEvent::new(r#"{"message": "hello"}"#);
         let data: Data = event.json().unwrap();
         assert_eq!(data.message, "hello");
     }

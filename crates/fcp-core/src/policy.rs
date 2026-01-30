@@ -1131,12 +1131,86 @@ fn sanitizer_receipt_object_id(receipt: &SanitizerReceipt) -> ObjectId {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ApprovalScope, ElevationScope, IntegrityLevel, ZoneId};
+    use crate::{
+        ApprovalScope, CapabilityGrant, CapabilityId, ConfidentialityLevel, ConnectorId, Decision,
+        ElevationScope, IntegrityLevel, NodeId, NodeSignature, ObjectId, OperationId, PrincipalId,
+        Provenance, ProvenanceRecord, ProvenanceViolation, SafetyTier, TaintFlag, ZoneId,
+    };
+    use fcp_cbor::SchemaId;
+    use semver::Version;
+
+    // ── helpers ────────────────────────────────────────────────────────────
+
+    fn test_header() -> ObjectHeader {
+        ObjectHeader {
+            schema: SchemaId::new("fcp.core", "Test", Version::new(1, 0, 0)),
+            zone_id: ZoneId::work(),
+            created_at: 1_000,
+            provenance: Provenance::new(ZoneId::work()),
+            refs: Vec::new(),
+            foreign_refs: Vec::new(),
+            ttl_secs: None,
+            placement: None,
+        }
+    }
+
+    fn test_signature() -> NodeSignature {
+        NodeSignature::new(NodeId::new("test-node"), [0u8; 64], 1_000)
+    }
+
+    fn minimal_zone_policy() -> ZonePolicyObject {
+        ZonePolicyObject {
+            header: test_header(),
+            zone_id: ZoneId::work(),
+            principal_allow: Vec::new(),
+            principal_deny: Vec::new(),
+            connector_allow: Vec::new(),
+            connector_deny: Vec::new(),
+            capability_allow: Vec::new(),
+            capability_deny: Vec::new(),
+            capability_ceiling: Vec::new(),
+            transport_policy: ZoneTransportPolicy {
+                allow_lan: true,
+                allow_derp: true,
+                allow_funnel: true,
+            },
+            decision_receipts: DecisionReceiptPolicy::default(),
+            requires_posture: None,
+        }
+    }
+
+    fn minimal_decision_input() -> PolicyDecisionInput<'static> {
+        static EMPTY_APPROVALS: &[ApprovalToken] = &[];
+        static EMPTY_RECEIPTS: &[SanitizerReceipt] = &[];
+        static EMPTY_OBJECTS: &[ObjectId] = &[];
+
+        PolicyDecisionInput {
+            request_object_id: ObjectId::from_unscoped_bytes(b"req-1"),
+            zone_id: ZoneId::work(),
+            principal: PrincipalId::new("user:alice").unwrap(),
+            connector_id: ConnectorId::from_static("test:conn:v1"),
+            operation_id: OperationId::from_static("op.test"),
+            capability_id: CapabilityId::new("cap.test").unwrap(),
+            safety_tier: SafetyTier::Safe,
+            provenance: ProvenanceRecord::new(ZoneId::work()),
+            approval_tokens: EMPTY_APPROVALS,
+            sanitizer_receipts: EMPTY_RECEIPTS,
+            request_input: None,
+            request_input_hash: None,
+            related_object_ids: EMPTY_OBJECTS,
+            transport: TransportMode::Lan,
+            checkpoint_fresh: true,
+            revocation_fresh: true,
+            execution_approval_required: false,
+            now_ms: 1_000,
+            posture_attestation: None,
+        }
+    }
+
+    // ── existing test ──────────────────────────────────────────────────────
 
     #[test]
     fn test_approval_token_object_id_is_content_addressed() {
-        // Demonstrates that ObjectId is derived from full content, ensuring malleability protection.
-
         let mut token = ApprovalToken {
             token_id: "test-token-123".to_string(),
             issued_at_ms: 1000,
@@ -1153,16 +1227,756 @@ mod tests {
 
         let id1 = approval_token_object_id(&token);
 
-        // Mutate content but keep token_id
         if let ApprovalScope::Elevation(ref mut scope) = token.scope {
             scope.target_integrity = IntegrityLevel::Untrusted;
         }
         let id2 = approval_token_object_id(&token);
 
-        // IDs MUST be different despite having same token_id
         assert_ne!(id1, id2);
-
-        // And they must NOT match the simple hash of the ID string
         assert_ne!(id1, ObjectId::from_unscoped_bytes(b"test-token-123"));
+    }
+
+    // ── TransportMode ──────────────────────────────────────────────────────
+
+    #[test]
+    fn transport_mode_serde_roundtrip() {
+        for mode in [
+            TransportMode::Lan,
+            TransportMode::Derp,
+            TransportMode::Funnel,
+        ] {
+            let json = serde_json::to_string(&mode).unwrap();
+            let back: TransportMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(mode, back);
+        }
+    }
+
+    #[test]
+    fn transport_mode_serde_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&TransportMode::Lan).unwrap(),
+            "\"lan\""
+        );
+        assert_eq!(
+            serde_json::to_string(&TransportMode::Derp).unwrap(),
+            "\"derp\""
+        );
+        assert_eq!(
+            serde_json::to_string(&TransportMode::Funnel).unwrap(),
+            "\"funnel\""
+        );
+    }
+
+    // ── ZoneTransportPolicy ────────────────────────────────────────────────
+
+    #[test]
+    fn zone_transport_policy_default_allows_only_lan() {
+        let policy = ZoneTransportPolicy::default();
+        assert!(policy.allow_lan);
+        assert!(!policy.allow_derp);
+        assert!(!policy.allow_funnel);
+    }
+
+    #[test]
+    fn zone_transport_policy_allows_checks_each_mode() {
+        let policy = ZoneTransportPolicy {
+            allow_lan: false,
+            allow_derp: true,
+            allow_funnel: false,
+        };
+        assert!(!policy.allows(TransportMode::Lan));
+        assert!(policy.allows(TransportMode::Derp));
+        assert!(!policy.allows(TransportMode::Funnel));
+    }
+
+    #[test]
+    fn zone_transport_policy_allows_all_when_all_true() {
+        let policy = ZoneTransportPolicy {
+            allow_lan: true,
+            allow_derp: true,
+            allow_funnel: true,
+        };
+        assert!(policy.allows(TransportMode::Lan));
+        assert!(policy.allows(TransportMode::Derp));
+        assert!(policy.allows(TransportMode::Funnel));
+    }
+
+    #[test]
+    fn zone_transport_policy_serde_roundtrip() {
+        let policy = ZoneTransportPolicy {
+            allow_lan: true,
+            allow_derp: false,
+            allow_funnel: true,
+        };
+        let json = serde_json::to_string(&policy).unwrap();
+        let back: ZoneTransportPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.allow_lan, policy.allow_lan);
+        assert_eq!(back.allow_derp, policy.allow_derp);
+        assert_eq!(back.allow_funnel, policy.allow_funnel);
+    }
+
+    // ── DecisionReceiptPolicy ──────────────────────────────────────────────
+
+    #[test]
+    fn decision_receipt_policy_default_emits_on_deny_only() {
+        let policy = DecisionReceiptPolicy::default();
+        assert!(!policy.emit_on_allow);
+        assert!(policy.emit_on_deny);
+    }
+
+    #[test]
+    fn decision_receipt_policy_serde_roundtrip() {
+        let policy = DecisionReceiptPolicy {
+            emit_on_allow: true,
+            emit_on_deny: false,
+        };
+        let json = serde_json::to_string(&policy).unwrap();
+        let back: DecisionReceiptPolicy = serde_json::from_str(&json).unwrap();
+        assert!(back.emit_on_allow);
+        assert!(!back.emit_on_deny);
+    }
+
+    // ── PolicyPattern ──────────────────────────────────────────────────────
+
+    #[test]
+    fn policy_pattern_exact_match() {
+        let pat = PolicyPattern {
+            pattern: "user:alice".into(),
+        };
+        assert!(pat.matches("user:alice"));
+        assert!(!pat.matches("user:bob"));
+    }
+
+    #[test]
+    fn policy_pattern_wildcard_star_matches_all() {
+        let pat = PolicyPattern {
+            pattern: "*".into(),
+        };
+        assert!(pat.matches("anything"));
+        assert!(pat.matches(""));
+    }
+
+    #[test]
+    fn policy_pattern_prefix_wildcard() {
+        let pat = PolicyPattern {
+            pattern: "user:*".into(),
+        };
+        assert!(pat.matches("user:alice"));
+        assert!(pat.matches("user:bob"));
+        assert!(!pat.matches("service:foo"));
+    }
+
+    #[test]
+    fn policy_pattern_suffix_wildcard() {
+        let pat = PolicyPattern {
+            pattern: "*:admin".into(),
+        };
+        assert!(pat.matches("user:admin"));
+        assert!(pat.matches("service:admin"));
+        assert!(!pat.matches("user:alice"));
+    }
+
+    #[test]
+    fn policy_pattern_middle_wildcard() {
+        let pat = PolicyPattern {
+            pattern: "a*z".into(),
+        };
+        assert!(pat.matches("az"));
+        assert!(pat.matches("abcz"));
+        assert!(!pat.matches("bz"));
+        assert!(!pat.matches("ay"));
+    }
+
+    #[test]
+    fn policy_pattern_multi_wildcard() {
+        let pat = PolicyPattern {
+            pattern: "a*b*c".into(),
+        };
+        assert!(pat.matches("abc"));
+        assert!(pat.matches("aXXbYYc"));
+        assert!(!pat.matches("aXXc")); // missing 'b'
+    }
+
+    #[test]
+    fn policy_pattern_empty_matches_empty() {
+        let pat = PolicyPattern { pattern: String::new() };
+        assert!(pat.matches(""));
+        assert!(!pat.matches("anything"));
+    }
+
+    // ── DecisionReasonCode ─────────────────────────────────────────────────
+
+    #[test]
+    fn decision_reason_code_as_str_select_variants() {
+        assert_eq!(DecisionReasonCode::Allow.as_str(), "allow");
+        assert_eq!(
+            DecisionReasonCode::CapabilityInsufficient.as_str(),
+            "capability.insufficient"
+        );
+        assert_eq!(
+            DecisionReasonCode::TransportDerpForbidden.as_str(),
+            "transport.derp_forbidden"
+        );
+        assert_eq!(
+            DecisionReasonCode::ZonePolicyPrincipalDenied.as_str(),
+            "zone_policy.principal_denied"
+        );
+        assert_eq!(
+            DecisionReasonCode::PostureAttestationMissing.as_str(),
+            "posture.attestation_missing"
+        );
+        assert_eq!(
+            DecisionReasonCode::SanitizerReceiptInvalid.as_str(),
+            "taint.sanitizer_invalid"
+        );
+    }
+
+    #[test]
+    fn decision_reason_code_serde_roundtrip() {
+        let code = DecisionReasonCode::TaintPublicInputDangerous;
+        let json = serde_json::to_string(&code).unwrap();
+        let back: DecisionReasonCode = serde_json::from_str(&json).unwrap();
+        assert_eq!(code, back);
+    }
+
+    #[test]
+    fn decision_reason_code_from_provenance_violation() {
+        assert_eq!(
+            DecisionReasonCode::from_provenance_violation(
+                &ProvenanceViolation::PublicInputForDangerousOperation
+            ),
+            DecisionReasonCode::TaintPublicInputDangerous,
+        );
+        assert_eq!(
+            DecisionReasonCode::from_provenance_violation(
+                &ProvenanceViolation::MaliciousInputDetected
+            ),
+            DecisionReasonCode::TaintMaliciousInput,
+        );
+        assert_eq!(
+            DecisionReasonCode::from_provenance_violation(
+                &ProvenanceViolation::CrossZoneUnapprovedForDangerousOperation
+            ),
+            DecisionReasonCode::TaintCrossZoneUnapproved,
+        );
+        assert_eq!(
+            DecisionReasonCode::from_provenance_violation(
+                &ProvenanceViolation::SanitizerCoverageInsufficient
+            ),
+            DecisionReasonCode::SanitizerCoverageInsufficient,
+        );
+        assert_eq!(
+            DecisionReasonCode::from_provenance_violation(
+                &ProvenanceViolation::ApprovalTokenInvalid
+            ),
+            DecisionReasonCode::ApprovalTokenInvalid,
+        );
+    }
+
+    // ── PolicyDecision ─────────────────────────────────────────────────────
+
+    #[test]
+    fn policy_decision_allow_has_allow_fields() {
+        let ev = vec![ObjectId::from_unscoped_bytes(b"ev1")];
+        let d = PolicyDecision::allow(ev.clone());
+        assert_eq!(d.decision, Decision::Allow);
+        assert_eq!(d.reason_code, DecisionReasonCode::Allow);
+        assert_eq!(d.evidence, ev);
+        assert!(d.explanation.is_none());
+    }
+
+    #[test]
+    fn policy_decision_deny_has_deny_fields() {
+        let d = PolicyDecision::deny(DecisionReasonCode::TransportDerpForbidden, Vec::new());
+        assert_eq!(d.decision, Decision::Deny);
+        assert_eq!(d.reason_code, DecisionReasonCode::TransportDerpForbidden);
+    }
+
+    #[test]
+    fn policy_decision_to_receipt_preserves_decision() {
+        let d = PolicyDecision::deny(
+            DecisionReasonCode::CapabilityInsufficient,
+            vec![ObjectId::from_unscoped_bytes(b"ev")],
+        );
+        let receipt = d.to_receipt(
+            test_header(),
+            ObjectId::from_unscoped_bytes(b"req"),
+            test_signature(),
+        );
+        assert_eq!(receipt.decision, Decision::Deny);
+        assert_eq!(receipt.reason_code, "capability.insufficient");
+        assert_eq!(receipt.evidence.len(), 1);
+        assert_eq!(
+            receipt.request_object_id,
+            ObjectId::from_unscoped_bytes(b"req")
+        );
+    }
+
+    // ── ResourceObject ─────────────────────────────────────────────────────
+
+    #[test]
+    fn resource_object_serde_roundtrip() {
+        let obj = ResourceObject {
+            header: test_header(),
+            resource_uri: "https://example.com/file.pdf".to_string(),
+            integrity_label: IntegrityLevel::Private,
+            confidentiality_label: ConfidentialityLevel::Private,
+            taint_flags: TaintFlags::default(),
+        };
+        let json = serde_json::to_string(&obj).unwrap();
+        let back: ResourceObject = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.resource_uri, "https://example.com/file.pdf");
+    }
+
+    // ── RoleGraph ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn role_graph_acyclic_single_role() {
+        let id_a = ObjectId::from_unscoped_bytes(b"role-a");
+        let role_a = RoleObject {
+            name: "admin".into(),
+            caps: vec![CapabilityGrant {
+                capability: CapabilityId::new("cap.read").unwrap(),
+                operation: None,
+            }],
+            includes: Vec::new(),
+        };
+        let mut roles = HashMap::new();
+        roles.insert(id_a, role_a);
+        let graph = RoleGraph::new(roles);
+        assert!(graph.validate_acyclic().is_ok());
+    }
+
+    #[test]
+    fn role_graph_acyclic_linear_chain() {
+        let id_a = ObjectId::from_unscoped_bytes(b"role-a");
+        let id_b = ObjectId::from_unscoped_bytes(b"role-b");
+        let role_a = RoleObject {
+            name: "base".into(),
+            caps: vec![],
+            includes: Vec::new(),
+        };
+        let role_b = RoleObject {
+            name: "admin".into(),
+            caps: vec![],
+            includes: vec![id_a],
+        };
+        let mut roles = HashMap::new();
+        roles.insert(id_a, role_a);
+        roles.insert(id_b, role_b);
+        let graph = RoleGraph::new(roles);
+        assert!(graph.validate_acyclic().is_ok());
+    }
+
+    #[test]
+    fn role_graph_detects_cycle() {
+        let id_a = ObjectId::from_unscoped_bytes(b"role-a");
+        let id_b = ObjectId::from_unscoped_bytes(b"role-b");
+        let role_a = RoleObject {
+            name: "alpha".into(),
+            caps: vec![],
+            includes: vec![id_b],
+        };
+        let role_b = RoleObject {
+            name: "beta".into(),
+            caps: vec![],
+            includes: vec![id_a],
+        };
+        let mut roles = HashMap::new();
+        roles.insert(id_a, role_a);
+        roles.insert(id_b, role_b);
+        let graph = RoleGraph::new(roles);
+        let err = graph.validate_acyclic().unwrap_err();
+        assert!(matches!(err, RoleGraphError::RoleCycle { .. }));
+    }
+
+    #[test]
+    fn role_graph_detects_unknown_role() {
+        let id_a = ObjectId::from_unscoped_bytes(b"role-a");
+        let id_missing = ObjectId::from_unscoped_bytes(b"role-missing");
+        let role_a = RoleObject {
+            name: "orphan".into(),
+            caps: vec![],
+            includes: vec![id_missing],
+        };
+        let mut roles = HashMap::new();
+        roles.insert(id_a, role_a);
+        let graph = RoleGraph::new(roles);
+        let err = graph.validate_acyclic().unwrap_err();
+        assert!(matches!(err, RoleGraphError::UnknownRole { .. }));
+    }
+
+    #[test]
+    fn role_graph_resolve_caps_collects_inherited() {
+        let id_a = ObjectId::from_unscoped_bytes(b"role-base");
+        let id_b = ObjectId::from_unscoped_bytes(b"role-derived");
+        let cap_read = CapabilityGrant {
+            capability: CapabilityId::new("cap.read").unwrap(),
+            operation: None,
+        };
+        let cap_write = CapabilityGrant {
+            capability: CapabilityId::new("cap.write").unwrap(),
+            operation: None,
+        };
+        let role_a = RoleObject {
+            name: "base".into(),
+            caps: vec![cap_read.clone()],
+            includes: Vec::new(),
+        };
+        let role_b = RoleObject {
+            name: "derived".into(),
+            caps: vec![cap_write.clone()],
+            includes: vec![id_a],
+        };
+        let mut roles = HashMap::new();
+        roles.insert(id_a, role_a);
+        roles.insert(id_b, role_b);
+        let graph = RoleGraph::new(roles);
+        let caps = graph.resolve_caps(&[id_b]).unwrap();
+        assert_eq!(caps.len(), 2);
+        assert!(caps.contains(&cap_write));
+        assert!(caps.contains(&cap_read));
+    }
+
+    #[test]
+    fn role_graph_resolve_caps_deduplicates_diamond() {
+        let id_a = ObjectId::from_unscoped_bytes(b"role-root");
+        let id_b = ObjectId::from_unscoped_bytes(b"role-left");
+        let id_c = ObjectId::from_unscoped_bytes(b"role-right");
+        let cap_root = CapabilityGrant {
+            capability: CapabilityId::new("cap.root").unwrap(),
+            operation: None,
+        };
+        let role_a = RoleObject {
+            name: "root".into(),
+            caps: vec![cap_root],
+            includes: Vec::new(),
+        };
+        let role_b = RoleObject {
+            name: "left".into(),
+            caps: vec![],
+            includes: vec![id_a],
+        };
+        let role_c = RoleObject {
+            name: "right".into(),
+            caps: vec![],
+            includes: vec![id_a],
+        };
+        let mut roles = HashMap::new();
+        roles.insert(id_a, role_a);
+        roles.insert(id_b, role_b);
+        roles.insert(id_c, role_c);
+        let graph = RoleGraph::new(roles);
+        // Resolve from both branches — root caps should appear once
+        let caps = graph.resolve_caps(&[id_b, id_c]).unwrap();
+        assert_eq!(caps.len(), 1);
+    }
+
+    // ── PolicyEngine ───────────────────────────────────────────────────────
+
+    #[test]
+    fn engine_allow_minimal_input() {
+        let engine = PolicyEngine {
+            zone_policy: minimal_zone_policy(),
+        };
+        let input = minimal_decision_input();
+        let decision = engine.evaluate_invoke(&input);
+        assert_eq!(decision.decision, Decision::Allow);
+        assert_eq!(decision.reason_code, DecisionReasonCode::Allow);
+    }
+
+    #[test]
+    fn engine_deny_revocation_stale() {
+        let engine = PolicyEngine {
+            zone_policy: minimal_zone_policy(),
+        };
+        let mut input = minimal_decision_input();
+        input.revocation_fresh = false;
+        let decision = engine.evaluate_invoke(&input);
+        assert_eq!(decision.decision, Decision::Deny);
+        assert_eq!(decision.reason_code, DecisionReasonCode::RevocationStaleFrontier);
+    }
+
+    #[test]
+    fn engine_deny_checkpoint_stale() {
+        let engine = PolicyEngine {
+            zone_policy: minimal_zone_policy(),
+        };
+        let mut input = minimal_decision_input();
+        input.checkpoint_fresh = false;
+        let decision = engine.evaluate_invoke(&input);
+        assert_eq!(decision.decision, Decision::Deny);
+        assert_eq!(decision.reason_code, DecisionReasonCode::CheckpointStaleFrontier);
+    }
+
+    #[test]
+    fn engine_deny_transport_derp_forbidden() {
+        let mut policy = minimal_zone_policy();
+        policy.transport_policy.allow_derp = false;
+        let engine = PolicyEngine { zone_policy: policy };
+        let mut input = minimal_decision_input();
+        input.transport = TransportMode::Derp;
+        let decision = engine.evaluate_invoke(&input);
+        assert_eq!(decision.decision, Decision::Deny);
+        assert_eq!(decision.reason_code, DecisionReasonCode::TransportDerpForbidden);
+    }
+
+    #[test]
+    fn engine_deny_transport_funnel_forbidden() {
+        let mut policy = minimal_zone_policy();
+        policy.transport_policy.allow_funnel = false;
+        let engine = PolicyEngine { zone_policy: policy };
+        let mut input = minimal_decision_input();
+        input.transport = TransportMode::Funnel;
+        let decision = engine.evaluate_invoke(&input);
+        assert_eq!(decision.decision, Decision::Deny);
+        assert_eq!(decision.reason_code, DecisionReasonCode::TransportFunnelForbidden);
+    }
+
+    #[test]
+    fn engine_deny_transport_lan_forbidden() {
+        let mut policy = minimal_zone_policy();
+        policy.transport_policy.allow_lan = false;
+        let engine = PolicyEngine { zone_policy: policy };
+        let input = minimal_decision_input();
+        let decision = engine.evaluate_invoke(&input);
+        assert_eq!(decision.decision, Decision::Deny);
+        assert_eq!(decision.reason_code, DecisionReasonCode::TransportLanForbidden);
+    }
+
+    #[test]
+    fn engine_deny_principal_on_deny_list() {
+        let mut policy = minimal_zone_policy();
+        policy.principal_deny.push(PolicyPattern { pattern: "user:alice".into() });
+        let engine = PolicyEngine { zone_policy: policy };
+        let input = minimal_decision_input();
+        let decision = engine.evaluate_invoke(&input);
+        assert_eq!(decision.decision, Decision::Deny);
+        assert_eq!(decision.reason_code, DecisionReasonCode::ZonePolicyPrincipalDenied);
+    }
+
+    #[test]
+    fn engine_deny_connector_on_deny_list() {
+        let mut policy = minimal_zone_policy();
+        policy.connector_deny.push(PolicyPattern { pattern: "test:conn:*".into() });
+        let engine = PolicyEngine { zone_policy: policy };
+        let input = minimal_decision_input();
+        let decision = engine.evaluate_invoke(&input);
+        assert_eq!(decision.decision, Decision::Deny);
+        assert_eq!(decision.reason_code, DecisionReasonCode::ZonePolicyConnectorDenied);
+    }
+
+    #[test]
+    fn engine_deny_capability_on_deny_list() {
+        let mut policy = minimal_zone_policy();
+        policy.capability_deny.push(PolicyPattern { pattern: "cap.*".into() });
+        let engine = PolicyEngine { zone_policy: policy };
+        let input = minimal_decision_input();
+        let decision = engine.evaluate_invoke(&input);
+        assert_eq!(decision.decision, Decision::Deny);
+        assert_eq!(decision.reason_code, DecisionReasonCode::ZonePolicyCapabilityDenied);
+    }
+
+    #[test]
+    fn engine_deny_principal_not_on_allow_list() {
+        let mut policy = minimal_zone_policy();
+        policy.principal_allow.push(PolicyPattern { pattern: "user:bob".into() });
+        let engine = PolicyEngine { zone_policy: policy };
+        let input = minimal_decision_input();
+        let decision = engine.evaluate_invoke(&input);
+        assert_eq!(decision.decision, Decision::Deny);
+        assert_eq!(decision.reason_code, DecisionReasonCode::ZonePolicyPrincipalNotAllowed);
+    }
+
+    #[test]
+    fn engine_allow_principal_on_allow_list() {
+        let mut policy = minimal_zone_policy();
+        policy.principal_allow.push(PolicyPattern { pattern: "user:*".into() });
+        let engine = PolicyEngine { zone_policy: policy };
+        let input = minimal_decision_input();
+        let decision = engine.evaluate_invoke(&input);
+        assert_eq!(decision.decision, Decision::Allow);
+    }
+
+    #[test]
+    fn engine_deny_connector_not_on_allow_list() {
+        let mut policy = minimal_zone_policy();
+        policy.connector_allow.push(PolicyPattern { pattern: "other:conn:*".into() });
+        let engine = PolicyEngine { zone_policy: policy };
+        let input = minimal_decision_input();
+        let decision = engine.evaluate_invoke(&input);
+        assert_eq!(decision.decision, Decision::Deny);
+        assert_eq!(decision.reason_code, DecisionReasonCode::ZonePolicyConnectorNotAllowed);
+    }
+
+    #[test]
+    fn engine_deny_capability_not_on_allow_list() {
+        let mut policy = minimal_zone_policy();
+        policy.capability_allow.push(PolicyPattern { pattern: "cap.other".into() });
+        let engine = PolicyEngine { zone_policy: policy };
+        let input = minimal_decision_input();
+        let decision = engine.evaluate_invoke(&input);
+        assert_eq!(decision.decision, Decision::Deny);
+        assert_eq!(decision.reason_code, DecisionReasonCode::ZonePolicyCapabilityNotAllowed);
+    }
+
+    #[test]
+    fn engine_deny_capability_ceiling_blocks() {
+        let mut policy = minimal_zone_policy();
+        policy.capability_ceiling.push(CapabilityId::new("cap.other").unwrap());
+        let engine = PolicyEngine { zone_policy: policy };
+        let input = minimal_decision_input();
+        let decision = engine.evaluate_invoke(&input);
+        assert_eq!(decision.decision, Decision::Deny);
+        assert_eq!(decision.reason_code, DecisionReasonCode::CapabilityInsufficient);
+    }
+
+    #[test]
+    fn engine_allow_capability_in_ceiling() {
+        let mut policy = minimal_zone_policy();
+        policy.capability_ceiling.push(CapabilityId::new("cap.test").unwrap());
+        let engine = PolicyEngine { zone_policy: policy };
+        let input = minimal_decision_input();
+        let decision = engine.evaluate_invoke(&input);
+        assert_eq!(decision.decision, Decision::Allow);
+    }
+
+    #[test]
+    fn engine_deny_tainted_public_input_dangerous_tier() {
+        let engine = PolicyEngine {
+            zone_policy: minimal_zone_policy(),
+        };
+        let mut input = minimal_decision_input();
+        input.safety_tier = SafetyTier::Dangerous;
+        input.provenance.taint_flags.insert(TaintFlag::PublicInput);
+        let decision = engine.evaluate_invoke(&input);
+        assert_eq!(decision.decision, Decision::Deny);
+        assert_eq!(decision.reason_code, DecisionReasonCode::TaintPublicInputDangerous);
+    }
+
+    #[test]
+    fn engine_deny_unverified_link_risky_tier() {
+        let engine = PolicyEngine {
+            zone_policy: minimal_zone_policy(),
+        };
+        let mut input = minimal_decision_input();
+        input.safety_tier = SafetyTier::Risky;
+        input.provenance.taint_flags.insert(TaintFlag::UnverifiedLink);
+        let decision = engine.evaluate_invoke(&input);
+        assert_eq!(decision.decision, Decision::Deny);
+        assert_eq!(decision.reason_code, DecisionReasonCode::TaintUnverifiedLinkRisky);
+    }
+
+    #[test]
+    fn engine_allow_tainted_safe_tier() {
+        let engine = PolicyEngine {
+            zone_policy: minimal_zone_policy(),
+        };
+        let mut input = minimal_decision_input();
+        input.safety_tier = SafetyTier::Safe;
+        input.provenance.taint_flags.insert(TaintFlag::PublicInput);
+        let decision = engine.evaluate_invoke(&input);
+        // PublicInput with Safe tier should still be allowed
+        assert_eq!(decision.decision, Decision::Allow);
+    }
+
+    #[test]
+    fn engine_execution_approval_missing_denies() {
+        let engine = PolicyEngine {
+            zone_policy: minimal_zone_policy(),
+        };
+        let mut input = minimal_decision_input();
+        input.execution_approval_required = true;
+        let decision = engine.evaluate_invoke(&input);
+        assert_eq!(decision.decision, Decision::Deny);
+        assert_eq!(decision.reason_code, DecisionReasonCode::ApprovalMissingExecution);
+    }
+
+    // ── check_transport (via PolicyEngine) ─────────────────────────────────
+
+    #[test]
+    fn check_transport_returns_correct_reason_per_mode() {
+        // Deny all transports
+        let policy = ZoneTransportPolicy {
+            allow_lan: false,
+            allow_derp: false,
+            allow_funnel: false,
+        };
+        assert_eq!(check_transport(&policy, TransportMode::Lan), Some(DecisionReasonCode::TransportLanForbidden));
+        assert_eq!(check_transport(&policy, TransportMode::Derp), Some(DecisionReasonCode::TransportDerpForbidden));
+        assert_eq!(check_transport(&policy, TransportMode::Funnel), Some(DecisionReasonCode::TransportFunnelForbidden));
+    }
+
+    #[test]
+    fn check_transport_none_when_allowed() {
+        let policy = ZoneTransportPolicy {
+            allow_lan: true,
+            allow_derp: true,
+            allow_funnel: true,
+        };
+        assert_eq!(check_transport(&policy, TransportMode::Lan), None);
+        assert_eq!(check_transport(&policy, TransportMode::Derp), None);
+        assert_eq!(check_transport(&policy, TransportMode::Funnel), None);
+    }
+
+    // ── input_constraints_match ────────────────────────────────────────────
+
+    #[test]
+    fn input_constraints_match_returns_false_when_no_input() {
+        let constraints = vec![crate::InputConstraint {
+            pointer: "/key".into(),
+            expected: serde_json::Value::String("val".into()),
+        }];
+        assert!(!input_constraints_match(&constraints, None));
+    }
+
+    #[test]
+    fn input_constraints_match_returns_true_when_matched() {
+        let constraints = vec![crate::InputConstraint {
+            pointer: "/key".into(),
+            expected: serde_json::json!("val"),
+        }];
+        let input = serde_json::json!({"key": "val"});
+        assert!(input_constraints_match(&constraints, Some(&input)));
+    }
+
+    #[test]
+    fn input_constraints_match_returns_false_on_mismatch() {
+        let constraints = vec![crate::InputConstraint {
+            pointer: "/key".into(),
+            expected: serde_json::json!("val"),
+        }];
+        let input = serde_json::json!({"key": "wrong"});
+        assert!(!input_constraints_match(&constraints, Some(&input)));
+    }
+
+    #[test]
+    fn input_constraints_match_empty_constraints_always_true() {
+        let input = serde_json::json!({"anything": true});
+        assert!(input_constraints_match(&[], Some(&input)));
+    }
+
+    // ── pattern_matches edge cases ─────────────────────────────────────────
+
+    #[test]
+    fn pattern_matches_double_wildcard() {
+        // "**" is just two wildcards — matches anything
+        let pat = PolicyPattern { pattern: "**".into() };
+        assert!(pat.matches("anything"));
+        assert!(pat.matches(""));
+    }
+
+    #[test]
+    fn pattern_matches_no_match_when_prefix_differs() {
+        let pat = PolicyPattern { pattern: "abc*".into() };
+        assert!(pat.matches("abcdef"));
+        assert!(!pat.matches("xabc"));
+    }
+
+    #[test]
+    fn pattern_matches_no_match_when_suffix_differs() {
+        let pat = PolicyPattern { pattern: "*xyz".into() };
+        assert!(pat.matches("abcxyz"));
+        assert!(!pat.matches("xyzabc"));
     }
 }

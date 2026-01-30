@@ -142,6 +142,8 @@ pub use fcp_core::{
     TraceContext,
     TrustLevel,
     UnsubscribeRequest,
+    UsageMetric,
+    UsageMetricKind,
     Webhook,
     ZoneId,
 

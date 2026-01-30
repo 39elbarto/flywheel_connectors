@@ -537,6 +537,10 @@ pub struct InvokeResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
 
+    /// Usage metrics for the operation (if available).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage_metrics: Option<Vec<UsageMetric>>,
+
     /// Response metadata (timing, cache hints).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_metadata: Option<ResponseMetadata>,
@@ -557,6 +561,7 @@ impl InvokeResponse {
             decision_receipt_id: None,
             resource_uris: Vec::new(),
             next_cursor: None,
+            usage_metrics: None,
             response_metadata: None,
         }
     }
@@ -575,6 +580,7 @@ impl InvokeResponse {
             decision_receipt_id: None,
             resource_uris: Vec::new(),
             next_cursor: None,
+            usage_metrics: None,
             response_metadata: None,
         }
     }
@@ -604,6 +610,13 @@ impl InvokeResponse {
     #[must_use]
     pub const fn with_metadata(mut self, metadata: ResponseMetadata) -> Self {
         self.response_metadata = Some(metadata);
+        self
+    }
+
+    /// Set usage metrics.
+    #[must_use]
+    pub fn with_usage_metrics(mut self, metrics: Vec<UsageMetric>) -> Self {
+        self.usage_metrics = Some(metrics);
         self
     }
 }
@@ -981,6 +994,120 @@ impl CurrencyCost {
     #[must_use]
     pub fn usd_cents(amount_cents: u64) -> Self {
         Self::new(amount_cents, "USD")
+    }
+}
+
+/// Usage metric kind for actual execution telemetry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageMetricKind {
+    /// API credits or tokens consumed.
+    ApiCredits,
+    /// Token usage (LLM tokens, etc.).
+    Tokens,
+    /// Bytes transferred.
+    Bytes,
+    /// Execution duration in milliseconds.
+    DurationMs,
+    /// Number of requests performed.
+    Requests,
+    /// Custom connector-specific metric.
+    Custom,
+}
+
+/// Usage metric for actual execution (NORMATIVE when present).
+///
+/// Connectors SHOULD emit usage metrics when they can measure actual usage.
+/// Host systems MAY aggregate these metrics per-zone for budget enforcement.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageMetric {
+    /// Metric kind.
+    pub kind: UsageMetricKind,
+
+    /// Measured usage amount.
+    pub amount: u64,
+
+    /// Optional unit label (for custom metrics).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+
+    /// Optional custom metric identifier (required when kind = Custom).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_id: Option<String>,
+}
+
+impl UsageMetric {
+    /// Usage metric for API credits.
+    #[must_use]
+    pub const fn api_credits(amount: u64) -> Self {
+        Self {
+            kind: UsageMetricKind::ApiCredits,
+            amount,
+            unit: None,
+            custom_id: None,
+        }
+    }
+
+    /// Usage metric for tokens.
+    #[must_use]
+    pub const fn tokens(amount: u64) -> Self {
+        Self {
+            kind: UsageMetricKind::Tokens,
+            amount,
+            unit: None,
+            custom_id: None,
+        }
+    }
+
+    /// Usage metric for bytes.
+    #[must_use]
+    pub const fn bytes(amount: u64) -> Self {
+        Self {
+            kind: UsageMetricKind::Bytes,
+            amount,
+            unit: None,
+            custom_id: None,
+        }
+    }
+
+    /// Usage metric for duration in milliseconds.
+    #[must_use]
+    pub const fn duration_ms(amount: u64) -> Self {
+        Self {
+            kind: UsageMetricKind::DurationMs,
+            amount,
+            unit: None,
+            custom_id: None,
+        }
+    }
+
+    /// Usage metric for request counts.
+    #[must_use]
+    pub const fn requests(amount: u64) -> Self {
+        Self {
+            kind: UsageMetricKind::Requests,
+            amount,
+            unit: None,
+            custom_id: None,
+        }
+    }
+
+    /// Usage metric for custom connector-specific measurements.
+    #[must_use]
+    pub fn custom(custom_id: impl Into<String>, amount: u64, unit: Option<String>) -> Self {
+        Self {
+            kind: UsageMetricKind::Custom,
+            amount,
+            unit,
+            custom_id: Some(custom_id.into()),
+        }
+    }
+
+    /// Attach a unit label.
+    #[must_use]
+    pub fn with_unit(mut self, unit: impl Into<String>) -> Self {
+        self.unit = Some(unit.into());
+        self
     }
 }
 
@@ -1619,6 +1746,11 @@ mod tests {
             decision_receipt_id: None,
             resource_uris: vec!["fcp://fcp.gmail/message/123".into()],
             next_cursor: Some("cursor_abc".into()),
+            usage_metrics: Some(vec![
+                UsageMetric::tokens(1200),
+                UsageMetric::bytes(2048),
+                UsageMetric::duration_ms(75),
+            ]),
             response_metadata: Some(ResponseMetadata {
                 processing_time_ms: Some(42),
                 cache_ttl_secs: Some(300),
@@ -1637,6 +1769,10 @@ mod tests {
         assert!(deserialized.error.is_none());
         assert_eq!(deserialized.resource_uris.len(), 1);
         assert_eq!(deserialized.next_cursor, Some("cursor_abc".into()));
+        let usage = deserialized.usage_metrics.unwrap();
+        assert_eq!(usage.len(), 3);
+        assert!(matches!(usage[0].kind, UsageMetricKind::Tokens));
+        assert_eq!(usage[0].amount, 1200);
         let meta = deserialized.response_metadata.unwrap();
         assert_eq!(meta.processing_time_ms, Some(42));
         assert!(!meta.from_cache);

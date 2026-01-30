@@ -63,6 +63,7 @@ pub enum GrantType {
     /// Refresh token grant.
     RefreshToken,
     /// Device code grant.
+    #[serde(rename = "urn:ietf:params:oauth:grant-type:device_code")]
     DeviceCode,
 }
 
@@ -126,7 +127,10 @@ mod tests {
             (GrantType::AuthorizationCode, "\"authorization_code\""),
             (GrantType::ClientCredentials, "\"client_credentials\""),
             (GrantType::RefreshToken, "\"refresh_token\""),
-            (GrantType::DeviceCode, "\"device_code\""),
+            (
+                GrantType::DeviceCode,
+                "\"urn:ietf:params:oauth:grant-type:device_code\"",
+            ),
         ];
 
         for (grant, expected_json) in variants {

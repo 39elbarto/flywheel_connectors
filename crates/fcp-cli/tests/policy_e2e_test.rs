@@ -164,6 +164,7 @@ impl PolicySimulationHarness {
         self.emit_log_with_result(phase, event_type, context, "pass", 0, LogAssertions::none());
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn emit_log_with_result(
         &self,
         phase: &str,

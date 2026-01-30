@@ -123,6 +123,11 @@ pub struct ObjectPlacementPolicy {
     #[serde(default)]
     pub excluded_devices: Vec<DeviceSelector>,
     pub target_coverage_bps: u32,
+    /// Minimum distinct source nodes required for reconstruction (diversity enforcement).
+    /// When set, objects MUST have symbols from at least this many distinct nodes
+    /// before reconstruction is permitted. Default is 0 (no diversity requirement).
+    #[serde(default)]
+    pub min_source_diversity: u8,
 }
 
 /// Universal object header (NORMATIVE).
@@ -420,6 +425,7 @@ mod tests {
             preferred_devices: vec![DeviceSelector::Tag("ssd".into())],
             excluded_devices: vec![DeviceSelector::Class("low-mem".into())],
             target_coverage_bps: 10000, // 100%
+            min_source_diversity: 2,
         };
 
         let json = serde_json::to_string(&policy).unwrap();
@@ -430,6 +436,7 @@ mod tests {
         assert_eq!(deserialized.target_coverage_bps, 10000);
         assert_eq!(deserialized.preferred_devices.len(), 1);
         assert_eq!(deserialized.excluded_devices.len(), 1);
+        assert_eq!(deserialized.min_source_diversity, 2);
     }
 
     #[test]
@@ -440,12 +447,14 @@ mod tests {
             preferred_devices: vec![],
             excluded_devices: vec![],
             target_coverage_bps: 10000,
+            min_source_diversity: 0,
         };
 
         let json = serde_json::to_string(&minimal).unwrap();
         let deserialized: ObjectPlacementPolicy = serde_json::from_str(&json).unwrap();
         assert!(deserialized.preferred_devices.is_empty());
         assert!(deserialized.excluded_devices.is_empty());
+        assert_eq!(deserialized.min_source_diversity, 0);
     }
 
     // ─────────────────────────────────────────────────────────────────────────

@@ -446,7 +446,7 @@ mod tests {
             RateLimitError::WaitExceeded { max_wait, .. } => {
                 assert_eq!(max_wait, Duration::from_millis(5));
             }
-            other => assert!(false, "expected WaitExceeded, got {other:?}"),
+            other => panic!("expected WaitExceeded, got {other:?}"),
         }
     }
 
@@ -614,7 +614,7 @@ mod tests {
             RateLimitError::WaitExceeded { max_wait, .. } => {
                 assert_eq!(max_wait, Duration::from_millis(5));
             }
-            other => assert!(false, "expected WaitExceeded, got {other:?}"),
+            other => panic!("expected WaitExceeded, got {other:?}"),
         }
     }
 

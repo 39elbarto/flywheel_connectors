@@ -179,6 +179,9 @@ pub struct Percentiles {
     /// 90th percentile in milliseconds.
     pub p90_ms: f64,
 
+    /// 95th percentile in milliseconds.
+    pub p95_ms: f64,
+
     /// 99th percentile in milliseconds.
     pub p99_ms: f64,
 
@@ -231,6 +234,7 @@ mod tests {
         let percentiles = Percentiles {
             p50_ms: 1.0,
             p90_ms: 2.0,
+            p95_ms: 2.5,
             p99_ms: 3.0,
             min_ms: 0.5,
             max_ms: 4.0,
@@ -286,6 +290,7 @@ mod tests {
       "percentiles": {
         "p50_ms": 1.0,
         "p90_ms": 2.0,
+        "p95_ms": 2.5,
         "p99_ms": 3.0,
         "min_ms": 0.5,
         "max_ms": 4.0,

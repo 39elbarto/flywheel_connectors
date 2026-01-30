@@ -143,7 +143,7 @@ impl TelegramConnector {
             });
         }
 
-        let token = match config.token.clone() {
+        let bot_token = match config.token.clone() {
             Some(token) => token,
             None => {
                 return Err(FcpError::InvalidRequest {
@@ -152,7 +152,7 @@ impl TelegramConnector {
                 });
             }
         };
-        let mut client = TelegramClient::new(&token).map_err(|e| FcpError::Internal {
+        let mut client = TelegramClient::new(&bot_token).map_err(|e| FcpError::Internal {
             message: format!("Failed to create HTTP client: {e}"),
         })?;
 
@@ -993,9 +993,11 @@ impl Default for TelegramConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{Chat, User};
     use chrono::{Duration, Utc};
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
+    use fcp_testkit::LogCapture;
 
     fn generate_valid_token(
         signing_key: &Ed25519SigningKey,
@@ -1072,8 +1074,180 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, cap);
-        (connector, token, mock_server)
+        let capability = generate_valid_token(&signing_key, cap);
+        (connector, capability, mock_server)
+    }
+
+    #[test]
+    fn test_polling_cursor_advances_and_persists() {
+        let mut cursor = TelegramPollingCursor::new();
+        assert_eq!(cursor.offset(), None);
+
+        cursor.advance_if_newer(100);
+        assert_eq!(cursor.offset(), Some(101));
+
+        cursor.advance_if_newer(50);
+        assert_eq!(cursor.offset(), Some(101));
+
+        cursor.advance_if_newer(101);
+        assert_eq!(cursor.offset(), Some(102));
+
+        assert!(cursor.persist().is_ok());
+        assert!(cursor.restore().is_ok());
+    }
+
+    #[test]
+    fn test_update_to_event_sets_untrusted_principal() {
+        let update = Update {
+            update_id: 42,
+            kind: UpdateKind::Message(Message {
+                message_id: 1,
+                from: Some(User {
+                    id: 7,
+                    is_bot: false,
+                    first_name: "Test".into(),
+                    last_name: None,
+                    username: Some("tester".into()),
+                    language_code: None,
+                }),
+                chat: Chat {
+                    id: 99,
+                    chat_type: "private".into(),
+                    title: None,
+                    username: Some("tester".into()),
+                    first_name: Some("Test".into()),
+                    last_name: None,
+                },
+                date: 1234567890,
+                text: Some("hello".into()),
+                caption: None,
+                photo: None,
+                document: None,
+                audio: None,
+                video: None,
+                voice: None,
+                reply_to_message: None,
+                message_thread_id: None,
+            }),
+        };
+
+        let event = update_to_event(
+            &update,
+            &ConnectorId::from_static("telegram"),
+            &InstanceId::new(),
+        )
+        .expect("event");
+
+        assert_eq!(event.topic, "telegram.message");
+        assert_eq!(event.seq, 42);
+        assert_eq!(event.data.zone_id, ZoneId::community());
+        assert_eq!(event.data.principal.kind, "telegram_user");
+        assert_eq!(event.data.principal.id, "7");
+        assert_eq!(event.data.principal.trust, TrustLevel::Untrusted);
+        assert_eq!(
+            event.data.payload.get("text").and_then(|v| v.as_str()),
+            Some("hello")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_capability_mismatch_denied() {
+        let (connector, token, _server) = setup_connector_with_token("telegram.get_file").await;
+
+        let input = serde_json::json!({
+            "chat_id": "123456789",
+            "text": "Hello"
+        });
+
+        let result = connector
+            .handle_invoke(serde_json::json!({
+                "operation": "telegram.send_message",
+                "input": input,
+                "capability_token": token
+            }))
+            .await;
+
+        let err = match result {
+            Err(err) => err,
+            Ok(_) => {
+                assert!(false, "expected OperationNotGranted");
+                return;
+            }
+        };
+
+        if let FcpError::OperationNotGranted { operation } = err {
+            assert_eq!(operation, "telegram.send_message");
+        } else {
+            assert!(false, "unexpected error: {err:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_logs_redact_token_and_message_text() {
+        let capture = LogCapture::new();
+        let _guard = capture.install_json();
+        let (connector, token, server) = setup_connector_with_token("telegram.send_message").await;
+
+        Mock::given(method("POST"))
+            .and(path("/botdummy_token/sendMessage"))
+            .and(body_json(serde_json::json!({
+                "chat_id": "123456789",
+                "text": "<b>secret message</b>",
+                "parse_mode": "HTML"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": false,
+                "error_code": 400,
+                "description": "Bad Request: can't parse entities"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/botdummy_token/sendMessage"))
+            .and(body_json(serde_json::json!({
+                "chat_id": "123456789",
+                "text": "secret message"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": {
+                    "message_id": 77,
+                    "chat": { "id": 123456789, "type": "private", "first_name": "Test" },
+                    "date": 1234567890,
+                    "text": "secret message"
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let input = serde_json::json!({
+            "chat_id": "123456789",
+            "text": "<b>secret message</b>",
+            "parse_mode": "HTML"
+        });
+
+        let result = connector
+            .handle_invoke(serde_json::json!({
+                "operation": "telegram.send_message",
+                "input": input,
+                "capability_token": token
+            }))
+            .await;
+
+        assert!(result.is_ok());
+
+        let logs = capture.jsonl();
+        assert!(logs.contains("Telegram parse error"));
+        assert!(!logs.contains("dummy_token"));
+        assert!(!logs.contains("secret message"));
+        for line in logs.lines().filter(|line| !line.trim().is_empty()) {
+            let parsed: serde_json::Value =
+                serde_json::from_str(line).expect("log lines should be JSON");
+            assert!(parsed.get("timestamp").is_some() || parsed.get("message").is_some());
+        }
     }
 
     #[tokio::test]

@@ -86,6 +86,15 @@ enum BenchCommand {
         size: String,
     },
 
+    /// Benchmark `RaptorQ` presets (LAN/DERP profiles).
+    ///
+    /// Emits separate results per profile.
+    RaptorqPresets {
+        /// Payload size (e.g., "1mb", "100kb").
+        #[arg(long, default_value = "1mb")]
+        size: String,
+    },
+
     /// Benchmark secret reconstruction (Shamir k-of-n).
     ///
     /// Target: p50 < 150ms / p99 < 750ms
@@ -188,6 +197,11 @@ pub fn run(args: BenchArgs) -> anyhow::Result<()> {
                 args.iterations,
                 args.warmup,
             )?]
+        }
+        BenchCommand::RaptorqPresets { size } => {
+            let size_label = normalize_size_label(&size);
+            let size_bytes = parse_size_bytes(&size_label)?;
+            bench_raptorq_presets(&size_label, size_bytes, args.iterations, args.warmup)?
         }
         BenchCommand::Secrets { k, n } => {
             // TODO: Implement secrets benchmarks once fcp-crypto Shamir is ready.
@@ -307,6 +321,7 @@ fn print_human_report(report: &BenchmarkReport) {
         if let Some(ref p) = result.percentiles {
             println!("  p50:  {:>10.3} ms", p.p50_ms);
             println!("  p90:  {:>10.3} ms", p.p90_ms);
+            println!("  p95:  {:>10.3} ms", p.p95_ms);
             println!("  p99:  {:>10.3} ms", p.p99_ms);
             println!("  min:  {:>10.3} ms", p.min_ms);
             println!("  max:  {:>10.3} ms", p.max_ms);
@@ -359,9 +374,63 @@ fn bench_raptorq(
     iterations: u32,
     warmup: u32,
 ) -> anyhow::Result<BenchmarkResult> {
-    use fcp_raptorq::{RaptorQConfig, RaptorQDecoder, RaptorQEncoder};
+    use fcp_raptorq::RaptorQConfig;
 
     let config = RaptorQConfig::default();
+    bench_raptorq_with_config(
+        format!("raptorq-{size_label}"),
+        size_label,
+        size_bytes,
+        iterations,
+        warmup,
+        &config,
+        None,
+    )
+}
+
+fn bench_raptorq_presets(
+    size_label: &str,
+    size_bytes: usize,
+    iterations: u32,
+    warmup: u32,
+) -> anyhow::Result<Vec<BenchmarkResult>> {
+    use fcp_raptorq::{RaptorQConfig, RaptorQPathProfile, RaptorQPreset};
+
+    let mut results = Vec::new();
+    let presets = [
+        (RaptorQPathProfile::Lan, "lan"),
+        (RaptorQPathProfile::Derp, "derp"),
+    ];
+
+    for (profile, label) in presets {
+        let preset = RaptorQPreset::for_profile(profile);
+        let config = RaptorQConfig::from_preset(preset)
+            .ok_or_else(|| anyhow!("invalid RaptorQ preset for profile {label}"))?;
+        results.push(bench_raptorq_with_config(
+            format!("raptorq-{label}-{size_label}"),
+            size_label,
+            size_bytes,
+            iterations,
+            warmup,
+            &config,
+            Some(preset),
+        )?);
+    }
+
+    Ok(results)
+}
+
+fn bench_raptorq_with_config(
+    name: String,
+    size_label: &str,
+    size_bytes: usize,
+    iterations: u32,
+    warmup: u32,
+    config: &fcp_raptorq::RaptorQConfig,
+    preset: Option<fcp_raptorq::RaptorQPreset>,
+) -> anyhow::Result<BenchmarkResult> {
+    use fcp_raptorq::{RaptorQDecoder, RaptorQEncoder};
+
     if size_bytes > config.max_object_size as usize {
         bail!(
             "size {} exceeds RaptorQ max_object_size {}",
@@ -371,7 +440,7 @@ fn bench_raptorq(
     }
 
     let payload = vec![0xAB_u8; size_bytes];
-    let encoder = RaptorQEncoder::new(&payload, &config)
+    let encoder = RaptorQEncoder::new(&payload, config)
         .map_err(|err| anyhow!("raptorq encode init failed: {err}"))?;
 
     let symbol_size = encoder.symbol_size();
@@ -380,30 +449,27 @@ fn bench_raptorq(
     let total_symbols = encoder.total_symbols();
 
     let (percentiles, outliers) = runner::run_benchmark_with_result(warmup, iterations, || {
-        let encoder = RaptorQEncoder::new(&payload, &config).expect("encoder init");
+        let encoder = RaptorQEncoder::new(&payload, config).expect("encoder init");
         let symbols = encoder.encode_all();
-        let mut decoder = RaptorQDecoder::new(encoder.transmission_info(), &config);
+        let mut decoder = RaptorQDecoder::new(encoder.transmission_info(), config);
 
+        let mut decoded_payload = None;
         for (esi, data) in symbols {
-            if let Some(decoded) = decoder
+            if let Some(payload) = decoder
                 .add_symbol(esi, data)
                 .expect("raptorq decode should succeed")
             {
-                return decoded.len();
+                decoded_payload = Some(payload);
+                break;
             }
         }
 
-        panic!("raptorq decode did not complete");
+        decoded_payload
+            .expect("raptorq decode did not complete")
+            .len()
     });
 
-    let mut result = BenchmarkResult::new(
-        format!("raptorq-{size_label}"),
-        "RaptorQ encode + decode wall time",
-        iterations,
-        warmup,
-        percentiles,
-    )
-    .with_parameters(serde_json::json!({
+    let mut parameters = serde_json::json!({
         "size": size_label,
         "size_bytes": size_bytes,
         "symbol_size": symbol_size,
@@ -411,7 +477,46 @@ fn bench_raptorq(
         "repair_symbols": repair_symbols,
         "total_symbols": total_symbols,
         "decode_timeout_ms": config.decode_timeout.as_millis(),
-    }));
+        "max_object_size": config.max_object_size,
+    });
+
+    if let Some(preset) = preset {
+        let profile = match preset.profile {
+            fcp_raptorq::RaptorQPathProfile::Lan => "lan",
+            fcp_raptorq::RaptorQPathProfile::Derp => "derp",
+        };
+        if let Some(map) = parameters.as_object_mut() {
+            map.insert(
+                "profile".to_string(),
+                serde_json::Value::String(profile.to_string()),
+            );
+            map.insert(
+                "max_datagram_bytes".to_string(),
+                serde_json::Value::from(preset.max_datagram_bytes),
+            );
+            map.insert(
+                "symbols_per_frame".to_string(),
+                serde_json::Value::from(preset.symbols_per_frame),
+            );
+            map.insert(
+                "preferred_symbol_size".to_string(),
+                serde_json::Value::from(preset.preferred_symbol_size),
+            );
+            map.insert(
+                "repair_ratio_bps".to_string(),
+                serde_json::Value::from(preset.repair_ratio_bps),
+            );
+        }
+    }
+
+    let mut result = BenchmarkResult::new(
+        name,
+        "RaptorQ encode + decode wall time",
+        iterations,
+        warmup,
+        percentiles,
+    )
+    .with_parameters(parameters);
 
     if size_bytes == 1024 * 1024 {
         result = result.with_targets(types::Targets {
@@ -482,8 +587,10 @@ fn bench_object_id(iterations: u32, warmup: u32) -> BenchmarkResult {
 }
 
 fn bench_capability_verify(iterations: u32, warmup: u32) -> BenchmarkResult {
-    use fcp_core::{CapabilityToken, CapabilityVerifier, InstanceId, OperationId, ZoneId};
-    use fcp_crypto::{CapabilityTokenBuilder, Ed25519SigningKey};
+    use fcp_core::{
+        CapabilityToken as CapabilityArtifact, CapabilityVerifier, InstanceId, OperationId, ZoneId,
+    };
+    use fcp_crypto::{CapabilityTokenBuilder as CapabilityBuilder, Ed25519SigningKey};
 
     let signing_key = Ed25519SigningKey::generate();
     let verifying_key = signing_key.verifying_key();
@@ -494,7 +601,7 @@ fn bench_capability_verify(iterations: u32, warmup: u32) -> BenchmarkResult {
     let zone = ZoneId::work();
     let ops = ["op.test"];
 
-    let cose_token = CapabilityTokenBuilder::new()
+    let cose_capability = CapabilityBuilder::new()
         .capability_id("cap.test")
         .zone_id(zone.as_str())
         .principal("principal:test")
@@ -504,7 +611,9 @@ fn bench_capability_verify(iterations: u32, warmup: u32) -> BenchmarkResult {
         .sign(&signing_key)
         .expect("capability token should sign");
 
-    let token = CapabilityToken { raw: cose_token };
+    let capability = CapabilityArtifact {
+        raw: cose_capability,
+    };
 
     let verifier = CapabilityVerifier::new(pub_bytes, zone.clone(), InstanceId::new());
     let op = OperationId::new("op.test").expect("operation id must be canonical");
@@ -512,7 +621,7 @@ fn bench_capability_verify(iterations: u32, warmup: u32) -> BenchmarkResult {
 
     let (percentiles, outliers) = runner::run_benchmark_with_result(warmup, iterations, || {
         verifier
-            .verify(&token, &cap, &op, &[])
+            .verify(&capability, &cap, &op, &[])
             .expect("capability verification should succeed");
     });
 

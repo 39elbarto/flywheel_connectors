@@ -1368,6 +1368,28 @@ fn gateway_event_to_fcp(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{Duration, Utc};
+    use fcp_core::{CapabilityToken as CapabilityArtifact, ConnectorId, InstanceId};
+    use fcp_crypto::cose::CapabilityTokenBuilder as CapabilityBuilder;
+    use fcp_crypto::ed25519::Ed25519SigningKey;
+
+    fn generate_capability(
+        signing_key: &Ed25519SigningKey,
+        capability_id: &str,
+        operations: &[&str],
+    ) -> CapabilityArtifact {
+        let now = Utc::now();
+        let cose = CapabilityBuilder::new()
+            .capability_id(capability_id)
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(operations)
+            .issuer("node:test")
+            .validity(now, now + Duration::hours(1))
+            .sign(signing_key)
+            .unwrap();
+        CapabilityArtifact { raw: cose }
+    }
 
     #[tokio::test]
     async fn test_send_message_content_too_long() {
@@ -1480,5 +1502,88 @@ mod tests {
                 "Expected InvalidRequest for embed limit, got: {err:?}"
             ),
         }
+    }
+
+    #[tokio::test]
+    async fn test_invoke_missing_capability_token() {
+        let connector = DiscordConnector::new();
+
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "discord.send_message",
+                "input": {
+                    "channel_id": "123456789",
+                    "content": "Hello"
+                }
+            }))
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, FcpError::InvalidRequest { code: 1003, ref message } if message.contains("capability_token")),
+            "Expected InvalidRequest for missing capability_token, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_invoke_capability_not_granted() {
+        let mut connector = DiscordConnector::new();
+
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        connector.verifier = Some(CapabilityVerifier::new(
+            verifying_key.to_bytes(),
+            ZoneId::work(),
+            connector.base.instance_id.clone(),
+        ));
+
+        let capability = generate_capability(
+            &signing_key,
+            "discord.get_channel",
+            &["discord.get_channel"],
+        );
+
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "discord.send_message",
+                "input": {
+                    "channel_id": "123456789",
+                    "content": "Hello"
+                },
+                "capability_token": capability
+            }))
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, FcpError::OperationNotGranted { .. }),
+            "Expected OperationNotGranted, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_gateway_event_to_fcp_message_create() {
+        let connector_id = ConnectorId::from_static("discord");
+        let instance_id = InstanceId::new();
+        let payload = json!({
+            "id": "msg-1",
+            "content": "Hello",
+            "author": {
+                "id": "user-1",
+                "username": "alice"
+            }
+        });
+
+        let event = GatewayEvent::MessageCreate(payload.clone());
+        let envelope =
+            gateway_event_to_fcp(&event, &connector_id, &instance_id).expect("event envelope");
+
+        assert_eq!(envelope.topic, "discord.message");
+        assert_eq!(envelope.data.payload, payload);
+        assert_eq!(envelope.data.zone_id, ZoneId::community());
+        assert_eq!(envelope.data.principal.id, "user-1");
+        assert_eq!(envelope.data.principal.display.as_deref(), Some("alice"));
     }
 }

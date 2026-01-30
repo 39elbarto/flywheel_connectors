@@ -50,6 +50,23 @@ pub enum GatewayOpcode {
     HeartbeatAck = 11,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gateway_opcode_try_from_known_values() {
+        assert_eq!(GatewayOpcode::try_from(0), Ok(GatewayOpcode::Dispatch));
+        assert_eq!(GatewayOpcode::try_from(10), Ok(GatewayOpcode::Hello));
+        assert_eq!(GatewayOpcode::try_from(11), Ok(GatewayOpcode::HeartbeatAck));
+    }
+
+    #[test]
+    fn gateway_opcode_try_from_unknown_is_err() {
+        assert!(GatewayOpcode::try_from(42).is_err());
+    }
+}
+
 impl TryFrom<i32> for GatewayOpcode {
     type Error = ();
 

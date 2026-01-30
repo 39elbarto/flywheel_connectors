@@ -221,6 +221,25 @@ mod bench {
     }
 
     #[test]
+    fn bench_raptorq_presets() {
+        fcp_cmd()
+            .args([
+                "bench",
+                "--iterations",
+                "2",
+                "--warmup",
+                "1",
+                "raptorq-presets",
+                "--size",
+                "10kb",
+            ])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("raptorq-lan-10kb"))
+            .stdout(predicate::str::contains("raptorq-derp-10kb"));
+    }
+
+    #[test]
     fn bench_connector_activate_placeholder() {
         // This benchmark returns a placeholder until fcp-sdk is implemented.
         fcp_cmd()
@@ -399,6 +418,7 @@ mod bench {
         // Verify percentile fields are present
         assert!(percentiles["p50_ms"].is_number());
         assert!(percentiles["p90_ms"].is_number());
+        assert!(percentiles["p95_ms"].is_number());
         assert!(percentiles["p99_ms"].is_number());
         assert!(percentiles["min_ms"].is_number());
         assert!(percentiles["max_ms"].is_number());
@@ -406,8 +426,10 @@ mod bench {
         // Verify values are reasonable (p50 <= p90 <= p99)
         let p50 = percentiles["p50_ms"].as_f64().unwrap();
         let p90 = percentiles["p90_ms"].as_f64().unwrap();
+        let p95 = percentiles["p95_ms"].as_f64().unwrap();
         let p99 = percentiles["p99_ms"].as_f64().unwrap();
         assert!(p50 <= p90, "p50 should be <= p90");
-        assert!(p90 <= p99, "p90 should be <= p99");
+        assert!(p90 <= p95, "p90 should be <= p95");
+        assert!(p95 <= p99, "p95 should be <= p99");
     }
 }

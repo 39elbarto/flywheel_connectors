@@ -25,14 +25,14 @@ impl TelegramClient {
     /// # Errors
     /// Returns an error if the HTTP client fails to build.
     pub fn new(token: impl Into<String>) -> Result<Self, TelegramError> {
-        let token = token.into();
+        let bot_token = token.into();
         let client = Client::builder()
             .timeout(Duration::from_secs(60))
             .build()
             .map_err(TelegramError::Http)?;
 
         Ok(Self {
-            token,
+            token: bot_token,
             client,
             base_url: "https://api.telegram.org".into(),
         })
@@ -379,7 +379,7 @@ fn normalize_chat_id(id: &str) -> Result<String, TelegramError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{body_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
@@ -530,6 +530,48 @@ mod tests {
             .unwrap();
 
         assert_eq!(message.message_id, 43);
+    }
+
+    #[tokio::test]
+    async fn test_send_message_with_reply_and_thread() {
+        let (mock_server, client) = setup_mock_client().await;
+
+        Mock::given(method("POST"))
+            .and(path("/bottest_token_12345/sendMessage"))
+            .and(body_json(serde_json::json!({
+                "chat_id": "123456",
+                "text": "*Hello*",
+                "parse_mode": "MarkdownV2",
+                "reply_to_message_id": 7,
+                "message_thread_id": 9
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": {
+                    "message_id": 44,
+                    "chat": {
+                        "id": 123456,
+                        "type": "private",
+                        "first_name": "Test"
+                    },
+                    "date": 1234567890,
+                    "text": "Hello"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let mut options = SendMessageOptions::default()
+            .markdown_v2()
+            .reply_to_message_id(7);
+        options.message_thread_id = Some(9);
+
+        let message = client
+            .send_message("123456", "*Hello*", options)
+            .await
+            .unwrap();
+
+        assert_eq!(message.message_id, 44);
     }
 
     #[tokio::test]

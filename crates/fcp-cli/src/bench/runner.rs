@@ -59,6 +59,7 @@ fn calculate_percentiles(sorted_ns: &[u64]) -> Percentiles {
         return Percentiles {
             p50_ms: 0.0,
             p90_ms: 0.0,
+            p95_ms: 0.0,
             p99_ms: 0.0,
             min_ms: 0.0,
             max_ms: 0.0,
@@ -72,10 +73,12 @@ fn calculate_percentiles(sorted_ns: &[u64]) -> Percentiles {
 
     let p50_idx = (len as f64 * 0.50) as usize;
     let p90_idx = (len as f64 * 0.90) as usize;
+    let p95_idx = (len as f64 * 0.95) as usize;
     let p99_idx = (len as f64 * 0.99) as usize;
 
     let p50_ms = ns_to_ms(sorted_ns[p50_idx.min(len - 1)]);
     let p90_ms = ns_to_ms(sorted_ns[p90_idx.min(len - 1)]);
+    let p95_ms = ns_to_ms(sorted_ns[p95_idx.min(len - 1)]);
     let p99_ms = ns_to_ms(sorted_ns[p99_idx.min(len - 1)]);
     let min_ms = ns_to_ms(sorted_ns[0]);
     let max_ms = ns_to_ms(sorted_ns[len - 1]);
@@ -100,6 +103,7 @@ fn calculate_percentiles(sorted_ns: &[u64]) -> Percentiles {
     Percentiles {
         p50_ms,
         p90_ms,
+        p95_ms,
         p99_ms,
         min_ms,
         max_ms,
@@ -147,6 +151,7 @@ mod tests {
         // p50 should be around 50ms, p90 around 90ms, p99 around 99ms.
         assert!((p.p50_ms - 50.0).abs() < 2.0);
         assert!((p.p90_ms - 90.0).abs() < 2.0);
+        assert!((p.p95_ms - 95.0).abs() < 2.0);
         assert!((p.p99_ms - 99.0).abs() < 2.0);
         assert!((p.min_ms - 1.0).abs() < 0.01);
         assert!((p.max_ms - 100.0).abs() < 0.01);

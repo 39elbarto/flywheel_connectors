@@ -7,8 +7,8 @@ use std::collections::HashMap;
 
 use chrono::Utc;
 use fcp_core::{
-    BudgetEnforcement, BudgetStatus, UsageBudgetPolicy, UsageBudgetSnapshot, UsageBudgetUsage,
-    UsageMetric, UsageMetricKind, ZoneId,
+    BudgetEnforcement, BudgetStatus, FcpError, UsageBudgetPolicy, UsageBudgetSnapshot,
+    UsageBudgetUsage, UsageMetric, UsageMetricKind, ZoneId,
 };
 
 /// Action to take when a budget is evaluated.
@@ -29,6 +29,32 @@ pub struct BudgetEvaluation {
     pub action: BudgetAction,
     /// Snapshot of budget usage after applying metrics.
     pub snapshot: UsageBudgetSnapshot,
+}
+
+impl BudgetEvaluation {
+    /// Convert a denial into an FCP error.
+    #[must_use]
+    pub fn to_error(&self) -> Option<FcpError> {
+        if self.action != BudgetAction::Deny {
+            return None;
+        }
+
+        let exceeded = self
+            .snapshot
+            .budgets
+            .iter()
+            .find(|entry| entry.status == BudgetStatus::Exceeded)?;
+        let window_seconds = exceeded
+            .window_resets_at
+            .saturating_sub(exceeded.window_started_at);
+
+        Some(FcpError::BudgetExceeded {
+            metric: exceeded.metric,
+            used: exceeded.used,
+            limit: exceeded.limit,
+            window_seconds,
+        })
+    }
 }
 
 /// Tracks usage per zone and enforces budget policies.

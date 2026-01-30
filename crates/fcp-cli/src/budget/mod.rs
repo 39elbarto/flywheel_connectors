@@ -98,10 +98,7 @@ fn simulate_budget_report(zone_filter: Option<&str>) -> BudgetReport {
     ];
 
     let filtered = if let Some(zone) = zone_filter {
-        zones
-            .into_iter()
-            .filter(|z| z.zone_id == zone)
-            .collect()
+        zones.into_iter().filter(|z| z.zone_id == zone).collect()
     } else {
         zones
     };
@@ -124,7 +121,10 @@ fn print_budget_report(report: &BudgetReport) {
     }
 
     for zone in &report.zones {
-        println!("Zone: {} (enforcement: {:?})", zone.zone_id, zone.enforcement);
+        println!(
+            "Zone: {} (enforcement: {:?})",
+            zone.zone_id, zone.enforcement
+        );
         if zone.budgets.is_empty() {
             println!("  No budgets configured.");
             continue;

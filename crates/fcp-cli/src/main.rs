@@ -14,8 +14,8 @@
 #![forbid(unsafe_code)]
 
 mod audit;
-mod budget;
 mod bench;
+mod budget;
 mod connector;
 mod doctor;
 mod explain;
@@ -247,7 +247,12 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Audit(args) => audit::run(args),
         Commands::Bench(args) => bench::run(args),
-        Commands::Budget(args) => budget::run(&args),
+        Commands::Budget(args) => {
+            if cli.input_stdin {
+                anyhow::bail!("--input-stdin is currently supported only for `fcp doctor`");
+            }
+            budget::run(&args)
+        }
         Commands::Connector(args) => connector::run(&args),
         Commands::Doctor(args) => doctor::run(&args),
         Commands::Explain(args) => {

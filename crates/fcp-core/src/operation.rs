@@ -735,12 +735,8 @@ mod tests {
             deserialized.outcome_object_ids.len()
         );
         assert_eq!(
-            receipt.usage_metrics.as_ref().map(Vec::len).unwrap_or(0),
-            deserialized
-                .usage_metrics
-                .as_ref()
-                .map(Vec::len)
-                .unwrap_or(0)
+            receipt.usage_metrics.as_ref().map_or(0, Vec::len),
+            deserialized.usage_metrics.as_ref().map_or(0, Vec::len)
         );
     }
 

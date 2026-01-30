@@ -9,6 +9,9 @@
 //! and validates them against the E2E log schema.
 
 use std::collections::BTreeMap;
+use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
 use std::time::Instant;
 
 use chrono::Utc;
@@ -137,6 +140,115 @@ fn schema_hash_same_schema_same_hash_across_invocations() {
     );
 
     capture.assert_valid();
+}
+
+// ============================================================================
+// Requirements Index CLI (bd-kjji / bd-3100)
+// ============================================================================
+
+fn repo_root() -> PathBuf {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .map(PathBuf::from)
+        .expect("repo root")
+}
+
+fn reqcheck_bin() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_fcp-reqcheck"))
+}
+
+fn temp_path(name: &str, ext: &str) -> PathBuf {
+    let mut path = std::env::temp_dir();
+    let suffix = uuid::Uuid::new_v4();
+    path.push(format!("fcp_reqcheck_{name}_{suffix}.{ext}"));
+    path
+}
+
+#[test]
+fn reqcheck_cli_valid_index_emits_valid_log() {
+    let root = repo_root();
+    let index = root.join("docs/STANDARD_Requirements_Index.md");
+    let beads = root.join(".beads/issues.jsonl");
+    let log_path = temp_path("valid", "jsonl");
+
+    let output = Command::new(reqcheck_bin())
+        .args([
+            "--index",
+            index.to_string_lossy().as_ref(),
+            "--beads",
+            beads.to_string_lossy().as_ref(),
+            "--json",
+            "--log-jsonl",
+            log_path.to_string_lossy().as_ref(),
+        ])
+        .output()
+        .expect("run fcp-reqcheck");
+
+    assert!(
+        output.status.success(),
+        "reqcheck failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("parse reqcheck json");
+    assert_eq!(payload["valid"], true);
+
+    let jsonl = fs::read_to_string(&log_path).expect("read reqcheck log");
+    validate_e2e_log_jsonl(&jsonl).expect("reqcheck log jsonl should be valid");
+}
+
+#[test]
+fn reqcheck_cli_missing_bead_exits_nonzero() {
+    let root = repo_root();
+    let beads = root.join(".beads/issues.jsonl");
+    let index_path = temp_path("missing", "md");
+    let log_path = temp_path("missing", "jsonl");
+
+    let missing_bead = "bd-zzz404fixture";
+    let content = format!(
+        r"
+## §1: Test
+
+| Aspect | Details |
+|--------|---------|
+| **Owners** | `{missing_bead}` |
+| **Tests** | n/a |
+
+---
+"
+    );
+    fs::write(&index_path, content).expect("write temp requirements index");
+
+    let output = Command::new(reqcheck_bin())
+        .args([
+            "--index",
+            index_path.to_string_lossy().as_ref(),
+            "--beads",
+            beads.to_string_lossy().as_ref(),
+            "--json",
+            "--log-jsonl",
+            log_path.to_string_lossy().as_ref(),
+        ])
+        .output()
+        .expect("run fcp-reqcheck");
+
+    assert_eq!(output.status.code(), Some(1));
+
+    let payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("parse reqcheck json");
+    assert_eq!(payload["valid"], false);
+    assert!(
+        payload["report"]["missing_beads"]
+            .as_array()
+            .is_some_and(|arr| arr.iter().any(|v| v.as_str() == Some(missing_bead)))
+    );
+
+    let jsonl = fs::read_to_string(&log_path).expect("read reqcheck log");
+    validate_e2e_log_jsonl(&jsonl).expect("reqcheck log jsonl should be valid");
 }
 
 /// Verify that ALL core schema registrations produce stable hashes.

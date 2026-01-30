@@ -24,6 +24,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Instant;
 
 use chrono::Utc;
 use clap::Parser;
@@ -31,6 +32,7 @@ use fcp_conformance::reqcheck::{
     RequirementsIndexParser, load_beads_from_br_list, load_beads_from_jsonl,
 };
 use serde_json::json;
+use uuid::Uuid;
 
 /// FCP2 Requirements Index Validator.
 ///
@@ -66,6 +68,8 @@ struct Args {
 
 #[allow(clippy::too_many_lines)]
 fn main() -> ExitCode {
+    let start = Instant::now();
+    let correlation_id = Uuid::new_v4().to_string();
     let args = Args::parse();
 
     // Load known beads
@@ -184,11 +188,22 @@ fn main() -> ExitCode {
 
     // Write JSONL log if requested
     if let Some(log_path) = &args.log_jsonl {
+        let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let failed_count = u64::try_from(report.errors.len()).unwrap_or(u64::MAX);
+        let passed_count =
+            u64::try_from(report.total_entries.saturating_sub(report.errors.len())).unwrap_or(0);
         let log_entry = json!({
             "timestamp": Utc::now().to_rfc3339(),
-            "tool": "fcp-reqcheck",
+            "test_name": "requirements_index_validation",
+            "module": "fcp-conformance::reqcheck",
             "phase": "verify",
+            "correlation_id": correlation_id,
             "result": if failed { "fail" } else { "pass" },
+            "duration_ms": duration_ms,
+            "assertions": {
+                "passed": passed_count,
+                "failed": failed_count,
+            },
             "details": {
                 "index_path": args.index.display().to_string(),
                 "entries_parsed": report.total_entries,

@@ -792,6 +792,9 @@ fn generate_limits_rs(short_name: &str) -> String {
 /// Max length for message text payloads (chars).
 pub const MAX_MESSAGE_CHARS: usize = 0;
 
+/// Max payload size in bytes (serialized JSON).
+pub const MAX_PAYLOAD_BYTES: usize = 0;
+
 /// Max number of attachments per message.
 pub const MAX_ATTACHMENTS: usize = 0;
 
@@ -831,6 +834,8 @@ use std::time::Instant;
 use fcp_sdk::prelude::*;
 use sha2::{{Digest, Sha256}};
 
+use crate::limits;
+
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 const OP_PLACEHOLDER: &str = "{short_name}.placeholder";
 const CAP_PLACEHOLDER: &str = "{short_name}.placeholder";
@@ -860,6 +865,28 @@ impl {struct_name}Connector {{
         let mut hasher = Sha256::new();
         hasher.update(MANIFEST_TOML.as_bytes());
         format!("sha256:{{}}", hex::encode(hasher.finalize()))
+    }}
+
+    fn enforce_limits(&self, input: &serde_json::Value) -> FcpResult<()> {{
+        if limits::MAX_MESSAGE_CHARS > 0 {{
+            if let Some(message) = input.get("message").and_then(|value| value.as_str()) {{
+                if message.chars().count() > limits::MAX_MESSAGE_CHARS {{
+                    return Err(FcpError::InvalidRequest {{
+                        code: 1005,
+                        message: "message exceeds MAX_MESSAGE_CHARS limit".to_string(),
+                    }});
+                }}
+            }}
+        }}
+
+        if limits::MAX_PAYLOAD_BYTES > 0 && input.to_string().len() > limits::MAX_PAYLOAD_BYTES {{
+            return Err(FcpError::InvalidRequest {{
+                code: 1006,
+                message: "payload exceeds MAX_PAYLOAD_BYTES limit".to_string(),
+            }});
+        }}
+
+        Ok(())
     }}
 
     fn placeholder_operation(&self) -> OperationInfo {{
@@ -983,6 +1010,8 @@ impl FcpConnector for {struct_name}Connector {{
         }} else {{
             return Err(FcpError::NotConfigured);
         }}
+
+        self.enforce_limits(&req.input)?;
 
         // TODO: Enforce network constraints, emit receipts.
         Ok(InvokeResponse::ok(

@@ -17,6 +17,7 @@ serde_json.workspace = true
 hex.workspace = true
 semver.workspace = true
 chrono.workspace = true
+uuid.workspace = true
 jsonschema.workspace = true
 clap = { workspace = true, features = ["derive"] }
 ciborium.workspace = true
@@ -41,5 +42,4 @@ path = "src/bin/reqcheck.rs"
 
 [dev-dependencies]
 pretty_assertions.workspace = true
-uuid.workspace = true
 fcp-testkit = { path = "../fcp-testkit" }

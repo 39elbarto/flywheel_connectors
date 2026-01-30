@@ -249,6 +249,10 @@ mod scaffold_creation {
             "limits template should define MAX_MESSAGE_CHARS"
         );
         assert!(
+            content.contains("MAX_PAYLOAD_BYTES"),
+            "limits template should define MAX_PAYLOAD_BYTES"
+        );
+        assert!(
             content.contains("MAX_ATTACHMENT_BYTES"),
             "limits template should define MAX_ATTACHMENT_BYTES"
         );

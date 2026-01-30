@@ -164,14 +164,12 @@ impl GatewayConnection {
     }
 }
 
-#[derive(Clone, Debug)]
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 struct GatewayState {
     session_id: Option<String>,
     resume_url: Option<String>,
     sequence: Option<u64>,
 }
-
 
 /// Handle for a single gateway connection attempt.
 pub struct GatewayStream {

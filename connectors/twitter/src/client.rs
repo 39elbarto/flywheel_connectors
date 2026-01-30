@@ -262,9 +262,7 @@ impl TwitterApiClient {
 
         // Handle rate limiting
         if status == StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = rate_limit
-                .time_until_reset()
-                .map_or(60, |d| d.as_secs());
+            let retry_after = rate_limit.time_until_reset().map_or(60, |d| d.as_secs());
 
             return Err(TwitterError::RateLimited { retry_after });
         }

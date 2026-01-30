@@ -290,12 +290,13 @@ impl TwitterConnector {
         debug!(operation = %operation, "Invoking Twitter operation");
 
         // Extract and verify capability token
-        let token_value = params
-            .get("capability_token")
-            .ok_or_else(|| FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing capability_token".into(),
-            })?;
+        let token_value =
+            params
+                .get("capability_token")
+                .ok_or_else(|| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing capability_token".into(),
+                })?;
 
         let token: CapabilityToken =
             serde_json::from_value(token_value.clone()).map_err(|e| FcpError::InvalidRequest {

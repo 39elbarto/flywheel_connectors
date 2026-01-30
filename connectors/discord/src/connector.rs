@@ -54,7 +54,7 @@ pub struct DiscordConnector {
 
 impl DiscordConnector {
     /// Create a new Discord connector.
-    #[must_use] 
+    #[must_use]
     pub fn new() -> Self {
         let (event_tx, _) = broadcast::channel(1000);
 
@@ -599,10 +599,7 @@ impl DiscordConnector {
                             let mut size = 0;
 
                             // Title
-                            size += e
-                                .get("title")
-                                .and_then(|v| v.as_str())
-                                .map_or(0, str::len);
+                            size += e.get("title").and_then(|v| v.as_str()).map_or(0, str::len);
 
                             // Description
                             size += e
@@ -673,14 +670,13 @@ impl DiscordConnector {
         &self,
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
-        let operation =
-            params
-                .get("operation")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing operation".into(),
-                })?;
+        let operation = params
+            .get("operation")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing operation".into(),
+            })?;
 
         let input = params.get("input").cloned().unwrap_or_else(|| json!({}));
 
@@ -689,12 +685,13 @@ impl DiscordConnector {
         Self::validate_input_early(operation, &input)?;
 
         // Extract and verify capability token
-        let token_value = params
-            .get("capability_token")
-            .ok_or_else(|| FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing capability_token".into(),
-            })?;
+        let token_value =
+            params
+                .get("capability_token")
+                .ok_or_else(|| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing capability_token".into(),
+                })?;
 
         let token: fcp_core::CapabilityToken = serde_json::from_value(token_value.clone())
             .map_err(|e| FcpError::InvalidRequest {
@@ -744,14 +741,13 @@ impl DiscordConnector {
         const MAX_CONTENT_LENGTH: usize = 2000;
 
         // Validate input first (before checking api) for better error messages
-        let channel_id =
-            input
-                .get("channel_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing channel_id".into(),
-                })?;
+        let channel_id = input
+            .get("channel_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing channel_id".into(),
+            })?;
 
         let content = input.get("content").and_then(|v| v.as_str());
         let embeds: Option<Vec<Embed>> = input
@@ -867,23 +863,21 @@ impl DiscordConnector {
         const MAX_CONTENT_LENGTH: usize = 2000;
 
         // Validate input first (before checking api) for better error messages
-        let channel_id =
-            input
-                .get("channel_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing channel_id".into(),
-                })?;
+        let channel_id = input
+            .get("channel_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing channel_id".into(),
+            })?;
 
-        let message_id =
-            input
-                .get("message_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing message_id".into(),
-                })?;
+        let message_id = input
+            .get("message_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing message_id".into(),
+            })?;
 
         let content = input.get("content").and_then(|v| v.as_str());
         let embeds: Option<Vec<Embed>> = input
@@ -991,23 +985,21 @@ impl DiscordConnector {
         input: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         // Validate input first (before checking api) for consistent error messages
-        let channel_id =
-            input
-                .get("channel_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing channel_id".into(),
-                })?;
+        let channel_id = input
+            .get("channel_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing channel_id".into(),
+            })?;
 
-        let message_id =
-            input
-                .get("message_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing message_id".into(),
-                })?;
+        let message_id = input
+            .get("message_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing message_id".into(),
+            })?;
 
         let api = self.require_api()?;
 
@@ -1024,14 +1016,13 @@ impl DiscordConnector {
 
     async fn invoke_get_channel(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         // Validate input first (before checking api) for consistent error messages
-        let channel_id =
-            input
-                .get("channel_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing channel_id".into(),
-                })?;
+        let channel_id = input
+            .get("channel_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing channel_id".into(),
+            })?;
 
         let api = self.require_api()?;
 
@@ -1053,14 +1044,13 @@ impl DiscordConnector {
 
     async fn invoke_get_guild(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         // Validate input first (before checking api) for consistent error messages
-        let guild_id =
-            input
-                .get("guild_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing guild_id".into(),
-                })?;
+        let guild_id = input
+            .get("guild_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing guild_id".into(),
+            })?;
 
         let api = self.require_api()?;
 
@@ -1085,14 +1075,13 @@ impl DiscordConnector {
         input: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         // Validate input first (before checking api) for consistent error messages
-        let channel_id =
-            input
-                .get("channel_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing channel_id".into(),
-                })?;
+        let channel_id = input
+            .get("channel_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing channel_id".into(),
+            })?;
 
         let api = self.require_api()?;
 

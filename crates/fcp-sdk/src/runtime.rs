@@ -2102,7 +2102,10 @@ impl<C: PollingCursor> PollingSupervisor<C> {
 mod tests {
     use super::*;
     use std::io::{self, Write};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
     use std::time::{Duration, Instant};
     use tracing_subscriber::{EnvFilter, layer::SubscriberExt};
 
@@ -2170,6 +2173,86 @@ mod tests {
             LogCaptureWriter {
                 bytes: Arc::clone(&self.bytes),
             }
+        }
+    }
+
+    #[derive(Debug, Default, Clone)]
+    struct TestStreamingSession {
+        resume_token: Option<String>,
+        sequence: u64,
+        last_heartbeat_sent: Option<Instant>,
+        last_heartbeat_ack: Option<Instant>,
+        heartbeat_seq: u64,
+        ack_seq: u64,
+        persist_calls: Arc<AtomicUsize>,
+        restore_calls: Arc<AtomicUsize>,
+    }
+
+    impl TestStreamingSession {
+        fn persist_calls(&self) -> usize {
+            self.persist_calls.load(Ordering::SeqCst)
+        }
+
+        fn restore_calls(&self) -> usize {
+            self.restore_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl StreamingSession for TestStreamingSession {
+        fn resume_token(&self) -> Option<String> {
+            self.resume_token.clone()
+        }
+
+        fn set_resume_token(&mut self, token: String) {
+            self.resume_token = Some(token);
+        }
+
+        fn clear_resume_token(&mut self) {
+            self.resume_token = None;
+        }
+
+        fn sequence(&self) -> u64 {
+            self.sequence
+        }
+
+        fn set_sequence(&mut self, seq: u64) {
+            self.sequence = seq;
+        }
+
+        fn record_heartbeat_sent(&mut self, at: Instant) {
+            self.last_heartbeat_sent = Some(at);
+            self.heartbeat_seq = self.heartbeat_seq.saturating_add(1);
+        }
+
+        fn record_heartbeat_ack(&mut self, at: Instant) {
+            self.last_heartbeat_ack = Some(at);
+            self.ack_seq = self.ack_seq.saturating_add(1);
+        }
+
+        fn last_heartbeat_sent(&self) -> Option<Instant> {
+            self.last_heartbeat_sent
+        }
+
+        fn last_heartbeat_ack(&self) -> Option<Instant> {
+            self.last_heartbeat_ack
+        }
+
+        fn heartbeat_seq(&self) -> u64 {
+            self.heartbeat_seq
+        }
+
+        fn ack_seq(&self) -> u64 {
+            self.ack_seq
+        }
+
+        fn persist(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            self.persist_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn restore(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            self.restore_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
         }
     }
 
@@ -2416,6 +2499,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn streaming_supervisor_restores_and_persists_on_shutdown() {
+        let config = SupervisorConfig::default();
+        let session = TestStreamingSession::default();
+        let mut supervisor = StreamingSupervisor::new(config, session);
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(true);
+        let _ = shutdown_tx;
+
+        let outcome = supervisor
+            .run::<i32, _, _, _, _>(
+                shutdown_rx,
+                |_session| async { Err(boxed_err("should not connect")) },
+                |_event, _session| async { Ok(()) },
+            )
+            .await;
+
+        assert!(matches!(outcome, SupervisorOutcome::Shutdown));
+        assert_eq!(supervisor.session().restore_calls(), 1);
+        assert_eq!(supervisor.session().persist_calls(), 1);
+    }
+
+    #[tokio::test]
     async fn streaming_supervisor_max_failures() {
         let config = SupervisorConfig::default()
             .with_max_consecutive_failures(2)
@@ -2437,6 +2542,32 @@ mod tests {
             outcome,
             SupervisorOutcome::MaxFailuresReached { failures: 2 }
         ));
+    }
+
+    #[tokio::test]
+    async fn streaming_supervisor_persists_on_max_failures() {
+        let config = SupervisorConfig::default()
+            .with_max_consecutive_failures(1)
+            .with_base_backoff_ms(1);
+        let session = TestStreamingSession::default();
+        let mut supervisor = StreamingSupervisor::new(config, session);
+
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+        let outcome = supervisor
+            .run::<i32, _, _, _, _>(
+                shutdown_rx,
+                |_session| async { Err(boxed_err("connect failed")) },
+                |_event, _session| async { Ok(()) },
+            )
+            .await;
+
+        assert!(matches!(
+            outcome,
+            SupervisorOutcome::MaxFailuresReached { failures: 1 }
+        ));
+        assert_eq!(supervisor.session().restore_calls(), 1);
+        assert_eq!(supervisor.session().persist_calls(), 1);
     }
 
     #[tokio::test]
@@ -2534,6 +2665,70 @@ mod tests {
         assert_eq!(log["ack_seq"], 0);
         assert_eq!(log["missed_heartbeats"], 1);
         assert_eq!(log["reconnect_count"], 0);
+    }
+
+    #[tokio::test]
+    async fn streaming_supervisor_resume_fallback_to_full_connect() {
+        let config = SupervisorConfig::default()
+            .with_base_backoff_ms(1)
+            .with_max_consecutive_failures(3);
+        let mut session = InMemoryStreamingSession::new();
+        session.set_resume_token("resume-token".to_string());
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let resume_attempts = Arc::new(AtomicUsize::new(0));
+        let full_attempts = Arc::new(AtomicUsize::new(0));
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let shutdown_tx = Arc::new(shutdown_tx);
+
+        let mut supervisor = StreamingSupervisor::new(config, session);
+
+        let attempts_cloned = Arc::clone(&attempts);
+        let resume_attempts_cloned = Arc::clone(&resume_attempts);
+        let full_attempts_cloned = Arc::clone(&full_attempts);
+        let shutdown_tx_cloned = Arc::clone(&shutdown_tx);
+
+        let outcome = supervisor
+            .run::<(), _, _, _, _>(
+                shutdown_rx,
+                move |session| {
+                    let attempts = Arc::clone(&attempts_cloned);
+                    let resume_attempts = Arc::clone(&resume_attempts_cloned);
+                    let full_attempts = Arc::clone(&full_attempts_cloned);
+                    let shutdown_tx = Arc::clone(&shutdown_tx_cloned);
+
+                    attempts.fetch_add(1, Ordering::SeqCst);
+
+                    let result = if session.resume_token().is_some() {
+                        resume_attempts.fetch_add(1, Ordering::SeqCst);
+                        session.clear_resume_token();
+                        Err(boxed_err("resume failed"))
+                    } else {
+                        full_attempts.fetch_add(1, Ordering::SeqCst);
+                        let _ = shutdown_tx.send(true);
+
+                        let (tx, rx) = mpsc::channel(1);
+                        drop(tx);
+                        let join_handle = tokio::spawn(async { Ok(()) });
+                        Ok(StreamingConnection {
+                            events: rx,
+                            join_handle,
+                        })
+                    };
+
+                    std::future::ready(result)
+                },
+                |_event, _session| async { Ok(()) },
+            )
+            .await;
+
+        assert!(matches!(outcome, SupervisorOutcome::Shutdown));
+        assert_eq!(resume_attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(full_attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(supervisor.stats().connection_attempts, 2);
+        assert_eq!(supervisor.streaming_health_state().reconnect_count, 1);
     }
 
     // ─────────────────────────────────────────────────────────────────────────

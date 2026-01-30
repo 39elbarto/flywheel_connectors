@@ -432,6 +432,7 @@ mod tests {
     use super::*;
     use crate::coverage::CoverageEvaluation;
     use chrono::Utc;
+    use fcp_testkit::LogCapture;
     use serde_json::json;
     use uuid::Uuid;
 
@@ -652,6 +653,88 @@ mod tests {
                 ..StoreLogData::default()
             }
         });
+    }
+
+    #[test]
+    fn can_reconstruct_with_policy_diversity() {
+        run_store_test(
+            "can_reconstruct_with_policy_diversity",
+            "verify",
+            "repair",
+            2,
+            || async {
+                let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+
+                let mut meta = test_object_meta();
+                meta.source_symbols = 4;
+                store.put_object_meta(meta).await.unwrap();
+
+                for esi in 0..4 {
+                    let mut symbol = test_symbol(esi);
+                    symbol.meta.source_node = Some(1);
+                    store.put_symbol(symbol).await.unwrap();
+                }
+
+                let policy = fcp_core::ObjectPlacementPolicy {
+                    min_nodes: 1,
+                    max_node_fraction_bps: 10_000,
+                    preferred_devices: vec![],
+                    excluded_devices: vec![],
+                    target_coverage_bps: 10_000,
+                    min_source_diversity: 2,
+                };
+
+                assert!(
+                    !store
+                        .can_reconstruct_with_policy(&test_object_id(), &policy)
+                        .await
+                );
+
+                let mut symbol = test_symbol(4);
+                symbol.meta.source_node = Some(2);
+                store.put_symbol(symbol).await.unwrap();
+
+                assert!(
+                    store
+                        .can_reconstruct_with_policy(&test_object_id(), &policy)
+                        .await
+                );
+
+                let dist = store.get_distribution(&test_object_id()).await.unwrap();
+                let eval = CoverageEvaluation::from_distribution(test_object_id(), &dist);
+
+                let capture = LogCapture::new();
+                let entry = json!({
+                    "timestamp": Utc::now().to_rfc3339(),
+                    "test_name": "can_reconstruct_with_policy_diversity",
+                    "module": "fcp-store",
+                    "phase": "verify",
+                    "correlation_id": Uuid::new_v4().to_string(),
+                    "result": "pass",
+                    "duration_ms": 0,
+                    "assertions": { "passed": 3, "failed": 0 },
+                    "details": {
+                        "object_id": test_object_id().to_string(),
+                        "source_count": eval.distinct_nodes,
+                        "diversity_bps": eval.diversity_bps(policy.min_source_diversity)
+                    }
+                });
+                capture.push_value(&entry).expect("serialize log entry");
+                capture.assert_valid();
+
+                StoreLogData {
+                    object_id: Some(test_object_id()),
+                    symbol_count: Some(dist.total_symbols),
+                    coverage_bps: Some(eval.coverage_bps),
+                    nodes_holding: Some(nodes_from_distribution(&dist)),
+                    details: Some(json!({
+                        "source_count": eval.distinct_nodes,
+                        "diversity_bps": eval.diversity_bps(policy.min_source_diversity)
+                    })),
+                    ..StoreLogData::default()
+                }
+            },
+        );
     }
 
     #[test]

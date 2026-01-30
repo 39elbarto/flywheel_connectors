@@ -776,6 +776,10 @@ mod tests {
                 // Have 1 node, need 5 = deficit of 4
                 assert_eq!(eval.diversity_deficit(5), 4);
 
+                assert_eq!(eval.diversity_bps(0), 10_000);
+                assert_eq!(eval.diversity_bps(2), 5_000);
+                assert_eq!(eval.diversity_bps(4), 2_500);
+
                 StoreLogData {
                     object_id: Some(object_id),
                     symbol_count: Some(dist.total_symbols),
@@ -783,7 +787,8 @@ mod tests {
                     nodes_holding: Some(nodes_from_distribution(&dist)),
                     details: Some(json!({
                         "distinct_nodes": eval.distinct_nodes,
-                        "deficit_for_3": eval.diversity_deficit(3)
+                        "deficit_for_3": eval.diversity_deficit(3),
+                        "diversity_bps_for_4": eval.diversity_bps(4)
                     })),
                 }
             },

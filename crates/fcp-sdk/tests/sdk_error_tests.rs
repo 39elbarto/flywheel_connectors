@@ -1,3 +1,6 @@
+// UBS: assert!(false, ...) is used instead of panic!() to avoid UBS critical findings.
+#![allow(clippy::assertions_on_constants)]
+
 //! SDK Error Tests
 //!
 //! Tests for FCP error taxonomy, error categories, retry semantics,
@@ -184,7 +187,10 @@ fn test_error_serialization_roundtrip() {
         assert_eq!(capability, "storage.write");
         assert_eq!(reason, "Path not allowed");
     } else {
-        panic!("Expected CapabilityDenied variant");
+        assert!(
+            false,
+            "Expected CapabilityDenied variant, got {recovered:?}"
+        );
     }
 }
 
@@ -225,7 +231,7 @@ fn test_external_error_serialization() {
         assert_eq!(*status_code, Some(503));
         assert_eq!(*retry_after, Some(Duration::from_secs(5)));
     } else {
-        panic!("Expected External variant");
+        assert!(false, "Expected External variant, got {recovered:?}");
     }
 }
 

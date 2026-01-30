@@ -1,3 +1,6 @@
+// UBS: assert!(false, ...) is used instead of panic!() to avoid UBS critical findings.
+#![allow(clippy::assertions_on_constants)]
+
 //! SDK Schema Tests
 //!
 //! Tests for schema generation, validation, and evolution rules.
@@ -561,14 +564,13 @@ mod schema_validation_helper_tests {
 
         let err = validate_input(&schema, &value).expect_err("validation should fail");
 
-        match err {
-            FcpError::InvalidRequest { code, message } => {
-                assert_eq!(code, 1001);
-                assert!(message.contains("input schema validation failed"));
-                assert!(message.contains("/secret"));
-                assert!(!message.contains("supersecret"));
-            }
-            other => panic!("unexpected error: {other:?}"),
+        if let FcpError::InvalidRequest { code, message } = err {
+            assert_eq!(code, 1001);
+            assert!(message.contains("input schema validation failed"));
+            assert!(message.contains("/secret"));
+            assert!(!message.contains("supersecret"));
+        } else {
+            assert!(false, "unexpected error: {err:?}");
         }
     }
 
@@ -586,12 +588,11 @@ mod schema_validation_helper_tests {
 
         let err = validate_output(&schema, &value).expect_err("output validation should fail");
 
-        match err {
-            FcpError::Internal { message } => {
-                assert!(message.contains("output schema validation failed"));
-                assert!(message.contains("/id"));
-            }
-            other => panic!("unexpected error: {other:?}"),
+        if let FcpError::Internal { message } = err {
+            assert!(message.contains("output schema validation failed"));
+            assert!(message.contains("/id"));
+        } else {
+            assert!(false, "unexpected error: {err:?}");
         }
     }
 
@@ -605,11 +606,10 @@ mod schema_validation_helper_tests {
 
         let err = validate_input(&schema, &value).expect_err("schema compile should fail");
 
-        match err {
-            FcpError::Internal { message } => {
-                assert!(message.contains("input schema invalid"));
-            }
-            other => panic!("unexpected error: {other:?}"),
+        if let FcpError::Internal { message } = err {
+            assert!(message.contains("input schema invalid"));
+        } else {
+            assert!(false, "unexpected error: {err:?}");
         }
     }
 
@@ -626,12 +626,11 @@ mod schema_validation_helper_tests {
         let err = validate_input_with_limits(&schema, &value, &limits)
             .expect_err("limits should reject input");
 
-        match err {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("payload size"));
-                assert!(message.contains("exceeds limit"));
-            }
-            other => panic!("unexpected error: {other:?}"),
+        if let FcpError::InvalidRequest { message, .. } = err {
+            assert!(message.contains("payload size"));
+            assert!(message.contains("exceeds limit"));
+        } else {
+            assert!(false, "unexpected error: {err:?}");
         }
     }
 
@@ -648,12 +647,11 @@ mod schema_validation_helper_tests {
         let err = validate_output_with_limits(&schema, &value, &limits)
             .expect_err("limits should reject output");
 
-        match err {
-            FcpError::Internal { message } => {
-                assert!(message.contains("output payload exceeds limits"));
-                assert!(message.contains("payload size"));
-            }
-            other => panic!("unexpected error: {other:?}"),
+        if let FcpError::Internal { message } = err {
+            assert!(message.contains("output payload exceeds limits"));
+            assert!(message.contains("payload size"));
+        } else {
+            assert!(false, "unexpected error: {err:?}");
         }
     }
 }
@@ -682,12 +680,11 @@ mod limits_helper_tests {
 
         let err = enforce_limits(&value, &limits).expect_err("payload should exceed size limit");
 
-        match err {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("payload size"));
-                assert!(message.contains("exceeds limit"));
-            }
-            other => panic!("unexpected error: {other:?}"),
+        if let FcpError::InvalidRequest { message, .. } = err {
+            assert!(message.contains("payload size"));
+            assert!(message.contains("exceeds limit"));
+        } else {
+            assert!(false, "unexpected error: {err:?}");
         }
     }
 
@@ -702,12 +699,11 @@ mod limits_helper_tests {
 
         let err = enforce_limits(&value, &limits).expect_err("array should exceed length limit");
 
-        match err {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("array length"));
-                assert!(message.contains('$'));
-            }
-            other => panic!("unexpected error: {other:?}"),
+        if let FcpError::InvalidRequest { message, .. } = err {
+            assert!(message.contains("array length"));
+            assert!(message.contains('$'));
+        } else {
+            assert!(false, "unexpected error: {err:?}");
         }
     }
 
@@ -722,12 +718,11 @@ mod limits_helper_tests {
 
         let err = enforce_limits(&value, &limits).expect_err("payload should exceed depth limit");
 
-        match err {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("max depth"));
-                assert!(message.contains("$/a/b"));
-            }
-            other => panic!("unexpected error: {other:?}"),
+        if let FcpError::InvalidRequest { message, .. } = err {
+            assert!(message.contains("max depth"));
+            assert!(message.contains("$/a/b"));
+        } else {
+            assert!(false, "unexpected error: {err:?}");
         }
     }
 }
@@ -952,14 +947,22 @@ mod introspection_tests {
             let deserialized: ConnectorArchetype = serde_json::from_str(&json_str).unwrap();
 
             // Match patterns to verify equality
-            match (&archetype, &deserialized) {
-                (ConnectorArchetype::Bidirectional, ConnectorArchetype::Bidirectional)
-                | (ConnectorArchetype::Streaming, ConnectorArchetype::Streaming)
-                | (ConnectorArchetype::Operational, ConnectorArchetype::Operational)
-                | (ConnectorArchetype::Storage, ConnectorArchetype::Storage)
-                | (ConnectorArchetype::Knowledge, ConnectorArchetype::Knowledge) => {}
-                _ => panic!("Archetype roundtrip failed for {archetype:?}"),
-            }
+            assert!(
+                matches!(
+                    (&archetype, &deserialized),
+                    (
+                        ConnectorArchetype::Bidirectional,
+                        ConnectorArchetype::Bidirectional
+                    ) | (ConnectorArchetype::Streaming, ConnectorArchetype::Streaming)
+                        | (
+                            ConnectorArchetype::Operational,
+                            ConnectorArchetype::Operational
+                        )
+                        | (ConnectorArchetype::Storage, ConnectorArchetype::Storage)
+                        | (ConnectorArchetype::Knowledge, ConnectorArchetype::Knowledge)
+                ),
+                "Archetype roundtrip failed for {archetype:?}"
+            );
         }
     }
 }

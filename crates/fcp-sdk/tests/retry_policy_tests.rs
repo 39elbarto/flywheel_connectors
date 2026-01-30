@@ -88,20 +88,18 @@ fn map_external_error_handles_rate_limit_and_transient() {
         Some(Duration::from_secs(5)),
     );
     assert_eq!(decision, RetryDecision::After(Duration::from_secs(5)));
-    match err {
-        FcpError::RateLimited { retry_after_ms, .. } => {
-            assert_eq!(retry_after_ms, 5_000);
-        }
-        _ => panic!("expected rate limited error"),
-    }
+    assert!(
+        matches!(&err, FcpError::RateLimited { retry_after_ms, .. } if *retry_after_ms == 5_000),
+        "expected rate limited error, got {err:?}"
+    );
 
     let (decision, err) =
         map_external_error("test-service", Some(503), "Service Unavailable", None);
     assert_eq!(decision, RetryDecision::Backoff);
-    match err {
-        FcpError::External { retryable, .. } => assert!(retryable),
-        _ => panic!("expected external error"),
-    }
+    assert!(
+        matches!(&err, FcpError::External { retryable, .. } if *retryable),
+        "expected external error, got {err:?}"
+    );
 }
 
 #[test]
@@ -113,8 +111,8 @@ fn map_external_error_handles_terminal_message() {
         None,
     );
     assert_eq!(decision, RetryDecision::Terminal);
-    match err {
-        FcpError::External { retryable, .. } => assert!(!retryable),
-        _ => panic!("expected external error"),
-    }
+    assert!(
+        matches!(&err, FcpError::External { retryable, .. } if !*retryable),
+        "expected external error, got {err:?}"
+    );
 }

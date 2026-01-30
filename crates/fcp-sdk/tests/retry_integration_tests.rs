@@ -38,12 +38,10 @@ async fn retry_policy_example_with_wiremock() {
     let (decision, err) =
         map_external_error("wiremock", Some(status), "Too Many Requests", retry_after);
     assert_eq!(decision, RetryDecision::After(Duration::from_secs(2)));
-    match err {
-        FcpError::RateLimited { retry_after_ms, .. } => {
-            assert_eq!(retry_after_ms, 2_000);
-        }
-        _ => panic!("expected rate limited error"),
-    }
+    assert!(
+        matches!(&err, FcpError::RateLimited { retry_after_ms, .. } if *retry_after_ms == 2_000),
+        "expected rate limited error, got {err:?}"
+    );
     let delay = policy.next_delay(0, decision, None).expect("delay");
     assert_eq!(delay, Duration::from_secs(2));
 
@@ -55,10 +53,10 @@ async fn retry_policy_example_with_wiremock() {
     let status = response.status().as_u16();
     let (decision, err) = map_external_error("wiremock", Some(status), "Service Unavailable", None);
     assert_eq!(decision, RetryDecision::Backoff);
-    match err {
-        FcpError::External { retryable, .. } => assert!(retryable),
-        _ => panic!("expected external error"),
-    }
+    assert!(
+        matches!(&err, FcpError::External { retryable, .. } if *retryable),
+        "expected external error, got {err:?}"
+    );
     let delay = policy.next_delay(0, decision, None).expect("delay");
     assert_eq!(delay, Duration::from_secs(1));
 }

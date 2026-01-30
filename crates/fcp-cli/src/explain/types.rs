@@ -344,28 +344,28 @@ mod tests {
         let report = ExplainReport {
             schema_version: "1.0.0".to_string(),
             generated_at,
-            request_object_id: "abc123def456".to_string(),
+            request_object_id: "request-id".to_string(),
             decision: DecisionOutcome::Deny,
             reason_code: "FCP-4030".to_string(),
-            operation_id: Some("op.test".to_string()),
+            operation_id: Some("operation-id".to_string()),
             retry_after_ms: Some(5000),
             reason_description: "Revocation check failed - token revoked".to_string(),
             evidence: vec![
                 EvidenceItem {
-                    object_id: "cap123".to_string(),
+                    object_id: "evidence-capability".to_string(),
                     evidence_type: EvidenceType::CapabilityToken,
-                    description: "Capability token that was revoked".to_string(),
+                    description: "Capability grant was revoked".to_string(),
                 },
                 EvidenceItem {
-                    object_id: "rev456".to_string(),
+                    object_id: "evidence-revocation".to_string(),
                     evidence_type: EvidenceType::Revocation,
-                    description: "Revocation entry for token".to_string(),
+                    description: "Revocation entry recorded".to_string(),
                 },
             ],
-            explanation: Some("Token was revoked at epoch 42".to_string()),
+            explanation: Some("Demo revocation recorded".to_string()),
             zone_id: "z:work".to_string(),
             signed_by: SignerInfo {
-                node_id: "node-1".to_string(),
+                node_id: "node-demo".to_string(),
                 signed_at: 1_700_000_000,
             },
         };

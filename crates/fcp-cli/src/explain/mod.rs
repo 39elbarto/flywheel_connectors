@@ -8,9 +8,11 @@
 //! ```text
 //! # Human-readable output
 //! fcp explain --request <object-id>
+//! fcp explain --receipt <path>
 //!
 //! # JSON output for tooling
 //! fcp explain --request <object-id> --json
+//! fcp explain --receipt <path> --output <file>
 //! ```
 
 pub mod types;
@@ -18,6 +20,13 @@ pub mod types;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Args;
+use fcp_cbor::{CanonicalSerializer, SchemaId};
+use fcp_core::{DecisionReceipt, FcpErrorResponse, InvokeResponse, InvokeStatus, OperationReceipt};
+use semver::Version;
+use serde::de::DeserializeOwned;
+use std::fs;
+use std::io::Cursor;
+use std::path::{Path, PathBuf};
 
 use types::{
     DecisionOutcome, EvidenceItem, EvidenceType, ExplainError, ExplainReport, SignerInfo,
@@ -28,8 +37,21 @@ use types::{
 #[derive(Args, Debug)]
 pub struct ExplainArgs {
     /// Request object ID to explain (hex-encoded, 64 characters).
-    #[arg(long, short = 'r')]
-    pub request: String,
+    #[arg(
+        long,
+        short = 'r',
+        conflicts_with = "receipt",
+        required_unless_present = "receipt"
+    )]
+    pub request: Option<String>,
+
+    /// Receipt file to explain (DecisionReceipt/OperationReceipt/InvokeResponse).
+    #[arg(long, conflicts_with = "request")]
+    pub receipt: Option<PathBuf>,
+
+    /// Output JSON to a file (implies --json).
+    #[arg(long)]
+    pub output: Option<PathBuf>,
 
     /// Output JSON instead of human-readable format.
     #[arg(long, default_value_t = false)]
@@ -46,25 +68,37 @@ pub struct ExplainArgs {
 ///
 /// Returns an error if the decision receipt cannot be loaded or rendered.
 pub fn run(args: &ExplainArgs) -> Result<()> {
-    // Validate object ID format
-    if let Err(e) = validate_object_id(&args.request) {
-        let error = ExplainError::invalid_object_id(&args.request, &e);
-        return output_error(&error, args.json);
-    }
+    if let Some(receipt_path) = args.receipt.as_deref() {
+        match load_receipt_from_file(receipt_path) {
+            Ok(report) => output_report(&report, args.json, args.output.as_deref()),
+            Err(error) => output_error(&error, args.json, args.output.as_deref()),
+        }
+    } else {
+        let request = args
+            .request
+            .as_deref()
+            .expect("request required unless receipt provided");
 
-    // TODO: In a full implementation, this would load the DecisionReceipt from
-    // the object store. For now, we demonstrate the output format with a
-    // simulated lookup that returns "not found" or a demo receipt.
-    //
-    // Full implementation would:
-    // 1. Connect to the mesh node for the specified zone
-    // 2. Query the object store for a DecisionReceipt with request_object_id == args.request
-    // 3. If found, render it; if not found, return ExplainError::receipt_not_found
+        // Validate object ID format
+        if let Err(e) = validate_object_id(request) {
+            let error = ExplainError::invalid_object_id(request, &e);
+            return output_error(&error, args.json, args.output.as_deref());
+        }
 
-    // For demonstration, check if this is a known test object ID
-    match load_decision_receipt(&args.request, args.zone.as_deref()) {
-        Ok(report) => output_report(&report, args.json),
-        Err(error) => output_error(&error, args.json),
+        // TODO: In a full implementation, this would load the DecisionReceipt from
+        // the object store. For now, we demonstrate the output format with a
+        // simulated lookup that returns "not found" or a demo receipt.
+        //
+        // Full implementation would:
+        // 1. Connect to the mesh node for the specified zone
+        // 2. Query the object store for a DecisionReceipt with request_object_id == args.request
+        // 3. If found, render it; if not found, return ExplainError::receipt_not_found
+
+        // For demonstration, check if this is a known test object ID
+        match load_decision_receipt(request, args.zone.as_deref()) {
+            Ok(report) => output_report(&report, args.json, args.output.as_deref()),
+            Err(error) => output_error(&error, args.json, args.output.as_deref()),
+        }
     }
 }
 
@@ -107,6 +141,178 @@ fn load_decision_receipt(
     }
 }
 
+fn load_receipt_from_file(path: &Path) -> Result<ExplainReport, ExplainError> {
+    let bytes =
+        fs::read(path).map_err(|err| ExplainError::receipt_read_failed(path, &err.to_string()))?;
+
+    let decision_schema = SchemaId::new("fcp.core", "DecisionReceipt", Version::new(1, 0, 0));
+    if let Ok(receipt) =
+        CanonicalSerializer::deserialize::<DecisionReceipt>(&bytes, &decision_schema)
+    {
+        return Ok(report_from_decision_receipt(&receipt));
+    }
+
+    let operation_schema = SchemaId::new("fcp.core", "OperationReceipt", Version::new(1, 0, 0));
+    if let Ok(receipt) =
+        CanonicalSerializer::deserialize::<OperationReceipt>(&bytes, &operation_schema)
+    {
+        return Ok(report_from_operation_receipt(&receipt));
+    }
+
+    if let Some(receipt) = try_decode_cbor::<DecisionReceipt>(&bytes) {
+        return Ok(report_from_decision_receipt(&receipt));
+    }
+
+    if let Some(receipt) = try_decode_cbor::<OperationReceipt>(&bytes) {
+        return Ok(report_from_operation_receipt(&receipt));
+    }
+
+    if let Some(response) = try_decode_cbor::<InvokeResponse>(&bytes) {
+        return Ok(report_from_invoke_response(&response));
+    }
+
+    if let Some(response) = try_decode_cbor::<FcpErrorResponse>(&bytes) {
+        return Ok(report_from_error_response(response, None));
+    }
+
+    if let Ok(response) = serde_json::from_slice::<InvokeResponse>(&bytes) {
+        return Ok(report_from_invoke_response(&response));
+    }
+
+    if let Ok(response) = serde_json::from_slice::<FcpErrorResponse>(&bytes) {
+        return Ok(report_from_error_response(response, None));
+    }
+
+    Err(ExplainError::receipt_decode_failed(path))
+}
+
+fn try_decode_cbor<T: DeserializeOwned>(bytes: &[u8]) -> Option<T> {
+    let mut cursor = Cursor::new(bytes);
+    ciborium::de::from_reader(&mut cursor).ok()
+}
+
+fn report_from_decision_receipt(receipt: &DecisionReceipt) -> ExplainReport {
+    let retry_after_ms = if receipt.reason_code == "FCP-3002" {
+        Some(0)
+    } else {
+        None
+    };
+    ExplainReport {
+        schema_version: ExplainReport::SCHEMA_VERSION.to_string(),
+        generated_at: Utc::now(),
+        request_object_id: receipt.request_object_id.to_string(),
+        decision: match receipt.decision {
+            fcp_core::Decision::Allow => DecisionOutcome::Allow,
+            fcp_core::Decision::Deny => DecisionOutcome::Deny,
+        },
+        reason_code: receipt.reason_code.clone(),
+        operation_id: None,
+        retry_after_ms,
+        reason_description: reason_code_description(&receipt.reason_code).to_string(),
+        evidence: receipt
+            .evidence
+            .iter()
+            .map(|object_id| EvidenceItem {
+                object_id: object_id.to_string(),
+                evidence_type: EvidenceType::Unknown,
+                description: format!("Evidence object {}", truncate_id(&object_id.to_string())),
+            })
+            .collect(),
+        explanation: receipt.explanation.clone(),
+        zone_id: receipt.header.zone_id.to_string(),
+        signed_by: SignerInfo {
+            node_id: receipt.signature.node_id.to_string(),
+            signed_at: receipt.signature.signed_at,
+        },
+    }
+}
+
+fn report_from_operation_receipt(receipt: &OperationReceipt) -> ExplainReport {
+    let request_id = receipt.request_object_id.to_string();
+    ExplainReport {
+        schema_version: ExplainReport::SCHEMA_VERSION.to_string(),
+        generated_at: Utc::now(),
+        request_object_id: request_id.clone(),
+        decision: DecisionOutcome::Allow,
+        reason_code: "FCP-0000".to_string(),
+        // Operation ID is not encoded in the receipt; fall back to request id so
+        // E2E scripts have a stable non-empty identifier.
+        operation_id: Some(request_id),
+        retry_after_ms: None,
+        reason_description: reason_code_description("FCP-0000").to_string(),
+        evidence: Vec::new(),
+        explanation: None,
+        zone_id: receipt.header.zone_id.to_string(),
+        signed_by: SignerInfo {
+            node_id: receipt.signature.node_id.to_string(),
+            signed_at: receipt.signature.signed_at,
+        },
+    }
+}
+
+fn report_from_invoke_response(response: &InvokeResponse) -> ExplainReport {
+    let request_id = response.id.to_string();
+    match response.status {
+        InvokeStatus::Ok => ExplainReport {
+            schema_version: ExplainReport::SCHEMA_VERSION.to_string(),
+            generated_at: Utc::now(),
+            request_object_id: request_id.clone(),
+            decision: DecisionOutcome::Allow,
+            reason_code: "FCP-0000".to_string(),
+            operation_id: Some(request_id),
+            retry_after_ms: None,
+            reason_description: reason_code_description("FCP-0000").to_string(),
+            evidence: Vec::new(),
+            explanation: None,
+            zone_id: "unknown".to_string(),
+            signed_by: SignerInfo {
+                node_id: "unknown".to_string(),
+                signed_at: 0,
+            },
+        },
+        InvokeStatus::Error => response.error.as_ref().map_or_else(
+            || {
+                report_from_error_response(
+                    FcpErrorResponse {
+                        code: "FCP-9001".to_string(),
+                        message: "invoke failed without error payload".to_string(),
+                        retryable: false,
+                        retry_after_ms: None,
+                        details: None,
+                        ai_recovery_hint: None,
+                    },
+                    Some(request_id.clone()),
+                )
+            },
+            |err| report_from_error_response(err.to_response(), Some(request_id.clone())),
+        ),
+    }
+}
+
+fn report_from_error_response(
+    response: FcpErrorResponse,
+    request_id: Option<String>,
+) -> ExplainReport {
+    let request_id = request_id.unwrap_or_else(|| "unknown".to_string());
+    ExplainReport {
+        schema_version: ExplainReport::SCHEMA_VERSION.to_string(),
+        generated_at: Utc::now(),
+        request_object_id: request_id.clone(),
+        decision: DecisionOutcome::Deny,
+        reason_code: response.code.clone(),
+        operation_id: Some(request_id),
+        retry_after_ms: response.retry_after_ms,
+        reason_description: reason_code_description(&response.code).to_string(),
+        evidence: Vec::new(),
+        explanation: Some(response.message),
+        zone_id: "unknown".to_string(),
+        signed_by: SignerInfo {
+            node_id: "unknown".to_string(),
+            signed_at: 0,
+        },
+    }
+}
+
 fn create_demo_allow_receipt(request_id: &str) -> ExplainReport {
     ExplainReport {
         schema_version: ExplainReport::SCHEMA_VERSION.to_string(),
@@ -114,6 +320,8 @@ fn create_demo_allow_receipt(request_id: &str) -> ExplainReport {
         request_object_id: request_id.to_string(),
         decision: DecisionOutcome::Allow,
         reason_code: "FCP-0000".to_string(),
+        operation_id: Some(request_id.to_string()),
+        retry_after_ms: None,
         reason_description: reason_code_description("FCP-0000").to_string(),
         evidence: vec![
             EvidenceItem {
@@ -149,13 +357,14 @@ fn create_demo_deny_revoked_receipt(request_id: &str) -> ExplainReport {
         request_object_id: request_id.to_string(),
         decision: DecisionOutcome::Deny,
         reason_code: "FCP-4030".to_string(),
+        operation_id: None,
+        retry_after_ms: None,
         reason_description: reason_code_description("FCP-4030").to_string(),
         evidence: vec![
             EvidenceItem {
                 object_id: "c".repeat(64),
                 evidence_type: EvidenceType::CapabilityToken,
-                description: "Capability token (jti: 550e8400-e29b-41d4-a716-446655440000)"
-                    .to_string(),
+                description: "Capability token (jti: <redacted>)".to_string(),
             },
             EvidenceItem {
                 object_id: "d".repeat(64),
@@ -181,6 +390,8 @@ fn create_demo_deny_zone_violation_receipt(request_id: &str) -> ExplainReport {
         request_object_id: request_id.to_string(),
         decision: DecisionOutcome::Deny,
         reason_code: "FCP-4001".to_string(),
+        operation_id: None,
+        retry_after_ms: None,
         reason_description: reason_code_description("FCP-4001").to_string(),
         evidence: vec![
             EvidenceItem {
@@ -207,7 +418,14 @@ fn create_demo_deny_zone_violation_receipt(request_id: &str) -> ExplainReport {
 }
 
 /// Output the explain report.
-fn output_report(report: &ExplainReport, json: bool) -> Result<()> {
+fn output_report(report: &ExplainReport, json: bool, output: Option<&Path>) -> Result<()> {
+    if let Some(path) = output {
+        let file = fs::File::create(path)
+            .with_context(|| format!("failed to create output file {}", path.display()))?;
+        serde_json::to_writer_pretty(file, report).context("failed to serialize report to JSON")?;
+        return Ok(());
+    }
+
     if json {
         let output =
             serde_json::to_string_pretty(report).context("failed to serialize report to JSON")?;
@@ -219,7 +437,14 @@ fn output_report(report: &ExplainReport, json: bool) -> Result<()> {
 }
 
 /// Output an error.
-fn output_error(error: &ExplainError, json: bool) -> Result<()> {
+fn output_error(error: &ExplainError, json: bool, output: Option<&Path>) -> Result<()> {
+    if let Some(path) = output {
+        let file = fs::File::create(path)
+            .with_context(|| format!("failed to create output file {}", path.display()))?;
+        serde_json::to_writer_pretty(file, error).context("failed to serialize error to JSON")?;
+        return Ok(());
+    }
+
     if json {
         let output =
             serde_json::to_string_pretty(error).context("failed to serialize error to JSON")?;

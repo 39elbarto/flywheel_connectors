@@ -12,7 +12,10 @@
 use async_trait::async_trait;
 use fcp_core::EventInfo;
 use fcp_sdk::prelude::*;
-use fcp_sdk::{OperationId, RateLimitDeclarations, ReplayBufferInfo, SessionId, SubscribeResult};
+use fcp_sdk::{
+    OperationId, RateLimitDeclarations, ReplayBufferInfo, SelfCheckReport, SelfCheckStatus,
+    SessionId, SubscribeResult,
+};
 use serde_json::json;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -371,9 +374,25 @@ async fn test_minimal_connector_lifecycle() {
     let health = connector.health().await;
     assert!(health.is_ready());
 
+    // Self-check (default)
+    let self_check = connector.self_check().await.expect("self-check");
+    assert_eq!(self_check.status, SelfCheckStatus::Unsupported);
+    assert_eq!(
+        self_check.reason_code.as_deref(),
+        Some("self_check_unsupported")
+    );
+
     // Shutdown
     let shutdown_result = connector.shutdown(test_shutdown_request()).await;
     assert!(shutdown_result.is_ok());
+}
+
+#[test]
+fn test_self_check_report_from_error() {
+    let err = FcpError::NotConfigured;
+    let report = SelfCheckReport::from_error(&err);
+    assert_eq!(report.status, SelfCheckStatus::Failed);
+    assert_eq!(report.reason_code.as_deref(), Some("FCP-5002"));
 }
 
 #[tokio::test]

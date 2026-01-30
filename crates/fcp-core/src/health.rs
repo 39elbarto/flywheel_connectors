@@ -4,6 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::FcpError;
+
 /// Health snapshot for a connector.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthSnapshot {
@@ -24,6 +26,96 @@ pub struct HealthSnapshot {
     /// Rate limit status
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_limit: Option<RateLimitStatus>,
+}
+
+/// Result of a connector self-check.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SelfCheckReport {
+    /// Overall self-check status.
+    pub status: SelfCheckStatus,
+
+    /// Stable reason code for degraded/failed states.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+
+    /// Human-readable message for operators.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+
+    /// Optional structured details from the connector.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
+}
+
+impl SelfCheckReport {
+    /// Self-check completed successfully.
+    #[must_use]
+    pub const fn ok() -> Self {
+        Self {
+            status: SelfCheckStatus::Ok,
+            reason_code: None,
+            message: None,
+            details: None,
+        }
+    }
+
+    /// Self-check completed but with degraded status.
+    #[must_use]
+    pub fn degraded(reason_code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            status: SelfCheckStatus::Degraded,
+            reason_code: Some(reason_code.into()),
+            message: Some(message.into()),
+            details: None,
+        }
+    }
+
+    /// Self-check failed.
+    #[must_use]
+    pub fn failed(reason_code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            status: SelfCheckStatus::Failed,
+            reason_code: Some(reason_code.into()),
+            message: Some(message.into()),
+            details: None,
+        }
+    }
+
+    /// Self-check is not supported by the connector.
+    #[must_use]
+    pub fn unsupported() -> Self {
+        Self {
+            status: SelfCheckStatus::Unsupported,
+            reason_code: Some("self_check_unsupported".to_string()),
+            message: Some("connector does not implement self-check".to_string()),
+            details: None,
+        }
+    }
+
+    /// Create a failed report from an `FcpError`.
+    #[must_use]
+    pub fn from_error(error: &FcpError) -> Self {
+        Self {
+            status: SelfCheckStatus::Failed,
+            reason_code: Some(error.error_code()),
+            message: Some(error.to_string()),
+            details: None,
+        }
+    }
+}
+
+/// Self-check status indicator.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SelfCheckStatus {
+    /// Self-check completed successfully.
+    Ok,
+    /// Self-check completed with issues.
+    Degraded,
+    /// Self-check failed.
+    Failed,
+    /// Self-check not supported by the connector.
+    Unsupported,
 }
 
 impl Default for HealthSnapshot {

@@ -123,6 +123,8 @@ pub use fcp_core::{
     RequestId,
     RequestResponse,
     ResourceAvailability,
+    SelfCheckReport,
+    SelfCheckStatus,
     SessionId,
     ShutdownAck,
     ShutdownRequest,

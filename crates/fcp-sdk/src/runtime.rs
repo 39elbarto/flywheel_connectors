@@ -40,9 +40,9 @@ use tokio::sync::mpsc;
 use fcp_cbor::CanonicalSerializer;
 use fcp_core::{
     ConnectorId, ConnectorStateObject, CursorState, HealthSnapshot, HealthState, InstanceId,
-    ObjectHeader, ObjectId, Signature, ZoneId,
+    ObjectHeader, ObjectId, ObjectIdKey, RetentionClass, Signature, StorageMeta, StoredObject,
+    ZoneId,
 };
-use fcp_core::{ObjectIdKey, RetentionClass, StorageMeta, StoredObject};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SupervisorConfig
@@ -1443,22 +1443,19 @@ impl<S: StreamingSession> StreamingSupervisor<S> {
                         }
                     }
                     maybe_event = events.recv() => {
-                        match maybe_event {
-                            Some(event) => {
-                                self.stats.events_processed += 1;
-                                if let Err(err) = handle_event(event, &mut self.session).await {
-                                    let message = err.to_string();
-                                    tracing::error!(error = %message, "Streaming event handler failed");
-                                    exit_message = message;
-                                    exit_fatal = true;
-                                    break;
-                                }
-                                self.health.record_success();
-                                self.health.evaluate(&self.config);
-                            }
-                            None => {
+                        if let Some(event) = maybe_event {
+                            self.stats.events_processed += 1;
+                            if let Err(err) = handle_event(event, &mut self.session).await {
+                                let message = err.to_string();
+                                tracing::error!(error = %message, "Streaming event handler failed");
+                                exit_message = message;
+                                exit_fatal = true;
                                 break;
                             }
+                            self.health.record_success();
+                            self.health.evaluate(&self.config);
+                        } else {
+                            break;
                         }
                     }
                     result = &mut join_handle => {
@@ -1473,13 +1470,12 @@ impl<S: StreamingSession> StreamingSupervisor<S> {
                         }
                         break;
                     }
-                    _ = async {
+                    () = async {
                         if let Some(interval) = &mut heartbeat_interval {
                             interval.tick().await;
                         }
                     }, if heartbeat_interval.is_some() => {
                         if let Some(timeout) = self.config.heartbeat_timeout() {
-                            self.session.record_heartbeat_sent(Instant::now());
                             if self.session.is_heartbeat_timeout(timeout) {
                                 exit_message = "heartbeat timeout".to_string();
                                 break;
@@ -1917,7 +1913,7 @@ mod tests {
     use std::io;
 
     fn boxed_err(message: &str) -> StreamingError {
-        Box::new(io::Error::new(io::ErrorKind::Other, message))
+        Box::new(io::Error::other(message))
     }
 
     #[test]

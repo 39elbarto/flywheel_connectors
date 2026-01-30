@@ -40,7 +40,7 @@ pub use crate::ratelimit::{RateLimitError, RateLimitPoolBuilder, RateLimitTracke
 pub use crate::{EventAck, EventCaps, EventData, EventEnvelope, EventNack, EventStream};
 
 // Health
-pub use crate::{ConnectorMetrics, HealthSnapshot, HealthState};
+pub use crate::{ConnectorMetrics, HealthSnapshot, HealthState, SelfCheckReport, SelfCheckStatus};
 
 // Identifiers
 pub use crate::{ConnectorId, InstanceId, ObjectId, RequestId, ZoneId};

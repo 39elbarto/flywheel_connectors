@@ -791,7 +791,7 @@ fn normalize_schema_filter(raw: &str) -> Result<String, String> {
 
 #[allow(clippy::too_many_lines)]
 fn main() {
-    let args = Args::parse();
+    let mut args = Args::parse();
     let schema_filter = args
         .schema
         .as_deref()
@@ -833,12 +833,7 @@ fn main() {
     );
 
     if args.verify {
-        let Some(baseline_path) = args
-            .baseline
-            .as_ref()
-            .cloned()
-            .or_else(default_baseline_path)
-        else {
+        let Some(baseline_path) = args.baseline.take().or_else(default_baseline_path) else {
             eprintln!(
                 "Error: --baseline is required with --verify (default tests/vectors/serialization/core_vectors.json or .cbor not found)"
             );

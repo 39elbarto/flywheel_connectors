@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     CapabilityToken, ConnectorId, EventAck, EventEnvelope, EventNack, FcpResult, HandshakeRequest,
     HandshakeResponse, HealthSnapshot, InstanceId, Introspection, InvokeRequest, InvokeResponse,
-    RateLimitDeclarations, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
-    SubscribeResponse, UnsubscribeRequest,
+    RateLimitDeclarations, SelfCheckReport, ShutdownRequest, SimulateRequest, SimulateResponse,
+    SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
 };
 
 /// Type alias for event streams.
@@ -33,6 +33,18 @@ pub trait FcpConnector: Send + Sync {
 
     /// Get the current health status.
     async fn health(&self) -> HealthSnapshot;
+
+    /// Run a connector self-check (read-only, bounded).
+    ///
+    /// **Contract:**
+    /// - MUST NOT perform side effects (read-only checks only).
+    /// - MUST be bounded by timeouts in the caller/host.
+    /// - SHOULD return stable `reason_code` values for degraded/failed states.
+    ///
+    /// Default implementation reports `unsupported`.
+    async fn self_check(&self) -> FcpResult<SelfCheckReport> {
+        Ok(SelfCheckReport::unsupported())
+    }
 
     /// Get connector metrics.
     fn metrics(&self) -> ConnectorMetrics;

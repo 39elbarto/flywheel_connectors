@@ -26,7 +26,13 @@ use serde_json::json;
 /// Correlation ID prefix for this test module.
 const MODULE: &str = "fcp-conformance::schema_hash_determinism";
 
+/// Convert elapsed time to milliseconds as u64 (saturating).
+fn elapsed_ms(start: &Instant) -> u64 {
+    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
 /// Helper to emit a structured E2E log entry.
+#[allow(clippy::too_many_arguments)]
 fn emit_log(
     capture: &LogCapture,
     test_name: &str,
@@ -101,7 +107,7 @@ fn schema_hash_same_schema_same_hash_across_invocations() {
                 "execute",
                 &correlation_id,
                 "fail",
-                start.elapsed().as_millis() as u64,
+                elapsed_ms(&start),
                 i,
                 1,
                 Some(json!({
@@ -120,7 +126,7 @@ fn schema_hash_same_schema_same_hash_across_invocations() {
         "verify",
         &correlation_id,
         "pass",
-        start.elapsed().as_millis() as u64,
+        elapsed_ms(&start),
         100,
         0,
         Some(json!({
@@ -172,7 +178,7 @@ fn schema_hash_all_core_schemas_stable() {
         "verify",
         &correlation_id,
         "pass",
-        start.elapsed().as_millis() as u64,
+        elapsed_ms(&start),
         passed,
         0,
         Some(json!({
@@ -244,7 +250,7 @@ fn schema_hash_differs_by_version_component() {
         "verify",
         &correlation_id,
         "pass",
-        start.elapsed().as_millis() as u64,
+        elapsed_ms(&start),
         passed,
         0,
         Some(json!({
@@ -284,7 +290,7 @@ fn schema_hash_differs_by_namespace() {
         "verify",
         &correlation_id,
         "pass",
-        start.elapsed().as_millis() as u64,
+        elapsed_ms(&start),
         3,
         0,
         Some(json!({
@@ -319,7 +325,7 @@ fn schema_hash_differs_by_name() {
         "verify",
         &correlation_id,
         "pass",
-        start.elapsed().as_millis() as u64,
+        elapsed_ms(&start),
         1,
         0,
         None,
@@ -418,7 +424,7 @@ fn vector_ordering_is_deterministic() {
         "verify",
         &correlation_id,
         "pass",
-        start.elapsed().as_millis() as u64,
+        elapsed_ms(&start),
         passed,
         0,
         Some(json!({
@@ -448,7 +454,7 @@ fn all_core_schema_vectors_are_deterministic() {
         name: "determinism-test".into(),
         active: true,
     };
-    let samples = vec![("determinism-sample".to_string(), sample.clone())];
+    let samples = vec![("determinism-sample".to_string(), sample)];
 
     let mut reference_map: BTreeMap<String, GeneratedVector> = BTreeMap::new();
     for reg in &registrations {
@@ -484,7 +490,7 @@ fn all_core_schema_vectors_are_deterministic() {
         "verify",
         &correlation_id,
         "pass",
-        start.elapsed().as_millis() as u64,
+        elapsed_ms(&start),
         passed,
         0,
         Some(json!({
@@ -496,7 +502,7 @@ fn all_core_schema_vectors_are_deterministic() {
     capture.assert_valid();
 }
 
-/// Verify that BTreeMap key ordering in output is deterministic.
+/// Verify that `BTreeMap` key ordering in output is deterministic.
 #[test]
 fn vector_map_ordering_is_deterministic() {
     let capture = LogCapture::new();
@@ -537,7 +543,7 @@ fn vector_map_ordering_is_deterministic() {
         "verify",
         &correlation_id,
         "pass",
-        start.elapsed().as_millis() as u64,
+        elapsed_ms(&start),
         2,
         0,
         Some(json!({
@@ -587,7 +593,7 @@ fn canonical_cbor_serialization_is_stable() {
         "verify",
         &correlation_id,
         "pass",
-        start.elapsed().as_millis() as u64,
+        elapsed_ms(&start),
         passed,
         0,
         Some(json!({
@@ -601,7 +607,7 @@ fn canonical_cbor_serialization_is_stable() {
     capture.assert_valid();
 }
 
-/// Verify that CanonicalSerializer roundtrip preserves bytes.
+/// Verify that `CanonicalSerializer` roundtrip preserves bytes.
 #[test]
 fn canonical_serializer_roundtrip_preserves_bytes() {
     let capture = LogCapture::new();
@@ -648,7 +654,7 @@ fn canonical_serializer_roundtrip_preserves_bytes() {
         "verify",
         &correlation_id,
         "pass",
-        start.elapsed().as_millis() as u64,
+        elapsed_ms(&start),
         passed,
         0,
         Some(json!({
@@ -689,7 +695,7 @@ fn nested_struct_cbor_is_deterministic() {
         "verify",
         &correlation_id,
         "pass",
-        start.elapsed().as_millis() as u64,
+        elapsed_ms(&start),
         passed,
         0,
         Some(json!({
@@ -751,7 +757,7 @@ fn golden_vector_schema_hashes_match_fresh_computation() {
         "verify",
         &correlation_id,
         "pass",
-        start.elapsed().as_millis() as u64,
+        elapsed_ms(&start),
         passed,
         0,
         Some(json!({
@@ -793,7 +799,7 @@ fn log_emission_produces_valid_jsonl() {
         "execute",
         &correlation_id,
         "pass",
-        start.elapsed().as_millis() as u64,
+        elapsed_ms(&start),
         1,
         0,
         None,
@@ -805,7 +811,7 @@ fn log_emission_produces_valid_jsonl() {
         "verify",
         &correlation_id,
         "pass",
-        start.elapsed().as_millis() as u64,
+        elapsed_ms(&start),
         2,
         0,
         Some(json!({"validated_entries": 2})),
@@ -828,7 +834,7 @@ fn log_emission_produces_valid_jsonl() {
 // Schema Registration Completeness
 // ============================================================================
 
-/// Verify that core_schema_registrations() returns a non-empty, unique set.
+/// Verify that `core_schema_registrations()` returns a non-empty, unique set.
 #[test]
 fn core_schema_registrations_are_unique_and_non_empty() {
     let capture = LogCapture::new();
@@ -870,7 +876,7 @@ fn core_schema_registrations_are_unique_and_non_empty() {
         "verify",
         &correlation_id,
         "pass",
-        start.elapsed().as_millis() as u64,
+        elapsed_ms(&start),
         2,
         0,
         Some(json!({

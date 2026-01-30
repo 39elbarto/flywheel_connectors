@@ -64,6 +64,28 @@ pub fn init_metrics() {
     // Event metrics
     describe_counter!("fcp_events_emitted_total", "Total events emitted");
     describe_counter!("fcp_events_dropped_total", "Total events dropped");
+
+    // Symbol coverage and diversity metrics
+    describe_gauge!(
+        "fcp_symbol_coverage_distinct_nodes",
+        "Number of distinct nodes holding symbols for an object"
+    );
+    describe_gauge!(
+        "fcp_symbol_coverage_bps",
+        "Symbol coverage ratio in basis points (10000 = 100%)"
+    );
+    describe_gauge!(
+        "fcp_symbol_max_node_fraction_bps",
+        "Maximum symbol fraction on any single node in basis points"
+    );
+    describe_counter!(
+        "fcp_symbol_diversity_violations_total",
+        "Total diversity policy violations during reconstruction attempts"
+    );
+    describe_counter!(
+        "fcp_symbol_coverage_evaluations_total",
+        "Total coverage evaluations performed"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -320,6 +342,54 @@ pub fn record_event_dropped(connector: &str, event_type: &str, reason: &str) {
             ("connector", connector),
             ("event_type", event_type),
             ("reason", reason),
+        ],
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Symbol Coverage and Diversity Metrics
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Record symbol coverage evaluation metrics.
+///
+/// Call this after evaluating coverage for an object to emit metrics.
+pub fn record_symbol_coverage(
+    zone_id: &str,
+    distinct_nodes: usize,
+    coverage_bps: u32,
+    max_node_fraction_bps: u16,
+) {
+    set_gauge(
+        "fcp_symbol_coverage_distinct_nodes",
+        distinct_nodes as f64,
+        &[("zone", zone_id)],
+    );
+    set_gauge(
+        "fcp_symbol_coverage_bps",
+        f64::from(coverage_bps),
+        &[("zone", zone_id)],
+    );
+    set_gauge(
+        "fcp_symbol_max_node_fraction_bps",
+        f64::from(max_node_fraction_bps),
+        &[("zone", zone_id)],
+    );
+    increment_counter(
+        "fcp_symbol_coverage_evaluations_total",
+        &[("zone", zone_id)],
+    );
+}
+
+/// Record a diversity policy violation during reconstruction.
+///
+/// Call this when reconstruction is denied due to insufficient source diversity.
+pub fn record_diversity_violation(zone_id: &str, required: u8, actual: usize) {
+    increment_counter(
+        "fcp_symbol_diversity_violations_total",
+        &[
+            ("zone", zone_id),
+            ("required", &required.to_string()),
+            ("actual", &actual.to_string()),
         ],
     );
 }
@@ -700,5 +770,48 @@ mod tests {
         update_rate_limit("test", 100, false); // fcp_rate_limit_remaining, fcp_rate_limit_exceeded_total
         record_event_emitted("test", "evt"); // fcp_events_emitted_total
         record_event_dropped("test", "evt", "reason"); // fcp_events_dropped_total
+    }
+
+    // ============ Symbol Coverage and Diversity Metrics Tests ============
+
+    #[test]
+    fn test_record_symbol_coverage_no_panic() {
+        record_symbol_coverage("z:work", 3, 10000, 4000);
+    }
+
+    #[test]
+    fn test_record_symbol_coverage_various_values() {
+        // Minimal coverage
+        record_symbol_coverage("z:minimal", 1, 1000, 10000);
+        // Over-coverage
+        record_symbol_coverage("z:over", 5, 15000, 2000);
+        // No coverage
+        record_symbol_coverage("z:empty", 0, 0, 0);
+    }
+
+    #[test]
+    fn test_record_diversity_violation_no_panic() {
+        record_diversity_violation("z:work", 3, 1);
+    }
+
+    #[test]
+    fn test_record_diversity_violation_various_values() {
+        // Missing 2 nodes
+        record_diversity_violation("z:test", 3, 1);
+        // Missing many nodes
+        record_diversity_violation("z:high-diversity", 10, 2);
+        // Edge case: required 0 (shouldn't happen but handle gracefully)
+        record_diversity_violation("z:edge", 0, 5);
+    }
+
+    #[test]
+    fn test_symbol_coverage_with_long_zone_id() {
+        let long_zone = "z:".to_string() + &"a".repeat(100);
+        record_symbol_coverage(&long_zone, 3, 10000, 4000);
+    }
+
+    #[test]
+    fn test_diversity_violation_with_unicode_zone() {
+        record_diversity_violation("z:日本語", 3, 1);
     }
 }

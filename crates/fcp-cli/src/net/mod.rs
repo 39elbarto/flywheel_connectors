@@ -236,7 +236,7 @@ fn build_report(
                             constraints.max_redirects
                         )),
                         constraints,
-                        &parsed,
+                        parsed,
                         Some(decision.canonical_host.as_str()),
                         Some(decision.port),
                     );
@@ -253,7 +253,7 @@ fn build_report(
                                 "SNI mismatch: expected `{expected}`, got `{actual_sni}`"
                             )),
                             constraints,
-                            &parsed,
+                            parsed,
                             None,
                             None,
                         );
@@ -268,7 +268,7 @@ fn build_report(
             code,
             Some(reason),
             constraints,
-            &parsed,
+            parsed,
             parsed.host.as_deref(),
             parsed.port,
         ),
@@ -292,15 +292,9 @@ fn deny_report(
 ) -> NetExplainReport {
     report.allowed = false;
     report.reason_code = Some(deny_reason_code(code));
-    report.rule_id = rule_id_for(code, constraints, parsed, host_override.as_deref());
+    report.rule_id = rule_id_for(code, constraints, parsed, host_override);
     report.details = details;
-    report.suggestion = suggestion_for(
-        code,
-        constraints,
-        parsed,
-        host_override.as_deref(),
-        port_override,
-    );
+    report.suggestion = suggestion_for(code, constraints, parsed, host_override, port_override);
     report
 }
 
@@ -375,10 +369,10 @@ fn suggestion_for(
     let canonical_host = canonical_or_raw(host);
 
     match code {
-        DenyReason::HostNotAllowed => canonical_host.clone().map(|value| SuggestedChange {
+        DenyReason::HostNotAllowed => canonical_host.as_ref().map(|value| SuggestedChange {
             field: "network_constraints.host_allow".to_string(),
             action: "add".to_string(),
-            value: Some(value.to_string()),
+            value: Some(value.clone()),
             note: None,
         }),
         DenyReason::PortNotAllowed => port.map(|value| SuggestedChange {
@@ -425,12 +419,14 @@ fn suggestion_for(
                 value: Some(canonical),
                 note: Some("use canonical hostname".to_string()),
             })
-            .or(Some(SuggestedChange {
-                field: "network_constraints.require_host_canonicalization".to_string(),
-                action: "set".to_string(),
-                value: Some("false".to_string()),
-                note: Some("or use a canonical hostname".to_string()),
-            })),
+            .or_else(|| {
+                Some(SuggestedChange {
+                    field: "network_constraints.require_host_canonicalization".to_string(),
+                    action: "set".to_string(),
+                    value: Some("false".to_string()),
+                    note: Some("or use a canonical hostname".to_string()),
+                })
+            }),
         DenyReason::DnsMaxIpsExceeded => Some(SuggestedChange {
             field: "network_constraints.dns_max_ips".to_string(),
             action: "increase".to_string(),

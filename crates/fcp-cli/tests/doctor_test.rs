@@ -117,7 +117,7 @@ mod doctor {
             .clone();
 
         let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-        assert_eq!(json["schema_version"], "1.0.0");
+        assert_eq!(json["schema_version"], "1.1.0");
     }
 
     #[test]
@@ -162,6 +162,32 @@ mod doctor {
             .success()
             .stdout(predicate::str::contains("Diagnose zone health"))
             .stdout(predicate::str::contains("--zone"))
-            .stdout(predicate::str::contains("--json"));
+            .stdout(predicate::str::contains("--json"))
+            .stdout(predicate::str::contains("--connector"));
+    }
+
+    #[test]
+    fn doctor_with_connector_self_check_json() {
+        let output = fcp_cmd()
+            .arg("doctor")
+            .args([
+                "--zone",
+                "z:work",
+                "--connector",
+                "fcp.telegram:messaging:v1",
+                "--json",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+
+        let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert!(json["connector_self_checks"].is_array());
+        assert_eq!(
+            json["connector_self_checks"][0]["connector_id"],
+            "fcp.telegram:messaging:v1"
+        );
     }
 }

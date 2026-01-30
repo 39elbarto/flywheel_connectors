@@ -10,6 +10,7 @@
 #![allow(clippy::trivially_copy_pass_by_ref)]
 
 use chrono::{DateTime, Utc};
+use fcp_core::{SelfCheckReport, SelfCheckStatus};
 use serde::{Deserialize, Serialize};
 
 /// Complete doctor report including zone health and freshness status.
@@ -47,11 +48,15 @@ pub struct DoctorReport {
 
     /// Individual check results.
     pub checks: Vec<CheckResult>,
+
+    /// Connector self-check results (when requested).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connector_self_checks: Vec<ConnectorSelfCheck>,
 }
 
 impl DoctorReport {
     /// Schema version constant.
-    pub const SCHEMA_VERSION: &'static str = "1.0.0";
+    pub const SCHEMA_VERSION: &'static str = "1.1.0";
 
     /// Create a new doctor report builder.
     #[must_use]
@@ -70,6 +75,7 @@ pub struct DoctorReportBuilder {
     store_coverage: Option<StoreCoverageStatus>,
     degraded_mode: Option<DegradedModeStatus>,
     checks: Vec<CheckResult>,
+    connector_self_checks: Vec<ConnectorSelfCheck>,
 }
 
 impl DoctorReportBuilder {
@@ -83,6 +89,7 @@ impl DoctorReportBuilder {
             store_coverage: None,
             degraded_mode: None,
             checks: Vec::new(),
+            connector_self_checks: Vec::new(),
         }
     }
 
@@ -129,6 +136,12 @@ impl DoctorReportBuilder {
     }
 
     #[must_use]
+    pub fn add_self_check(mut self, check: ConnectorSelfCheck) -> Self {
+        self.connector_self_checks.push(check);
+        self
+    }
+
+    #[must_use]
     pub fn build(self) -> DoctorReport {
         let checkpoint = self.checkpoint.unwrap_or_default();
         let revocation = self.revocation.unwrap_or_default();
@@ -144,6 +157,7 @@ impl DoctorReportBuilder {
             &audit,
             &degraded_mode,
             &self.checks,
+            &self.connector_self_checks,
         );
 
         DoctorReport {
@@ -158,6 +172,7 @@ impl DoctorReportBuilder {
             store_coverage,
             degraded_mode,
             checks: self.checks,
+            connector_self_checks: self.connector_self_checks,
         }
     }
 }
@@ -168,11 +183,20 @@ fn compute_overall_status(
     audit: &AuditStatus,
     degraded_mode: &DegradedModeStatus,
     checks: &[CheckResult],
+    connector_self_checks: &[ConnectorSelfCheck],
 ) -> OverallStatus {
     // FAIL if any critical check failed
     if checks
         .iter()
         .any(|c| c.status == CheckStatus::Fail && c.severity == CheckSeverity::Critical)
+    {
+        return OverallStatus::Fail;
+    }
+
+    // FAIL if any connector self-check failed
+    if connector_self_checks
+        .iter()
+        .any(|check| check.report.status == SelfCheckStatus::Failed)
     {
         return OverallStatus::Fail;
     }
@@ -190,6 +214,14 @@ fn compute_overall_status(
         return OverallStatus::Warn;
     }
 
+    // WARN if any connector self-check is degraded
+    if connector_self_checks
+        .iter()
+        .any(|check| check.report.status == SelfCheckStatus::Degraded)
+    {
+        return OverallStatus::Warn;
+    }
+
     // WARN if any checkpoint/revocation/audit is stale
     if checkpoint.freshness == FreshnessLevel::Stale
         || revocation.freshness == FreshnessLevel::Stale
@@ -204,6 +236,16 @@ fn compute_overall_status(
     }
 
     OverallStatus::Ok
+}
+
+/// Connector self-check entry in the report.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectorSelfCheck {
+    /// Connector identifier.
+    pub connector_id: String,
+
+    /// Self-check report from connector.
+    pub report: SelfCheckReport,
 }
 
 /// Overall status of the zone.
@@ -508,12 +550,13 @@ mod tests {
     fn doctor_report_builder_defaults() {
         let report = DoctorReport::builder("z:work").build();
 
-        assert_eq!(report.schema_version, "1.0.0");
+        assert_eq!(report.schema_version, "1.1.0");
         assert_eq!(report.zone_id, "z:work");
         assert_eq!(report.overall_status, OverallStatus::Ok);
         assert_eq!(report.checkpoint.freshness, FreshnessLevel::Fresh);
         assert_eq!(report.revocation.freshness, FreshnessLevel::Fresh);
         assert_eq!(report.audit.freshness, FreshnessLevel::Fresh);
+        assert!(report.connector_self_checks.is_empty());
     }
 
     #[test]
@@ -588,7 +631,7 @@ mod tests {
         let generated_at = Utc.with_ymd_and_hms(2026, 1, 16, 12, 0, 0).unwrap();
 
         let report = DoctorReport {
-            schema_version: "1.0.0".to_string(),
+            schema_version: "1.1.0".to_string(),
             generated_at,
             zone_id: "z:work".to_string(),
             overall_status: OverallStatus::Ok,
@@ -638,12 +681,13 @@ mod tests {
                 "checkpoint_freshness",
                 "Checkpoint is fresh (30s old)",
             )],
+            connector_self_checks: vec![],
         };
 
         let json = serde_json::to_string_pretty(&report).unwrap();
 
         // Verify key fields are present
-        assert!(json.contains("\"schema_version\": \"1.0.0\""));
+        assert!(json.contains("\"schema_version\": \"1.1.0\""));
         assert!(json.contains("\"zone_id\": \"z:work\""));
         assert!(json.contains("\"overall_status\": \"OK\""));
         assert!(json.contains("\"checkpoint_seq\": 42"));
@@ -654,6 +698,54 @@ mod tests {
         assert_eq!(parsed.zone_id, "z:work");
         assert_eq!(parsed.overall_status, OverallStatus::Ok);
         assert_eq!(parsed.checkpoint.checkpoint_seq, Some(42));
+    }
+
+    #[test]
+    fn overall_status_fail_on_self_check_failure() {
+        let report = DoctorReport::builder("z:test")
+            .add_self_check(ConnectorSelfCheck {
+                connector_id: "fcp.test:example:v1".to_string(),
+                report: SelfCheckReport::failed("self_check_failed", "boom"),
+            })
+            .build();
+
+        assert_eq!(report.overall_status, OverallStatus::Fail);
+    }
+
+    #[test]
+    fn overall_status_ok_on_self_check_success() {
+        let report = DoctorReport::builder("z:test")
+            .add_self_check(ConnectorSelfCheck {
+                connector_id: "fcp.test:example:v1".to_string(),
+                report: SelfCheckReport::ok(),
+            })
+            .build();
+
+        assert_eq!(report.overall_status, OverallStatus::Ok);
+    }
+
+    #[test]
+    fn overall_status_fail_on_self_check_timeout() {
+        let report = DoctorReport::builder("z:test")
+            .add_self_check(ConnectorSelfCheck {
+                connector_id: "fcp.test:example:v1".to_string(),
+                report: SelfCheckReport::failed("timeout", "self-check timed out"),
+            })
+            .build();
+
+        assert_eq!(report.overall_status, OverallStatus::Fail);
+    }
+
+    #[test]
+    fn overall_status_warn_on_self_check_degraded() {
+        let report = DoctorReport::builder("z:test")
+            .add_self_check(ConnectorSelfCheck {
+                connector_id: "fcp.test:example:v1".to_string(),
+                report: SelfCheckReport::degraded("self_check_degraded", "slow"),
+            })
+            .build();
+
+        assert_eq!(report.overall_status, OverallStatus::Warn);
     }
 
     #[test]

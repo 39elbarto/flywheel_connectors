@@ -6,6 +6,7 @@
 //! - `fcp connector` - Connector discovery and introspection
 //! - `fcp explain` - Operation decision explanations
 //! - `fcp install` - Connector installation with verification
+//! - `fcp manifest` - Manifest repair and lint checks
 //! - `fcp policy` - Policy simulation and preflight checks
 //! - `fcp repair` - Coverage status and repair planning
 
@@ -17,6 +18,7 @@ mod connector;
 mod doctor;
 mod explain;
 mod install;
+mod manifest;
 mod new;
 mod package;
 mod policy;
@@ -92,6 +94,11 @@ enum Commands {
     /// Verify manifest signatures, binary checksums, and supply chain policy,
     /// then mirror the connector to the mesh store.
     Install(install::InstallArgs),
+
+    /// Repair and validate connector manifests.
+    ///
+    /// Recompute interface hashes and lint manifest defaults.
+    Manifest(manifest::ManifestArgs),
 
     /// Create a new FCP2-compliant connector scaffold.
     ///
@@ -246,6 +253,12 @@ fn main() -> Result<()> {
                 anyhow::bail!("--input-stdin is currently supported only for `fcp doctor`");
             }
             install::run(args)
+        }
+        Commands::Manifest(args) => {
+            if cli.input_stdin {
+                anyhow::bail!("--input-stdin is currently supported only for `fcp doctor`");
+            }
+            manifest::run(args)
         }
         Commands::New(args) => {
             if cli.input_stdin {

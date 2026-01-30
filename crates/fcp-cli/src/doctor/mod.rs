@@ -11,6 +11,9 @@
 //! # JSON output
 //! fcp doctor --zone z:private --json
 //!
+//! # Connector self-checks
+//! fcp doctor --zone z:private --connector fcp.telegram:messaging:v1
+//!
 //! # Test specific scenarios (simulation mode)
 //! fcp doctor --zone z:private --scenario degraded
 //! fcp doctor --zone z:private --scenario stale-checkpoint
@@ -32,11 +35,12 @@ pub mod types;
 use anyhow::Result;
 use chrono::Utc;
 use clap::{Args, ValueEnum};
-use fcp_core::ZoneId;
+use fcp_core::{ConnectorId, SelfCheckReport, SelfCheckStatus, ZoneId};
 
 use types::{
-    AuditStatus, CheckResult, CheckpointStatus, DegradedModeStatus, DegradedReason, DoctorReport,
-    FreshnessLevel, OverallStatus, RevocationStatus, StoreCoverageStatus, TransportPolicyStatus,
+    AuditStatus, CheckResult, CheckpointStatus, ConnectorSelfCheck, DegradedModeStatus,
+    DegradedReason, DoctorReport, FreshnessLevel, OverallStatus, RevocationStatus,
+    StoreCoverageStatus, TransportPolicyStatus,
 };
 
 /// Simulation scenarios for testing different health states.
@@ -66,6 +70,10 @@ pub struct DoctorArgs {
     #[arg(long, short = 'z')]
     pub zone: String,
 
+    /// Connector IDs to self-check (repeatable).
+    #[arg(long, value_name = "CONNECTOR", num_args = 1..)]
+    pub connector: Vec<String>,
+
     /// Output JSON instead of human-readable format.
     #[arg(long, default_value_t = false)]
     pub json: bool,
@@ -79,13 +87,14 @@ pub struct DoctorArgs {
 pub fn run(args: &DoctorArgs) -> Result<()> {
     // Validate zone ID format
     let zone_id: ZoneId = args.zone.parse()?;
+    let connector_ids = parse_connector_ids(&args.connector)?;
 
     // Check for real mesh endpoint (future functionality)
     if std::env::var("FCP_MESH_ENDPOINT").is_ok() {
         // TODO: Connect to real mesh node when available
         eprintln!("Note: Real mesh connectivity not yet implemented, using simulation");
     }
-    let report = simulate_report(&zone_id, args.scenario);
+    let report = simulate_report(&zone_id, &connector_ids, args.scenario);
 
     if args.json {
         let output = serde_json::to_string_pretty(&report)?;
@@ -104,10 +113,24 @@ pub fn run(args: &DoctorArgs) -> Result<()> {
     Ok(())
 }
 
-fn simulate_report(zone_id: &ZoneId, scenario: DoctorScenario) -> DoctorReport {
-    let now = Utc::now().timestamp() as u64;
+fn parse_connector_ids(ids: &[String]) -> Result<Vec<ConnectorId>> {
+    let mut parsed = Vec::new();
+    for id in ids {
+        let connector_id: ConnectorId = id.parse()?;
+        parsed.push(connector_id);
+    }
+    Ok(parsed)
+}
 
-    match scenario {
+fn simulate_report(
+    zone_id: &ZoneId,
+    connector_ids: &[ConnectorId],
+    scenario: DoctorScenario,
+) -> DoctorReport {
+    let now = Utc::now().timestamp() as u64;
+    let self_checks = simulate_self_checks(connector_ids, scenario);
+
+    let mut report = match scenario {
         DoctorScenario::Healthy => build_healthy_report(zone_id, now),
         DoctorScenario::Degraded => build_degraded_report(zone_id, now),
         DoctorScenario::StaleCheckpoint => build_stale_checkpoint_report(zone_id, now),
@@ -115,7 +138,44 @@ fn simulate_report(zone_id: &ZoneId, scenario: DoctorScenario) -> DoctorReport {
         DoctorScenario::NetworkPartition => build_network_partition_report(zone_id, now),
         DoctorScenario::LowCoverage => build_low_coverage_report(zone_id, now),
         DoctorScenario::Critical => build_critical_report(zone_id, now),
+    };
+
+    if !self_checks.is_empty() {
+        report.connector_self_checks = self_checks;
     }
+
+    report
+}
+
+fn simulate_self_checks(
+    connector_ids: &[ConnectorId],
+    scenario: DoctorScenario,
+) -> Vec<ConnectorSelfCheck> {
+    connector_ids
+        .iter()
+        .map(|connector_id| {
+            let report = match scenario {
+                DoctorScenario::Healthy => SelfCheckReport::ok(),
+                DoctorScenario::Critical => SelfCheckReport::failed(
+                    "self_check_failed",
+                    "Connector self-check failed (simulated)",
+                ),
+                DoctorScenario::Degraded
+                | DoctorScenario::LowCoverage
+                | DoctorScenario::NetworkPartition
+                | DoctorScenario::StaleCheckpoint
+                | DoctorScenario::StaleRevocation => SelfCheckReport::degraded(
+                    "self_check_degraded",
+                    "Connector self-check degraded (simulated)",
+                ),
+            };
+
+            ConnectorSelfCheck {
+                connector_id: connector_id.to_string(),
+                report,
+            }
+        })
+        .collect()
 }
 
 fn build_healthy_report(zone_id: &ZoneId, now: u64) -> DoctorReport {
@@ -714,6 +774,34 @@ fn print_human_readable(report: &DoctorReport) {
             println!(
                 "  {status_color}{status_symbol} {}: {}{code_suffix}{reset}",
                 check.name, check.message
+            );
+        }
+        println!();
+    }
+
+    // Connector self-checks
+    if !report.connector_self_checks.is_empty() {
+        println!("Connector Self-Checks:");
+        for check in &report.connector_self_checks {
+            let (status_color, status_label) = match check.report.status {
+                SelfCheckStatus::Ok => (green, "ok"),
+                SelfCheckStatus::Degraded => (yellow, "degraded"),
+                SelfCheckStatus::Failed => (red, "failed"),
+                SelfCheckStatus::Unsupported => (dim, "unsupported"),
+            };
+            let reason = check
+                .report
+                .reason_code
+                .as_deref()
+                .map_or(String::new(), |code| format!(" [{code}]"));
+            let message = check
+                .report
+                .message
+                .as_deref()
+                .map_or(String::new(), |msg| format!(" - {msg}"));
+            println!(
+                "  {status_color}{}{}:{reset} {}{}",
+                status_label, reason, check.connector_id, message
             );
         }
         println!();

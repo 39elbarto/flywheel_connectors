@@ -2133,6 +2133,7 @@ dependencies = [
  "fcp-core",
  "fcp-raptorq",
  "fcp-telemetry",
+ "fcp-testkit",
  "parking_lot",
  "rand 0.8.5",
  "raptorq",
@@ -2271,7 +2272,9 @@ dependencies = [
  "bytes",
  "chrono",
  "fcp-core",
+ "fcp-manifest",
  "fcp-sdk",
+ "fcp-testkit",
  "futures-util",
  "hmac",
  "percent-encoding",
@@ -2283,6 +2286,26 @@ dependencies = [
  "thiserror 2.0.17",
  "tokio",
  "tokio-stream",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "wiremock",
+]
+
+[[package]]
+name = "fcp-vectordb"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "fcp-core",
+ "fcp-testkit",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.17",
+ "tokio",
  "tracing",
  "tracing-subscriber",
  "uuid",

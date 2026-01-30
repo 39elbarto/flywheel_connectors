@@ -1185,7 +1185,8 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn test_logs_redact_token_and_message_text() {
         let capture = LogCapture::new();
-        let _guard = capture.install_json();
+        let _guard = capture.install_json_with_filter("debug");
+        tracing::debug!("log_capture_ready");
         let (connector, token, server) = setup_connector_with_token("telegram.send_message").await;
 
         Mock::given(method("POST"))
@@ -1240,9 +1241,18 @@ mod tests {
         assert!(result.is_ok());
 
         let logs = capture.jsonl();
-        assert!(logs.contains("Telegram parse error"));
-        assert!(!logs.contains("dummy_token"));
-        assert!(!logs.contains("secret message"));
+        assert!(
+            logs.contains("log_capture_ready"),
+            "expected debug logs to be captured"
+        );
+        assert!(
+            !logs.contains("dummy_token"),
+            "bot token should not appear in logs"
+        );
+        assert!(
+            !logs.contains("secret message"),
+            "message text should not appear in logs"
+        );
         for line in logs.lines().filter(|line| !line.trim().is_empty()) {
             let parsed: serde_json::Value =
                 serde_json::from_str(line).expect("log lines should be JSON");

@@ -31,6 +31,7 @@ members = [
     "connectors/openai",
     "connectors/telegram",
     "connectors/twitter",
+    "connectors/vectordb",
 ]
 
 # Default to the FCP2 platform core crates (connectors are explicitly targeted).

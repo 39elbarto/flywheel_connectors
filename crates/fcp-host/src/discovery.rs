@@ -289,7 +289,10 @@ impl From<&OperationInfo> for ToolDescriptor {
             supports_simulate: true, // Assume all support simulate by default
             latency_hint: None,
             rate_limits: op.rate_limit.as_ref().map_or_else(Vec::new, |rl| {
-                vec![rl.scope.clone().unwrap_or_else(|| "default".to_string())]
+                rl.pool_name
+                    .clone()
+                    .or_else(|| rl.scope.clone())
+                    .map_or_else(Vec::new, |value| vec![value])
             }),
             examples: op
                 .ai_hints
@@ -311,6 +314,21 @@ impl From<&OperationInfo> for ToolDescriptor {
                 Some(op.ai_hints.clone())
             },
         }
+    }
+}
+
+impl ToolDescriptor {
+    pub(crate) fn from_operation(
+        op: &OperationInfo,
+        declarations: Option<&RateLimitDeclarations>,
+    ) -> Self {
+        let mut tool = Self::from(op);
+        if let Some(decls) = declarations
+            && let Some(pools) = decls.tool_pool_map.get(op.id.as_str())
+        {
+            tool.rate_limits.clone_from(pools);
+        }
+        tool
     }
 }
 
@@ -625,7 +643,7 @@ where
         let tools: Vec<ToolDescriptor> = introspection
             .operations
             .iter()
-            .map(ToolDescriptor::from)
+            .map(|op| ToolDescriptor::from_operation(op, rate_limits.as_ref()))
             .collect();
 
         Ok(IntrospectionResponse {

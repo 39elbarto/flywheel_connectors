@@ -3,7 +3,8 @@
 //! These types represent the structured output of connector discovery commands.
 
 use fcp_core::{
-    AgentHint, ApprovalMode, CapabilityId, ConnectorHealth, IdempotencyClass, RiskLevel, SafetyTier,
+    AgentHint, ApprovalMode, CapabilityId, ConnectorHealth, IdempotencyClass,
+    RateLimitDeclarations, RiskLevel, SafetyTier,
 };
 use serde::{Deserialize, Serialize};
 
@@ -128,6 +129,10 @@ pub struct ConnectorInfo {
     /// Operations
     pub operations: Vec<OperationSummary>,
 
+    /// Rate limit pool declarations and tool mappings.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limits: Option<RateLimitDeclarations>,
+
     /// Events
     pub events: Vec<EventSummary>,
 
@@ -217,6 +222,10 @@ pub struct ConnectorIntrospection {
 
     /// Event topic descriptors
     pub events: Vec<EventDescriptor>,
+
+    /// Rate limit pool declarations and tool mappings.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limits: Option<RateLimitDeclarations>,
 
     /// Resource type descriptors
     pub resource_types: Vec<ResourceTypeDescriptor>,
@@ -441,6 +450,25 @@ mod tests {
 
     #[test]
     fn connector_introspection_serialization() {
+        let rate_limits = RateLimitDeclarations {
+            limits: vec![fcp_core::RateLimitPool {
+                id: "twitter_api".to_string(),
+                description: "Twitter API pool".to_string(),
+                config: fcp_core::RateLimitConfig {
+                    requests: 300,
+                    window: std::time::Duration::from_secs(900),
+                    burst: Some(30),
+                    unit: fcp_core::RateLimitUnit::Requests,
+                },
+                enforcement: fcp_core::RateLimitEnforcement::Hard,
+                scope: fcp_core::RateLimitScope::Credential,
+            }],
+            tool_pool_map: std::collections::HashMap::from([(
+                "twitter.post_tweet".to_string(),
+                vec!["twitter_api".to_string()],
+            )]),
+        };
+
         let intro = ConnectorIntrospection {
             connector_id: "fcp.twitter:social:v1".to_string(),
             version: "1.0.0".to_string(),
@@ -450,6 +478,7 @@ mod tests {
                 schema: serde_json::json!({"type": "object"}),
                 requires_ack: true,
             }],
+            rate_limits: Some(rate_limits),
             resource_types: vec![ResourceTypeDescriptor {
                 name: "Tweet".to_string(),
                 uri_pattern: "fcp://fcp.twitter/tweet/{id}".to_string(),
@@ -470,10 +499,30 @@ mod tests {
         assert_eq!(deserialized.connector_id, intro.connector_id);
         assert_eq!(deserialized.events.len(), 1);
         assert!(deserialized.event_caps.is_some());
+        assert!(deserialized.rate_limits.is_some());
     }
 
     #[test]
     fn connector_info_serialization() {
+        let rate_limits = RateLimitDeclarations {
+            limits: vec![fcp_core::RateLimitPool {
+                id: "twitter_api".to_string(),
+                description: "Twitter API pool".to_string(),
+                config: fcp_core::RateLimitConfig {
+                    requests: 300,
+                    window: std::time::Duration::from_secs(900),
+                    burst: Some(30),
+                    unit: fcp_core::RateLimitUnit::Requests,
+                },
+                enforcement: fcp_core::RateLimitEnforcement::Hard,
+                scope: fcp_core::RateLimitScope::Credential,
+            }],
+            tool_pool_map: std::collections::HashMap::from([(
+                "twitter.get_timeline".to_string(),
+                vec!["twitter_api".to_string()],
+            )]),
+        };
+
         let info = ConnectorInfo {
             id: "fcp.twitter:social:v1".to_string(),
             name: "Twitter Connector".to_string(),
@@ -492,6 +541,7 @@ mod tests {
                 risk_level: RiskLevel::Low,
                 safety_tier: SafetyTier::Safe,
             }],
+            rate_limits: Some(rate_limits),
             events: vec![],
             sandbox: SandboxInfo {
                 profile: "strict".to_string(),
@@ -520,5 +570,6 @@ mod tests {
         assert_eq!(deserialized.id, info.id);
         assert!(matches!(deserialized.status, ConnectorHealth::Healthy));
         assert!(deserialized.metrics.is_some());
+        assert!(deserialized.rate_limits.is_some());
     }
 }

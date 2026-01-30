@@ -9,8 +9,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use fcp_cbor::{CanonicalSerializer, SchemaId, SerializationError};
 use fcp_core::{
-    CapabilityId, ObjectHeader, ObjectId, ObjectIdKey, Provenance, RetentionClass, StorageMeta,
-    StoredObject, ZoneId, ZonePolicyObject,
+    CapabilityId, ObjectHeader, ObjectId, ObjectIdKey, Provenance, RateLimitDeclarations,
+    RetentionClass, StorageMeta, StoredObject, ZoneId, ZonePolicyObject,
 };
 use fcp_crypto::ed25519::{Ed25519Signature, Ed25519VerifyingKey};
 use fcp_manifest::{
@@ -588,6 +588,15 @@ impl VerifiedConnectorBundle {
             verified_at,
             outcome: outcome.to_string(),
         }
+    }
+
+    /// Extract rate limit declarations from the verified manifest, if present.
+    #[must_use]
+    pub fn rate_limit_declarations(&self) -> Option<RateLimitDeclarations> {
+        self.manifest
+            .rate_limits
+            .as_ref()
+            .map(|section| section.to_declarations())
     }
 }
 

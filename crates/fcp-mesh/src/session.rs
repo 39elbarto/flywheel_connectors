@@ -198,3 +198,81 @@ impl MeshSession {
         self.check_recv_seq(seq)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build_session(is_initiator: bool, replay_policy: SessionReplayPolicy) -> MeshSession {
+        let keys = SessionKeys {
+            k_mac_i2r: [1u8; 32],
+            k_mac_r2i: [2u8; 32],
+            k_ctx: [3u8; 32],
+        };
+        MeshSession::new(
+            MeshSessionId([7u8; 16]),
+            NodeId::new("node-test"),
+            SessionCryptoSuite::Suite1,
+            keys,
+            TransportLimits::default(),
+            is_initiator,
+            1_000,
+            replay_policy,
+        )
+    }
+
+    #[test]
+    fn mac_outgoing_triggers_rekey_after_threshold() {
+        let replay_policy = SessionReplayPolicy {
+            max_reorder_window: 128,
+            rekey_after_frames: 1,
+            rekey_after_seconds: u64::MAX,
+            rekey_after_bytes: u64::MAX,
+        };
+        let mut session = build_session(true, replay_policy);
+        assert!(!session.needs_rekey(1_000));
+
+        let _ = session.mac_outgoing(b"frame");
+        assert!(session.needs_rekey(1_000));
+    }
+
+    #[test]
+    fn verify_incoming_accepts_valid_mac_and_rejects_replay() {
+        let mut session = build_session(true, SessionReplayPolicy::default());
+        let frame = b"payload";
+        let seq = 1;
+
+        let tag = compute_session_mac(
+            SessionCryptoSuite::Suite1,
+            session.recv_mac_key(),
+            &session.session_id,
+            session.recv_direction(),
+            seq,
+            frame,
+        )
+        .expect("mac");
+
+        assert!(session.verify_incoming(seq, frame, &tag));
+        // Replays should be rejected by replay window.
+        assert!(!session.verify_incoming(seq, frame, &tag));
+    }
+
+    #[test]
+    fn verify_incoming_rejects_bad_mac() {
+        let mut session = build_session(true, SessionReplayPolicy::default());
+        let frame = b"payload";
+        let seq = 1;
+
+        let bad_tag = compute_session_mac(
+            SessionCryptoSuite::Suite1,
+            session.send_mac_key(),
+            &session.session_id,
+            session.send_direction(),
+            seq,
+            frame,
+        )
+        .expect("mac");
+
+        assert!(!session.verify_incoming(seq, frame, &bad_tag));
+    }
+}

@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:0f208aeb028894635329b8efae92a551fe4450f8fa59f519f16059348d9b7421"
+interface_hash = "blake3-256:fcp.interface.v2:c0c168e061aa053e9981d578f5c6003f8f992ddef0310852bc885b468d729d9f"
 
 [connector]
 id = "fcp.twitter"
@@ -97,6 +97,7 @@ type = "array"
 host_allow = [
     "api.twitter.com",
     "api.x.com",
+    "stream.twitter.com",
 ]
 port_allow = [443]
 ip_allow = []
@@ -163,6 +164,7 @@ type = "object"
 host_allow = [
     "api.twitter.com",
     "api.x.com",
+    "stream.twitter.com",
 ]
 port_allow = [443]
 ip_allow = []
@@ -228,6 +230,7 @@ type = "string"
 host_allow = [
     "api.twitter.com",
     "api.x.com",
+    "stream.twitter.com",
 ]
 port_allow = [443]
 ip_allow = []
@@ -294,6 +297,7 @@ type = "string"
 host_allow = [
     "api.twitter.com",
     "api.x.com",
+    "stream.twitter.com",
 ]
 port_allow = [443]
 ip_allow = []
@@ -356,6 +360,7 @@ type = "boolean"
 host_allow = [
     "api.twitter.com",
     "api.x.com",
+    "stream.twitter.com",
 ]
 port_allow = [443]
 ip_allow = []
@@ -423,6 +428,7 @@ type = "string"
 host_allow = [
     "api.twitter.com",
     "api.x.com",
+    "stream.twitter.com",
 ]
 port_allow = [443]
 ip_allow = []
@@ -496,6 +502,7 @@ type = "string"
 host_allow = [
     "api.twitter.com",
     "api.x.com",
+    "stream.twitter.com",
 ]
 port_allow = [443]
 ip_allow = []
@@ -592,6 +599,7 @@ type = "object"
 host_allow = [
     "api.twitter.com",
     "api.x.com",
+    "stream.twitter.com",
 ]
 port_allow = [443]
 ip_allow = []
@@ -656,6 +664,7 @@ type = "object"
 host_allow = [
     "api.twitter.com",
     "api.x.com",
+    "stream.twitter.com",
 ]
 port_allow = [443]
 ip_allow = []
@@ -717,6 +726,7 @@ type = "object"
 host_allow = [
     "api.twitter.com",
     "api.x.com",
+    "stream.twitter.com",
 ]
 port_allow = [443]
 ip_allow = []
@@ -783,6 +793,7 @@ type = "string"
 host_allow = [
     "api.twitter.com",
     "api.x.com",
+    "stream.twitter.com",
 ]
 port_allow = [443]
 ip_allow = []
@@ -858,6 +869,7 @@ type = "object"
 host_allow = [
     "api.twitter.com",
     "api.x.com",
+    "stream.twitter.com",
 ]
 port_allow = [443]
 ip_allow = []
@@ -936,6 +948,7 @@ type = "object"
 host_allow = [
     "api.twitter.com",
     "api.x.com",
+    "stream.twitter.com",
 ]
 port_allow = [443]
 ip_allow = []
@@ -1004,16 +1017,16 @@ burst = 50
 scope = "instance"
 
 [rate_limits.operation_pools]
-tweet_get = ["twitter.read"]
-stream_rules_add = ["twitter.stream"]
-stream_rules_delete = ["twitter.stream"]
-user_timeline = ["twitter.read"]
 tweet_reply = ["twitter.write"]
-tweet_create = ["twitter.write"]
-user_me = ["twitter.read"]
-tweet_delete = ["twitter.delete"]
-stream_rules_list = ["twitter.stream"]
 user_mentions = ["twitter.read"]
-tweet_search = ["twitter.read"]
-user_by_username = ["twitter.read"]
+stream_rules_delete = ["twitter.stream"]
+tweet_get = ["twitter.read"]
+user_timeline = ["twitter.read"]
+user_me = ["twitter.read"]
 user_get = ["twitter.read"]
+tweet_delete = ["twitter.delete"]
+tweet_search = ["twitter.read"]
+tweet_create = ["twitter.write"]
+stream_rules_list = ["twitter.stream"]
+stream_rules_add = ["twitter.stream"]
+user_by_username = ["twitter.read"]

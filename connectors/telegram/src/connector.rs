@@ -7,11 +7,12 @@ use std::time::Instant;
 
 use fcp_core::*;
 use fcp_sdk::{
-    ErrorClass, FormatMode, Formatter, Limits, classify_error_message, validate_input_with_limits,
-    validate_output_with_limits,
+    ErrorClass, FormatMode, Formatter, Limits, classify_error_message,
+    runtime::{PollResult, PollingCursor, PollingSupervisor, SupervisorConfig},
+    validate_input_with_limits, validate_output_with_limits,
 };
 use serde_json::json;
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::{RwLock, broadcast, watch};
 use tracing::{error, info, warn};
 
 use crate::client::{SendMessageOptions, TelegramClient, TelegramError};
@@ -39,6 +40,50 @@ fn default_poll_timeout() -> i32 {
     30
 }
 
+#[derive(Debug, Default)]
+struct TelegramPollingCursor {
+    offset: Option<i64>,
+    last_poll_at: Option<Instant>,
+    last_poll_count: usize,
+}
+
+impl TelegramPollingCursor {
+    fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PollingCursor for TelegramPollingCursor {
+    fn offset(&self) -> Option<i64> {
+        self.offset
+    }
+
+    fn set_offset(&mut self, offset: i64) {
+        self.offset = Some(offset);
+    }
+
+    fn last_poll_at(&self) -> Option<Instant> {
+        self.last_poll_at
+    }
+
+    fn record_poll(&mut self, at: Instant, updates_received: usize) {
+        self.last_poll_at = Some(at);
+        self.last_poll_count = updates_received;
+    }
+
+    fn last_poll_count(&self) -> usize {
+        self.last_poll_count
+    }
+
+    fn persist(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Ok(())
+    }
+
+    fn restore(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Ok(())
+    }
+}
+
 /// Telegram FCP connector.
 pub struct TelegramConnector {
     base: Arc<BaseConnector>,
@@ -49,9 +94,9 @@ pub struct TelegramConnector {
     // instance_id: InstanceId, // Remove
 
     // Polling state
-    last_update_id: Arc<RwLock<Option<i64>>>,
     poll_running: Arc<RwLock<bool>>,
     poll_task: Option<tokio::task::JoinHandle<()>>,
+    poll_shutdown_tx: Option<watch::Sender<bool>>,
 
     // Event broadcast
     event_tx: broadcast::Sender<FcpResult<EventEnvelope>>,
@@ -72,9 +117,9 @@ impl TelegramConnector {
             verifier: None,
             session_id: None,
             // instance_id: InstanceId::new(), // Remove
-            last_update_id: Arc::new(RwLock::new(None)),
             poll_running: Arc::new(RwLock::new(false)),
             poll_task: None,
+            poll_shutdown_tx: None,
             event_tx,
             start_time: Instant::now(),
         }
@@ -757,6 +802,9 @@ impl TelegramConnector {
         info!("Shutting down Telegram connector");
 
         // Stop polling
+        if let Some(shutdown_tx) = self.poll_shutdown_tx.take() {
+            let _ = shutdown_tx.send(true);
+        }
         *self.poll_running.write().await = false;
 
         if let Some(task) = self.poll_task.take() {
@@ -775,65 +823,74 @@ impl TelegramConnector {
         let client = self.client.clone().ok_or(FcpError::NotConfigured)?;
         let config = self.config.clone().ok_or(FcpError::NotConfigured)?;
         let event_tx = self.event_tx.clone();
-        let last_update_id = self.last_update_id.clone();
         let poll_running = self.poll_running.clone();
         let instance_id = self.base.instance_id.clone(); // Use base.instance_id
         let connector_id = self.base.id.clone();
         let base = self.base.clone();
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        self.poll_shutdown_tx = Some(shutdown_tx.clone());
 
         *poll_running.write().await = true;
 
         let task = tokio::spawn(async move {
             info!("Starting Telegram polling loop");
 
-            while *poll_running.read().await {
-                let offset = last_update_id.read().await.map(|id| id + 1);
+            let mut supervisor =
+                PollingSupervisor::new(SupervisorConfig::default(), TelegramPollingCursor::new());
 
-                let request = GetUpdatesRequest {
-                    offset,
-                    limit: Some(100),
-                    timeout: Some(config.poll_timeout),
-                    allowed_updates: if config.allowed_updates.is_empty() {
-                        None
-                    } else {
-                        Some(config.allowed_updates.clone())
+            let outcome = supervisor
+                .run(
+                    shutdown_rx,
+                    0,
+                    |offset| {
+                        let client = client.clone();
+                        let config = config.clone();
+                        async move {
+                            let request = GetUpdatesRequest {
+                                offset,
+                                limit: Some(100),
+                                timeout: Some(config.poll_timeout),
+                                allowed_updates: if config.allowed_updates.is_empty() {
+                                    None
+                                } else {
+                                    Some(config.allowed_updates.clone())
+                                },
+                            };
+
+                            match client.get_updates(request).await {
+                                Ok(updates) => PollResult::success(updates),
+                                Err(err) if err.is_retryable() => {
+                                    PollResult::recoverable(err.to_string())
+                                }
+                                Err(err) => PollResult::fatal(err.to_string()),
+                            }
+                        }
                     },
-                };
-
-                let result: Result<Vec<Update>, TelegramError> = client.get_updates(request).await;
-                match result {
-                    Ok(updates) => {
+                    |updates, cursor| {
                         for update in updates {
-                            // Update the offset
-                            *last_update_id.write().await = Some(update.update_id);
+                            cursor.advance_if_newer(update.update_id);
 
-                            // Convert to event
                             if let Some(event) =
                                 update_to_event(&update, &connector_id, &instance_id)
                             {
                                 base.record_event();
                                 if event_tx.send(Ok(event)).is_err() {
                                     info!("Event receiver dropped, closing polling loop");
-                                    *poll_running.write().await = false;
-                                    return;
+                                    let _ = shutdown_tx.send(true);
+                                    break;
                                 }
                             }
                         }
-                    }
-                    Err(e) => {
-                        warn!("Polling error: {}", e);
-                        if !e.is_retryable() {
-                            error!("Non-retryable error, stopping polling");
-                            *poll_running.write().await = false;
-                            break;
-                        }
-                        // Wait before retry
-                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    }
-                }
-            }
+                        Ok(())
+                    },
+                )
+                .await;
+
+            info!(?outcome, "Telegram polling supervisor stopped");
 
             info!("Telegram polling loop stopped");
+            *poll_running.write().await = false;
         });
 
         self.poll_task = Some(task);

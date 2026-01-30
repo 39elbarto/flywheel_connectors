@@ -12,9 +12,16 @@ use fcp_core::{
     Principal, RiskLevel, SafetyTier, SessionId, SimulateRequest, SimulateResponse, TrustLevel,
     ZoneId,
 };
-use fcp_sdk::{Limits, validate_input_with_limits, validate_output_with_limits};
+use fcp_sdk::{
+    Limits,
+    runtime::{
+        InMemoryStreamingSession, StreamingConnection, StreamingError, StreamingSupervisor,
+        SupervisorConfig,
+    },
+    validate_input_with_limits, validate_output_with_limits,
+};
 use serde_json::json;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use tracing::info;
 
 use crate::{
@@ -29,7 +36,7 @@ pub struct DiscordConnector {
     base: Arc<BaseConnector>,
     config: Option<DiscordConfig>,
     api_client: Option<Arc<DiscordApiClient>>,
-    gateway: Option<GatewayConnection>,
+    gateway: Option<Arc<GatewayConnection>>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
     bot_user_id: Option<String>,
@@ -39,6 +46,7 @@ pub struct DiscordConnector {
 
     // Gateway task
     gateway_task: Option<tokio::task::JoinHandle<()>>,
+    gateway_shutdown_tx: Option<watch::Sender<bool>>,
 
     // Metrics
     start_time: Instant,
@@ -59,6 +67,7 @@ impl DiscordConnector {
             bot_user_id: None,
             event_tx,
             gateway_task: None,
+            gateway_shutdown_tx: None,
             start_time: Instant::now(),
         }
     }
@@ -108,7 +117,7 @@ impl DiscordConnector {
 
         self.bot_user_id = Some(user.id.clone());
         self.api_client = Some(api_client.clone());
-        self.gateway = Some(GatewayConnection::new(config.clone(), api_client));
+        self.gateway = Some(Arc::new(GatewayConnection::new(config.clone(), api_client)));
         self.config = Some(config);
         self.base.set_configured(true);
 
@@ -1128,6 +1137,10 @@ impl DiscordConnector {
     ) -> FcpResult<serde_json::Value> {
         info!("Shutting down Discord connector");
 
+        if let Some(shutdown_tx) = self.gateway_shutdown_tx.take() {
+            let _ = shutdown_tx.send(true);
+        }
+
         if let Some(task) = self.gateway_task.take() {
             task.abort();
         }
@@ -1137,27 +1150,81 @@ impl DiscordConnector {
 
     /// Connect to the Discord gateway.
     async fn connect_gateway(&mut self) -> FcpResult<()> {
-        let gateway = self.gateway.as_mut().ok_or(FcpError::NotConfigured)?;
+        if let Some(task) = &self.gateway_task {
+            if !task.is_finished() {
+                return Ok(()); // Already connected
+            }
+        }
+        self.gateway_task = None;
+        self.gateway_shutdown_tx = None;
 
-        let mut event_rx = gateway.connect().await.map_err(|e| e.to_fcp_error())?;
+        let gateway = self.gateway.clone().ok_or(FcpError::NotConfigured)?;
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        self.gateway_shutdown_tx = Some(shutdown_tx.clone());
 
         let event_tx = self.event_tx.clone();
         let connector_id = self.base.id.clone();
         let instance_id = self.base.instance_id.clone();
         let base = self.base.clone();
 
+        let mut supervisor = StreamingSupervisor::new(
+            SupervisorConfig {
+                heartbeat_interval_ms: 0, // Gateway handles its own heartbeat
+                ..SupervisorConfig::default()
+            },
+            InMemoryStreamingSession::new(),
+        );
+
         let task = tokio::spawn(async move {
-            while let Some(gateway_event) = event_rx.recv().await {
-                if let Some(event) =
-                    gateway_event_to_fcp(&gateway_event, &connector_id, &instance_id)
-                {
-                    base.record_event();
-                    if event_tx.send(Ok(event)).is_err() {
-                        tracing::info!("Event receiver dropped, stopping gateway event forwarding");
-                        break;
-                    }
-                }
-            }
+            let outcome = supervisor
+                .run(
+                    shutdown_rx,
+                    |session| {
+                        let gateway = Arc::clone(&gateway);
+                        async move {
+                            let stream = gateway
+                                .connect_once()
+                                .await
+                                .map_err(|e| -> StreamingError { Box::new(e) })?;
+                            let join_handle = tokio::spawn(async move {
+                                match stream.join_handle.await {
+                                    Ok(Ok(())) => Ok(()),
+                                    Ok(Err(e)) => Err(Box::new(e) as StreamingError),
+                                    Err(e) => Err(Box::new(e) as StreamingError),
+                                }
+                            });
+                            let _ = session; // Session reserved for future use
+                            Ok(StreamingConnection {
+                                events: stream.events,
+                                join_handle,
+                            })
+                        }
+                    },
+                    |gateway_event, _session| {
+                        let event_tx = event_tx.clone();
+                        let connector_id = connector_id.clone();
+                        let instance_id = instance_id.clone();
+                        let base = base.clone();
+                        let shutdown_tx = shutdown_tx.clone();
+                        async move {
+                            if let Some(event) =
+                                gateway_event_to_fcp(&gateway_event, &connector_id, &instance_id)
+                            {
+                                base.record_event();
+                                if event_tx.send(Ok(event)).is_err() {
+                                    tracing::info!(
+                                        "Event receiver dropped, stopping gateway stream"
+                                    );
+                                    let _ = shutdown_tx.send(true);
+                                }
+                            }
+                            Ok(())
+                        }
+                    },
+                )
+                .await;
+
+            tracing::info!(?outcome, "Discord gateway supervisor stopped");
         });
 
         self.gateway_task = Some(task);

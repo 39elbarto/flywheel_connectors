@@ -10,8 +10,12 @@ use fcp_core::{
     BaseConnector, CapabilityGrant, CapabilityToken, CapabilityVerifier, ConnectorId, EventCaps,
     FcpError, HandshakeRequest, HandshakeResponse, SessionId, SimulateRequest, SimulateResponse,
 };
+use fcp_sdk::runtime::{
+    InMemoryStreamingSession, StreamingConnection, StreamingError, StreamingSupervisor,
+    SupervisorConfig,
+};
 use serde_json::{Value, json};
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::{RwLock, broadcast, watch};
 use tracing::{debug, info, instrument};
 
 use crate::{
@@ -49,6 +53,12 @@ pub struct TwitterConnector {
 
     /// Stream subscriber count
     stream_subscribers: Arc<AtomicU64>,
+
+    /// Stream shutdown signal
+    stream_shutdown_tx: Option<watch::Sender<bool>>,
+
+    /// Stream supervisor task
+    stream_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl TwitterConnector {
@@ -67,6 +77,8 @@ impl TwitterConnector {
             event_tx,
             stream_active: Arc::new(RwLock::new(false)),
             stream_subscribers: Arc::new(AtomicU64::new(0)),
+            stream_shutdown_tx: None,
+            stream_task: None,
         }
     }
 
@@ -347,61 +359,103 @@ impl TwitterConnector {
         };
 
         if should_start {
-            let stream = FilteredStream::new(config.clone()).map_err(|e| e.to_fcp_error())?;
-
-            let mut event_rx = match stream.connect().await {
-                Ok(rx) => rx,
+            let stream = match FilteredStream::new(config.clone()) {
+                Ok(stream) => stream,
                 Err(err) => {
                     *self.stream_active.write().await = false;
                     return Err(err.to_fcp_error());
                 }
             };
+            let stream = Arc::new(stream);
+            let (shutdown_tx, shutdown_rx) = watch::channel(false);
+            self.stream_shutdown_tx = Some(shutdown_tx.clone());
 
             let event_tx = self.event_tx.clone();
             let stream_active_flag = self.stream_active.clone();
 
-            tokio::spawn(async move {
-                while let Some(event) = event_rx.recv().await {
-                    let value = match &event {
-                        StreamEvent::Tweet(tweet) => {
-                            json!({
-                                "type": "tweet",
-                                "data": tweet
-                            })
-                        }
-                        StreamEvent::Connected => {
-                            json!({
-                                "type": "connected"
-                            })
-                        }
-                        StreamEvent::Disconnected { reason } => {
-                            json!({
-                                "type": "disconnected",
-                                "reason": reason
-                            })
-                        }
-                        StreamEvent::Heartbeat => {
-                            json!({
-                                "type": "heartbeat"
-                            })
-                        }
-                        StreamEvent::Error(msg) => {
-                            json!({
-                                "type": "error",
-                                "message": msg
-                            })
-                        }
-                    };
+            let mut supervisor = StreamingSupervisor::new(
+                SupervisorConfig {
+                    heartbeat_interval_ms: 0, // SSE heartbeats are connector-managed
+                    ..SupervisorConfig::default()
+                },
+                InMemoryStreamingSession::new(),
+            );
 
-                    if event_tx.send(value).is_err() {
-                        // No subscribers
-                        break;
-                    }
-                }
+            let task = tokio::spawn(async move {
+                let outcome = supervisor
+                    .run(
+                        shutdown_rx,
+                        |_session| {
+                            let stream = Arc::clone(&stream);
+                            async move {
+                                let handle = stream
+                                    .connect_once()
+                                    .await
+                                    .map_err(|e| -> StreamingError { Box::new(e) })?;
+                                let join_handle = tokio::spawn(async move {
+                                    match handle.join_handle.await {
+                                        Ok(Ok(())) => Ok(()),
+                                        Ok(Err(e)) => Err(Box::new(e) as StreamingError),
+                                        Err(e) => Err(Box::new(e) as StreamingError),
+                                    }
+                                });
+                                Ok(StreamingConnection {
+                                    events: handle.events,
+                                    join_handle,
+                                })
+                            }
+                        },
+                        |event, _session| {
+                            let event_tx = event_tx.clone();
+                            let shutdown_tx = shutdown_tx.clone();
+                            async move {
+                                let value = match &event {
+                                    StreamEvent::Tweet(tweet) => {
+                                        json!({
+                                            "type": "tweet",
+                                            "data": tweet
+                                        })
+                                    }
+                                    StreamEvent::Connected => {
+                                        json!({
+                                            "type": "connected"
+                                        })
+                                    }
+                                    StreamEvent::Disconnected { reason } => {
+                                        json!({
+                                            "type": "disconnected",
+                                            "reason": reason
+                                        })
+                                    }
+                                    StreamEvent::Heartbeat => {
+                                        json!({
+                                            "type": "heartbeat"
+                                        })
+                                    }
+                                    StreamEvent::Error(msg) => {
+                                        json!({
+                                            "type": "error",
+                                            "message": msg
+                                        })
+                                    }
+                                };
 
+                                if event_tx.send(value).is_err() {
+                                    let _ = shutdown_tx.send(true);
+                                }
+
+                                Ok(())
+                            }
+                        },
+                    )
+                    .await;
+
+                info!(?outcome, "Twitter stream supervisor stopped");
                 let mut active = stream_active_flag.write().await;
                 *active = false;
             });
+
+            self.stream_task = Some(task);
         }
 
         self.stream_subscribers.fetch_add(1, Ordering::Relaxed);
@@ -416,6 +470,14 @@ impl TwitterConnector {
     #[instrument(skip(self, _params))]
     pub async fn handle_shutdown(&mut self, _params: Value) -> Result<Value, FcpError> {
         info!("Shutting down Twitter connector");
+
+        if let Some(shutdown_tx) = self.stream_shutdown_tx.take() {
+            let _ = shutdown_tx.send(true);
+        }
+
+        if let Some(task) = self.stream_task.take() {
+            task.abort();
+        }
 
         // Mark stream as inactive
         let mut stream_active = self.stream_active.write().await;

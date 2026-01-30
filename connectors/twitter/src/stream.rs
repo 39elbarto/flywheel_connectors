@@ -42,6 +42,12 @@ pub struct FilteredStream {
     bearer_token: String,
 }
 
+/// Handle for a single stream connection attempt.
+pub struct StreamHandle {
+    pub events: mpsc::Receiver<StreamEvent>,
+    pub join_handle: tokio::task::JoinHandle<TwitterResult<()>>,
+}
+
 impl FilteredStream {
     /// Create a new filtered stream connection.
     pub fn new(config: TwitterConfig) -> TwitterResult<Self> {
@@ -56,93 +62,60 @@ impl FilteredStream {
         })
     }
 
-    /// Connect to the filtered stream and return a receiver for stream events.
-    ///
-    /// The stream will automatically reconnect on disconnection with exponential backoff.
-    pub async fn connect(&self) -> TwitterResult<mpsc::Receiver<StreamEvent>> {
+    /// Connect to the filtered stream once and return a handle for stream events.
+    pub async fn connect_once(&self) -> TwitterResult<StreamHandle> {
         let (event_tx, event_rx) = mpsc::channel(256);
 
         let config = self.config.clone();
         let bearer_token = self.bearer_token.clone();
 
-        tokio::spawn(async move {
-            run_stream_loop(config, bearer_token, event_tx).await;
-        });
+        let join_handle =
+            tokio::spawn(async move { run_stream_once(config, bearer_token, event_tx).await });
 
-        Ok(event_rx)
+        Ok(StreamHandle {
+            events: event_rx,
+            join_handle,
+        })
     }
 }
 
-/// Run the stream connection loop with automatic reconnection.
-async fn run_stream_loop(
+/// Run a single stream connection attempt.
+async fn run_stream_once(
     config: TwitterConfig,
     bearer_token: String,
     event_tx: mpsc::Sender<StreamEvent>,
-) {
-    let mut backoff = Duration::from_secs(1);
-    let max_backoff = Duration::from_secs(60 * 16); // Max 16 minutes per Twitter docs
-    let linear_backoff_threshold = Duration::from_secs(60);
+) -> TwitterResult<()> {
+    let url = format!(
+        "{}/2/tweets/search/stream?tweet.fields=id,text,author_id,created_at,public_metrics,entities&expansions=author_id&user.fields=id,name,username,profile_image_url",
+        config.api_url.trim_end_matches('/')
+    );
 
-    loop {
-        let url = format!(
-            "{}/2/tweets/search/stream?tweet.fields=id,text,author_id,created_at,public_metrics,entities&expansions=author_id&user.fields=id,name,username,profile_image_url",
-            config.api_url.trim_end_matches('/')
-        );
+    info!(url = %url, "Connecting to Twitter filtered stream");
 
-        info!(url = %url, "Connecting to Twitter filtered stream");
-
-        match connect_stream(&url, &bearer_token).await {
-            Ok(response) => {
-                // Reset backoff on successful connection
-                backoff = Duration::from_secs(1);
-
-                if event_tx.send(StreamEvent::Connected).await.is_err() {
-                    info!("Event receiver dropped, stopping stream");
-                    return;
-                }
-
-                // Process the stream
-                if let Err(e) = process_stream(response, &event_tx).await {
-                    warn!(error = %e, "Stream processing error");
-
-                    if event_tx
-                        .send(StreamEvent::Disconnected {
-                            reason: e.to_string(),
-                        })
-                        .await
-                        .is_err()
-                    {
-                        info!("Event receiver dropped, stopping stream");
-                        return;
-                    }
-                }
-            }
-            Err(e) => {
-                error!(error = %e, "Failed to connect to stream");
-
-                if event_tx
-                    .send(StreamEvent::Error(e.to_string()))
-                    .await
-                    .is_err()
-                {
-                    info!("Event receiver dropped, stopping stream");
-                    return;
-                }
-            }
+    let response = match connect_stream(&url, &bearer_token).await {
+        Ok(response) => response,
+        Err(err) => {
+            let _ = event_tx.send(StreamEvent::Error(err.to_string())).await;
+            return Err(err);
         }
+    };
 
-        // Wait before reconnecting
-        info!(delay_secs = backoff.as_secs(), "Reconnecting after delay");
-        tokio::time::sleep(backoff).await;
-
-        // Increase backoff
-        // Twitter recommends: linear backoff up to 1 minute, then exponential up to 16 minutes
-        if backoff < linear_backoff_threshold {
-            backoff += Duration::from_secs(1);
-        } else {
-            backoff = std::cmp::min(backoff * 2, max_backoff);
-        }
+    if event_tx.send(StreamEvent::Connected).await.is_err() {
+        info!("Event receiver dropped, stopping stream");
+        return Ok(());
     }
+
+    if let Err(e) = process_stream(response, &event_tx).await {
+        warn!(error = %e, "Stream processing error");
+        let _ = event_tx
+            .send(StreamEvent::Disconnected {
+                reason: e.to_string(),
+            })
+            .await;
+        return Err(e);
+    }
+
+    Ok(())
 }
 
 /// Connect to the stream endpoint.

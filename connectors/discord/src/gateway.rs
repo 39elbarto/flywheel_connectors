@@ -6,7 +6,7 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc};
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async, tungstenite::protocol::Message as WsMessage,
 };
@@ -105,9 +105,7 @@ pub enum GatewayEvent {
 pub struct GatewayConnection {
     config: DiscordConfig,
     api_client: Arc<DiscordApiClient>,
-    session_id: Option<String>,
-    resume_url: Option<String>,
-    sequence: Option<u64>,
+    state: Arc<Mutex<GatewayState>>,
 }
 
 impl GatewayConnection {
@@ -116,95 +114,53 @@ impl GatewayConnection {
         Self {
             config,
             api_client,
-            session_id: None,
-            resume_url: None,
-            sequence: None,
+            state: Arc::new(Mutex::new(GatewayState::default())),
         }
     }
 
-    /// Connect to the gateway and start receiving events.
+    /// Connect to the gateway once and return the event stream handle.
     /// If we have a previous session, will attempt to resume.
     #[instrument(skip(self))]
-    pub async fn connect(&mut self) -> DiscordResult<mpsc::Receiver<GatewayEvent>> {
+    pub async fn connect_once(&self) -> DiscordResult<GatewayStream> {
         let (event_tx, event_rx) = mpsc::channel(256);
 
-        // Spawn the gateway supervisor task
         let config = self.config.clone();
         let api_client = self.api_client.clone();
+        let state_store = Arc::clone(&self.state);
 
-        // Initial state
-        let mut state = GatewayState {
-            session_id: self.session_id.clone(),
-            resume_url: self.resume_url.clone(),
-            sequence: self.sequence,
+        let state_snapshot = {
+            let state = state_store.lock().await;
+            state.clone()
         };
 
-        tokio::spawn(async move {
-            let mut backoff = Duration::from_secs(1);
-            let max_backoff = Duration::from_secs(60);
+        // Determine gateway URL
+        let gateway_url = if let Some(ref url) = state_snapshot.resume_url {
+            url.clone()
+        } else if let Some(url) = &config.gateway_url {
+            url.clone()
+        } else {
+            api_client.get_gateway().await?
+        };
 
-            loop {
-                // Determine gateway URL
-                let gateway_url_result = if let Some(ref url) = state.resume_url {
-                    Ok(url.clone())
-                } else if let Some(url) = &config.gateway_url {
-                    Ok(url.clone())
-                } else {
-                    api_client.get_gateway().await
-                };
+        let ws_url = format!("{}/?v=10&encoding=json", gateway_url);
+        info!(
+            url = %ws_url,
+            resuming = state_snapshot.session_id.is_some(),
+            "Connecting to Discord gateway"
+        );
 
-                let gateway_url = match gateway_url_result {
-                    Ok(url) => url,
-                    Err(e) => {
-                        error!(error = %e, "Failed to get gateway URL");
-                        tokio::time::sleep(backoff).await;
-                        backoff = (backoff * 2).min(max_backoff);
-                        continue;
-                    }
-                };
+        let (ws_stream, _) = connect_async(&ws_url)
+            .await
+            .map_err(|e| DiscordError::Gateway(format!("Failed to connect WS: {e}")))?;
 
-                // Connect
-                let ws_url = format!("{}/?v=10&encoding=json", gateway_url);
-                info!(url = %ws_url, resuming = state.session_id.is_some(), "Connecting to Discord gateway");
-
-                let connect_result = connect_async(&ws_url).await;
-
-                match connect_result {
-                    Ok((ws_stream, _)) => {
-                        // Reset backoff on successful connection
-                        backoff = Duration::from_secs(1);
-
-                        // Run the loop
-                        match run_gateway_loop(
-                            ws_stream,
-                            config.clone(),
-                            event_tx.clone(),
-                            state.clone(),
-                        )
-                        .await
-                        {
-                            Ok(new_state) => {
-                                // Graceful exit or expected reconnection
-                                state = new_state;
-                                info!("Gateway loop ended, reconnecting immediately");
-                            }
-                            Err(e) => {
-                                error!(error = %e, "Gateway connection error");
-                                tokio::time::sleep(backoff).await;
-                                backoff = (backoff * 2).min(max_backoff);
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        error!(error = %e, "Failed to connect WS");
-                        tokio::time::sleep(backoff).await;
-                        backoff = (backoff * 2).min(max_backoff);
-                    }
-                }
-            }
+        let join_handle = tokio::spawn(async move {
+            run_gateway_loop(ws_stream, config, event_tx, state_snapshot, state_store).await
         });
 
-        Ok(event_rx)
+        Ok(GatewayStream {
+            events: event_rx,
+            join_handle,
+        })
     }
 }
 
@@ -215,13 +171,42 @@ struct GatewayState {
     sequence: Option<u64>,
 }
 
+impl Default for GatewayState {
+    fn default() -> Self {
+        Self {
+            session_id: None,
+            resume_url: None,
+            sequence: None,
+        }
+    }
+}
+
+/// Handle for a single gateway connection attempt.
+pub struct GatewayStream {
+    pub events: mpsc::Receiver<GatewayEvent>,
+    pub join_handle: tokio::task::JoinHandle<DiscordResult<()>>,
+}
+
 /// Run the gateway event loop.
 async fn run_gateway_loop(
     ws_stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
     config: DiscordConfig,
     event_tx: mpsc::Sender<GatewayEvent>,
     mut state: GatewayState,
-) -> DiscordResult<GatewayState> {
+    state_store: Arc<Mutex<GatewayState>>,
+) -> DiscordResult<()> {
+    let result = run_gateway_loop_inner(ws_stream, config, &event_tx, &mut state).await;
+    let mut store = state_store.lock().await;
+    *store = state;
+    result
+}
+
+async fn run_gateway_loop_inner(
+    ws_stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
+    config: DiscordConfig,
+    event_tx: &mpsc::Sender<GatewayEvent>,
+    state: &mut GatewayState,
+) -> DiscordResult<()> {
     let (mut write, mut read) = ws_stream.split();
 
     // Wait for Hello
@@ -381,7 +366,7 @@ async fn run_gateway_loop(
 
                                 if event_tx.send(event).await.is_err() {
                                     info!("Event receiver dropped, closing gateway");
-                                    return Ok(state);
+                                    return Ok(());
                                 }
                             }
                             Ok(GatewayOpcode::HeartbeatAck) => {
@@ -390,7 +375,7 @@ async fn run_gateway_loop(
                             }
                             Ok(GatewayOpcode::Reconnect) => {
                                 info!("Received reconnect request");
-                                return Ok(state);
+                                return Ok(());
                             }
                             Ok(GatewayOpcode::InvalidSession) => {
                                 let resumable = payload.d.and_then(|v| v.as_bool()).unwrap_or(false);
@@ -401,7 +386,7 @@ async fn run_gateway_loop(
                                     state.resume_url = None;
                                     state.sequence = None;
                                 }
-                                return Ok(state);
+                                return Ok(());
                             }
                             Ok(GatewayOpcode::Heartbeat) => {
                                 // Immediately send heartbeat
@@ -421,7 +406,7 @@ async fn run_gateway_loop(
                     }
                     Some(Ok(WsMessage::Close(frame))) => {
                         info!(frame = ?frame, "Gateway connection closed");
-                        return Ok(state);
+                        return Ok(());
                     }
                     Some(Ok(_)) => {
                         // Ignore other message types (ping, pong, binary)
@@ -432,7 +417,7 @@ async fn run_gateway_loop(
                     }
                     None => {
                         info!("Gateway connection ended");
-                        return Ok(state);
+                        return Ok(());
                     }
                 }
             }

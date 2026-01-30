@@ -5,7 +5,7 @@
 //! - Rejection of forbidden constructs (negative tests)
 //! - Deterministic validation behavior
 
-use super::{E2E_LOG_V1_SCHEMA, FZPF_V01_SCHEMA};
+use super::{E2E_LOG_V1_SCHEMA, E2E_LOG_V2_SCHEMA, FZPF_V01_SCHEMA};
 use jsonschema::Validator;
 use serde_json::Value;
 
@@ -221,15 +221,14 @@ fn reject_invalid_confidentiality_level() {
 // E2E Log Schema Validation
 // ============================================================================
 
-fn load_e2e_log_schema() -> Validator {
-    let schema: Value =
-        serde_json::from_str(E2E_LOG_V1_SCHEMA).expect("E2E log schema should be valid JSON");
+fn load_e2e_log_schema(schema: &str) -> Validator {
+    let schema: Value = serde_json::from_str(schema).expect("E2E log schema should be valid JSON");
     Validator::new(&schema).expect("E2E log schema should be a valid JSON Schema")
 }
 
 #[test]
-fn valid_e2e_log_entry() {
-    let validator = load_e2e_log_schema();
+fn valid_e2e_log_entry_v1() {
+    let validator = load_e2e_log_schema(E2E_LOG_V1_SCHEMA);
     let doc: Value = serde_json::from_str(examples::E2E_LOG_MINIMAL)
         .expect("e2e_log_minimal.json should be valid JSON");
     let result = validator.validate(&doc);
@@ -241,8 +240,31 @@ fn valid_e2e_log_entry() {
 }
 
 #[test]
+fn valid_e2e_log_entry_v2() {
+    let validator = load_e2e_log_schema(E2E_LOG_V2_SCHEMA);
+    let doc: Value = serde_json::from_str(
+        r#"{
+            "timestamp": "2026-01-27T00:00:00Z",
+            "log_version": "v2",
+            "script": "e2e_happy_path",
+            "step": "invoke",
+            "correlation_id": "00000000-0000-4000-8000-000000000000",
+            "duration_ms": 25,
+            "result": "pass"
+        }"#,
+    )
+    .unwrap();
+    let result = validator.validate(&doc);
+    assert!(
+        result.is_ok(),
+        "v2 log entry should validate: {:?}",
+        result.err().map(|e| e.to_string())
+    );
+}
+
+#[test]
 fn reject_missing_e2e_log_fields() {
-    let validator = load_e2e_log_schema();
+    let validator = load_e2e_log_schema(E2E_LOG_V1_SCHEMA);
     let doc: Value = serde_json::from_str(
         r#"{
             "timestamp": "2026-01-27T00:00:00Z",
@@ -257,6 +279,250 @@ fn reject_missing_e2e_log_fields() {
     assert!(
         validator.validate(&doc).is_err(),
         "Log entry missing required fields should be rejected"
+    );
+}
+
+// ============================================================================
+// E2E Log Schema Migration Tests (bd-35sx)
+// ============================================================================
+
+#[test]
+fn v1_without_log_version_validates() {
+    // v1 schema accepts entries without log_version field (implicit v1)
+    use super::validate_e2e_log_entry;
+
+    let doc: Value = serde_json::from_str(
+        r#"{
+            "timestamp": "2026-01-27T00:00:00Z",
+            "script": "e2e_migration_test",
+            "step": "setup",
+            "correlation_id": "00000000-0000-4000-8000-000000000001",
+            "duration_ms": 10,
+            "result": "pass"
+        }"#,
+    )
+    .unwrap();
+
+    assert!(
+        validate_e2e_log_entry(&doc).is_ok(),
+        "v1 entry without log_version should validate"
+    );
+}
+
+#[test]
+fn v1_with_explicit_version_validates() {
+    // v1 schema accepts entries with explicit log_version: "v1"
+    use super::validate_e2e_log_entry;
+
+    let doc: Value = serde_json::from_str(
+        r#"{
+            "timestamp": "2026-01-27T00:00:00Z",
+            "log_version": "v1",
+            "script": "e2e_migration_test",
+            "step": "setup",
+            "correlation_id": "00000000-0000-4000-8000-000000000002",
+            "duration_ms": 10,
+            "result": "pass"
+        }"#,
+    )
+    .unwrap();
+
+    assert!(
+        validate_e2e_log_entry(&doc).is_ok(),
+        "v1 entry with explicit log_version should validate"
+    );
+}
+
+#[test]
+fn v2_with_explicit_version_validates() {
+    // v2 schema requires explicit log_version: "v2"
+    use super::validate_e2e_log_entry;
+
+    let doc: Value = serde_json::from_str(
+        r#"{
+            "timestamp": "2026-01-27T00:00:00Z",
+            "log_version": "v2",
+            "script": "e2e_migration_test",
+            "step": "verify",
+            "correlation_id": "00000000-0000-4000-8000-000000000003",
+            "duration_ms": 25,
+            "result": "pass"
+        }"#,
+    )
+    .unwrap();
+
+    assert!(
+        validate_e2e_log_entry(&doc).is_ok(),
+        "v2 entry with explicit log_version should validate"
+    );
+}
+
+#[test]
+fn unknown_log_version_fails_with_clear_error() {
+    // Unknown log_version values should fail with a clear error message
+    use super::validate_e2e_log_entry;
+
+    let doc: Value = serde_json::from_str(
+        r#"{
+            "timestamp": "2026-01-27T00:00:00Z",
+            "log_version": "v99",
+            "script": "e2e_migration_test",
+            "step": "setup",
+            "correlation_id": "00000000-0000-4000-8000-000000000004",
+            "duration_ms": 10,
+            "result": "pass"
+        }"#,
+    )
+    .unwrap();
+
+    let result = validate_e2e_log_entry(&doc);
+    assert!(result.is_err(), "Unknown log_version should fail");
+
+    let err = result.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("v99") && msg.contains("unknown"),
+        "Error should mention unknown version: {msg}"
+    );
+}
+
+#[test]
+fn invalid_log_version_type_fails_with_clear_error() {
+    // log_version must be a string, not a number or other type
+    use super::validate_e2e_log_entry;
+
+    let doc: Value = serde_json::from_str(
+        r#"{
+            "timestamp": "2026-01-27T00:00:00Z",
+            "log_version": 1,
+            "script": "e2e_migration_test",
+            "step": "setup",
+            "correlation_id": "00000000-0000-4000-8000-000000000005",
+            "duration_ms": 10,
+            "result": "pass"
+        }"#,
+    )
+    .unwrap();
+
+    let result = validate_e2e_log_entry(&doc);
+    assert!(result.is_err(), "Non-string log_version should fail");
+
+    let err = result.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("string"),
+        "Error should mention expected type: {msg}"
+    );
+}
+
+#[test]
+fn jsonl_with_mixed_versions_validates() {
+    // JSONL with mixed v1 and v2 entries should validate
+    use super::validate_e2e_log_jsonl;
+
+    let jsonl = r#"{"timestamp": "2026-01-27T00:00:00Z", "script": "test", "step": "setup", "correlation_id": "a", "duration_ms": 1, "result": "pass"}
+{"timestamp": "2026-01-27T00:00:01Z", "log_version": "v1", "script": "test", "step": "execute", "correlation_id": "b", "duration_ms": 2, "result": "pass"}
+{"timestamp": "2026-01-27T00:00:02Z", "log_version": "v2", "script": "test", "step": "verify", "correlation_id": "c", "duration_ms": 3, "result": "pass"}"#;
+
+    assert!(
+        validate_e2e_log_jsonl(jsonl).is_ok(),
+        "Mixed v1/v2 JSONL should validate"
+    );
+}
+
+#[test]
+fn jsonl_with_invalid_version_reports_line_number() {
+    // JSONL validation should report the line number of failures
+    use super::validate_e2e_log_jsonl;
+
+    let jsonl = r#"{"timestamp": "2026-01-27T00:00:00Z", "script": "test", "step": "setup", "correlation_id": "a", "duration_ms": 1, "result": "pass"}
+{"timestamp": "2026-01-27T00:00:01Z", "log_version": "v1", "script": "test", "step": "execute", "correlation_id": "b", "duration_ms": 2, "result": "pass"}
+{"timestamp": "2026-01-27T00:00:02Z", "log_version": "v99", "script": "test", "step": "verify", "correlation_id": "c", "duration_ms": 3, "result": "pass"}"#;
+
+    let result = validate_e2e_log_jsonl(jsonl);
+    assert!(result.is_err(), "JSONL with invalid version should fail");
+
+    let err = result.unwrap_err();
+    let msg = err.to_string();
+    // Error message should indicate the problem is with v99
+    assert!(
+        msg.contains("v99") || msg.contains("unknown"),
+        "Error should mention the problem: {msg}"
+    );
+}
+
+#[test]
+fn v1_required_fields_preserved_in_dispatch() {
+    // Verify that v1 required fields are correctly validated
+    use super::validate_e2e_log_entry;
+
+    // Minimal valid v1 script entry
+    let valid_doc: Value = serde_json::from_str(
+        r#"{
+            "timestamp": "2026-01-27T00:00:00Z",
+            "script": "test",
+            "step": "setup",
+            "correlation_id": "test-id",
+            "duration_ms": 10,
+            "result": "pass"
+        }"#,
+    )
+    .unwrap();
+    assert!(
+        validate_e2e_log_entry(&valid_doc).is_ok(),
+        "Valid v1 entry should pass"
+    );
+
+    // Missing required field should fail
+    let invalid_doc: Value = serde_json::from_str(
+        r#"{
+            "timestamp": "2026-01-27T00:00:00Z",
+            "script": "test",
+            "step": "setup"
+        }"#,
+    )
+    .unwrap();
+    assert!(
+        validate_e2e_log_entry(&invalid_doc).is_err(),
+        "v1 entry missing required fields should fail"
+    );
+}
+
+#[test]
+fn v2_required_fields_preserved_in_dispatch() {
+    // Verify that v2 required fields are correctly validated
+    use super::validate_e2e_log_entry;
+
+    // Minimal valid v2 script entry
+    let valid_doc: Value = serde_json::from_str(
+        r#"{
+            "timestamp": "2026-01-27T00:00:00Z",
+            "log_version": "v2",
+            "script": "test",
+            "step": "setup",
+            "correlation_id": "test-id",
+            "duration_ms": 10,
+            "result": "pass"
+        }"#,
+    )
+    .unwrap();
+    assert!(
+        validate_e2e_log_entry(&valid_doc).is_ok(),
+        "Valid v2 entry should pass"
+    );
+
+    // v2 entry missing required fields should fail
+    let invalid_doc: Value = serde_json::from_str(
+        r#"{
+            "timestamp": "2026-01-27T00:00:00Z",
+            "log_version": "v2",
+            "script": "test"
+        }"#,
+    )
+    .unwrap();
+    assert!(
+        validate_e2e_log_entry(&invalid_doc).is_err(),
+        "v2 entry missing required fields should fail"
     );
 }
 

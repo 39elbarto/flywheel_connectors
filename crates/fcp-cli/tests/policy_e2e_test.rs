@@ -243,7 +243,7 @@ mod cli {
     #[test]
     fn policy_diff_reports_added_and_transport_change() {
         let zone = ZoneId::work();
-        let before = base_zone_policy(zone.clone());
+        let before = base_zone_policy(zone);
         let mut after = before.clone();
 
         after.connector_allow.push(PolicyPattern {

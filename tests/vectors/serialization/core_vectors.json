@@ -27,12 +27,12 @@
       }
     ]
   },
-  "fcp.core:EventEnvelope@1.0.0": {
+  "fcp.stream:EventEnvelope@1.1.0": {
     "description": "Streaming event wrapper",
-    "schema_namespace": "fcp.core",
+    "schema_namespace": "fcp.stream",
     "schema_name": "EventEnvelope",
-    "schema_version": "1.0.0",
-    "expected_schema_hash": "d18d603bf45029b91600e4d7e60553e82ca17e78ef52d79b52b443d023542230",
+    "schema_version": "1.1.0",
+    "expected_schema_hash": "7ec732a7c333dafce67f030d72ce7ec6e9a61951d780418261a589e9cd86f920",
     "payloads": []
   },
   "fcp.core:ObjectHeader@1.0.0": {

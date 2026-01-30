@@ -1301,6 +1301,21 @@ pub struct StreamingSupervisorStats {
     pub missed_heartbeats: u64,
 }
 
+/// Streaming-specific health state details.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamingHealthState {
+    /// Last heartbeat sent time in milliseconds since supervisor start.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_heartbeat_at: Option<u64>,
+    /// Last heartbeat ack time in milliseconds since supervisor start.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_ack_at: Option<u64>,
+    /// Total reconnect attempts after the first successful connection.
+    pub reconnect_count: u64,
+    /// Total missed heartbeat timeouts.
+    pub missed_heartbeats: u64,
+}
+
 /// Supervised streaming loop with backoff, health tracking, and session resumption.
 ///
 /// The supervisor provides:
@@ -1366,6 +1381,68 @@ impl<S: StreamingSession> StreamingSupervisor<S> {
             self.stats.missed_heartbeats,
             reconnect_count,
         )
+    }
+
+    fn elapsed_ms(&self, instant: Instant) -> u64 {
+        let elapsed = instant.saturating_duration_since(self.health.started_at);
+        u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// Get streaming-specific health state details.
+    #[must_use]
+    pub fn streaming_health_state(&self) -> StreamingHealthState {
+        StreamingHealthState {
+            last_heartbeat_at: self
+                .session
+                .last_heartbeat_sent()
+                .map(|instant| self.elapsed_ms(instant)),
+            last_ack_at: self
+                .session
+                .last_heartbeat_ack()
+                .map(|instant| self.elapsed_ms(instant)),
+            reconnect_count: self.stats.connection_attempts.saturating_sub(1),
+            missed_heartbeats: self.stats.missed_heartbeats,
+        }
+    }
+
+    /// Build a `HealthSnapshot` that includes streaming health details.
+    #[must_use]
+    pub fn streaming_health_snapshot(&self) -> HealthSnapshot {
+        let mut snapshot = self.health.snapshot();
+        let mut details = match snapshot.details.take() {
+            Some(serde_json::Value::Object(map)) => map,
+            Some(other) => {
+                let mut map = serde_json::Map::new();
+                map.insert("tracker".to_string(), other);
+                map
+            }
+            None => serde_json::Map::new(),
+        };
+
+        let streaming = self.streaming_health_state();
+        if let Some(last_heartbeat_at) = streaming.last_heartbeat_at {
+            details.insert(
+                "last_heartbeat_at".to_string(),
+                serde_json::Value::from(last_heartbeat_at),
+            );
+        }
+        if let Some(last_ack_at) = streaming.last_ack_at {
+            details.insert(
+                "last_ack_at".to_string(),
+                serde_json::Value::from(last_ack_at),
+            );
+        }
+        details.insert(
+            "reconnect_count".to_string(),
+            serde_json::Value::from(streaming.reconnect_count),
+        );
+        details.insert(
+            "missed_heartbeats".to_string(),
+            serde_json::Value::from(streaming.missed_heartbeats),
+        );
+
+        snapshot.details = Some(serde_json::Value::Object(details));
+        snapshot
     }
 
     /// Run the streaming supervisor loop.
@@ -2165,6 +2242,46 @@ mod tests {
         session.record_heartbeat_ack(now);
         assert_eq!(session.heartbeat_seq(), 1);
         assert_eq!(session.ack_seq(), 1);
+    }
+
+    #[test]
+    fn streaming_health_snapshot_includes_streaming_details() {
+        let config = SupervisorConfig::default();
+        let session = InMemoryStreamingSession::new();
+        let mut supervisor = StreamingSupervisor::new(config, session);
+
+        let now = Instant::now();
+        supervisor.session_mut().record_heartbeat_sent(now);
+        supervisor.session_mut().record_heartbeat_ack(now);
+
+        let snapshot = supervisor.streaming_health_snapshot();
+        let details = snapshot.details.expect("streaming details");
+        let details = details.as_object().expect("details map");
+
+        assert!(
+            details
+                .get("last_heartbeat_at")
+                .and_then(serde_json::Value::as_u64)
+                .is_some()
+        );
+        assert!(
+            details
+                .get("last_ack_at")
+                .and_then(serde_json::Value::as_u64)
+                .is_some()
+        );
+        assert_eq!(
+            details
+                .get("reconnect_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(0)
+        );
+        assert_eq!(
+            details
+                .get("missed_heartbeats")
+                .and_then(serde_json::Value::as_u64),
+            Some(0)
+        );
     }
 
     #[test]

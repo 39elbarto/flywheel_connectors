@@ -86,8 +86,6 @@ pub use fcp_core::{
     EventEnvelope,
     EventNack,
     EventStream,
-    ThreadInfo,
-    ThreadKind,
     FcpConnector,
     FcpError,
     FcpErrorResponse,
@@ -138,6 +136,8 @@ pub use fcp_core::{
     SubscribeResult,
     TaintFlag,
     TaintLevel,
+    ThreadInfo,
+    ThreadKind,
     // Observability
     TraceContext,
     TrustLevel,

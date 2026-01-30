@@ -957,6 +957,7 @@ fn update_to_event(
         payload,
         correlation_id: None,
         resource_uris: vec![],
+        thread_info: None,
     };
 
     // update_id is always positive per Telegram API, but use saturating conversion for safety

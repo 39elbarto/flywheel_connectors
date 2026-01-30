@@ -159,14 +159,14 @@ enum PolicyDocument {
 }
 
 impl PolicyDocument {
-    fn zone_id(&self) -> &fcp_core::ZoneId {
+    const fn zone_id(&self) -> &fcp_core::ZoneId {
         match self {
             Self::ZonePolicy(policy) => &policy.zone_id,
             Self::ZoneDefinition(definition) => &definition.zone_id,
         }
     }
 
-    fn policy_type(&self) -> &'static str {
+    const fn policy_type(&self) -> &'static str {
         match self {
             Self::ZonePolicy(_) => "zone_policy",
             Self::ZoneDefinition(_) => "zone_definition",
@@ -226,6 +226,13 @@ struct RollbackPlan {
     current_policy_id: String,
     previous_policy_id: String,
     plan_type: String,
+}
+
+#[derive(Debug, Serialize)]
+struct JsonDiff {
+    added: BTreeMap<String, Value>,
+    removed: BTreeMap<String, Value>,
+    changed: BTreeMap<String, Change<Value>>,
 }
 
 fn run_diff(args: &DiffArgs) -> Result<()> {
@@ -354,7 +361,7 @@ fn diff_zone_definition(
 ) -> Result<PolicyDiffOutput> {
     let before_json = serde_json::to_value(before)?;
     let after_json = serde_json::to_value(after)?;
-    let (added, removed, changed) = diff_json_objects(&before_json, &after_json)?;
+    let diff = diff_json_objects(&before_json, &after_json)?;
 
     Ok(PolicyDiffOutput {
         policy_type: "zone_definition".to_string(),
@@ -367,9 +374,9 @@ fn diff_zone_definition(
             &after_json,
         )?)
         .to_string(),
-        added: serde_json::to_value(&added)?,
-        removed: serde_json::to_value(&removed)?,
-        changed: serde_json::to_value(&changed)?,
+        added: serde_json::to_value(&diff.added)?,
+        removed: serde_json::to_value(&diff.removed)?,
+        changed: serde_json::to_value(&diff.changed)?,
         risk_flags: Vec::new(),
     })
 }
@@ -477,14 +484,7 @@ fn compute_risk_flags(added: &PolicyListDiff, changed: &PolicyChangedFields) -> 
     flags
 }
 
-fn diff_json_objects(
-    before: &Value,
-    after: &Value,
-) -> Result<(
-    BTreeMap<String, Value>,
-    BTreeMap<String, Value>,
-    BTreeMap<String, Change<Value>>,
-)> {
+fn diff_json_objects(before: &Value, after: &Value) -> Result<JsonDiff> {
     let before_obj = before
         .as_object()
         .context("before policy is not a JSON object")?;
@@ -518,7 +518,11 @@ fn diff_json_objects(
         }
     }
 
-    Ok((added, removed, changed))
+    Ok(JsonDiff {
+        added,
+        removed,
+        changed,
+    })
 }
 
 fn diff_patterns(
@@ -559,7 +563,7 @@ fn diff_capability_ids(
     (added, removed)
 }
 
-fn transport_policy_changed(
+const fn transport_policy_changed(
     before: &fcp_core::ZoneTransportPolicy,
     after: &fcp_core::ZoneTransportPolicy,
 ) -> bool {
@@ -648,6 +652,7 @@ fn output_error(err: &PolicySimulationError, json: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fcp_core::PolicyPattern;
 
     #[test]
     fn parse_policy_simulation_input_direct() {
@@ -672,5 +677,57 @@ mod tests {
         let raw = serde_json::to_string(&invoke).unwrap();
         let input = parse_simulation_input(&raw).unwrap();
         assert_eq!(input.invoke_request.zone_id, fcp_core::ZoneId::work());
+    }
+
+    fn base_policy(zone: fcp_core::ZoneId) -> ZonePolicyObject {
+        let invoke = InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: fcp_core::RequestId::new("req-1"),
+            connector_id: "fcp.test:base:v1".parse().unwrap(),
+            operation: "op".parse().unwrap(),
+            zone_id: zone,
+            input: serde_json::json!({"k": "v"}),
+            capability_token: fcp_core::CapabilityToken::test_token(),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+
+        default_zone_policy(&invoke)
+    }
+
+    #[test]
+    fn policy_diff_detects_added_connector_and_transport_risk() {
+        let zone = fcp_core::ZoneId::work();
+        let before = base_policy(zone.clone());
+        let mut after = base_policy(zone);
+
+        after.connector_allow.push(PolicyPattern {
+            pattern: "fcp.test:*".to_string(),
+        });
+        after.transport_policy.allow_derp = true;
+
+        let diff = diff_zone_policy(&before, &after).expect("diff zone policy");
+        let added = diff.added.as_object().expect("added object");
+        let connector_allow = added
+            .get("connector_allow")
+            .and_then(Value::as_array)
+            .expect("connector_allow array");
+
+        assert!(
+            connector_allow
+                .iter()
+                .any(|v| v.as_str() == Some("fcp.test:*"))
+        );
+        assert!(
+            diff.risk_flags
+                .iter()
+                .any(|flag| flag == "transport_derp_enabled")
+        );
     }
 }

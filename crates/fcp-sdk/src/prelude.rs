@@ -37,9 +37,7 @@ pub use crate::{
 pub use crate::ratelimit::{RateLimitError, RateLimitPoolBuilder, RateLimitTracker};
 
 // Events
-pub use crate::{
-    EventAck, EventCaps, EventData, EventEnvelope, EventNack, EventStream,
-};
+pub use crate::{EventAck, EventCaps, EventData, EventEnvelope, EventNack, EventStream};
 pub use fcp_core::{ThreadInfo, ThreadKind};
 
 // Health
@@ -72,8 +70,8 @@ pub use crate::runtime::{
     CursorLease, CursorStore, CursorStoreBackend, CursorStoreError, HealthTracker,
     HealthTransition, InMemoryCursorStoreBackend, InMemoryPollingCursor, InMemoryStreamingSession,
     PollResult, PollingCursor, PollingSupervisor, PollingSupervisorStats, StreamingConnection,
-    StreamingError, StreamingSession, StreamingSupervisor, StreamingSupervisorStats,
-    SupervisorConfig, SupervisorOutcome,
+    StreamingError, StreamingHealthState, StreamingSession, StreamingSupervisor,
+    StreamingSupervisorStats, SupervisorConfig, SupervisorOutcome,
 };
 
 // Schema validation helpers

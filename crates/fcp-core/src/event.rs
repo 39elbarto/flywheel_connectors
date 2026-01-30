@@ -474,8 +474,8 @@ mod tests {
 
     #[test]
     fn event_data_with_thread_info() {
-        let thread = ThreadInfo::new("thread-123", ThreadKind::ForumTopic)
-            .with_parent_id("channel-1");
+        let thread =
+            ThreadInfo::new("thread-123", ThreadKind::ForumTopic).with_parent_id("channel-1");
         let data = sample_event_data().with_thread_info(thread.clone());
 
         assert_eq!(data.thread_info, Some(thread));

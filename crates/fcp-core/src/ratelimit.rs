@@ -465,6 +465,119 @@ mod declaration_tests {
     }
 
     #[test]
+    fn test_declarations_is_empty() {
+        let empty = RateLimitDeclarations::default();
+        assert!(empty.is_empty());
+
+        let non_empty = RateLimitDeclarations {
+            limits: vec![sample_pool("p")],
+            tool_pool_map: HashMap::new(),
+        };
+        assert!(!non_empty.is_empty());
+    }
+
+    #[test]
+    fn test_validate_empty_pool_id() {
+        let decls = RateLimitDeclarations {
+            limits: vec![sample_pool("")],
+            tool_pool_map: HashMap::new(),
+        };
+        assert!(matches!(
+            decls.validate().unwrap_err(),
+            RateLimitDeclarationError::EmptyPoolId
+        ));
+    }
+
+    #[test]
+    fn test_validate_duplicate_pool_id() {
+        let decls = RateLimitDeclarations {
+            limits: vec![sample_pool("dup"), sample_pool("dup")],
+            tool_pool_map: HashMap::new(),
+        };
+        assert!(matches!(
+            decls.validate().unwrap_err(),
+            RateLimitDeclarationError::DuplicatePoolId { .. }
+        ));
+    }
+
+    #[test]
+    fn test_validate_empty_tool_name() {
+        let decls = RateLimitDeclarations {
+            limits: vec![sample_pool("p")],
+            tool_pool_map: HashMap::from([(String::new(), vec!["p".to_string()])]),
+        };
+        assert!(matches!(
+            decls.validate().unwrap_err(),
+            RateLimitDeclarationError::EmptyToolName
+        ));
+    }
+
+    #[test]
+    fn test_validate_empty_tool_pools() {
+        let decls = RateLimitDeclarations {
+            limits: vec![sample_pool("p")],
+            tool_pool_map: HashMap::from([("tool".to_string(), vec![])]),
+        };
+        assert!(matches!(
+            decls.validate().unwrap_err(),
+            RateLimitDeclarationError::EmptyToolPools { .. }
+        ));
+    }
+
+    #[test]
+    fn test_validate_empty_tool_pool_id() {
+        let decls = RateLimitDeclarations {
+            limits: vec![sample_pool("p")],
+            tool_pool_map: HashMap::from([("tool".to_string(), vec![String::new()])]),
+        };
+        assert!(matches!(
+            decls.validate().unwrap_err(),
+            RateLimitDeclarationError::EmptyToolPoolId { .. }
+        ));
+    }
+
+    #[test]
+    fn test_validate_unknown_pool() {
+        let decls = RateLimitDeclarations {
+            limits: vec![sample_pool("p")],
+            tool_pool_map: HashMap::from([("tool".to_string(), vec!["nonexistent".to_string()])]),
+        };
+        assert!(matches!(
+            decls.validate().unwrap_err(),
+            RateLimitDeclarationError::UnknownPool { .. }
+        ));
+    }
+
+    #[test]
+    fn test_validate_zero_burst() {
+        let mut pool = sample_pool("p");
+        pool.config.burst = Some(0);
+        assert!(matches!(
+            pool.validate().unwrap_err(),
+            RateLimitDeclarationError::ZeroBurst
+        ));
+    }
+
+    #[test]
+    fn test_validate_no_burst_is_ok() {
+        let mut pool = sample_pool("p");
+        pool.config.burst = None;
+        assert!(pool.validate().is_ok());
+    }
+
+    #[test]
+    fn test_aggregated_rate_limits_default() {
+        let agg = AggregatedRateLimits::default();
+        assert!(agg.limits.is_empty());
+    }
+
+    #[test]
+    fn test_aggregate_empty_input() {
+        let agg = aggregate_rate_limits(std::iter::empty());
+        assert!(agg.limits.is_empty());
+    }
+
+    #[test]
     fn test_aggregate_rate_limits() {
         let connector_a = ConnectorId::from_static("discord");
         let connector_b = ConnectorId::from_static("openai");
@@ -626,6 +739,116 @@ mod tests {
         });
 
         assert_eq!(v1.violation_id, v2.violation_id);
+    }
+
+    #[test]
+    fn violation_new_populates_fields() {
+        let input = ThrottleViolationInput {
+            timestamp_ms: 42_000,
+            zone_id: "z:work".parse().unwrap(),
+            connector_id: Some("test:conn:v1".parse().unwrap()),
+            operation_id: Some("test.op".parse().unwrap()),
+            limit_type: LimitType::Quota,
+            limit_value: 200,
+            current_value: 250,
+            retry_after_ms: 1000,
+        };
+        let v = ThrottleViolation::new(input);
+        assert_eq!(v.timestamp_ms, 42_000);
+        assert_eq!(v.limit_type, LimitType::Quota);
+        assert_eq!(v.limit_value, 200);
+        assert_eq!(v.current_value, 250);
+        assert_eq!(v.retry_after_ms, 1000);
+        assert!(v.connector_id.is_some());
+        assert!(v.operation_id.is_some());
+    }
+
+    #[test]
+    fn violation_without_optional_fields() {
+        let v = ThrottleViolation::new(ThrottleViolationInput {
+            timestamp_ms: 1000,
+            zone_id: "z:work".parse().unwrap(),
+            connector_id: None,
+            operation_id: None,
+            limit_type: LimitType::Concurrent,
+            limit_value: 10,
+            current_value: 11,
+            retry_after_ms: 0,
+        });
+        assert!(v.connector_id.is_none());
+        assert!(v.operation_id.is_none());
+    }
+
+    #[test]
+    fn throttle_violation_serde_roundtrip() {
+        let v = ThrottleViolation::new(ThrottleViolationInput {
+            timestamp_ms: 5000,
+            zone_id: "z:private".parse().unwrap(),
+            connector_id: Some("gmail:fcp2:1.0".parse().unwrap()),
+            operation_id: None,
+            limit_type: LimitType::Rpm,
+            limit_value: 60,
+            current_value: 61,
+            retry_after_ms: 2000,
+        });
+        let json = serde_json::to_string(&v).unwrap();
+        let back: ThrottleViolation = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.violation_id, v.violation_id);
+        assert_eq!(back.limit_type, LimitType::Rpm);
+        assert_eq!(back.retry_after_ms, 2000);
+    }
+
+    #[test]
+    fn limit_type_serde_roundtrip() {
+        for lt in [
+            LimitType::Rpm,
+            LimitType::Concurrent,
+            LimitType::Burst,
+            LimitType::Quota,
+        ] {
+            let json = serde_json::to_string(&lt).unwrap();
+            let back: LimitType = serde_json::from_str(&json).unwrap();
+            assert_eq!(lt, back);
+        }
+    }
+
+    #[test]
+    fn backpressure_level_serde_roundtrip() {
+        for level in [
+            BackpressureLevel::Normal,
+            BackpressureLevel::Warning,
+            BackpressureLevel::SoftLimit,
+            BackpressureLevel::HardLimit,
+        ] {
+            let json = serde_json::to_string(&level).unwrap();
+            let back: BackpressureLevel = serde_json::from_str(&json).unwrap();
+            assert_eq!(level, back);
+        }
+    }
+
+    #[test]
+    fn backpressure_signal_serde_roundtrip() {
+        let signal = BackpressureSignal {
+            level: BackpressureLevel::Warning,
+            utilization_bps: 7500,
+            retry_after_ms: Some(500),
+        };
+        let json = serde_json::to_string(&signal).unwrap();
+        let back: BackpressureSignal = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.level, BackpressureLevel::Warning);
+        assert_eq!(back.utilization_bps, 7500);
+        assert_eq!(back.retry_after_ms, Some(500));
+    }
+
+    #[test]
+    fn backpressure_signal_no_retry_after() {
+        let signal = BackpressureSignal {
+            level: BackpressureLevel::Normal,
+            utilization_bps: 1000,
+            retry_after_ms: None,
+        };
+        let json = serde_json::to_string(&signal).unwrap();
+        assert!(!json.contains("retry_after_ms")); // skipped when None
     }
 
     #[test]

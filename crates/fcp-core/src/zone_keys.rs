@@ -1466,6 +1466,201 @@ mod tests {
         assert!(ring.active_object_id_key_id.is_none());
     }
 
+    // ── Serde and structural coverage ──
+
+    #[test]
+    fn zone_key_id_serde_roundtrip() {
+        let id = ZoneKeyId::from_bytes([0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF]);
+        let json = serde_json::to_string(&id).unwrap();
+        let back: ZoneKeyId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn object_id_key_id_serde_roundtrip() {
+        let id = ObjectIdKeyId::from_bytes([0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10]);
+        let json = serde_json::to_string(&id).unwrap();
+        let back: ObjectIdKeyId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn zone_key_algorithm_serde_roundtrip() {
+        for alg in [
+            ZoneKeyAlgorithm::ChaCha20Poly1305,
+            ZoneKeyAlgorithm::XChaCha20Poly1305,
+        ] {
+            let json = serde_json::to_string(&alg).unwrap();
+            let back: ZoneKeyAlgorithm = serde_json::from_str(&json).unwrap();
+            assert_eq!(alg, back);
+        }
+        // Verify snake_case
+        let json = serde_json::to_string(&ZoneKeyAlgorithm::ChaCha20Poly1305).unwrap();
+        assert!(json.contains("cha_cha20"));
+    }
+
+    #[test]
+    fn rekey_policy_default() {
+        let rp = RekeyPolicy::default();
+        assert!(!rp.epoch_ratchet);
+        assert!(rp.overlap_window_secs.is_none());
+        assert!(rp.retain_epochs.is_none());
+        assert!(!rp.rewrap_on_membership_change);
+        assert!(!rp.rotate_object_id_key_on_membership_change);
+    }
+
+    #[test]
+    fn rekey_policy_serde_roundtrip() {
+        let rp = RekeyPolicy {
+            epoch_ratchet: true,
+            overlap_window_secs: Some(600),
+            retain_epochs: Some(5),
+            rewrap_on_membership_change: true,
+            rotate_object_id_key_on_membership_change: false,
+        };
+        let json = serde_json::to_string(&rp).unwrap();
+        let back: RekeyPolicy = serde_json::from_str(&json).unwrap();
+        assert!(back.epoch_ratchet);
+        assert_eq!(back.overlap_window_secs, Some(600));
+        assert_eq!(back.retain_epochs, Some(5));
+        assert!(back.rewrap_on_membership_change);
+        assert!(!back.rotate_object_id_key_on_membership_change);
+    }
+
+    #[test]
+    fn rekey_policy_serde_omits_none_fields() {
+        let rp = RekeyPolicy::default();
+        let json = serde_json::to_string(&rp).unwrap();
+        assert!(!json.contains("overlap_window_secs"));
+        assert!(!json.contains("retain_epochs"));
+    }
+
+    #[test]
+    fn zone_key_from_bytes_as_bytes() {
+        let bytes = [0x42u8; ZONE_KEY_LEN];
+        let key = ZoneKey::from_bytes(bytes);
+        assert_eq!(*key.as_bytes(), bytes);
+    }
+
+    #[test]
+    fn zone_key_ring_new_empty() {
+        let zone_id = ZoneId::work();
+        let ring = ZoneKeyRing::new(zone_id.clone());
+        assert_eq!(ring.zone_id, zone_id);
+        assert!(ring.active_zone_key_id.is_none());
+        assert!(ring.active_object_id_key_id.is_none());
+        assert!(ring.active_zone_key().is_none());
+        assert!(ring.active_object_id_key().is_none());
+    }
+
+    #[test]
+    fn zone_key_ring_lookup_returns_none_for_unknown() {
+        let ring = ZoneKeyRing::new(ZoneId::work());
+        let unknown = ZoneKeyId::from_bytes([0xFF; 8]);
+        let unknown_obj = ObjectIdKeyId::from_bytes([0xEE; 8]);
+        assert!(ring.zone_key(&unknown).is_none());
+        assert!(ring.object_id_key(&unknown_obj).is_none());
+    }
+
+    #[test]
+    fn zone_key_error_display() {
+        let err = ZoneKeyError::InvalidKeyLength {
+            expected: 32,
+            found: 16,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("32"));
+        assert!(msg.contains("16"));
+
+        let err = ZoneKeyError::ZoneIdMismatch {
+            expected: "z:work".into(),
+            found: "z:private".into(),
+        };
+        assert!(err.to_string().contains("z:work"));
+
+        let err = ZoneKeyError::MissingWrappedZoneKey {
+            node_id: "node-42".into(),
+        };
+        assert!(err.to_string().contains("node-42"));
+
+        let err = ZoneKeyError::MissingWrappedObjectIdKey {
+            node_id: "node-99".into(),
+        };
+        assert!(err.to_string().contains("node-99"));
+    }
+
+    #[test]
+    fn object_id_key_unwrap_fails_with_wrong_node_id() {
+        let zone_id = ZoneId::work();
+        let node_id = TailscaleNodeId::new("node-5");
+        let issued_at = 1_700_000_000;
+
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+        let key = random_object_id_key();
+
+        let mut wrapped = wrap_object_id_key(&pk, &zone_id, &node_id, issued_at, &key).unwrap();
+        wrapped.recipient = TailscaleNodeId::new("node-6");
+
+        let result = unwrap_object_id_key(&sk, &zone_id, &wrapped);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn apply_manifest_missing_object_id_key() {
+        let zone_id = ZoneId::work();
+        let node_id = TailscaleNodeId::new("node-no-obj");
+        let issued_at = 1_700_000_000;
+
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+
+        let zone_key = random_zone_key();
+
+        let wrapped_zone = wrap_zone_key(&pk, &zone_id, &node_id, issued_at, &zone_key).unwrap();
+
+        // Create manifest with zone key but NO object id key for this node
+        let manifest = ZoneKeyManifest {
+            header: test_header(&zone_id),
+            zone_id: zone_id.clone(),
+            zone_key_id: ZoneKeyId::from_bytes([0x01; 8]),
+            object_id_key_id: ObjectIdKeyId::from_bytes([0x11; 8]),
+            algorithm: ZoneKeyAlgorithm::ChaCha20Poly1305,
+            valid_from: issued_at,
+            valid_until: None,
+            prev_zone_key_id: None,
+            wrapped_keys: vec![wrapped_zone],
+            wrapped_object_id_keys: vec![], // Empty!
+            rekey_policy: None,
+            signature: test_signature(),
+        };
+
+        let mut ring = ZoneKeyRing::new(zone_id);
+        let err = ring
+            .apply_manifest(&manifest, &node_id, &sk)
+            .expect_err("should fail without object id key");
+        assert!(matches!(
+            err,
+            ZoneKeyError::MissingWrappedObjectIdKey { .. }
+        ));
+    }
+
+    #[test]
+    fn zone_key_manifest_new_empty() {
+        let zone_id = ZoneId::work();
+        let signing_key = fcp_crypto::Ed25519SigningKey::generate();
+        let manifest =
+            ZoneKeyManifest::new_empty(zone_id.clone(), 1_700_000_000, &signing_key).unwrap();
+        assert_eq!(manifest.zone_id, zone_id);
+        assert_eq!(manifest.valid_from, 1_700_000_000);
+        assert!(manifest.valid_until.is_none());
+        assert!(manifest.prev_zone_key_id.is_none());
+        assert!(manifest.wrapped_keys.is_empty());
+        assert!(manifest.wrapped_object_id_keys.is_empty());
+        assert!(manifest.rekey_policy.is_none());
+        assert_eq!(manifest.algorithm, ZoneKeyAlgorithm::ChaCha20Poly1305);
+    }
+
     /// Test `wrapped_key_for` returns `None` when recipient not found.
     #[test]
     fn wrapped_key_for_missing_recipient() {

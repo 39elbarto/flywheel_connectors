@@ -1600,6 +1600,388 @@ mod tests {
         assert!(detector.lease_seq(&genesis).is_none());
     }
 
+    // ── Additional coverage ──
+
+    #[test]
+    fn crdt_type_as_str() {
+        assert_eq!(CrdtType::LwwMap.as_str(), "lww_map");
+        assert_eq!(CrdtType::OrSet.as_str(), "or_set");
+        assert_eq!(CrdtType::GCounter.as_str(), "g_counter");
+        assert_eq!(CrdtType::PnCounter.as_str(), "pn_counter");
+    }
+
+    #[test]
+    fn signature_serde_roundtrip() {
+        let sig = Signature::from_bytes([0xAB; 64]);
+        let json = serde_json::to_string(&sig).unwrap();
+        let back: Signature = serde_json::from_str(&json).unwrap();
+        assert_eq!(sig, back);
+    }
+
+    #[test]
+    fn signature_debug_is_truncated() {
+        let sig = Signature::from_bytes([0xCD; 64]);
+        let debug = format!("{sig:?}");
+        assert!(debug.contains("Signature"));
+        assert!(debug.contains("..."));
+    }
+
+    #[test]
+    fn signature_default_is_zero() {
+        let sig = Signature::default();
+        assert_eq!(sig, Signature::zero());
+    }
+
+    #[test]
+    fn connector_state_model_tagged_serde() {
+        // Verify the internally tagged representation
+        let json = serde_json::to_string(&ConnectorStateModel::Stateless).unwrap();
+        assert!(json.contains("\"type\":\"stateless\""));
+
+        let json = serde_json::to_string(&ConnectorStateModel::SingletonWriter).unwrap();
+        assert!(json.contains("\"type\":\"singleton_writer\""));
+
+        let json = serde_json::to_string(&ConnectorStateModel::Crdt {
+            crdt_type: CrdtType::OrSet,
+        })
+        .unwrap();
+        assert!(json.contains("\"type\":\"crdt\""));
+        assert!(json.contains("\"crdt_type\":\"or_set\""));
+    }
+
+    fn test_header() -> ObjectHeader {
+        ObjectHeader {
+            schema: SchemaId::new("fcp.test", "Test", Version::new(1, 0, 0)),
+            zone_id: ZoneId::work(),
+            created_at: 1_700_000_000,
+            provenance: Provenance::new(ZoneId::work()),
+            refs: Vec::new(),
+            foreign_refs: Vec::new(),
+            ttl_secs: None,
+            placement: None,
+        }
+    }
+
+    #[test]
+    fn connector_state_root_stateless_constructor() {
+        let root =
+            ConnectorStateRoot::stateless(test_header(), test_connector_id(), ZoneId::work());
+        assert!(root.model.is_stateless());
+        assert!(root.head.is_none());
+        assert!(root.instance_id.is_none());
+        assert_eq!(root.state_schema_version, 1);
+    }
+
+    #[test]
+    fn connector_state_root_singleton_writer_constructor() {
+        let root = ConnectorStateRoot::singleton_writer(
+            test_header(),
+            test_connector_id(),
+            ZoneId::work(),
+        );
+        assert!(root.model.is_singleton_writer());
+    }
+
+    #[test]
+    fn connector_state_root_crdt_constructor() {
+        let root = ConnectorStateRoot::crdt(
+            test_header(),
+            test_connector_id(),
+            ZoneId::work(),
+            CrdtType::GCounter,
+        );
+        assert!(root.model.is_crdt());
+        assert_eq!(root.model.crdt_type(), Some(CrdtType::GCounter));
+    }
+
+    #[test]
+    fn connector_state_root_with_instance_id() {
+        let root =
+            ConnectorStateRoot::stateless(test_header(), test_connector_id(), ZoneId::work())
+                .with_instance_id(InstanceId::new());
+        assert!(root.instance_id.is_some());
+    }
+
+    #[test]
+    fn connector_state_root_with_head() {
+        let head = test_object_id("head");
+        let root =
+            ConnectorStateRoot::stateless(test_header(), test_connector_id(), ZoneId::work())
+                .with_head(head);
+        assert_eq!(root.head, Some(head));
+    }
+
+    #[test]
+    fn connector_state_object_is_genesis() {
+        let mut header = test_header();
+        let lease_id = test_object_id("lease");
+        header.refs.push(lease_id);
+
+        let genesis = ConnectorStateObject {
+            header: header.clone(),
+            connector_id: test_connector_id(),
+            instance_id: None,
+            zone_id: ZoneId::work(),
+            prev: None,
+            seq: 0,
+            state_cbor: vec![],
+            updated_at: 1_700_000_000,
+            lease_seq: 1,
+            lease_object_id: lease_id,
+            signature: Signature::zero(),
+        };
+        assert!(genesis.is_genesis());
+
+        let non_genesis = ConnectorStateObject {
+            prev: Some(test_object_id("prev")),
+            seq: 1,
+            ..genesis
+        };
+        assert!(!non_genesis.is_genesis());
+    }
+
+    #[test]
+    fn validate_fencing_success() {
+        let lease_id = test_object_id("lease");
+        let mut header = test_header();
+        header.refs.push(lease_id);
+
+        let state_obj = ConnectorStateObject {
+            header,
+            connector_id: test_connector_id(),
+            instance_id: None,
+            zone_id: ZoneId::work(),
+            prev: None,
+            seq: 1,
+            state_cbor: vec![],
+            updated_at: 1_700_000_000,
+            lease_seq: 5,
+            lease_object_id: lease_id,
+            signature: Signature::zero(),
+        };
+
+        // Valid: now < lease_exp, lease_seq >= current_known_seq, lease in refs
+        let result = validate_singleton_writer_fencing(&state_obj, 5, 1_700_000_100, 1_700_001_000);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_fencing_lease_expired() {
+        let lease_id = test_object_id("lease");
+        let mut header = test_header();
+        header.refs.push(lease_id);
+
+        let state_obj = ConnectorStateObject {
+            header,
+            connector_id: test_connector_id(),
+            instance_id: None,
+            zone_id: ZoneId::work(),
+            prev: None,
+            seq: 1,
+            state_cbor: vec![],
+            updated_at: 1_700_000_000,
+            lease_seq: 5,
+            lease_object_id: lease_id,
+            signature: Signature::zero(),
+        };
+
+        let result = validate_singleton_writer_fencing(&state_obj, 5, 1_700_002_000, 1_700_001_000);
+        assert!(matches!(result, Err(FencingError::LeaseExpired { .. })));
+    }
+
+    #[test]
+    fn validate_fencing_stale_seq() {
+        let lease_id = test_object_id("lease");
+        let mut header = test_header();
+        header.refs.push(lease_id);
+
+        let state_obj = ConnectorStateObject {
+            header,
+            connector_id: test_connector_id(),
+            instance_id: None,
+            zone_id: ZoneId::work(),
+            prev: None,
+            seq: 1,
+            state_cbor: vec![],
+            updated_at: 1_700_000_000,
+            lease_seq: 3, // Less than current known seq
+            lease_object_id: lease_id,
+            signature: Signature::zero(),
+        };
+
+        let result =
+            validate_singleton_writer_fencing(&state_obj, 10, 1_700_000_100, 1_700_001_000);
+        assert!(matches!(result, Err(FencingError::StaleLeaseSeq { .. })));
+    }
+
+    #[test]
+    fn validate_fencing_lease_not_in_refs() {
+        let lease_id = test_object_id("lease");
+        let header = test_header(); // No refs
+
+        let state_obj = ConnectorStateObject {
+            header,
+            connector_id: test_connector_id(),
+            instance_id: None,
+            zone_id: ZoneId::work(),
+            prev: None,
+            seq: 1,
+            state_cbor: vec![],
+            updated_at: 1_700_000_000,
+            lease_seq: 5,
+            lease_object_id: lease_id,
+            signature: Signature::zero(),
+        };
+
+        let result = validate_singleton_writer_fencing(&state_obj, 5, 1_700_000_100, 1_700_001_000);
+        assert!(matches!(result, Err(FencingError::LeaseNotFound { .. })));
+    }
+
+    #[test]
+    fn cursor_state_empty_fields() {
+        let state = CursorState {
+            offset: None,
+            last_seen_id: None,
+            watermark: None,
+        };
+        let encoded = state.to_cbor().unwrap();
+        let decoded = CursorState::from_cbor(&encoded).unwrap();
+        assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn fork_resolution_outcome_success() {
+        let fork = ForkEvent::new(
+            test_object_id("prev"),
+            test_object_id("a"),
+            test_object_id("b"),
+            1,
+            1_700_000_000,
+            ZoneId::work(),
+            test_connector_id(),
+        );
+        let outcome = ForkResolutionOutcome::success(
+            fork,
+            ForkResolution::ChooseByLease,
+            test_object_id("a"),
+            1_700_000_001,
+        );
+        assert!(outcome.resolved);
+        assert_eq!(outcome.winning_head, Some(test_object_id("a")));
+        assert!(outcome.failure_reason.is_none());
+    }
+
+    #[test]
+    fn fork_resolution_outcome_failure() {
+        let fork = ForkEvent::new(
+            test_object_id("prev"),
+            test_object_id("a"),
+            test_object_id("b"),
+            1,
+            1_700_000_000,
+            ZoneId::work(),
+            test_connector_id(),
+        );
+        let outcome = ForkResolutionOutcome::failure(
+            fork,
+            ForkResolution::ManualResolution,
+            1_700_000_001,
+            "operator not available",
+        );
+        assert!(!outcome.resolved);
+        assert!(outcome.winning_head.is_none());
+        assert!(outcome.failure_reason.unwrap().contains("operator"));
+    }
+
+    #[test]
+    fn snapshot_config_serde_roundtrip() {
+        let config = SnapshotConfig {
+            snapshot_every_updates: 100,
+            snapshot_every_bytes: 2048,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let back: SnapshotConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.snapshot_every_updates, 100);
+        assert_eq!(back.snapshot_every_bytes, 2048);
+    }
+
+    #[test]
+    fn fork_event_serde_roundtrip() {
+        let fork = ForkEvent::new(
+            test_object_id("prev"),
+            test_object_id("a"),
+            test_object_id("b"),
+            5,
+            1_700_000_000,
+            ZoneId::work(),
+            test_connector_id(),
+        );
+        let json = serde_json::to_string(&fork).unwrap();
+        let back: ForkEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(fork, back);
+    }
+
+    #[test]
+    fn fork_detector_lease_seq_lookup() {
+        let mut detector = StateForkDetector::new();
+        let obj = test_object_id("obj");
+        detector.register(obj, None, 0, 42);
+        assert_eq!(detector.lease_seq(&obj), Some(42));
+
+        let unknown = test_object_id("unknown");
+        assert!(detector.lease_seq(&unknown).is_none());
+    }
+
+    #[test]
+    fn fork_resolve_crdt_merge_returns_failure() {
+        let mut detector = StateForkDetector::new();
+        let genesis = test_object_id("genesis");
+        let branch_a = test_object_id("branch_a");
+        let branch_b = test_object_id("branch_b");
+
+        detector.register(genesis, None, 0, 100);
+        detector.register(branch_a, Some(genesis), 1, 100);
+        detector.register(branch_b, Some(genesis), 1, 100);
+
+        let result = detector.detect_fork(ZoneId::work(), test_connector_id(), 1_700_000_000);
+        let fork = result.fork_event().unwrap();
+
+        let outcome = detector.resolve(
+            fork,
+            ForkResolution::CrdtMerge,
+            &ConnectorStateModel::Crdt {
+                crdt_type: CrdtType::LwwMap,
+            },
+            1_700_000_001,
+        );
+        assert!(!outcome.resolved);
+        assert!(outcome.failure_reason.unwrap().contains("delta-level"));
+    }
+
+    #[test]
+    fn fork_resolve_lease_tie() {
+        let mut detector = StateForkDetector::new();
+        let genesis = test_object_id("genesis");
+        let branch_a = test_object_id("branch_a");
+        let branch_b = test_object_id("branch_b");
+
+        detector.register(genesis, None, 0, 100);
+        detector.register(branch_a, Some(genesis), 1, 100); // Same lease_seq
+        detector.register(branch_b, Some(genesis), 1, 100); // Same lease_seq
+
+        let result = detector.detect_fork(ZoneId::work(), test_connector_id(), 1_700_000_000);
+        let fork = result.fork_event().unwrap();
+
+        let outcome = detector.resolve(
+            fork,
+            ForkResolution::ChooseByLease,
+            &ConnectorStateModel::SingletonWriter,
+            1_700_000_001,
+        );
+        assert!(!outcome.resolved);
+        assert!(outcome.failure_reason.unwrap().contains("tie"));
+    }
+
     #[test]
     fn state_fork_detection_result_serde() {
         let no_fork = StateForkDetectionResult::NoFork {

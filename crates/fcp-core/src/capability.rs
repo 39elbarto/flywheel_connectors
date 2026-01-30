@@ -1889,6 +1889,542 @@ mod tests {
         }
     }
 
+    // ── validate_canonical_id ────────────────────────────────────────────
+
+    #[test]
+    fn canonical_id_rejects_empty() {
+        assert_eq!(validate_canonical_id(""), Err(IdValidationError::Empty));
+    }
+
+    #[test]
+    fn canonical_id_rejects_too_long() {
+        let long = "a".repeat(129);
+        assert!(matches!(
+            validate_canonical_id(&long),
+            Err(IdValidationError::TooLong { len: 129, max: 128 })
+        ));
+        // Exactly 128 should be ok
+        let exact = "a".repeat(128);
+        assert!(validate_canonical_id(&exact).is_ok());
+    }
+
+    #[test]
+    fn canonical_id_rejects_non_ascii() {
+        assert_eq!(
+            validate_canonical_id("héllo"),
+            Err(IdValidationError::NonAscii)
+        );
+    }
+
+    #[test]
+    fn canonical_id_rejects_invalid_start_char() {
+        assert!(matches!(
+            validate_canonical_id(".test"),
+            Err(IdValidationError::InvalidStartChar { ch: '.' })
+        ));
+        assert!(matches!(
+            validate_canonical_id("-test"),
+            Err(IdValidationError::InvalidStartChar { ch: '-' })
+        ));
+    }
+
+    #[test]
+    fn canonical_id_rejects_invalid_char() {
+        assert!(matches!(
+            validate_canonical_id("test@value"),
+            Err(IdValidationError::InvalidChar { ch: '@', .. })
+        ));
+        assert!(matches!(
+            validate_canonical_id("test value"),
+            Err(IdValidationError::InvalidChar { ch: ' ', .. })
+        ));
+    }
+
+    #[test]
+    fn canonical_id_allows_all_valid_chars() {
+        assert!(validate_canonical_id("abc.def_ghi:jkl-mno").is_ok());
+        assert!(validate_canonical_id("0123456789").is_ok());
+        assert!(validate_canonical_id("a:b:c").is_ok());
+    }
+
+    // ── Identifier types ───────────────────────────────────────────────────
+
+    #[test]
+    fn capability_id_serde_roundtrip() {
+        let id = CapabilityId::new("cap.read").unwrap();
+        let json = serde_json::to_string(&id).unwrap();
+        let back: CapabilityId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn capability_id_display() {
+        let id = CapabilityId::new("cap.read").unwrap();
+        assert_eq!(id.to_string(), "cap.read");
+    }
+
+    #[test]
+    fn capability_id_from_str() {
+        let id: CapabilityId = "cap.write".parse().unwrap();
+        assert_eq!(id.as_str(), "cap.write");
+        assert!("BAD".parse::<CapabilityId>().is_err());
+    }
+
+    #[test]
+    fn connector_id_three_part() {
+        let id = ConnectorId::new("gmail", "fcp2", "1.0").unwrap();
+        assert_eq!(id.as_str(), "gmail:fcp2:1.0");
+    }
+
+    #[test]
+    fn connector_id_from_static() {
+        let id = ConnectorId::from_static("test:conn:v1");
+        assert_eq!(id.as_str(), "test:conn:v1");
+    }
+
+    #[test]
+    fn connector_id_serde_roundtrip() {
+        let id = ConnectorId::from_static("discord:fcp2:1.0");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: ConnectorId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn instance_id_is_unique() {
+        let a = InstanceId::new();
+        let b = InstanceId::new();
+        assert_ne!(a.as_str(), b.as_str());
+    }
+
+    #[test]
+    fn instance_id_default_same_as_new() {
+        let d = InstanceId::default();
+        assert!(d.as_str().starts_with("inst_"));
+    }
+
+    #[test]
+    fn operation_id_from_static() {
+        let id = OperationId::from_static("op.send");
+        assert_eq!(id.as_str(), "op.send");
+    }
+
+    #[test]
+    fn operation_id_serde_roundtrip() {
+        let id = OperationId::new("op.test").unwrap();
+        let json = serde_json::to_string(&id).unwrap();
+        let back: OperationId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn principal_id_serde_roundtrip() {
+        let id = PrincipalId::new("user:alice").unwrap();
+        let json = serde_json::to_string(&id).unwrap();
+        let back: PrincipalId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    // ── ZoneId ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn zone_id_standard_zones() {
+        assert_eq!(ZoneId::owner().as_str(), "z:owner");
+        assert_eq!(ZoneId::private().as_str(), "z:private");
+        assert_eq!(ZoneId::work().as_str(), "z:work");
+        assert_eq!(ZoneId::community().as_str(), "z:community");
+        assert_eq!(ZoneId::public().as_str(), "z:public");
+    }
+
+    #[test]
+    fn zone_id_parse_valid() {
+        let z: ZoneId = "z:work".parse().unwrap();
+        assert_eq!(z.as_str(), "z:work");
+    }
+
+    #[test]
+    fn zone_id_rejects_missing_prefix() {
+        assert!(matches!(
+            "work".parse::<ZoneId>(),
+            Err(ZoneIdError::MissingPrefix)
+        ));
+    }
+
+    #[test]
+    fn zone_id_rejects_empty() {
+        assert!(matches!("".parse::<ZoneId>(), Err(ZoneIdError::Empty)));
+    }
+
+    #[test]
+    fn zone_id_rejects_too_long() {
+        let long = format!("z:{}", "a".repeat(63));
+        assert!(matches!(
+            long.parse::<ZoneId>(),
+            Err(ZoneIdError::TooLong { .. })
+        ));
+    }
+
+    #[test]
+    fn zone_id_hash_deterministic() {
+        let z1 = ZoneId::work();
+        let z2 = ZoneId::work();
+        assert_eq!(z1.hash().as_bytes(), z2.hash().as_bytes());
+    }
+
+    #[test]
+    fn zone_id_hash_differs_across_zones() {
+        assert_ne!(
+            ZoneId::work().hash().as_bytes(),
+            ZoneId::owner().hash().as_bytes()
+        );
+    }
+
+    #[test]
+    fn zone_id_to_tailscale_tag() {
+        assert_eq!(ZoneId::work().to_tailscale_tag(), "tag:fcp-work");
+        assert_eq!(ZoneId::owner().to_tailscale_tag(), "tag:fcp-owner");
+    }
+
+    #[test]
+    fn zone_id_from_tailscale_tag() {
+        let z = ZoneId::from_tailscale_tag("tag:fcp-work").unwrap();
+        assert_eq!(z.as_str(), "z:work");
+    }
+
+    #[test]
+    fn zone_id_from_tailscale_tag_rejects_invalid() {
+        assert!(matches!(
+            ZoneId::from_tailscale_tag("tag:wrong-work"),
+            Err(ZoneIdError::InvalidTailscaleTagPrefix)
+        ));
+    }
+
+    #[test]
+    fn zone_id_serde_roundtrip() {
+        let z = ZoneId::work();
+        let json = serde_json::to_string(&z).unwrap();
+        let back: ZoneId = serde_json::from_str(&json).unwrap();
+        assert_eq!(z, back);
+    }
+
+    // ── RateLimit ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn rate_limit_validate_ok() {
+        let rl = RateLimit {
+            max: 10,
+            per_ms: 60_000,
+            burst: Some(5),
+            scope: Some("per_zone".into()),
+            pool_name: Some("api".into()),
+        };
+        assert!(rl.validate().is_ok());
+    }
+
+    #[test]
+    fn rate_limit_validate_zero_max() {
+        let rl = RateLimit {
+            max: 0,
+            per_ms: 1000,
+            burst: None,
+            scope: None,
+            pool_name: None,
+        };
+        assert_eq!(rl.validate(), Err(RateLimitValidationError::ZeroMax));
+    }
+
+    #[test]
+    fn rate_limit_validate_zero_period() {
+        let rl = RateLimit {
+            max: 10,
+            per_ms: 0,
+            burst: None,
+            scope: None,
+            pool_name: None,
+        };
+        assert_eq!(rl.validate(), Err(RateLimitValidationError::ZeroPeriod));
+    }
+
+    #[test]
+    fn rate_limit_validate_invalid_scope() {
+        let rl = RateLimit {
+            max: 10,
+            per_ms: 1000,
+            burst: None,
+            scope: Some("bad".into()),
+            pool_name: None,
+        };
+        assert!(matches!(
+            rl.validate(),
+            Err(RateLimitValidationError::InvalidScope { .. })
+        ));
+    }
+
+    #[test]
+    fn rate_limit_validate_empty_pool_name() {
+        let rl = RateLimit {
+            max: 10,
+            per_ms: 1000,
+            burst: None,
+            scope: None,
+            pool_name: Some(String::new()),
+        };
+        assert_eq!(rl.validate(), Err(RateLimitValidationError::EmptyPoolName));
+    }
+
+    #[test]
+    fn rate_limit_validate_invalid_pool_name() {
+        let rl = RateLimit {
+            max: 10,
+            per_ms: 1000,
+            burst: None,
+            scope: None,
+            pool_name: Some("a b".into()),
+        };
+        assert!(matches!(
+            rl.validate(),
+            Err(RateLimitValidationError::InvalidPoolName { .. })
+        ));
+    }
+
+    #[test]
+    fn rate_limit_parsed_scope_default() {
+        let rl = RateLimit {
+            max: 10,
+            per_ms: 1000,
+            burst: None,
+            scope: None,
+            pool_name: None,
+        };
+        assert_eq!(rl.parsed_scope(), OperationRateLimitScope::PerConnector);
+    }
+
+    #[test]
+    fn rate_limit_parsed_scope_explicit() {
+        let rl = RateLimit {
+            max: 10,
+            per_ms: 1000,
+            burst: None,
+            scope: Some("per_principal".into()),
+            pool_name: None,
+        };
+        assert_eq!(rl.parsed_scope(), OperationRateLimitScope::PerPrincipal);
+    }
+
+    // ── OperationRateLimitScope ────────────────────────────────────────────
+
+    #[test]
+    fn operation_rate_limit_scope_from_str() {
+        assert_eq!(
+            "per_connector".parse::<OperationRateLimitScope>().unwrap(),
+            OperationRateLimitScope::PerConnector
+        );
+        assert_eq!(
+            "per_zone".parse::<OperationRateLimitScope>().unwrap(),
+            OperationRateLimitScope::PerZone
+        );
+        assert_eq!(
+            "per_principal".parse::<OperationRateLimitScope>().unwrap(),
+            OperationRateLimitScope::PerPrincipal
+        );
+        assert!("invalid".parse::<OperationRateLimitScope>().is_err());
+    }
+
+    #[test]
+    fn operation_rate_limit_scope_display() {
+        assert_eq!(
+            OperationRateLimitScope::PerConnector.to_string(),
+            "per_connector"
+        );
+        assert_eq!(OperationRateLimitScope::PerZone.to_string(), "per_zone");
+        assert_eq!(
+            OperationRateLimitScope::PerPrincipal.to_string(),
+            "per_principal"
+        );
+    }
+
+    #[test]
+    fn operation_rate_limit_scope_default() {
+        assert_eq!(
+            OperationRateLimitScope::default(),
+            OperationRateLimitScope::PerConnector
+        );
+    }
+
+    // ── RetryConfig ────────────────────────────────────────────────────────
+
+    #[test]
+    fn retry_config_default_values() {
+        let cfg = RetryConfig::default();
+        assert_eq!(cfg.max_attempts, 3);
+        assert_eq!(cfg.initial_delay, std::time::Duration::from_millis(100));
+        assert_eq!(cfg.max_delay, std::time::Duration::from_secs(30));
+        assert!((cfg.multiplier - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn retry_config_serde_roundtrip() {
+        let cfg = RetryConfig::default();
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: RetryConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.max_attempts, cfg.max_attempts);
+    }
+
+    // ── TrustLevel ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn trust_level_ordering() {
+        assert!(TrustLevel::Blocked < TrustLevel::Anonymous);
+        assert!(TrustLevel::Anonymous < TrustLevel::Untrusted);
+        assert!(TrustLevel::Untrusted < TrustLevel::Paired);
+        assert!(TrustLevel::Paired < TrustLevel::Admin);
+        assert!(TrustLevel::Admin < TrustLevel::Owner);
+    }
+
+    #[test]
+    fn trust_level_serde_roundtrip() {
+        for level in [
+            TrustLevel::Blocked,
+            TrustLevel::Anonymous,
+            TrustLevel::Untrusted,
+            TrustLevel::Paired,
+            TrustLevel::Admin,
+            TrustLevel::Owner,
+        ] {
+            let json = serde_json::to_string(&level).unwrap();
+            let back: TrustLevel = serde_json::from_str(&json).unwrap();
+            assert_eq!(level, back);
+        }
+    }
+
+    // ── TaintLevel ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn taint_level_default_is_untainted() {
+        assert_eq!(TaintLevel::default(), TaintLevel::Untainted);
+    }
+
+    #[test]
+    fn taint_level_ordering() {
+        assert!(TaintLevel::Untainted < TaintLevel::Tainted);
+        assert!(TaintLevel::Tainted < TaintLevel::HighlyTainted);
+    }
+
+    // ── Provenance ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn provenance_new_is_untainted() {
+        let p = Provenance::new(ZoneId::work());
+        assert!(!p.is_tainted());
+        assert!(p.can_access_higher_trust());
+        assert_eq!(p.origin_zone.as_str(), "z:work");
+    }
+
+    #[test]
+    fn provenance_tainted() {
+        let p = Provenance::tainted(ZoneId::public());
+        assert!(p.is_tainted());
+        assert!(!p.can_access_higher_trust());
+    }
+
+    #[test]
+    fn provenance_highly_tainted() {
+        let p = Provenance::highly_tainted(ZoneId::public());
+        assert!(p.is_tainted());
+        assert_eq!(p.taint, TaintLevel::HighlyTainted);
+    }
+
+    #[test]
+    fn provenance_elevated_can_access_higher() {
+        let p = Provenance::tainted(ZoneId::public()).elevated_with("token-123");
+        assert!(p.is_tainted());
+        assert!(p.elevated);
+        assert!(p.can_access_higher_trust());
+    }
+
+    #[test]
+    fn provenance_with_step() {
+        let step = ProvenanceStep {
+            timestamp_ms: 1000,
+            zone: ZoneId::work(),
+            actor: "agent:bot".into(),
+            action: "invoke".into(),
+            resource: "cap.read".into(),
+        };
+        let p = Provenance::new(ZoneId::work()).with_step(step);
+        assert_eq!(p.chain.len(), 1);
+    }
+
+    // ── IdempotencyClass ───────────────────────────────────────────────────
+
+    #[test]
+    fn idempotency_class_serde_roundtrip() {
+        for class in [
+            IdempotencyClass::None,
+            IdempotencyClass::BestEffort,
+            IdempotencyClass::Strict,
+        ] {
+            let json = serde_json::to_string(&class).unwrap();
+            let back: IdempotencyClass = serde_json::from_str(&json).unwrap();
+            assert_eq!(class, back);
+        }
+    }
+
+    // ── CorrelationId / SessionId ──────────────────────────────────────────
+
+    #[test]
+    fn correlation_id_unique() {
+        let a = CorrelationId::new();
+        let b = CorrelationId::new();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn session_id_unique() {
+        let a = SessionId::new();
+        let b = SessionId::new();
+        assert_ne!(a, b);
+    }
+
+    // ── CapabilityGrant ────────────────────────────────────────────────────
+
+    #[test]
+    fn capability_grant_serde_roundtrip() {
+        let grant = CapabilityGrant {
+            capability: CapabilityId::new("cap.read").unwrap(),
+            operation: Some(OperationId::new("op.list").unwrap()),
+        };
+        let json = serde_json::to_string(&grant).unwrap();
+        let back: CapabilityGrant = serde_json::from_str(&json).unwrap();
+        assert_eq!(grant, back);
+    }
+
+    #[test]
+    fn capability_grant_omits_none_operation() {
+        let grant = CapabilityGrant {
+            capability: CapabilityId::new("cap.all").unwrap(),
+            operation: None,
+        };
+        let json = serde_json::to_string(&grant).unwrap();
+        assert!(!json.contains("operation"));
+    }
+
+    // ── RiskLevel ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn risk_level_serde_roundtrip() {
+        for level in [
+            RiskLevel::Low,
+            RiskLevel::Medium,
+            RiskLevel::High,
+            RiskLevel::Critical,
+        ] {
+            let json = serde_json::to_string(&level).unwrap();
+            let back: RiskLevel = serde_json::from_str(&json).unwrap();
+            assert_eq!(level, back);
+        }
+    }
+
     #[test]
     fn risk_level_vs_safety_tier_are_distinct() {
         // RiskLevel: UX/prioritization (Low, Medium, High, Critical)

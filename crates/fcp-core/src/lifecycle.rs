@@ -1061,6 +1061,281 @@ mod tests {
         );
     }
 
+    // ── Additional coverage ──
+
+    #[test]
+    fn lifecycle_state_default_is_pending() {
+        assert_eq!(LifecycleState::default(), LifecycleState::Pending);
+    }
+
+    #[test]
+    fn lifecycle_state_can_start_canary() {
+        assert!(LifecycleState::Pending.can_start_canary());
+        assert!(LifecycleState::Installing.can_start_canary());
+        assert!(LifecycleState::RolledBack.can_start_canary());
+        assert!(!LifecycleState::Canary.can_start_canary());
+        assert!(!LifecycleState::Production.can_start_canary());
+        assert!(!LifecycleState::Disabled.can_start_canary());
+        assert!(!LifecycleState::Uninstalled.can_start_canary());
+    }
+
+    #[test]
+    fn lifecycle_state_as_str_all_variants() {
+        assert_eq!(LifecycleState::Pending.as_str(), "pending");
+        assert_eq!(LifecycleState::Installing.as_str(), "installing");
+        assert_eq!(LifecycleState::Canary.as_str(), "canary");
+        assert_eq!(LifecycleState::Production.as_str(), "production");
+        assert_eq!(LifecycleState::RolledBack.as_str(), "rolled_back");
+        assert_eq!(LifecycleState::Disabled.as_str(), "disabled");
+        assert_eq!(LifecycleState::Uninstalled.as_str(), "uninstalled");
+    }
+
+    #[test]
+    fn lifecycle_error_display() {
+        let err = LifecycleError::InvalidTransition {
+            from: LifecycleState::Pending,
+            to: LifecycleState::Production,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("pending"));
+        assert!(msg.contains("production"));
+
+        let err = LifecycleError::InvalidPolicy {
+            reason: "bad threshold".into(),
+        };
+        assert!(err.to_string().contains("bad threshold"));
+
+        let err = LifecycleError::NotFound {
+            connector_id: test_connector_id(),
+        };
+        assert!(err.to_string().contains("not found"));
+
+        let err = LifecycleError::NoRollbackTarget;
+        assert!(err.to_string().contains("rollback"));
+    }
+
+    #[test]
+    fn lifecycle_transition_with_initiator() {
+        let t = LifecycleTransition::new(
+            LifecycleState::Canary,
+            LifecycleState::Production,
+            TransitionReason::ManualPromotion,
+        )
+        .with_initiator("operator@example.com");
+        assert_eq!(t.initiated_by.as_deref(), Some("operator@example.com"));
+    }
+
+    #[test]
+    fn lifecycle_record_with_previous_version() {
+        let record = LifecycleRecord::new(test_connector_id(), test_version())
+            .with_previous_version(semver::Version::new(0, 9, 0));
+        assert_eq!(record.previous_version, Some(semver::Version::new(0, 9, 0)));
+    }
+
+    #[test]
+    fn lifecycle_record_reset_health() {
+        let mut record = LifecycleRecord::new(test_connector_id(), test_version());
+        record.update_health(true, Some(100));
+        record.update_health(false, Some(200));
+        assert_eq!(record.health.samples, 2);
+
+        record.reset_health();
+        assert_eq!(record.health.samples, 0);
+        assert_eq!(record.health.successes, 0);
+        assert_eq!(record.health.failures, 0);
+    }
+
+    #[test]
+    fn health_metrics_default_values() {
+        let metrics = HealthMetrics::default();
+        assert_eq!(metrics.successes, 0);
+        assert_eq!(metrics.failures, 0);
+        assert_eq!(metrics.samples, 0);
+        assert_eq!(metrics.success_rate, 100); // Optimistic default
+        assert_eq!(metrics.total_latency_ms, 0);
+        assert_eq!(metrics.max_latency_ms, 0);
+    }
+
+    #[test]
+    fn health_metrics_avg_latency_zero_samples() {
+        let metrics = HealthMetrics::default();
+        assert!(metrics.avg_latency_ms().is_none());
+    }
+
+    #[test]
+    fn canary_policy_validate_invalid_duration() {
+        let policy = CanaryPolicy {
+            min_canary_duration_secs: 3600,
+            max_canary_duration_secs: 300, // Less than min!
+            ..Default::default()
+        };
+        assert!(matches!(
+            policy.validate(),
+            Err(LifecycleError::InvalidPolicy { .. })
+        ));
+    }
+
+    #[test]
+    fn canary_policy_serde_roundtrip() {
+        let policy = CanaryPolicy::new()
+            .with_promotion_threshold(99)
+            .with_rollback_threshold(70)
+            .with_min_samples(50)
+            .with_min_canary_duration(120)
+            .with_canary_traffic_percent(5);
+        let json = serde_json::to_string(&policy).unwrap();
+        let back: CanaryPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.promotion_threshold, 99);
+        assert_eq!(back.rollback_threshold, 70);
+        assert_eq!(back.min_samples, 50);
+        assert_eq!(back.min_canary_duration_secs, 120);
+        assert_eq!(back.canary_traffic_percent, 5);
+    }
+
+    #[test]
+    fn transition_production_to_rolled_back() {
+        let mut record = LifecycleRecord::new(test_connector_id(), test_version());
+        record
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
+            .unwrap();
+        record
+            .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
+            .unwrap();
+        record
+            .transition(
+                LifecycleState::Production,
+                TransitionReason::ManualPromotion,
+            )
+            .unwrap();
+        record
+            .transition(
+                LifecycleState::RolledBack,
+                TransitionReason::ManualRollback {
+                    reason: Some("regression found".into()),
+                },
+            )
+            .unwrap();
+        assert_eq!(record.state, LifecycleState::RolledBack);
+    }
+
+    #[test]
+    fn transition_to_disabled() {
+        let mut record = LifecycleRecord::new(test_connector_id(), test_version());
+        record
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
+            .unwrap();
+        record
+            .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
+            .unwrap();
+        record
+            .transition(
+                LifecycleState::Disabled,
+                TransitionReason::Disabled {
+                    reason: "maintenance".into(),
+                },
+            )
+            .unwrap();
+        assert_eq!(record.state, LifecycleState::Disabled);
+    }
+
+    #[test]
+    fn transition_to_uninstalled() {
+        let mut record = LifecycleRecord::new(test_connector_id(), test_version());
+        record
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
+            .unwrap();
+        record
+            .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
+            .unwrap();
+        record
+            .transition(LifecycleState::Uninstalled, TransitionReason::Uninstalled)
+            .unwrap();
+        assert_eq!(record.state, LifecycleState::Uninstalled);
+    }
+
+    #[test]
+    fn transition_reason_display_all_variants() {
+        assert_eq!(
+            TransitionReason::InstallComplete.to_string(),
+            "installation completed"
+        );
+        assert_eq!(
+            TransitionReason::ManualRollback { reason: None }.to_string(),
+            "manual rollback"
+        );
+        assert_eq!(
+            TransitionReason::ManualRollback {
+                reason: Some("oops".into())
+            }
+            .to_string(),
+            "manual rollback: oops"
+        );
+        assert_eq!(
+            TransitionReason::Disabled {
+                reason: "maintenance".into()
+            }
+            .to_string(),
+            "disabled: maintenance"
+        );
+        assert_eq!(TransitionReason::Uninstalled.to_string(), "uninstalled");
+        assert_eq!(
+            TransitionReason::NewVersion {
+                from_version: "1.0.0".into(),
+                to_version: "2.0.0".into()
+            }
+            .to_string(),
+            "new version: 1.0.0 -> 2.0.0"
+        );
+    }
+
+    #[test]
+    fn update_health_no_latency() {
+        let mut record = LifecycleRecord::new(test_connector_id(), test_version());
+        record.update_health(true, None);
+        assert_eq!(record.health.samples, 1);
+        assert_eq!(record.health.successes, 1);
+        assert_eq!(record.health.total_latency_ms, 0);
+        assert_eq!(record.health.max_latency_ms, 0);
+    }
+
+    #[test]
+    fn should_not_auto_promote_when_not_canary() {
+        let mut record = LifecycleRecord::new(test_connector_id(), test_version())
+            .with_canary_policy(
+                CanaryPolicy::new()
+                    .with_promotion_threshold(90)
+                    .with_min_samples(1)
+                    .with_min_canary_duration(0),
+            );
+
+        record.update_health(true, Some(100));
+        // Still in Pending state
+        assert!(!record.should_auto_promote());
+    }
+
+    #[test]
+    fn should_not_auto_rollback_when_not_canary() {
+        let mut record = LifecycleRecord::new(test_connector_id(), test_version())
+            .with_canary_policy(
+                CanaryPolicy::new()
+                    .with_rollback_threshold(80)
+                    .with_min_samples(1),
+            );
+
+        record.update_health(false, Some(100));
+        // Still in Pending state
+        assert!(!record.should_auto_rollback());
+    }
+
     #[test]
     fn transition_reason_serde_roundtrip() {
         let reasons = [

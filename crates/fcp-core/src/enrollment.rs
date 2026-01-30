@@ -1060,6 +1060,150 @@ mod tests {
         }
     }
 
+    // ── Additional coverage ──
+
+    #[test]
+    fn device_id_from_string() {
+        let id: DeviceId = String::from("string-device").into();
+        assert_eq!(id.as_str(), "string-device");
+    }
+
+    #[test]
+    fn device_id_equality() {
+        let a = DeviceId::new("same");
+        let b = DeviceId::new("same");
+        let c = DeviceId::new("different");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn device_metadata_serde_roundtrip() {
+        let meta = DeviceMetadata::new()
+            .with_display_name("Test")
+            .with_hostname("h")
+            .with_os("Linux")
+            .with_arch("arm64")
+            .with_device_class("mobile")
+            .with_tag("t1")
+            .with_tag("t2");
+        let json = serde_json::to_string(&meta).unwrap();
+        let back: DeviceMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(meta, back);
+    }
+
+    #[test]
+    fn key_type_serde_roundtrip() {
+        for kt in [KeyType::Signing, KeyType::Encryption, KeyType::Issuance] {
+            let json = serde_json::to_string(&kt).unwrap();
+            let back: KeyType = serde_json::from_str(&json).unwrap();
+            assert_eq!(kt, back);
+        }
+        // Verify snake_case
+        let json = serde_json::to_string(&KeyType::Signing).unwrap();
+        assert!(json.contains("signing"));
+    }
+
+    #[test]
+    fn key_rotation_schedule_serde_roundtrip() {
+        let schedule = KeyRotationSchedule::new()
+            .with_signing_rotation(12)
+            .with_encryption_rotation(6)
+            .with_issuance_rotation(48)
+            .with_max_age(720)
+            .with_overlap(4);
+        let json = serde_json::to_string(&schedule).unwrap();
+        let back: KeyRotationSchedule = serde_json::from_str(&json).unwrap();
+        assert_eq!(schedule, back);
+    }
+
+    #[test]
+    fn key_rotation_needs_rotation_all_types() {
+        let schedule = KeyRotationSchedule::new()
+            .with_signing_rotation(1)
+            .with_encryption_rotation(2)
+            .with_issuance_rotation(3);
+
+        let old_90_min = Utc::now() - chrono::Duration::minutes(90);
+
+        // 90 min old: signing (1h) needs rotation, encryption (2h) doesn't, issuance (3h) doesn't
+        assert!(schedule.needs_rotation(KeyType::Signing, old_90_min));
+        assert!(!schedule.needs_rotation(KeyType::Encryption, old_90_min));
+        assert!(!schedule.needs_rotation(KeyType::Issuance, old_90_min));
+    }
+
+    #[test]
+    fn enrollment_approval_remaining_validity_positive() {
+        let (signing_secret, signing_key, encryption_key, issuance_key) = create_test_keys();
+        let owner_key = Ed25519SigningKey::generate();
+
+        let request = DeviceEnrollmentRequest::new(
+            "test-device",
+            signing_key,
+            encryption_key,
+            issuance_key,
+            DeviceMetadata::default(),
+            &signing_secret,
+        )
+        .unwrap();
+
+        let approval = DeviceEnrollmentApproval::sign(
+            &owner_key,
+            &request,
+            ZoneId::work(),
+            vec![],
+            create_test_manifest(),
+            168,
+        )
+        .unwrap();
+
+        assert!(approval.remaining_validity().num_hours() > 0);
+        assert!(!approval.is_expired());
+    }
+
+    #[test]
+    fn enrollment_constants() {
+        assert_eq!(DEFAULT_ENROLLMENT_VALIDITY_HOURS, 168); // 7 days
+        assert_eq!(DEFAULT_KEY_ROTATION_HOURS, 24);
+    }
+
+    #[test]
+    fn enrollment_request_serde_roundtrip() {
+        let (signing_secret, signing_key, encryption_key, issuance_key) = create_test_keys();
+
+        let request = DeviceEnrollmentRequest::new(
+            "serde-test",
+            signing_key,
+            encryption_key,
+            issuance_key,
+            DeviceMetadata::new().with_hostname("test-host"),
+            &signing_secret,
+        )
+        .unwrap();
+
+        let json = serde_json::to_string(&request).unwrap();
+        let back: DeviceEnrollmentRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.device_id, request.device_id);
+        assert_eq!(back.signing_key, request.signing_key);
+        assert_eq!(back.encryption_key, request.encryption_key);
+        assert_eq!(back.metadata.hostname, request.metadata.hostname);
+    }
+
+    #[test]
+    fn key_rotation_schedule_default_issuance_is_weekly() {
+        let schedule = KeyRotationSchedule::default();
+        assert_eq!(
+            schedule.issuance_key_rotation_hours,
+            DEFAULT_KEY_ROTATION_HOURS * 7
+        );
+    }
+
+    #[test]
+    fn key_rotation_schedule_default_max_age_monthly() {
+        let schedule = KeyRotationSchedule::default();
+        assert_eq!(schedule.max_key_age_hours, DEFAULT_KEY_ROTATION_HOURS * 30);
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // Golden Vector Tests
     // ─────────────────────────────────────────────────────────────────────────

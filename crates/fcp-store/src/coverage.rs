@@ -224,6 +224,28 @@ impl CoverageEvaluation {
         true
     }
 
+    /// Calculate source diversity in basis points relative to the required minimum.
+    ///
+    /// When `min_diversity` is 0, returns 10000 (no requirement).
+    #[must_use]
+    pub const fn diversity_bps(&self, min_diversity: u8) -> u32 {
+        if min_diversity == 0 {
+            return 10_000;
+        }
+
+        let required = min_diversity as u64;
+        let actual = self.distinct_nodes as u64;
+
+        if actual >= required {
+            10_000
+        } else {
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                ((actual * 10_000) / required) as u32
+            }
+        }
+    }
+
     /// Calculate how many additional source nodes are needed to meet diversity requirements.
     #[must_use]
     pub const fn diversity_deficit(&self, min_diversity: u8) -> u8 {

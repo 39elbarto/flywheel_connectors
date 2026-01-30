@@ -71,12 +71,20 @@ pub fn init_metrics() {
         "Number of distinct nodes holding symbols for an object"
     );
     describe_gauge!(
+        "fcp_symbol_source_count",
+        "Number of distinct source nodes holding symbols for an object"
+    );
+    describe_gauge!(
         "fcp_symbol_coverage_bps",
         "Symbol coverage ratio in basis points (10000 = 100%)"
     );
     describe_gauge!(
         "fcp_symbol_max_node_fraction_bps",
         "Maximum symbol fraction on any single node in basis points"
+    );
+    describe_gauge!(
+        "fcp_symbol_diversity_bps",
+        "Source diversity in basis points relative to policy requirement"
     );
     describe_counter!(
         "fcp_symbol_diversity_violations_total",
@@ -358,9 +366,15 @@ pub fn record_symbol_coverage(
     distinct_nodes: usize,
     coverage_bps: u32,
     max_node_fraction_bps: u16,
+    diversity_bps: u32,
 ) {
     set_gauge(
         "fcp_symbol_coverage_distinct_nodes",
+        distinct_nodes as f64,
+        &[("zone", zone_id)],
+    );
+    set_gauge(
+        "fcp_symbol_source_count",
         distinct_nodes as f64,
         &[("zone", zone_id)],
     );
@@ -372,6 +386,11 @@ pub fn record_symbol_coverage(
     set_gauge(
         "fcp_symbol_max_node_fraction_bps",
         f64::from(max_node_fraction_bps),
+        &[("zone", zone_id)],
+    );
+    set_gauge(
+        "fcp_symbol_diversity_bps",
+        f64::from(diversity_bps),
         &[("zone", zone_id)],
     );
     increment_counter(
@@ -776,17 +795,17 @@ mod tests {
 
     #[test]
     fn test_record_symbol_coverage_no_panic() {
-        record_symbol_coverage("z:work", 3, 10000, 4000);
+        record_symbol_coverage("z:work", 3, 10000, 4000, 10000);
     }
 
     #[test]
     fn test_record_symbol_coverage_various_values() {
         // Minimal coverage
-        record_symbol_coverage("z:minimal", 1, 1000, 10000);
+        record_symbol_coverage("z:minimal", 1, 1000, 10000, 2500);
         // Over-coverage
-        record_symbol_coverage("z:over", 5, 15000, 2000);
+        record_symbol_coverage("z:over", 5, 15000, 2000, 10000);
         // No coverage
-        record_symbol_coverage("z:empty", 0, 0, 0);
+        record_symbol_coverage("z:empty", 0, 0, 0, 0);
     }
 
     #[test]
@@ -807,7 +826,7 @@ mod tests {
     #[test]
     fn test_symbol_coverage_with_long_zone_id() {
         let long_zone = "z:".to_string() + &"a".repeat(100);
-        record_symbol_coverage(&long_zone, 3, 10000, 4000);
+        record_symbol_coverage(&long_zone, 3, 10000, 4000, 10000);
     }
 
     #[test]

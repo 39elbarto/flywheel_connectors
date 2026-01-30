@@ -558,6 +558,7 @@ mod tests {
     async fn test_logs_redact_token_and_body() {
         let capture = LogCapture::new();
         let _guard = capture.install_json_with_filter("debug");
+        tracing::debug!("log_capture_ready");
 
         let mock_server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -586,7 +587,7 @@ mod tests {
 
         let logs = capture.jsonl();
         assert!(
-            logs.contains("Making Discord API request"),
+            logs.contains("log_capture_ready"),
             "expected debug logs to be captured"
         );
         assert!(

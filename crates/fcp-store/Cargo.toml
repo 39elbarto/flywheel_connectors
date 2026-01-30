@@ -24,6 +24,7 @@ raptorq.workspace = true
 # Internal crates
 fcp-core = { path = "../fcp-core" }
 fcp-raptorq = { path = "../fcp-raptorq" }
+fcp-telemetry = { path = "../fcp-telemetry" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

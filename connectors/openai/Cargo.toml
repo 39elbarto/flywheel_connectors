@@ -38,3 +38,4 @@ uuid.workspace = true
 wiremock.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 fcp-crypto = { path = "../../crates/fcp-crypto" }
+fcp-testkit = { path = "../../crates/fcp-testkit" }

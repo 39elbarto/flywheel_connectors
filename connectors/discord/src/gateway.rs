@@ -53,6 +53,7 @@ pub enum GatewayOpcode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn gateway_opcode_try_from_known_values() {
@@ -64,6 +65,66 @@ mod tests {
     #[test]
     fn gateway_opcode_try_from_unknown_is_err() {
         assert!(GatewayOpcode::try_from(42).is_err());
+    }
+
+    #[test]
+    fn dispatch_event_updates_state_on_ready() {
+        let mut state = GatewayState::default();
+        let data = json!({
+            "v": 10,
+            "user": { "id": "123", "username": "bot" },
+            "session_id": "sess-1",
+            "resume_gateway_url": "wss://gateway.discord.gg"
+        });
+
+        let event = dispatch_event("READY".to_string(), data, &mut state).unwrap();
+
+        match event {
+            GatewayEvent::Ready(ready) => {
+                assert_eq!(ready.session_id, "sess-1");
+            }
+            _ => panic!("expected READY event"),
+        }
+
+        assert_eq!(state.session_id.as_deref(), Some("sess-1"));
+        assert_eq!(
+            state.resume_url.as_deref(),
+            Some("wss://gateway.discord.gg")
+        );
+    }
+
+    #[test]
+    fn dispatch_event_maps_message_create() {
+        let mut state = GatewayState::default();
+        let data = json!({ "id": "msg-1" });
+
+        let event = dispatch_event("MESSAGE_CREATE".to_string(), data.clone(), &mut state).unwrap();
+
+        match event {
+            GatewayEvent::MessageCreate(payload) => {
+                assert_eq!(payload, data);
+            }
+            _ => panic!("expected MESSAGE_CREATE event"),
+        }
+    }
+
+    #[test]
+    fn dispatch_event_unknown_passthrough() {
+        let mut state = GatewayState::default();
+        let data = json!({ "foo": "bar" });
+
+        let event = dispatch_event("SOMETHING_ELSE".to_string(), data.clone(), &mut state).unwrap();
+
+        match event {
+            GatewayEvent::Unknown {
+                event_name,
+                data: payload,
+            } => {
+                assert_eq!(event_name, "SOMETHING_ELSE");
+                assert_eq!(payload, data);
+            }
+            _ => panic!("expected Unknown event"),
+        }
     }
 }
 
@@ -188,6 +249,41 @@ struct GatewayState {
     sequence: Option<u64>,
 }
 
+fn dispatch_event(
+    event_name: String,
+    data: serde_json::Value,
+    state: &mut GatewayState,
+) -> DiscordResult<GatewayEvent> {
+    let event = match event_name.as_str() {
+        "READY" => {
+            let ready: GatewayReady = serde_json::from_value(data)?;
+            state.session_id = Some(ready.session_id.clone());
+            state.resume_url = Some(ready.resume_gateway_url.clone());
+            info!(
+                user = ?ready.user.username,
+                session_id = %ready.session_id,
+                "Gateway ready"
+            );
+            GatewayEvent::Ready(ready)
+        }
+        "RESUMED" => {
+            info!("Session resumed successfully");
+            GatewayEvent::Resumed
+        }
+        "MESSAGE_CREATE" => GatewayEvent::MessageCreate(data),
+        "MESSAGE_UPDATE" => GatewayEvent::MessageUpdate(data),
+        "MESSAGE_DELETE" => GatewayEvent::MessageDelete(data),
+        "GUILD_CREATE" => GatewayEvent::GuildCreate(data),
+        "GUILD_UPDATE" => GatewayEvent::GuildUpdate(data),
+        "CHANNEL_CREATE" => GatewayEvent::ChannelCreate(data),
+        "CHANNEL_UPDATE" => GatewayEvent::ChannelUpdate(data),
+        "TYPING_START" => GatewayEvent::TypingStart(data),
+        _ => GatewayEvent::Unknown { event_name, data },
+    };
+
+    Ok(event)
+}
+
 /// Handle for a single gateway connection attempt.
 pub struct GatewayStream {
     pub events: mpsc::Receiver<GatewayEvent>,
@@ -250,7 +346,7 @@ async fn run_gateway_loop_inner(
         info!(session_id = %sess_id, sequence = seq, "Attempting to resume session");
 
         let resume = GatewayResume {
-            token: config.bot_token.clone(),
+            token: config.bot_credential.clone(),
             session_id: sess_id.clone(),
             seq,
         };
@@ -271,7 +367,7 @@ async fn run_gateway_loop_inner(
     } else {
         // Fresh connection - send Identify
         let identify = GatewayIdentify {
-            token: config.bot_token.clone(),
+            token: config.bot_credential.clone(),
             intents: config.intents,
             properties: GatewayProperties {
                 os: std::env::consts::OS.into(),
@@ -343,33 +439,7 @@ async fn run_gateway_loop_inner(
                             Ok(GatewayOpcode::Dispatch) => {
                                 let event_name = payload.t.clone().unwrap_or_default();
                                 let data = payload.d.clone().unwrap_or_default();
-
-                                let event = match event_name.as_str() {
-                                    "READY" => {
-                                        let ready: GatewayReady = serde_json::from_value(data)?;
-                                        state.session_id = Some(ready.session_id.clone());
-                                        state.resume_url = Some(ready.resume_gateway_url.clone());
-                                        info!(
-                                            user = ?ready.user.username,
-                                            session_id = %ready.session_id,
-                                            "Gateway ready"
-                                        );
-                                        GatewayEvent::Ready(ready)
-                                    }
-                                    "RESUMED" => {
-                                        info!("Session resumed successfully");
-                                        GatewayEvent::Resumed
-                                    }
-                                    "MESSAGE_CREATE" => GatewayEvent::MessageCreate(data),
-                                    "MESSAGE_UPDATE" => GatewayEvent::MessageUpdate(data),
-                                    "MESSAGE_DELETE" => GatewayEvent::MessageDelete(data),
-                                    "GUILD_CREATE" => GatewayEvent::GuildCreate(data),
-                                    "GUILD_UPDATE" => GatewayEvent::GuildUpdate(data),
-                                    "CHANNEL_CREATE" => GatewayEvent::ChannelCreate(data),
-                                    "CHANNEL_UPDATE" => GatewayEvent::ChannelUpdate(data),
-                                    "TYPING_START" => GatewayEvent::TypingStart(data),
-                                    _ => GatewayEvent::Unknown { event_name, data },
-                                };
+                                let event = dispatch_event(event_name, data, state)?;
 
                                 if event_tx.send(event).await.is_err() {
                                     info!("Event receiver dropped, closing gateway");

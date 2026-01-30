@@ -17,7 +17,7 @@ use crate::{
 pub struct DiscordApiClient {
     client: Client,
     base_url: String,
-    bot_token: String,
+    bot_credential: String,
     max_retries: u32,
     initial_delay_ms: u64,
     max_delay_ms: u64,
@@ -31,17 +31,17 @@ impl DiscordApiClient {
             .user_agent(format!("fcp-discord/{}", env!("CARGO_PKG_VERSION")))
             .build()?;
 
-        // Normalize token (remove "Bot " prefix if present)
-        let bot_token = config
-            .bot_token
+        // Normalize credential (remove "Bot " prefix if present)
+        let bot_credential = config
+            .bot_credential
             .strip_prefix("Bot ")
-            .unwrap_or(&config.bot_token)
+            .unwrap_or(&config.bot_credential)
             .to_string();
 
         Ok(Self {
             client,
             base_url: config.api_url.trim_end_matches('/').to_string(),
-            bot_token,
+            bot_credential,
             max_retries: config.retry.max_attempts,
             initial_delay_ms: config.retry.initial_delay_ms,
             max_delay_ms: config.retry.max_delay_ms,
@@ -99,7 +99,7 @@ impl DiscordApiClient {
                 _ => self.client.get(&url),
             };
 
-            let req = req.header("Authorization", format!("Bot {}", self.bot_token));
+            let req = req.header("Authorization", format!("Bot {}", self.bot_credential));
             let result = req.send().await;
 
             match result {
@@ -199,7 +199,7 @@ impl DiscordApiClient {
                 _ => self.client.get(&url),
             };
 
-            req = req.header("Authorization", format!("Bot {}", self.bot_token));
+            req = req.header("Authorization", format!("Bot {}", self.bot_credential));
 
             if let Some(b) = body {
                 req = req.json(b);
@@ -411,6 +411,7 @@ impl DiscordApiClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fcp_testkit::LogCapture;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{header, method, path},
@@ -419,7 +420,7 @@ mod tests {
     /// Create a test config pointing to the mock server.
     fn test_config(mock_server: &MockServer) -> DiscordConfig {
         DiscordConfig {
-            bot_token: "test_token_12345".into(),
+            bot_credential: "test_token_12345".into(),
             api_url: mock_server.uri(),
             retry: crate::config::RetryConfig {
                 max_attempts: 1,
@@ -553,6 +554,51 @@ mod tests {
         assert_eq!(message.embeds[0].title.as_deref(), Some("Test Embed"));
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_logs_redact_token_and_body() {
+        let capture = LogCapture::new();
+        let _guard = capture.install_json_with_filter("debug");
+
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/channels/123/messages"))
+            .and(header("Authorization", "Bot test_token_12345"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "111222333",
+                "channel_id": "123",
+                "content": "ok",
+                "timestamp": "2024-01-01T00:00:00.000000+00:00",
+                "tts": false,
+                "mention_everyone": false,
+                "attachments": [],
+                "embeds": []
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let config = test_config(&mock_server);
+        let client = DiscordApiClient::new(&config).unwrap();
+        let secret_body = "TopSecretMessage";
+        let _ = client
+            .create_message("123", Some(secret_body), None, None)
+            .await
+            .unwrap();
+
+        let logs = capture.jsonl();
+        assert!(
+            logs.contains("Making Discord API request"),
+            "expected debug logs to be captured"
+        );
+        assert!(
+            !logs.contains(&config.bot_credential),
+            "bot token should not appear in logs"
+        );
+        assert!(
+            !logs.contains(secret_body),
+            "message body should not appear in logs"
+        );
+    }
+
     #[tokio::test]
     async fn test_get_channel_success() {
         let mock_server = MockServer::start().await;
@@ -677,7 +723,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_bot_token_normalization() {
+    async fn test_bot_credential_normalization() {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("GET"))
@@ -693,7 +739,7 @@ mod tests {
 
         // Test that "Bot " prefix is stripped
         let config = DiscordConfig {
-            bot_token: "Bot actual_token".into(),
+            bot_credential: "Bot actual_token".into(),
             api_url: mock_server.uri(),
             ..Default::default()
         };

@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 /// Configuration for the Discord connector.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscordConfig {
-    /// Bot token from Discord Developer Portal
-    pub bot_token: String,
+    /// Bot credential from Discord Developer Portal
+    pub bot_credential: String,
 
     /// Application ID
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -132,7 +132,7 @@ pub struct ShardConfig {
 impl Default for DiscordConfig {
     fn default() -> Self {
         Self {
-            bot_token: String::new(),
+            bot_credential: String::new(),
             application_id: None,
             api_url: default_api_url(),
             gateway_url: None,

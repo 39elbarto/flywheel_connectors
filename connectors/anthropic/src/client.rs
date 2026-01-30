@@ -417,6 +417,7 @@ fn parse_sse_event(event_str: &str) -> Option<AnthropicResult<StreamEvent>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fcp_testkit::LogCapture;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{header, method, path},
@@ -512,6 +513,139 @@ mod tests {
             result.unwrap_err(),
             AnthropicError::RateLimited { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn test_overloaded() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(529).set_body_json(serde_json::json!({
+                "error": {
+                    "type": "overloaded_error",
+                    "message": "Overloaded"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = AnthropicClient::new("test_key")
+            .unwrap()
+            .with_base_url(mock_server.uri())
+            .with_retry_config(1, 10, 100);
+
+        let result = client.chat(Model::ClaudeSonnet4, "Hi", None, 1024).await;
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            AnthropicError::Overloaded { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_context_length_exceeded() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "context length exceeded"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = AnthropicClient::new("test_key")
+            .unwrap()
+            .with_base_url(mock_server.uri())
+            .with_retry_config(1, 10, 100);
+
+        let result = client.chat(Model::ClaudeSonnet4, "Hi", None, 1024).await;
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            AnthropicError::ContextLengthExceeded { .. }
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_logs_redact_api_key_and_prompt() {
+        let capture = LogCapture::new();
+        let _guard = capture.install_json_with_filter("debug");
+        tracing::debug!("log_capture_ready");
+
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .and(header("x-api-key", "test_key"))
+            .and(header("anthropic-version", API_VERSION))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "msg_123",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Hello!"}],
+                "model": "claude-sonnet-4-20250514",
+                "stop_reason": "end_turn",
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 5
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = AnthropicClient::new("test_key")
+            .unwrap()
+            .with_base_url(mock_server.uri());
+        let secret_prompt = "TopSecretPrompt";
+        let _ = client
+            .chat(Model::ClaudeSonnet4, secret_prompt, None, 1024)
+            .await
+            .unwrap();
+
+        let logs = capture.jsonl();
+        assert!(
+            logs.contains("log_capture_ready"),
+            "expected debug logs to be captured"
+        );
+        assert!(
+            !logs.contains("test_key"),
+            "API key should not appear in logs"
+        );
+        assert!(
+            !logs.contains(secret_prompt),
+            "prompt text should not appear in logs"
+        );
+    }
+
+    #[test]
+    fn test_parse_sse_event_ping() {
+        let event = parse_sse_event("event: ping\ndata: {\"type\":\"ping\"}\n");
+        let event = event
+            .expect("expected ping event")
+            .expect("expected ok event");
+
+        assert!(matches!(event, StreamEvent::Ping));
+    }
+
+    #[test]
+    fn test_parse_sse_event_invalid_json() {
+        let event = parse_sse_event("event: ping\ndata: {not json}\n");
+        let event = event.expect("expected ping event");
+
+        assert!(matches!(event, Err(AnthropicError::Json(_))));
+    }
+
+    #[test]
+    fn test_parse_sse_event_unknown_ignored() {
+        let event = parse_sse_event("event: unknown\ndata: {}\n");
+        assert!(event.is_none());
     }
 
     #[tokio::test]

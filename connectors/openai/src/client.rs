@@ -432,6 +432,7 @@ fn parse_sse_event(event_str: &str) -> Option<OpenAIResult<ChatCompletionChunk>>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fcp_testkit::LogCapture;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{header, method, path},
@@ -540,6 +541,156 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_overloaded() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(503).set_body_json(serde_json::json!({
+                "error": {
+                    "message": "Server overloaded",
+                    "type": "server_error",
+                    "param": null,
+                    "code": null
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = OpenAIClient::new("test_key")
+            .unwrap()
+            .with_base_url(mock_server.uri())
+            .with_retry_config(1, 10, 100);
+
+        let result = client.chat(Model::Gpt4o, "Hi", None, Some(1024)).await;
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            OpenAIError::Overloaded { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_context_length_exceeded() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": {
+                    "message": "maximum context length exceeded",
+                    "type": "invalid_request_error",
+                    "param": null,
+                    "code": null
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = OpenAIClient::new("test_key")
+            .unwrap()
+            .with_base_url(mock_server.uri())
+            .with_retry_config(1, 10, 100);
+
+        let result = client.chat(Model::Gpt4o, "Hi", None, Some(1024)).await;
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            OpenAIError::ContextLengthExceeded { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_content_filtered() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": {
+                    "message": "Content filtered",
+                    "type": "invalid_request_error",
+                    "param": null,
+                    "code": "content_filter"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = OpenAIClient::new("test_key")
+            .unwrap()
+            .with_base_url(mock_server.uri())
+            .with_retry_config(1, 10, 100);
+
+        let result = client.chat(Model::Gpt4o, "Hi", None, Some(1024)).await;
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            OpenAIError::ContentFiltered { .. }
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_logs_redact_api_key_and_prompt() {
+        let capture = LogCapture::new();
+        let _guard = capture.install_json_with_filter("debug");
+        tracing::debug!("log_capture_ready");
+
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(header("Authorization", "Bearer test_key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "chatcmpl-123",
+                "object": "chat.completion",
+                "created": 1677652288,
+                "model": "gpt-4o",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "Hello! How can I help you today?"
+                    },
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 8,
+                    "total_tokens": 18
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = OpenAIClient::new("test_key")
+            .unwrap()
+            .with_base_url(mock_server.uri());
+        let secret_prompt = "TopSecretPrompt";
+        let _ = client
+            .chat(Model::Gpt4o, secret_prompt, None, Some(1024))
+            .await
+            .unwrap();
+
+        let logs = capture.jsonl();
+        assert!(
+            logs.contains("log_capture_ready"),
+            "expected debug logs to be captured"
+        );
+        assert!(
+            !logs.contains("test_key"),
+            "API key should not appear in logs"
+        );
+        assert!(
+            !logs.contains(secret_prompt),
+            "prompt text should not appear in logs"
+        );
+    }
+
+    #[tokio::test]
     async fn test_model_pricing() {
         assert_eq!(Model::Gpt4o.input_price_per_million(), 2.50);
         assert_eq!(Model::Gpt4o.output_price_per_million(), 10.0);
@@ -593,5 +744,18 @@ mod tests {
             .is_retryable()
         );
         assert!(!OpenAIError::InvalidApiKey.is_retryable());
+    }
+
+    #[test]
+    fn test_parse_sse_event_done() {
+        let event = parse_sse_event("data: [DONE]\n");
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn test_parse_sse_event_invalid_json() {
+        let event = parse_sse_event("data: {not json}\n");
+        let event = event.expect("expected event");
+        assert!(matches!(event, Err(OpenAIError::Json(_))));
     }
 }

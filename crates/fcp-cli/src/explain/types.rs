@@ -24,6 +24,14 @@ pub struct ExplainReport {
     /// Stable reason code (FCP-XXXX).
     pub reason_code: String,
 
+    /// Operation ID associated with this decision (if available).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+
+    /// Retry-after hint in milliseconds (if applicable).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
+
     /// Human-readable reason code description.
     pub reason_description: String,
 
@@ -48,7 +56,7 @@ impl ExplainReport {
 
 /// Decision outcome (allow/deny).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "UPPERCASE")]
+#[serde(rename_all = "lowercase")]
 pub enum DecisionOutcome {
     Allow,
     Deny,
@@ -266,6 +274,32 @@ impl ExplainError {
             ],
         }
     }
+
+    /// Create a "receipt read failed" error.
+    #[must_use]
+    pub fn receipt_read_failed(path: &std::path::Path, reason: &str) -> Self {
+        Self {
+            code: "FCP-1001".to_string(),
+            message: format!("Failed to read receipt at '{}': {reason}", path.display()),
+            hints: vec![
+                "Verify the receipt path exists and is readable".to_string(),
+                "Ensure the file is not truncated or locked by another process".to_string(),
+            ],
+        }
+    }
+
+    /// Create an "invalid receipt format" error.
+    #[must_use]
+    pub fn receipt_decode_failed(path: &std::path::Path) -> Self {
+        Self {
+            code: "FCP-1002".to_string(),
+            message: format!("Receipt at '{}' is not a supported format", path.display()),
+            hints: vec![
+                "Expected canonical CBOR DecisionReceipt/OperationReceipt".to_string(),
+                "Or CBOR/JSON InvokeResponse or FcpErrorResponse".to_string(),
+            ],
+        }
+    }
 }
 
 #[cfg(test)]
@@ -313,6 +347,8 @@ mod tests {
             request_object_id: "abc123def456".to_string(),
             decision: DecisionOutcome::Deny,
             reason_code: "FCP-4030".to_string(),
+            operation_id: Some("op.test".to_string()),
+            retry_after_ms: Some(5000),
             reason_description: "Revocation check failed - token revoked".to_string(),
             evidence: vec![
                 EvidenceItem {
@@ -338,7 +374,7 @@ mod tests {
 
         // Verify key fields
         assert!(json.contains("\"schema_version\": \"1.0.0\""));
-        assert!(json.contains("\"decision\": \"DENY\""));
+        assert!(json.contains("\"decision\": \"deny\""));
         assert!(json.contains("\"reason_code\": \"FCP-4030\""));
         assert!(json.contains("\"evidence_type\": \"capability_token\""));
 

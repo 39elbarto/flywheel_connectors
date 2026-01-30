@@ -84,10 +84,10 @@ impl DiscordConnector {
                 message: format!("Invalid configuration: {e}"),
             })?;
 
-        if config.bot_token.is_empty() {
+        if config.bot_credential.is_empty() {
             return Err(FcpError::InvalidRequest {
                 code: 1004,
-                message: "Missing required 'bot_token' in configuration".into(),
+                message: "Missing required 'bot_credential' in configuration".into(),
             });
         }
 

@@ -14,7 +14,7 @@ use crate::types::*;
 /// Telegram Bot API client.
 #[derive(Debug, Clone)]
 pub struct TelegramClient {
-    token: String,
+    credential: String,
     client: Client,
     base_url: String,
 }
@@ -24,15 +24,15 @@ impl TelegramClient {
     ///
     /// # Errors
     /// Returns an error if the HTTP client fails to build.
-    pub fn new(token: impl Into<String>) -> Result<Self, TelegramError> {
-        let bot_token = token.into();
+    pub fn new(credential: impl Into<String>) -> Result<Self, TelegramError> {
+        let bot_credential = credential.into();
         let client = Client::builder()
             .timeout(Duration::from_secs(60))
             .build()
             .map_err(TelegramError::Http)?;
 
         Ok(Self {
-            token: bot_token,
+            credential: bot_credential,
             client,
             base_url: "https://api.telegram.org".into(),
         })
@@ -47,7 +47,7 @@ impl TelegramClient {
 
     /// Build the API URL for a method.
     fn api_url(&self, method: &str) -> String {
-        format!("{}/bot{}/{}", self.base_url, self.token, method)
+        format!("{}/bot{}/{}", self.base_url, self.credential, method)
     }
 
     /// Execute a request with retries.
@@ -232,7 +232,10 @@ impl TelegramClient {
 
     /// Download a file by its path.
     pub fn file_download_url(&self, file_path: &str) -> String {
-        format!("{}/file/bot{}/{}", self.base_url, self.token, file_path)
+        format!(
+            "{}/file/bot{}/{}",
+            self.base_url, self.credential, file_path
+        )
     }
 
     /// Answer a callback query (acknowledge button press).

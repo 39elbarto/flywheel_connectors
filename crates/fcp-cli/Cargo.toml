@@ -33,6 +33,7 @@ tracing-subscriber.workspace = true
 
 # FCP crate dependencies
 fcp-cbor = { path = "../fcp-cbor" }
+ciborium = { workspace = true }
 fcp-core = { path = "../fcp-core" }
 fcp-crypto = { path = "../fcp-crypto" }
 fcp-manifest = { path = "../fcp-manifest" }

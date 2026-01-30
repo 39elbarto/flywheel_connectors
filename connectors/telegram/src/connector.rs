@@ -21,8 +21,8 @@ use crate::types::{GetUpdatesRequest, Message, Update, UpdateKind};
 /// Telegram connector configuration.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct TelegramConfig {
-    /// Bot token (required)
-    pub token: Option<String>,
+    /// Bot credential (required)
+    pub credential: Option<String>,
 
     /// Custom API base URL (optional)
     pub base_url: Option<String>,
@@ -136,23 +136,23 @@ impl TelegramConnector {
                 message: format!("Invalid configuration: {e}"),
             })?;
 
-        if config.token.is_none() {
+        if config.credential.is_none() {
             return Err(FcpError::InvalidRequest {
                 code: 1004,
-                message: "Missing required 'token' in configuration".into(),
+                message: "Missing required 'credential' in configuration".into(),
             });
         }
 
-        let bot_token = match config.token.clone() {
-            Some(token) => token,
+        let bot_credential = match config.credential.clone() {
+            Some(credential) => credential,
             None => {
                 return Err(FcpError::InvalidRequest {
                     code: 1004,
-                    message: "Missing required 'token' in configuration".into(),
+                    message: "Missing required 'credential' in configuration".into(),
                 });
             }
         };
-        let mut client = TelegramClient::new(&bot_token).map_err(|e| FcpError::Internal {
+        let mut client = TelegramClient::new(&bot_credential).map_err(|e| FcpError::Internal {
             message: format!("Failed to create HTTP client: {e}"),
         })?;
 
@@ -1051,10 +1051,10 @@ mod tests {
 
         let mut connector = TelegramConnector::new();
 
-        // Configure with dummy token and mock base URL
+        // Configure with dummy credential and mock base URL
         connector
             .handle_configure(serde_json::json!({
-                "token": "dummy_token",
+                "credential": "dummy_token",
                 "base_url": mock_server.uri()
             }))
             .await
@@ -1182,7 +1182,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_logs_redact_token_and_message_text() {
         let capture = LogCapture::new();
         let _guard = capture.install_json();

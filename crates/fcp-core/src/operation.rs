@@ -266,7 +266,7 @@ impl OperationReceipt {
                 bytes.extend_from_slice(&metric.amount.to_le_bytes());
                 if let Some(unit) = &metric.unit {
                     bytes.extend_from_slice(&[1]);
-                    let unit_len = u32::try_from(unit.as_bytes().len()).unwrap_or(u32::MAX);
+                    let unit_len = u32::try_from(unit.len()).unwrap_or(u32::MAX);
                     bytes.extend_from_slice(&unit_len.to_le_bytes());
                     bytes.extend_from_slice(unit.as_bytes());
                 } else {
@@ -274,7 +274,7 @@ impl OperationReceipt {
                 }
                 if let Some(custom_id) = &metric.custom_id {
                     bytes.extend_from_slice(&[1]);
-                    let id_len = u32::try_from(custom_id.as_bytes().len()).unwrap_or(u32::MAX);
+                    let id_len = u32::try_from(custom_id.len()).unwrap_or(u32::MAX);
                     bytes.extend_from_slice(&id_len.to_le_bytes());
                     bytes.extend_from_slice(custom_id.as_bytes());
                 } else {

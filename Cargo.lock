@@ -2272,6 +2272,7 @@ dependencies = [
  "bytes",
  "chrono",
  "fcp-core",
+ "fcp-manifest",
  "fcp-sdk",
  "fcp-testkit",
  "futures-util",

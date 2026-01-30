@@ -66,10 +66,7 @@ impl BudgetTracker {
     ) -> BudgetEvaluation {
         let now = now_secs();
         let usage_by_kind = aggregate_metrics(metrics);
-        let state = self
-            .zones
-            .entry(zone_id.clone())
-            .or_insert_with(ZoneBudgetState::default);
+        let state = self.zones.entry(zone_id.clone()).or_default();
 
         let mut entries = Vec::new();
         let mut exceeded = false;
@@ -128,10 +125,7 @@ impl BudgetTracker {
         policy: &UsageBudgetPolicy,
     ) -> UsageBudgetSnapshot {
         let now = now_secs();
-        let state = self
-            .zones
-            .entry(zone_id.clone())
-            .or_insert_with(ZoneBudgetState::default);
+        let state = self.zones.entry(zone_id.clone()).or_default();
 
         let mut entries = Vec::new();
         for budget in &policy.budgets {
@@ -171,7 +165,7 @@ impl BudgetTracker {
 }
 
 impl MetricWindow {
-    fn new(window_seconds: u64, now: u64) -> Self {
+    const fn new(window_seconds: u64, now: u64) -> Self {
         Self {
             window_seconds,
             window_started_at: now,
@@ -179,7 +173,7 @@ impl MetricWindow {
         }
     }
 
-    fn roll_if_needed(&mut self, now: u64, configured_window: u64) {
+    const fn roll_if_needed(&mut self, now: u64, configured_window: u64) {
         if self.window_seconds != configured_window {
             self.window_seconds = configured_window;
             self.window_started_at = now;

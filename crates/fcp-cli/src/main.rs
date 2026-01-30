@@ -2,6 +2,7 @@
 //!
 //! This CLI provides tooling for FCP2 operators and developers:
 //! - `fcp audit` - Audit chain operations for incident response
+//! - `fcp budget` - Usage budget status per zone
 //! - `fcp bench` - Performance benchmarking suite
 //! - `fcp connector` - Connector discovery and introspection
 //! - `fcp explain` - Operation decision explanations
@@ -13,6 +14,7 @@
 #![forbid(unsafe_code)]
 
 mod audit;
+mod budget;
 mod bench;
 mod connector;
 mod doctor;
@@ -72,6 +74,11 @@ enum Commands {
     /// Run benchmarks to measure and track FCP2 performance characteristics.
     /// Outputs machine-readable JSON with environment metadata for regression tracking.
     Bench(bench::BenchArgs),
+
+    /// Report usage budgets per zone.
+    ///
+    /// Shows current usage vs budget and enforcement mode for each zone.
+    Budget(budget::BudgetArgs),
 
     /// Connector discovery and introspection.
     ///
@@ -240,6 +247,7 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Audit(args) => audit::run(args),
         Commands::Bench(args) => bench::run(args),
+        Commands::Budget(args) => budget::run(&args),
         Commands::Connector(args) => connector::run(&args),
         Commands::Doctor(args) => doctor::run(&args),
         Commands::Explain(args) => {

@@ -1,0 +1,871 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:4dfbb8acff98b7c148e34376d45de580ecfc16a9885ab362dafa5310274e113a"
+
+[connector]
+id = "fcp.airtable"
+name = "Airtable Connector"
+version = "0.1.0"
+description = "FCP connector for Airtable flexible database and spreadsheet platform"
+archetypes = [
+    "storage",
+    "operational",
+]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+]
+optional = ["media.download"]
+forbidden = [
+    "system.exec",
+    "network.listen",
+]
+
+[provides.operations.create_record]
+description = "Create a new record in an Airtable table"
+capability = "airtable.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations.create_record.rate_limit]
+max = 50
+per_ms = 60000
+
+[provides.operations.create_record.input_schema]
+required = [
+    "base_id",
+    "table_id",
+    "fields",
+]
+type = "object"
+
+[provides.operations.create_record.input_schema.properties.base_id]
+description = "Airtable base ID"
+pattern = "^app[a-zA-Z0-9]+$"
+type = "string"
+
+[provides.operations.create_record.input_schema.properties.fields]
+description = "Field values for the new record"
+type = "object"
+
+[provides.operations.create_record.input_schema.properties.table_id]
+description = "Table name or ID"
+type = "string"
+
+[provides.operations.create_record.input_schema.properties.typecast]
+description = "If true, Airtable will try to convert string values to appropriate types"
+type = "boolean"
+
+[provides.operations.create_record.output_schema]
+required = [
+    "id",
+    "fields",
+]
+type = "object"
+
+[provides.operations.create_record.output_schema.properties.createdTime]
+type = "string"
+
+[provides.operations.create_record.output_schema.properties.fields]
+description = "Record field values"
+type = "object"
+
+[provides.operations.create_record.output_schema.properties.id]
+description = "Created record ID"
+type = "string"
+
+[provides.operations.create_record.network_constraints]
+host_allow = ["api.airtable.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations.create_record.ai_hints]
+when_to_use = "Add a new record to an Airtable table."
+common_mistakes = [
+    "Using field IDs instead of field names.",
+    "Not matching field types (e.g., string for number field).",
+    "Missing required fields defined in the table.",
+]
+examples = ['{"base_id": "appXXX", "table_id": "Tasks", "fields": {"Name": "New Task", "Status": "Todo"}}']
+related = [
+    "airtable.get_base_schema",
+    "airtable.update_record",
+]
+
+[provides.operations.create_records]
+description = "Create multiple records in an Airtable table (batch, max 10)"
+capability = "airtable.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations.create_records.rate_limit]
+max = 50
+per_ms = 60000
+
+[provides.operations.create_records.input_schema]
+required = [
+    "base_id",
+    "table_id",
+    "records",
+]
+type = "object"
+
+[provides.operations.create_records.input_schema.properties.base_id]
+description = "Airtable base ID"
+pattern = "^app[a-zA-Z0-9]+$"
+type = "string"
+
+[provides.operations.create_records.input_schema.properties.records]
+description = "Array of records to create (max 10)"
+maxItems = 10
+type = "array"
+
+[provides.operations.create_records.input_schema.properties.records.items]
+type = "object"
+
+[provides.operations.create_records.input_schema.properties.table_id]
+description = "Table name or ID"
+type = "string"
+
+[provides.operations.create_records.input_schema.properties.typecast]
+description = "If true, Airtable will try to convert string values to appropriate types"
+type = "boolean"
+
+[provides.operations.create_records.output_schema]
+required = ["records"]
+type = "object"
+
+[provides.operations.create_records.output_schema.properties.records]
+description = "Created records with IDs"
+type = "array"
+
+[provides.operations.create_records.network_constraints]
+host_allow = ["api.airtable.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 2097152
+
+[provides.operations.create_records.ai_hints]
+when_to_use = "Create multiple records efficiently. Limited to 10 records per call."
+common_mistakes = ["Exceeding 10 record limit per batch."]
+examples = ['{"base_id": "appXXX", "table_id": "Tasks", "records": [{"fields": {"Name": "Task 1"}}, {"fields": {"Name": "Task 2"}}]}']
+related = ["airtable.create_record"]
+
+[provides.operations.delete_record]
+description = "Delete a record from an Airtable table (irreversible)"
+capability = "airtable.delete"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations.delete_record.rate_limit]
+max = 30
+per_ms = 60000
+
+[provides.operations.delete_record.input_schema]
+required = [
+    "base_id",
+    "table_id",
+    "record_id",
+]
+type = "object"
+
+[provides.operations.delete_record.input_schema.properties.base_id]
+description = "Airtable base ID"
+pattern = "^app[a-zA-Z0-9]+$"
+type = "string"
+
+[provides.operations.delete_record.input_schema.properties.record_id]
+description = "Record ID to delete"
+pattern = "^rec[a-zA-Z0-9]+$"
+type = "string"
+
+[provides.operations.delete_record.input_schema.properties.table_id]
+description = "Table name or ID"
+type = "string"
+
+[provides.operations.delete_record.output_schema]
+required = [
+    "id",
+    "deleted",
+]
+type = "object"
+
+[provides.operations.delete_record.output_schema.properties.deleted]
+type = "boolean"
+
+[provides.operations.delete_record.output_schema.properties.id]
+type = "string"
+
+[provides.operations.delete_record.network_constraints]
+host_allow = ["api.airtable.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations.delete_record.ai_hints]
+when_to_use = "Permanently delete a record. This cannot be undone."
+common_mistakes = [
+    "Deleting without confirmation.",
+    "Deleting records that are linked from other tables.",
+]
+examples = ['{"base_id": "appXXX", "table_id": "Tasks", "record_id": "recYYY"}']
+related = ["airtable.get_record"]
+
+[provides.operations.download_attachment]
+description = "Download an attachment file from an Airtable record"
+capability = "airtable.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations.download_attachment.rate_limit]
+max = 50
+per_ms = 60000
+
+[provides.operations.download_attachment.input_schema]
+required = ["url"]
+type = "object"
+
+[provides.operations.download_attachment.input_schema.properties.url]
+description = "Attachment URL from a record's attachment field"
+type = "string"
+
+[provides.operations.download_attachment.output_schema]
+required = [
+    "data",
+    "content_type",
+]
+type = "object"
+
+[provides.operations.download_attachment.output_schema.properties.content_type]
+description = "MIME type of the file"
+type = "string"
+
+[provides.operations.download_attachment.output_schema.properties.data]
+description = "Base64-encoded file data"
+type = "string"
+
+[provides.operations.download_attachment.output_schema.properties.filename]
+description = "Original filename"
+type = "string"
+
+[provides.operations.download_attachment.network_constraints]
+host_allow = [
+    "dl.airtable.com",
+    "*.dl.airtable.com",
+    "v5.airtableusercontent.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 30000
+total_timeout_ms = 120000
+max_response_bytes = 104857600
+
+[provides.operations.download_attachment.ai_hints]
+when_to_use = "Download attachment files (images, documents) from Airtable records."
+common_mistakes = [
+    "Using the thumbnail URL instead of the full URL.",
+    "Not handling large files appropriately.",
+]
+examples = ['{"url": "https://dl.airtable.com/.attachments/..."}']
+related = ["airtable.get_record"]
+
+[provides.operations.get_base_schema]
+description = "Get the schema of an Airtable base including all tables and fields"
+capability = "airtable.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations.get_base_schema.rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations.get_base_schema.input_schema]
+required = ["base_id"]
+type = "object"
+
+[provides.operations.get_base_schema.input_schema.properties.base_id]
+description = "Airtable base ID (starts with 'app')"
+pattern = "^app[a-zA-Z0-9]+$"
+type = "string"
+
+[provides.operations.get_base_schema.output_schema]
+required = ["tables"]
+type = "object"
+
+[provides.operations.get_base_schema.output_schema.properties.tables]
+description = "List of tables with their fields"
+type = "array"
+
+[provides.operations.get_base_schema.network_constraints]
+host_allow = ["api.airtable.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations.get_base_schema.ai_hints]
+when_to_use = "Discover table structure and field types before querying records."
+common_mistakes = ["Using table name instead of base_id to get schema."]
+examples = ['{"base_id": "appXXXXXXXXXXXXXX"}']
+related = [
+    "airtable.list_bases",
+    "airtable.list_records",
+]
+
+[provides.operations.get_record]
+description = "Get a single record by ID from an Airtable table"
+capability = "airtable.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations.get_record.rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations.get_record.input_schema]
+required = [
+    "base_id",
+    "table_id",
+    "record_id",
+]
+type = "object"
+
+[provides.operations.get_record.input_schema.properties.base_id]
+description = "Airtable base ID"
+pattern = "^app[a-zA-Z0-9]+$"
+type = "string"
+
+[provides.operations.get_record.input_schema.properties.record_id]
+description = "Record ID (starts with 'rec')"
+pattern = "^rec[a-zA-Z0-9]+$"
+type = "string"
+
+[provides.operations.get_record.input_schema.properties.table_id]
+description = "Table name or ID"
+type = "string"
+
+[provides.operations.get_record.output_schema]
+required = [
+    "id",
+    "fields",
+]
+type = "object"
+
+[provides.operations.get_record.output_schema.properties.createdTime]
+description = "ISO 8601 timestamp when record was created"
+type = "string"
+
+[provides.operations.get_record.output_schema.properties.fields]
+description = "Record field values"
+type = "object"
+
+[provides.operations.get_record.output_schema.properties.id]
+description = "Record ID"
+type = "string"
+
+[provides.operations.get_record.network_constraints]
+host_allow = ["api.airtable.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations.get_record.ai_hints]
+when_to_use = "Retrieve a specific record when you know its ID."
+common_mistakes = ["Using row number instead of record ID."]
+examples = ['{"base_id": "appXXX", "table_id": "Tasks", "record_id": "recYYY"}']
+related = [
+    "airtable.list_records",
+    "airtable.update_record",
+]
+
+[provides.operations.list_bases]
+description = "List all accessible Airtable bases for the authenticated user"
+capability = "airtable.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations.list_bases.rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations.list_bases.input_schema]
+required = []
+type = "object"
+
+[provides.operations.list_bases.input_schema.properties.offset]
+description = "Pagination cursor from previous response"
+type = "string"
+
+[provides.operations.list_bases.output_schema]
+required = ["bases"]
+type = "object"
+
+[provides.operations.list_bases.output_schema.properties.bases]
+description = "List of accessible bases"
+type = "array"
+
+[provides.operations.list_bases.output_schema.properties.bases.items]
+type = "object"
+
+[provides.operations.list_bases.output_schema.properties.offset]
+description = "Pagination cursor for next page"
+type = "string"
+
+[provides.operations.list_bases.network_constraints]
+host_allow = ["api.airtable.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations.list_bases.ai_hints]
+when_to_use = "Discover available Airtable bases the user has access to."
+common_mistakes = []
+examples = ["{}"]
+related = ["airtable.get_base_schema"]
+
+[provides.operations.list_records]
+description = "List records from an Airtable table with filtering and sorting"
+capability = "airtable.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations.list_records.rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations.list_records.input_schema]
+required = [
+    "base_id",
+    "table_id",
+]
+type = "object"
+
+[provides.operations.list_records.input_schema.properties.base_id]
+description = "Airtable base ID (starts with 'app')"
+pattern = "^app[a-zA-Z0-9]+$"
+type = "string"
+
+[provides.operations.list_records.input_schema.properties.fields]
+description = "Only return specified field names"
+type = "array"
+
+[provides.operations.list_records.input_schema.properties.fields.items]
+type = "string"
+
+[provides.operations.list_records.input_schema.properties.filter_by_formula]
+description = """Airtable formula to filter records (e.g., '{Status} = "Active"')"""
+type = "string"
+
+[provides.operations.list_records.input_schema.properties.max_records]
+description = "Maximum number of records to return (max 100)"
+maximum = 100
+minimum = 1
+type = "integer"
+
+[provides.operations.list_records.input_schema.properties.offset]
+description = "Pagination cursor from previous response"
+type = "string"
+
+[provides.operations.list_records.input_schema.properties.page_size]
+description = "Records per page (max 100)"
+maximum = 100
+minimum = 1
+type = "integer"
+
+[provides.operations.list_records.input_schema.properties.sort]
+description = "Fields to sort by"
+type = "array"
+
+[provides.operations.list_records.input_schema.properties.sort.items]
+type = "object"
+
+[provides.operations.list_records.input_schema.properties.table_id]
+description = "Table name or ID"
+type = "string"
+
+[provides.operations.list_records.input_schema.properties.view]
+description = "View name or ID to use for filtering/sorting"
+type = "string"
+
+[provides.operations.list_records.output_schema]
+required = ["records"]
+type = "object"
+
+[provides.operations.list_records.output_schema.properties.offset]
+description = "Pagination cursor for next page"
+type = "string"
+
+[provides.operations.list_records.output_schema.properties.records]
+description = "List of records"
+type = "array"
+
+[provides.operations.list_records.output_schema.properties.records.items]
+type = "object"
+
+[provides.operations.list_records.network_constraints]
+host_allow = ["api.airtable.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations.list_records.ai_hints]
+when_to_use = "Query records from an Airtable table. Use filter_by_formula for filtering, sort for ordering."
+common_mistakes = [
+    "Using SQL syntax instead of Airtable formula syntax.",
+    "Not handling pagination for large datasets.",
+    "Requesting more than 100 records per page.",
+]
+examples = [
+    '{"base_id": "appXXX", "table_id": "Tasks", "filter_by_formula": "{Status} = \"Active\""}',
+    '{"base_id": "appXXX", "table_id": "tblYYY", "max_records": 50, "sort": [{"field": "Created", "direction": "desc"}]}',
+]
+related = [
+    "airtable.get_record",
+    "airtable.get_base_schema",
+]
+
+[provides.operations.replace_record]
+description = "Replace all fields of a record (destructive update)"
+capability = "airtable.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations.replace_record.rate_limit]
+max = 30
+per_ms = 60000
+
+[provides.operations.replace_record.input_schema]
+required = [
+    "base_id",
+    "table_id",
+    "record_id",
+    "fields",
+]
+type = "object"
+
+[provides.operations.replace_record.input_schema.properties.base_id]
+description = "Airtable base ID"
+pattern = "^app[a-zA-Z0-9]+$"
+type = "string"
+
+[provides.operations.replace_record.input_schema.properties.fields]
+description = "Complete field values (replaces all existing values)"
+type = "object"
+
+[provides.operations.replace_record.input_schema.properties.record_id]
+description = "Record ID to replace"
+pattern = "^rec[a-zA-Z0-9]+$"
+type = "string"
+
+[provides.operations.replace_record.input_schema.properties.table_id]
+description = "Table name or ID"
+type = "string"
+
+[provides.operations.replace_record.output_schema]
+required = [
+    "id",
+    "fields",
+]
+type = "object"
+
+[provides.operations.replace_record.output_schema.properties.fields]
+type = "object"
+
+[provides.operations.replace_record.output_schema.properties.id]
+type = "string"
+
+[provides.operations.replace_record.network_constraints]
+host_allow = ["api.airtable.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations.replace_record.ai_hints]
+when_to_use = "Replace all fields of a record. Uses PUT semantics - fields not included will be cleared. Prefer update_record for partial updates."
+common_mistakes = [
+    "Using replace when update_record would suffice.",
+    "Accidentally clearing fields by not including them.",
+]
+examples = []
+related = ["airtable.update_record"]
+
+[provides.operations.update_record]
+description = "Update an existing record in an Airtable table"
+capability = "airtable.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations.update_record.rate_limit]
+max = 50
+per_ms = 60000
+
+[provides.operations.update_record.input_schema]
+required = [
+    "base_id",
+    "table_id",
+    "record_id",
+    "fields",
+]
+type = "object"
+
+[provides.operations.update_record.input_schema.properties.base_id]
+description = "Airtable base ID"
+pattern = "^app[a-zA-Z0-9]+$"
+type = "string"
+
+[provides.operations.update_record.input_schema.properties.fields]
+description = "Field values to update (partial update - only specified fields are changed)"
+type = "object"
+
+[provides.operations.update_record.input_schema.properties.record_id]
+description = "Record ID to update"
+pattern = "^rec[a-zA-Z0-9]+$"
+type = "string"
+
+[provides.operations.update_record.input_schema.properties.table_id]
+description = "Table name or ID"
+type = "string"
+
+[provides.operations.update_record.input_schema.properties.typecast]
+description = "If true, Airtable will try to convert string values to appropriate types"
+type = "boolean"
+
+[provides.operations.update_record.output_schema]
+required = [
+    "id",
+    "fields",
+]
+type = "object"
+
+[provides.operations.update_record.output_schema.properties.fields]
+type = "object"
+
+[provides.operations.update_record.output_schema.properties.id]
+type = "string"
+
+[provides.operations.update_record.network_constraints]
+host_allow = ["api.airtable.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations.update_record.ai_hints]
+when_to_use = "Modify specific fields of an existing record. Uses PATCH semantics - only specified fields are updated."
+common_mistakes = [
+    "Trying to update the record ID field.",
+    "Not quoting linked record IDs correctly.",
+]
+examples = ['{"base_id": "appXXX", "table_id": "Tasks", "record_id": "recYYY", "fields": {"Status": "Done"}}']
+related = [
+    "airtable.get_record",
+    "airtable.replace_record",
+]
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "airtable.read"
+requests = 100
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "airtable.write"
+requests = 50
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "airtable.delete"
+requests = 30
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[rate_limits.operation_pools]
+create_record = ["airtable.write"]
+update_record = ["airtable.write"]
+create_records = ["airtable.write"]
+get_base_schema = ["airtable.read"]
+replace_record = ["airtable.write"]
+list_records = ["airtable.read"]
+get_record = ["airtable.read"]
+list_bases = ["airtable.read"]
+download_attachment = ["airtable.read"]
+delete_record = ["airtable.delete"]

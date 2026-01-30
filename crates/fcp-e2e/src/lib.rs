@@ -1269,7 +1269,10 @@ mod tests {
             .await
             .expect("suite runs");
 
-        assert!(report.passed, "rate limit suite should pass when error expected");
+        assert!(
+            report.passed,
+            "rate limit suite should pass when error expected"
+        );
         let invoke_entry = report
             .logs
             .iter()

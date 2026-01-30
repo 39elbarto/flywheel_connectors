@@ -122,6 +122,10 @@ mod scaffold_creation {
             "src/connector.rs should exist"
         );
         assert!(
+            crate_dir.join("src/limits.rs").exists(),
+            "src/limits.rs should exist"
+        );
+        assert!(
             crate_dir.join("src/types.rs").exists(),
             "src/types.rs should exist"
         );
@@ -224,6 +228,30 @@ mod scaffold_creation {
                 "manifest should not contain secret pattern: {pattern}"
             );
         }
+    }
+
+    #[test]
+    fn generated_limits_template_contains_placeholders() {
+        let tmp = TempDir::new().unwrap();
+        create_workspace(&tmp);
+
+        fcp_cmd()
+            .current_dir(tmp.path().join("connectors"))
+            .args(["new", "fcp.limits"])
+            .assert()
+            .success();
+
+        let limits_path = tmp.path().join("connectors/limits/src/limits.rs");
+        let content = fs::read_to_string(&limits_path).unwrap();
+
+        assert!(
+            content.contains("MAX_MESSAGE_CHARS"),
+            "limits template should define MAX_MESSAGE_CHARS"
+        );
+        assert!(
+            content.contains("MAX_ATTACHMENT_BYTES"),
+            "limits template should define MAX_ATTACHMENT_BYTES"
+        );
     }
 
     #[test]

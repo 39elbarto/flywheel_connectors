@@ -396,6 +396,11 @@ fn generate_files(
             "Connector implementation".to_string(),
         ),
         (
+            "src/limits.rs".to_string(),
+            generate_limits_rs(short_name),
+            "Connector API limit constants".to_string(),
+        ),
+        (
             "src/types.rs".to_string(),
             generate_types_rs(short_name),
             "Request/response types".to_string(),
@@ -766,9 +771,38 @@ fn generate_lib_rs(short_name: &str) -> String {
 #![forbid(unsafe_code)]
 
 pub mod connector;
+pub mod limits;
 pub mod types;
 
 pub use connector::{struct_name}Connector;
+"
+    )
+}
+
+/// Generate limits.rs content.
+fn generate_limits_rs(short_name: &str) -> String {
+    let struct_name = to_pascal_case(short_name);
+    format!(
+        r"//! {struct_name} connector API limits.
+//!
+//! TODO: Replace placeholders with the actual service limits before shipping.
+
+#![allow(dead_code)]
+
+/// Max length for message text payloads (chars).
+pub const MAX_MESSAGE_CHARS: usize = 0;
+
+/// Max number of attachments per message.
+pub const MAX_ATTACHMENTS: usize = 0;
+
+/// Max size of a single attachment (bytes).
+pub const MAX_ATTACHMENT_BYTES: usize = 0;
+
+/// Max number of embeds/blocks per message.
+pub const MAX_EMBEDS: usize = 0;
+
+/// Max character length for titles/subject fields.
+pub const MAX_TITLE_CHARS: usize = 0;
 "
     )
 }

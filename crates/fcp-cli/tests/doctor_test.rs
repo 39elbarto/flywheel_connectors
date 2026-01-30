@@ -163,7 +163,18 @@ mod doctor {
             .stdout(predicate::str::contains("Diagnose zone health"))
             .stdout(predicate::str::contains("--zone"))
             .stdout(predicate::str::contains("--json"))
-            .stdout(predicate::str::contains("--connector"));
+            .stdout(predicate::str::contains("--connector"))
+            .stdout(predicate::str::contains("--self-check"));
+    }
+
+    #[test]
+    fn doctor_self_check_requires_connector() {
+        fcp_cmd()
+            .arg("doctor")
+            .args(["--zone", "z:work", "--self-check"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("--self-check requires"));
     }
 
     #[test]
@@ -188,6 +199,34 @@ mod doctor {
         assert_eq!(
             json["connector_self_checks"][0]["connector_id"],
             "fcp.telegram:messaging:v1"
+        );
+    }
+
+    #[test]
+    fn doctor_self_check_failure_sets_failed_status() {
+        let output = fcp_cmd()
+            .arg("doctor")
+            .args([
+                "--zone",
+                "z:work",
+                "--connector",
+                "fcp.telegram:messaging:v1",
+                "--self-check",
+                "--scenario",
+                "critical",
+                "--json",
+            ])
+            .assert()
+            .failure()
+            .get_output()
+            .stdout
+            .clone();
+
+        let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(json["overall_status"], "FAIL");
+        assert_eq!(
+            json["connector_self_checks"][0]["report"]["status"],
+            "failed"
         );
     }
 }

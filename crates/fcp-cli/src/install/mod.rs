@@ -520,7 +520,7 @@ forbidden = []
 [capabilities]
 required = ["network.dns"]
 optional = []
-forbidden = []
+forbidden = ["system.exec"]
 
 [provides.operations.demo_op]
 description = "Demo operation"

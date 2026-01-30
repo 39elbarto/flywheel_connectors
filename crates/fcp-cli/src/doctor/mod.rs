@@ -74,6 +74,10 @@ pub struct DoctorArgs {
     #[arg(long, value_name = "CONNECTOR", num_args = 1..)]
     pub connector: Vec<String>,
 
+    /// Run connector self-checks (requires --connector).
+    #[arg(long, default_value_t = false)]
+    pub self_check: bool,
+
     /// Output JSON instead of human-readable format.
     #[arg(long, default_value_t = false)]
     pub json: bool,
@@ -88,13 +92,26 @@ pub fn run(args: &DoctorArgs) -> Result<()> {
     // Validate zone ID format
     let zone_id: ZoneId = args.zone.parse()?;
     let connector_ids = parse_connector_ids(&args.connector)?;
+    let enable_self_checks = args.self_check || !connector_ids.is_empty();
+    if args.self_check && connector_ids.is_empty() {
+        anyhow::bail!("--self-check requires at least one --connector");
+    }
 
     // Check for real mesh endpoint (future functionality)
     if std::env::var("FCP_MESH_ENDPOINT").is_ok() {
         // TODO: Connect to real mesh node when available
         eprintln!("Note: Real mesh connectivity not yet implemented, using simulation");
     }
-    let report = simulate_report(&zone_id, &connector_ids, args.scenario);
+    let empty = Vec::new();
+    let report = simulate_report(
+        &zone_id,
+        if enable_self_checks {
+            &connector_ids
+        } else {
+            &empty
+        },
+        args.scenario,
+    );
 
     if args.json {
         let output = serde_json::to_string_pretty(&report)?;

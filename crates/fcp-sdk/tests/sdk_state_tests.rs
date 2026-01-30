@@ -9,9 +9,14 @@
 use std::sync::Arc;
 
 use fcp_cbor::SchemaId;
-use fcp_core::{ObjectHeader, Signature};
+use fcp_core::{ObjectHeader, ObjectIdKey, Signature};
 use fcp_sdk::prelude::*;
 use semver::Version;
+
+#[cfg(feature = "cursor-store-object-store")]
+use fcp_sdk::runtime::ObjectStoreCursorBackend;
+#[cfg(feature = "cursor-store-object-store")]
+use fcp_store::{MemoryObjectStore, MemoryObjectStoreConfig};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ConnectorStateModel Tests
@@ -146,6 +151,26 @@ fn test_header(created_at: u64) -> ObjectHeader {
     }
 }
 
+#[cfg(feature = "cursor-store-object-store")]
+fn object_store_header(created_at: u64, zone_id: ZoneId) -> ObjectHeader {
+    ObjectHeader {
+        schema: SchemaId::new("fcp.connector_state", "state_object", Version::new(1, 0, 0)),
+        zone_id: zone_id.clone(),
+        created_at,
+        provenance: Provenance {
+            origin_zone: zone_id,
+            chain: Vec::new(),
+            taint: TaintLevel::Untainted,
+            elevated: false,
+            elevation_token: None,
+        },
+        refs: Vec::new(),
+        foreign_refs: Vec::new(),
+        ttl_secs: None,
+        placement: None,
+    }
+}
+
 #[test]
 fn cursor_store_commit_and_load() {
     let backend = InMemoryCursorStoreBackend::new();
@@ -168,6 +193,51 @@ fn cursor_store_commit_and_load() {
         .commit_cursor(
             cursor.clone(),
             test_header(1_700_000_000),
+            lease,
+            Signature::zero(),
+        )
+        .expect("commit should succeed");
+
+    assert_eq!(store.head(), Some(object_id));
+
+    let loaded = store
+        .load_cursor()
+        .expect("load should succeed")
+        .expect("cursor should exist");
+    assert_eq!(loaded, cursor);
+}
+
+#[cfg(feature = "cursor-store-object-store")]
+#[test]
+fn cursor_store_object_store_roundtrip() {
+    let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+    let object_id_key = ObjectIdKey::from_bytes([0xA5; 32]);
+    let connector_id = ConnectorId::from_static("test:operational:1.0");
+    let zone_id = ZoneId::work();
+
+    let backend = ObjectStoreCursorBackend::new(
+        object_store,
+        object_id_key,
+        connector_id.clone(),
+        zone_id.clone(),
+    );
+    let mut store = CursorStore::new(backend, connector_id, zone_id);
+
+    let cursor = CursorState {
+        offset: Some(42),
+        last_seen_id: Some("id-42".to_string()),
+        watermark: Some(420),
+    };
+
+    let lease = CursorLease {
+        lease_seq: 1,
+        lease_object_id: ObjectId::from_bytes([0x11; 32]),
+    };
+
+    let object_id = store
+        .commit_cursor(
+            cursor.clone(),
+            object_store_header(1_700_100_000, ZoneId::work()),
             lease,
             Signature::zero(),
         )

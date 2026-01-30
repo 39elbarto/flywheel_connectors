@@ -35,10 +35,13 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "cursor-store-object-store")]
+use fcp_cbor::CanonicalSerializer;
 use fcp_core::{
     ConnectorId, ConnectorStateObject, CursorState, HealthSnapshot, HealthState, InstanceId,
     ObjectHeader, ObjectId, Signature, ZoneId,
 };
+use fcp_core::{ObjectIdKey, RetentionClass, StorageMeta, StoredObject};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SupervisorConfig
@@ -767,6 +770,176 @@ impl CursorStoreBackend for Arc<InMemoryCursorStoreBackend> {
         state_obj: ConnectorStateObject,
     ) -> Result<ObjectId, CursorStoreError> {
         self.as_ref().store_state_object(state_obj)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ObjectStore-backed cursor store
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Cursor store backend backed by an `ObjectStore` (mesh persistence).
+#[cfg(feature = "cursor-store-object-store")]
+#[derive(Clone)]
+pub struct ObjectStoreCursorBackend {
+    object_store: Arc<dyn fcp_store::ObjectStore>,
+    object_id_key: ObjectIdKey,
+    connector_id: ConnectorId,
+    zone_id: ZoneId,
+    retention: RetentionClass,
+}
+
+#[cfg(feature = "cursor-store-object-store")]
+impl ObjectStoreCursorBackend {
+    /// Create a new backend that stores connector state objects in an `ObjectStore`.
+    #[must_use]
+    pub fn new(
+        object_store: Arc<dyn fcp_store::ObjectStore>,
+        object_id_key: ObjectIdKey,
+        connector_id: ConnectorId,
+        zone_id: ZoneId,
+    ) -> Self {
+        Self {
+            object_store,
+            object_id_key,
+            connector_id,
+            zone_id,
+            retention: RetentionClass::Pinned,
+        }
+    }
+
+    /// Override retention class for stored state objects.
+    #[must_use]
+    pub const fn with_retention(mut self, retention: RetentionClass) -> Self {
+        self.retention = retention;
+        self
+    }
+
+    #[allow(clippy::missing_const_for_fn)]
+    fn schema_id() -> fcp_cbor::SchemaId {
+        fcp_cbor::SchemaId::new(
+            "fcp.connector_state",
+            "state_object",
+            semver::Version::new(1, 0, 0),
+        )
+    }
+
+    fn block_on_store<T>(
+        fut: impl std::future::Future<Output = Result<T, fcp_store::ObjectStoreError>>,
+    ) -> Result<T, CursorStoreError> {
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
+                return tokio::task::block_in_place(|| handle.block_on(fut))
+                    .map_err(|err| CursorStoreError::Storage(err.to_string()));
+            }
+        } else {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|err| CursorStoreError::Storage(err.to_string()))?;
+            return runtime
+                .block_on(fut)
+                .map_err(|err| CursorStoreError::Storage(err.to_string()));
+        }
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| CursorStoreError::Storage(err.to_string()))?;
+        runtime
+            .block_on(fut)
+            .map_err(|err| CursorStoreError::Storage(err.to_string()))
+    }
+
+    fn decode_state_object(
+        stored: &StoredObject,
+    ) -> Result<ConnectorStateObject, CursorStoreError> {
+        CanonicalSerializer::deserialize(&stored.body, &stored.header.schema)
+            .map_err(|err| CursorStoreError::CursorDecoding(err.to_string()))
+    }
+}
+
+#[cfg(feature = "cursor-store-object-store")]
+impl CursorStoreBackend for ObjectStoreCursorBackend {
+    fn load_head(&self) -> Result<Option<(ObjectId, ConnectorStateObject)>, CursorStoreError> {
+        let object_ids =
+            Self::block_on_store(async { Ok(self.object_store.list_zone(&self.zone_id).await) })?;
+
+        let mut best: Option<(ObjectId, ConnectorStateObject)> = None;
+
+        for object_id in object_ids {
+            let stored = match Self::block_on_store(self.object_store.get(&object_id)) {
+                Ok(obj) => obj,
+                Err(err) => {
+                    tracing::warn!(error = %err, object_id = %object_id, "Failed to load state object");
+                    continue;
+                }
+            };
+
+            if stored.header.schema != Self::schema_id() {
+                continue;
+            }
+
+            let state = match Self::decode_state_object(&stored) {
+                Ok(state) => state,
+                Err(err) => {
+                    tracing::warn!(error = %err, object_id = %object_id, "Failed to decode state object");
+                    continue;
+                }
+            };
+
+            if state.connector_id != self.connector_id || state.zone_id != self.zone_id {
+                continue;
+            }
+
+            let replace = match &best {
+                None => true,
+                Some((_id, current)) => {
+                    state.seq > current.seq
+                        || (state.seq == current.seq && state.lease_seq > current.lease_seq)
+                }
+            };
+
+            if replace {
+                best = Some((object_id, state));
+            }
+        }
+
+        Ok(best)
+    }
+
+    fn store_state_object(
+        &self,
+        state_obj: ConnectorStateObject,
+    ) -> Result<ObjectId, CursorStoreError> {
+        if state_obj.connector_id != self.connector_id || state_obj.zone_id != self.zone_id {
+            return Err(CursorStoreError::Storage(
+                "connector_id/zone_id mismatch in state object".into(),
+            ));
+        }
+
+        if state_obj.header.schema != Self::schema_id() {
+            return Err(CursorStoreError::Storage(
+                "unexpected schema for connector state object".into(),
+            ));
+        }
+
+        let body = CanonicalSerializer::serialize(&state_obj, &state_obj.header.schema)
+            .map_err(|err| CursorStoreError::CursorEncoding(err.to_string()))?;
+        let object_id = StoredObject::derive_id(&state_obj.header, &body, &self.object_id_key)
+            .map_err(|err| CursorStoreError::CursorEncoding(err.to_string()))?;
+
+        let header = state_obj.header;
+        let stored = StoredObject {
+            object_id,
+            header,
+            body,
+            storage: StorageMeta {
+                retention: self.retention,
+            },
+        };
+
+        Self::block_on_store(self.object_store.put(stored))?;
+        Ok(object_id)
     }
 }
 

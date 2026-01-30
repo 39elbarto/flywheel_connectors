@@ -1,0 +1,843 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:58a82020b8b361edebf04f34ce0aa970dc1d6f9945bc4daeb210f6e9420c2f62"
+
+[connector]
+id = "fcp.vectordb"
+name = "Vector Database Connector"
+version = "0.1.0"
+description = "Provider-selectable vector database connector supporting Pinecone, Qdrant, and other vector stores"
+archetypes = [
+    "operational",
+    "bidirectional",
+]
+format = "native"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+]
+optional = ["storage.state"]
+forbidden = [
+    "system.exec",
+    "network.listen",
+]
+
+[provides.operations.create_collection]
+description = "Create a new vector collection/index"
+capability = "vectordb.collections.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "best_effort"
+
+[provides.operations.create_collection.rate_limit]
+max = 10
+per_ms = 60000
+
+[provides.operations.create_collection.input_schema]
+required = [
+    "collection",
+    "dimension",
+]
+type = "object"
+
+[provides.operations.create_collection.input_schema.properties.collection]
+description = "Collection name (lowercase alphanumeric)"
+maxLength = 64
+minLength = 1
+pattern = "^[a-z][a-z0-9_-]*$"
+type = "string"
+
+[provides.operations.create_collection.input_schema.properties.dimension]
+description = "Vector dimensionality"
+maximum = 10000
+minimum = 1
+type = "integer"
+
+[provides.operations.create_collection.input_schema.properties.metric]
+default = "cosine"
+description = "Distance metric for similarity"
+enum = [
+    "cosine",
+    "euclidean",
+    "dotproduct",
+]
+type = "string"
+
+[provides.operations.create_collection.input_schema.properties.namespace]
+type = "string"
+
+[provides.operations.create_collection.input_schema.properties.provider_options]
+description = "Provider-specific options (replicas, shards, etc.)"
+type = "object"
+
+[provides.operations.create_collection.output_schema]
+required = [
+    "collection",
+    "status",
+]
+type = "object"
+
+[provides.operations.create_collection.output_schema.properties.collection]
+type = "string"
+
+[provides.operations.create_collection.output_schema.properties.host]
+type = "string"
+
+[provides.operations.create_collection.output_schema.properties.status]
+enum = [
+    "created",
+    "pending",
+    "exists",
+]
+type = "string"
+
+[provides.operations.create_collection.network_constraints]
+host_allow = [
+    "*.pinecone.io",
+    "*.qdrant.io",
+    "*.qdrant.tech",
+]
+port_allow = [
+    443,
+    6333,
+    6334,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations.create_collection.ai_hints]
+when_to_use = "Use when setting up a new vector store for embeddings. Choose dimension based on your embedding model."
+common_mistakes = [
+    "Wrong dimension for model (OpenAI ada-002 = 1536, text-embedding-3-small = 1536).",
+    "Changing metric after data inserted.",
+]
+examples = []
+related = []
+
+[provides.operations.delete_collection]
+description = "Delete a vector collection/index and all its vectors"
+capability = "vectordb.collections.delete"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "best_effort"
+
+[provides.operations.delete_collection.rate_limit]
+max = 5
+per_ms = 60000
+
+[provides.operations.delete_collection.input_schema]
+required = ["collection"]
+type = "object"
+
+[provides.operations.delete_collection.input_schema.properties.collection]
+type = "string"
+
+[provides.operations.delete_collection.input_schema.properties.confirm]
+description = "Must be true to confirm deletion"
+type = "boolean"
+
+[provides.operations.delete_collection.input_schema.properties.namespace]
+type = "string"
+
+[provides.operations.delete_collection.output_schema]
+required = ["deleted"]
+type = "object"
+
+[provides.operations.delete_collection.output_schema.properties.collection]
+type = "string"
+
+[provides.operations.delete_collection.output_schema.properties.deleted]
+type = "boolean"
+
+[provides.operations.delete_collection.network_constraints]
+host_allow = [
+    "*.pinecone.io",
+    "*.qdrant.io",
+    "*.qdrant.tech",
+]
+port_allow = [
+    443,
+    6333,
+    6334,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations.delete_collection.ai_hints]
+when_to_use = "Only use to permanently delete a collection. This is irreversible."
+common_mistakes = [
+    "Deleting production collections.",
+    "Forgetting to backup data first.",
+]
+examples = []
+related = []
+
+[provides.operations.delete_vectors]
+description = "Delete vectors by ID or filter"
+capability = "vectordb.vectors.delete"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "best_effort"
+
+[provides.operations.delete_vectors.rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations.delete_vectors.input_schema]
+required = ["collection"]
+type = "object"
+
+[provides.operations.delete_vectors.input_schema.properties.collection]
+type = "string"
+
+[provides.operations.delete_vectors.input_schema.properties.delete_all]
+default = false
+description = "Delete all vectors (dangerous)"
+type = "boolean"
+
+[provides.operations.delete_vectors.input_schema.properties.filter]
+description = "Metadata filter to select vectors for deletion"
+type = "object"
+
+[provides.operations.delete_vectors.input_schema.properties.ids]
+description = "Vector IDs to delete"
+type = "array"
+
+[provides.operations.delete_vectors.input_schema.properties.ids.items]
+type = "string"
+
+[provides.operations.delete_vectors.input_schema.properties.namespace]
+type = "string"
+
+[provides.operations.delete_vectors.output_schema]
+type = "object"
+
+[provides.operations.delete_vectors.output_schema.properties.deleted_count]
+type = "integer"
+
+[provides.operations.delete_vectors.network_constraints]
+host_allow = [
+    "*.pinecone.io",
+    "*.qdrant.io",
+    "*.qdrant.tech",
+]
+port_allow = [
+    443,
+    6333,
+    6334,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations.delete_vectors.ai_hints]
+when_to_use = "Use to remove specific vectors or vectors matching a filter."
+common_mistakes = [
+    "Using delete_all accidentally.",
+    "Wrong filter deleting unintended vectors.",
+]
+examples = []
+related = []
+
+[provides.operations.describe_collection]
+description = "Get detailed metadata about a specific collection/index"
+capability = "vectordb.collections.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations.describe_collection.rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations.describe_collection.input_schema]
+required = ["collection"]
+type = "object"
+
+[provides.operations.describe_collection.input_schema.properties.collection]
+description = "Collection/index name"
+type = "string"
+
+[provides.operations.describe_collection.input_schema.properties.namespace]
+type = "string"
+
+[provides.operations.describe_collection.output_schema]
+required = [
+    "name",
+    "dimension",
+    "metric",
+]
+type = "object"
+
+[provides.operations.describe_collection.output_schema.properties.created_at]
+format = "date-time"
+type = "string"
+
+[provides.operations.describe_collection.output_schema.properties.dimension]
+type = "integer"
+
+[provides.operations.describe_collection.output_schema.properties.metric]
+enum = [
+    "cosine",
+    "euclidean",
+    "dotproduct",
+    "ip",
+]
+type = "string"
+
+[provides.operations.describe_collection.output_schema.properties.name]
+type = "string"
+
+[provides.operations.describe_collection.output_schema.properties.provider_metadata]
+type = "object"
+
+[provides.operations.describe_collection.output_schema.properties.status]
+type = "string"
+
+[provides.operations.describe_collection.output_schema.properties.vector_count]
+type = "integer"
+
+[provides.operations.describe_collection.ai_hints]
+when_to_use = "Use to verify collection exists and check dimension/metric before inserting vectors."
+common_mistakes = ["Inserting vectors with wrong dimension."]
+examples = []
+related = []
+
+[provides.operations.fetch_vectors]
+description = "Retrieve vectors by their IDs"
+capability = "vectordb.vectors.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations.fetch_vectors.rate_limit]
+max = 500
+per_ms = 60000
+
+[provides.operations.fetch_vectors.input_schema]
+required = [
+    "collection",
+    "ids",
+]
+type = "object"
+
+[provides.operations.fetch_vectors.input_schema.properties.collection]
+type = "string"
+
+[provides.operations.fetch_vectors.input_schema.properties.ids]
+maxItems = 1000
+minItems = 1
+type = "array"
+
+[provides.operations.fetch_vectors.input_schema.properties.ids.items]
+type = "string"
+
+[provides.operations.fetch_vectors.input_schema.properties.namespace]
+type = "string"
+
+[provides.operations.fetch_vectors.output_schema]
+required = ["vectors"]
+type = "object"
+
+[provides.operations.fetch_vectors.output_schema.properties.vectors]
+type = "object"
+
+[provides.operations.fetch_vectors.output_schema.properties.vectors.additionalProperties]
+type = "object"
+
+[provides.operations.fetch_vectors.output_schema.properties.vectors.additionalProperties.properties.id]
+type = "string"
+
+[provides.operations.fetch_vectors.output_schema.properties.vectors.additionalProperties.properties.metadata]
+type = "object"
+
+[provides.operations.fetch_vectors.output_schema.properties.vectors.additionalProperties.properties.values]
+type = "array"
+
+[provides.operations.fetch_vectors.output_schema.properties.vectors.additionalProperties.properties.values.items]
+type = "number"
+
+[provides.operations.fetch_vectors.network_constraints]
+host_allow = [
+    "*.pinecone.io",
+    "*.qdrant.io",
+    "*.qdrant.tech",
+]
+port_allow = [
+    443,
+    6333,
+    6334,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations.fetch_vectors.ai_hints]
+when_to_use = "Use to retrieve specific vectors when you know their IDs."
+common_mistakes = ["Fetching too many IDs at once."]
+examples = []
+related = []
+
+[provides.operations.list_collections]
+description = "List all vector collections/indexes in the configured namespace"
+capability = "vectordb.collections.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations.list_collections.rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations.list_collections.input_schema]
+type = "object"
+
+[provides.operations.list_collections.input_schema.properties.namespace]
+description = "Optional namespace filter"
+type = "string"
+
+[provides.operations.list_collections.output_schema]
+required = ["collections"]
+type = "object"
+
+[provides.operations.list_collections.output_schema.properties.collections]
+type = "array"
+
+[provides.operations.list_collections.output_schema.properties.collections.items]
+required = ["name"]
+type = "object"
+
+[provides.operations.list_collections.output_schema.properties.collections.items.properties.dimension]
+type = "integer"
+
+[provides.operations.list_collections.output_schema.properties.collections.items.properties.metric]
+type = "string"
+
+[provides.operations.list_collections.output_schema.properties.collections.items.properties.name]
+type = "string"
+
+[provides.operations.list_collections.output_schema.properties.collections.items.properties.vector_count]
+type = "integer"
+
+[provides.operations.list_collections.ai_hints]
+when_to_use = "Use to discover available collections before querying or inserting vectors."
+common_mistakes = ["Forgetting namespace in multi-tenant setups."]
+examples = []
+related = []
+
+[provides.operations.query_vectors]
+description = "Search for similar vectors using a query vector"
+capability = "vectordb.vectors.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations.query_vectors.rate_limit]
+max = 500
+per_ms = 60000
+
+[provides.operations.query_vectors.input_schema]
+required = [
+    "collection",
+    "vector",
+]
+type = "object"
+
+[provides.operations.query_vectors.input_schema.properties.collection]
+type = "string"
+
+[provides.operations.query_vectors.input_schema.properties.filter]
+description = "Metadata filter (provider-specific syntax)"
+type = "object"
+
+[provides.operations.query_vectors.input_schema.properties.include_metadata]
+default = true
+type = "boolean"
+
+[provides.operations.query_vectors.input_schema.properties.include_values]
+default = false
+type = "boolean"
+
+[provides.operations.query_vectors.input_schema.properties.namespace]
+type = "string"
+
+[provides.operations.query_vectors.input_schema.properties.sparse_vector]
+description = "Sparse query vector for hybrid search (Pinecone)"
+type = "object"
+
+[provides.operations.query_vectors.input_schema.properties.top_k]
+default = 10
+description = "Number of results to return"
+maximum = 10000
+minimum = 1
+type = "integer"
+
+[provides.operations.query_vectors.input_schema.properties.vector]
+description = "Query vector"
+type = "array"
+
+[provides.operations.query_vectors.input_schema.properties.vector.items]
+type = "number"
+
+[provides.operations.query_vectors.output_schema]
+required = ["matches"]
+type = "object"
+
+[provides.operations.query_vectors.output_schema.properties.matches]
+type = "array"
+
+[provides.operations.query_vectors.output_schema.properties.matches.items]
+required = [
+    "id",
+    "score",
+]
+type = "object"
+
+[provides.operations.query_vectors.output_schema.properties.matches.items.properties.id]
+type = "string"
+
+[provides.operations.query_vectors.output_schema.properties.matches.items.properties.metadata]
+type = "object"
+
+[provides.operations.query_vectors.output_schema.properties.matches.items.properties.score]
+type = "number"
+
+[provides.operations.query_vectors.output_schema.properties.matches.items.properties.values]
+type = "array"
+
+[provides.operations.query_vectors.output_schema.properties.matches.items.properties.values.items]
+type = "number"
+
+[provides.operations.query_vectors.output_schema.properties.namespace]
+type = "string"
+
+[provides.operations.query_vectors.network_constraints]
+host_allow = [
+    "*.pinecone.io",
+    "*.qdrant.io",
+    "*.qdrant.tech",
+]
+port_allow = [
+    443,
+    6333,
+    6334,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations.query_vectors.ai_hints]
+when_to_use = "Use to find similar items based on vector similarity. Core operation for RAG/semantic search."
+common_mistakes = [
+    "Query vector dimension mismatch.",
+    "Setting top_k too high.",
+    "Not using filters to scope results.",
+]
+examples = []
+related = []
+
+[provides.operations.update_vector_metadata]
+description = "Update metadata for existing vectors without re-uploading values"
+capability = "vectordb.vectors.write"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "best_effort"
+
+[provides.operations.update_vector_metadata.rate_limit]
+max = 500
+per_ms = 60000
+
+[provides.operations.update_vector_metadata.input_schema]
+required = [
+    "collection",
+    "id",
+    "metadata",
+]
+type = "object"
+
+[provides.operations.update_vector_metadata.input_schema.properties.collection]
+type = "string"
+
+[provides.operations.update_vector_metadata.input_schema.properties.id]
+type = "string"
+
+[provides.operations.update_vector_metadata.input_schema.properties.metadata]
+description = "New metadata to set (replaces existing)"
+type = "object"
+
+[provides.operations.update_vector_metadata.input_schema.properties.namespace]
+type = "string"
+
+[provides.operations.update_vector_metadata.output_schema]
+required = ["updated"]
+type = "object"
+
+[provides.operations.update_vector_metadata.output_schema.properties.updated]
+type = "boolean"
+
+[provides.operations.update_vector_metadata.network_constraints]
+host_allow = [
+    "*.pinecone.io",
+    "*.qdrant.io",
+    "*.qdrant.tech",
+]
+port_allow = [
+    443,
+    6333,
+    6334,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations.update_vector_metadata.ai_hints]
+when_to_use = "Use to update metadata without re-embedding. Useful for status flags, timestamps, etc."
+common_mistakes = ["Replacing when you meant to merge metadata."]
+examples = []
+related = []
+
+[provides.operations.upsert_vectors]
+description = "Insert or update vectors in a collection"
+capability = "vectordb.vectors.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "best_effort"
+
+[provides.operations.upsert_vectors.rate_limit]
+max = 1000
+per_ms = 60000
+
+[provides.operations.upsert_vectors.input_schema]
+required = [
+    "collection",
+    "vectors",
+]
+type = "object"
+
+[provides.operations.upsert_vectors.input_schema.properties.collection]
+type = "string"
+
+[provides.operations.upsert_vectors.input_schema.properties.namespace]
+type = "string"
+
+[provides.operations.upsert_vectors.input_schema.properties.vectors]
+maxItems = 1000
+minItems = 1
+type = "array"
+
+[provides.operations.upsert_vectors.input_schema.properties.vectors.items]
+required = [
+    "id",
+    "values",
+]
+type = "object"
+
+[provides.operations.upsert_vectors.input_schema.properties.vectors.items.properties.id]
+maxLength = 512
+type = "string"
+
+[provides.operations.upsert_vectors.input_schema.properties.vectors.items.properties.metadata]
+description = "Arbitrary metadata for filtering"
+type = "object"
+
+[provides.operations.upsert_vectors.input_schema.properties.vectors.items.properties.sparse_values]
+description = "Sparse vector (Pinecone hybrid search)"
+type = "object"
+
+[provides.operations.upsert_vectors.input_schema.properties.vectors.items.properties.sparse_values.properties.indices]
+type = "array"
+
+[provides.operations.upsert_vectors.input_schema.properties.vectors.items.properties.sparse_values.properties.indices.items]
+type = "integer"
+
+[provides.operations.upsert_vectors.input_schema.properties.vectors.items.properties.sparse_values.properties.values]
+type = "array"
+
+[provides.operations.upsert_vectors.input_schema.properties.vectors.items.properties.sparse_values.properties.values.items]
+type = "number"
+
+[provides.operations.upsert_vectors.input_schema.properties.vectors.items.properties.values]
+description = "Vector values (must match collection dimension)"
+type = "array"
+
+[provides.operations.upsert_vectors.input_schema.properties.vectors.items.properties.values.items]
+type = "number"
+
+[provides.operations.upsert_vectors.output_schema]
+required = ["upserted_count"]
+type = "object"
+
+[provides.operations.upsert_vectors.output_schema.properties.upserted_count]
+type = "integer"
+
+[provides.operations.upsert_vectors.network_constraints]
+host_allow = [
+    "*.pinecone.io",
+    "*.qdrant.io",
+    "*.qdrant.tech",
+]
+port_allow = [
+    443,
+    6333,
+    6334,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations.upsert_vectors.ai_hints]
+when_to_use = "Use to add new vectors or update existing ones. Batch for efficiency (up to 1000)."
+common_mistakes = [
+    "Vector dimension mismatch.",
+    "Exceeding batch size limits.",
+    "Metadata too large.",
+]
+examples = []
+related = []
+
+[sandbox]
+profile = "strict"
+memory_mb = 512
+cpu_percent = 50
+wall_clock_timeout_ms = 60000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "vectordb.read"
+requests = 1000
+window_ms = 60000
+burst = 100
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "vectordb.write"
+requests = 500
+window_ms = 60000
+burst = 50
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "vectordb.admin"
+requests = 20
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[rate_limits.operation_pools]

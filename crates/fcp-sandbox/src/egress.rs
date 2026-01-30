@@ -1179,4 +1179,420 @@ mod tests {
         // Empty pins should pass
         assert!(verifier.verify_spki(&[1, 2], &[]).is_ok());
     }
+
+    // ── New tests ──
+
+    #[test]
+    fn test_egress_error_display() {
+        let e = EgressError::Denied {
+            reason: "bad host".into(),
+            code: DenyReason::HostNotAllowed,
+        };
+        assert!(e.to_string().contains("bad host"));
+
+        let e = EgressError::InvalidRequest("malformed".into());
+        assert!(e.to_string().contains("malformed"));
+
+        let e = EgressError::InvalidUrl("no scheme".into());
+        assert!(e.to_string().contains("no scheme"));
+
+        let e = EgressError::CanonicalizationFailed("punycode".into());
+        assert!(e.to_string().contains("punycode"));
+
+        let e = EgressError::DnsResolutionFailed("NXDOMAIN".into());
+        assert!(e.to_string().contains("NXDOMAIN"));
+
+        let e = EgressError::CredentialError("not found".into());
+        assert!(e.to_string().contains("not found"));
+
+        let e = EgressError::TlsVerificationFailed("expired cert".into());
+        assert!(e.to_string().contains("expired cert"));
+    }
+
+    #[test]
+    fn test_deny_reason_serde_roundtrip() {
+        let reasons = [
+            DenyReason::HostNotAllowed,
+            DenyReason::PortNotAllowed,
+            DenyReason::IpLiteralDenied,
+            DenyReason::LocalhostDenied,
+            DenyReason::PrivateRangeDenied,
+            DenyReason::TailnetRangeDenied,
+            DenyReason::LinkLocalDenied,
+            DenyReason::CidrDenyMatched,
+            DenyReason::SniMismatch,
+            DenyReason::SpkiPinMismatch,
+            DenyReason::CredentialNotAuthorized,
+            DenyReason::CredentialHostNotAllowed,
+            DenyReason::HostnameNotCanonical,
+            DenyReason::DnsMaxIpsExceeded,
+            DenyReason::MaxRedirectsExceeded,
+        ];
+        for reason in reasons {
+            let json = serde_json::to_string(&reason).unwrap();
+            let roundtrip: DenyReason = serde_json::from_str(&json).unwrap();
+            assert_eq!(roundtrip, reason);
+        }
+    }
+
+    #[test]
+    fn test_egress_request_http_serde() {
+        let req = EgressRequest::Http(EgressHttpRequest {
+            url: "https://api.example.com/data".into(),
+            method: "POST".into(),
+            headers: vec![HttpHeader {
+                name: "Content-Type".into(),
+                value: "application/json".into(),
+            }],
+            body: Some(b"{}".to_vec()),
+            credential_id: Some("cred-1".into()),
+        });
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"type\":\"http\""));
+        let roundtrip: EgressRequest = serde_json::from_str(&json).unwrap();
+        if let EgressRequest::Http(http) = roundtrip {
+            assert_eq!(http.url, "https://api.example.com/data");
+            assert_eq!(http.method, "POST");
+            assert_eq!(http.headers.len(), 1);
+            assert_eq!(http.credential_id, Some("cred-1".into()));
+        } else {
+            panic!("expected Http variant");
+        }
+    }
+
+    #[test]
+    fn test_egress_request_tcp_serde() {
+        let req = EgressRequest::TcpConnect(EgressTcpConnectRequest {
+            host: "db.example.com".into(),
+            port: 5432,
+            tls: true,
+            sni_override: Some("db.example.com".into()),
+            credential_id: None,
+        });
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"type\":\"tcp_connect\""));
+        let roundtrip: EgressRequest = serde_json::from_str(&json).unwrap();
+        if let EgressRequest::TcpConnect(tcp) = roundtrip {
+            assert_eq!(tcp.host, "db.example.com");
+            assert_eq!(tcp.port, 5432);
+            assert!(tcp.tls);
+            assert_eq!(tcp.sni_override, Some("db.example.com".into()));
+        } else {
+            panic!("expected TcpConnect variant");
+        }
+    }
+
+    #[test]
+    fn test_egress_guard_default() {
+        let guard = EgressGuard::default();
+        // Just verify it can be constructed via Default
+        let _ = format!("{guard:?}");
+    }
+
+    #[test]
+    fn test_canonicalize_idempotent() {
+        // Already canonical hostname should pass through unchanged
+        let canonical = canonicalize_hostname("api.example.com").unwrap();
+        let double = canonicalize_hostname(&canonical).unwrap();
+        assert_eq!(canonical, double);
+    }
+
+    #[test]
+    fn test_is_hostname_canonical_empty() {
+        assert!(!is_hostname_canonical(""));
+    }
+
+    #[test]
+    fn test_is_hostname_canonical_non_ascii() {
+        assert!(!is_hostname_canonical("münchen.example.com"));
+    }
+
+    #[test]
+    fn test_noop_credential_injector() {
+        let injector = NoOpCredentialInjector;
+
+        // is_authorized always returns false
+        let result = injector
+            .is_authorized("cred-1", "op-1", &["cred-1".into()])
+            .unwrap();
+        assert!(!result);
+
+        // inject_http returns error
+        let mut headers = vec![];
+        let result = injector.inject_http("cred-1", &mut headers);
+        assert!(result.is_err());
+
+        // get_tcp_auth returns error
+        let result = injector.get_tcp_auth("cred-1");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_dns_resolution_valid() {
+        let guard = EgressGuard::new();
+        let constraints = test_constraints();
+
+        let ips: Vec<IpAddr> = vec!["8.8.8.8".parse().unwrap(), "8.8.4.4".parse().unwrap()];
+        let result = guard.validate_dns_resolution(&ips, &constraints);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_validate_dns_resolution_contains_denied() {
+        let guard = EgressGuard::new();
+        let constraints = test_constraints();
+
+        let ips: Vec<IpAddr> = vec![
+            "8.8.8.8".parse().unwrap(),
+            "127.0.0.1".parse().unwrap(), // localhost - denied
+        ];
+        let result = guard.validate_dns_resolution(&ips, &constraints);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_check_ip_link_local_denied() {
+        let guard = EgressGuard::new();
+        let constraints = test_constraints();
+
+        let result = guard.check_ip_constraints("169.254.1.1".parse().unwrap(), &constraints);
+        assert!(result.is_err());
+        if let Err(EgressError::Denied { code, .. }) = result {
+            assert_eq!(code, DenyReason::LinkLocalDenied);
+        }
+    }
+
+    #[test]
+    fn test_check_ip_custom_cidr_deny() {
+        let guard = EgressGuard::new();
+        let mut constraints = test_constraints();
+        constraints.cidr_deny = vec!["203.0.113.0/24".into()]; // TEST-NET-3
+
+        let result = guard.check_ip_constraints("203.0.113.42".parse().unwrap(), &constraints);
+        assert!(result.is_err());
+        if let Err(EgressError::Denied { code, .. }) = result {
+            assert_eq!(code, DenyReason::CidrDenyMatched);
+        }
+
+        // IP outside that CIDR should pass
+        let result = guard.check_ip_constraints("203.0.114.1".parse().unwrap(), &constraints);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_evaluate_non_canonical_host_allowed_when_not_required() {
+        let guard = EgressGuard::new();
+        let mut constraints = test_constraints();
+        constraints.require_host_canonicalization = false;
+        constraints.host_allow = vec!["api.example.com".into()];
+        constraints.deny_ip_literals = false;
+
+        let request = EgressRequest::Http(EgressHttpRequest {
+            url: "https://API.EXAMPLE.COM:443/".into(),
+            method: "GET".into(),
+            headers: vec![],
+            body: None,
+            credential_id: None,
+        });
+
+        let decision = guard.evaluate(&request, &constraints).unwrap();
+        assert!(decision.allowed);
+        assert_eq!(decision.canonical_host, "api.example.com");
+    }
+
+    #[test]
+    fn test_evaluate_tcp_denied_port() {
+        let guard = EgressGuard::new();
+        let constraints = test_constraints();
+
+        let request = EgressRequest::TcpConnect(EgressTcpConnectRequest {
+            host: "api.example.com".into(),
+            port: 9999, // Not in port_allow
+            tls: false,
+            sni_override: None,
+            credential_id: None,
+        });
+
+        let result = guard.evaluate(&request, &constraints);
+        assert!(result.is_err());
+        if let Err(EgressError::Denied { code, .. }) = result {
+            assert_eq!(code, DenyReason::PortNotAllowed);
+        }
+    }
+
+    #[test]
+    fn test_evaluate_sni_decision() {
+        let guard = EgressGuard::new();
+        let constraints = test_constraints(); // require_sni = true
+
+        let request = EgressRequest::Http(EgressHttpRequest {
+            url: "https://api.example.com/".into(),
+            method: "GET".into(),
+            headers: vec![],
+            body: None,
+            credential_id: None,
+        });
+
+        let decision = guard.evaluate(&request, &constraints).unwrap();
+        assert!(decision.tls_required);
+        assert_eq!(decision.expected_sni, Some("api.example.com".into()));
+    }
+
+    #[test]
+    fn test_evaluate_no_sni_when_not_required() {
+        let guard = EgressGuard::new();
+        let mut constraints = test_constraints();
+        constraints.require_sni = false;
+
+        let request = EgressRequest::Http(EgressHttpRequest {
+            url: "https://api.example.com/".into(),
+            method: "GET".into(),
+            headers: vec![],
+            body: None,
+            credential_id: None,
+        });
+
+        let decision = guard.evaluate(&request, &constraints).unwrap();
+        assert!(decision.tls_required);
+        assert_eq!(decision.expected_sni, None);
+    }
+
+    #[test]
+    fn test_evaluate_spki_pins_in_decision() {
+        use fcp_manifest::Base64Bytes;
+        let guard = EgressGuard::new();
+        let mut constraints = test_constraints();
+        constraints.spki_pins = vec![
+            Base64Bytes::try_from("base64:cGluMQ==".to_string()).unwrap(),
+            Base64Bytes::try_from("base64:cGluMg==".to_string()).unwrap(),
+        ];
+
+        let request = EgressRequest::Http(EgressHttpRequest {
+            url: "https://api.example.com/".into(),
+            method: "GET".into(),
+            headers: vec![],
+            body: None,
+            credential_id: None,
+        });
+
+        let decision = guard.evaluate(&request, &constraints).unwrap();
+        assert_eq!(decision.spki_pins.len(), 2);
+    }
+
+    #[test]
+    fn test_evaluate_invalid_url() {
+        let guard = EgressGuard::new();
+        let constraints = test_constraints();
+
+        let request = EgressRequest::Http(EgressHttpRequest {
+            url: "not-a-url".into(),
+            method: "GET".into(),
+            headers: vec![],
+            body: None,
+            credential_id: None,
+        });
+
+        let result = guard.evaluate(&request, &constraints);
+        assert!(matches!(result, Err(EgressError::InvalidUrl(_))));
+    }
+
+    #[test]
+    fn test_wildcard_does_not_match_bare_domain() {
+        let guard = EgressGuard::new();
+        let mut constraints = test_constraints();
+        constraints.host_allow = vec!["*.test.com".into()];
+        constraints.deny_ip_literals = false;
+
+        // Bare domain "test.com" should NOT match "*.test.com"
+        let request = EgressRequest::Http(EgressHttpRequest {
+            url: "https://test.com:443/".into(),
+            method: "GET".into(),
+            headers: vec![],
+            body: None,
+            credential_id: None,
+        });
+
+        let result = guard.evaluate(&request, &constraints);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ip_literal_in_ip_allow() {
+        let guard = EgressGuard::new();
+        let mut constraints = test_constraints();
+        constraints.deny_ip_literals = false;
+        constraints.ip_allow = vec!["93.184.216.34".parse().unwrap()];
+        constraints.port_allow = vec![443];
+
+        let request = EgressRequest::Http(EgressHttpRequest {
+            url: "https://93.184.216.34/".into(),
+            method: "GET".into(),
+            headers: vec![],
+            body: None,
+            credential_id: None,
+        });
+
+        let decision = guard.evaluate(&request, &constraints).unwrap();
+        assert!(decision.allowed);
+    }
+
+    #[test]
+    fn test_is_localhost_unspecified() {
+        assert!(is_localhost("0.0.0.0".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_is_private_range_ipv6_ula() {
+        assert!(is_private_range("fd12:3456:789a::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_is_link_local_ipv6() {
+        assert!(is_link_local("fe80::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_sni_verification_deny_code() {
+        let verifier = DefaultTlsVerifier;
+        let result = verifier.verify_sni("wrong.com", "expected.com");
+        if let Err(EgressError::Denied { code, .. }) = result {
+            assert_eq!(code, DenyReason::SniMismatch);
+        } else {
+            panic!("expected Denied error");
+        }
+    }
+
+    #[test]
+    fn test_spki_verification_deny_code() {
+        let verifier = DefaultTlsVerifier;
+        let pins = vec![vec![1, 2, 3]];
+        let result = verifier.verify_spki(&[4, 5, 6], &pins);
+        if let Err(EgressError::Denied { code, .. }) = result {
+            assert_eq!(code, DenyReason::SpkiPinMismatch);
+        } else {
+            panic!("expected Denied error");
+        }
+    }
+
+    #[test]
+    fn test_http_header_serde() {
+        let header = HttpHeader {
+            name: "Authorization".into(),
+            value: "Bearer token".into(),
+        };
+        let json = serde_json::to_string(&header).unwrap();
+        let roundtrip: HttpHeader = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip.name, "Authorization");
+        assert_eq!(roundtrip.value, "Bearer token");
+    }
+
+    #[test]
+    fn test_tcp_connect_defaults() {
+        let json = r#"{"host":"db.example.com","port":5432}"#;
+        let req: EgressTcpConnectRequest = serde_json::from_str(json).unwrap();
+        assert!(!req.tls); // default false
+        assert!(req.sni_override.is_none());
+        assert!(req.credential_id.is_none());
+    }
 }

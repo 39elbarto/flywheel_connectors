@@ -1016,4 +1016,248 @@ mod tests {
         assert_eq!(WasiConfig::cpu_percent_to_fuel(50), 5_000_000_000);
         assert_eq!(WasiConfig::cpu_percent_to_fuel(10), 1_000_000_000);
     }
+
+    // ── New tests ──
+
+    #[test]
+    fn test_wasi_error_display() {
+        let e = WasiError::EngineCreation("no support".into());
+        assert!(e.to_string().contains("no support"));
+
+        let e = WasiError::ComponentLoad("bad wasm".into());
+        assert!(e.to_string().contains("bad wasm"));
+
+        let e = WasiError::Instantiation("linker fail".into());
+        assert!(e.to_string().contains("linker fail"));
+
+        let e = WasiError::Execution("trap".into());
+        assert!(e.to_string().contains("trap"));
+
+        let e = WasiError::ResourceLimit("oom".into());
+        assert!(e.to_string().contains("oom"));
+
+        let e = WasiError::Timeout;
+        assert!(e.to_string().contains("timeout"));
+
+        let e = WasiError::FsAccessDenied {
+            path: "/etc/shadow".into(),
+            reason: "not allowed".into(),
+        };
+        assert!(e.to_string().contains("/etc/shadow"));
+        assert!(e.to_string().contains("not allowed"));
+
+        let e = WasiError::NetworkAccessDenied("blocked".into());
+        assert!(e.to_string().contains("blocked"));
+
+        let e = WasiError::ClockAccessDenied;
+        assert!(e.to_string().contains("deterministic"));
+
+        let e = WasiError::EntropyAccessDenied;
+        assert!(e.to_string().contains("deterministic"));
+
+        let e = WasiError::InvalidComponent("not a component".into());
+        assert!(e.to_string().contains("not a component"));
+
+        let e = WasiError::ManifestExtraction("missing".into());
+        assert!(e.to_string().contains("missing"));
+
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "gone");
+        let e = WasiError::Io(io_err);
+        assert!(e.to_string().contains("gone"));
+    }
+
+    #[test]
+    fn test_wasi_config_with_env() {
+        let mut env = HashMap::new();
+        env.insert("KEY".into(), "VALUE".into());
+        let config = WasiConfig::default().with_env(env);
+        assert_eq!(config.env_vars.get("KEY"), Some(&"VALUE".into()));
+    }
+
+    #[test]
+    fn test_wasi_config_with_args() {
+        let config = WasiConfig::default().with_args(vec!["arg1".into(), "arg2".into()]);
+        assert_eq!(config.args.len(), 2);
+        assert_eq!(config.args[0], "arg1");
+    }
+
+    #[test]
+    fn test_wasi_config_with_inherit_stdio() {
+        let config = WasiConfig::default().with_inherit_stdio(true, true);
+        assert!(config.inherit_stdout);
+        assert!(config.inherit_stderr);
+
+        let config = WasiConfig::default().with_inherit_stdio(false, true);
+        assert!(!config.inherit_stdout);
+        assert!(config.inherit_stderr);
+    }
+
+    #[test]
+    fn test_wasi_config_from_policy() {
+        use crate::sandbox::{CompiledPolicy, PlatformFlags};
+        use fcp_manifest::SandboxProfile;
+        let policy = CompiledPolicy {
+            profile: SandboxProfile::Strict,
+            memory_limit_bytes: 512 * 1024 * 1024,
+            cpu_percent: 75,
+            wall_clock_timeout: Duration::from_secs(60),
+            readonly_paths: vec![PathBuf::from("/usr")],
+            writable_paths: vec![PathBuf::from("/tmp/data")],
+            deny_exec: true,
+            deny_ptrace: true,
+            block_direct_network: true,
+            state_dir: Some(PathBuf::from("/tmp/data")),
+            platform_flags: PlatformFlags::default(),
+        };
+
+        let config = WasiConfig::from_policy(&policy).unwrap();
+        assert_eq!(config.memory_limit_bytes, 512 * 1024 * 1024);
+        assert_eq!(config.wall_clock_timeout, Duration::from_secs(60));
+        assert!(config.block_direct_network);
+        assert_eq!(config.readonly_paths.len(), 1);
+        assert_eq!(config.writable_paths.len(), 1);
+        assert_eq!(config.state_dir, Some(PathBuf::from("/tmp/data")));
+    }
+
+    #[test]
+    fn test_deterministic_rng_zero_seed_uses_default() {
+        let mut rng = DeterministicRng::new(0);
+        // Zero seed should use a non-zero default
+        let val = rng.next_u64();
+        assert_ne!(val, 0);
+    }
+
+    #[test]
+    fn test_deterministic_rng_next_byte() {
+        let mut rng1 = DeterministicRng::new(42);
+        let mut rng2 = DeterministicRng::new(42);
+        // Same seed produces same byte sequence
+        for _ in 0..10 {
+            assert_eq!(rng1.next_byte(), rng2.next_byte());
+        }
+    }
+
+    #[test]
+    fn test_network_capability_gate_check_tcp_no_constraints() {
+        let gate = NetworkCapabilityGate::new(None, true);
+        let result = gate.check_tcp("db.example.com", 5432, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_network_capability_gate_not_blocked_no_constraints() {
+        // block_direct=false, no constraints = should error with "no network policy"
+        let gate = NetworkCapabilityGate::new(None, false);
+        let result = gate.check_http("https://example.com/", "GET");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_network_capability_gate_with_constraints() {
+        use fcp_manifest::NetworkConstraints;
+        let constraints = NetworkConstraints {
+            host_allow: vec!["api.example.com".into()],
+            port_allow: vec![443],
+            ip_allow: vec![],
+            cidr_deny: vec![],
+            deny_localhost: true,
+            deny_private_ranges: true,
+            deny_tailnet_ranges: true,
+            require_sni: false,
+            spki_pins: vec![],
+            deny_ip_literals: true,
+            require_host_canonicalization: false,
+            dns_max_ips: 16,
+            max_redirects: 5,
+            connect_timeout_ms: 10_000,
+            total_timeout_ms: 60_000,
+            max_response_bytes: 10_485_760,
+        };
+
+        let gate = NetworkCapabilityGate::new(Some(constraints), true);
+        let result = gate.check_http("https://api.example.com/data", "GET");
+        assert!(result.is_ok());
+
+        // Denied host
+        let result = gate.check_http("https://evil.com/", "GET");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_leb128_empty_input() {
+        assert_eq!(read_leb128(&[]), None);
+    }
+
+    #[test]
+    fn test_leb128_single_byte_max() {
+        assert_eq!(read_leb128(&[0x7F]), Some((127, 1)));
+    }
+
+    #[test]
+    fn test_leb128_multi_byte() {
+        // 300 = 0xAC 0x02
+        assert_eq!(read_leb128(&[0xAC, 0x02]), Some((300, 2)));
+    }
+
+    #[test]
+    fn test_leb128_incomplete() {
+        // High bit set but no continuation byte
+        assert_eq!(read_leb128(&[0x80]), None);
+    }
+
+    #[test]
+    fn test_cpu_percent_to_fuel_zero() {
+        assert_eq!(WasiConfig::cpu_percent_to_fuel(0), 0);
+    }
+
+    #[test]
+    fn test_cpu_percent_to_fuel_one() {
+        assert_eq!(WasiConfig::cpu_percent_to_fuel(1), 100_000_000);
+    }
+
+    #[test]
+    fn test_cpu_percent_to_fuel_above_100() {
+        // 200% → unlimited (0)
+        assert_eq!(WasiConfig::cpu_percent_to_fuel(200), 0);
+    }
+
+    #[test]
+    fn test_extract_custom_section_too_short() {
+        // Less than 8 bytes (WASM magic + version)
+        assert!(extract_custom_section(&[0, 1, 2], "anything").is_none());
+    }
+
+    #[test]
+    fn test_extract_custom_section_empty_wasm() {
+        // Valid WASM magic + version but no sections
+        let wasm = b"\0asm\x01\0\0\0";
+        assert!(extract_custom_section(wasm, "fcp-manifest").is_none());
+    }
+
+    #[test]
+    fn test_wasi_config_default_comprehensive() {
+        let config = WasiConfig::default();
+        assert_eq!(config.memory_limit_bytes, 256 * 1024 * 1024);
+        assert_eq!(config.wall_clock_timeout, Duration::from_secs(30));
+        assert!(config.readonly_paths.is_empty());
+        assert!(config.writable_paths.is_empty());
+        assert!(config.state_dir.is_none());
+        assert!(!config.deterministic_mode);
+        assert_eq!(config.deterministic_timestamp, 0);
+        assert_eq!(config.deterministic_seed, 0);
+        assert!(config.network_constraints.is_none());
+        assert!(config.block_direct_network);
+        assert_eq!(config.max_fuel, 0);
+        assert!(config.env_vars.is_empty());
+        assert!(config.args.is_empty());
+        assert!(!config.inherit_stdout);
+        assert!(!config.inherit_stderr);
+    }
+
+    #[test]
+    fn test_fs_capability_gate_empty() {
+        let gate = FsCapabilityGate::new(vec![], vec![]);
+        assert!(gate.readonly_paths.is_empty());
+        assert!(gate.writable_paths.is_empty());
+    }
 }

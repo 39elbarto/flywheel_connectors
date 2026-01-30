@@ -438,4 +438,200 @@ mod tests {
         let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
         assert!(sandbox.apply(&policy).is_ok());
     }
+
+    // ── New tests ──
+
+    #[test]
+    fn test_sandbox_error_display() {
+        let e = SandboxError::UnsupportedPlatform("wasm".into());
+        assert!(e.to_string().contains("wasm"));
+
+        let e = SandboxError::PolicyCompilationFailed("bad rule".into());
+        assert!(e.to_string().contains("bad rule"));
+
+        let e = SandboxError::ApplyFailed("seccomp denied".into());
+        assert!(e.to_string().contains("seccomp denied"));
+
+        let e = SandboxError::ResourceLimitExceeded("memory".into());
+        assert!(e.to_string().contains("memory"));
+
+        let e = SandboxError::InvalidConfig("missing field".into());
+        assert!(e.to_string().contains("missing field"));
+
+        let e = SandboxError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "gone"));
+        assert!(e.to_string().contains("gone"));
+
+        let e = SandboxError::SyscallFailed("prctl".into());
+        assert!(e.to_string().contains("prctl"));
+
+        let e = SandboxError::Timeout;
+        assert!(e.to_string().contains("timeout"));
+    }
+
+    #[test]
+    fn test_platform_flags_default_is_empty() {
+        let flags = PlatformFlags::default();
+        assert!(flags.is_empty());
+        assert!(!flags.linux_use_landlock);
+        assert!(!flags.linux_use_userns);
+        assert!(flags.macos_entitlements.is_empty());
+        assert!(!flags.windows_low_integrity);
+    }
+
+    #[test]
+    fn test_platform_flags_not_empty() {
+        let flags = PlatformFlags {
+            linux_use_landlock: true,
+            ..Default::default()
+        };
+        assert!(!flags.is_empty());
+
+        let flags = PlatformFlags {
+            linux_use_userns: true,
+            ..Default::default()
+        };
+        assert!(!flags.is_empty());
+
+        let flags = PlatformFlags {
+            macos_entitlements: vec!["com.apple.security.network.client".into()],
+            ..Default::default()
+        };
+        assert!(!flags.is_empty());
+
+        let flags = PlatformFlags {
+            windows_low_integrity: true,
+            ..Default::default()
+        };
+        assert!(!flags.is_empty());
+    }
+
+    #[test]
+    fn test_compiled_policy_with_platform_flags() {
+        let section = test_sandbox_section();
+        let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
+        assert!(policy.platform_flags.is_empty());
+
+        let flags = PlatformFlags {
+            linux_use_landlock: true,
+            ..Default::default()
+        };
+        let policy = policy.with_platform_flags(flags);
+        assert!(policy.platform_flags.linux_use_landlock);
+    }
+
+    #[test]
+    fn test_expand_path_connector_state_subpath() {
+        let state_dir = PathBuf::from("/data/state");
+        assert_eq!(
+            expand_path("$CONNECTOR_STATE/db/main.sqlite", Some(&state_dir)),
+            Some(PathBuf::from("/data/state/db/main.sqlite"))
+        );
+    }
+
+    #[test]
+    fn test_expand_path_absolute_ignores_state_dir() {
+        let state_dir = PathBuf::from("/data/state");
+        assert_eq!(
+            expand_path("/etc/hosts", Some(&state_dir)),
+            Some(PathBuf::from("/etc/hosts"))
+        );
+    }
+
+    #[test]
+    fn test_compiled_policy_state_dir_added_to_writable() {
+        let mut section = test_sandbox_section();
+        section.fs_writable_paths = vec![]; // No writable paths
+        let state_dir = Some(PathBuf::from("/data/state"));
+        let policy = CompiledPolicy::from_manifest(&section, state_dir).unwrap();
+        assert!(
+            policy
+                .writable_paths
+                .contains(&PathBuf::from("/data/state"))
+        );
+    }
+
+    #[test]
+    fn test_compiled_policy_state_dir_not_duplicated() {
+        let mut section = test_sandbox_section();
+        section.fs_writable_paths = vec!["$CONNECTOR_STATE".into()];
+        let state_dir = Some(PathBuf::from("/data/state"));
+        let policy = CompiledPolicy::from_manifest(&section, state_dir).unwrap();
+        // $CONNECTOR_STATE expands to /data/state, and state_dir is also /data/state
+        // Should not be duplicated
+        let count = policy
+            .writable_paths
+            .iter()
+            .filter(|p| *p == &PathBuf::from("/data/state"))
+            .count();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_create_sandbox_returns_linux() {
+        let sandbox = create_sandbox().unwrap();
+        assert_eq!(sandbox.platform_name(), "linux");
+        assert!(sandbox.is_available());
+    }
+
+    #[test]
+    fn test_noop_sandbox_verify_file_access() {
+        let sandbox = NoOpSandbox;
+        let section = test_sandbox_section();
+        let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
+        // NoOp always allows
+        assert!(
+            sandbox
+                .verify_file_access(&policy, std::path::Path::new("/anything"), true)
+                .is_ok()
+        );
+        assert!(
+            sandbox
+                .verify_file_access(&policy, std::path::Path::new("/anything"), false)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_noop_sandbox_verify_exec_and_network() {
+        let sandbox = NoOpSandbox;
+        let section = test_sandbox_section();
+        let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
+        assert!(sandbox.verify_exec_allowed(&policy).is_ok());
+        assert!(sandbox.verify_network_blocked(&policy).is_ok());
+    }
+
+    #[test]
+    fn test_compiled_policy_serde_roundtrip() {
+        let section = test_sandbox_section();
+        let state_dir = Some(PathBuf::from("/tmp/state"));
+        let policy = CompiledPolicy::from_manifest(&section, state_dir).unwrap();
+
+        let json = serde_json::to_string(&policy).unwrap();
+        let roundtrip: CompiledPolicy = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(roundtrip.profile, policy.profile);
+        assert_eq!(roundtrip.memory_limit_bytes, policy.memory_limit_bytes);
+        assert_eq!(roundtrip.cpu_percent, policy.cpu_percent);
+        assert_eq!(roundtrip.deny_exec, policy.deny_exec);
+        assert_eq!(roundtrip.deny_ptrace, policy.deny_ptrace);
+        assert_eq!(roundtrip.block_direct_network, policy.block_direct_network);
+    }
+
+    #[test]
+    fn test_platform_flags_serde_roundtrip() {
+        let flags = PlatformFlags {
+            linux_use_landlock: true,
+            linux_use_userns: true,
+            macos_entitlements: vec!["com.apple.security.network.client".into()],
+            windows_low_integrity: true,
+        };
+
+        let json = serde_json::to_string(&flags).unwrap();
+        let roundtrip: PlatformFlags = serde_json::from_str(&json).unwrap();
+
+        assert!(roundtrip.linux_use_landlock);
+        assert!(roundtrip.linux_use_userns);
+        assert_eq!(roundtrip.macos_entitlements.len(), 1);
+        assert!(roundtrip.windows_low_integrity);
+    }
 }

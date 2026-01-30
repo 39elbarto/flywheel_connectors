@@ -1000,4 +1000,172 @@ mod tests {
         assert_eq!(last.code, 0x06);
         assert_eq!(last.k, SECCOMP_RET_KILL_PROCESS);
     }
+
+    // ── New tests ──
+
+    #[test]
+    fn test_linux_sandbox_default() {
+        let sandbox = LinuxSandbox::default();
+        assert!(sandbox.is_available());
+        assert_eq!(sandbox.platform_name(), "linux");
+    }
+
+    #[test]
+    fn test_syscall_allowlist_no_network() {
+        let sandbox = LinuxSandbox::new();
+        let policy = test_policy(); // block_direct_network = true
+        let allowed = sandbox.build_syscall_allowlist(&policy);
+
+        // Network syscalls should NOT be present when network is blocked
+        assert!(!allowed.contains(&syscall_nr::SOCKET));
+        assert!(!allowed.contains(&syscall_nr::CONNECT));
+        assert!(!allowed.contains(&syscall_nr::BIND));
+    }
+
+    #[test]
+    fn test_syscall_allowlist_with_network() {
+        let sandbox = LinuxSandbox::new();
+        let mut policy = test_policy();
+        policy.block_direct_network = false;
+        let allowed = sandbox.build_syscall_allowlist(&policy);
+
+        // Network syscalls SHOULD be present when network is not blocked
+        assert!(allowed.contains(&syscall_nr::SOCKET));
+        assert!(allowed.contains(&syscall_nr::CONNECT));
+        assert!(allowed.contains(&syscall_nr::BIND));
+    }
+
+    #[test]
+    fn test_syscall_allowlist_deny_exec() {
+        let sandbox = LinuxSandbox::new();
+        let policy = test_policy(); // deny_exec = true
+        let allowed = sandbox.build_syscall_allowlist(&policy);
+
+        // Exec syscalls should NOT be present
+        assert!(!allowed.contains(&syscall_nr::EXECVE));
+        assert!(!allowed.contains(&syscall_nr::FORK));
+        assert!(!allowed.contains(&syscall_nr::CLONE));
+    }
+
+    #[test]
+    fn test_syscall_allowlist_allow_exec() {
+        let sandbox = LinuxSandbox::new();
+        let mut policy = test_policy();
+        policy.deny_exec = false;
+        let allowed = sandbox.build_syscall_allowlist(&policy);
+
+        assert!(allowed.contains(&syscall_nr::EXECVE));
+        assert!(allowed.contains(&syscall_nr::FORK));
+        assert!(allowed.contains(&syscall_nr::CLONE));
+    }
+
+    #[test]
+    fn test_syscall_allowlist_deny_ptrace() {
+        let sandbox = LinuxSandbox::new();
+        let policy = test_policy(); // deny_ptrace = true
+        let allowed = sandbox.build_syscall_allowlist(&policy);
+
+        assert!(!allowed.contains(&syscall_nr::PTRACE));
+    }
+
+    #[test]
+    fn test_syscall_allowlist_allow_ptrace() {
+        let sandbox = LinuxSandbox::new();
+        let mut policy = test_policy();
+        policy.deny_ptrace = false;
+        let allowed = sandbox.build_syscall_allowlist(&policy);
+
+        assert!(allowed.contains(&syscall_nr::PTRACE));
+    }
+
+    #[test]
+    fn test_syscall_allowlist_writable_paths_add_fs_modify() {
+        let sandbox = LinuxSandbox::new();
+        let policy = test_policy(); // has writable_paths = ["/tmp/test"]
+        let allowed = sandbox.build_syscall_allowlist(&policy);
+
+        // File modification syscalls should be present
+        assert!(allowed.contains(&syscall_nr::MKDIR));
+        assert!(allowed.contains(&syscall_nr::UNLINK));
+        assert!(allowed.contains(&syscall_nr::RENAME));
+    }
+
+    #[test]
+    fn test_syscall_allowlist_no_writable_paths_no_fs_modify() {
+        let sandbox = LinuxSandbox::new();
+        let mut policy = test_policy();
+        policy.writable_paths = vec![];
+        let allowed = sandbox.build_syscall_allowlist(&policy);
+
+        assert!(!allowed.contains(&syscall_nr::MKDIR));
+        assert!(!allowed.contains(&syscall_nr::UNLINK));
+        assert!(!allowed.contains(&syscall_nr::RENAME));
+    }
+
+    #[test]
+    fn test_sock_filter_stmt() {
+        let f = SockFilter::stmt(0x06, 0x7fff_0000);
+        assert_eq!(f.code, 0x06);
+        assert_eq!(f.jt, 0);
+        assert_eq!(f.jf, 0);
+        assert_eq!(f.k, 0x7fff_0000);
+    }
+
+    #[test]
+    fn test_sock_filter_jump() {
+        let f = SockFilter::jump(0x15, 42, 1, 0);
+        assert_eq!(f.code, 0x15);
+        assert_eq!(f.k, 42);
+        assert_eq!(f.jt, 1);
+        assert_eq!(f.jf, 0);
+    }
+
+    #[test]
+    fn test_verify_file_access_denied_path() {
+        let sandbox = LinuxSandbox::new();
+        let policy = test_policy();
+
+        // Path not in readonly or writable paths
+        assert!(
+            sandbox
+                .verify_file_access(&policy, Path::new("/etc/shadow"), false)
+                .is_err()
+        );
+        assert!(
+            sandbox
+                .verify_file_access(&policy, Path::new("/etc/shadow"), true)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_verify_exec_allowed_when_permitted() {
+        let sandbox = LinuxSandbox::new();
+        let mut policy = test_policy();
+        policy.deny_exec = false;
+        assert!(sandbox.verify_exec_allowed(&policy).is_ok());
+    }
+
+    #[test]
+    fn test_verify_network_not_blocked() {
+        let sandbox = LinuxSandbox::new();
+        let mut policy = test_policy();
+        policy.block_direct_network = false;
+        assert!(sandbox.verify_network_blocked(&policy).is_err());
+    }
+
+    #[test]
+    fn test_build_filter_with_all_features_enabled() {
+        let sandbox = LinuxSandbox::new();
+        let mut policy = test_policy();
+        policy.deny_exec = false;
+        policy.deny_ptrace = false;
+        policy.block_direct_network = false;
+        let filter = sandbox.build_seccomp_filter(&policy);
+
+        // Should have more instructions with all features enabled
+        let restricted_policy = test_policy();
+        let restricted_filter = sandbox.build_seccomp_filter(&restricted_policy);
+        assert!(filter.len() > restricted_filter.len());
+    }
 }

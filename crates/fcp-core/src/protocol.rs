@@ -1015,6 +1015,21 @@ pub enum UsageMetricKind {
     Custom,
 }
 
+impl UsageMetricKind {
+    /// Stable string representation for signing and diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ApiCredits => "api_credits",
+            Self::Tokens => "tokens",
+            Self::Bytes => "bytes",
+            Self::DurationMs => "duration_ms",
+            Self::Requests => "requests",
+            Self::Custom => "custom",
+        }
+    }
+}
+
 /// Usage metric for actual execution (NORMATIVE when present).
 ///
 /// Connectors SHOULD emit usage metrics when they can measure actual usage.

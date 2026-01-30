@@ -15,7 +15,7 @@ use crate::{
     Decision, DecisionReceipt, FlowCheckResult, IntegrityLevel, InvokeRequest, NodeId,
     NodeSignature, ObjectHeader, ObjectId, OperationId, PrincipalId, Provenance, ProvenanceRecord,
     ProvenanceViolation, RoleObject, SafetyTier, SanitizerReceipt, TaintFlag, TaintFlags,
-    TaintLevel, ZoneId,
+    TaintLevel, UsageMetricKind, ZoneId,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -81,6 +81,82 @@ impl Default for DecisionReceiptPolicy {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Usage Budget Policy (Zone-Level Guardrails)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Budget enforcement mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BudgetEnforcement {
+    /// Exceeding a budget should emit warnings but not deny operations.
+    Warn,
+    /// Exceeding a budget should deny operations.
+    Deny,
+}
+
+/// Budget limit for a specific usage metric.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageBudgetLimit {
+    /// Metric that the budget applies to.
+    pub metric: UsageMetricKind,
+    /// Maximum allowed usage within the window.
+    pub limit: u64,
+    /// Budget window in seconds.
+    pub window_seconds: u64,
+}
+
+/// Usage budget policy for a zone (NORMATIVE when present).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageBudgetPolicy {
+    /// Enforcement mode when budgets are exceeded.
+    pub enforcement: BudgetEnforcement,
+    /// Metric budgets enforced for the zone.
+    pub budgets: Vec<UsageBudgetLimit>,
+}
+
+/// Budget usage status for a metric.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BudgetStatus {
+    /// Usage is within budget.
+    Ok,
+    /// Usage exceeds the configured budget.
+    Exceeded,
+}
+
+/// Usage vs budget report for a specific metric.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageBudgetUsage {
+    /// Metric covered by this budget.
+    pub metric: UsageMetricKind,
+    /// Usage observed within the window.
+    pub used: u64,
+    /// Budget limit for the window.
+    pub limit: u64,
+    /// Remaining usage before exceeding the budget (0 if exceeded).
+    pub remaining: u64,
+    /// Window start timestamp (Unix seconds).
+    pub window_started_at: u64,
+    /// Window reset timestamp (Unix seconds).
+    pub window_resets_at: u64,
+    /// Budget status for this metric.
+    pub status: BudgetStatus,
+}
+
+/// Usage budget snapshot for a zone.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageBudgetSnapshot {
+    /// Zone that this snapshot applies to.
+    pub zone_id: ZoneId,
+    /// Enforcement mode in effect.
+    pub enforcement: BudgetEnforcement,
+    /// Budget usage entries.
+    pub budgets: Vec<UsageBudgetUsage>,
+    /// When the snapshot was generated (Unix seconds).
+    pub updated_at: u64,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Policy Objects
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -124,6 +200,9 @@ pub struct ZonePolicyObject {
     pub transport_policy: ZoneTransportPolicy,
     #[serde(default)]
     pub decision_receipts: DecisionReceiptPolicy,
+    /// Optional usage budget policy for this zone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_budget: Option<UsageBudgetPolicy>,
     /// Device posture requirements for this zone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requires_posture: Option<crate::posture::PostureRequirements>,

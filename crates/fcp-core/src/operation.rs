@@ -29,7 +29,9 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{IdempotencyClass, NodeSignature, ObjectHeader, ObjectId, TailscaleNodeId, ZoneId};
+use crate::{
+    IdempotencyClass, NodeSignature, ObjectHeader, ObjectId, TailscaleNodeId, UsageMetric, ZoneId,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // OperationIntent (NORMATIVE)
@@ -194,6 +196,10 @@ pub struct OperationReceipt {
     /// Enables auditing of what resources were affected.
     pub resource_object_ids: Vec<ObjectId>,
 
+    /// Usage metrics observed during execution (if available).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage_metrics: Option<Vec<UsageMetric>>,
+
     /// When execution completed (Unix timestamp seconds).
     pub executed_at: u64,
 
@@ -248,6 +254,33 @@ impl OperationReceipt {
         bytes.extend_from_slice(&resource_count.to_le_bytes());
         for oid in &self.resource_object_ids {
             bytes.extend_from_slice(oid.as_bytes());
+        }
+        if let Some(metrics) = &self.usage_metrics {
+            let metric_count = u32::try_from(metrics.len()).unwrap_or(u32::MAX);
+            bytes.extend_from_slice(&metric_count.to_le_bytes());
+            for metric in metrics {
+                let kind_bytes = metric.kind.as_str().as_bytes();
+                let kind_len = u32::try_from(kind_bytes.len()).unwrap_or(u32::MAX);
+                bytes.extend_from_slice(&kind_len.to_le_bytes());
+                bytes.extend_from_slice(kind_bytes);
+                bytes.extend_from_slice(&metric.amount.to_le_bytes());
+                if let Some(unit) = &metric.unit {
+                    bytes.extend_from_slice(&[1]);
+                    let unit_len = u32::try_from(unit.as_bytes().len()).unwrap_or(u32::MAX);
+                    bytes.extend_from_slice(&unit_len.to_le_bytes());
+                    bytes.extend_from_slice(unit.as_bytes());
+                } else {
+                    bytes.extend_from_slice(&[0]);
+                }
+                if let Some(custom_id) = &metric.custom_id {
+                    bytes.extend_from_slice(&[1]);
+                    let id_len = u32::try_from(custom_id.as_bytes().len()).unwrap_or(u32::MAX);
+                    bytes.extend_from_slice(&id_len.to_le_bytes());
+                    bytes.extend_from_slice(custom_id.as_bytes());
+                } else {
+                    bytes.extend_from_slice(&[0]);
+                }
+            }
         }
         bytes.extend_from_slice(&self.executed_at.to_le_bytes());
         bytes.extend_from_slice(self.executed_by.as_str().as_bytes());
@@ -574,6 +607,7 @@ mod tests {
             idempotency_key: Some("idem-key-123".to_string()),
             outcome_object_ids: vec![test_object_id("outcome-1")],
             resource_object_ids: vec![],
+            usage_metrics: Some(vec![UsageMetric::tokens(1200), UsageMetric::bytes(4096)]),
             executed_at: 1100,
             executed_by: test_node("executor-node"),
             signature: test_signature(),
@@ -677,6 +711,17 @@ mod tests {
     }
 
     #[test]
+    fn test_receipt_signable_bytes_change_with_usage() {
+        let mut receipt1 = create_test_receipt();
+        let mut receipt2 = create_test_receipt();
+
+        receipt1.usage_metrics = Some(vec![UsageMetric::tokens(100)]);
+        receipt2.usage_metrics = Some(vec![UsageMetric::tokens(200)]);
+
+        assert_ne!(receipt1.signable_bytes(), receipt2.signable_bytes());
+    }
+
+    #[test]
     fn test_receipt_serde() {
         let receipt = create_test_receipt();
         let json = serde_json::to_string(&receipt).unwrap();
@@ -688,6 +733,14 @@ mod tests {
         assert_eq!(
             receipt.outcome_object_ids.len(),
             deserialized.outcome_object_ids.len()
+        );
+        assert_eq!(
+            receipt.usage_metrics.as_ref().map(Vec::len).unwrap_or(0),
+            deserialized
+                .usage_metrics
+                .as_ref()
+                .map(Vec::len)
+                .unwrap_or(0)
         );
     }
 

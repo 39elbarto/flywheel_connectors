@@ -15,7 +15,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::ThrottleViolation;
+use crate::{ThrottleViolation, UsageMetricKind};
 
 /// FCP error type covering all error categories.
 #[derive(Error, Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +119,14 @@ pub enum FcpError {
 
     #[error("Resource exhausted: {resource}")]
     ResourceExhausted { resource: String },
+
+    #[error("Budget exceeded for {metric:?}: used {used} of {limit} per {window_seconds}s")]
+    BudgetExceeded {
+        metric: UsageMetricKind,
+        used: u64,
+        limit: u64,
+        window_seconds: u64,
+    },
 
     #[error("Conflict: {message}")]
     Conflict { message: String },
@@ -259,6 +267,7 @@ impl FcpError {
 
             Self::ResourceNotFound { .. }
             | Self::ResourceExhausted { .. }
+            | Self::BudgetExceeded { .. }
             | Self::Conflict { .. } => ErrorCategory::Resource,
 
             Self::External { .. }
@@ -307,6 +316,7 @@ impl FcpError {
             Self::ResourceNotFound { .. } => 6001,
             Self::ResourceExhausted { .. } => 6002,
             Self::Conflict { .. } => 6003,
+            Self::BudgetExceeded { .. } => 6004,
 
             Self::External { status_code, .. } => match status_code {
                 Some(429) => 7001,
@@ -328,6 +338,7 @@ impl FcpError {
             Self::External { retryable, .. } => *retryable,
             Self::RateLimited { .. }
             | Self::ResourceExhausted { .. }
+            | Self::BudgetExceeded { .. }
             | Self::UpstreamTimeout { .. }
             | Self::DependencyUnavailable { .. }
             | Self::ConnectorUnavailable { .. } => true,
@@ -480,6 +491,18 @@ impl FcpError {
                     "Resource '{resource}' is exhausted. Wait for resources to become available or reduce concurrent usage. This is usually transient."
                 )),
             ),
+            Self::BudgetExceeded {
+                metric,
+                used,
+                limit,
+                window_seconds,
+                ..
+            } => (
+                "FCP-6004".into(),
+                Some(format!(
+                    "Usage budget exceeded for {metric:?}. Used {used} of {limit} in the last {window_seconds}s. Reduce usage or wait for the budget window to reset."
+                )),
+            ),
             Self::Conflict { message, .. } => (
                 "FCP-6003".into(),
                 Some(format!(
@@ -559,6 +582,17 @@ impl FcpError {
                     "throttle_violation": v,
                 })
             }),
+            Self::BudgetExceeded {
+                metric,
+                used,
+                limit,
+                window_seconds,
+            } => Some(serde_json::json!({
+                "metric": metric,
+                "used": used,
+                "limit": limit,
+                "window_seconds": window_seconds,
+            })),
             Self::ZoneViolation {
                 source_zone,
                 target_zone,
@@ -740,6 +774,16 @@ mod tests {
             ErrorCategory::Resource
         );
         assert_eq!(
+            FcpError::BudgetExceeded {
+                metric: UsageMetricKind::Tokens,
+                used: 10,
+                limit: 5,
+                window_seconds: 60,
+            }
+            .category(),
+            ErrorCategory::Resource
+        );
+        assert_eq!(
             FcpError::Conflict {
                 message: "test".into()
             }
@@ -824,6 +868,16 @@ mod tests {
             }
             .numeric_code(),
             6001
+        );
+        assert_eq!(
+            FcpError::BudgetExceeded {
+                metric: UsageMetricKind::Bytes,
+                used: 10,
+                limit: 5,
+                window_seconds: 60,
+            }
+            .numeric_code(),
+            6004
         );
 
         // External: 7000-7999

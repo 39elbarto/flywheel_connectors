@@ -72,6 +72,7 @@ fn create_test_receipt() -> OperationReceipt {
         idempotency_key: Some("idem-key-123".to_string()),
         outcome_object_ids: vec![test_object_id("outcome-1")],
         resource_object_ids: vec![],
+        usage_metrics: None,
         executed_at: 1100,
         executed_by: test_node("executor-node"),
         signature: test_signature(),

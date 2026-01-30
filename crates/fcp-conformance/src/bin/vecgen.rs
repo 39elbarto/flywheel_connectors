@@ -364,6 +364,7 @@ fn sample_operation_receipt(schema: SchemaId) -> OperationReceipt {
         idempotency_key: Some("idem-key-123".to_string()),
         outcome_object_ids: vec![sample_object_id("outcome-1")],
         resource_object_ids: vec![],
+        usage_metrics: None,
         executed_at: fixed_timestamp_secs() + 120,
         executed_by: TailscaleNodeId::new("ts-node-1"),
         signature: sample_node_signature(),

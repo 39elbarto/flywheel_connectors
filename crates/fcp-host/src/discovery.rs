@@ -16,7 +16,7 @@ use chrono::{DateTime, Utc};
 use fcp_core::{
     AgentHint, ApprovalMode, CapabilityId, ConnectorHealth, ConnectorId, IdempotencyClass,
     Introspection, OperationInfo, RateLimitDeclarations, RiskLevel, SafetyTier, SelfCheckReport,
-    UsageBudgetSnapshot,
+    UsageBudgetSnapshot, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
@@ -395,6 +395,10 @@ pub struct PreflightRequest {
     /// Principal making the request.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub principal: Option<String>,
+
+    /// Zone the operation would execute in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub zone_id: Option<ZoneId>,
 }
 
 /// Response from preflight check.
@@ -1313,6 +1317,7 @@ mod tests {
             operation: "invoke".to_string(),
             params: None,
             principal: None,
+            zone_id: None,
         };
 
         let response = endpoint.preflight(request).await;

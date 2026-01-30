@@ -68,7 +68,7 @@ impl EventEnvelope {
     /// Schema identifier for canonical encoding.
     #[must_use]
     pub fn schema() -> SchemaId {
-        SchemaId::new("fcp.stream", "EventEnvelope", Version::new(1, 0, 0))
+        SchemaId::new("fcp.stream", "EventEnvelope", Version::new(1, 1, 0))
     }
 
     /// Canonical bytes (schema hash + deterministic CBOR).
@@ -83,6 +83,51 @@ impl EventEnvelope {
     #[must_use]
     pub fn with_cursor_seq(mut self, seq: u64) -> Self {
         self.cursor = seq.to_string();
+        self
+    }
+}
+
+/// Thread context for event metadata.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadKind {
+    /// Standard thread under a parent message.
+    Thread,
+    /// Forum topic (e.g., Telegram forum topics).
+    ForumTopic,
+    /// Channel-scoped thread (platform-native thread or topic channel).
+    Channel,
+    /// Reply thread (reply-chain semantics).
+    Reply,
+}
+
+/// Normalized thread metadata for events.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThreadInfo {
+    /// Thread identifier in the source system.
+    pub thread_id: String,
+    /// Optional parent identifier (message/channel/topic).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    /// Thread kind.
+    pub kind: ThreadKind,
+}
+
+impl ThreadInfo {
+    /// Create thread metadata with required fields.
+    #[must_use]
+    pub fn new(thread_id: impl Into<String>, kind: ThreadKind) -> Self {
+        Self {
+            thread_id: thread_id.into(),
+            parent_id: None,
+            kind,
+        }
+    }
+
+    /// Attach a parent identifier (message/channel/topic).
+    #[must_use]
+    pub fn with_parent_id(mut self, parent_id: impl Into<String>) -> Self {
+        self.parent_id = Some(parent_id.into());
         self
     }
 }
@@ -112,6 +157,10 @@ pub struct EventData {
     /// Resource URIs affected by this event
     #[serde(default)]
     pub resource_uris: Vec<String>,
+
+    /// Optional thread metadata for threading/ordering semantics.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_info: Option<ThreadInfo>,
 }
 
 impl EventData {
@@ -132,6 +181,7 @@ impl EventData {
             payload,
             correlation_id: None,
             resource_uris: Vec::new(),
+            thread_info: None,
         }
     }
 
@@ -146,6 +196,13 @@ impl EventData {
     #[must_use]
     pub fn with_resource_uris(mut self, uris: Vec<String>) -> Self {
         self.resource_uris = uris;
+        self
+    }
+
+    /// Attach thread metadata.
+    #[must_use]
+    pub fn with_thread_info(mut self, info: ThreadInfo) -> Self {
+        self.thread_info = Some(info);
         self
     }
 }
@@ -393,6 +450,7 @@ mod tests {
         assert_eq!(data.payload, json!({"key": "value"}));
         assert!(data.correlation_id.is_none());
         assert!(data.resource_uris.is_empty());
+        assert!(data.thread_info.is_none());
     }
 
     #[test]
@@ -412,6 +470,15 @@ mod tests {
         let data = sample_event_data().with_resource_uris(uris.clone());
 
         assert_eq!(data.resource_uris, uris);
+    }
+
+    #[test]
+    fn event_data_with_thread_info() {
+        let thread = ThreadInfo::new("thread-123", ThreadKind::ForumTopic)
+            .with_parent_id("channel-1");
+        let data = sample_event_data().with_thread_info(thread.clone());
+
+        assert_eq!(data.thread_info, Some(thread));
     }
 
     #[test]
@@ -438,6 +505,17 @@ mod tests {
         assert_eq!(parsed.connector_id.as_str(), "test:streaming:v1");
         assert_eq!(parsed.correlation_id.unwrap(), corr_id);
         assert_eq!(parsed.resource_uris.len(), 2);
+    }
+
+    #[test]
+    fn event_data_serialization_includes_thread_info() {
+        let thread = ThreadInfo::new("thread-9", ThreadKind::Thread);
+        let data = sample_event_data().with_thread_info(thread.clone());
+
+        let json = serde_json::to_string(&data).unwrap();
+        let parsed: EventData = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.thread_info, Some(thread));
     }
 
     #[test]

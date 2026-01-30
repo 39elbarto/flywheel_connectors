@@ -1758,9 +1758,35 @@ pub struct EventEnvelope {
     pub seq: u64,
     pub cursor: String,
     pub requires_ack: bool,
-    pub data: Value,
+    pub data: EventData,
+}
+
+pub struct EventData {
+    pub connector_id: ConnectorId,
+    pub instance_id: InstanceId,
+    pub zone_id: ZoneId,
+    pub principal: Principal,
+    pub payload: Value,
+    pub correlation_id: Option<CorrelationId>,
+    pub resource_uris: Vec<String>,
+    pub thread_info: Option<ThreadInfo>,
+}
+
+pub struct ThreadInfo {
+    pub thread_id: String,
+    pub parent_id: Option<String>,
+    pub kind: ThreadKind,
+}
+
+pub enum ThreadKind {
+    Thread,
+    ForumTopic,
+    Channel,
+    Reply,
 }
 ```
+
+Threading is optional metadata. Use `thread_info` to normalize forum topics (Telegram), platform-native threads (Discord/Slack), or reply chains across connectors.
 
 ---
 

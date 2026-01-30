@@ -86,6 +86,8 @@ pub use fcp_core::{
     EventEnvelope,
     EventNack,
     EventStream,
+    ThreadInfo,
+    ThreadKind,
     FcpConnector,
     FcpError,
     FcpErrorResponse,

@@ -37,7 +37,10 @@ pub use crate::{
 pub use crate::ratelimit::{RateLimitError, RateLimitPoolBuilder, RateLimitTracker};
 
 // Events
-pub use crate::{EventAck, EventCaps, EventData, EventEnvelope, EventNack, EventStream};
+pub use crate::{
+    EventAck, EventCaps, EventData, EventEnvelope, EventNack, EventStream,
+};
+pub use fcp_core::{ThreadInfo, ThreadKind};
 
 // Health
 pub use crate::{ConnectorMetrics, HealthSnapshot, HealthState, SelfCheckReport, SelfCheckStatus};

@@ -24,7 +24,7 @@ forbidden = []
 [capabilities]
 required = ["network.egress:api.example.com:443", "network.dns"]
 optional = []
-forbidden = []
+forbidden = ["system.exec"]
 
 [provides.operations.minimal_op]
 description = "Minimal operation"

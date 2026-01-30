@@ -24,7 +24,7 @@ forbidden = []
 [capabilities]
 required = ["network.dns"]
 optional = []
-forbidden = []
+forbidden = ["system.exec"]
 
 [provides.operations.minimal_op]
 description = "Minimal operation"

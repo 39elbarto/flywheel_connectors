@@ -25,5 +25,7 @@ fcp-crypto = { path = "../fcp-crypto" }
 fcp-tailscale = { path = "../fcp-tailscale" }
 
 [dev-dependencies]
+chrono.workspace = true
+fcp-testkit = { path = "../fcp-testkit" }
 rand.workspace = true
 serde_json.workspace = true

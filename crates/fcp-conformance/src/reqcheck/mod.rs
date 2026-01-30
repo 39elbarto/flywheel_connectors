@@ -285,10 +285,13 @@ impl RequirementsIndexParser {
             }
         }
 
+        let mut missing_beads: Vec<String> = missing_beads.into_iter().collect();
+        missing_beads.sort();
+
         ValidationReport {
             total_entries: self.entries.len(),
             unique_beads: self.all_bead_ids.len(),
-            missing_beads: missing_beads.into_iter().collect(),
+            missing_beads,
             errors,
             warnings,
             entries: None,
@@ -503,7 +506,10 @@ mod tests {
 
         assert!(!report.is_valid());
         assert_eq!(report.errors.len(), 2);
-        assert_eq!(report.missing_beads.len(), 2);
+        assert_eq!(
+            report.missing_beads,
+            vec!["bd-8abc".to_string(), "bd-9xyz".to_string()]
+        );
     }
 
     #[test]

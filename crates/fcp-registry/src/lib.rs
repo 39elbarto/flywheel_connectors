@@ -2822,7 +2822,7 @@ forbidden = []
 [capabilities]
 required = []
 optional = []
-forbidden = []
+forbidden = ["system.exec"]
 
 [provides.operations.test_op]
 description = "Test operation"

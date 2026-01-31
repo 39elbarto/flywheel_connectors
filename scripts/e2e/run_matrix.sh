@@ -105,6 +105,8 @@ SCENARIOS=(
   "offline_repair|./offline_repair_flow.sh|Reduced availability -> repair -> recovery|true"
   "epoch_replay_mirror|./epoch_replay_mirror_install.sh|Epoch replay + binary mirror install|true"
   "batch_invoke|./batch_invoke_flow.sh|Batch invoke multi-operation flow|true"
+  "progress_streaming|./progress_streaming_flow.sh|Progress streaming updates|true"
+  "cancellation_flow|./cancellation_flow.sh|Operation cancellation flow|true"
   "rate_limit|./rate_limit_flow.sh|Rate limit enforcement flow|true"
   "budget|./budget_flow.sh|Budget enforcement flow|false"
   "egress_denial|./egress_denial.sh|Sandbox egress denial|true"

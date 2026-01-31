@@ -1792,6 +1792,7 @@ dependencies = [
  "chrono",
  "ciborium",
  "coset",
+ "criterion",
  "ed25519-dalek",
  "hex",
  "hkdf",

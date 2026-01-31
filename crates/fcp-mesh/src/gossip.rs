@@ -839,6 +839,12 @@ impl MeshGossip {
             return;
         }
 
+        if summary.object_count as usize > self.config.max_objects_per_summary
+            || summary.symbol_count as usize > self.config.max_symbols_per_summary
+        {
+            return;
+        }
+
         let peer_id = summary.from.clone();
 
         // Update peer state
@@ -899,6 +905,17 @@ impl MeshGossip {
     /// Handle a request from a peer.
     #[must_use]
     pub fn handle_request(&self, request: &GossipRequest) -> GossipResponse {
+        if !request.is_valid() {
+            return GossipResponse {
+                from: self.local_node.clone(),
+                to: request.from.clone(),
+                zone_id: request.zone_id.clone(),
+                have_objects: Vec::new(),
+                have_symbols: Vec::new(),
+                timestamp: request.timestamp,
+            };
+        }
+
         let zone_state = self.zone_states.get(&request.zone_id);
 
         let have_objects: Vec<ObjectId> = request
@@ -1285,6 +1302,33 @@ mod tests {
     }
 
     #[test]
+    fn mesh_gossip_ignores_oversized_summary() {
+        let config = GossipConfig {
+            max_objects_per_summary: 1,
+            max_symbols_per_summary: 1,
+            summary_ttl_secs: DEFAULT_SUMMARY_TTL_SECS,
+            reconciliation_batch_size: DEFAULT_RECONCILIATION_BATCH_SIZE,
+        };
+        let mut gossip = MeshGossip::new(test_node("local"), config);
+
+        let summary = GossipSummary {
+            from: test_node("peer-1"),
+            zone_id: test_zone(),
+            epoch_id: test_epoch(),
+            object_filter_digest: [0; 32],
+            symbol_filter_digest: [0; 32],
+            object_count: 2,
+            symbol_count: 2,
+            iblt: vec![],
+            timestamp: 1000,
+            signature: None,
+        };
+
+        gossip.handle_summary(summary, 1000);
+        assert_eq!(gossip.peer_count(), 0);
+    }
+
+    #[test]
     fn mesh_gossip_handle_request() {
         let mut gossip = MeshGossip::with_defaults(test_node("local"));
         let obj_id = test_object_id("obj-1");
@@ -1309,7 +1353,31 @@ mod tests {
     fn mesh_gossip_handle_request_bounds_results() {
         let mut gossip = MeshGossip::with_defaults(test_node("local"));
 
-        let object_ids: Vec<ObjectId> = (0..(MAX_OBJECT_IDS_PER_REQUEST + 10))
+        let object_ids: Vec<ObjectId> = (0..MAX_OBJECT_IDS_PER_REQUEST)
+            .map(|i| test_object_id(&format!("obj-{i}")))
+            .collect();
+
+        for object_id in &object_ids {
+            gossip.announce_object(
+                &test_zone(),
+                object_id,
+                ObjectAdmissionClass::Admitted,
+                1000,
+            );
+        }
+
+        let request =
+            GossipRequest::for_objects(test_node("peer"), test_zone(), object_ids.clone(), 1000);
+
+        let response = gossip.handle_request(&request);
+        assert_eq!(response.have_objects.len(), object_ids.len());
+    }
+
+    #[test]
+    fn mesh_gossip_handle_request_rejects_invalid_request() {
+        let mut gossip = MeshGossip::with_defaults(test_node("local"));
+
+        let object_ids: Vec<ObjectId> = (0..=MAX_OBJECT_IDS_PER_REQUEST)
             .map(|i| test_object_id(&format!("obj-{i}")))
             .collect();
 
@@ -1325,14 +1393,15 @@ mod tests {
         let request = GossipRequest {
             from: test_node("peer"),
             zone_id: test_zone(),
-            object_ids: object_ids.clone(),
+            object_ids,
             symbols: vec![],
             timestamp: 1000,
             signature: None,
         };
 
         let response = gossip.handle_request(&request);
-        assert_eq!(response.have_objects.len(), MAX_OBJECT_IDS_PER_REQUEST);
+        assert!(response.have_objects.is_empty());
+        assert!(response.have_symbols.is_empty());
     }
 
     #[test]

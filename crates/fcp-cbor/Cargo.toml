@@ -18,3 +18,10 @@ hex.workspace = true
 semver.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "cbor_benchmarks"
+harness = false

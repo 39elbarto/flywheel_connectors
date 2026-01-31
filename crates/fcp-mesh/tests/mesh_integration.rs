@@ -15,7 +15,10 @@
 
 use std::collections::HashSet;
 
-use fcp_core::{ConnectorId, EpochId, ObjectId, TailscaleNodeId, ZoneId};
+use fcp_core::{
+    ConnectorId, DecisionReasonCode, EpochId, ObjectId, TailscaleNodeId, ZoneId,
+    ZoneTransportPolicy,
+};
 use fcp_mesh::admission::{AdmissionController, AdmissionError, AdmissionPolicy, PeerBudget};
 use fcp_mesh::device::{
     AvailabilityProfile, CpuArch, DeviceProfile, GpuProfile, GpuVendor, InstalledConnector,
@@ -25,6 +28,7 @@ use fcp_mesh::gossip::{GossipConfig, GossipState};
 use fcp_mesh::planner::{
     ExecutionPlanner, HeldLease, LeasePurpose, NodeInfo, PlannerContext, PlannerInput,
 };
+use fcp_mesh::transport::{TransportPath, TransportPathKind, TransportSelector};
 use fcp_tailscale::NodeId;
 
 // ============================================================================
@@ -52,6 +56,8 @@ mod meshnode {
     use bytes::Bytes;
     use fcp_cbor::SchemaId;
     use fcp_core::{ObjectHeader, Provenance, ZoneKeyId};
+    use fcp_mesh::admission::AdmissionError;
+    use fcp_mesh::admission::ObjectAdmissionClass;
     use fcp_mesh::{
         ControlPlaneEnvelope, InMemoryControlPlaneHandler, MeshNode, MeshNodeConfig, MeshSession,
         RetentionClass, SymbolRequestError,
@@ -66,7 +72,7 @@ mod meshnode {
     use fcp_store::{
         MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore, MemorySymbolStoreConfig,
         ObjectAdmissionPolicy, ObjectSymbolMeta, ObjectTransmissionInfo, QuarantineStore,
-        StoredSymbol, SymbolMeta, SymbolStore, SymbolStoreError,
+        QuarantinedObject, StoredSymbol, SymbolMeta, SymbolStore, SymbolStoreError,
     };
     use raptorq::ObjectTransmissionInformation;
     use semver::Version;
@@ -200,6 +206,112 @@ mod meshnode {
 
         assert!(!response.symbol_esis.is_empty());
         assert!(response.symbol_esis.len() <= 2);
+    }
+
+    #[tokio::test]
+    async fn meshnode_symbol_request_missing_object() {
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([1u8; 8]);
+        let object_id = test_object_id("meshnode-missing-object");
+
+        let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+        let symbol_store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig::default()));
+        let quarantine_store = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
+
+        let config = MeshNodeConfig::new("node-1").with_sender_instance_id(7);
+        let mut node = MeshNode::new(config, object_store, symbol_store, quarantine_store);
+
+        let request = SymbolRequest::new(
+            test_header(&zone_id),
+            object_id,
+            zone_id,
+            zone_key_id,
+            1,
+            2,
+            1,
+        );
+
+        let err = node
+            .handle_symbol_request(request, &NodeId::new("peer-1"), true, 0)
+            .await
+            .expect_err("missing object should return error");
+
+        assert!(matches!(err, SymbolRequestError::ObjectNotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn meshnode_quarantined_object_not_gossiped() {
+        let zone_id = ZoneId::work();
+        let object_id = test_object_id("meshnode-quarantine-gossip");
+
+        let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+        let symbol_store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig::default()));
+        let quarantine_store = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
+
+        let config = MeshNodeConfig::new("node-1");
+        let mut node = MeshNode::new(config, object_store, symbol_store, quarantine_store.clone());
+
+        quarantine_store
+            .quarantine(QuarantinedObject {
+                object_id,
+                zone_id: zone_id.clone(),
+                data: Bytes::from_static(b"quarantined"),
+                source_peer: None,
+                received_at: 0,
+                peer_reputation: -10,
+            })
+            .expect("quarantine");
+
+        let added =
+            node.announce_object(&zone_id, &object_id, ObjectAdmissionClass::Admitted, 1000);
+
+        assert!(!added);
+        assert!(!node.gossip_mut().has_object(&zone_id, &object_id));
+    }
+
+    #[tokio::test]
+    async fn meshnode_quarantined_symbol_request_rejected() {
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([1u8; 8]);
+        let object_id = test_object_id("meshnode-quarantine-request");
+
+        let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+        let symbol_store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig::default()));
+        let quarantine_store = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
+
+        let config = MeshNodeConfig::new("node-1").with_sender_instance_id(7);
+        let mut node = MeshNode::new(config, object_store, symbol_store, quarantine_store.clone());
+
+        quarantine_store
+            .quarantine(QuarantinedObject {
+                object_id,
+                zone_id: zone_id.clone(),
+                data: Bytes::from_static(b"quarantined"),
+                source_peer: None,
+                received_at: 0,
+                peer_reputation: -10,
+            })
+            .expect("quarantine");
+
+        let request = SymbolRequest::new(
+            test_header(&zone_id),
+            object_id,
+            zone_id,
+            zone_key_id,
+            1,
+            2,
+            1,
+        );
+
+        let err = node
+            .handle_symbol_request(request, &NodeId::new("peer-1"), true, 0)
+            .await
+            .expect_err("quarantined request should fail");
+
+        assert!(matches!(
+            err,
+            SymbolRequestError::AdmissionRejected(AdmissionError::ObjectQuarantined { .. })
+        ));
     }
 
     #[tokio::test]
@@ -722,6 +834,135 @@ mod meshnode {
             serde_json::json!({
                 "symbols_sent": response.symbol_esis.len(),
                 "authenticated": true,
+            }),
+        );
+    }
+}
+
+// ============================================================================
+// TRANSPORT SELECTION INTEGRATION TESTS
+// ============================================================================
+
+mod transport_selection {
+    use super::*;
+
+    #[test]
+    fn transport_policy_enforced_in_ranking() {
+        const TEST_NAME: &str = "transport_policy_enforced_in_ranking";
+        const CATEGORY: &str = "routing";
+
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let policy = ZoneTransportPolicy {
+            allow_lan: true,
+            allow_derp: false,
+            allow_funnel: false,
+        };
+
+        let paths = vec![
+            TransportPath::new(
+                TransportPathKind::Direct,
+                NodeId::new("peer-1"),
+                "direct",
+                None,
+            ),
+            TransportPath::new(TransportPathKind::Mesh, NodeId::new("peer-2"), "mesh", None),
+            TransportPath::new(TransportPathKind::Derp, NodeId::new("peer-3"), "derp", None),
+            TransportPath::new(
+                TransportPathKind::Funnel,
+                NodeId::new("peer-4"),
+                "funnel",
+                None,
+            ),
+        ];
+
+        let ranked = TransportSelector::rank_paths(&paths, &policy);
+        assert_eq!(ranked[0].path.kind, TransportPathKind::Direct);
+        assert!(
+            ranked
+                .iter()
+                .take(2)
+                .all(|entry| entry.eligible && entry.reason.is_none())
+        );
+
+        let derp = ranked
+            .iter()
+            .find(|entry| entry.path.kind == TransportPathKind::Derp)
+            .expect("derp entry missing");
+        assert_eq!(
+            derp.reason,
+            Some(DecisionReasonCode::TransportDerpForbidden)
+        );
+
+        let funnel = ranked
+            .iter()
+            .find(|entry| entry.path.kind == TransportPathKind::Funnel)
+            .expect("funnel entry missing");
+        assert_eq!(
+            funnel.reason,
+            Some(DecisionReasonCode::TransportFunnelForbidden)
+        );
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "eligible_count": ranked.iter().filter(|entry| entry.eligible).count(),
+                "blocked": {
+                    "derp": derp.reason.is_some(),
+                    "funnel": funnel.reason.is_some()
+                }
+            }),
+        );
+    }
+
+    #[test]
+    fn transport_multipath_is_deterministic() {
+        const TEST_NAME: &str = "transport_multipath_is_deterministic";
+        const CATEGORY: &str = "routing";
+
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let policy = ZoneTransportPolicy {
+            allow_lan: true,
+            allow_derp: true,
+            allow_funnel: true,
+        };
+
+        let paths = vec![
+            TransportPath::new(
+                TransportPathKind::Direct,
+                NodeId::new("peer-1"),
+                "direct-a",
+                None,
+            ),
+            TransportPath::new(
+                TransportPathKind::Direct,
+                NodeId::new("peer-2"),
+                "direct-b",
+                None,
+            ),
+            TransportPath::new(TransportPathKind::Mesh, NodeId::new("peer-3"), "mesh", None),
+            TransportPath::new(TransportPathKind::Derp, NodeId::new("peer-4"), "derp", None),
+        ];
+
+        let object_id = test_object_id("transport-multipath");
+        let selection_a = TransportSelector::select_multipath(&paths, &policy, &object_id, 3, 2);
+        let selection_b = TransportSelector::select_multipath(&paths, &policy, &object_id, 3, 2);
+
+        assert_eq!(selection_a, selection_b);
+        assert!(
+            selection_a
+                .iter()
+                .all(|path| path.kind == TransportPathKind::Direct)
+        );
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "selected": selection_a.len(),
+                "kinds": selection_a.iter().map(|path| format!("{:?}", path.kind)).collect::<Vec<_>>(),
             }),
         );
     }

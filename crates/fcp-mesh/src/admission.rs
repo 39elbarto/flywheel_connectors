@@ -566,20 +566,37 @@ impl AdmissionController {
             .or_insert_with(|| PeerUsage::new(now_ms))
     }
 
-    /// Check if peer can send the given number of bytes (NORMATIVE).
-    ///
-    /// # Errors
-    ///
-    /// Returns `AdmissionError::ByteBudgetExceeded` if the peer has exceeded
-    /// their byte budget for the current window.
-    pub fn check_bytes(
+    fn effective_byte_limit(&self, is_authenticated: bool) -> u64 {
+        if !is_authenticated && self.policy.strict_unauthenticated_limits {
+            let restrictive = PeerBudget::restrictive();
+            self.policy
+                .per_peer
+                .max_bytes_per_min
+                .min(restrictive.max_bytes_per_min)
+        } else {
+            self.policy.per_peer.max_bytes_per_min
+        }
+    }
+
+    fn effective_symbol_limit(&self, is_authenticated: bool) -> u32 {
+        if !is_authenticated && self.policy.strict_unauthenticated_limits {
+            let restrictive = PeerBudget::restrictive();
+            self.policy
+                .per_peer
+                .max_symbols_per_min
+                .min(restrictive.max_symbols_per_min)
+        } else {
+            self.policy.per_peer.max_symbols_per_min
+        }
+    }
+
+    fn check_bytes_with_limit(
         &mut self,
         peer: &NodeId,
         bytes: u64,
         now_ms: u64,
+        limit: u64,
     ) -> Result<(), AdmissionError> {
-        // Copy limit before mutable borrow
-        let limit = self.policy.per_peer.max_bytes_per_min;
         let usage = self.get_or_create_usage(peer, now_ms);
         usage.maybe_reset_window(now_ms);
 
@@ -593,6 +610,44 @@ impl AdmissionController {
         }
 
         Ok(())
+    }
+
+    fn check_symbols_with_limit(
+        &mut self,
+        peer: &NodeId,
+        symbols: u32,
+        now_ms: u64,
+        limit: u32,
+    ) -> Result<(), AdmissionError> {
+        let usage = self.get_or_create_usage(peer, now_ms);
+        usage.maybe_reset_window(now_ms);
+
+        let new_total = usage.symbols_in_window.saturating_add(symbols);
+        if new_total > limit {
+            return Err(AdmissionError::SymbolBudgetExceeded {
+                current: usage.symbols_in_window,
+                limit,
+                retry_after: usage.time_until_window_reset(now_ms),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Check if peer can send the given number of bytes (NORMATIVE).
+    ///
+    /// # Errors
+    ///
+    /// Returns `AdmissionError::ByteBudgetExceeded` if the peer has exceeded
+    /// their byte budget for the current window.
+    pub fn check_bytes(
+        &mut self,
+        peer: &NodeId,
+        bytes: u64,
+        now_ms: u64,
+    ) -> Result<(), AdmissionError> {
+        let limit = self.policy.per_peer.max_bytes_per_min;
+        self.check_bytes_with_limit(peer, bytes, now_ms, limit)
     }
 
     /// Record bytes received from peer.
@@ -614,21 +669,8 @@ impl AdmissionController {
         symbols: u32,
         now_ms: u64,
     ) -> Result<(), AdmissionError> {
-        // Copy limit before mutable borrow
         let limit = self.policy.per_peer.max_symbols_per_min;
-        let usage = self.get_or_create_usage(peer, now_ms);
-        usage.maybe_reset_window(now_ms);
-
-        let new_total = usage.symbols_in_window.saturating_add(symbols);
-        if new_total > limit {
-            return Err(AdmissionError::SymbolBudgetExceeded {
-                current: usage.symbols_in_window,
-                limit,
-                retry_after: usage.time_until_window_reset(now_ms),
-            });
-        }
-
-        Ok(())
+        self.check_symbols_with_limit(peer, symbols, now_ms, limit)
     }
 
     /// Record symbols received from peer.
@@ -802,8 +844,10 @@ impl AdmissionController {
         now_ms: u64,
     ) -> Result<(), AdmissionError> {
         self.check_authentication_required(is_authenticated)?;
-        self.check_bytes(peer, bytes, now_ms)?;
-        self.check_symbols(peer, symbols, now_ms)?;
+        let byte_limit = self.effective_byte_limit(is_authenticated);
+        let symbol_limit = self.effective_symbol_limit(is_authenticated);
+        self.check_bytes_with_limit(peer, bytes, now_ms, byte_limit)?;
+        self.check_symbols_with_limit(peer, symbols, now_ms, symbol_limit)?;
         Ok(())
     }
 
@@ -881,6 +925,54 @@ mod tests {
         assert!(policy.require_authenticated_requests);
         assert_eq!(policy.max_amplification_factor, 10);
         assert!(policy.strict_unauthenticated_limits);
+    }
+
+    #[test]
+    fn strict_unauthenticated_limits_apply_to_bytes() {
+        let policy = AdmissionPolicy {
+            per_peer: PeerBudget {
+                max_bytes_per_min: 10 * 1024 * 1024,
+                ..PeerBudget::default()
+            },
+            require_authenticated_requests: false,
+            strict_unauthenticated_limits: true,
+            ..AdmissionPolicy::default()
+        };
+        let mut controller = AdmissionController::new(policy);
+        let peer = test_peer();
+
+        let result = controller.check_admission(&peer, 2 * 1024 * 1024, 1, false, 0);
+        assert!(matches!(
+            result,
+            Err(AdmissionError::ByteBudgetExceeded { .. })
+        ));
+
+        assert!(
+            controller
+                .check_admission(&peer, 2 * 1024 * 1024, 1, true, 0)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn strict_unauthenticated_limits_apply_to_symbols() {
+        let policy = AdmissionPolicy {
+            per_peer: PeerBudget {
+                max_symbols_per_min: 50_000,
+                ..PeerBudget::default()
+            },
+            require_authenticated_requests: false,
+            strict_unauthenticated_limits: true,
+            ..AdmissionPolicy::default()
+        };
+        let mut controller = AdmissionController::new(policy);
+        let peer = test_peer();
+
+        let result = controller.check_admission(&peer, 0, 20_000, false, 0);
+        assert!(matches!(
+            result,
+            Err(AdmissionError::SymbolBudgetExceeded { .. })
+        ));
     }
 
     #[test]

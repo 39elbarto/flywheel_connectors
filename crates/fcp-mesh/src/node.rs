@@ -778,15 +778,18 @@ mod tests {
     use super::*;
     use crate::device::DeviceProfileBuilder;
     use crate::planner::{LeasePurpose, PlannerContext};
+    use bytes::Bytes;
     use fcp_core::{ObjectId, ZoneId, ZoneKeyId};
     use fcp_protocol::session::{
         MeshSessionId, SessionCryptoSuite, SessionKeys, SessionReplayPolicy, TransportLimits,
     };
-    use fcp_protocol::{DecodeStatus, SymbolAck, SymbolAckReason};
+    use fcp_protocol::{DecodeStatus, SymbolAck, SymbolAckReason, SymbolRequest};
     use fcp_store::{
         MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore, MemorySymbolStoreConfig,
-        ObjectAdmissionPolicy, QuarantineStore,
+        ObjectAdmissionPolicy, ObjectSymbolMeta, ObjectTransmissionInfo, QuarantineStore,
+        QuarantinedObject, StoredSymbol, SymbolMeta,
     };
+    use raptorq::ObjectTransmissionInformation;
 
     fn test_node(name: &str) -> MeshNode {
         let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
@@ -833,6 +836,129 @@ mod tests {
             ttl_secs: None,
             placement: None,
         }
+    }
+
+    fn test_object_id(name: &str) -> ObjectId {
+        let hash = blake3::hash(name.as_bytes());
+        ObjectId::from_bytes(*hash.as_bytes())
+    }
+
+    // ---- Symbol request lifecycle tests ----
+
+    #[test]
+    fn prune_stale_state_clears_transfer_tracking() {
+        let mut node = test_node("node-1");
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([9u8; 8]);
+        let object_id = test_object_id("meshnode-prune-state");
+
+        let oti = ObjectTransmissionInformation::new(256, 64, 1, 1, 1);
+        let meta = ObjectSymbolMeta {
+            object_id,
+            zone_id: zone_id.clone(),
+            oti: ObjectTransmissionInfo::from(oti),
+            source_symbols: 2,
+            first_symbol_at: 0,
+        };
+
+        let request = SymbolRequest::new(
+            test_object_header(),
+            object_id,
+            zone_id.clone(),
+            zone_key_id,
+            1,
+            2,
+            1,
+        );
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        runtime.block_on(async {
+            node.symbol_store
+                .put_object_meta(meta)
+                .await
+                .expect("store meta");
+
+            for esi in 0..2u32 {
+                let symbol = StoredSymbol {
+                    meta: SymbolMeta {
+                        object_id,
+                        esi,
+                        zone_id: zone_id.clone(),
+                        source_node: Some(1),
+                        stored_at: 0,
+                    },
+                    data: bytes::Bytes::from(vec![u8::try_from(esi).unwrap_or(0); 8]),
+                };
+                node.symbol_store
+                    .put_symbol(symbol)
+                    .await
+                    .expect("store symbol");
+            }
+
+            let _ = node
+                .handle_symbol_request(request, &NodeId::new("peer-1"), true, 0)
+                .await
+                .expect("symbol request");
+        });
+
+        assert_eq!(node.symbol_requests.active_transfer_count(), 1);
+        assert!(node.sent_symbols.contains_key(&object_id));
+
+        let ttl = node.symbol_requests.policy().transfer_state_ttl_ms;
+        let pruned = node.prune_stale_state(ttl + 1);
+
+        assert!(pruned > 0);
+        assert_eq!(node.symbol_requests.active_transfer_count(), 0);
+        assert!(!node.sent_symbols.contains_key(&object_id));
+    }
+
+    #[test]
+    fn symbol_request_rejects_quarantined_object() {
+        let mut node = test_node("node-1");
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([10u8; 8]);
+        let object_id = test_object_id("meshnode-quarantined-request");
+
+        node.quarantine_store()
+            .quarantine(QuarantinedObject {
+                object_id,
+                zone_id: zone_id.clone(),
+                data: Bytes::from_static(b"quarantined"),
+                source_peer: None,
+                received_at: 0,
+                peer_reputation: -5,
+            })
+            .expect("quarantine");
+
+        let request = SymbolRequest::new(
+            test_object_header(),
+            object_id,
+            zone_id,
+            zone_key_id,
+            1,
+            2,
+            1,
+        );
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        let err = runtime.block_on(async {
+            node.handle_symbol_request(request, &NodeId::new("peer-1"), true, 0)
+                .await
+                .expect_err("quarantined request should fail")
+        });
+
+        assert!(matches!(
+            err,
+            SymbolRequestError::AdmissionRejected(AdmissionError::ObjectQuarantined { .. })
+        ));
     }
 
     // ---- MeshNodeConfig builder tests ----
@@ -1023,6 +1149,57 @@ mod tests {
             1000,
         );
         // Quarantined objects must not be gossiped (NORMATIVE)
+        assert!(!added);
+        assert_eq!(node.metrics().gossip_announcements, 0);
+    }
+
+    #[test]
+    fn quarantine_store_overrides_admission() {
+        let mut node = test_node("node-1");
+        let zone_id = ZoneId::work();
+        let object_id = ObjectId::from_bytes([0x34; 32]);
+
+        node.quarantine_store()
+            .quarantine(QuarantinedObject {
+                object_id,
+                zone_id: zone_id.clone(),
+                data: Bytes::from_static(b"quarantined"),
+                source_peer: None,
+                received_at: 0,
+                peer_reputation: -10,
+            })
+            .expect("quarantine");
+
+        let added =
+            node.announce_object(&zone_id, &object_id, ObjectAdmissionClass::Admitted, 1000);
+        assert!(!added);
+        assert_eq!(node.metrics().gossip_announcements, 0);
+    }
+
+    #[test]
+    fn quarantine_store_overrides_symbol_admission() {
+        let mut node = test_node("node-1");
+        let zone_id = ZoneId::work();
+        let object_id = ObjectId::from_bytes([0x35; 32]);
+
+        node.quarantine_store()
+            .quarantine(QuarantinedObject {
+                object_id,
+                zone_id: zone_id.clone(),
+                data: Bytes::from_static(b"quarantined"),
+                source_peer: None,
+                received_at: 0,
+                peer_reputation: -10,
+            })
+            .expect("quarantine");
+
+        let added = node.announce_symbol(
+            &zone_id,
+            &object_id,
+            0,
+            ObjectAdmissionClass::Admitted,
+            1000,
+        );
         assert!(!added);
         assert_eq!(node.metrics().gossip_announcements, 0);
     }

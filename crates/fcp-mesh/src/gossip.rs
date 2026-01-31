@@ -835,6 +835,10 @@ impl MeshGossip {
 
     /// Handle received summary from a peer.
     pub fn handle_summary(&mut self, summary: GossipSummary, now: u64) {
+        if summary.is_stale(now, self.config.summary_ttl_secs) {
+            return;
+        }
+
         let peer_id = summary.from.clone();
 
         // Update peer state
@@ -900,6 +904,7 @@ impl MeshGossip {
         let have_objects: Vec<ObjectId> = request
             .object_ids
             .iter()
+            .take(MAX_OBJECT_IDS_PER_REQUEST)
             .filter(|id| zone_state.is_some_and(|s| s.has_object(id)))
             .copied()
             .collect();
@@ -907,6 +912,7 @@ impl MeshGossip {
         let have_symbols: Vec<(ObjectId, u32)> = request
             .symbols
             .iter()
+            .take(MAX_OBJECT_IDS_PER_REQUEST)
             .filter(|(id, esi)| zone_state.is_some_and(|s| s.has_symbol(id, *esi)))
             .copied()
             .collect();
@@ -1256,6 +1262,29 @@ mod tests {
     }
 
     #[test]
+    fn mesh_gossip_ignores_stale_summary() {
+        let mut gossip = MeshGossip::with_defaults(test_node("local"));
+        let now = 1000u64;
+        let timestamp = now.saturating_sub(DEFAULT_SUMMARY_TTL_SECS + 1);
+
+        let summary = GossipSummary {
+            from: test_node("peer-1"),
+            zone_id: test_zone(),
+            epoch_id: test_epoch(),
+            object_filter_digest: [0; 32],
+            symbol_filter_digest: [0; 32],
+            object_count: 50,
+            symbol_count: 500,
+            iblt: vec![],
+            timestamp,
+            signature: None,
+        };
+
+        gossip.handle_summary(summary, now);
+        assert_eq!(gossip.peer_count(), 0);
+    }
+
+    #[test]
     fn mesh_gossip_handle_request() {
         let mut gossip = MeshGossip::with_defaults(test_node("local"));
         let obj_id = test_object_id("obj-1");
@@ -1274,6 +1303,36 @@ mod tests {
         // Should only include objects we have
         assert_eq!(response.have_objects.len(), 1);
         assert_eq!(response.have_objects[0], obj_id);
+    }
+
+    #[test]
+    fn mesh_gossip_handle_request_bounds_results() {
+        let mut gossip = MeshGossip::with_defaults(test_node("local"));
+
+        let object_ids: Vec<ObjectId> = (0..(MAX_OBJECT_IDS_PER_REQUEST + 10))
+            .map(|i| test_object_id(&format!("obj-{i}")))
+            .collect();
+
+        for object_id in &object_ids {
+            gossip.announce_object(
+                &test_zone(),
+                object_id,
+                ObjectAdmissionClass::Admitted,
+                1000,
+            );
+        }
+
+        let request = GossipRequest {
+            from: test_node("peer"),
+            zone_id: test_zone(),
+            object_ids: object_ids.clone(),
+            symbols: vec![],
+            timestamp: 1000,
+            signature: None,
+        };
+
+        let response = gossip.handle_request(&request);
+        assert_eq!(response.have_objects.len(), MAX_OBJECT_IDS_PER_REQUEST);
     }
 
     #[test]

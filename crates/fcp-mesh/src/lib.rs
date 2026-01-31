@@ -6,6 +6,7 @@
 //! - [`gossip`] - Gossip protocol for metadata and object announcement
 //! - [`session`] - Session layer with authenticated handshake, key schedule, and anti-replay
 //! - [`symbol_request`] - Symbol request handling with bounded requests and targeted repair
+//! - [`transport`] - Transport path ranking + deterministic multipath selection
 
 #![forbid(unsafe_code)]
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
@@ -31,6 +32,7 @@ pub mod node;
 pub mod planner;
 pub mod session;
 pub mod symbol_request;
+pub mod transport;
 
 pub use admission::*;
 pub use degraded::*;
@@ -40,3 +42,4 @@ pub use node::*;
 pub use planner::*;
 pub use session::*;
 pub use symbol_request::*;
+pub use transport::*;

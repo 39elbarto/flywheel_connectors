@@ -136,3 +136,20 @@ fcp-e2e --validate-log scripts/e2e/out/e2e_happy_path.jsonl
 
 The CLI will exit non-zero on the first invalid line and print a line number
 plus the schema violation.
+
+Scenario Matrix Runner
+----------------------
+
+Run the full E2E script matrix via:
+
+```bash
+./scripts/e2e/run_matrix.sh
+```
+
+The runner writes:
+- `out/e2e_matrix_runner/summary.jsonl` (one record per scenario)
+- `out/e2e_matrix_runner/summary.json` (aggregate summary)
+
+Required scenarios are listed in `scripts/e2e/run_matrix.sh` and should exit
+`pass` with schema-valid JSONL logs. Optional scenarios may be skipped until
+the underlying harness APIs are implemented.

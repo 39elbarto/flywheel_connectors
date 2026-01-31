@@ -1,10 +1,12 @@
 //! Doctor report service for mesh health and connector self-checks.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use fcp_core::{ConnectorId, SelfCheckReport, SelfCheckStatus, ZoneId};
 use serde::{Deserialize, Serialize};
+use tokio::time::timeout;
 
 use crate::{ConnectorRegistry, HostError, HostResult};
 
@@ -212,10 +214,13 @@ impl DoctorReport {
     }
 }
 
+const DEFAULT_SELF_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Doctor report service built on top of a connector registry.
 #[derive(Clone)]
 pub struct DoctorService<R> {
     registry: Arc<R>,
+    self_check_timeout: Duration,
 }
 
 impl<R> DoctorService<R>
@@ -225,7 +230,19 @@ where
     /// Create a new doctor service.
     #[allow(clippy::missing_const_for_fn)]
     pub fn new(registry: Arc<R>) -> Self {
-        Self { registry }
+        Self {
+            registry,
+            self_check_timeout: DEFAULT_SELF_CHECK_TIMEOUT,
+        }
+    }
+
+    /// Create a doctor service with a custom self-check timeout.
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn with_timeout(registry: Arc<R>, self_check_timeout: Duration) -> Self {
+        Self {
+            registry,
+            self_check_timeout,
+        }
     }
 
     /// Build a doctor report for the given request.
@@ -243,11 +260,24 @@ where
                 let connector_id: ConnectorId = connector.parse().map_err(|err| {
                     HostError::InvalidFilter(format!("invalid connector id '{connector}': {err}"))
                 })?;
-                let report = self
-                    .registry
-                    .self_check(&connector_id)
-                    .await
-                    .ok_or_else(|| HostError::ConnectorNotFound(connector_id.to_string()))?;
+                let report = match timeout(
+                    self.self_check_timeout,
+                    self.registry.self_check(&connector_id),
+                )
+                .await
+                {
+                    Ok(Some(report)) => report,
+                    Ok(None) => {
+                        return Err(HostError::ConnectorNotFound(connector_id.to_string()));
+                    }
+                    Err(_) => SelfCheckReport::failed(
+                        "self_check_timeout",
+                        format!(
+                            "self_check exceeded {}ms",
+                            self.self_check_timeout.as_millis()
+                        ),
+                    ),
+                };
                 self_checks.push(ConnectorSelfCheck {
                     connector_id: connector_id.to_string(),
                     report,

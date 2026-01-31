@@ -546,7 +546,7 @@ mod meshnode {
                 zone_id.clone(),
                 zone_key_id,
                 1,
-                2,
+                meta.source_symbols,
                 1,
             )
             .with_missing_hint(missing.clone());

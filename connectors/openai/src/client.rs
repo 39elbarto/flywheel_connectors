@@ -102,6 +102,29 @@ impl OpenAIClient {
         self.total_completion_tokens.store(0, Ordering::Relaxed);
     }
 
+    /// Perform a lightweight credentials/availability check.
+    pub async fn health_check(&self) -> OpenAIResult<()> {
+        let url = format!("{}/v1/models", self.base_url);
+        let mut request = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json");
+
+        if let Some(org) = &self.organization {
+            request = request.header("OpenAI-Organization", org);
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+        let bytes = response.bytes().await?;
+        if status.is_success() {
+            Ok(())
+        } else {
+            Err(parse_error_response(status, &bytes))
+        }
+    }
+
     /// Track usage from a response.
     fn track_usage(&self, usage: &Usage) {
         self.total_prompt_tokens

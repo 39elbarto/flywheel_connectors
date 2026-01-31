@@ -27,6 +27,12 @@
 //! export FCP_MESH_ENDPOINT=http://localhost:9090
 //! fcp doctor --zone z:private
 //! ```
+//!
+//! The CLI will POST a JSON body to `{FCP_MESH_ENDPOINT}/doctor` (or the exact
+//! URL if a path is provided) with:
+//! ```json
+//! {"zone_id":"z:private","connectors":["fcp.telegram:messaging:v1"],"self_check":true}
+//! ```
 
 #![allow(clippy::cast_sign_loss)]
 
@@ -36,6 +42,9 @@ use anyhow::Result;
 use chrono::Utc;
 use clap::{Args, ValueEnum};
 use fcp_core::{ConnectorId, SelfCheckReport, SelfCheckStatus, ZoneId};
+use serde::Serialize;
+use std::time::Duration;
+use url::Url;
 
 use types::{
     AuditStatus, CheckResult, CheckpointStatus, ConnectorSelfCheck, DegradedModeStatus,
@@ -88,7 +97,7 @@ pub struct DoctorArgs {
 }
 
 /// Run the doctor command.
-pub fn run(args: &DoctorArgs) -> Result<()> {
+pub fn run(args: &DoctorArgs, stdin_input: Option<&serde_json::Value>) -> Result<()> {
     // Validate zone ID format
     let zone_id: ZoneId = args.zone.parse()?;
     let connector_ids = parse_connector_ids(&args.connector)?;
@@ -97,21 +106,31 @@ pub fn run(args: &DoctorArgs) -> Result<()> {
         anyhow::bail!("--self-check requires at least one --connector");
     }
 
-    // Check for real mesh endpoint (future functionality)
-    if std::env::var("FCP_MESH_ENDPOINT").is_ok() {
-        // TODO: Connect to real mesh node when available
-        eprintln!("Note: Real mesh connectivity not yet implemented, using simulation");
-    }
-    let empty = Vec::new();
-    let report = simulate_report(
-        &zone_id,
-        if enable_self_checks {
-            &connector_ids
-        } else {
-            &empty
-        },
-        args.scenario,
-    );
+    let report = if let Some(input) = stdin_input {
+        let report: DoctorReport = serde_json::from_value(input.clone())
+            .map_err(|err| anyhow::anyhow!("Failed to parse doctor report from stdin: {err}"))?;
+        if report.zone_id != zone_id.as_str() {
+            anyhow::bail!(
+                "stdin report zone_id '{}' does not match requested zone '{}'",
+                report.zone_id,
+                zone_id.as_str()
+            );
+        }
+        report
+    } else if let Ok(endpoint) = std::env::var("FCP_MESH_ENDPOINT") {
+        fetch_report_from_mesh(&endpoint, &zone_id, &connector_ids, enable_self_checks)?
+    } else {
+        let empty = Vec::new();
+        simulate_report(
+            &zone_id,
+            if enable_self_checks {
+                &connector_ids
+            } else {
+                &empty
+            },
+            args.scenario,
+        )
+    };
 
     if args.json {
         let output = serde_json::to_string_pretty(&report)?;
@@ -128,6 +147,63 @@ pub fn run(args: &DoctorArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct DoctorRequest {
+    zone_id: String,
+    connectors: Vec<String>,
+    self_check: bool,
+}
+
+fn build_doctor_url(endpoint: &str) -> Result<Url> {
+    let mut url = Url::parse(endpoint)
+        .map_err(|err| anyhow::anyhow!("Invalid FCP_MESH_ENDPOINT URL: {err}"))?;
+    if url.path().is_empty() || url.path() == "/" {
+        url.set_path("doctor");
+    }
+    Ok(url)
+}
+
+fn fetch_report_from_mesh(
+    endpoint: &str,
+    zone_id: &ZoneId,
+    connector_ids: &[ConnectorId],
+    enable_self_checks: bool,
+) -> Result<DoctorReport> {
+    let url = build_doctor_url(endpoint)?;
+    let request = DoctorRequest {
+        zone_id: zone_id.as_str().to_string(),
+        connectors: connector_ids.iter().map(ToString::to_string).collect(),
+        self_check: enable_self_checks,
+    };
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|err| anyhow::anyhow!("Failed to build HTTP client: {err}"))?;
+
+    let response = client
+        .post(url)
+        .json(&request)
+        .send()
+        .map_err(|err| anyhow::anyhow!("Failed to contact mesh endpoint: {err}"))?
+        .error_for_status()
+        .map_err(|err| anyhow::anyhow!("Mesh endpoint error: {err}"))?;
+
+    let report: DoctorReport = response
+        .json()
+        .map_err(|err| anyhow::anyhow!("Failed to parse doctor report: {err}"))?;
+
+    if report.zone_id != zone_id.as_str() {
+        anyhow::bail!(
+            "mesh report zone_id '{}' does not match requested zone '{}'",
+            report.zone_id,
+            zone_id.as_str()
+        );
+    }
+
+    Ok(report)
 }
 
 fn parse_connector_ids(ids: &[String]) -> Result<Vec<ConnectorId>> {

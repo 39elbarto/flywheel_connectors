@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
     ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier, SessionId,
-    SimulateRequest, SimulateResponse,
+    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
 use serde_json::json;
 use tracing::{info, instrument};
@@ -166,6 +166,31 @@ impl OpenAIConnector {
                 "total_cost_usd": self.total_cost()
             }
         }))
+    }
+
+    /// Handle connector self-check.
+    pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
+        let Some(client) = &self.client else {
+            let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize self-check report: {e}"),
+            });
+        };
+
+        let report = match client.health_check().await {
+            Ok(()) => SelfCheckReport::ok(),
+            Err(err) => {
+                if err.is_retryable() {
+                    SelfCheckReport::degraded("self_check_retryable", err.to_string())
+                } else {
+                    SelfCheckReport::failed("self_check_failed", err.to_string())
+                }
+            }
+        };
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {e}"),
+        })
     }
 
     /// Handle introspect method.

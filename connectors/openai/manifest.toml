@@ -1,0 +1,367 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:pending"
+
+[connector]
+id = "fcp.openai"
+name = "OpenAI Connector"
+version = "0.1.0"
+description = "FCP connector for OpenAI chat completion API with streaming support"
+archetypes = [
+    "operational",
+    "streaming",
+]
+format = "native"
+
+[connector.state]
+model = "none"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+]
+optional = []
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "storage.state",
+]
+
+# -----------------------------------------------------------------------------
+# Operations
+# -----------------------------------------------------------------------------
+
+[provides.operations.chat]
+description = "Send a chat completion request to OpenAI models"
+capability = "openai.chat"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations.chat.rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations.chat.input_schema]
+required = ["messages"]
+type = "object"
+
+[provides.operations.chat.input_schema.properties.model]
+description = "OpenAI model to use"
+default = "gpt-4o"
+enum = [
+    "gpt-4o",
+    "gpt-4o-mini",
+    "gpt-4-turbo",
+    "gpt-4",
+    "gpt-3.5-turbo",
+]
+type = "string"
+
+[provides.operations.chat.input_schema.properties.messages]
+description = "Array of chat messages"
+type = "array"
+minItems = 1
+
+[provides.operations.chat.input_schema.properties.messages.items]
+type = "object"
+required = ["role", "content"]
+
+[provides.operations.chat.input_schema.properties.messages.items.properties.role]
+type = "string"
+enum = ["system", "user", "assistant", "tool"]
+
+[provides.operations.chat.input_schema.properties.messages.items.properties.content]
+type = "string"
+
+[provides.operations.chat.input_schema.properties.max_tokens]
+description = "Maximum tokens to generate"
+type = "integer"
+default = 4096
+minimum = 1
+maximum = 128000
+
+[provides.operations.chat.input_schema.properties.temperature]
+description = "Sampling temperature (0-2)"
+type = "number"
+minimum = 0
+maximum = 2
+
+[provides.operations.chat.input_schema.properties.tools]
+description = "Tool definitions for function calling"
+type = "array"
+
+[provides.operations.chat.input_schema.properties.tool_choice]
+description = "Controls how the model uses tools"
+type = "object"
+
+[provides.operations.chat.output_schema]
+required = ["id", "content"]
+type = "object"
+
+[provides.operations.chat.output_schema.properties.id]
+description = "Response ID from OpenAI"
+type = "string"
+
+[provides.operations.chat.output_schema.properties.content]
+description = "Generated response content"
+type = "string"
+
+[provides.operations.chat.output_schema.properties.model]
+description = "Model used for generation"
+type = "string"
+
+[provides.operations.chat.output_schema.properties.finish_reason]
+description = "Reason generation stopped"
+type = "string"
+enum = ["stop", "length", "tool_calls", "content_filter"]
+
+[provides.operations.chat.output_schema.properties.usage]
+type = "object"
+
+[provides.operations.chat.output_schema.properties.usage.properties.prompt_tokens]
+type = "integer"
+
+[provides.operations.chat.output_schema.properties.usage.properties.completion_tokens]
+type = "integer"
+
+[provides.operations.chat.output_schema.properties.usage.properties.total_tokens]
+type = "integer"
+
+[provides.operations.chat.output_schema.properties.cost_usd]
+description = "Estimated cost in USD"
+type = "number"
+
+[provides.operations.chat.network_constraints]
+host_allow = ["api.openai.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 10485760
+
+[provides.operations.chat.ai_hints]
+when_to_use = "Send a chat completion request to OpenAI models. Supports multi-turn conversations and function calling."
+common_mistakes = [
+    "Not providing messages array.",
+    "Exceeding model context length.",
+    "Using wrong model name.",
+]
+examples = [
+    '{"messages": [{"role": "user", "content": "Hello!"}]}',
+    '{"model": "gpt-4o-mini", "messages": [{"role": "system", "content": "You are helpful."}, {"role": "user", "content": "Hi"}]}',
+]
+related = ["openai.simple_chat"]
+
+# -----------------------------------------------------------------------------
+
+[provides.operations.simple_chat]
+description = "Simple single-turn chat with GPT models"
+capability = "openai.chat"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations.simple_chat.rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations.simple_chat.input_schema]
+required = ["message"]
+type = "object"
+
+[provides.operations.simple_chat.input_schema.properties.model]
+description = "OpenAI model to use"
+default = "gpt-4o"
+enum = [
+    "gpt-4o",
+    "gpt-4o-mini",
+    "gpt-4-turbo",
+    "gpt-4",
+    "gpt-3.5-turbo",
+]
+type = "string"
+
+[provides.operations.simple_chat.input_schema.properties.message]
+description = "User message to send"
+type = "string"
+minLength = 1
+
+[provides.operations.simple_chat.input_schema.properties.system]
+description = "Optional system prompt"
+type = "string"
+
+[provides.operations.simple_chat.input_schema.properties.max_tokens]
+description = "Maximum tokens to generate"
+type = "integer"
+default = 4096
+minimum = 1
+maximum = 128000
+
+[provides.operations.simple_chat.output_schema]
+required = ["response"]
+type = "object"
+
+[provides.operations.simple_chat.output_schema.properties.response]
+description = "Generated response text"
+type = "string"
+
+[provides.operations.simple_chat.output_schema.properties.usage]
+type = "object"
+
+[provides.operations.simple_chat.output_schema.properties.usage.properties.prompt_tokens]
+type = "integer"
+
+[provides.operations.simple_chat.output_schema.properties.usage.properties.completion_tokens]
+type = "integer"
+
+[provides.operations.simple_chat.output_schema.properties.usage.properties.total_tokens]
+type = "integer"
+
+[provides.operations.simple_chat.output_schema.properties.cost_usd]
+description = "Estimated cost in USD"
+type = "number"
+
+[provides.operations.simple_chat.network_constraints]
+host_allow = ["api.openai.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 10485760
+
+[provides.operations.simple_chat.ai_hints]
+when_to_use = "Quick single-turn chat when you just need a simple response. For multi-turn or complex conversations, use openai.chat instead."
+common_mistakes = [
+    "Using for multi-turn conversations.",
+]
+examples = [
+    '{"message": "What is 2+2?"}',
+    '{"message": "Explain quantum computing", "system": "Explain like I am 5"}',
+]
+related = ["openai.chat"]
+
+# -----------------------------------------------------------------------------
+
+[provides.operations.get_usage]
+description = "Get current usage and cost statistics for this session"
+capability = "openai.chat"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations.get_usage.rate_limit]
+max = 1000
+per_ms = 60000
+
+[provides.operations.get_usage.input_schema]
+type = "object"
+
+[provides.operations.get_usage.output_schema]
+required = ["total_prompt_tokens", "total_completion_tokens", "total_cost_usd"]
+type = "object"
+
+[provides.operations.get_usage.output_schema.properties.total_prompt_tokens]
+description = "Total prompt tokens used in session"
+type = "integer"
+
+[provides.operations.get_usage.output_schema.properties.total_completion_tokens]
+description = "Total completion tokens generated in session"
+type = "integer"
+
+[provides.operations.get_usage.output_schema.properties.total_cost_usd]
+description = "Total estimated cost in USD"
+type = "number"
+
+[provides.operations.get_usage.output_schema.properties.requests_total]
+description = "Total requests made"
+type = "integer"
+
+[provides.operations.get_usage.output_schema.properties.requests_error]
+description = "Total failed requests"
+type = "integer"
+
+[provides.operations.get_usage.ai_hints]
+when_to_use = "Check usage and costs for the current session. Useful for monitoring spend."
+common_mistakes = []
+examples = []
+related = []
+
+# -----------------------------------------------------------------------------
+# Sandbox
+# -----------------------------------------------------------------------------
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = []
+deny_exec = true
+deny_ptrace = true
+
+# -----------------------------------------------------------------------------
+# Rate Limits
+# -----------------------------------------------------------------------------
+
+[[rate_limits.pools]]
+id = "openai.chat"
+requests = 100
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "openai.usage"
+requests = 1000
+window_ms = 60000
+burst = 100
+scope = "instance"
+
+[rate_limits.operation_pools]

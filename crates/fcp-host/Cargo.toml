@@ -35,6 +35,9 @@ tracing = "0.1"
 # Semver for version comparison
 semver = { version = "1", features = ["serde"] }
 
+# HTTP server (doctor endpoint)
+axum = { version = "0.7", features = ["json"] }
+
 [dev-dependencies]
 fcp-conformance = { path = "../fcp-conformance" }
 fcp-e2e = { path = "../fcp-e2e" }

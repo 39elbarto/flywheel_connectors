@@ -256,6 +256,11 @@ impl SymbolRequestHandler {
                     max: MAX_MISSING_HINT_ENTRIES,
                 });
             }
+            if hints.len() > request.max_symbols as usize {
+                return Err(SymbolRequestError::InvalidRequest {
+                    reason: "missing hint exceeds max_symbols".to_string(),
+                });
+            }
         }
 
         // Compute maximum allowed response
@@ -518,23 +523,31 @@ impl TargetedRepairEngine {
 
         // If we have a missing hint, prioritize those
         if let Some(ref hints) = request.request.missing_hint {
-            let mut selected: Vec<u32> = hints
-                .iter()
-                .filter(|esi| available.contains(esi) && !already_sent.contains(esi))
-                .copied()
-                .take(limit)
-                .collect();
+            let mut seen = HashSet::new();
+            let mut selected = Vec::new();
+            for esi in hints.iter().copied() {
+                if selected.len() >= limit {
+                    break;
+                }
+                if !seen.insert(esi) {
+                    continue;
+                }
+                if available.contains(&esi) && !already_sent.contains(&esi) {
+                    selected.push(esi);
+                }
+            }
 
             // If we have room and the hint didn't fill it, add more
             if selected.len() < limit {
                 let remaining = limit - selected.len();
                 let hint_set: HashSet<_> = hints.iter().copied().collect();
-                let additional: Vec<_> = available
+                let mut additional: Vec<_> = available
                     .iter()
                     .filter(|esi| !hint_set.contains(esi) && !already_sent.contains(esi))
                     .copied()
-                    .take(remaining)
                     .collect();
+                additional.sort_unstable();
+                additional.truncate(remaining);
                 selected.extend(additional);
             }
 
@@ -548,12 +561,14 @@ impl TargetedRepairEngine {
             selected
         } else {
             // No hints, select any available symbols
-            available
+            let mut candidates: Vec<u32> = available
                 .iter()
                 .filter(|esi| !already_sent.contains(esi))
                 .copied()
-                .take(limit)
-                .collect()
+                .collect();
+            candidates.sort_unstable();
+            candidates.truncate(limit);
+            candidates
         }
     }
 
@@ -832,6 +847,21 @@ mod tests {
     }
 
     #[test]
+    fn reject_hint_exceeding_max_symbols() {
+        let handler = SymbolRequestHandler::with_default_policy();
+        let mut admission = AdmissionController::with_default_policy();
+        let peer = NodeId::new("peer-hint-max");
+
+        let request = test_symbol_request(2, Some(vec![1, 2, 3]));
+        let result = handler.validate_request(&request, true, &mut admission, &peer, 0, 64);
+
+        assert!(matches!(
+            result,
+            Err(SymbolRequestError::InvalidRequest { .. })
+        ));
+    }
+
+    #[test]
     fn targeted_repair_selects_from_hints() {
         let mut engine = TargetedRepairEngine::new();
         let object_id = ObjectId::from_bytes([0x11; 32]);
@@ -878,6 +908,44 @@ mod tests {
         assert!(!selected.contains(&5));
         assert!(!selected.contains(&10));
         assert!(selected.contains(&15));
+    }
+
+    #[test]
+    fn targeted_repair_dedups_hints_and_orders_additional() {
+        let mut engine = TargetedRepairEngine::new();
+        let object_id = ObjectId::from_bytes([0x11; 32]);
+
+        engine.register_available(object_id.clone(), 0..20);
+
+        let request = ValidatedRequest {
+            request: test_symbol_request(4, Some(vec![10, 5, 10, 3])),
+            is_authenticated: true,
+            max_response_symbols: 4,
+            has_proof_of_need: true,
+        };
+
+        let selected = engine.select_symbols(&request, &HashSet::new());
+
+        assert_eq!(selected, vec![10, 5, 3, 0, 1]);
+    }
+
+    #[test]
+    fn targeted_repair_is_deterministic_without_hints() {
+        let mut engine = TargetedRepairEngine::new();
+        let object_id = ObjectId::from_bytes([0x11; 32]);
+
+        engine.register_available(object_id.clone(), 0..10);
+
+        let request = ValidatedRequest {
+            request: test_symbol_request(5, None),
+            is_authenticated: true,
+            max_response_symbols: 5,
+            has_proof_of_need: false,
+        };
+
+        let selected = engine.select_symbols(&request, &HashSet::new());
+
+        assert_eq!(selected, vec![0, 1, 2, 3, 4, 5]);
     }
 
     #[test]

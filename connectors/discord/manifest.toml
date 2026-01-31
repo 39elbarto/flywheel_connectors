@@ -1,0 +1,594 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:pending"
+
+[connector]
+id = "fcp.discord"
+name = "Discord Connector"
+version = "0.1.0"
+description = "FCP connector for Discord with REST API and Gateway streaming support"
+archetypes = [
+    "operational",
+    "streaming",
+    "bidirectional",
+]
+format = "native"
+
+[connector.state]
+model = "none"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+]
+optional = []
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "storage.state",
+]
+
+# -----------------------------------------------------------------------------
+# Operations
+# -----------------------------------------------------------------------------
+
+[provides.operations.send_message]
+description = "Send a message to a Discord channel"
+capability = "discord.send"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations.send_message.rate_limit]
+max = 50
+per_ms = 60000
+
+[provides.operations.send_message.input_schema]
+required = ["channel_id"]
+type = "object"
+
+[provides.operations.send_message.input_schema.properties.channel_id]
+description = "Discord channel ID (snowflake)"
+type = "string"
+pattern = "^[0-9]+$"
+
+[provides.operations.send_message.input_schema.properties.content]
+description = "Message text content (max 2000 chars)"
+type = "string"
+maxLength = 2000
+
+[provides.operations.send_message.input_schema.properties.embeds]
+description = "Rich embed objects (max 10)"
+type = "array"
+maxItems = 10
+
+[provides.operations.send_message.input_schema.properties.embeds.items]
+type = "object"
+
+[provides.operations.send_message.input_schema.properties.reply_to]
+description = "Message ID to reply to"
+type = "string"
+pattern = "^[0-9]+$"
+
+[provides.operations.send_message.output_schema]
+required = ["id", "channel_id"]
+type = "object"
+
+[provides.operations.send_message.output_schema.properties.id]
+description = "Created message ID"
+type = "string"
+
+[provides.operations.send_message.output_schema.properties.channel_id]
+type = "string"
+
+[provides.operations.send_message.output_schema.properties.content]
+type = "string"
+
+[provides.operations.send_message.network_constraints]
+host_allow = ["discord.com", "*.discord.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations.send_message.ai_hints]
+when_to_use = "Send a message to a Discord channel. Use channel_id (numeric snowflake), not channel name."
+common_mistakes = [
+    "Using channel name instead of ID.",
+    "Exceeding 2000 character message limit.",
+    "Empty content without embeds.",
+]
+examples = [
+    '{"channel_id": "123456789012345678", "content": "Hello!"}',
+]
+related = ["discord.edit_message", "discord.trigger_typing"]
+
+# -----------------------------------------------------------------------------
+
+[provides.operations.edit_message]
+description = "Edit an existing message in a Discord channel"
+capability = "discord.edit"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations.edit_message.rate_limit]
+max = 50
+per_ms = 60000
+
+[provides.operations.edit_message.input_schema]
+required = ["channel_id", "message_id"]
+type = "object"
+
+[provides.operations.edit_message.input_schema.properties.channel_id]
+description = "Discord channel ID"
+type = "string"
+pattern = "^[0-9]+$"
+
+[provides.operations.edit_message.input_schema.properties.message_id]
+description = "Message ID to edit"
+type = "string"
+pattern = "^[0-9]+$"
+
+[provides.operations.edit_message.input_schema.properties.content]
+description = "New message content"
+type = "string"
+maxLength = 2000
+
+[provides.operations.edit_message.input_schema.properties.embeds]
+description = "New embed objects"
+type = "array"
+maxItems = 10
+
+[provides.operations.edit_message.output_schema]
+required = ["id"]
+type = "object"
+
+[provides.operations.edit_message.output_schema.properties.id]
+type = "string"
+
+[provides.operations.edit_message.output_schema.properties.content]
+type = "string"
+
+[provides.operations.edit_message.network_constraints]
+host_allow = ["discord.com", "*.discord.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations.edit_message.ai_hints]
+when_to_use = "Edit an existing Discord message. Only the bot can edit its own messages."
+common_mistakes = [
+    "Trying to edit messages from other users.",
+]
+examples = []
+related = ["discord.send_message"]
+
+# -----------------------------------------------------------------------------
+
+[provides.operations.delete_message]
+description = "Delete a message from a Discord channel (irreversible)"
+capability = "discord.delete"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations.delete_message.rate_limit]
+max = 30
+per_ms = 60000
+
+[provides.operations.delete_message.input_schema]
+required = ["channel_id", "message_id"]
+type = "object"
+
+[provides.operations.delete_message.input_schema.properties.channel_id]
+description = "Discord channel ID"
+type = "string"
+pattern = "^[0-9]+$"
+
+[provides.operations.delete_message.input_schema.properties.message_id]
+description = "Message ID to delete"
+type = "string"
+pattern = "^[0-9]+$"
+
+[provides.operations.delete_message.output_schema]
+required = ["deleted"]
+type = "object"
+
+[provides.operations.delete_message.output_schema.properties.deleted]
+type = "boolean"
+
+[provides.operations.delete_message.network_constraints]
+host_allow = ["discord.com", "*.discord.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations.delete_message.ai_hints]
+when_to_use = "Delete a Discord message. This is irreversible - use with caution."
+common_mistakes = [
+    "Deleting important messages without confirmation.",
+]
+examples = []
+related = []
+
+# -----------------------------------------------------------------------------
+
+[provides.operations.get_channel]
+description = "Get information about a Discord channel"
+capability = "discord.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations.get_channel.rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations.get_channel.input_schema]
+required = ["channel_id"]
+type = "object"
+
+[provides.operations.get_channel.input_schema.properties.channel_id]
+description = "Discord channel ID"
+type = "string"
+pattern = "^[0-9]+$"
+
+[provides.operations.get_channel.output_schema]
+required = ["id"]
+type = "object"
+
+[provides.operations.get_channel.output_schema.properties.id]
+type = "string"
+
+[provides.operations.get_channel.output_schema.properties.name]
+type = "string"
+
+[provides.operations.get_channel.output_schema.properties.type]
+description = "Channel type (0=text, 2=voice, 4=category, etc.)"
+type = "integer"
+
+[provides.operations.get_channel.network_constraints]
+host_allow = ["discord.com", "*.discord.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations.get_channel.ai_hints]
+when_to_use = "Get metadata about a Discord channel."
+common_mistakes = []
+examples = ['{"channel_id": "123456789012345678"}']
+related = ["discord.get_guild"]
+
+# -----------------------------------------------------------------------------
+
+[provides.operations.get_guild]
+description = "Get information about a Discord server (guild)"
+capability = "discord.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations.get_guild.rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations.get_guild.input_schema]
+required = ["guild_id"]
+type = "object"
+
+[provides.operations.get_guild.input_schema.properties.guild_id]
+description = "Discord guild/server ID"
+type = "string"
+pattern = "^[0-9]+$"
+
+[provides.operations.get_guild.output_schema]
+required = ["id"]
+type = "object"
+
+[provides.operations.get_guild.output_schema.properties.id]
+type = "string"
+
+[provides.operations.get_guild.output_schema.properties.name]
+type = "string"
+
+[provides.operations.get_guild.output_schema.properties.icon]
+type = "string"
+
+[provides.operations.get_guild.output_schema.properties.owner_id]
+type = "string"
+
+[provides.operations.get_guild.network_constraints]
+host_allow = ["discord.com", "*.discord.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations.get_guild.ai_hints]
+when_to_use = "Get metadata about a Discord server/guild."
+common_mistakes = [
+    "Using server name instead of guild ID.",
+]
+examples = ['{"guild_id": "123456789012345678"}']
+related = ["discord.get_channel"]
+
+# -----------------------------------------------------------------------------
+
+[provides.operations.trigger_typing]
+description = "Show typing indicator in a Discord channel (lasts 10 seconds)"
+capability = "discord.send"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations.trigger_typing.rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations.trigger_typing.input_schema]
+required = ["channel_id"]
+type = "object"
+
+[provides.operations.trigger_typing.input_schema.properties.channel_id]
+description = "Discord channel ID"
+type = "string"
+pattern = "^[0-9]+$"
+
+[provides.operations.trigger_typing.output_schema]
+required = ["triggered"]
+type = "object"
+
+[provides.operations.trigger_typing.output_schema.properties.triggered]
+type = "boolean"
+
+[provides.operations.trigger_typing.network_constraints]
+host_allow = ["discord.com", "*.discord.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations.trigger_typing.ai_hints]
+when_to_use = "Show typing indicator before sending a message. Lasts 10 seconds or until a message is sent."
+common_mistakes = []
+examples = ['{"channel_id": "123456789012345678"}']
+related = ["discord.send_message"]
+
+# -----------------------------------------------------------------------------
+# Events
+# -----------------------------------------------------------------------------
+
+[provides.events.message]
+description = "Discord message created in a channel"
+topic = "discord.message"
+requires_ack = false
+
+[provides.events.message.schema]
+type = "object"
+
+[provides.events.message.schema.properties.id]
+description = "Message ID"
+type = "string"
+
+[provides.events.message.schema.properties.channel_id]
+type = "string"
+
+[provides.events.message.schema.properties.content]
+type = "string"
+
+[provides.events.message.schema.properties.author]
+type = "object"
+
+[provides.events.message_update]
+description = "Discord message was edited"
+topic = "discord.message_update"
+requires_ack = false
+
+[provides.events.message_update.schema]
+type = "object"
+
+[provides.events.message_delete]
+description = "Discord message was deleted"
+topic = "discord.message_delete"
+requires_ack = false
+
+[provides.events.message_delete.schema]
+type = "object"
+
+[provides.events.typing]
+description = "User started typing in a channel"
+topic = "discord.typing"
+requires_ack = false
+
+[provides.events.typing.schema]
+type = "object"
+
+[provides.events.guild_create]
+description = "Bot joined a guild or guild became available"
+topic = "discord.guild_create"
+requires_ack = false
+
+[provides.events.guild_create.schema]
+type = "object"
+
+[provides.events.ready]
+description = "Gateway connection ready"
+topic = "discord.ready"
+requires_ack = false
+
+[provides.events.ready.schema]
+type = "object"
+
+# -----------------------------------------------------------------------------
+# Gateway (streaming)
+# -----------------------------------------------------------------------------
+
+[provides.streaming]
+gateway_host = "gateway.discord.gg"
+protocol = "wss"
+heartbeat_interval_ms = 41250
+reconnect_policy = "exponential_backoff"
+
+[provides.streaming.network_constraints]
+host_allow = ["gateway.discord.gg", "*.discord.gg"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 30000
+total_timeout_ms = 0
+max_response_bytes = 0
+
+# -----------------------------------------------------------------------------
+# Sandbox
+# -----------------------------------------------------------------------------
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = []
+deny_exec = true
+deny_ptrace = true
+
+# -----------------------------------------------------------------------------
+# Rate Limits
+# -----------------------------------------------------------------------------
+
+[[rate_limits.pools]]
+id = "discord.read"
+requests = 100
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "discord.send"
+requests = 50
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "discord.edit"
+requests = 50
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "discord.delete"
+requests = 30
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[rate_limits.operation_pools]

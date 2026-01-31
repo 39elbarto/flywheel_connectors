@@ -15,8 +15,10 @@
 
 mod budget;
 mod discovery;
+mod doctor;
 mod error;
 
 pub use budget::*;
 pub use discovery::*;
+pub use doctor::*;
 pub use error::*;

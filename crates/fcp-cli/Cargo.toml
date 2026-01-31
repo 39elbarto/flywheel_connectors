@@ -32,6 +32,7 @@ toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 url.workspace = true
+reqwest = { workspace = true, features = ["blocking", "json", "rustls-tls"], default-features = false }
 
 # FCP crate dependencies
 fcp-cbor = { path = "../fcp-cbor" }

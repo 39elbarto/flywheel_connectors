@@ -243,7 +243,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let _pager = PagerConfig::from_cli(&cli);
 
-    let _stdin_input = if cli.input_stdin {
+    let stdin_input = if cli.input_stdin {
         Some(read_stdin_input(cli.input_format)?)
     } else {
         None
@@ -259,7 +259,7 @@ fn main() -> Result<()> {
             budget::run(&args)
         }
         Commands::Connector(args) => connector::run(&args),
-        Commands::Doctor(args) => doctor::run(&args),
+        Commands::Doctor(args) => doctor::run(&args, stdin_input.as_ref()),
         Commands::Explain(args) => {
             if cli.input_stdin {
                 anyhow::bail!("--input-stdin is currently supported only for `fcp doctor`");

@@ -9,8 +9,8 @@ use fcp_core::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier, ConnectorId,
     EventCaps, EventData, EventEnvelope, EventInfo, FcpError, FcpResult, HandshakeRequest,
     HandshakeResponse, IdempotencyClass, InstanceId, Introspection, OperationId, OperationInfo,
-    Principal, RiskLevel, SafetyTier, SessionId, SimulateRequest, SimulateResponse, TrustLevel,
-    ZoneId,
+    Principal, RiskLevel, SafetyTier, SelfCheckReport, SessionId, SimulateRequest,
+    SimulateResponse, TrustLevel, ZoneId,
 };
 use fcp_sdk::{
     Limits,
@@ -215,6 +215,39 @@ impl DiscordConnector {
                 "error": e.to_string()
             })),
         }
+    }
+
+    /// Handle connector self-check.
+    pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
+        let Some(api_client) = &self.api_client else {
+            let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize self-check report: {e}"),
+            });
+        };
+
+        let report = match api_client.get_current_user().await {
+            Ok(user) => {
+                let mut report = SelfCheckReport::ok();
+                report.details = Some(json!({
+                    "user_id": user.id,
+                    "username": user.username,
+                    "bot": user.bot,
+                }));
+                report
+            }
+            Err(err) => {
+                if err.is_retryable() {
+                    SelfCheckReport::degraded("self_check_retryable", err.to_string())
+                } else {
+                    SelfCheckReport::failed("self_check_failed", err.to_string())
+                }
+            }
+        };
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {e}"),
+        })
     }
 
     fn send_message_input_schema() -> serde_json::Value {

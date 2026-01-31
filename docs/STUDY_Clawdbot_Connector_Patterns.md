@@ -115,8 +115,10 @@ connectors/<platform>/src/
 ├── config.rs        # config + defaults
 ├── error.rs         # platform errors + retryability
 ├── types.rs         # platform API types
+├── limits.rs        # platform limits + TODOs
 ├── api.rs           # REST client (if applicable)
-└── stream.rs        # streaming/polling supervisor (if applicable)
+├── stream.rs        # streaming supervisor (if applicable)
+└── polling.rs       # polling cursor + scheduler (if applicable)
 ```
 
 ### 5.2 Implementation Guidelines
@@ -147,8 +149,11 @@ connectors/fcp.myservice/
     ├── connector.rs
     ├── config.rs
     ├── error.rs
+    ├── limits.rs
     ├── types.rs
-    └── stream.rs
+    ├── api.rs       # request-response only
+    ├── stream.rs    # streaming or bidirectional
+    └── polling.rs   # polling only
 ```
 
 ### 6.2 Minimal Connector Skeleton (Rust)
@@ -236,4 +241,3 @@ impl FcpConnector for MyServiceConnector {
 - Deterministic CI: mocks only, no real network.
 - Structured JSON logs with stable `test_name` identifiers.
 - Clear template + checklist usable by `fcp new` scaffold.
-

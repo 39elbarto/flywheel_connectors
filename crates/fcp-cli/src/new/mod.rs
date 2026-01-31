@@ -369,6 +369,12 @@ fn generate_files(
 ) -> Result<Vec<(String, String, String)>> {
     let manifest = generate_manifest_toml(connector_id, short_name, archetype, zone)?;
     let crate_ident = crate_name.replace('-', "_");
+    let include_api = matches!(archetype, ConnectorArchetype::RequestResponse);
+    let include_stream = matches!(
+        archetype,
+        ConnectorArchetype::Streaming | ConnectorArchetype::Bidirectional
+    );
+    let include_polling = matches!(archetype, ConnectorArchetype::Polling);
     let mut files = vec![
         (
             "Cargo.toml".to_string(),
@@ -387,8 +393,18 @@ fn generate_files(
         ),
         (
             "src/lib.rs".to_string(),
-            generate_lib_rs(short_name),
+            generate_lib_rs(short_name, include_api, include_stream, include_polling),
             "Library exports".to_string(),
+        ),
+        (
+            "src/config.rs".to_string(),
+            generate_config_rs(short_name),
+            "Connector configuration".to_string(),
+        ),
+        (
+            "src/error.rs".to_string(),
+            generate_error_rs(short_name),
+            "Connector error taxonomy".to_string(),
         ),
         (
             "src/connector.rs".to_string(),
@@ -411,6 +427,27 @@ fn generate_files(
             "Unit test scaffolding".to_string(),
         ),
     ];
+    if include_api {
+        files.push((
+            "src/api.rs".to_string(),
+            generate_api_rs(short_name),
+            "Request/response API client".to_string(),
+        ));
+    }
+    if include_stream {
+        files.push((
+            "src/stream.rs".to_string(),
+            generate_stream_rs(short_name),
+            "Streaming supervisor scaffolding".to_string(),
+        ));
+    }
+    if include_polling {
+        files.push((
+            "src/polling.rs".to_string(),
+            generate_polling_rs(short_name),
+            "Polling cursor/scaffold".to_string(),
+        ));
+    }
 
     if !no_e2e {
         files.push((
@@ -452,6 +489,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio = {{ workspace = true, features = ["full"] }}
+tokio-stream.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
@@ -763,18 +801,367 @@ async fn handle_message(connector: &mut {struct_name}Connector, message: &str) -
 }
 
 /// Generate lib.rs content.
-fn generate_lib_rs(short_name: &str) -> String {
+fn generate_lib_rs(
+    short_name: &str,
+    include_api: bool,
+    include_stream: bool,
+    include_polling: bool,
+) -> String {
     let struct_name = to_pascal_case(short_name);
+    let api_module = if include_api { "pub mod api;\n" } else { "" };
+    let stream_module = if include_stream {
+        "pub mod stream;\n"
+    } else {
+        ""
+    };
+    let polling_module = if include_polling {
+        "pub mod polling;\n"
+    } else {
+        ""
+    };
     format!(
         r"//! Library exports for {struct_name} connector.
 
 #![forbid(unsafe_code)]
 
-pub mod connector;
+pub mod config;
+pub mod error;
+{api_module}{stream_module}{polling_module}pub mod connector;
 pub mod limits;
 pub mod types;
 
 pub use connector::{struct_name}Connector;
+"
+    )
+}
+
+/// Generate config.rs content.
+fn generate_config_rs(short_name: &str) -> String {
+    let struct_name = to_pascal_case(short_name);
+    format!(
+        r#"//! {struct_name} connector configuration.
+//!
+//! TODO: Define configuration fields for your connector.
+//! NOTE: Never store secrets in config. Use capability tokens and host-provided secrets.
+
+use fcp_sdk::prelude::{{FcpError, FcpResult}};
+use serde::{{Deserialize, Serialize}};
+use serde_json::Value;
+
+/// Connector configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct {struct_name}Config {{
+    // Example fields:
+    // pub endpoint: String,
+    // pub timeout_ms: u64,
+}}
+
+impl {struct_name}Config {{
+    /// Parse and validate connector configuration from JSON.
+    pub fn from_value(value: Value) -> FcpResult<Self> {{
+        let config: Self = serde_json::from_value(value).map_err(|e| FcpError::InvalidRequest {{
+            code: 1003,
+            message: format!("Invalid config: {{e}}"),
+        }})?;
+        config.validate()?;
+        Ok(config)
+    }}
+
+    /// Validate configuration invariants.
+    pub fn validate(&self) -> FcpResult<()> {{
+        // TODO: Add validation checks (required fields, bounds, etc.)
+        Ok(())
+    }}
+}}
+"#
+    )
+}
+
+/// Generate error.rs content.
+fn generate_error_rs(short_name: &str) -> String {
+    let struct_name = to_pascal_case(short_name);
+    format!(
+        r#"//! {struct_name} connector error taxonomy.
+
+use fcp_sdk::prelude::FcpError;
+
+/// Connector-specific errors.
+#[derive(Debug, thiserror::Error)]
+pub enum {struct_name}Error {{
+    /// Configuration error.
+    #[error("configuration error: {{0}}")]
+    Config(String),
+
+    /// External service error.
+    #[error("external service error: {{0}}")]
+    ExternalService(String),
+
+    /// Rate limit error.
+    #[error("rate limited: {{0}}")]
+    RateLimited(String),
+}}
+
+impl {struct_name}Error {{
+    /// Convert to a structured FCP error.
+    pub fn to_fcp_error(&self) -> FcpError {{
+        match self {{
+            Self::Config(message) => FcpError::InvalidRequest {{
+                code: 5001,
+                message: message.clone(),
+            }},
+            Self::ExternalService(message) => FcpError::ExternalService {{
+                code: 7001,
+                message: message.clone(),
+                retryable: true,
+            }},
+            Self::RateLimited(message) => FcpError::ExternalService {{
+                code: 7002,
+                message: message.clone(),
+                retryable: true,
+            }},
+        }}
+    }}
+}}
+"#
+    )
+}
+
+/// Generate api.rs content (request-response connectors only).
+fn generate_api_rs(short_name: &str) -> String {
+    let struct_name = to_pascal_case(short_name);
+    format!(
+        r#"//! {struct_name} connector API client (request-response archetype).
+//!
+//! TODO: Implement HTTP calls and map failures to connector errors.
+
+use std::future::Future;
+use std::time::Duration;
+
+use tokio::time::sleep;
+
+use crate::error::{struct_name}Error;
+
+/// API client configuration.
+#[derive(Debug, Clone)]
+pub struct ApiClient {{
+    base_url: String,
+    timeout: Duration,
+}}
+
+impl ApiClient {{
+    /// Create a new API client.
+    pub fn new(base_url: impl Into<String>, timeout: Duration) -> Self {{
+        Self {{
+            base_url: base_url.into(),
+            timeout,
+        }}
+    }}
+
+    /// Execute a placeholder request.
+    pub async fn request(
+        &self,
+        _path: &str,
+        _payload: serde_json::Value,
+    ) -> Result<serde_json::Value, {struct_name}Error> {{
+        let _ = &self.base_url;
+        let _ = self.timeout;
+        Err({struct_name}Error::ExternalService(
+            "api client not implemented".to_string(),
+        ))
+    }}
+}}
+
+/// Retry helper with exponential backoff.
+pub async fn retry<T, F, Fut>(
+    mut attempts: usize,
+    mut backoff: Duration,
+    mut op: F,
+) -> Result<T, {struct_name}Error>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, {struct_name}Error>>,
+{{
+    loop {{
+        match op().await {{
+            Ok(value) => return Ok(value),
+            Err(err) => {{
+                attempts = attempts.saturating_sub(1);
+                if attempts == 0 {{
+                    return Err(err);
+                }}
+                sleep(backoff).await;
+                backoff = backoff.saturating_mul(2);
+            }}
+        }}
+    }}
+}}
+"#
+    )
+}
+
+/// Generate stream.rs content (streaming/bidirectional archetypes).
+fn generate_stream_rs(short_name: &str) -> String {
+    let struct_name = to_pascal_case(short_name);
+    format!(
+        r"//! {struct_name} streaming supervisor scaffolding.
+//!
+//! TODO: Replace with a real stream supervisor tied to your transport layer.
+
+use std::collections::HashSet;
+
+use fcp_sdk::prelude::{{EventEnvelope, EventStream, FcpResult, SubscribeRequest}};
+use tokio_stream::iter;
+
+/// Supervisor for streaming subscriptions (placeholder).
+#[derive(Debug, Default)]
+pub struct StreamSupervisor {{
+    topics: HashSet<String>,
+    last_cursor: Option<String>,
+}}
+
+impl StreamSupervisor {{
+    /// Create a new supervisor.
+    pub fn new() -> Self {{
+        Self::default()
+    }}
+
+    /// Record a subscription request.
+    pub fn on_subscribe(&mut self, req: &SubscribeRequest) {{
+        for topic in &req.topics {{
+            self.topics.insert(topic.clone());
+        }}
+    }}
+
+    /// Record a single topic subscription.
+    pub fn on_subscribe_topic(&mut self, topic: &str) {{
+        self.topics.insert(topic.to_string());
+    }}
+
+    /// Record unsubscription topics.
+    pub fn on_unsubscribe(&mut self, topics: &[String]) {{
+        for topic in topics {{
+            self.topics.remove(topic);
+        }}
+    }}
+
+    /// Record the last seen cursor.
+    pub fn record_cursor(&mut self, cursor: impl Into<String>) {{
+        self.last_cursor = Some(cursor.into());
+    }}
+
+    /// Access current topics (debugging).
+    pub fn topics(&self) -> Vec<String> {{
+        self.topics.iter().cloned().collect()
+    }}
+}}
+
+/// Empty event stream placeholder.
+pub fn empty_event_stream() -> EventStream {{
+    Box::pin(iter(std::iter::empty::<FcpResult<EventEnvelope>>()))
+}}
+ "
+    )
+}
+
+/// Generate polling.rs content (polling archetype).
+fn generate_polling_rs(short_name: &str) -> String {
+    let struct_name = to_pascal_case(short_name);
+    format!(
+        r"//! {struct_name} polling scaffolding (cursor + sequentialization hooks).
+//!
+//! TODO: Replace with real polling logic and durable cursor persistence.
+
+use std::time::{{Duration, Instant}};
+
+use fcp_sdk::prelude::CursorState;
+use tokio_stream::iter;
+
+/// Cursor wrapper with sequentialization hints.
+#[derive(Debug, Clone)]
+pub struct PollingCursor {{
+    state: CursorState,
+    last_polled_at: Option<Instant>,
+}}
+
+impl PollingCursor {{
+    /// Create a fresh cursor (empty state).
+    pub fn new() -> Self {{
+        Self {{
+            state: CursorState {{
+                offset: None,
+                last_seen_id: None,
+                watermark: None,
+            }},
+            last_polled_at: None,
+        }}
+    }}
+
+    /// Update cursor after a successful poll.
+    pub fn advance(&mut self, next: CursorState) {{
+        // TODO: Enforce monotonic cursor progression.
+        self.state = next;
+        self.last_polled_at = Some(Instant::now());
+    }}
+
+    /// Determine if it's time to poll again.
+    pub fn should_poll(&self, interval: Duration) -> bool {{
+        match self.last_polled_at {{
+            Some(ts) => ts.elapsed() >= interval,
+            None => true,
+        }}
+    }}
+
+    /// Return the current cursor state.
+    pub fn state(&self) -> &CursorState {{
+        &self.state
+    }}
+}}
+
+/// Polling supervisor (ensures sequential polling).
+#[derive(Debug)]
+pub struct PollingSupervisor {{
+    cursor: PollingCursor,
+    in_flight: bool,
+}}
+
+impl PollingSupervisor {{
+    /// Create a new polling supervisor.
+    pub fn new() -> Self {{
+        Self {{
+            cursor: PollingCursor::new(),
+            in_flight: false,
+        }}
+    }}
+
+    /// Begin a poll cycle. Returns false if a poll is already in flight.
+    pub fn begin_poll(&mut self) -> bool {{
+        if self.in_flight {{
+            return false;
+        }}
+        self.in_flight = true;
+        true
+    }}
+
+    /// Finish a poll cycle and update cursor.
+    pub fn finish_poll(&mut self, next: Option<CursorState>) {{
+        if let Some(state) = next {{
+            self.cursor.advance(state);
+        }}
+        self.in_flight = false;
+    }}
+
+    /// Return the current cursor state.
+    pub fn cursor(&self) -> &CursorState {{
+        self.cursor.state()
+    }}
+}}
+
+/// Empty event stream placeholder.
+pub fn empty_event_stream() -> fcp_sdk::prelude::EventStream {{
+    Box::pin(iter(std::iter::empty::<fcp_sdk::prelude::FcpResult<
+        fcp_sdk::prelude::EventEnvelope,
+    >>()))
+}}
 "
     )
 }
@@ -818,6 +1205,148 @@ fn generate_connector_rs(
     archetype: ConnectorArchetype,
 ) -> String {
     let struct_name = to_pascal_case(short_name);
+    let include_stream = matches!(
+        archetype,
+        ConnectorArchetype::Streaming | ConnectorArchetype::Bidirectional
+    );
+    let include_polling = matches!(archetype, ConnectorArchetype::Polling);
+    let include_bidirectional = matches!(archetype, ConnectorArchetype::Bidirectional);
+    let needs_mutex = include_stream || include_polling;
+    let mutex_import = if needs_mutex {
+        "use std::sync::Mutex;\n"
+    } else {
+        ""
+    };
+    let stream_import = if include_stream {
+        "use crate::stream::StreamSupervisor;\n"
+    } else {
+        ""
+    };
+    let polling_import = if include_polling {
+        "use crate::polling::PollingSupervisor;\n"
+    } else {
+        ""
+    };
+    let stream_field = if include_stream {
+        "    stream: Mutex<StreamSupervisor>,\n"
+    } else {
+        ""
+    };
+    let polling_field = if include_polling {
+        "    polling: Mutex<PollingSupervisor>,\n"
+    } else {
+        ""
+    };
+    let stream_init = if include_stream {
+        "            stream: Mutex::new(StreamSupervisor::new()),\n"
+    } else {
+        ""
+    };
+    let polling_init = if include_polling {
+        "            polling: Mutex::new(PollingSupervisor::new()),\n"
+    } else {
+        ""
+    };
+    let stream_subscribe = if include_stream {
+        "        if let Ok(mut stream) = self.stream.lock() {\n            stream.on_subscribe(&req);\n        }\n"
+    } else {
+        ""
+    };
+    let stream_unsubscribe = if include_stream {
+        "        if let Ok(mut stream) = self.stream.lock() {\n            stream.on_unsubscribe(&req.topics);\n        }\n"
+    } else {
+        ""
+    };
+    let unsubscribe_param = if include_stream { "req" } else { "_req" };
+    let streaming_impl = if include_stream {
+        format!(
+            r"
+#[async_trait]
+impl Streaming for {struct_name}Connector {{
+    async fn stream_subscribe(&self, topic: &str) -> FcpResult<EventStream> {{
+        if let Ok(mut stream) = self.stream.lock() {{
+            stream.on_subscribe_topic(topic);
+        }}
+        Ok(crate::stream::empty_event_stream())
+    }}
+
+    fn events(&self) -> EventStream {{
+        crate::stream::empty_event_stream()
+    }}
+}}
+"
+        )
+    } else {
+        String::new()
+    };
+    let polling_impl = if include_polling {
+        format!(
+            r#"
+#[async_trait]
+impl Polling for {struct_name}Connector {{
+    async fn start_polling(
+        &self,
+        _target: &str,
+        _interval: Option<std::time::Duration>,
+        _token: &CapabilityToken,
+    ) -> FcpResult<()> {{
+        if let Ok(mut polling) = self.polling.lock() {{
+            if !polling.begin_poll() {{
+                return Err(FcpError::ConnectorUnavailable {{
+                    code: 5003,
+                    message: "poll already in flight".to_string(),
+                }});
+            }}
+            polling.finish_poll(None);
+        }}
+        Ok(())
+    }}
+
+    async fn stop_polling(&self, _target: &str, _token: &CapabilityToken) -> FcpResult<()> {{
+        Ok(())
+    }}
+
+    async fn poll_now(&self, _target: &str, _token: &CapabilityToken) -> FcpResult<usize> {{
+        if let Ok(mut polling) = self.polling.lock() {{
+            if !polling.begin_poll() {{
+                return Err(FcpError::ConnectorUnavailable {{
+                    code: 5003,
+                    message: "poll already in flight".to_string(),
+                }});
+            }}
+            // TODO: Execute poll, then update cursor via polling.finish_poll(Some(cursor))
+            polling.finish_poll(None);
+        }}
+        Ok(0)
+    }}
+
+    fn events(&self) -> EventStream {{
+        crate::polling::empty_event_stream()
+    }}
+}}
+"#
+        )
+    } else {
+        String::new()
+    };
+    let bidirectional_impl = if include_bidirectional {
+        format!(
+            r#"
+#[async_trait]
+impl Bidirectional for {struct_name}Connector {{
+    async fn send(&self, message: serde_json::Value) -> FcpResult<()> {{
+        let _ = message;
+        Err(FcpError::ConnectorUnavailable {{
+            code: 5002,
+            message: "bidirectional send not implemented".to_string(),
+        }})
+    }}
+}}
+"#
+        )
+    } else {
+        String::new()
+    };
     let supports_streaming = matches!(
         archetype,
         ConnectorArchetype::Streaming
@@ -830,11 +1359,14 @@ fn generate_connector_rs(
         r#"//! {struct_name} connector implementation.
 
 use std::time::Instant;
+{mutex_import}
 
 use fcp_sdk::prelude::*;
 use sha2::{{Digest, Sha256}};
 
+use crate::config::{struct_name}Config;
 use crate::limits;
+{stream_import}{polling_import}
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 const OP_PLACEHOLDER: &str = "{short_name}.placeholder";
@@ -846,7 +1378,8 @@ const SUPPORTS_STREAMING: bool = {supports_streaming};
 pub struct {struct_name}Connector {{
     base: BaseConnector,
     configured: bool,
-    started_at: Instant,
+    config: Option<{struct_name}Config>,
+{stream_field}{polling_field}    started_at: Instant,
     verifier: Option<CapabilityVerifier>,
 }}
 
@@ -856,7 +1389,8 @@ impl {struct_name}Connector {{
         Self {{
             base: BaseConnector::new(ConnectorId::from_static("{connector_id}")),
             configured: false,
-            started_at: Instant::now(),
+            config: None,
+{stream_init}{polling_init}            started_at: Instant::now(),
             verifier: None,
         }}
     }}
@@ -918,7 +1452,9 @@ impl FcpConnector for {struct_name}Connector {{
         &self.base.id
     }}
 
-    async fn configure(&mut self, _config: serde_json::Value) -> FcpResult<()> {{
+    async fn configure(&mut self, config: serde_json::Value) -> FcpResult<()> {{
+        let config = {struct_name}Config::from_value(config)?;
+        self.config = Some(config);
         self.configured = true;
         self.base.set_configured(true);
         Ok(())
@@ -1028,6 +1564,7 @@ impl FcpConnector for {struct_name}Connector {{
             return Err(FcpError::StreamingNotSupported);
         }}
 
+{stream_subscribe}
         Ok(SubscribeResponse {{
             r#type: "response".into(),
             id: req.id,
@@ -1040,10 +1577,12 @@ impl FcpConnector for {struct_name}Connector {{
         }})
     }}
 
-    async fn unsubscribe(&self, _req: UnsubscribeRequest) -> FcpResult<()> {{
+    async fn unsubscribe(&self, {unsubscribe_param}: UnsubscribeRequest) -> FcpResult<()> {{
+{stream_unsubscribe}
         Ok(())
     }}
 }}
+{streaming_impl}{polling_impl}{bidirectional_impl}
 
 impl Default for {struct_name}Connector {{
     fn default() -> Self {{
@@ -1118,24 +1657,9 @@ fn generate_types_rs(short_name: &str) -> String {
     let struct_name = to_pascal_case(short_name);
 
     format!(
-        r#"//! Request and response types for {struct_name} connector.
+        r"//! Request and response types for {struct_name} connector.
 
 use serde::{{Deserialize, Serialize}};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Configuration
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Connector configuration.
-///
-/// TODO: Define configuration fields for your connector.
-/// Remember: Never store secrets in configuration - use capability tokens.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct {struct_name}Config {{
-    // Example fields:
-    // pub endpoint: String,
-    // pub timeout_ms: u64,
-}}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Operation types
@@ -1157,38 +1681,6 @@ pub struct PlaceholderOutput {{
     // Example: pub result: String,
 }}
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Error types
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Connector-specific errors.
-///
-/// Maps to FCP error taxonomy:
-/// - FCP-5xxx: Connector errors
-/// - FCP-7xxx: External service errors
-#[derive(Debug, thiserror::Error)]
-pub enum {struct_name}Error {{
-    /// Configuration error.
-    #[error("configuration error: {{0}}")]
-    Config(String),
-
-    /// External service error.
-    #[error("external service error: {{0}}")]
-    ExternalService(String),
-
-    // TODO: Add connector-specific error variants
-}}
-
-impl {struct_name}Error {{
-    /// Convert to FCP error code.
-    pub fn to_fcp_code(&self) -> u16 {{
-        match self {{
-            Self::Config(_) => 5001,
-            Self::ExternalService(_) => 7001,
-        }}
-    }}
-}}
-
 #[cfg(test)]
 mod tests {{
     use super::*;
@@ -1198,7 +1690,7 @@ mod tests {{
         // TODO: Add serialization tests for your types
     }}
 }}
-"#
+"
     )
 }
 
@@ -2158,10 +2650,112 @@ mod tests {
         assert!(file_paths.contains(&"manifest.toml"));
         assert!(file_paths.contains(&"src/main.rs"));
         assert!(file_paths.contains(&"src/lib.rs"));
+        assert!(file_paths.contains(&"src/config.rs"));
+        assert!(file_paths.contains(&"src/error.rs"));
         assert!(file_paths.contains(&"src/connector.rs"));
+        assert!(file_paths.contains(&"src/api.rs"));
         assert!(file_paths.contains(&"src/types.rs"));
+        assert!(file_paths.contains(&"src/limits.rs"));
         assert!(file_paths.contains(&"tests/unit_tests.rs"));
         assert!(file_paths.contains(&"tests/e2e_tests.rs"));
+
+        let files = generate_files(
+            "fcp.test",
+            "test",
+            "fcp-test",
+            ConnectorArchetype::RequestResponse,
+            "z:project:test",
+            false,
+        )
+        .expect("generate files should succeed");
+        let config = files
+            .iter()
+            .find(|(path, _, _)| path == "src/config.rs")
+            .expect("config.rs present")
+            .1
+            .clone();
+        let error = files
+            .iter()
+            .find(|(path, _, _)| path == "src/error.rs")
+            .expect("error.rs present")
+            .1
+            .clone();
+        let api = files
+            .iter()
+            .find(|(path, _, _)| path == "src/api.rs")
+            .expect("api.rs present")
+            .1
+            .clone();
+        let limits = files
+            .iter()
+            .find(|(path, _, _)| path == "src/limits.rs")
+            .expect("limits.rs present")
+            .1
+            .clone();
+
+        assert!(config.contains("Never store secrets"));
+        assert!(error.contains("Connector-specific errors"));
+        assert!(api.contains("Retry helper"));
+        assert!(limits.contains("TODO: Replace placeholders"));
+    }
+
+    #[test]
+    fn scaffold_archetype_file_matrix() {
+        fn has_file(files: &[(String, String, String)], path: &str) -> bool {
+            files.iter().any(|(p, _, _)| p == path)
+        }
+
+        let rr_files = generate_files(
+            "fcp.test",
+            "test",
+            "fcp-test",
+            ConnectorArchetype::RequestResponse,
+            "z:project:test",
+            false,
+        )
+        .expect("rr files");
+        assert!(has_file(&rr_files, "src/api.rs"));
+        assert!(!has_file(&rr_files, "src/stream.rs"));
+        assert!(!has_file(&rr_files, "src/polling.rs"));
+
+        let streaming_files = generate_files(
+            "fcp.test",
+            "test",
+            "fcp-test",
+            ConnectorArchetype::Streaming,
+            "z:project:test",
+            false,
+        )
+        .expect("streaming files");
+        assert!(has_file(&streaming_files, "src/stream.rs"));
+        assert!(!has_file(&streaming_files, "src/api.rs"));
+        assert!(!has_file(&streaming_files, "src/polling.rs"));
+
+        let bidirectional_files = generate_files(
+            "fcp.test",
+            "test",
+            "fcp-test",
+            ConnectorArchetype::Bidirectional,
+            "z:project:test",
+            false,
+        )
+        .expect("bidirectional files");
+        assert!(has_file(&bidirectional_files, "src/stream.rs"));
+        assert!(!has_file(&bidirectional_files, "src/api.rs"));
+        assert!(!has_file(&bidirectional_files, "src/polling.rs"));
+
+        let polling_files = generate_files(
+            "fcp.test",
+            "test",
+            "fcp-test",
+            ConnectorArchetype::Polling,
+            "z:project:test",
+            false,
+        )
+        .expect("polling files");
+        assert!(has_file(&polling_files, "src/polling.rs"));
+        assert!(!has_file(&polling_files, "src/api.rs"));
+        assert!(!has_file(&polling_files, "src/stream.rs"));
     }
 
     #[test]

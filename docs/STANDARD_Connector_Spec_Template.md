@@ -32,6 +32,31 @@ For each connector **epic** (e.g., `fcp.slack`, `fcp.github`), create these bead
 
 ---
 
+## Scaffolded Module Layout (fcp new)
+
+When you run `fcp new`, the connector scaffold should follow this layout:
+
+```
+connectors/<service>/src/
+├── lib.rs           # re-exports + archetype declaration
+├── main.rs          # stdin/stdout loop or host integration
+├── connector.rs     # FcpConnector impl
+├── config.rs        # config + defaults (no secrets)
+├── error.rs         # error taxonomy + retryability
+├── types.rs         # platform API types
+├── limits.rs        # platform limits + TODOs
+├── api.rs           # request-response client (if applicable)
+├── stream.rs        # streaming supervisor (streaming/bidirectional)
+└── polling.rs       # polling cursor + scheduler (polling only)
+```
+
+Notes:
+- `api.rs` is only generated for request-response connectors.
+- `stream.rs` is only generated for streaming/bidirectional connectors.
+- `polling.rs` is only generated for polling connectors.
+
+---
+
 ## 1. Template: Connector Epic Description
 
 Copy and customize this template for new connector epic beads.

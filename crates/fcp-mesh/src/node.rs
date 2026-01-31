@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use fcp_core::{
     CapabilityVerifier, FcpError, InvokeRequest, InvokeValidationError, ObjectId, OperationIntent,
-    OperationReceipt, RevocationRegistry, TailscaleNodeId, ZoneId,
+    OperationReceipt, RevocationRegistry, TailscaleNodeId, ZoneId, ZoneTransportPolicy,
 };
 use fcp_crypto::{CwtClaims, Ed25519Signature, Ed25519VerifyingKey};
 use fcp_protocol::{DecodeStatus, SymbolAck, SymbolRequest};
@@ -41,6 +41,7 @@ use crate::symbol_request::{
     SymbolRequestError, SymbolRequestHandler, SymbolRequestMetrics, SymbolRequestPolicy,
     SymbolResponse, SymbolResponseBuilder, TargetedRepairEngine,
 };
+use crate::transport::{RankedPath, TransportPath, TransportSelector};
 
 /// MeshNode configuration (builder-style).
 #[derive(Debug, Clone)]
@@ -740,6 +741,29 @@ impl MeshNode {
         metrics
     }
 
+    /// Rank candidate transport paths according to zone policy.
+    #[must_use]
+    pub fn rank_transport_paths(
+        &self,
+        policy: &ZoneTransportPolicy,
+        paths: &[TransportPath],
+    ) -> Vec<RankedPath> {
+        TransportSelector::rank_paths(paths, policy)
+    }
+
+    /// Select deterministic multipath routes for a symbol.
+    #[must_use]
+    pub fn select_transport_paths(
+        &self,
+        policy: &ZoneTransportPolicy,
+        paths: &[TransportPath],
+        object_id: &ObjectId,
+        symbol_index: u32,
+        fanout: usize,
+    ) -> Vec<TransportPath> {
+        TransportSelector::select_multipath(paths, policy, object_id, symbol_index, fanout)
+    }
+
     /// Access underlying gossip state (mutable).
     pub fn gossip_mut(&mut self) -> &mut MeshGossip {
         &mut self.gossip
@@ -776,6 +800,7 @@ impl MeshNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TransportPathKind;
     use crate::device::DeviceProfileBuilder;
     use crate::planner::{LeasePurpose, PlannerContext};
     use bytes::Bytes;
@@ -841,6 +866,49 @@ mod tests {
     fn test_object_id(name: &str) -> ObjectId {
         let hash = blake3::hash(name.as_bytes());
         ObjectId::from_bytes(*hash.as_bytes())
+    }
+
+    #[test]
+    fn meshnode_transport_helpers_respect_policy() {
+        let node = test_node("node-1");
+        let policy = ZoneTransportPolicy {
+            allow_lan: true,
+            allow_derp: false,
+            allow_funnel: false,
+        };
+
+        let paths = vec![
+            TransportPath::new(
+                TransportPathKind::Direct,
+                NodeId::new("peer-1"),
+                "direct",
+                None,
+            ),
+            TransportPath::new(TransportPathKind::Derp, NodeId::new("peer-2"), "derp", None),
+            TransportPath::new(
+                TransportPathKind::Funnel,
+                NodeId::new("peer-3"),
+                "funnel",
+                None,
+            ),
+        ];
+
+        let ranked = node.rank_transport_paths(&policy, &paths);
+        assert!(
+            ranked
+                .iter()
+                .any(|entry| entry.path.kind == TransportPathKind::Direct)
+        );
+        assert!(
+            ranked
+                .iter()
+                .any(|entry| entry.path.kind == TransportPathKind::Derp && !entry.eligible)
+        );
+
+        let object_id = test_object_id("meshnode-transport");
+        let selection = node.select_transport_paths(&policy, &paths, &object_id, 1, 1);
+        assert_eq!(selection.len(), 1);
+        assert_eq!(selection[0].kind, TransportPathKind::Direct);
     }
 
     // ---- Symbol request lifecycle tests ----

@@ -98,6 +98,10 @@ step_install() {
   fcp install "${CONNECTOR}" --zone "${ZONE}"
 }
 
+step_verify_install() {
+  fcp verify "${CONNECTOR}" --expect=valid
+}
+
 step_create_token() {
   fcp-harness create-token \
     --connector="${CONNECTOR}" \
@@ -143,11 +147,12 @@ mkdir -p "${OUT_DIR}"
 
 run_step "init" 1 "[]" step_init
 run_step "install_connector" 2 "[]" step_install
-run_step "create_token" 3 "[\"${OUT_DIR}/token.cbor\"]" step_create_token
-run_step "prepare_batch" 4 "[\"${OUT_DIR}/batch.json\"]" step_prepare_batch
-run_step "batch_invoke" 5 "[\"${OUT_DIR}/batch_receipts.json\"]" step_batch_invoke
-run_step "verify_batch" 6 "[]" step_verify_batch
-run_step "teardown" 7 "[]" step_teardown
+run_step "verify_install" 3 "[]" step_verify_install
+run_step "create_token" 4 "[\"${OUT_DIR}/token.cbor\"]" step_create_token
+run_step "prepare_batch" 5 "[\"${OUT_DIR}/batch.json\"]" step_prepare_batch
+run_step "batch_invoke" 6 "[\"${OUT_DIR}/batch_receipts.json\"]" step_batch_invoke
+run_step "verify_batch" 7 "[]" step_verify_batch
+run_step "teardown" 8 "[]" step_teardown
 
 fcp-e2e --validate-log "${LOG_JSONL}"
 

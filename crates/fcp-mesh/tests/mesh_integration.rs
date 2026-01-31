@@ -469,6 +469,65 @@ mod meshnode {
     }
 
     #[tokio::test]
+    async fn meshnode_symbol_request_ignores_unavailable_hints() {
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([1u8; 8]);
+        let object_id = test_object_id("meshnode-hint-unavailable");
+
+        let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+        let symbol_store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig::default()));
+        let quarantine_store = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
+
+        let config = MeshNodeConfig::new("node-1").with_sender_instance_id(7);
+        let mut node = MeshNode::new(config, object_store, symbol_store.clone(), quarantine_store);
+
+        let oti = ObjectTransmissionInformation::new(1024, 256, 1, 1, 1);
+        let meta = ObjectSymbolMeta {
+            object_id,
+            zone_id: zone_id.clone(),
+            oti: ObjectTransmissionInfo::from(oti),
+            source_symbols: 4,
+            first_symbol_at: 0,
+        };
+
+        symbol_store.put_object_meta(meta).await.unwrap();
+
+        for esi in 0..4u32 {
+            let esi_byte = u8::try_from(esi).expect("esi fits in u8");
+            let symbol = StoredSymbol {
+                meta: SymbolMeta {
+                    object_id,
+                    esi,
+                    zone_id: zone_id.clone(),
+                    source_node: Some(1),
+                    stored_at: 0,
+                },
+                data: Bytes::from(vec![esi_byte; 16]),
+            };
+            symbol_store.put_symbol(symbol).await.unwrap();
+        }
+
+        let request = SymbolRequest::new(
+            test_header(&zone_id),
+            object_id,
+            zone_id,
+            zone_key_id,
+            1,
+            2,
+            1,
+        )
+        .with_missing_hint(vec![9, 10]);
+
+        let response = node
+            .handle_symbol_request(request, &NodeId::new("peer-1"), true, 0)
+            .await
+            .expect("symbol request should succeed");
+
+        assert_eq!(response.symbol_esis.len(), 2);
+        assert!(response.symbol_esis.iter().all(|esi| *esi < 4));
+    }
+
+    #[tokio::test]
     async fn meshnode_quarantined_object_not_gossiped() {
         let zone_id = ZoneId::work();
         let object_id = test_object_id("meshnode-quarantine-gossip");

@@ -828,9 +828,16 @@ impl MeshGossip {
     /// Create a summary for a zone.
     #[must_use]
     pub fn create_summary(&self, zone_id: &ZoneId, epoch_id: EpochId) -> Option<GossipSummary> {
-        self.zone_states
-            .get(zone_id)
-            .map(|state| state.create_summary(self.local_node.clone(), epoch_id))
+        self.zone_states.get(zone_id).map(|state| {
+            let mut summary = state.create_summary(self.local_node.clone(), epoch_id);
+            summary.object_count = summary
+                .object_count
+                .min(self.config.max_objects_per_summary as u32);
+            summary.symbol_count = summary
+                .symbol_count
+                .min(self.config.max_symbols_per_summary as u32);
+            summary
+        })
     }
 
     /// Handle received summary from a peer.
@@ -1255,6 +1262,42 @@ mod tests {
         let summary = gossip.create_summary(&test_zone(), test_epoch());
         assert!(summary.is_some());
         assert_eq!(summary.unwrap().object_count, 1);
+    }
+
+    #[test]
+    fn mesh_gossip_create_summary_clamps_counts() {
+        let config = GossipConfig {
+            max_objects_per_summary: 1,
+            max_symbols_per_summary: 1,
+            summary_ttl_secs: DEFAULT_SUMMARY_TTL_SECS,
+            reconciliation_batch_size: DEFAULT_RECONCILIATION_BATCH_SIZE,
+        };
+        let mut gossip = MeshGossip::new(test_node("local"), config);
+
+        let obj_id = test_object_id("obj-1");
+        gossip.announce_object(&test_zone(), &obj_id, ObjectAdmissionClass::Admitted, 1000);
+        gossip.announce_symbol(
+            &test_zone(),
+            &obj_id,
+            1,
+            ObjectAdmissionClass::Admitted,
+            1000,
+        );
+        let obj_id2 = test_object_id("obj-2");
+        gossip.announce_object(&test_zone(), &obj_id2, ObjectAdmissionClass::Admitted, 1000);
+        gossip.announce_symbol(
+            &test_zone(),
+            &obj_id2,
+            2,
+            ObjectAdmissionClass::Admitted,
+            1000,
+        );
+
+        let summary = gossip
+            .create_summary(&test_zone(), test_epoch())
+            .expect("summary");
+        assert_eq!(summary.object_count, 1);
+        assert_eq!(summary.symbol_count, 1);
     }
 
     #[test]

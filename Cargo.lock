@@ -1682,6 +1682,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "ciborium",
+ "criterion",
  "hex",
  "semver",
  "serde",

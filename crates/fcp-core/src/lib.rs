@@ -32,6 +32,7 @@ mod quorum;
 mod ratelimit;
 mod revocation;
 mod secret;
+mod telemetry;
 pub mod util;
 mod zone_keys;
 
@@ -58,6 +59,7 @@ pub use quorum::*;
 pub use ratelimit::*;
 pub use revocation::*;
 pub use secret::*;
+pub use telemetry::*;
 pub use zone_keys::*;
 
 // Re-export commonly used external types

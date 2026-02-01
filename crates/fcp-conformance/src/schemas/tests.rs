@@ -6,8 +6,8 @@
 //! - Deterministic validation behavior
 
 use super::{
-    E2E_LOG_V1_SCHEMA, E2E_LOG_V2_SCHEMA, FZPF_V01_SCHEMA, RELEASE_MANIFEST_V1_SCHEMA,
-    ROLLOUT_POLICY_V1_SCHEMA,
+    CAPABILITY_USAGE_V1_SCHEMA, E2E_LOG_V1_SCHEMA, E2E_LOG_V2_SCHEMA, FZPF_V01_SCHEMA,
+    RELEASE_MANIFEST_V1_SCHEMA, ROLLOUT_POLICY_V1_SCHEMA, TRACE_V1_SCHEMA,
 };
 use fcp_cbor::to_canonical_cbor;
 use fcp_core::ObjectId;
@@ -243,6 +243,18 @@ fn load_rollout_policy_schema() -> Validator {
     Validator::new(&schema).expect("RolloutPolicy schema should be a valid JSON Schema")
 }
 
+fn load_trace_schema() -> Validator {
+    let schema: Value =
+        serde_json::from_str(TRACE_V1_SCHEMA).expect("Trace schema should be valid JSON");
+    Validator::new(&schema).expect("Trace schema should be a valid JSON Schema")
+}
+
+fn load_capability_usage_schema() -> Validator {
+    let schema: Value = serde_json::from_str(CAPABILITY_USAGE_V1_SCHEMA)
+        .expect("CapabilityUsage schema should be valid JSON");
+    Validator::new(&schema).expect("CapabilityUsage schema should be a valid JSON Schema")
+}
+
 fn sample_release_manifest() -> Value {
     serde_json::from_str(
         r#"{
@@ -300,6 +312,62 @@ fn sample_rollout_policy() -> Value {
     )
     .expect("sample rollout policy should parse")
 }
+
+fn sample_trace() -> Value {
+    serde_json::from_str(
+        r#"{
+            "format": "fcp-trace",
+            "schema_version": "1.0",
+            "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+            "captured_at": "2026-02-01T12:00:00Z",
+            "node_id": "node-1",
+            "redaction_policy": {
+                "policy_version": "1.0",
+                "applied": true,
+                "fields": ["payload"]
+            },
+            "entries": [
+                {
+                    "ts": "2026-02-01T12:00:01Z",
+                    "kind": "routing_decision",
+                    "direction": "internal",
+                    "component": "mesh.router",
+                    "zone_id": "z:work",
+                    "decision": "allow",
+                    "reason_code": "route.direct",
+                    "payload_hash": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "payload": "redacted",
+                    "redaction": {
+                        "applied": true,
+                        "fields": ["payload"]
+                    }
+                }
+            ]
+        }"#,
+    )
+    .expect("sample trace should parse")
+}
+
+fn sample_capability_usage() -> Value {
+    serde_json::from_str(
+        r#"{
+            "format": "fcp-capability-usage",
+            "schema_version": "1.0",
+            "zone_id": "z:work",
+            "connector_id": "fcp.example:request-response:1",
+            "capability_id": "fcp.example.read",
+            "principal_id": "user:alice",
+            "risk_tier": "risky",
+            "operation": "op.list",
+            "outcome": "allow",
+            "occurred_at": 1738387200
+        }"#,
+    )
+    .expect("sample capability usage should parse")
+}
+
+const TRACE_CBOR_HEX: &str = "a766666f726d6174696663702d747261636567656e747269657381aa62747374323032362d30322d30315431323a30303a30315a646b696e6470726f7574696e675f6465636973696f6e677061796c6f6164687265646163746564677a6f6e655f6964667a3a776f726b686465636973696f6e65616c6c6f7769636f6d706f6e656e746b6d6573682e726f7574657269646972656374696f6e68696e7465726e616c69726564616374696f6ea2666669656c647381677061796c6f6164676170706c696564f56b726561736f6e5f636f64656c726f7574652e6469726563746c7061796c6f61645f68617368784b626c616b65332d3235363a61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161676e6f64655f6964666e6f64652d316874726163655f6964782034626639326633353737623334646136613363653932396430653065343733366b63617074757265645f617474323032362d30322d30315431323a30303a30305a6e736368656d615f76657273696f6e63312e3070726564616374696f6e5f706f6c696379a3666669656c647381677061796c6f6164676170706c696564f56e706f6c6963795f76657273696f6e63312e30";
+const CAPABILITY_USAGE_CBOR_HEX: &str = "aa66666f726d6174746663702d6361706162696c6974792d7573616765676f7574636f6d6565616c6c6f77677a6f6e655f6964667a3a776f726b696f7065726174696f6e676f702e6c697374697269736b5f74696572657269736b796b6f636375727265645f61741a679daf006c636f6e6e6563746f725f6964781e6663702e6578616d706c653a726571756573742d726573706f6e73653a316c7072696e636970616c5f69646a757365723a616c6963656d6361706162696c6974795f6964706663702e6578616d706c652e726561646e736368656d615f76657273696f6e63312e30";
 
 #[test]
 fn valid_e2e_log_entry_v1() {
@@ -1273,6 +1341,109 @@ fn rollout_policy_cbor_is_deterministic() {
     let hash1 = ObjectId::from_unscoped_bytes(&bytes1);
     let hash2 = ObjectId::from_unscoped_bytes(&bytes2);
     assert_eq!(hash1, hash2, "hashes must match for identical CBOR");
+}
+
+// ============================================================================
+// Trace Schema Validation
+// ============================================================================
+
+#[test]
+fn valid_trace_document() {
+    let validator = load_trace_schema();
+    let doc = sample_trace();
+    assert!(validator.validate(&doc).is_ok(), "trace should validate");
+}
+
+#[test]
+fn reject_trace_payload_without_redaction() {
+    let validator = load_trace_schema();
+    let doc: Value = serde_json::from_str(
+        r#"{
+            "format": "fcp-trace",
+            "schema_version": "1.0",
+            "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+            "captured_at": "2026-02-01T12:00:00Z",
+            "redaction_policy": {
+                "policy_version": "1.0",
+                "applied": true,
+                "fields": ["payload"]
+            },
+            "entries": [
+                {
+                    "ts": "2026-02-01T12:00:01Z",
+                    "kind": "fcpc_frame",
+                    "direction": "inbound",
+                    "component": "mesh.control",
+                    "payload": {"unsafe": true}
+                }
+            ]
+        }"#,
+    )
+    .unwrap();
+    assert!(
+        validator.validate(&doc).is_err(),
+        "payload without redaction must be rejected"
+    );
+}
+
+#[test]
+fn trace_cbor_is_deterministic() {
+    let doc = sample_trace();
+    let bytes1 = to_canonical_cbor(&doc).expect("canonical CBOR should serialize");
+    let bytes2 = to_canonical_cbor(&doc).expect("canonical CBOR should serialize");
+    assert_eq!(bytes1, bytes2, "canonical CBOR must be deterministic");
+
+    let hash1 = ObjectId::from_unscoped_bytes(&bytes1);
+    let hash2 = ObjectId::from_unscoped_bytes(&bytes2);
+    assert_eq!(hash1, hash2, "hashes must match for identical CBOR");
+}
+
+#[test]
+fn trace_cbor_matches_golden_vector() {
+    let doc = sample_trace();
+    let bytes = to_canonical_cbor(&doc).expect("canonical CBOR should serialize");
+    assert_eq!(
+        hex::encode(bytes),
+        TRACE_CBOR_HEX,
+        "trace CBOR should match golden vector"
+    );
+}
+
+// ============================================================================
+// Capability Usage Schema Validation
+// ============================================================================
+
+#[test]
+fn valid_capability_usage_event() {
+    let validator = load_capability_usage_schema();
+    let doc = sample_capability_usage();
+    assert!(
+        validator.validate(&doc).is_ok(),
+        "capability usage should validate"
+    );
+}
+
+#[test]
+fn capability_usage_cbor_is_deterministic() {
+    let doc = sample_capability_usage();
+    let bytes1 = to_canonical_cbor(&doc).expect("canonical CBOR should serialize");
+    let bytes2 = to_canonical_cbor(&doc).expect("canonical CBOR should serialize");
+    assert_eq!(bytes1, bytes2, "canonical CBOR must be deterministic");
+
+    let hash1 = ObjectId::from_unscoped_bytes(&bytes1);
+    let hash2 = ObjectId::from_unscoped_bytes(&bytes2);
+    assert_eq!(hash1, hash2, "hashes must match for identical CBOR");
+}
+
+#[test]
+fn capability_usage_cbor_matches_golden_vector() {
+    let doc = sample_capability_usage();
+    let bytes = to_canonical_cbor(&doc).expect("canonical CBOR should serialize");
+    assert_eq!(
+        hex::encode(bytes),
+        CAPABILITY_USAGE_CBOR_HEX,
+        "capability usage CBOR should match golden vector"
+    );
 }
 
 #[test]

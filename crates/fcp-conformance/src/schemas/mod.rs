@@ -46,6 +46,10 @@ pub const POLICY_BUNDLE_V1_SCHEMA: &str = include_str!("PolicyBundle_v1.schema.j
 pub const RELEASE_MANIFEST_V1_SCHEMA: &str = include_str!("ReleaseManifest_v1.schema.json");
 /// The `RolloutPolicy` JSON schema (v1).
 pub const ROLLOUT_POLICY_V1_SCHEMA: &str = include_str!("RolloutPolicy_v1.schema.json");
+/// The `Trace` JSON schema (v1).
+pub const TRACE_V1_SCHEMA: &str = include_str!("Trace_v1.schema.json");
+/// The `CapabilityUsage` JSON schema (v1).
+pub const CAPABILITY_USAGE_V1_SCHEMA: &str = include_str!("CapabilityUsage_v1.schema.json");
 
 /// Schema validation error for conformance helpers.
 #[derive(Debug, Clone)]
@@ -177,6 +181,30 @@ pub fn validate_release_manifest(value: &Value) -> Result<(), SchemaValidationEr
 /// Returns `SchemaValidationError` if validation fails.
 pub fn validate_rollout_policy(value: &Value) -> Result<(), SchemaValidationError> {
     let validator = compile_schema(ROLLOUT_POLICY_V1_SCHEMA)?;
+    validator
+        .validate(value)
+        .map_err(|err| SchemaValidationError::new(err.to_string()))
+}
+
+/// Validate a `Trace` JSON document against the v1 schema.
+///
+/// # Errors
+///
+/// Returns `SchemaValidationError` if validation fails.
+pub fn validate_trace(value: &Value) -> Result<(), SchemaValidationError> {
+    let validator = compile_schema(TRACE_V1_SCHEMA)?;
+    validator
+        .validate(value)
+        .map_err(|err| SchemaValidationError::new(err.to_string()))
+}
+
+/// Validate a `CapabilityUsage` JSON document against the v1 schema.
+///
+/// # Errors
+///
+/// Returns `SchemaValidationError` if validation fails.
+pub fn validate_capability_usage(value: &Value) -> Result<(), SchemaValidationError> {
+    let validator = compile_schema(CAPABILITY_USAGE_V1_SCHEMA)?;
     validator
         .validate(value)
         .map_err(|err| SchemaValidationError::new(err.to_string()))

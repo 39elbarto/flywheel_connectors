@@ -1,0 +1,266 @@
+{
+  "_comment": "Golden vectors for ack/nack state machine transitions per FCP2 streaming spec",
+  "_version": "1.0.0",
+  "_generated": "2026-02-01",
+
+  "ack_scenarios": [
+    {
+      "name": "single_ack_success",
+      "description": "Single event acknowledged successfully",
+      "initial_state": {
+        "pending_acks": [1],
+        "buffer_seqs": [1, 2, 3]
+      },
+      "action": {
+        "type": "ack",
+        "seqs": [1]
+      },
+      "expected_result": {
+        "acked": [1],
+        "missing": []
+      },
+      "final_state": {
+        "pending_acks": [],
+        "buffer_seqs": [1, 2, 3]
+      }
+    },
+    {
+      "name": "batch_ack_success",
+      "description": "Multiple events acknowledged in batch",
+      "initial_state": {
+        "pending_acks": [1, 2, 3],
+        "buffer_seqs": [1, 2, 3, 4, 5]
+      },
+      "action": {
+        "type": "ack",
+        "seqs": [1, 2, 3]
+      },
+      "expected_result": {
+        "acked": [1, 2, 3],
+        "missing": []
+      },
+      "final_state": {
+        "pending_acks": [],
+        "buffer_seqs": [1, 2, 3, 4, 5]
+      }
+    },
+    {
+      "name": "ack_unknown_seq",
+      "description": "Ack for sequence not in pending list",
+      "initial_state": {
+        "pending_acks": [1, 2],
+        "buffer_seqs": [1, 2, 3]
+      },
+      "action": {
+        "type": "ack",
+        "seqs": [999]
+      },
+      "expected_result": {
+        "acked": [],
+        "missing": [999]
+      },
+      "final_state": {
+        "pending_acks": [1, 2],
+        "buffer_seqs": [1, 2, 3]
+      }
+    },
+    {
+      "name": "ack_partial_match",
+      "description": "Some sequences found, some missing",
+      "initial_state": {
+        "pending_acks": [1, 2, 3],
+        "buffer_seqs": [1, 2, 3]
+      },
+      "action": {
+        "type": "ack",
+        "seqs": [1, 2, 999]
+      },
+      "expected_result": {
+        "acked": [1, 2],
+        "missing": [999]
+      },
+      "final_state": {
+        "pending_acks": [3],
+        "buffer_seqs": [1, 2, 3]
+      }
+    },
+    {
+      "name": "ack_out_of_order",
+      "description": "Ack events in different order than emitted",
+      "initial_state": {
+        "pending_acks": [1, 2, 3],
+        "buffer_seqs": [1, 2, 3]
+      },
+      "action": {
+        "type": "ack",
+        "seqs": [3, 1]
+      },
+      "expected_result": {
+        "acked": [3, 1],
+        "missing": []
+      },
+      "final_state": {
+        "pending_acks": [2],
+        "buffer_seqs": [1, 2, 3]
+      }
+    }
+  ],
+
+  "nack_scenarios": [
+    {
+      "name": "nack_triggers_redeliver",
+      "description": "Nack causes event to be redelivered",
+      "initial_state": {
+        "pending_acks": [1, 2, 3],
+        "buffer_seqs": [1, 2, 3]
+      },
+      "action": {
+        "type": "nack",
+        "seqs": [2],
+        "reason": "processing_failed"
+      },
+      "expected_result": {
+        "redeliver_seqs": [2],
+        "missing": []
+      },
+      "final_state": {
+        "pending_acks": [1, 2, 3],
+        "buffer_seqs": [1, 2, 3]
+      },
+      "notes": "Nack does not remove from pending; redelivered events still need ack"
+    },
+    {
+      "name": "nack_unknown_seq",
+      "description": "Nack for trimmed/unknown sequence",
+      "initial_state": {
+        "pending_acks": [1, 2],
+        "buffer_seqs": [1, 2]
+      },
+      "action": {
+        "type": "nack",
+        "seqs": [999],
+        "reason": "retry_requested"
+      },
+      "expected_result": {
+        "redeliver_seqs": [],
+        "missing": [999]
+      },
+      "final_state": {
+        "pending_acks": [1, 2],
+        "buffer_seqs": [1, 2]
+      }
+    },
+    {
+      "name": "nack_batch_redeliver",
+      "description": "Multiple events nacked for batch redelivery",
+      "initial_state": {
+        "pending_acks": [1, 2, 3, 4, 5],
+        "buffer_seqs": [1, 2, 3, 4, 5]
+      },
+      "action": {
+        "type": "nack",
+        "seqs": [2, 4],
+        "reason": "transient_error"
+      },
+      "expected_result": {
+        "redeliver_seqs": [2, 4],
+        "missing": []
+      },
+      "final_state": {
+        "pending_acks": [1, 2, 3, 4, 5],
+        "buffer_seqs": [1, 2, 3, 4, 5]
+      }
+    }
+  ],
+
+  "buffer_trim_scenarios": [
+    {
+      "name": "trim_respects_pending_acks",
+      "description": "Buffer retains events with pending acks even when over max",
+      "initial_state": {
+        "buffer_limits": {"min": 2, "max": 3},
+        "pending_acks": [1],
+        "buffer_seqs": [1, 2, 3, 4]
+      },
+      "action": {
+        "type": "emit",
+        "count": 1
+      },
+      "final_state": {
+        "pending_acks": [1],
+        "buffer_seqs": [1, 2, 3, 4, 5],
+        "notes": "Event 1 retained despite exceeding max because pending ack"
+      }
+    },
+    {
+      "name": "trim_after_ack",
+      "description": "Acking oldest allows buffer to trim",
+      "initial_state": {
+        "buffer_limits": {"min": 2, "max": 3},
+        "pending_acks": [1, 2, 3, 4],
+        "buffer_seqs": [1, 2, 3, 4]
+      },
+      "action": {
+        "type": "ack",
+        "seqs": [1]
+      },
+      "expected_result": {
+        "acked": [1],
+        "missing": []
+      },
+      "final_state": {
+        "pending_acks": [2, 3, 4],
+        "buffer_seqs": [2, 3, 4],
+        "notes": "Event 1 can now be trimmed"
+      }
+    }
+  ],
+
+  "replay_scenarios": [
+    {
+      "name": "replay_from_middle",
+      "description": "Replay from middle of buffer returns subsequent events",
+      "initial_state": {
+        "buffer_seqs": [10, 11, 12, 13, 14]
+      },
+      "action": {
+        "type": "replay",
+        "cursor": "12"
+      },
+      "expected_result": {
+        "replayed_seqs": [13, 14],
+        "error": null
+      }
+    },
+    {
+      "name": "replay_from_start",
+      "description": "Empty cursor replays entire buffer",
+      "initial_state": {
+        "buffer_seqs": [10, 11, 12]
+      },
+      "action": {
+        "type": "replay",
+        "cursor": ""
+      },
+      "expected_result": {
+        "replayed_seqs": [10, 11, 12],
+        "error": null
+      }
+    },
+    {
+      "name": "replay_from_end",
+      "description": "Cursor at last event returns empty",
+      "initial_state": {
+        "buffer_seqs": [10, 11, 12]
+      },
+      "action": {
+        "type": "replay",
+        "cursor": "12"
+      },
+      "expected_result": {
+        "replayed_seqs": [],
+        "error": null
+      }
+    }
+  ]
+}

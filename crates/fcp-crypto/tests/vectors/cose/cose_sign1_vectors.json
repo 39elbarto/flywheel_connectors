@@ -1,0 +1,120 @@
+{
+  "_comment": "COSE_Sign1 test vectors per RFC 8152 and RFC 9052",
+  "_version": "1.0.0",
+  "_generated": "2026-02-01",
+  "_sources": [
+    "RFC 8152 Appendix C - Examples",
+    "RFC 9052 - Updated COSE examples"
+  ],
+
+  "algorithm_identifiers": {
+    "description": "COSE algorithm identifiers per IANA registry",
+    "EdDSA": -8,
+    "ES256": -7,
+    "ES384": -35,
+    "ES512": -36
+  },
+
+  "sign1_structure": {
+    "description": "COSE_Sign1 message structure",
+    "cbor_tag": 18,
+    "array_elements": [
+      "protected header (bstr)",
+      "unprotected header (map)",
+      "payload (bstr or null for detached)",
+      "signature (bstr)"
+    ]
+  },
+
+  "sig_structure": {
+    "description": "Sig_structure for computing signature",
+    "context_string": "Signature1",
+    "elements": [
+      "context (text)",
+      "body_protected (bstr)",
+      "external_aad (bstr)",
+      "payload (bstr)"
+    ]
+  },
+
+  "test_vectors": [
+    {
+      "name": "eddsa_sign1_empty_payload",
+      "description": "COSE_Sign1 with EdDSA algorithm and empty payload",
+      "algorithm": "EdDSA",
+      "algorithm_id": -8,
+      "protected_header": {
+        "alg": -8
+      },
+      "protected_header_cbor_hex": "a10127",
+      "unprotected_header": {},
+      "payload_hex": "",
+      "external_aad_hex": "",
+      "notes": "Signature over Sig_structure with empty payload"
+    },
+    {
+      "name": "eddsa_sign1_hello_world",
+      "description": "COSE_Sign1 with EdDSA and 'Hello World' payload",
+      "algorithm": "EdDSA",
+      "algorithm_id": -8,
+      "protected_header": {
+        "alg": -8
+      },
+      "payload": "Hello World",
+      "payload_hex": "48656c6c6f20576f726c64",
+      "external_aad_hex": "",
+      "notes": "Standard test case for EdDSA signing"
+    },
+    {
+      "name": "eddsa_sign1_with_kid",
+      "description": "COSE_Sign1 with key ID in unprotected header",
+      "algorithm": "EdDSA",
+      "algorithm_id": -8,
+      "protected_header": {
+        "alg": -8
+      },
+      "unprotected_header": {
+        "kid": "test-key-1"
+      },
+      "payload": "data",
+      "notes": "Key ID in unprotected header per RFC 8152 §3.1"
+    }
+  ],
+
+  "verification_properties": [
+    {
+      "name": "signature_bound_to_protected",
+      "description": "Modifying protected header invalidates signature",
+      "test": "Change protected header bytes → verify must fail"
+    },
+    {
+      "name": "signature_bound_to_payload",
+      "description": "Modifying payload invalidates signature",
+      "test": "Change payload bytes → verify must fail"
+    },
+    {
+      "name": "unprotected_not_signed",
+      "description": "Unprotected header can be modified without invalidating signature",
+      "test": "Add field to unprotected → verify still succeeds",
+      "warning": "Security-sensitive fields MUST be in protected header"
+    }
+  ],
+
+  "error_cases": [
+    {
+      "name": "truncated_signature",
+      "description": "Signature shorter than expected",
+      "expected_error": "invalid_signature_length"
+    },
+    {
+      "name": "wrong_algorithm",
+      "description": "Signature made with different algorithm than declared",
+      "expected_error": "algorithm_mismatch"
+    },
+    {
+      "name": "invalid_cbor",
+      "description": "Malformed CBOR in COSE_Sign1 structure",
+      "expected_error": "parse_error"
+    }
+  ]
+}

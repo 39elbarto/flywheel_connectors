@@ -1,0 +1,141 @@
+{
+  "_comment": "Golden vectors for canonical CBOR encoding per RFC 8949 §4.2",
+  "_version": "1.0.0",
+  "_generated": "2026-02-01",
+
+  "integer_minimal_encoding": [
+    {
+      "value": 0,
+      "canonical_hex": "00",
+      "description": "Zero encodes as single byte 0x00"
+    },
+    {
+      "value": 23,
+      "canonical_hex": "17",
+      "description": "Values 0-23 encode in major type byte"
+    },
+    {
+      "value": 24,
+      "canonical_hex": "1818",
+      "description": "Value 24 requires 1-byte additional info"
+    },
+    {
+      "value": 255,
+      "canonical_hex": "18ff",
+      "description": "Max 1-byte value"
+    },
+    {
+      "value": 256,
+      "canonical_hex": "190100",
+      "description": "256 requires 2-byte additional info"
+    },
+    {
+      "value": 65535,
+      "canonical_hex": "19ffff",
+      "description": "Max 2-byte value"
+    },
+    {
+      "value": 65536,
+      "canonical_hex": "1a00010000",
+      "description": "65536 requires 4-byte additional info"
+    }
+  ],
+
+  "non_canonical_integers": [
+    {
+      "non_canonical_hex": "1800",
+      "canonical_value": 0,
+      "canonical_hex": "00",
+      "error": "non_canonical_integer_encoding",
+      "description": "0 with unnecessary 1-byte length"
+    },
+    {
+      "non_canonical_hex": "1817",
+      "canonical_value": 23,
+      "canonical_hex": "17",
+      "error": "non_canonical_integer_encoding",
+      "description": "23 with unnecessary 1-byte length"
+    },
+    {
+      "non_canonical_hex": "190018",
+      "canonical_value": 24,
+      "canonical_hex": "1818",
+      "error": "non_canonical_integer_encoding",
+      "description": "24 with unnecessary 2-byte length"
+    }
+  ],
+
+  "map_key_ordering": {
+    "description": "RFC 8949 §4.2.1: Map keys sorted by length first, then lexicographically",
+    "test_cases": [
+      {
+        "name": "length_first",
+        "keys": ["bb", "aaa", "a"],
+        "sorted_keys": ["a", "bb", "aaa"],
+        "description": "Shorter keys come first regardless of lexicographic order"
+      },
+      {
+        "name": "lexicographic_same_length",
+        "keys": ["z", "a", "m"],
+        "sorted_keys": ["a", "m", "z"],
+        "description": "Same-length keys sorted lexicographically"
+      },
+      {
+        "name": "mixed",
+        "keys": ["zz", "aa", "b", "aaa"],
+        "sorted_keys": ["b", "aa", "zz", "aaa"],
+        "description": "Length first, then lexicographic"
+      }
+    ]
+  },
+
+  "duplicate_map_keys": {
+    "description": "Duplicate map keys MUST be rejected",
+    "test_case": {
+      "cbor_diagnostic": "{\"a\": 1, \"a\": 2}",
+      "expected_error": "duplicate_map_key",
+      "notes": "Canonical CBOR does not allow duplicate keys"
+    }
+  },
+
+  "string_encoding": [
+    {
+      "value": "",
+      "canonical_hex": "60",
+      "description": "Empty string"
+    },
+    {
+      "value": "a",
+      "canonical_hex": "6161",
+      "description": "Single char string"
+    },
+    {
+      "value": "IETF",
+      "canonical_hex": "6449455446",
+      "description": "4-char ASCII string"
+    }
+  ],
+
+  "array_encoding": [
+    {
+      "value": [],
+      "canonical_hex": "80",
+      "description": "Empty array"
+    },
+    {
+      "value": [1, 2, 3],
+      "canonical_hex": "83010203",
+      "description": "Array of small integers"
+    }
+  ],
+
+  "payload_format": {
+    "description": "FCP2 serialized objects are prefixed with 32-byte schema hash",
+    "format": "<32-byte schema hash><canonical CBOR payload>",
+    "example": {
+      "schema": {"namespace": "fcp.test", "name": "Demo", "version": [0, 1, 0]},
+      "value": 42,
+      "payload_structure": "[hash:32][cbor:1+]"
+    }
+  }
+}

@@ -918,7 +918,12 @@ impl MeshGossip {
         object_ids: Vec<ObjectId>,
         now: u64,
     ) -> GossipRequest {
-        GossipRequest::for_objects(self.local_node.clone(), zone_id.clone(), object_ids, now)
+        let max_objects = self
+            .config
+            .max_objects_per_request
+            .min(MAX_OBJECT_IDS_PER_REQUEST);
+        let bounded: Vec<_> = object_ids.into_iter().take(max_objects).collect();
+        GossipRequest::for_objects(self.local_node.clone(), zone_id.clone(), bounded, now)
     }
 
     /// Handle a request from a peer.

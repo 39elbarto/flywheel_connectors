@@ -24,7 +24,7 @@ use fcp_mesh::device::{
     AvailabilityProfile, CpuArch, DeviceProfile, GpuProfile, GpuVendor, InstalledConnector,
     LatencyClass, PowerSource,
 };
-use fcp_mesh::gossip::{GossipConfig, GossipState};
+use fcp_mesh::gossip::{GossipConfig, GossipRequest, GossipState, MeshGossip};
 use fcp_mesh::planner::{
     ExecutionPlanner, HeldLease, LeasePurpose, NodeInfo, PlannerContext, PlannerInput,
 };
@@ -2362,6 +2362,7 @@ mod policy_enforcement {
 
 mod gossip_integration {
     use super::*;
+    use fcp_mesh::admission::ObjectAdmissionClass;
 
     /// Test: Object availability announcement.
     #[test]
@@ -2579,6 +2580,79 @@ mod gossip_integration {
                 "total_objects": 20,
                 "limited_list_count": 5,
                 "full_list_count": 20,
+            }),
+        );
+    }
+
+    /// Test: `MeshGossip` `create_request` respects config bounds.
+    #[test]
+    fn test_gossip_create_request_respects_config_bounds() {
+        const TEST_NAME: &str = "gossip_create_request_config_bounds";
+        const CATEGORY: &str = "gossip";
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let zone_id = ZoneId::work();
+        let config = GossipConfig {
+            max_objects_per_request: 1,
+            max_symbols_per_request: 1,
+            ..GossipConfig::default()
+        };
+        let gossip = MeshGossip::new(TailscaleNodeId::new("node-0"), config);
+
+        let object_ids = vec![test_object_id("obj-a"), test_object_id("obj-b")];
+        let request = gossip.create_request(&zone_id, object_ids, 1000);
+
+        assert_eq!(request.object_ids.len(), 1);
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "zone": zone_id.as_str(),
+                "requested_objects": 2,
+                "bounded_objects": request.object_ids.len(),
+            }),
+        );
+    }
+
+    /// Test: `MeshGossip` drops over-config requests.
+    #[test]
+    fn test_gossip_request_rejects_over_config_bounds() {
+        const TEST_NAME: &str = "gossip_request_rejects_over_config_bounds";
+        const CATEGORY: &str = "gossip";
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let zone_id = ZoneId::work();
+        let config = GossipConfig {
+            max_objects_per_request: 1,
+            max_symbols_per_request: 1,
+            ..GossipConfig::default()
+        };
+        let mut gossip = MeshGossip::new(TailscaleNodeId::new("node-0"), config);
+
+        let object_ids = vec![test_object_id("obj-1"), test_object_id("obj-2")];
+        for object_id in &object_ids {
+            gossip.announce_object(&zone_id, object_id, ObjectAdmissionClass::Admitted, 1000);
+        }
+
+        let request = GossipRequest::for_objects(
+            TailscaleNodeId::new("peer-1"),
+            zone_id.clone(),
+            object_ids,
+            1000,
+        );
+        let response = gossip.handle_request(&request);
+
+        assert!(response.have_objects.is_empty());
+        assert!(response.have_symbols.is_empty());
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "zone": zone_id.as_str(),
+                "response_objects": response.have_objects.len(),
+                "response_symbols": response.have_symbols.len(),
             }),
         );
     }

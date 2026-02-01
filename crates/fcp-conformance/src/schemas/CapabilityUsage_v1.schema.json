@@ -1,0 +1,55 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "fcp://schemas/capability-usage/v1",
+  "title": "FCP CapabilityUsage v1",
+  "type": "object",
+  "required": [
+    "format",
+    "schema_version",
+    "zone_id",
+    "connector_id",
+    "capability_id",
+    "principal_id",
+    "risk_tier",
+    "operation",
+    "outcome",
+    "occurred_at"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "format": { "const": "fcp-capability-usage" },
+    "schema_version": { "const": "1.0" },
+    "zone_id": {
+      "type": "string",
+      "pattern": "^z:[a-z][a-z0-9_-]*$"
+    },
+    "connector_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._:-]*$"
+    },
+    "capability_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._:-]*$"
+    },
+    "principal_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "risk_tier": {
+      "type": "string",
+      "enum": ["safe", "risky", "dangerous", "critical", "forbidden"]
+    },
+    "operation": {
+      "type": "string",
+      "minLength": 1
+    },
+    "outcome": {
+      "type": "string",
+      "enum": ["allow", "deny", "error"]
+    },
+    "occurred_at": {
+      "type": "integer",
+      "minimum": 0
+    }
+  }
+}

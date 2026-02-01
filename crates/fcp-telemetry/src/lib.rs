@@ -30,10 +30,12 @@ mod export;
 mod logging;
 pub mod metrics;
 mod tracing_layer;
+mod usage;
 
 pub use context::*;
 pub use export::*;
 pub use logging::*;
+pub use usage::*;
 // Re-export tracing_layer items explicitly to avoid TraceContext collision
 // (we prefer context::TraceContext which is the proper W3C binary implementation)
 pub use tracing_layer::{

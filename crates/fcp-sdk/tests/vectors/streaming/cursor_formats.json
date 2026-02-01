@@ -1,0 +1,120 @@
+{
+  "_comment": "Golden vectors for cursor format validation per FCP2 streaming spec",
+  "_version": "1.0.0",
+  "_generated": "2026-02-01",
+
+  "valid_cursors": [
+    {
+      "input": "0",
+      "expected_seq": 0,
+      "description": "Zero sequence cursor"
+    },
+    {
+      "input": "1",
+      "expected_seq": 1,
+      "description": "Simple single-digit cursor"
+    },
+    {
+      "input": "42",
+      "expected_seq": 42,
+      "description": "Multi-digit cursor"
+    },
+    {
+      "input": "999999999",
+      "expected_seq": 999999999,
+      "description": "Large sequence number"
+    },
+    {
+      "input": "18446744073709551615",
+      "expected_seq": 18446744073709551615,
+      "description": "Max u64 cursor"
+    },
+    {
+      "input": "",
+      "expected_seq": null,
+      "description": "Empty cursor (replay all)",
+      "special": "replay_all"
+    }
+  ],
+
+  "invalid_cursors": [
+    {
+      "input": "not-a-number",
+      "expected_error": "InvalidCursor",
+      "description": "Alphabetic string"
+    },
+    {
+      "input": "-1",
+      "expected_error": "InvalidCursor",
+      "description": "Negative number"
+    },
+    {
+      "input": "1.5",
+      "expected_error": "InvalidCursor",
+      "description": "Floating point"
+    },
+    {
+      "input": "1e10",
+      "expected_error": "InvalidCursor",
+      "description": "Scientific notation"
+    },
+    {
+      "input": "0x10",
+      "expected_error": "InvalidCursor",
+      "description": "Hex notation"
+    },
+    {
+      "input": " 42",
+      "expected_error": "InvalidCursor",
+      "description": "Leading whitespace"
+    },
+    {
+      "input": "42 ",
+      "expected_error": "InvalidCursor",
+      "description": "Trailing whitespace"
+    },
+    {
+      "input": "18446744073709551616",
+      "expected_error": "InvalidCursor",
+      "description": "Overflow u64"
+    }
+  ],
+
+  "stale_cursor_scenarios": [
+    {
+      "buffer_oldest_seq": 100,
+      "buffer_newest_seq": 200,
+      "requested_cursor": "50",
+      "expected_error": "CursorStale",
+      "description": "Cursor before buffer start"
+    },
+    {
+      "buffer_oldest_seq": 100,
+      "buffer_newest_seq": 200,
+      "requested_cursor": "99",
+      "expected_error": "CursorStale",
+      "description": "Cursor one before oldest"
+    },
+    {
+      "buffer_oldest_seq": 100,
+      "buffer_newest_seq": 200,
+      "requested_cursor": "100",
+      "expected_result_count": 100,
+      "description": "Cursor at oldest (valid, returns events 101-200)"
+    },
+    {
+      "buffer_oldest_seq": 100,
+      "buffer_newest_seq": 200,
+      "requested_cursor": "199",
+      "expected_result_count": 1,
+      "description": "Cursor at second-to-last (returns event 200)"
+    },
+    {
+      "buffer_oldest_seq": 100,
+      "buffer_newest_seq": 200,
+      "requested_cursor": "200",
+      "expected_result_count": 0,
+      "description": "Cursor at newest (returns empty)"
+    }
+  ]
+}

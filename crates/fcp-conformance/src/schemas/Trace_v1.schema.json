@@ -1,0 +1,139 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "fcp://schemas/trace/v1",
+  "title": "FCP Trace v1",
+  "type": "object",
+  "required": [
+    "format",
+    "schema_version",
+    "trace_id",
+    "captured_at",
+    "entries",
+    "redaction_policy"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "format": { "const": "fcp-trace" },
+    "schema_version": { "const": "1.0" },
+    "trace_id": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{32}$"
+    },
+    "captured_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "node_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "zone_id": {
+      "type": "string",
+      "pattern": "^z:[a-z][a-z0-9_-]*$"
+    },
+    "correlation_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "redaction_policy": {
+      "type": "object",
+      "required": ["policy_version", "applied", "fields"],
+      "additionalProperties": false,
+      "properties": {
+        "policy_version": { "type": "string", "minLength": 1 },
+        "applied": { "type": "boolean" },
+        "fields": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "notes": { "type": "string" }
+      }
+    },
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["ts", "kind", "direction", "component"],
+        "additionalProperties": false,
+        "properties": {
+          "ts": { "type": "string", "format": "date-time" },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "fcps_frame",
+              "fcpc_frame",
+              "routing_decision",
+              "admission_decision",
+              "gossip_summary",
+              "gossip_request",
+              "lease_event",
+              "execution_decision",
+              "checkpoint_sync",
+              "audit_event",
+              "custom"
+            ]
+          },
+          "direction": {
+            "type": "string",
+            "enum": ["inbound", "outbound", "internal"]
+          },
+          "component": { "type": "string", "minLength": 1 },
+          "peer_id": { "type": "string", "minLength": 1 },
+          "span_id": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{16}$"
+          },
+          "zone_id": {
+            "type": "string",
+            "pattern": "^z:[a-z][a-z0-9_-]*$"
+          },
+          "request_id": { "type": "string", "minLength": 1 },
+          "operation_id": { "type": "string", "minLength": 1 },
+          "object_id": { "type": "string", "minLength": 1 },
+          "decision": {
+            "type": "string",
+            "enum": ["allow", "deny", "defer"]
+          },
+          "reason_code": { "type": "string", "minLength": 1 },
+          "payload_hash": {
+            "type": "string",
+            "pattern": "^blake3-256:[a-f0-9]{64}$"
+          },
+          "payload": {
+            "type": ["object", "array", "string", "number", "boolean", "null"]
+          },
+          "redaction": {
+            "type": "object",
+            "required": ["applied", "fields"],
+            "additionalProperties": false,
+            "properties": {
+              "applied": { "type": "boolean" },
+              "fields": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "type": "string", "minLength": 1 }
+              },
+              "reason": { "type": "string" }
+            }
+          }
+        },
+        "allOf": [
+          {
+            "if": { "required": ["payload"] },
+            "then": {
+              "required": ["redaction"],
+              "properties": {
+                "redaction": {
+                  "properties": {
+                    "applied": { "const": true }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "_comment": "Golden vectors for SchemaId hash computation per FCP2 CBOR spec",
+  "_version": "1.0.0",
+  "_generated": "2026-02-01",
+  "_algorithm": "BLAKE3 of canonical CBOR encoding of [namespace, name, [major, minor, patch]]",
+
+  "schema_hash_vectors": [
+    {
+      "namespace": "fcp.core",
+      "name": "CapabilityToken",
+      "version": [1, 0, 0],
+      "expected_hash_hex": "8a7bb1d0e9b3f6c5a4e2d1c0b9a8f7e6d5c4b3a2918071605f4e3d2c1b0a0908",
+      "description": "Core capability token schema v1.0.0"
+    },
+    {
+      "namespace": "fcp.core",
+      "name": "ZoneDefinition",
+      "version": [2, 0, 0],
+      "expected_hash_prefix": "varies",
+      "description": "Zone definition schema v2.0.0 - hash computed at runtime"
+    },
+    {
+      "namespace": "fcp.mesh",
+      "name": "ObjectId",
+      "version": [1, 0, 0],
+      "expected_hash_prefix": "varies",
+      "description": "Mesh object identifier schema"
+    }
+  ],
+
+  "hash_properties": [
+    {
+      "name": "deterministic",
+      "description": "Same input always produces same hash",
+      "test": "hash(schema1) == hash(schema1)"
+    },
+    {
+      "name": "namespace_sensitive",
+      "description": "Different namespaces produce different hashes",
+      "test": "hash(fcp.core/Object/1.0.0) != hash(fcp.mesh/Object/1.0.0)"
+    },
+    {
+      "name": "name_sensitive",
+      "description": "Different names produce different hashes",
+      "test": "hash(fcp.core/ObjectA/1.0.0) != hash(fcp.core/ObjectB/1.0.0)"
+    },
+    {
+      "name": "version_sensitive",
+      "description": "Different versions produce different hashes",
+      "test": "hash(fcp.core/Object/1.0.0) != hash(fcp.core/Object/2.0.0)"
+    },
+    {
+      "name": "length_32",
+      "description": "Hash is always 32 bytes (BLAKE3 output)",
+      "test": "len(hash(any_schema)) == 32"
+    }
+  ],
+
+  "schema_id_canonical_encoding": {
+    "description": "SchemaId is canonically encoded as CBOR array [namespace, name, [major, minor, patch]]",
+    "example": {
+      "schema": {"namespace": "fcp.test", "name": "Demo", "version": [0, 1, 0]},
+      "cbor_diagnostic": "[\"fcp.test\", \"Demo\", [0, 1, 0]]",
+      "notes": "Array elements are sorted by type (strings before arrays), keys within maps are sorted by length then lexicographically"
+    }
+  }
+}

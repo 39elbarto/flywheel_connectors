@@ -108,6 +108,7 @@ SCENARIOS=(
   "progress_streaming|./progress_streaming_flow.sh|Progress streaming updates|true"
   "cancellation_flow|./cancellation_flow.sh|Operation cancellation flow|true"
   "rate_limit|./rate_limit_flow.sh|Rate limit enforcement flow|true"
+  "gossip_bounds|./gossip_bounds_flow.sh|Gossip request bounds + config enforcement|true"
   "budget|./budget_flow.sh|Budget enforcement flow|false"
   "egress_denial|./egress_denial.sh|Sandbox egress denial|true"
 )

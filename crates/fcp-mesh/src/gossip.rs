@@ -1219,6 +1219,17 @@ mod tests {
         assert_eq!(request.object_ids.len(), MAX_OBJECT_IDS_PER_REQUEST);
     }
 
+    #[test]
+    fn request_bounds_symbols() {
+        let object_id = test_object_id("obj-symbols");
+        let symbols: Vec<(ObjectId, u32)> = (0..200).map(|esi| (object_id, esi)).collect();
+
+        let request = GossipRequest::for_symbols(test_node("node"), test_zone(), symbols, 1000);
+
+        assert!(request.is_valid());
+        assert_eq!(request.symbols.len(), MAX_OBJECT_IDS_PER_REQUEST);
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // MeshGossip Tests
     // ─────────────────────────────────────────────────────────────────────────

@@ -1,0 +1,93 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "fcp://schemas/policybundle/v1",
+  "title": "FCP PolicyBundle v1",
+  "type": "object",
+  "required": [
+    "format",
+    "schema_version",
+    "bundle_id",
+    "zone_id",
+    "policy_seq",
+    "hash_algo",
+    "bundle_hash",
+    "policies",
+    "signature"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "format": { "const": "fcp-policy-bundle" },
+    "schema_version": { "const": "1.0" },
+    "bundle_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "zone_id": {
+      "type": "string",
+      "pattern": "^z:[a-z][a-z0-9_-]*$"
+    },
+    "policy_seq": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "previous_bundle": {
+      "type": "string",
+      "minLength": 1
+    },
+    "hash_algo": {
+      "const": "blake3-256"
+    },
+    "bundle_hash": {
+      "type": "string",
+      "pattern": "^blake3-256:[a-f0-9]{64}$"
+    },
+    "policies": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["object_id", "schema_id", "object_hash"],
+        "additionalProperties": false,
+        "properties": {
+          "object_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "schema_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "object_hash": {
+            "type": "string",
+            "pattern": "^blake3-256:[a-f0-9]{64}$"
+          }
+        }
+      }
+    },
+    "signature": {
+      "type": "object",
+      "required": ["algorithm", "key_id", "signature", "signed_fields"],
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": { "const": "ed25519" },
+        "key_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "signature": {
+          "type": "string",
+          "minLength": 1
+        },
+        "signed_fields": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string" }
+        }
+      }
+    }
+  }
+}

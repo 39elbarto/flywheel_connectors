@@ -5,7 +5,12 @@
 //! - Rejection of forbidden constructs (negative tests)
 //! - Deterministic validation behavior
 
-use super::{E2E_LOG_V1_SCHEMA, E2E_LOG_V2_SCHEMA, FZPF_V01_SCHEMA};
+use super::{
+    E2E_LOG_V1_SCHEMA, E2E_LOG_V2_SCHEMA, FZPF_V01_SCHEMA, RELEASE_MANIFEST_V1_SCHEMA,
+    ROLLOUT_POLICY_V1_SCHEMA,
+};
+use fcp_cbor::to_canonical_cbor;
+use fcp_core::ObjectId;
 use jsonschema::Validator;
 use serde_json::Value;
 
@@ -224,6 +229,76 @@ fn reject_invalid_confidentiality_level() {
 fn load_e2e_log_schema(schema: &str) -> Validator {
     let schema: Value = serde_json::from_str(schema).expect("E2E log schema should be valid JSON");
     Validator::new(&schema).expect("E2E log schema should be a valid JSON Schema")
+}
+
+fn load_release_manifest_schema() -> Validator {
+    let schema: Value = serde_json::from_str(RELEASE_MANIFEST_V1_SCHEMA)
+        .expect("ReleaseManifest schema should be valid JSON");
+    Validator::new(&schema).expect("ReleaseManifest schema should be a valid JSON Schema")
+}
+
+fn load_rollout_policy_schema() -> Validator {
+    let schema: Value = serde_json::from_str(ROLLOUT_POLICY_V1_SCHEMA)
+        .expect("RolloutPolicy schema should be valid JSON");
+    Validator::new(&schema).expect("RolloutPolicy schema should be a valid JSON Schema")
+}
+
+fn sample_release_manifest() -> Value {
+    serde_json::from_str(
+        r#"{
+            "format": "fcp-release-manifest",
+            "schema_version": "1.0",
+            "connector_id": "fcp.example:request-response:1",
+            "version": "1.2.3",
+            "digest": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "channel": "stable",
+            "required_caps": ["fcp.example.read"],
+            "min_host_version": "0.1.0",
+            "signed_by": "owner-key-1",
+            "signature": {
+                "algorithm": "ed25519",
+                "key_id": "owner-key-1",
+                "signature": "deadbeef",
+                "signed_fields": [
+                    "format",
+                    "schema_version",
+                    "connector_id",
+                    "version",
+                    "digest",
+                    "channel",
+                    "required_caps",
+                    "min_host_version",
+                    "signed_by"
+                ]
+            }
+        }"#,
+    )
+    .expect("sample release manifest should parse")
+}
+
+fn sample_rollout_policy() -> Value {
+    serde_json::from_str(
+        r#"{
+            "format": "fcp-rollout-policy",
+            "schema_version": "1.0",
+            "canary_percent": 10,
+            "min_canary_duration_secs": 3600,
+            "success_thresholds": {
+                "min_success_rate_bps": 9900,
+                "max_error_rate_bps": 100,
+                "min_samples": 100,
+                "window_secs": 3600
+            },
+            "rollback_rules": {
+                "max_error_rate_bps": 500,
+                "max_consecutive_failures": 3,
+                "min_samples": 30,
+                "window_secs": 600,
+                "auto_rollback": true
+            }
+        }"#,
+    )
+    .expect("sample rollout policy should parse")
 }
 
 #[test]
@@ -1093,5 +1168,140 @@ fn valid_json_pointer_edge_cases() {
     assert!(
         validator.validate(&doc).is_ok(),
         "Valid RFC 6901 JSON Pointers should be accepted"
+    );
+}
+
+// ============================================================================
+// Release Manifest Schema Validation
+// ============================================================================
+
+#[test]
+fn valid_release_manifest() {
+    let validator = load_release_manifest_schema();
+    let doc = sample_release_manifest();
+    assert!(
+        validator.validate(&doc).is_ok(),
+        "release manifest should validate"
+    );
+}
+
+#[test]
+fn release_manifest_cbor_is_deterministic() {
+    let doc = sample_release_manifest();
+    let bytes1 = to_canonical_cbor(&doc).expect("canonical CBOR should serialize");
+    let bytes2 = to_canonical_cbor(&doc).expect("canonical CBOR should serialize");
+    assert_eq!(bytes1, bytes2, "canonical CBOR must be deterministic");
+
+    let hash1 = ObjectId::from_unscoped_bytes(&bytes1);
+    let hash2 = ObjectId::from_unscoped_bytes(&bytes2);
+    assert_eq!(hash1, hash2, "hashes must match for identical CBOR");
+}
+
+#[test]
+fn reject_release_manifest_invalid_digest() {
+    let validator = load_release_manifest_schema();
+    let doc: Value = serde_json::from_str(
+        r#"{
+            "format": "fcp-release-manifest",
+            "schema_version": "1.0",
+            "connector_id": "fcp.example:request-response:1",
+            "version": "1.2.3",
+            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "channel": "stable",
+            "required_caps": ["fcp.example.read"],
+            "min_host_version": "0.1.0",
+            "signed_by": "owner-key-1",
+            "signature": {
+                "algorithm": "ed25519",
+                "key_id": "owner-key-1",
+                "signature": "deadbeef",
+                "signed_fields": ["format"]
+            }
+        }"#,
+    )
+    .unwrap();
+    assert!(
+        validator.validate(&doc).is_err(),
+        "invalid digest should be rejected"
+    );
+}
+
+#[test]
+fn reject_release_manifest_missing_signature() {
+    let validator = load_release_manifest_schema();
+    let doc: Value = serde_json::from_str(
+        r#"{
+            "format": "fcp-release-manifest",
+            "schema_version": "1.0",
+            "connector_id": "fcp.example:request-response:1",
+            "version": "1.2.3",
+            "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "channel": "stable",
+            "required_caps": ["fcp.example.read"],
+            "min_host_version": "0.1.0",
+            "signed_by": "owner-key-1"
+        }"#,
+    )
+    .unwrap();
+    assert!(
+        validator.validate(&doc).is_err(),
+        "missing signature should be rejected"
+    );
+}
+
+// ============================================================================
+// Rollout Policy Schema Validation
+// ============================================================================
+
+#[test]
+fn valid_rollout_policy() {
+    let validator = load_rollout_policy_schema();
+    let doc = sample_rollout_policy();
+    assert!(
+        validator.validate(&doc).is_ok(),
+        "rollout policy should validate"
+    );
+}
+
+#[test]
+fn rollout_policy_cbor_is_deterministic() {
+    let doc = sample_rollout_policy();
+    let bytes1 = to_canonical_cbor(&doc).expect("canonical CBOR should serialize");
+    let bytes2 = to_canonical_cbor(&doc).expect("canonical CBOR should serialize");
+    assert_eq!(bytes1, bytes2, "canonical CBOR must be deterministic");
+
+    let hash1 = ObjectId::from_unscoped_bytes(&bytes1);
+    let hash2 = ObjectId::from_unscoped_bytes(&bytes2);
+    assert_eq!(hash1, hash2, "hashes must match for identical CBOR");
+}
+
+#[test]
+fn reject_rollout_policy_out_of_range_canary() {
+    let validator = load_rollout_policy_schema();
+    let doc: Value = serde_json::from_str(
+        r#"{
+            "format": "fcp-rollout-policy",
+            "schema_version": "1.0",
+            "canary_percent": 150,
+            "min_canary_duration_secs": 0,
+            "success_thresholds": {
+                "min_success_rate_bps": 9900,
+                "max_error_rate_bps": 100,
+                "min_samples": 100,
+                "window_secs": 3600
+            },
+            "rollback_rules": {
+                "max_error_rate_bps": 500,
+                "max_consecutive_failures": 3,
+                "min_samples": 30,
+                "window_secs": 600,
+                "auto_rollback": true
+            }
+        }"#,
+    )
+    .unwrap();
+    assert!(
+        validator.validate(&doc).is_err(),
+        "canary percent above 100 should be rejected"
     );
 }

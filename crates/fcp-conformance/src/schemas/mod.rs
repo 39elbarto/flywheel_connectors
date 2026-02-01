@@ -40,6 +40,12 @@ pub const FZPF_V01_SCHEMA: &str = include_str!("FZPF_v0.1.schema.json");
 pub const E2E_LOG_V1_SCHEMA: &str = include_str!("E2E_Log_v1.schema.json");
 /// The E2E harness JSONL log schema (v2).
 pub const E2E_LOG_V2_SCHEMA: &str = include_str!("E2E_Log_v2.schema.json");
+/// The `PolicyBundle` JSON schema (v1).
+pub const POLICY_BUNDLE_V1_SCHEMA: &str = include_str!("PolicyBundle_v1.schema.json");
+/// The `ReleaseManifest` JSON schema (v1).
+pub const RELEASE_MANIFEST_V1_SCHEMA: &str = include_str!("ReleaseManifest_v1.schema.json");
+/// The `RolloutPolicy` JSON schema (v1).
+pub const ROLLOUT_POLICY_V1_SCHEMA: &str = include_str!("RolloutPolicy_v1.schema.json");
 
 /// Schema validation error for conformance helpers.
 #[derive(Debug, Clone)]
@@ -138,6 +144,42 @@ pub fn validate_e2e_log_jsonl(input: &str) -> Result<(), SchemaValidationError> 
         }
     }
     Ok(())
+}
+
+/// Validate a `PolicyBundle` JSON document against the v1 schema.
+///
+/// # Errors
+///
+/// Returns `SchemaValidationError` if validation fails.
+pub fn validate_policy_bundle(value: &Value) -> Result<(), SchemaValidationError> {
+    let validator = compile_schema(POLICY_BUNDLE_V1_SCHEMA)?;
+    validator
+        .validate(value)
+        .map_err(|err| SchemaValidationError::new(err.to_string()))
+}
+
+/// Validate a `ReleaseManifest` JSON document against the v1 schema.
+///
+/// # Errors
+///
+/// Returns `SchemaValidationError` if validation fails.
+pub fn validate_release_manifest(value: &Value) -> Result<(), SchemaValidationError> {
+    let validator = compile_schema(RELEASE_MANIFEST_V1_SCHEMA)?;
+    validator
+        .validate(value)
+        .map_err(|err| SchemaValidationError::new(err.to_string()))
+}
+
+/// Validate a `RolloutPolicy` JSON document against the v1 schema.
+///
+/// # Errors
+///
+/// Returns `SchemaValidationError` if validation fails.
+pub fn validate_rollout_policy(value: &Value) -> Result<(), SchemaValidationError> {
+    let validator = compile_schema(ROLLOUT_POLICY_V1_SCHEMA)?;
+    validator
+        .validate(value)
+        .map_err(|err| SchemaValidationError::new(err.to_string()))
 }
 
 #[cfg(test)]

@@ -82,7 +82,10 @@ pub struct ReleaseManifest {
 impl ReleaseManifest {
     /// Create a new release manifest builder.
     #[must_use]
-    pub fn builder(connector_id: ConnectorId, version: impl Into<String>) -> ReleaseManifestBuilder {
+    pub fn builder(
+        connector_id: ConnectorId,
+        version: impl Into<String>,
+    ) -> ReleaseManifestBuilder {
         ReleaseManifestBuilder::new(connector_id, version)
     }
 
@@ -218,13 +221,14 @@ impl ReleaseManifestBuilder {
 
     /// Set the creation timestamp.
     #[must_use]
-    pub fn created_at(mut self, timestamp: DateTime<Utc>) -> Self {
+    pub const fn created_at(mut self, timestamp: DateTime<Utc>) -> Self {
         self.created_at = Some(timestamp);
         self
     }
 
     /// Set the signature.
     #[must_use]
+    #[allow(clippy::missing_const_for_fn)] // ReleaseSignature has String fields with destructors
     pub fn signature(mut self, signature: ReleaseSignature) -> Self {
         self.signature = Some(signature);
         self
@@ -236,9 +240,11 @@ impl ReleaseManifestBuilder {
     ///
     /// Returns [`ReleaseError::InvalidManifest`] if required fields are missing.
     pub fn build(self) -> Result<ReleaseManifest, ReleaseError> {
-        let signature = self.signature.ok_or_else(|| ReleaseError::InvalidManifest {
-            reason: "signature is required".to_string(),
-        })?;
+        let signature = self
+            .signature
+            .ok_or_else(|| ReleaseError::InvalidManifest {
+                reason: "signature is required".to_string(),
+            })?;
 
         let manifest = ReleaseManifest {
             format: RELEASE_MANIFEST_FORMAT.to_string(),
@@ -282,7 +288,11 @@ pub struct ReleaseSignature {
 impl ReleaseSignature {
     /// Create a new Ed25519 signature.
     #[must_use]
-    pub fn new(key_id: impl Into<String>, signature: impl Into<String>, signed_fields: Vec<String>) -> Self {
+    pub fn new(
+        key_id: impl Into<String>,
+        signature: impl Into<String>,
+        signed_fields: Vec<String>,
+    ) -> Self {
         Self {
             algorithm: "ed25519".to_string(),
             key_id: key_id.into(),
@@ -408,10 +418,11 @@ impl RolloutPolicy {
         self.success_thresholds.validate()?;
         self.rollback_rules.validate()?;
 
-        // Success thresholds should be stricter than rollback thresholds
-        if self.success_thresholds.min_success_rate_bps < self.rollback_rules.max_error_rate_bps {
+        // Promotion error tolerance should be stricter than rollback threshold.
+        // E.g., if promotion allows max 5% error, rollback should trigger at >= 5%.
+        if self.success_thresholds.max_error_rate_bps > self.rollback_rules.max_error_rate_bps {
             return Err(ReleaseError::InvalidPolicy {
-                reason: "success threshold should be higher than rollback threshold".to_string(),
+                reason: "promotion error tolerance cannot exceed rollback threshold".to_string(),
             });
         }
 
@@ -474,21 +485,21 @@ impl RolloutPolicyBuilder {
 
     /// Set the success thresholds.
     #[must_use]
-    pub fn success_thresholds(mut self, thresholds: SuccessThresholds) -> Self {
+    pub const fn success_thresholds(mut self, thresholds: SuccessThresholds) -> Self {
         self.success_thresholds = Some(thresholds);
         self
     }
 
     /// Set the rollback rules.
     #[must_use]
-    pub fn rollback_rules(mut self, rules: RollbackRules) -> Self {
+    pub const fn rollback_rules(mut self, rules: RollbackRules) -> Self {
         self.rollback_rules = Some(rules);
         self
     }
 
     /// Set the creation timestamp.
     #[must_use]
-    pub fn created_at(mut self, timestamp: DateTime<Utc>) -> Self {
+    pub const fn created_at(mut self, timestamp: DateTime<Utc>) -> Self {
         self.created_at = Some(timestamp);
         self
     }
@@ -762,7 +773,11 @@ mod tests {
         ReleaseSignature::new(
             "key-001",
             "sig-data",
-            vec!["connector_id".to_string(), "version".to_string(), "digest".to_string()],
+            vec![
+                "connector_id".to_string(),
+                "version".to_string(),
+                "digest".to_string(),
+            ],
         )
     }
 
@@ -937,6 +952,21 @@ mod tests {
         let policy = RolloutPolicy::default();
         assert!((policy.success_rate_percent() - 95.0).abs() < f64::EPSILON);
         assert!((policy.error_rate_percent() - 20.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn rollout_policy_validation_threshold_consistency() {
+        // Promotion error tolerance cannot exceed rollback threshold.
+        // If promotion allows 20% error but rollback triggers at 5%, that's invalid.
+        let policy = RolloutPolicy::builder()
+            .success_thresholds(SuccessThresholds::new(8000, 2000, 50, 120)) // 20% max error for promotion
+            .rollback_rules(RollbackRules::new(500, 3, 5, 30, true)) // 5% triggers rollback
+            .build();
+
+        assert!(matches!(
+            policy.validate(),
+            Err(ReleaseError::InvalidPolicy { reason }) if reason.contains("promotion error tolerance")
+        ));
     }
 
     #[test]

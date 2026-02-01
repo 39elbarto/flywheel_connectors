@@ -134,6 +134,14 @@ impl TransportSelector {
         ranked
     }
 
+    /// Select the best eligible path according to policy and priority.
+    #[must_use]
+    pub fn best_path(paths: &[TransportPath], policy: &ZoneTransportPolicy) -> Option<RankedPath> {
+        Self::rank_paths(paths, policy)
+            .into_iter()
+            .find(|path| path.eligible)
+    }
+
     /// Select deterministic multipath routes for a symbol.
     #[must_use]
     pub fn select_multipath(
@@ -315,5 +323,40 @@ mod tests {
                 .iter()
                 .all(|path| path.kind == TransportPathKind::Direct)
         );
+    }
+
+    #[test]
+    fn best_path_selects_highest_priority() {
+        let policy = ZoneTransportPolicy {
+            allow_lan: true,
+            allow_derp: true,
+            allow_funnel: true,
+        };
+
+        let paths = vec![
+            TransportPath::new(TransportPathKind::Derp, peer("p3"), "derp", None),
+            TransportPath::new(TransportPathKind::Mesh, peer("p2"), "mesh", None),
+            TransportPath::new(TransportPathKind::Direct, peer("p1"), "direct", None),
+        ];
+
+        let best = TransportSelector::best_path(&paths, &policy).expect("best path");
+        assert_eq!(best.path.kind, TransportPathKind::Direct);
+    }
+
+    #[test]
+    fn best_path_none_when_forbidden() {
+        let policy = ZoneTransportPolicy {
+            allow_lan: false,
+            allow_derp: false,
+            allow_funnel: false,
+        };
+
+        let paths = vec![
+            TransportPath::new(TransportPathKind::Direct, peer("p1"), "direct", None),
+            TransportPath::new(TransportPathKind::Derp, peer("p2"), "derp", None),
+        ];
+
+        let best = TransportSelector::best_path(&paths, &policy);
+        assert!(best.is_none());
     }
 }

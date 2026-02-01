@@ -29,6 +29,8 @@ mod examples {
     pub const FRESHNESS_POLICY: &str = include_str!("examples/freshness_policy.json");
     pub const TAINT_APPROVAL: &str = include_str!("examples/taint_approval.json");
     pub const E2E_LOG_MINIMAL: &str = include_str!("examples/e2e_log_minimal.json");
+    pub const RELEASE_MANIFEST: &str = include_str!("examples/release_manifest.json");
+    pub const ROLLOUT_POLICY: &str = include_str!("examples/rollout_policy.json");
 }
 
 // ============================================================================
@@ -256,61 +258,11 @@ fn load_capability_usage_schema() -> Validator {
 }
 
 fn sample_release_manifest() -> Value {
-    serde_json::from_str(
-        r#"{
-            "format": "fcp-release-manifest",
-            "schema_version": "1.0",
-            "connector_id": "fcp.example:request-response:1",
-            "version": "1.2.3",
-            "digest": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "channel": "stable",
-            "required_caps": ["fcp.example.read"],
-            "min_host_version": "0.1.0",
-            "signed_by": "owner-key-1",
-            "signature": {
-                "algorithm": "ed25519",
-                "key_id": "owner-key-1",
-                "signature": "deadbeef",
-                "signed_fields": [
-                    "format",
-                    "schema_version",
-                    "connector_id",
-                    "version",
-                    "digest",
-                    "channel",
-                    "required_caps",
-                    "min_host_version",
-                    "signed_by"
-                ]
-            }
-        }"#,
-    )
-    .expect("sample release manifest should parse")
+    serde_json::from_str(examples::RELEASE_MANIFEST).expect("sample release manifest should parse")
 }
 
 fn sample_rollout_policy() -> Value {
-    serde_json::from_str(
-        r#"{
-            "format": "fcp-rollout-policy",
-            "schema_version": "1.0",
-            "canary_percent": 10,
-            "min_canary_duration_secs": 3600,
-            "success_thresholds": {
-                "min_success_rate_bps": 9900,
-                "max_error_rate_bps": 100,
-                "min_samples": 100,
-                "window_secs": 3600
-            },
-            "rollback_rules": {
-                "max_error_rate_bps": 500,
-                "max_consecutive_failures": 3,
-                "min_samples": 30,
-                "window_secs": 600,
-                "auto_rollback": true
-            }
-        }"#,
-    )
-    .expect("sample rollout policy should parse")
+    serde_json::from_str(examples::ROLLOUT_POLICY).expect("sample rollout policy should parse")
 }
 
 fn sample_trace() -> Value {

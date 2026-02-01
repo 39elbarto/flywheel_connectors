@@ -244,10 +244,10 @@ impl GCounter {
     }
 
     #[must_use]
-    pub fn value(&self) -> u64 {
+    pub fn value(&self) -> u128 {
         self.counts
             .values()
-            .fold(0, |acc, value| acc.saturating_add(*value))
+            .fold(0u128, |acc, value| acc.saturating_add(u128::from(*value)))
     }
 
     pub fn merge(&mut self, other: &Self) {
@@ -278,15 +278,26 @@ impl PnCounter {
 
     #[must_use]
     pub fn value(&self) -> i64 {
-        // Use i128 to capture the full range of difference before clamping
-        let pos = i128::from(self.positive.value());
-        let neg = i128::from(self.negative.value());
-        let diff = pos - neg;
+        let pos = self.positive.value();
+        let neg = self.negative.value();
 
-        match i64::try_from(diff) {
-            Ok(value) => value,
-            Err(_) if diff.is_negative() => i64::MIN,
-            Err(_) => i64::MAX,
+        if pos >= neg {
+            let diff = pos - neg;
+            // Clamp positive overflow to i64::MAX
+            if diff > i64::MAX as u128 {
+                i64::MAX
+            } else {
+                diff as i64
+            }
+        } else {
+            let diff = neg - pos;
+            // Clamp negative overflow to i64::MIN
+            // |i64::MIN| = i64::MAX + 1
+            if diff >= (i64::MAX as u128) + 1 {
+                i64::MIN
+            } else {
+                -(diff as i64)
+            }
         }
     }
 
@@ -738,7 +749,7 @@ mod tests {
         let mut counter = GCounter::default();
         counter.increment(actor("A"), u64::MAX);
         counter.increment(actor("B"), 1);
-        assert_eq!(counter.value(), u64::MAX); // saturating
+        assert_eq!(counter.value(), u128::from(u64::MAX) + 1); // overflows to u64::MAX + 1
     }
 
     // ---- PnCounter tests ----

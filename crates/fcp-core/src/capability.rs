@@ -850,11 +850,11 @@ pub struct CapabilityConstraints {
 impl CapabilityConstraints {
     /// Check if a credential ID is allowed by this capability's constraints.
     ///
-    /// Returns `true` if the credential is in `credential_allow` or if
-    /// `credential_allow` is empty (no credential restrictions).
+    /// Returns `true` only if the credential is explicitly listed in `credential_allow`.
+    /// Empty `credential_allow` implies no credentials are allowed (default deny).
     #[must_use]
     pub fn is_credential_allowed(&self, credential_id: &CredentialId) -> bool {
-        self.credential_allow.is_empty() || self.credential_allow.contains(credential_id)
+        self.credential_allow.contains(credential_id)
     }
 
     /// Validate that a credential ID is allowed by these constraints.
@@ -1713,12 +1713,12 @@ mod tests {
     // ─────────────────────────────────────────────────────────────────────────
 
     #[test]
-    fn credential_allow_empty_allows_all() {
+    fn credential_allow_empty_denies_all() {
         let constraints = CapabilityConstraints::default();
         let cred_id = CredentialId::new();
 
-        assert!(constraints.is_credential_allowed(&cred_id));
-        assert!(constraints.validate_credential(&cred_id).is_ok());
+        assert!(!constraints.is_credential_allowed(&cred_id));
+        assert!(constraints.validate_credential(&cred_id).is_err());
     }
 
     #[test]

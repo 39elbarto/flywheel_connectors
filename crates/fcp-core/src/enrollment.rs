@@ -50,7 +50,7 @@
 use chrono::{DateTime, Utc};
 use fcp_crypto::{
     Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey, KeyId, X25519PublicKey,
-    canonical_signing_bytes,
+    canonical_signing_bytes, canonicalize::to_deterministic_cbor,
 };
 use serde::{Deserialize, Serialize};
 
@@ -275,7 +275,7 @@ impl DeviceEnrollmentRequest {
 
         let signing_bytes = canonical_signing_bytes(
             ENROLLMENT_REQUEST_SCHEMA,
-            &serde_json::to_vec(&payload).map_err(|e| FcpError::Internal {
+            &to_deterministic_cbor(&payload).map_err(|e| FcpError::Internal {
                 message: e.to_string(),
             })?,
         );
@@ -312,7 +312,7 @@ impl DeviceEnrollmentRequest {
 
         let signing_bytes = canonical_signing_bytes(
             ENROLLMENT_REQUEST_SCHEMA,
-            &serde_json::to_vec(&payload).map_err(|e| FcpError::Internal {
+            &to_deterministic_cbor(&payload).map_err(|e| FcpError::Internal {
                 message: e.to_string(),
             })?,
         );
@@ -433,7 +433,7 @@ impl DeviceEnrollmentApproval {
 
         let signing_bytes = canonical_signing_bytes(
             ENROLLMENT_APPROVAL_SCHEMA,
-            &serde_json::to_vec(&payload).map_err(|e| FcpError::Internal {
+            &to_deterministic_cbor(&payload).map_err(|e| FcpError::Internal {
                 message: e.to_string(),
             })?,
         );
@@ -489,7 +489,7 @@ impl DeviceEnrollmentApproval {
 
         let signing_bytes = canonical_signing_bytes(
             ENROLLMENT_APPROVAL_SCHEMA,
-            &serde_json::to_vec(&payload).map_err(|e| FcpError::Internal {
+            &to_deterministic_cbor(&payload).map_err(|e| FcpError::Internal {
                 message: e.to_string(),
             })?,
         );

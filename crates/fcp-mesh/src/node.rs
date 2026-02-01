@@ -751,6 +751,16 @@ impl MeshNode {
         TransportSelector::rank_paths(paths, policy)
     }
 
+    /// Select the best eligible transport path according to policy and priority.
+    #[must_use]
+    pub fn best_transport_path(
+        &self,
+        policy: &ZoneTransportPolicy,
+        paths: &[TransportPath],
+    ) -> Option<RankedPath> {
+        TransportSelector::best_path(paths, policy)
+    }
+
     /// Select deterministic multipath routes for a symbol.
     #[must_use]
     pub fn select_transport_paths(
@@ -909,6 +919,26 @@ mod tests {
         let selection = node.select_transport_paths(&policy, &paths, &object_id, 1, 1);
         assert_eq!(selection.len(), 1);
         assert_eq!(selection[0].kind, TransportPathKind::Direct);
+    }
+
+    #[test]
+    fn meshnode_best_transport_path_returns_none_when_forbidden() {
+        let node = test_node("node-1");
+        let policy = ZoneTransportPolicy {
+            allow_lan: false,
+            allow_derp: false,
+            allow_funnel: false,
+        };
+
+        let paths = vec![TransportPath::new(
+            TransportPathKind::Direct,
+            NodeId::new("peer-1"),
+            "direct",
+            None,
+        )];
+
+        let best = node.best_transport_path(&policy, &paths);
+        assert!(best.is_none());
     }
 
     // ---- Symbol request lifecycle tests ----

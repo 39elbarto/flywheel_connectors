@@ -1459,6 +1459,37 @@ mod tests {
     }
 
     #[test]
+    fn mesh_gossip_handle_request_rejects_invalid_symbol_request() {
+        let mut gossip = MeshGossip::with_defaults(test_node("local"));
+        let object_id = test_object_id("obj-symbols-invalid");
+
+        gossip.announce_symbol(
+            &test_zone(),
+            &object_id,
+            1,
+            ObjectAdmissionClass::Admitted,
+            1000,
+        );
+
+        let max_esi =
+            u32::try_from(MAX_OBJECT_IDS_PER_REQUEST).expect("max symbols fits u32 in test");
+        let symbols: Vec<(ObjectId, u32)> = (0..=max_esi).map(|esi| (object_id, esi)).collect();
+
+        let request = GossipRequest {
+            from: test_node("peer"),
+            zone_id: test_zone(),
+            object_ids: vec![],
+            symbols,
+            timestamp: 1000,
+            signature: None,
+        };
+
+        let response = gossip.handle_request(&request);
+        assert!(response.have_objects.is_empty());
+        assert!(response.have_symbols.is_empty());
+    }
+
+    #[test]
     fn mesh_gossip_find_object_sources() {
         let mut gossip = MeshGossip::with_defaults(test_node("local"));
         let obj_id = test_object_id("obj-1");

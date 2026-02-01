@@ -359,4 +359,26 @@ mod tests {
         let best = TransportSelector::best_path(&paths, &policy);
         assert!(best.is_none());
     }
+
+    #[test]
+    fn best_path_prefers_lower_rtt_when_same_priority() {
+        let policy = ZoneTransportPolicy {
+            allow_lan: true,
+            allow_derp: true,
+            allow_funnel: true,
+        };
+
+        let paths = vec![
+            TransportPath::new(
+                TransportPathKind::Direct,
+                peer("p1"),
+                "direct-high",
+                Some(50),
+            ),
+            TransportPath::new(TransportPathKind::Direct, peer("p2"), "direct-low", Some(5)),
+        ];
+
+        let best = TransportSelector::best_path(&paths, &policy).expect("best path");
+        assert_eq!(best.path.path_id, "direct-low");
+    }
 }

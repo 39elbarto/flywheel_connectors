@@ -929,8 +929,10 @@ mod tests {
 
     #[test]
     fn rollout_policy_validation_format() {
-        let mut policy = RolloutPolicy::default();
-        policy.format = "wrong".to_string();
+        let policy = RolloutPolicy {
+            format: "wrong".to_string(),
+            ..Default::default()
+        };
         assert!(matches!(
             policy.validate(),
             Err(ReleaseError::InvalidPolicy { .. })
@@ -939,8 +941,10 @@ mod tests {
 
     #[test]
     fn rollout_policy_validation_canary_percent() {
-        let mut policy = RolloutPolicy::default();
-        policy.canary_percent = 150;
+        let policy = RolloutPolicy {
+            canary_percent: 150,
+            ..Default::default()
+        };
         assert!(matches!(
             policy.validate(),
             Err(ReleaseError::InvalidPolicy { .. })
@@ -996,8 +1000,10 @@ mod tests {
 
     #[test]
     fn success_thresholds_validation() {
-        let mut thresholds = SuccessThresholds::default();
-        thresholds.min_success_rate_bps = 15000;
+        let thresholds = SuccessThresholds {
+            min_success_rate_bps: 15000,
+            ..Default::default()
+        };
         assert!(matches!(
             thresholds.validate(),
             Err(ReleaseError::InvalidPolicy { .. })
@@ -1027,8 +1033,10 @@ mod tests {
 
     #[test]
     fn rollback_rules_validation_error_rate() {
-        let mut rules = RollbackRules::default();
-        rules.max_error_rate_bps = 15000;
+        let rules = RollbackRules {
+            max_error_rate_bps: 15000,
+            ..Default::default()
+        };
         assert!(matches!(
             rules.validate(),
             Err(ReleaseError::InvalidPolicy { .. })
@@ -1037,8 +1045,10 @@ mod tests {
 
     #[test]
     fn rollback_rules_validation_consecutive_failures() {
-        let mut rules = RollbackRules::default();
-        rules.max_consecutive_failures = 0;
+        let rules = RollbackRules {
+            max_consecutive_failures: 0,
+            ..Default::default()
+        };
         assert!(matches!(
             rules.validate(),
             Err(ReleaseError::InvalidPolicy { .. })

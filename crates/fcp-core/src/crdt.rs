@@ -287,16 +287,16 @@ impl PnCounter {
             if diff > i64::MAX as u128 {
                 i64::MAX
             } else {
-                diff as i64
+                i64::try_from(diff).unwrap_or(i64::MAX)
             }
         } else {
             let diff = neg - pos;
             // Clamp negative overflow to i64::MIN
             // |i64::MIN| = i64::MAX + 1
-            if diff >= (i64::MAX as u128) + 1 {
+            if diff > i64::MAX as u128 {
                 i64::MIN
             } else {
-                -(diff as i64)
+                -i64::try_from(diff).unwrap_or(i64::MAX)
             }
         }
     }

@@ -114,21 +114,28 @@ fn test_integer_minimal_encoding_from_vectors() {
     let vectors = load_canonical_vectors();
 
     for vector in vectors.integer_minimal_encoding {
-        // For small values that fit in u8
-        if vector.value <= 255 {
-            let encoded =
-                to_canonical_cbor(&u8::try_from(vector.value).expect("value fits u8")).unwrap();
-            let _expected = hex_to_bytes(&vector.canonical_hex);
+        let expected = hex_to_bytes(&vector.canonical_hex);
 
-            // The encoding should match or be a valid representation
-            // Note: to_canonical_cbor may use different representation for same value
-            assert!(
-                !encoded.is_empty(),
-                "Vector '{}' ({}) should produce non-empty encoding",
-                vector.value,
-                vector.description
-            );
-        }
+        // Use appropriately-sized integer type for minimal encoding.
+        let encoded = if let Ok(value) = u8::try_from(vector.value) {
+            to_canonical_cbor(&value).unwrap()
+        } else if let Ok(value) = u16::try_from(vector.value) {
+            to_canonical_cbor(&value).unwrap()
+        } else if let Ok(value) = u32::try_from(vector.value) {
+            to_canonical_cbor(&value).unwrap()
+        } else {
+            to_canonical_cbor(&vector.value).unwrap()
+        };
+
+        assert_eq!(
+            encoded,
+            expected,
+            "Value {} ({}) encoding mismatch: got {} expected {}",
+            vector.value,
+            vector.description,
+            bytes_to_hex(&encoded),
+            vector.canonical_hex
+        );
     }
 }
 

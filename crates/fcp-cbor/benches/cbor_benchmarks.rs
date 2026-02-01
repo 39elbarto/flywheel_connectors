@@ -131,9 +131,13 @@ fn bench_serialize_medium(c: &mut Criterion) {
     let schema = SchemaId::new("fcp.test", "MediumPayload", Version::new(1, 0, 0));
     let payload = make_medium_payload();
 
+    // Compute actual serialized size for accurate throughput measurement
+    let serialized_size = CanonicalSerializer::serialize(&payload, &schema)
+        .expect("serialization should succeed")
+        .len() as u64;
+
     let mut group = c.benchmark_group("serialize");
-    // Estimate ~500 bytes for medium payload
-    group.throughput(Throughput::Bytes(500));
+    group.throughput(Throughput::Bytes(serialized_size));
     group.bench_function("serialize_medium", |b| {
         b.iter(|| {
             let _ = CanonicalSerializer::serialize(black_box(&payload), black_box(&schema));
@@ -146,9 +150,13 @@ fn bench_serialize_large(c: &mut Criterion) {
     let schema = SchemaId::new("fcp.test", "LargePayload", Version::new(1, 0, 0));
     let payload = make_large_payload();
 
+    // Compute actual serialized size for accurate throughput measurement
+    let serialized_size = CanonicalSerializer::serialize(&payload, &schema)
+        .expect("serialization should succeed")
+        .len() as u64;
+
     let mut group = c.benchmark_group("serialize_large");
-    // Estimate ~5KB for large payload
-    group.throughput(Throughput::Bytes(5000));
+    group.throughput(Throughput::Bytes(serialized_size));
     group.bench_function("serialize_large", |b| {
         b.iter(|| {
             let _ = CanonicalSerializer::serialize(black_box(&payload), black_box(&schema));

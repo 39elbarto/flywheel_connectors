@@ -117,17 +117,17 @@ impl ObjectStore for MemoryObjectStore {
         let size = Self::object_size(&object);
 
         let mut objects = self.objects.write();
-        let mut used_bytes = self.used_bytes.write();
 
+        if objects.contains_key(&object.object_id) {
+            return Err(ObjectStoreError::AlreadyExists(object.object_id));
+        }
+
+        let mut used_bytes = self.used_bytes.write();
         if *used_bytes + size > self.config.max_bytes {
             return Err(ObjectStoreError::QuotaExceeded {
                 used: *used_bytes,
                 max: self.config.max_bytes,
             });
-        }
-
-        if objects.contains_key(&object.object_id) {
-            return Err(ObjectStoreError::AlreadyExists(object.object_id));
         }
 
         let id = object.object_id;
@@ -403,6 +403,41 @@ mod tests {
                 ..StoreLogData::default()
             }
         });
+    }
+
+    #[test]
+    fn duplicate_object_does_not_report_quota() {
+        run_store_test(
+            "duplicate_object_does_not_report_quota",
+            "verify",
+            "write",
+            2,
+            || async {
+                let obj = test_stored_object(1, b"body");
+                let size = MemoryObjectStore::object_size(&obj);
+                let config = MemoryObjectStoreConfig { max_bytes: size };
+                let store = MemoryObjectStore::new(config);
+
+                store.put(obj.clone()).await.unwrap();
+
+                let used_before = store.storage_used().await;
+                let result = store.put(obj.clone()).await;
+                assert!(matches!(result, Err(ObjectStoreError::AlreadyExists(_))));
+
+                let used_after = store.storage_used().await;
+                assert_eq!(used_before, used_after);
+
+                StoreLogData {
+                    object_id: Some(obj.object_id),
+                    object_size: Some(obj.body.len() as u64),
+                    details: Some(json!({
+                        "used_bytes": used_after,
+                        "duplicate_insert": "already_exists"
+                    })),
+                    ..StoreLogData::default()
+                }
+            },
+        );
     }
 
     #[test]

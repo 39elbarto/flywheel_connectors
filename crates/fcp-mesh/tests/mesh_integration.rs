@@ -15,6 +15,7 @@
 
 use std::collections::HashSet;
 
+use chrono::{SecondsFormat, Utc};
 use fcp_core::{
     ConnectorId, DecisionReasonCode, EpochId, ObjectId, TailscaleNodeId, ZoneId,
     ZoneTransportPolicy,
@@ -38,9 +39,15 @@ use fcp_tailscale::NodeId;
 /// Structured test event for JSON logging.
 #[derive(Debug, serde::Serialize)]
 struct TestEvent {
+    timestamp: String,
+    module: &'static str,
+    phase: &'static str,
+    correlation_id: String,
     test_name: &'static str,
     category: &'static str,
     status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<&'static str>,
     details: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
@@ -1438,11 +1445,23 @@ impl TestEvent {
     }
 }
 
+fn test_correlation_id(test_name: &str, category: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(test_name.as_bytes());
+    hasher.update(category.as_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
 fn emit_test_start(test_name: &'static str, category: &'static str) {
     TestEvent {
+        timestamp: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        module: "fcp-mesh",
+        phase: "start",
+        correlation_id: test_correlation_id(test_name, category),
         test_name,
         category,
         status: "started",
+        result: None,
         details: serde_json::json!({}),
         error: None,
     }
@@ -1451,9 +1470,14 @@ fn emit_test_start(test_name: &'static str, category: &'static str) {
 
 fn emit_test_pass(test_name: &'static str, category: &'static str, details: serde_json::Value) {
     TestEvent {
+        timestamp: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        module: "fcp-mesh",
+        phase: "complete",
+        correlation_id: test_correlation_id(test_name, category),
         test_name,
         category,
         status: "passed",
+        result: Some("pass"),
         details,
         error: None,
     }
@@ -1463,9 +1487,14 @@ fn emit_test_pass(test_name: &'static str, category: &'static str, details: serd
 #[allow(dead_code)]
 fn emit_test_fail(test_name: &'static str, category: &'static str, error: &str) {
     TestEvent {
+        timestamp: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        module: "fcp-mesh",
+        phase: "complete",
+        correlation_id: test_correlation_id(test_name, category),
         test_name,
         category,
         status: "failed",
+        result: Some("fail"),
         details: serde_json::json!({}),
         error: Some(error.to_string()),
     }

@@ -240,6 +240,87 @@ pub const POLICY_BUNDLE_SCHEMA_ID: &str = "fcp://schemas/policybundle/v1";
 /// Hash algorithm for policy bundles.
 pub const POLICY_BUNDLE_HASH_ALGO: &str = "blake3-256";
 
+/// Fields included in policy bundle signatures (stable ordering).
+pub const POLICY_BUNDLE_SIGNED_FIELDS: &[&str] = &[
+    "format",
+    "schema_version",
+    "bundle_id",
+    "zone_id",
+    "policy_seq",
+    "created_at",
+    "previous_bundle",
+    "hash_algo",
+    "bundle_hash",
+    "policies",
+];
+
+#[derive(Debug, Clone, Serialize)]
+struct PolicyBundleHashable {
+    format: String,
+    schema_version: String,
+    bundle_id: String,
+    zone_id: ZoneId,
+    policy_seq: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    previous_bundle: Option<String>,
+    hash_algo: String,
+    policies: Vec<PolicyBundlePolicyRef>,
+}
+
+/// Compute the deterministic bundle hash for a policy bundle.
+///
+/// The hash is computed over a canonicalized payload that excludes the
+/// signature and the bundle hash itself.
+///
+/// # Errors
+/// Returns [`PolicyBundleError::InvalidBundle`] if policies are empty.
+/// Returns [`PolicyBundleError::CanonicalizationFailed`] if serialization fails.
+pub fn compute_policy_bundle_hash(
+    bundle_id: &str,
+    zone_id: &ZoneId,
+    policy_seq: u64,
+    created_at: Option<DateTime<Utc>>,
+    previous_bundle: Option<&str>,
+    policies: &[PolicyBundlePolicyRef],
+) -> Result<String, PolicyBundleError> {
+    if policies.is_empty() {
+        return Err(PolicyBundleError::InvalidBundle {
+            reason: "policies cannot be empty".to_string(),
+        });
+    }
+
+    let mut policies_sorted = policies.to_vec();
+    policies_sorted.sort_by(|a, b| {
+        a.object_id
+            .cmp(&b.object_id)
+            .then(a.schema_id.cmp(&b.schema_id))
+            .then(a.object_hash.cmp(&b.object_hash))
+    });
+
+    let hashable = PolicyBundleHashable {
+        format: POLICY_BUNDLE_FORMAT.to_string(),
+        schema_version: POLICY_BUNDLE_SCHEMA_VERSION.to_string(),
+        bundle_id: bundle_id.to_string(),
+        zone_id: zone_id.clone(),
+        policy_seq,
+        created_at,
+        previous_bundle: previous_bundle.map(ToString::to_string),
+        hash_algo: POLICY_BUNDLE_HASH_ALGO.to_string(),
+        policies: policies_sorted,
+    };
+
+    let cbor = to_deterministic_cbor(&hashable).map_err(|err| {
+        PolicyBundleError::CanonicalizationFailed {
+            reason: err.to_string(),
+        }
+    })?;
+    let hash = blake3::hash(&cbor).to_hex().to_string();
+
+    Ok(format!("{POLICY_BUNDLE_HASH_ALGO}:{hash}"))
+}
+
 /// Signed policy bundle (NORMATIVE).
 ///
 /// Matches the `PolicyBundle_v1.schema.json` specification.
@@ -1680,6 +1761,256 @@ fn push_risk(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Policy Bundle Preview
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Policy preview sample for would-allow/deny evaluation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyPreviewSample {
+    /// Sample identifier for stable reporting.
+    pub id: String,
+    /// Invocation request to evaluate.
+    pub invoke_request: InvokeRequest,
+    /// Transport mode to evaluate (default: LAN).
+    #[serde(default = "default_transport_mode")]
+    pub transport: TransportMode,
+    /// Whether checkpoints are considered fresh.
+    #[serde(default = "default_true")]
+    pub checkpoint_fresh: bool,
+    /// Whether revocations are considered fresh.
+    #[serde(default = "default_true")]
+    pub revocation_fresh: bool,
+    /// Whether execution approval is required.
+    #[serde(default)]
+    pub execution_approval_required: bool,
+    /// Sanitizer receipts to apply (optional).
+    #[serde(default)]
+    pub sanitizer_receipts: Vec<SanitizerReceipt>,
+    /// Related object IDs (optional).
+    #[serde(default)]
+    pub related_object_ids: Vec<ObjectId>,
+    /// Explicit request object ID override (optional).
+    #[serde(default)]
+    pub request_object_id: Option<ObjectId>,
+    /// Explicit input hash override (optional).
+    #[serde(default)]
+    pub request_input_hash: Option<[u8; 32]>,
+    /// Safety tier for the requested operation.
+    #[serde(default = "default_safety_tier")]
+    pub safety_tier: SafetyTier,
+    /// Optional principal override (otherwise derived from capability token).
+    #[serde(default)]
+    pub principal: Option<String>,
+    /// Optional capability id override (otherwise derived from capability token).
+    #[serde(default)]
+    pub capability_id: Option<String>,
+    /// Optional explicit provenance record (otherwise derived from request/zone).
+    #[serde(default)]
+    pub provenance_record: Option<ProvenanceRecord>,
+    /// Optional override for evaluation time (epoch ms).
+    #[serde(default)]
+    pub now_ms: Option<u64>,
+    /// Optional device posture attestation.
+    #[serde(default)]
+    pub posture_attestation: Option<crate::posture::PostureAttestation>,
+}
+
+impl PolicyPreviewSample {
+    fn to_simulation_input(&self, zone_policy: ZonePolicyObject) -> PolicySimulationInput {
+        PolicySimulationInput {
+            zone_policy,
+            invoke_request: self.invoke_request.clone(),
+            transport: self.transport,
+            checkpoint_fresh: self.checkpoint_fresh,
+            revocation_fresh: self.revocation_fresh,
+            execution_approval_required: self.execution_approval_required,
+            sanitizer_receipts: self.sanitizer_receipts.clone(),
+            related_object_ids: self.related_object_ids.clone(),
+            request_object_id: self.request_object_id,
+            request_input_hash: self.request_input_hash,
+            safety_tier: self.safety_tier,
+            principal: self.principal.clone(),
+            capability_id: self.capability_id.clone(),
+            provenance_record: self.provenance_record.clone(),
+            now_ms: self.now_ms,
+            posture_attestation: self.posture_attestation.clone(),
+        }
+    }
+}
+
+/// Preview decision classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyPreviewDecision {
+    Allow,
+    Deny,
+    RequireApproval,
+}
+
+/// Preview delta classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyPreviewDelta {
+    WouldAllow,
+    WouldDeny,
+    WouldRequireApproval,
+    ReasonChanged,
+}
+
+/// Preview evaluation for a single sample.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyPreviewEntry {
+    pub sample_id: String,
+    pub before: DecisionReceipt,
+    pub after: DecisionReceipt,
+    pub before_decision: PolicyPreviewDecision,
+    pub after_decision: PolicyPreviewDecision,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delta: Option<PolicyPreviewDelta>,
+}
+
+/// Summary of preview outcomes.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PolicyPreviewSummary {
+    pub total: usize,
+    pub would_allow: usize,
+    pub would_deny: usize,
+    pub would_require_approval: usize,
+    pub reason_changed: usize,
+}
+
+/// Policy bundle preview report.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyPreviewReport {
+    pub zone_id: ZoneId,
+    pub before_bundle_id: String,
+    pub after_bundle_id: String,
+    pub entries: Vec<PolicyPreviewEntry>,
+    pub summary: PolicyPreviewSummary,
+}
+
+/// Errors raised during policy preview.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum PolicyPreviewError {
+    #[error("zone mismatch: {before} vs {after}")]
+    ZoneMismatch { before: ZoneId, after: ZoneId },
+    #[error("missing zone policy in {which} bundle")]
+    MissingZonePolicy { which: &'static str },
+    #[error("policy simulation failed for sample '{sample_id}' ({stage}): {message}")]
+    SimulationFailed {
+        sample_id: String,
+        stage: &'static str,
+        message: String,
+    },
+}
+
+/// Preview a policy bundle change with sample invocations.
+///
+/// # Errors
+/// Returns [`PolicyPreviewError`] if zones mismatch, required policies are missing,
+/// or simulation fails.
+pub fn preview_policy_bundles(
+    before: &PolicyBundleResolved,
+    after: &PolicyBundleResolved,
+    samples: &[PolicyPreviewSample],
+) -> Result<PolicyPreviewReport, PolicyPreviewError> {
+    if before.bundle.zone_id != after.bundle.zone_id {
+        return Err(PolicyPreviewError::ZoneMismatch {
+            before: before.bundle.zone_id.clone(),
+            after: after.bundle.zone_id.clone(),
+        });
+    }
+
+    let zone_policy_before = resolve_zone_policy(before, &mut Vec::new())
+        .ok_or(PolicyPreviewError::MissingZonePolicy { which: "before" })?;
+    let zone_policy_after = resolve_zone_policy(after, &mut Vec::new())
+        .ok_or(PolicyPreviewError::MissingZonePolicy { which: "after" })?;
+
+    let mut entries = Vec::with_capacity(samples.len());
+    let mut summary = PolicyPreviewSummary::default();
+
+    for sample in samples {
+        let before_input = sample.to_simulation_input(zone_policy_before.clone());
+        let after_input = sample.to_simulation_input(zone_policy_after.clone());
+
+        let before_receipt = simulate_policy_decision(&before_input).map_err(|err| {
+            PolicyPreviewError::SimulationFailed {
+                sample_id: sample.id.clone(),
+                stage: "before",
+                message: err.to_string(),
+            }
+        })?;
+        let after_receipt = simulate_policy_decision(&after_input).map_err(|err| {
+            PolicyPreviewError::SimulationFailed {
+                sample_id: sample.id.clone(),
+                stage: "after",
+                message: err.to_string(),
+            }
+        })?;
+
+        let before_decision = preview_decision_kind(&before_receipt);
+        let after_decision = preview_decision_kind(&after_receipt);
+        let delta = preview_delta(&before_receipt, &after_receipt);
+        if let Some(change) = delta {
+            match change {
+                PolicyPreviewDelta::WouldAllow => summary.would_allow += 1,
+                PolicyPreviewDelta::WouldDeny => summary.would_deny += 1,
+                PolicyPreviewDelta::WouldRequireApproval => summary.would_require_approval += 1,
+                PolicyPreviewDelta::ReasonChanged => summary.reason_changed += 1,
+            }
+        }
+        summary.total += 1;
+
+        entries.push(PolicyPreviewEntry {
+            sample_id: sample.id.clone(),
+            before: before_receipt,
+            after: after_receipt,
+            before_decision,
+            after_decision,
+            delta,
+        });
+    }
+
+    Ok(PolicyPreviewReport {
+        zone_id: before.bundle.zone_id.clone(),
+        before_bundle_id: before.bundle.bundle_id.clone(),
+        after_bundle_id: after.bundle.bundle_id.clone(),
+        entries,
+        summary,
+    })
+}
+
+fn preview_decision_kind(receipt: &DecisionReceipt) -> PolicyPreviewDecision {
+    match receipt.decision {
+        Decision::Allow => PolicyPreviewDecision::Allow,
+        Decision::Deny => {
+            if receipt.reason_code.starts_with("approval.") {
+                PolicyPreviewDecision::RequireApproval
+            } else {
+                PolicyPreviewDecision::Deny
+            }
+        }
+    }
+}
+
+fn preview_delta(before: &DecisionReceipt, after: &DecisionReceipt) -> Option<PolicyPreviewDelta> {
+    let before_decision = preview_decision_kind(before);
+    let after_decision = preview_decision_kind(after);
+
+    if before_decision != after_decision {
+        return Some(match after_decision {
+            PolicyPreviewDecision::Allow => PolicyPreviewDelta::WouldAllow,
+            PolicyPreviewDecision::Deny => PolicyPreviewDelta::WouldDeny,
+            PolicyPreviewDecision::RequireApproval => PolicyPreviewDelta::WouldRequireApproval,
+        });
+    }
+    if before.reason_code != after.reason_code {
+        return Some(PolicyPreviewDelta::ReasonChanged);
+    }
+    None
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Resource Objects
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -2669,9 +3000,10 @@ fn sanitizer_receipt_object_id(receipt: &SanitizerReceipt) -> ObjectId {
 mod tests {
     use super::*;
     use crate::{
-        ApprovalScope, CapabilityGrant, CapabilityId, ConfidentialityLevel, ConnectorId, Decision,
-        ElevationScope, IntegrityLevel, NodeId, NodeSignature, ObjectId, OperationId, PrincipalId,
-        Provenance, ProvenanceRecord, ProvenanceViolation, SafetyTier, TaintFlag, ZoneId,
+        ApprovalScope, CapabilityGrant, CapabilityId, CapabilityToken, ConfidentialityLevel,
+        ConnectorId, Decision, ElevationScope, IntegrityLevel, NodeId, NodeSignature, ObjectId,
+        OperationId, PrincipalId, Provenance, ProvenanceRecord, ProvenanceViolation, RequestId,
+        SafetyTier, TaintFlag, ZoneId,
     };
     use fcp_cbor::SchemaId;
     use semver::Version;
@@ -2693,6 +3025,48 @@ mod tests {
 
     fn test_signature() -> NodeSignature {
         NodeSignature::new(NodeId::new("test-node"), [0u8; 64], 1_000)
+    }
+
+    fn test_invoke_request(zone_id: ZoneId) -> InvokeRequest {
+        InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::new("req-1"),
+            connector_id: ConnectorId::new("test", "request_response", "1.0.0")
+                .expect("connector id"),
+            operation: OperationId::from_static("op.test"),
+            zone_id,
+            input: serde_json::json!({ "example": true }),
+            capability_token: CapabilityToken::test_token(),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        }
+    }
+
+    fn preview_sample(sample_id: &str, invoke: InvokeRequest) -> PolicyPreviewSample {
+        PolicyPreviewSample {
+            id: sample_id.to_string(),
+            invoke_request: invoke,
+            transport: TransportMode::Lan,
+            checkpoint_fresh: true,
+            revocation_fresh: true,
+            execution_approval_required: false,
+            sanitizer_receipts: Vec::new(),
+            related_object_ids: Vec::new(),
+            request_object_id: None,
+            request_input_hash: None,
+            safety_tier: SafetyTier::Safe,
+            principal: Some("user:alice".to_string()),
+            capability_id: Some("cap.all".to_string()),
+            provenance_record: None,
+            now_ms: None,
+            posture_attestation: None,
+        }
     }
 
     fn minimal_zone_policy() -> ZonePolicyObject {
@@ -3085,6 +3459,75 @@ mod tests {
         let codes: BTreeSet<PolicyRiskCode> = diff.risk.flags.iter().map(|f| f.code).collect();
 
         assert!(codes.contains(&PolicyRiskCode::IntegrityLowered));
+    }
+
+    #[test]
+    fn policy_bundle_preview_reports_decision_deltas() {
+        let zone = ZoneId::work();
+        let before_policy = test_zone_policy(zone.clone());
+        let mut after_policy = test_zone_policy(zone.clone());
+        after_policy.capability_deny.push(PolicyPattern {
+            pattern: "cap.all".to_string(),
+        });
+
+        let before_bundle = policy_bundle(
+            "bundle-before",
+            zone.clone(),
+            vec![policy_ref("policy-1", "fcp.core:ZonePolicy@1.0")],
+        );
+        let after_bundle = policy_bundle(
+            "bundle-after",
+            zone.clone(),
+            vec![policy_ref("policy-1", "fcp.core:ZonePolicy@1.0")],
+        );
+
+        let mut before_objects = BTreeMap::new();
+        before_objects.insert(
+            "policy-1".to_string(),
+            PolicyBundleObject::ZonePolicy(before_policy),
+        );
+        let mut after_objects = BTreeMap::new();
+        after_objects.insert(
+            "policy-1".to_string(),
+            PolicyBundleObject::ZonePolicy(after_policy),
+        );
+
+        let before_resolved = PolicyBundleResolved::new(before_bundle, before_objects);
+        let after_resolved = PolicyBundleResolved::new(after_bundle, after_objects);
+
+        let invoke = test_invoke_request(zone);
+        let allow_sample = preview_sample("allow-to-deny", invoke.clone());
+
+        let mut require_sample = preview_sample("require-approval", invoke);
+        require_sample.execution_approval_required = true;
+
+        let report = preview_policy_bundles(
+            &before_resolved,
+            &after_resolved,
+            &[allow_sample, require_sample],
+        )
+        .expect("preview report");
+
+        assert_eq!(report.entries.len(), 2);
+        assert_eq!(
+            report.entries[0].before_decision,
+            PolicyPreviewDecision::Allow
+        );
+        assert_eq!(
+            report.entries[0].after_decision,
+            PolicyPreviewDecision::Deny
+        );
+        assert!(report.entries[0].delta.is_some());
+
+        assert_eq!(
+            report.entries[1].before_decision,
+            PolicyPreviewDecision::RequireApproval
+        );
+        assert_eq!(
+            report.entries[1].after_decision,
+            PolicyPreviewDecision::Deny
+        );
+        assert_eq!(report.summary.would_deny, 2);
     }
 
     #[test]

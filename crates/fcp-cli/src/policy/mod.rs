@@ -8,16 +8,22 @@ use std::io::{self, Read};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use chrono::{DateTime, Utc};
 use clap::{Args, Subcommand};
 use fcp_cbor::SchemaId;
 use fcp_core::{
     CapabilityObject, DecisionReceipt, DecisionReceiptPolicy, InvokeRequest, ObjectId,
-    PolicyBundle, PolicyBundleObject, PolicyBundleResolved, PolicySimulationError,
-    PolicySimulationInput, Provenance, ResourceObject, RoleObject, ZoneDefinitionObject,
-    ZonePolicyObject, diff_policy_bundles,
+    PolicyBundle, PolicyBundleObject, PolicyBundlePolicyRef, PolicyBundleResolved,
+    PolicyBundleSignature, PolicyPreviewSample, PolicySimulationError, PolicySimulationInput,
+    Provenance, ResourceObject, RoleObject, ZoneDefinitionObject, ZoneId, ZonePolicyObject,
+    compute_policy_bundle_hash, diff_policy_bundles, preview_policy_bundles,
 };
+use fcp_crypto::ed25519::{Ed25519SigningKey, SECRET_KEY_SIZE};
+use hex::decode as hex_decode;
 use semver::Version;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Arguments for the `fcp policy` command.
@@ -102,8 +108,16 @@ pub struct BundleArgs {
 /// Policy bundle subcommands.
 #[derive(Subcommand, Debug)]
 pub enum BundleCommands {
+    /// Create a new policy bundle.
+    Create(BundleCreateArgs),
     /// Diff two policy bundles (resolved objects required).
     Diff(BundleDiffArgs),
+    /// Preview policy changes for a bundle diff with sample invocations.
+    Preview(BundlePreviewArgs),
+    /// Apply a policy bundle to a state file.
+    Apply(BundleApplyArgs),
+    /// Roll back policy state to a previous bundle.
+    Rollback(BundleRollbackArgs),
 }
 
 /// Arguments for `fcp policy bundle diff`.
@@ -130,6 +144,118 @@ pub struct BundleDiffArgs {
     pub json: bool,
 }
 
+/// Arguments for `fcp policy bundle create`.
+#[derive(Args, Debug)]
+pub struct BundleCreateArgs {
+    /// Bundle identifier.
+    #[arg(long)]
+    pub bundle_id: String,
+
+    /// Zone identifier (e.g. z:work).
+    #[arg(long)]
+    pub zone: String,
+
+    /// Monotonic policy sequence number.
+    #[arg(long)]
+    pub policy_seq: u64,
+
+    /// Path to policy reference list (JSON array).
+    #[arg(long)]
+    pub policies: PathBuf,
+
+    /// Previous bundle id (optional).
+    #[arg(long)]
+    pub previous_bundle: Option<String>,
+
+    /// Creation timestamp (RFC3339). Defaults to now.
+    #[arg(long)]
+    pub created_at: Option<String>,
+
+    /// Signing key id for the bundle signature.
+    #[arg(long)]
+    pub key_id: String,
+
+    /// Signing key seed as hex (32 bytes).
+    #[arg(long, conflicts_with = "signing_key_file")]
+    pub signing_key_hex: Option<String>,
+
+    /// Path to signing key seed hex (32 bytes).
+    #[arg(long, conflicts_with = "signing_key_hex")]
+    pub signing_key_file: Option<PathBuf>,
+
+    /// Output path for the bundle JSON (stdout if omitted).
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+}
+
+/// Arguments for `fcp policy bundle preview`.
+#[derive(Args, Debug)]
+pub struct BundlePreviewArgs {
+    /// Path to the "before" bundle JSON.
+    #[arg(long)]
+    pub before: PathBuf,
+
+    /// Path to the "after" bundle JSON.
+    #[arg(long)]
+    pub after: PathBuf,
+
+    /// JSON map of `object_id` -> policy object for the "before" bundle.
+    #[arg(long)]
+    pub objects_before: PathBuf,
+
+    /// JSON map of `object_id` -> policy object for the "after" bundle.
+    #[arg(long)]
+    pub objects_after: PathBuf,
+
+    /// Preview samples (JSON array or object with `samples` field).
+    #[arg(long)]
+    pub samples: PathBuf,
+
+    /// Output JSON report. Default true.
+    #[arg(long, default_value_t = true)]
+    pub json: bool,
+}
+
+/// Arguments for `fcp policy bundle apply`.
+#[derive(Args, Debug)]
+pub struct BundleApplyArgs {
+    /// Bundle JSON to apply.
+    #[arg(long)]
+    pub bundle: PathBuf,
+
+    /// Policy bundle state file to write.
+    #[arg(long)]
+    pub state: PathBuf,
+
+    /// Emit a plan only (do not write state).
+    #[arg(long, default_value_t = false)]
+    pub plan: bool,
+
+    /// Output JSON. Default true.
+    #[arg(long, default_value_t = true)]
+    pub json: bool,
+}
+
+/// Arguments for `fcp policy bundle rollback`.
+#[derive(Args, Debug)]
+pub struct BundleRollbackArgs {
+    /// Bundle JSON to roll back to.
+    #[arg(long)]
+    pub to: PathBuf,
+
+    /// Policy bundle state file to write.
+    #[arg(long)]
+    pub state: PathBuf,
+
+    /// Emit a plan only (do not write state).
+    #[arg(long, default_value_t = false)]
+    pub plan: bool,
+
+    /// Output JSON. Default true.
+    #[arg(long, default_value_t = true)]
+    pub json: bool,
+}
+
 /// Run the policy command.
 pub fn run(args: &PolicyArgs) -> Result<()> {
     match &args.command {
@@ -151,7 +277,11 @@ fn run_simulate(args: &SimulateArgs) -> Result<()> {
 
 fn run_bundle(args: &BundleArgs) -> Result<()> {
     match &args.command {
+        BundleCommands::Create(create_args) => run_bundle_create(create_args),
         BundleCommands::Diff(diff_args) => run_bundle_diff(diff_args),
+        BundleCommands::Preview(preview_args) => run_bundle_preview(preview_args),
+        BundleCommands::Apply(apply_args) => run_bundle_apply(apply_args),
+        BundleCommands::Rollback(rollback_args) => run_bundle_rollback(rollback_args),
     }
 }
 
@@ -185,6 +315,145 @@ fn run_bundle_diff(args: &BundleDiffArgs) -> Result<()> {
     output_json_or_human(&diff, args.json)
 }
 
+fn run_bundle_create(args: &BundleCreateArgs) -> Result<()> {
+    let zone_id: ZoneId = args
+        .zone
+        .parse()
+        .with_context(|| format!("invalid zone id '{}'", args.zone))?;
+    let created_at = parse_created_at(args.created_at.as_deref())?;
+    let policies = load_policy_refs(&args.policies)?;
+
+    let bundle_hash = compute_policy_bundle_hash(
+        &args.bundle_id,
+        &zone_id,
+        args.policy_seq,
+        created_at,
+        args.previous_bundle.as_deref(),
+        &policies,
+    )
+    .map_err(|err| anyhow::anyhow!("failed to compute bundle hash: {err}"))?;
+
+    let signing_key = load_signing_key(args)?;
+    let mut signed_fields = vec![
+        "format".to_string(),
+        "schema_version".to_string(),
+        "bundle_id".to_string(),
+        "zone_id".to_string(),
+        "policy_seq".to_string(),
+        "hash_algo".to_string(),
+        "bundle_hash".to_string(),
+        "policies".to_string(),
+    ];
+    if created_at.is_some() {
+        signed_fields.push("created_at".to_string());
+    }
+    if args.previous_bundle.is_some() {
+        signed_fields.push("previous_bundle".to_string());
+    }
+
+    let placeholder_signature =
+        PolicyBundleSignature::new(args.key_id.clone(), "pending", signed_fields.clone());
+
+    let mut builder = PolicyBundle::builder(&args.bundle_id, zone_id, args.policy_seq)
+        .bundle_hash(bundle_hash)
+        .policies(policies)
+        .signature(placeholder_signature);
+    if let Some(created_at) = created_at {
+        builder = builder.created_at(created_at);
+    }
+    if let Some(previous) = &args.previous_bundle {
+        builder = builder.previous_bundle(previous.clone());
+    }
+
+    let mut bundle = builder
+        .build()
+        .map_err(|err| anyhow::anyhow!("policy bundle build failed: {err}"))?;
+
+    let signing_bytes = bundle
+        .signing_bytes()
+        .map_err(|err| anyhow::anyhow!("failed to compute signing bytes: {err}"))?;
+    let signature = signing_key.sign(&signing_bytes);
+    let signature_b64 = BASE64_STANDARD.encode(signature.to_bytes());
+    bundle.signature =
+        PolicyBundleSignature::new(args.key_id.clone(), signature_b64, signed_fields);
+    bundle
+        .validate()
+        .map_err(|err| anyhow::anyhow!("policy bundle validation failed: {err}"))?;
+
+    write_bundle_output(&bundle, args.out.as_ref())
+}
+
+fn run_bundle_preview(args: &BundlePreviewArgs) -> Result<()> {
+    let before_bundle = load_policy_bundle(&args.before)?;
+    let after_bundle = load_policy_bundle(&args.after)?;
+    let before_objects_raw = load_object_map(&args.objects_before)?;
+    let after_objects_raw = load_object_map(&args.objects_after)?;
+    let samples = load_preview_samples(&args.samples)?;
+
+    let before_objects = resolve_bundle_objects(&before_bundle, &before_objects_raw)?;
+    let after_objects = resolve_bundle_objects(&after_bundle, &after_objects_raw)?;
+
+    let before_resolved = PolicyBundleResolved::new(before_bundle, before_objects);
+    let after_resolved = PolicyBundleResolved::new(after_bundle, after_objects);
+
+    let report = preview_policy_bundles(&before_resolved, &after_resolved, &samples)
+        .map_err(|err| anyhow::anyhow!("policy bundle preview failed: {err}"))?;
+
+    output_json_or_human(&report, args.json)
+}
+
+#[derive(Debug, Serialize)]
+struct BundleApplyPlan {
+    plan_type: String,
+    zone_id: String,
+    bundle_id: String,
+    state_path: String,
+}
+
+fn run_bundle_apply(args: &BundleApplyArgs) -> Result<()> {
+    if !args.plan {
+        anyhow::bail!("bundle apply requires --plan (execution is not supported yet)");
+    }
+
+    let bundle = load_policy_bundle(&args.bundle)?;
+    let zone_id = bundle.zone_id.to_string();
+    let bundle_id = bundle.bundle_id;
+    let plan = BundleApplyPlan {
+        plan_type: "bundle_apply".to_string(),
+        zone_id,
+        bundle_id,
+        state_path: args.state.display().to_string(),
+    };
+
+    output_json_or_human(&plan, args.json)
+}
+
+#[derive(Debug, Serialize)]
+struct BundleRollbackPlan {
+    plan_type: String,
+    zone_id: String,
+    target_bundle_id: String,
+    state_path: String,
+}
+
+fn run_bundle_rollback(args: &BundleRollbackArgs) -> Result<()> {
+    if !args.plan {
+        anyhow::bail!("bundle rollback requires --plan (execution is not supported yet)");
+    }
+
+    let bundle = load_policy_bundle(&args.to)?;
+    let zone_id = bundle.zone_id.to_string();
+    let target_bundle_id = bundle.bundle_id;
+    let plan = BundleRollbackPlan {
+        plan_type: "bundle_rollback".to_string(),
+        zone_id,
+        target_bundle_id,
+        state_path: args.state.display().to_string(),
+    };
+
+    output_json_or_human(&plan, args.json)
+}
+
 fn load_policy_bundle(path: &PathBuf) -> Result<PolicyBundle> {
     let raw = read_input(path)?;
     let bundle: PolicyBundle = serde_json::from_str(&raw)
@@ -200,6 +469,86 @@ fn load_object_map(path: &PathBuf) -> Result<BTreeMap<String, Value>> {
     let map: BTreeMap<String, Value> = serde_json::from_str(&raw)
         .with_context(|| format!("failed to parse object map {}", path.display()))?;
     Ok(map)
+}
+
+fn load_policy_refs(path: &PathBuf) -> Result<Vec<PolicyBundlePolicyRef>> {
+    let raw = read_input(path)?;
+    let refs: Vec<PolicyBundlePolicyRef> = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse policy refs {}", path.display()))?;
+    if refs.is_empty() {
+        anyhow::bail!("policy refs list is empty");
+    }
+    for (idx, policy_ref) in refs.iter().enumerate() {
+        policy_ref
+            .validate()
+            .map_err(|err| anyhow::anyhow!("invalid policy ref at index {idx}: {err}"))?;
+    }
+    Ok(refs)
+}
+
+#[derive(Debug, Deserialize)]
+struct PreviewSamplesFile {
+    samples: Vec<PolicyPreviewSample>,
+}
+
+fn load_preview_samples(path: &PathBuf) -> Result<Vec<PolicyPreviewSample>> {
+    let raw = read_input(path)?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("preview samples input is empty");
+    }
+    if let Ok(samples) = serde_json::from_str::<Vec<PolicyPreviewSample>>(trimmed) {
+        return Ok(samples);
+    }
+    if let Ok(wrapper) = serde_json::from_str::<PreviewSamplesFile>(trimmed) {
+        return Ok(wrapper.samples);
+    }
+    anyhow::bail!("failed to parse preview samples as array or object with 'samples'")
+}
+
+fn parse_created_at(value: Option<&str>) -> Result<Option<DateTime<Utc>>> {
+    let Some(raw) = value else {
+        return Ok(None);
+    };
+    let parsed = DateTime::parse_from_rfc3339(raw)
+        .with_context(|| format!("invalid RFC3339 timestamp '{raw}'"))?;
+    Ok(Some(parsed.with_timezone(&Utc)))
+}
+
+fn load_signing_key(args: &BundleCreateArgs) -> Result<Ed25519SigningKey> {
+    let key_hex = if let Some(hex) = &args.signing_key_hex {
+        hex.clone()
+    } else if let Some(path) = &args.signing_key_file {
+        fs::read_to_string(path)
+            .with_context(|| format!("failed to read signing key {}", path.display()))?
+    } else {
+        anyhow::bail!("signing key is required (--signing-key-hex or --signing-key-file)");
+    };
+
+    let key_hex = key_hex.trim();
+    let bytes = hex_decode(key_hex).context("failed to decode signing key hex")?;
+    if bytes.len() != SECRET_KEY_SIZE {
+        anyhow::bail!(
+            "signing key must be {SECRET_KEY_SIZE} bytes, got {}",
+            bytes.len()
+        );
+    }
+    let mut arr = [0u8; SECRET_KEY_SIZE];
+    arr.copy_from_slice(&bytes);
+    Ed25519SigningKey::from_bytes(&arr)
+        .map_err(|err| anyhow::anyhow!("failed to load signing key: {err}"))
+}
+
+fn write_bundle_output(bundle: &PolicyBundle, out: Option<&PathBuf>) -> Result<()> {
+    let json = serde_json::to_string_pretty(bundle)?;
+    if let Some(path) = out {
+        fs::write(path, json)
+            .with_context(|| format!("failed to write bundle {}", path.display()))?;
+        return Ok(());
+    }
+
+    println!("{json}");
+    Ok(())
 }
 
 fn resolve_bundle_objects(

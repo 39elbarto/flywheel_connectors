@@ -3,7 +3,7 @@
 //! This module defines zone policy objects and a minimal evaluation pipeline
 //! that produces stable decision reason codes and decision receipts.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 
 use chrono::{DateTime, Utc};
@@ -11,13 +11,14 @@ use fcp_cbor::SchemaId;
 use fcp_crypto::{canonical_signing_bytes, canonicalize::to_deterministic_cbor};
 use semver::Version;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::{
-    ApprovalScope, ApprovalToken, CapabilityGrant, CapabilityId, ConfidentialityLevel, ConnectorId,
-    Decision, DecisionReceipt, FlowCheckResult, IntegrityLevel, InvokeRequest, NodeId,
-    NodeSignature, ObjectHeader, ObjectId, OperationId, PrincipalId, Provenance, ProvenanceRecord,
-    ProvenanceViolation, RoleObject, SafetyTier, SanitizerReceipt, TaintFlag, TaintFlags,
-    TaintLevel, UsageMetricKind, ZoneId,
+    ApprovalScope, ApprovalToken, CapabilityGrant, CapabilityId, CapabilityObject,
+    ConfidentialityLevel, ConnectorId, Decision, DecisionReceipt, FlowCheckResult, IntegrityLevel,
+    InvokeRequest, NodeId, NodeSignature, ObjectHeader, ObjectId, OperationId, PrincipalId,
+    Provenance, ProvenanceRecord, ProvenanceViolation, RoleObject, SafetyTier, SanitizerReceipt,
+    TaintFlag, TaintFlags, TaintLevel, UsageMetricKind, ZoneId,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -620,6 +621,1062 @@ fn hash_has_blake3_prefix(value: &str) -> bool {
     value.strip_prefix("blake3-256:").is_some_and(|hex| {
         hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
     })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Policy Bundle Diff + Risk Summary
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Resolved policy bundle with referenced objects loaded.
+#[derive(Debug, Clone)]
+pub struct PolicyBundleResolved {
+    pub bundle: PolicyBundle,
+    pub objects: BTreeMap<String, PolicyBundleObject>,
+}
+
+impl PolicyBundleResolved {
+    #[allow(clippy::missing_const_for_fn)]
+    #[must_use]
+    pub fn new(bundle: PolicyBundle, objects: BTreeMap<String, PolicyBundleObject>) -> Self {
+        Self { bundle, objects }
+    }
+}
+
+/// Policy bundle object variants.
+#[derive(Debug, Clone)]
+pub enum PolicyBundleObject {
+    ZonePolicy(ZonePolicyObject),
+    ZoneDefinition(ZoneDefinitionObject),
+    Role(RoleObject),
+    Resource(ResourceObject),
+    Capability(CapabilityObject),
+}
+
+/// Policy bundle reference change (same `object_id`, different hash/schema).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyBundlePolicyRefChange {
+    pub object_id: String,
+    pub schema_id_before: String,
+    pub schema_id_after: String,
+    pub hash_before: String,
+    pub hash_after: String,
+}
+
+/// Zone policy diff (stable ordering).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ZonePolicyDiff {
+    pub added: PolicyListDiff,
+    pub removed: PolicyListDiff,
+    pub changed: PolicyChangedFields,
+}
+
+/// List diff for policy allow/deny/ceiling sets.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PolicyListDiff {
+    pub principal_allow: Vec<String>,
+    pub principal_deny: Vec<String>,
+    pub connector_allow: Vec<String>,
+    pub connector_deny: Vec<String>,
+    pub capability_allow: Vec<String>,
+    pub capability_deny: Vec<String>,
+    pub capability_ceiling: Vec<String>,
+}
+
+/// Changed scalar fields in a policy object.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PolicyChangedFields {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transport_policy: Option<TransportPolicyChange>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision_receipts: Option<Change<Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requires_posture: Option<Change<Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage_budget: Option<Change<Value>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransportPolicyChange {
+    pub before: ZoneTransportPolicy,
+    pub after: ZoneTransportPolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Change<T> {
+    pub before: T,
+    pub after: T,
+}
+
+/// Zone definition diff (JSON field-level).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ZoneDefinitionDiff {
+    pub added: BTreeMap<String, Value>,
+    pub removed: BTreeMap<String, Value>,
+    pub changed: BTreeMap<String, Change<Value>>,
+}
+
+/// Role diff.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoleDiff {
+    pub name: String,
+    pub added_caps: Vec<String>,
+    pub removed_caps: Vec<String>,
+    pub added_includes: Vec<String>,
+    pub removed_includes: Vec<String>,
+}
+
+/// Resource diff (integrity/confidentiality only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceDiff {
+    pub resource_uri: String,
+    pub integrity_before: IntegrityLevel,
+    pub integrity_after: IntegrityLevel,
+    pub confidentiality_before: ConfidentialityLevel,
+    pub confidentiality_after: ConfidentialityLevel,
+}
+
+/// Capability object diff.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilityDiff {
+    pub object_id: String,
+    pub added_caps: Vec<String>,
+    pub removed_caps: Vec<String>,
+    pub resource_allow_added: Vec<String>,
+    pub resource_allow_removed: Vec<String>,
+}
+
+/// Risk summary with stable ordering.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PolicyRiskSummary {
+    pub flags: Vec<PolicyRiskFlag>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyRiskFlag {
+    pub code: PolicyRiskCode,
+    pub severity: PolicyRiskSeverity,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyRiskCode {
+    PrincipalAllowExpanded,
+    ConnectorAllowExpanded,
+    CapabilityAllowExpanded,
+    CapabilityCeilingExpanded,
+    CapabilityDenyReduced,
+    RoleExpanded,
+    EgressExpanded,
+    TransportDerpEnabled,
+    TransportFunnelEnabled,
+    TransportLanEnabled,
+    IntegrityLowered,
+    ConfidentialityLowered,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyRiskSeverity {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+/// Diff output for policy bundles.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyBundleDiff {
+    pub zone_id: ZoneId,
+    pub before_bundle_id: String,
+    pub after_bundle_id: String,
+    pub added: Vec<PolicyBundlePolicyRef>,
+    pub removed: Vec<PolicyBundlePolicyRef>,
+    pub changed: Vec<PolicyBundlePolicyRefChange>,
+    pub zone_policy: Option<ZonePolicyDiff>,
+    pub zone_definition: Option<ZoneDefinitionDiff>,
+    pub roles: Vec<RoleDiff>,
+    pub resources: Vec<ResourceDiff>,
+    pub capabilities: Vec<CapabilityDiff>,
+    pub missing_objects: Vec<String>,
+    pub risk: PolicyRiskSummary,
+}
+
+/// Errors raised during policy diffing.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum PolicyDiffError {
+    #[error("zone mismatch: {before} vs {after}")]
+    ZoneMismatch { before: ZoneId, after: ZoneId },
+    #[error("serialization failed: {0}")]
+    Serialization(String),
+}
+
+/// Diff two resolved policy bundles with deterministic ordering.
+///
+/// # Errors
+/// Returns [`PolicyDiffError`] if zones mismatch or serialization fails.
+pub fn diff_policy_bundles(
+    before: &PolicyBundleResolved,
+    after: &PolicyBundleResolved,
+) -> Result<PolicyBundleDiff, PolicyDiffError> {
+    if before.bundle.zone_id != after.bundle.zone_id {
+        return Err(PolicyDiffError::ZoneMismatch {
+            before: before.bundle.zone_id.clone(),
+            after: after.bundle.zone_id.clone(),
+        });
+    }
+
+    let (added, removed, changed) = diff_policy_refs(&before.bundle, &after.bundle);
+
+    let mut missing_objects = Vec::new();
+    let zone_policy_before = resolve_zone_policy(before, &mut missing_objects);
+    let zone_policy_after = resolve_zone_policy(after, &mut missing_objects);
+    let zone_policy = match (zone_policy_before, zone_policy_after) {
+        (Some(before_policy), Some(after_policy)) => {
+            Some(diff_zone_policy(before_policy, after_policy)?)
+        }
+        _ => None,
+    };
+
+    let zone_definition_before = resolve_zone_definition(before, &mut missing_objects);
+    let zone_definition_after = resolve_zone_definition(after, &mut missing_objects);
+    let zone_definition = match (zone_definition_before, zone_definition_after) {
+        (Some(before_def), Some(after_def)) => Some(diff_zone_definition(before_def, after_def)?),
+        _ => None,
+    };
+
+    let roles = diff_roles(before, after, &mut missing_objects);
+    let resources = diff_resources(before, after, &mut missing_objects);
+    let capabilities = diff_capabilities(before, after, &mut missing_objects);
+
+    let risk = compute_policy_risk_summary(
+        zone_policy.as_ref(),
+        zone_definition_before,
+        zone_definition_after,
+        &roles,
+        &resources,
+        &capabilities,
+    );
+
+    Ok(PolicyBundleDiff {
+        zone_id: before.bundle.zone_id.clone(),
+        before_bundle_id: before.bundle.bundle_id.clone(),
+        after_bundle_id: after.bundle.bundle_id.clone(),
+        added,
+        removed,
+        changed,
+        zone_policy,
+        zone_definition,
+        roles,
+        resources,
+        capabilities,
+        missing_objects,
+        risk,
+    })
+}
+
+fn diff_policy_refs(
+    before: &PolicyBundle,
+    after: &PolicyBundle,
+) -> (
+    Vec<PolicyBundlePolicyRef>,
+    Vec<PolicyBundlePolicyRef>,
+    Vec<PolicyBundlePolicyRefChange>,
+) {
+    let before_map = policy_ref_map(before);
+    let after_map = policy_ref_map(after);
+    let before_keys: BTreeSet<String> = before_map.keys().cloned().collect();
+    let after_keys: BTreeSet<String> = after_map.keys().cloned().collect();
+
+    let added = after_keys
+        .difference(&before_keys)
+        .filter_map(|key| after_map.get(key).cloned())
+        .collect::<Vec<_>>();
+    let removed = before_keys
+        .difference(&after_keys)
+        .filter_map(|key| before_map.get(key).cloned())
+        .collect::<Vec<_>>();
+
+    let mut changed = Vec::new();
+    for key in before_keys.intersection(&after_keys) {
+        if let (Some(before_ref), Some(after_ref)) = (before_map.get(key), after_map.get(key)) {
+            if before_ref.schema_id != after_ref.schema_id
+                || before_ref.object_hash != after_ref.object_hash
+            {
+                changed.push(PolicyBundlePolicyRefChange {
+                    object_id: key.clone(),
+                    schema_id_before: before_ref.schema_id.clone(),
+                    schema_id_after: after_ref.schema_id.clone(),
+                    hash_before: before_ref.object_hash.clone(),
+                    hash_after: after_ref.object_hash.clone(),
+                });
+            }
+        }
+    }
+
+    (added, removed, changed)
+}
+
+fn policy_ref_map(bundle: &PolicyBundle) -> BTreeMap<String, PolicyBundlePolicyRef> {
+    bundle
+        .policies
+        .iter()
+        .map(|policy| (policy.object_id.clone(), policy.clone()))
+        .collect()
+}
+
+fn resolve_zone_policy<'a>(
+    bundle: &'a PolicyBundleResolved,
+    missing: &mut Vec<String>,
+) -> Option<&'a ZonePolicyObject> {
+    resolve_object_by_schema(bundle, "ZonePolicy", missing).and_then(|obj| match obj {
+        PolicyBundleObject::ZonePolicy(policy) => Some(policy),
+        _ => None,
+    })
+}
+
+fn resolve_zone_definition<'a>(
+    bundle: &'a PolicyBundleResolved,
+    missing: &mut Vec<String>,
+) -> Option<&'a ZoneDefinitionObject> {
+    resolve_object_by_schema(bundle, "ZoneDefinition", missing).and_then(|obj| match obj {
+        PolicyBundleObject::ZoneDefinition(definition) => Some(definition),
+        _ => None,
+    })
+}
+
+fn resolve_object_by_schema<'a>(
+    bundle: &'a PolicyBundleResolved,
+    schema_name: &str,
+    missing: &mut Vec<String>,
+) -> Option<&'a PolicyBundleObject> {
+    let schema_prefix = format!("fcp.core:{schema_name}@");
+    let policy_ref = bundle
+        .bundle
+        .policies
+        .iter()
+        .find(|policy| policy.schema_id.starts_with(&schema_prefix))?;
+
+    bundle.objects.get(&policy_ref.object_id).map_or_else(
+        || {
+            missing.push(policy_ref.object_id.clone());
+            None
+        },
+        Some,
+    )
+}
+
+fn diff_zone_policy(
+    before: &ZonePolicyObject,
+    after: &ZonePolicyObject,
+) -> Result<ZonePolicyDiff, PolicyDiffError> {
+    let (added, removed) = diff_policy_lists(before, after);
+    let changed = diff_policy_changed(before, after)?;
+
+    Ok(ZonePolicyDiff {
+        added,
+        removed,
+        changed,
+    })
+}
+
+fn diff_zone_definition(
+    before: &ZoneDefinitionObject,
+    after: &ZoneDefinitionObject,
+) -> Result<ZoneDefinitionDiff, PolicyDiffError> {
+    let before_json = serde_json::to_value(before).map_err(|err| {
+        PolicyDiffError::Serialization(format!("zone definition serialize: {err}"))
+    })?;
+    let after_json = serde_json::to_value(after).map_err(|err| {
+        PolicyDiffError::Serialization(format!("zone definition serialize: {err}"))
+    })?;
+
+    diff_json_objects(&before_json, &after_json)
+}
+
+fn diff_policy_lists(
+    before: &ZonePolicyObject,
+    after: &ZonePolicyObject,
+) -> (PolicyListDiff, PolicyListDiff) {
+    let (principal_allow_added, principal_allow_removed) =
+        diff_patterns(&before.principal_allow, &after.principal_allow);
+    let (principal_deny_added, principal_deny_removed) =
+        diff_patterns(&before.principal_deny, &after.principal_deny);
+    let (connector_allow_added, connector_allow_removed) =
+        diff_patterns(&before.connector_allow, &after.connector_allow);
+    let (connector_deny_added, connector_deny_removed) =
+        diff_patterns(&before.connector_deny, &after.connector_deny);
+    let (capability_allow_added, capability_allow_removed) =
+        diff_patterns(&before.capability_allow, &after.capability_allow);
+    let (capability_deny_added, capability_deny_removed) =
+        diff_patterns(&before.capability_deny, &after.capability_deny);
+    let (capability_ceiling_added, capability_ceiling_removed) =
+        diff_capability_ids(&before.capability_ceiling, &after.capability_ceiling);
+
+    let added = PolicyListDiff {
+        principal_allow: principal_allow_added,
+        principal_deny: principal_deny_added,
+        connector_allow: connector_allow_added,
+        connector_deny: connector_deny_added,
+        capability_allow: capability_allow_added,
+        capability_deny: capability_deny_added,
+        capability_ceiling: capability_ceiling_added,
+    };
+    let removed = PolicyListDiff {
+        principal_allow: principal_allow_removed,
+        principal_deny: principal_deny_removed,
+        connector_allow: connector_allow_removed,
+        connector_deny: connector_deny_removed,
+        capability_allow: capability_allow_removed,
+        capability_deny: capability_deny_removed,
+        capability_ceiling: capability_ceiling_removed,
+    };
+
+    (added, removed)
+}
+
+fn diff_policy_changed(
+    before: &ZonePolicyObject,
+    after: &ZonePolicyObject,
+) -> Result<PolicyChangedFields, PolicyDiffError> {
+    let mut changed = PolicyChangedFields::default();
+
+    if transport_policy_changed(&before.transport_policy, &after.transport_policy) {
+        changed.transport_policy = Some(TransportPolicyChange {
+            before: before.transport_policy.clone(),
+            after: after.transport_policy.clone(),
+        });
+    }
+
+    let decision_before = serde_json::to_value(&before.decision_receipts).map_err(|err| {
+        PolicyDiffError::Serialization(format!("decision_receipts serialize: {err}"))
+    })?;
+    let decision_after = serde_json::to_value(&after.decision_receipts).map_err(|err| {
+        PolicyDiffError::Serialization(format!("decision_receipts serialize: {err}"))
+    })?;
+    if decision_before != decision_after {
+        changed.decision_receipts = Some(Change {
+            before: decision_before,
+            after: decision_after,
+        });
+    }
+
+    let posture_before = serde_json::to_value(&before.requires_posture).map_err(|err| {
+        PolicyDiffError::Serialization(format!("requires_posture serialize: {err}"))
+    })?;
+    let posture_after = serde_json::to_value(&after.requires_posture).map_err(|err| {
+        PolicyDiffError::Serialization(format!("requires_posture serialize: {err}"))
+    })?;
+    if posture_before != posture_after {
+        changed.requires_posture = Some(Change {
+            before: posture_before,
+            after: posture_after,
+        });
+    }
+
+    let usage_before = serde_json::to_value(&before.usage_budget)
+        .map_err(|err| PolicyDiffError::Serialization(format!("usage_budget serialize: {err}")))?;
+    let usage_after = serde_json::to_value(&after.usage_budget)
+        .map_err(|err| PolicyDiffError::Serialization(format!("usage_budget serialize: {err}")))?;
+    if usage_before != usage_after {
+        changed.usage_budget = Some(Change {
+            before: usage_before,
+            after: usage_after,
+        });
+    }
+
+    Ok(changed)
+}
+
+fn diff_json_objects(before: &Value, after: &Value) -> Result<ZoneDefinitionDiff, PolicyDiffError> {
+    let before_obj = before
+        .as_object()
+        .ok_or_else(|| PolicyDiffError::Serialization("before is not object".to_string()))?;
+    let after_obj = after
+        .as_object()
+        .ok_or_else(|| PolicyDiffError::Serialization("after is not object".to_string()))?;
+
+    let mut added = BTreeMap::new();
+    let mut removed = BTreeMap::new();
+    let mut changed = BTreeMap::new();
+
+    for (key, value) in before_obj {
+        if !after_obj.contains_key(key) {
+            removed.insert(key.clone(), value.clone());
+        } else if let Some(after_value) = after_obj.get(key) {
+            if after_value != value {
+                changed.insert(
+                    key.clone(),
+                    Change {
+                        before: value.clone(),
+                        after: after_value.clone(),
+                    },
+                );
+            }
+        }
+    }
+
+    for (key, value) in after_obj {
+        if !before_obj.contains_key(key) {
+            added.insert(key.clone(), value.clone());
+        }
+    }
+
+    Ok(ZoneDefinitionDiff {
+        added,
+        removed,
+        changed,
+    })
+}
+
+fn diff_patterns(before: &[PolicyPattern], after: &[PolicyPattern]) -> (Vec<String>, Vec<String>) {
+    let before_set: BTreeSet<String> = before.iter().map(|p| p.pattern.clone()).collect();
+    let after_set: BTreeSet<String> = after.iter().map(|p| p.pattern.clone()).collect();
+
+    let added = after_set
+        .difference(&before_set)
+        .cloned()
+        .collect::<Vec<_>>();
+    let removed = before_set
+        .difference(&after_set)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    (added, removed)
+}
+
+fn diff_capability_ids(
+    before: &[CapabilityId],
+    after: &[CapabilityId],
+) -> (Vec<String>, Vec<String>) {
+    let before_set: BTreeSet<String> = before.iter().map(|c| c.as_str().to_string()).collect();
+    let after_set: BTreeSet<String> = after.iter().map(|c| c.as_str().to_string()).collect();
+
+    let added = after_set
+        .difference(&before_set)
+        .cloned()
+        .collect::<Vec<_>>();
+    let removed = before_set
+        .difference(&after_set)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    (added, removed)
+}
+
+const fn transport_policy_changed(
+    before: &ZoneTransportPolicy,
+    after: &ZoneTransportPolicy,
+) -> bool {
+    before.allow_lan != after.allow_lan
+        || before.allow_derp != after.allow_derp
+        || before.allow_funnel != after.allow_funnel
+}
+
+fn diff_roles(
+    before: &PolicyBundleResolved,
+    after: &PolicyBundleResolved,
+    missing: &mut Vec<String>,
+) -> Vec<RoleDiff> {
+    let before_roles = collect_roles(before, missing);
+    let after_roles = collect_roles(after, missing);
+    let names: BTreeSet<String> = before_roles
+        .keys()
+        .chain(after_roles.keys())
+        .cloned()
+        .collect();
+
+    let mut diffs = Vec::new();
+    for name in names {
+        let before_role = before_roles.get(&name);
+        let after_role = after_roles.get(&name);
+        let (added_caps, removed_caps, added_includes, removed_includes) =
+            diff_role_fields(before_role, after_role);
+
+        if added_caps.is_empty()
+            && removed_caps.is_empty()
+            && added_includes.is_empty()
+            && removed_includes.is_empty()
+        {
+            continue;
+        }
+
+        diffs.push(RoleDiff {
+            name: name.clone(),
+            added_caps,
+            removed_caps,
+            added_includes,
+            removed_includes,
+        });
+    }
+
+    diffs
+}
+
+fn collect_roles(
+    bundle: &PolicyBundleResolved,
+    missing: &mut Vec<String>,
+) -> BTreeMap<String, RoleObject> {
+    let schema_prefix = "fcp.core:RoleObject@";
+    let mut roles = BTreeMap::new();
+
+    for policy_ref in &bundle.bundle.policies {
+        if !policy_ref.schema_id.starts_with(schema_prefix) {
+            continue;
+        }
+        match bundle.objects.get(&policy_ref.object_id) {
+            Some(PolicyBundleObject::Role(role)) => {
+                roles.insert(role.name.clone(), role.clone());
+            }
+            Some(_) => {}
+            None => missing.push(policy_ref.object_id.clone()),
+        }
+    }
+
+    roles
+}
+
+fn diff_role_fields(
+    before: Option<&RoleObject>,
+    after: Option<&RoleObject>,
+) -> (Vec<String>, Vec<String>, Vec<String>, Vec<String>) {
+    let before_caps = before.map_or_else(BTreeSet::new, |role| {
+        role.caps.iter().map(capability_grant_key).collect()
+    });
+    let after_caps = after.map_or_else(BTreeSet::new, |role| {
+        role.caps.iter().map(capability_grant_key).collect()
+    });
+
+    let added_caps = after_caps
+        .difference(&before_caps)
+        .cloned()
+        .collect::<Vec<_>>();
+    let removed_caps = before_caps
+        .difference(&after_caps)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let before_includes = before.map_or_else(BTreeSet::new, |role| {
+        role.includes.iter().map(ToString::to_string).collect()
+    });
+    let after_includes = after.map_or_else(BTreeSet::new, |role| {
+        role.includes.iter().map(ToString::to_string).collect()
+    });
+
+    let added_includes = after_includes
+        .difference(&before_includes)
+        .cloned()
+        .collect::<Vec<_>>();
+    let removed_includes = before_includes
+        .difference(&after_includes)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    (added_caps, removed_caps, added_includes, removed_includes)
+}
+
+fn capability_grant_key(grant: &CapabilityGrant) -> String {
+    grant.operation.as_ref().map_or_else(
+        || grant.capability.as_str().to_string(),
+        |operation| format!("{}/{}", grant.capability.as_str(), operation.as_str()),
+    )
+}
+
+fn diff_resources(
+    before: &PolicyBundleResolved,
+    after: &PolicyBundleResolved,
+    missing: &mut Vec<String>,
+) -> Vec<ResourceDiff> {
+    let before_resources = collect_resources(before, missing);
+    let after_resources = collect_resources(after, missing);
+    let keys: BTreeSet<String> = before_resources
+        .keys()
+        .chain(after_resources.keys())
+        .cloned()
+        .collect();
+
+    let mut diffs = Vec::new();
+    for key in keys {
+        let before_res = before_resources.get(&key);
+        let after_res = after_resources.get(&key);
+        if let (Some(before_obj), Some(after_obj)) = (before_res, after_res) {
+            if before_obj.integrity_label != after_obj.integrity_label
+                || before_obj.confidentiality_label != after_obj.confidentiality_label
+            {
+                diffs.push(ResourceDiff {
+                    resource_uri: key.clone(),
+                    integrity_before: before_obj.integrity_label,
+                    integrity_after: after_obj.integrity_label,
+                    confidentiality_before: before_obj.confidentiality_label,
+                    confidentiality_after: after_obj.confidentiality_label,
+                });
+            }
+        } else if let Some(before_obj) = before_res {
+            diffs.push(ResourceDiff {
+                resource_uri: key.clone(),
+                integrity_before: before_obj.integrity_label,
+                integrity_after: before_obj.integrity_label,
+                confidentiality_before: before_obj.confidentiality_label,
+                confidentiality_after: before_obj.confidentiality_label,
+            });
+        } else if let Some(after_obj) = after_res {
+            diffs.push(ResourceDiff {
+                resource_uri: key.clone(),
+                integrity_before: after_obj.integrity_label,
+                integrity_after: after_obj.integrity_label,
+                confidentiality_before: after_obj.confidentiality_label,
+                confidentiality_after: after_obj.confidentiality_label,
+            });
+        }
+    }
+
+    diffs
+}
+
+fn collect_resources(
+    bundle: &PolicyBundleResolved,
+    missing: &mut Vec<String>,
+) -> BTreeMap<String, ResourceObject> {
+    let schema_prefix = "fcp.core:ResourceObject@";
+    let mut resources = BTreeMap::new();
+
+    for policy_ref in &bundle.bundle.policies {
+        if !policy_ref.schema_id.starts_with(schema_prefix) {
+            continue;
+        }
+        match bundle.objects.get(&policy_ref.object_id) {
+            Some(PolicyBundleObject::Resource(resource)) => {
+                resources.insert(resource.resource_uri.clone(), resource.clone());
+            }
+            Some(_) => {}
+            None => missing.push(policy_ref.object_id.clone()),
+        }
+    }
+
+    resources
+}
+
+fn diff_capabilities(
+    before: &PolicyBundleResolved,
+    after: &PolicyBundleResolved,
+    missing: &mut Vec<String>,
+) -> Vec<CapabilityDiff> {
+    let before_caps = collect_capabilities(before, missing);
+    let after_caps = collect_capabilities(after, missing);
+    let keys: BTreeSet<String> = before_caps
+        .keys()
+        .chain(after_caps.keys())
+        .cloned()
+        .collect();
+
+    let mut diffs = Vec::new();
+    for key in keys {
+        let before_obj = before_caps.get(&key);
+        let after_obj = after_caps.get(&key);
+        let (added_caps, removed_caps) = diff_capability_grants(before_obj, after_obj);
+        let (resource_allow_added, resource_allow_removed) =
+            diff_resource_allow(before_obj, after_obj);
+
+        if added_caps.is_empty()
+            && removed_caps.is_empty()
+            && resource_allow_added.is_empty()
+            && resource_allow_removed.is_empty()
+        {
+            continue;
+        }
+
+        diffs.push(CapabilityDiff {
+            object_id: key.clone(),
+            added_caps,
+            removed_caps,
+            resource_allow_added,
+            resource_allow_removed,
+        });
+    }
+
+    diffs
+}
+
+fn collect_capabilities(
+    bundle: &PolicyBundleResolved,
+    missing: &mut Vec<String>,
+) -> BTreeMap<String, CapabilityObject> {
+    let schema_prefix = "fcp.core:CapabilityObject@";
+    let mut caps = BTreeMap::new();
+
+    for policy_ref in &bundle.bundle.policies {
+        if !policy_ref.schema_id.starts_with(schema_prefix) {
+            continue;
+        }
+        match bundle.objects.get(&policy_ref.object_id) {
+            Some(PolicyBundleObject::Capability(capability)) => {
+                caps.insert(policy_ref.object_id.clone(), capability.clone());
+            }
+            Some(_) => {}
+            None => missing.push(policy_ref.object_id.clone()),
+        }
+    }
+
+    caps
+}
+
+fn diff_capability_grants(
+    before: Option<&CapabilityObject>,
+    after: Option<&CapabilityObject>,
+) -> (Vec<String>, Vec<String>) {
+    let before_set = before.map_or_else(BTreeSet::new, |cap| {
+        cap.caps.iter().map(capability_grant_key).collect()
+    });
+    let after_set = after.map_or_else(BTreeSet::new, |cap| {
+        cap.caps.iter().map(capability_grant_key).collect()
+    });
+
+    let added = after_set
+        .difference(&before_set)
+        .cloned()
+        .collect::<Vec<_>>();
+    let removed = before_set
+        .difference(&after_set)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    (added, removed)
+}
+
+fn diff_resource_allow(
+    before: Option<&CapabilityObject>,
+    after: Option<&CapabilityObject>,
+) -> (Vec<String>, Vec<String>) {
+    let before_set = before.map_or_else(BTreeSet::new, |cap| {
+        cap.constraints.resource_allow.iter().cloned().collect()
+    });
+    let after_set = after.map_or_else(BTreeSet::new, |cap| {
+        cap.constraints.resource_allow.iter().cloned().collect()
+    });
+
+    let added = after_set
+        .difference(&before_set)
+        .cloned()
+        .collect::<Vec<_>>();
+    let removed = before_set
+        .difference(&after_set)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    (added, removed)
+}
+
+fn compute_policy_risk_summary(
+    zone_policy: Option<&ZonePolicyDiff>,
+    zone_definition_before: Option<&ZoneDefinitionObject>,
+    zone_definition_after: Option<&ZoneDefinitionObject>,
+    roles: &[RoleDiff],
+    resources: &[ResourceDiff],
+    capabilities: &[CapabilityDiff],
+) -> PolicyRiskSummary {
+    let mut flags: BTreeMap<PolicyRiskCode, PolicyRiskFlag> = BTreeMap::new();
+
+    add_zone_policy_risks(&mut flags, zone_policy);
+    add_role_risks(&mut flags, roles);
+    add_capability_risks(&mut flags, capabilities);
+    add_zone_definition_risks(&mut flags, zone_definition_before, zone_definition_after);
+    add_resource_risks(&mut flags, resources);
+
+    PolicyRiskSummary {
+        flags: flags.into_values().collect(),
+    }
+}
+
+fn add_zone_policy_risks(
+    flags: &mut BTreeMap<PolicyRiskCode, PolicyRiskFlag>,
+    zone_policy: Option<&ZonePolicyDiff>,
+) {
+    let Some(diff) = zone_policy else { return };
+
+    if !diff.added.principal_allow.is_empty() {
+        push_risk(
+            flags,
+            PolicyRiskCode::PrincipalAllowExpanded,
+            PolicyRiskSeverity::Medium,
+            None,
+        );
+    }
+    if !diff.added.connector_allow.is_empty() {
+        push_risk(
+            flags,
+            PolicyRiskCode::ConnectorAllowExpanded,
+            PolicyRiskSeverity::Medium,
+            None,
+        );
+    }
+    if !diff.added.capability_allow.is_empty() {
+        push_risk(
+            flags,
+            PolicyRiskCode::CapabilityAllowExpanded,
+            PolicyRiskSeverity::High,
+            None,
+        );
+    }
+    if !diff.added.capability_ceiling.is_empty() {
+        push_risk(
+            flags,
+            PolicyRiskCode::CapabilityCeilingExpanded,
+            PolicyRiskSeverity::High,
+            None,
+        );
+    }
+    if !diff.removed.capability_deny.is_empty() {
+        push_risk(
+            flags,
+            PolicyRiskCode::CapabilityDenyReduced,
+            PolicyRiskSeverity::Medium,
+            None,
+        );
+    }
+    if let Some(ref transport) = diff.changed.transport_policy {
+        if !transport.before.allow_derp && transport.after.allow_derp {
+            push_risk(
+                flags,
+                PolicyRiskCode::TransportDerpEnabled,
+                PolicyRiskSeverity::High,
+                None,
+            );
+        }
+        if !transport.before.allow_funnel && transport.after.allow_funnel {
+            push_risk(
+                flags,
+                PolicyRiskCode::TransportFunnelEnabled,
+                PolicyRiskSeverity::High,
+                None,
+            );
+        }
+        if !transport.before.allow_lan && transport.after.allow_lan {
+            push_risk(
+                flags,
+                PolicyRiskCode::TransportLanEnabled,
+                PolicyRiskSeverity::Medium,
+                None,
+            );
+        }
+    }
+}
+
+fn add_role_risks(flags: &mut BTreeMap<PolicyRiskCode, PolicyRiskFlag>, roles: &[RoleDiff]) {
+    for role in roles {
+        if !role.added_caps.is_empty() || !role.added_includes.is_empty() {
+            push_risk(
+                flags,
+                PolicyRiskCode::RoleExpanded,
+                PolicyRiskSeverity::Medium,
+                Some(role.name.clone()),
+            );
+        }
+    }
+}
+
+fn add_capability_risks(
+    flags: &mut BTreeMap<PolicyRiskCode, PolicyRiskFlag>,
+    capabilities: &[CapabilityDiff],
+) {
+    for capability in capabilities {
+        if !capability.added_caps.is_empty() {
+            push_risk(
+                flags,
+                PolicyRiskCode::CapabilityAllowExpanded,
+                PolicyRiskSeverity::High,
+                Some(capability.object_id.clone()),
+            );
+        }
+        if !capability.resource_allow_added.is_empty() {
+            push_risk(
+                flags,
+                PolicyRiskCode::EgressExpanded,
+                PolicyRiskSeverity::High,
+                Some(capability.object_id.clone()),
+            );
+        }
+    }
+}
+
+fn add_zone_definition_risks(
+    flags: &mut BTreeMap<PolicyRiskCode, PolicyRiskFlag>,
+    before: Option<&ZoneDefinitionObject>,
+    after: Option<&ZoneDefinitionObject>,
+) {
+    let (Some(before), Some(after)) = (before, after) else {
+        return;
+    };
+
+    if after.integrity_level < before.integrity_level {
+        push_risk(
+            flags,
+            PolicyRiskCode::IntegrityLowered,
+            PolicyRiskSeverity::High,
+            Some(format!(
+                "{} -> {}",
+                before.integrity_level, after.integrity_level
+            )),
+        );
+    }
+    if after.confidentiality_level < before.confidentiality_level {
+        push_risk(
+            flags,
+            PolicyRiskCode::ConfidentialityLowered,
+            PolicyRiskSeverity::High,
+            Some(format!(
+                "{} -> {}",
+                before.confidentiality_level, after.confidentiality_level
+            )),
+        );
+    }
+}
+
+fn add_resource_risks(
+    flags: &mut BTreeMap<PolicyRiskCode, PolicyRiskFlag>,
+    resources: &[ResourceDiff],
+) {
+    for resource in resources {
+        if resource.integrity_after < resource.integrity_before {
+            push_risk(
+                flags,
+                PolicyRiskCode::IntegrityLowered,
+                PolicyRiskSeverity::High,
+                Some(resource.resource_uri.clone()),
+            );
+        }
+        if resource.confidentiality_after < resource.confidentiality_before {
+            push_risk(
+                flags,
+                PolicyRiskCode::ConfidentialityLowered,
+                PolicyRiskSeverity::High,
+                Some(resource.resource_uri.clone()),
+            );
+        }
+    }
+}
+
+fn push_risk(
+    flags: &mut BTreeMap<PolicyRiskCode, PolicyRiskFlag>,
+    code: PolicyRiskCode,
+    severity: PolicyRiskSeverity,
+    detail: Option<String>,
+) {
+    flags
+        .entry(code)
+        .and_modify(|flag| {
+            if severity > flag.severity {
+                flag.severity = severity;
+            }
+            if flag.detail.is_none() {
+                flag.detail.clone_from(&detail);
+            }
+        })
+        .or_insert(PolicyRiskFlag {
+            code,
+            severity,
+            detail,
+        });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1868,6 +2925,166 @@ mod tests {
         let bytes1 = bundle1.signing_bytes().expect("signing bytes");
         let bytes2 = bundle2.signing_bytes().expect("signing bytes");
         assert_ne!(bytes1, bytes2);
+    }
+
+    fn test_header_for(schema_name: &str, zone_id: ZoneId) -> ObjectHeader {
+        ObjectHeader {
+            schema: SchemaId::new("fcp.core", schema_name, Version::new(1, 0, 0)),
+            zone_id: zone_id.clone(),
+            created_at: 0,
+            provenance: Provenance::new(zone_id),
+            refs: Vec::new(),
+            foreign_refs: Vec::new(),
+            ttl_secs: None,
+            placement: None,
+        }
+    }
+
+    fn test_zone_policy(zone_id: ZoneId) -> ZonePolicyObject {
+        ZonePolicyObject {
+            header: test_header_for("ZonePolicy", zone_id.clone()),
+            zone_id,
+            principal_allow: Vec::new(),
+            principal_deny: Vec::new(),
+            connector_allow: Vec::new(),
+            connector_deny: Vec::new(),
+            capability_allow: Vec::new(),
+            capability_deny: Vec::new(),
+            capability_ceiling: Vec::new(),
+            transport_policy: ZoneTransportPolicy::default(),
+            decision_receipts: DecisionReceiptPolicy::default(),
+            usage_budget: None,
+            requires_posture: None,
+        }
+    }
+
+    fn test_zone_definition(
+        zone_id: ZoneId,
+        integrity: IntegrityLevel,
+        confidentiality: ConfidentialityLevel,
+    ) -> ZoneDefinitionObject {
+        ZoneDefinitionObject {
+            header: test_header_for("ZoneDefinition", zone_id.clone()),
+            zone_id,
+            name: "zone".to_string(),
+            integrity_level: integrity,
+            confidentiality_level: confidentiality,
+            symbol_port: 7777,
+            control_port: 8888,
+            transport_policy: ZoneTransportPolicy::default(),
+            policy_object_id: ObjectId::from_unscoped_bytes(b"policy"),
+            prev: None,
+            signature: NodeSignature::new(NodeId::new("node-1"), [0u8; 64], 0),
+        }
+    }
+
+    fn policy_ref(object_id: &str, schema_id: &str) -> PolicyBundlePolicyRef {
+        PolicyBundlePolicyRef {
+            object_id: object_id.to_string(),
+            schema_id: schema_id.to_string(),
+            object_hash: test_bundle_hash(),
+        }
+    }
+
+    fn policy_bundle(
+        bundle_id: &str,
+        zone_id: ZoneId,
+        policies: Vec<PolicyBundlePolicyRef>,
+    ) -> PolicyBundle {
+        PolicyBundle::builder(bundle_id, zone_id, 1)
+            .bundle_hash(test_bundle_hash())
+            .policies(policies)
+            .signature(test_bundle_signature())
+            .build()
+            .expect("bundle build")
+    }
+
+    #[test]
+    fn policy_bundle_diff_flags_capability_and_transport() {
+        let zone = ZoneId::work();
+        let before_policy = test_zone_policy(zone.clone());
+        let mut after_policy = test_zone_policy(zone.clone());
+
+        after_policy.capability_allow.push(PolicyPattern {
+            pattern: "cap.read".to_string(),
+        });
+        after_policy.transport_policy.allow_derp = true;
+
+        let before_bundle = policy_bundle(
+            "bundle-before",
+            zone.clone(),
+            vec![policy_ref("policy-1", "fcp.core:ZonePolicy@1.0")],
+        );
+        let after_bundle = policy_bundle(
+            "bundle-after",
+            zone,
+            vec![policy_ref("policy-1", "fcp.core:ZonePolicy@1.0")],
+        );
+
+        let mut before_objects = BTreeMap::new();
+        before_objects.insert(
+            "policy-1".to_string(),
+            PolicyBundleObject::ZonePolicy(before_policy),
+        );
+        let mut after_objects = BTreeMap::new();
+        after_objects.insert(
+            "policy-1".to_string(),
+            PolicyBundleObject::ZonePolicy(after_policy),
+        );
+
+        let before_resolved = PolicyBundleResolved::new(before_bundle, before_objects);
+        let after_resolved = PolicyBundleResolved::new(after_bundle, after_objects);
+
+        let diff = diff_policy_bundles(&before_resolved, &after_resolved).expect("bundle diff");
+        let codes: BTreeSet<PolicyRiskCode> = diff.risk.flags.iter().map(|f| f.code).collect();
+
+        assert!(codes.contains(&PolicyRiskCode::CapabilityAllowExpanded));
+        assert!(codes.contains(&PolicyRiskCode::TransportDerpEnabled));
+    }
+
+    #[test]
+    fn policy_bundle_diff_flags_integrity_lowered() {
+        let zone = ZoneId::work();
+        let before_def = test_zone_definition(
+            zone.clone(),
+            IntegrityLevel::Owner,
+            ConfidentialityLevel::Owner,
+        );
+        let after_def = test_zone_definition(
+            zone.clone(),
+            IntegrityLevel::Work,
+            ConfidentialityLevel::Owner,
+        );
+
+        let before_bundle = policy_bundle(
+            "bundle-before",
+            zone.clone(),
+            vec![policy_ref("def-1", "fcp.core:ZoneDefinition@1.0")],
+        );
+        let after_bundle = policy_bundle(
+            "bundle-after",
+            zone,
+            vec![policy_ref("def-1", "fcp.core:ZoneDefinition@1.0")],
+        );
+
+        let mut before_objects = BTreeMap::new();
+        before_objects.insert(
+            "def-1".to_string(),
+            PolicyBundleObject::ZoneDefinition(before_def),
+        );
+        let mut after_objects = BTreeMap::new();
+        after_objects.insert(
+            "def-1".to_string(),
+            PolicyBundleObject::ZoneDefinition(after_def),
+        );
+
+        let before_resolved = PolicyBundleResolved::new(before_bundle, before_objects);
+        let after_resolved = PolicyBundleResolved::new(after_bundle, after_objects);
+
+        let diff = diff_policy_bundles(&before_resolved, &after_resolved).expect("bundle diff");
+        let codes: BTreeSet<PolicyRiskCode> = diff.risk.flags.iter().map(|f| f.code).collect();
+
+        assert!(codes.contains(&PolicyRiskCode::IntegrityLowered));
     }
 
     #[test]

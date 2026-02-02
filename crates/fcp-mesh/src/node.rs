@@ -223,6 +223,7 @@ pub struct MeshNode {
     symbol_store: Arc<dyn SymbolStore>,
     quarantine_store: Arc<QuarantineStore>,
     sessions: HashMap<NodeId, MeshSession>,
+    peer_signing_keys: HashMap<NodeId, Ed25519VerifyingKey>,
     peers: HashMap<NodeId, PeerState>,
     local_profile: Option<DeviceProfile>,
     local_symbols: HashSet<ObjectId>,
@@ -258,6 +259,7 @@ impl MeshNode {
             symbol_store,
             quarantine_store,
             sessions: HashMap::new(),
+            peer_signing_keys: HashMap::new(),
             local_node,
             local_node_ts,
             peers: HashMap::new(),
@@ -315,6 +317,17 @@ impl MeshNode {
     /// Remove a peer from tracking.
     pub fn remove_peer(&mut self, node_id: &NodeId) {
         self.peers.remove(node_id);
+        self.peer_signing_keys.remove(node_id);
+    }
+
+    /// Register a peer's signing key for signature verification.
+    pub fn register_peer_signing_key(&mut self, peer_id: NodeId, key: Ed25519VerifyingKey) {
+        self.peer_signing_keys.insert(peer_id, key);
+    }
+
+    /// Remove a peer's signing key.
+    pub fn remove_peer_signing_key(&mut self, peer_id: &NodeId) {
+        self.peer_signing_keys.remove(peer_id);
     }
 
     /// Current peer count (excluding local).
@@ -553,7 +566,10 @@ impl MeshNode {
         // Fetch metadata first to get accurate symbol size for admission control
         let meta = self.load_symbol_meta(&request).await?;
 
-        let authenticated = is_authenticated || self.is_peer_authenticated(peer);
+        let mut authenticated = is_authenticated || self.is_peer_authenticated(peer);
+        if !authenticated {
+            authenticated = self.verify_symbol_request_signature(peer, &request)?;
+        }
         self.admission
             .set_authenticated(peer, authenticated, now_ms);
 
@@ -635,6 +651,21 @@ impl MeshNode {
             .record_symbols_sent(response.symbol_count(), request.missing_hint.is_some());
 
         Ok(response)
+    }
+
+    fn verify_symbol_request_signature(
+        &self,
+        peer: &NodeId,
+        request: &SymbolRequest,
+    ) -> Result<bool, SymbolRequestError> {
+        let Some(key) = self.peer_signing_keys.get(peer) else {
+            return Ok(false);
+        };
+
+        request
+            .verify(key)
+            .map(|()| true)
+            .map_err(|_| SymbolRequestError::SignatureInvalid)
     }
 
     async fn load_symbol_meta(
@@ -834,10 +865,14 @@ mod tests {
     use crate::planner::{LeasePurpose, PlannerContext};
     use bytes::Bytes;
     use fcp_core::{ObjectId, ZoneId, ZoneKeyId};
+    use fcp_crypto::Ed25519SigningKey;
     use fcp_protocol::session::{
         MeshSessionId, SessionCryptoSuite, SessionKeys, SessionReplayPolicy, TransportLimits,
     };
-    use fcp_protocol::{DecodeStatus, SymbolAck, SymbolAckReason, SymbolRequest};
+    use fcp_protocol::{
+        DEFAULT_MAX_SYMBOLS_UNAUTHENTICATED, DecodeStatus, SymbolAck, SymbolAckReason,
+        SymbolRequest,
+    };
     use fcp_store::{
         MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore, MemorySymbolStoreConfig,
         ObjectAdmissionPolicy, ObjectSymbolMeta, ObjectTransmissionInfo, QuarantineStore,
@@ -1076,6 +1111,141 @@ mod tests {
             err,
             SymbolRequestError::AdmissionRejected(AdmissionError::ObjectQuarantined { .. })
         ));
+    }
+
+    #[test]
+    fn symbol_request_accepts_signed_unauthenticated_peer() {
+        let mut node = test_node("node-1");
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([11u8; 8]);
+        let object_id = test_object_id("meshnode-signed-unauth");
+        let peer_id = NodeId::new("peer-1");
+
+        let oti = ObjectTransmissionInformation::new(256, 64, 1, 1, 1);
+        let meta = ObjectSymbolMeta {
+            object_id,
+            zone_id: zone_id.clone(),
+            oti: ObjectTransmissionInfo::from(oti),
+            source_symbols: 2,
+            first_symbol_at: 0,
+        };
+
+        let mut request = SymbolRequest::new(
+            test_object_header(),
+            object_id,
+            zone_id.clone(),
+            zone_key_id,
+            1,
+            DEFAULT_MAX_SYMBOLS_UNAUTHENTICATED + 5,
+            1,
+        );
+
+        let signing_key = Ed25519SigningKey::generate();
+        request.sign(&signing_key);
+        node.register_peer_signing_key(peer_id.clone(), signing_key.verifying_key());
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        let result = runtime.block_on(async {
+            node.symbol_store
+                .put_object_meta(meta)
+                .await
+                .expect("store meta");
+
+            for esi in 0..2u32 {
+                let symbol = StoredSymbol {
+                    meta: SymbolMeta {
+                        object_id,
+                        esi,
+                        zone_id: zone_id.clone(),
+                        source_node: Some(1),
+                        stored_at: 0,
+                    },
+                    data: bytes::Bytes::from(vec![u8::try_from(esi).unwrap_or(0); 64]),
+                };
+                node.symbol_store
+                    .put_symbol(symbol)
+                    .await
+                    .expect("store symbol");
+            }
+
+            node.handle_symbol_request(request, &peer_id, false, 0)
+                .await
+        });
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn symbol_request_rejects_invalid_signature() {
+        let mut node = test_node("node-1");
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([12u8; 8]);
+        let object_id = test_object_id("meshnode-bad-signature");
+        let peer_id = NodeId::new("peer-1");
+
+        let oti = ObjectTransmissionInformation::new(256, 64, 1, 1, 1);
+        let meta = ObjectSymbolMeta {
+            object_id,
+            zone_id: zone_id.clone(),
+            oti: ObjectTransmissionInfo::from(oti),
+            source_symbols: 2,
+            first_symbol_at: 0,
+        };
+
+        let mut request = SymbolRequest::new(
+            test_object_header(),
+            object_id,
+            zone_id.clone(),
+            zone_key_id,
+            1,
+            DEFAULT_MAX_SYMBOLS_UNAUTHENTICATED + 5,
+            1,
+        );
+
+        let signing_key = Ed25519SigningKey::generate();
+        let wrong_key = Ed25519SigningKey::generate();
+        request.sign(&wrong_key);
+        node.register_peer_signing_key(peer_id.clone(), signing_key.verifying_key());
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        let err = runtime
+            .block_on(async {
+                node.symbol_store
+                    .put_object_meta(meta)
+                    .await
+                    .expect("store meta");
+
+                for esi in 0..2u32 {
+                    let symbol = StoredSymbol {
+                        meta: SymbolMeta {
+                            object_id,
+                            esi,
+                            zone_id: zone_id.clone(),
+                            source_node: Some(1),
+                            stored_at: 0,
+                        },
+                        data: bytes::Bytes::from(vec![u8::try_from(esi).unwrap_or(0); 64]),
+                    };
+                    node.symbol_store
+                        .put_symbol(symbol)
+                        .await
+                        .expect("store symbol");
+                }
+
+                node.handle_symbol_request(request, &peer_id, false, 0)
+                    .await
+            })
+            .expect_err("invalid signature should fail");
+
+        assert!(matches!(err, SymbolRequestError::SignatureInvalid));
     }
 
     // ---- MeshNodeConfig builder tests ----

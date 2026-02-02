@@ -4,9 +4,11 @@
 //! that produces stable decision reason codes and decision receipts.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use fcp_cbor::SchemaId;
+use fcp_crypto::{canonical_signing_bytes, canonicalize::to_deterministic_cbor};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 
@@ -219,6 +221,405 @@ impl PolicyPattern {
     pub fn matches(&self, value: &str) -> bool {
         pattern_matches(&self.pattern, value)
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Policy Bundles
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Format identifier for policy bundle JSON.
+pub const POLICY_BUNDLE_FORMAT: &str = "fcp-policy-bundle";
+
+/// Schema version for policy bundles.
+pub const POLICY_BUNDLE_SCHEMA_VERSION: &str = "1.0";
+
+/// Schema ID for policy bundle signing bytes.
+pub const POLICY_BUNDLE_SCHEMA_ID: &str = "fcp://schemas/policybundle/v1";
+
+/// Hash algorithm for policy bundles.
+pub const POLICY_BUNDLE_HASH_ALGO: &str = "blake3-256";
+
+/// Signed policy bundle (NORMATIVE).
+///
+/// Matches the `PolicyBundle_v1.schema.json` specification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyBundle {
+    /// Format identifier (always "fcp-policy-bundle").
+    pub format: String,
+
+    /// Schema version (always "1.0" for v1).
+    pub schema_version: String,
+
+    /// Unique bundle identifier.
+    pub bundle_id: String,
+
+    /// Zone this bundle applies to.
+    pub zone_id: ZoneId,
+
+    /// Monotonic policy sequence number.
+    pub policy_seq: u64,
+
+    /// Bundle creation timestamp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateTime<Utc>>,
+
+    /// Previous bundle ID, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_bundle: Option<String>,
+
+    /// Hash algorithm for bundle hash (always "blake3-256").
+    pub hash_algo: String,
+
+    /// Bundle hash in format `blake3-256:<hex>`.
+    pub bundle_hash: String,
+
+    /// Policies referenced by this bundle.
+    pub policies: Vec<PolicyBundlePolicyRef>,
+
+    /// Ed25519 signature.
+    pub signature: PolicyBundleSignature,
+}
+
+impl PolicyBundle {
+    /// Create a new policy bundle builder.
+    #[must_use]
+    pub fn builder(
+        bundle_id: impl Into<String>,
+        zone_id: ZoneId,
+        policy_seq: u64,
+    ) -> PolicyBundleBuilder {
+        PolicyBundleBuilder::new(bundle_id, zone_id, policy_seq)
+    }
+
+    /// Compute deterministic signing bytes for the policy bundle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PolicyBundleError::CanonicalizationFailed`] if serialization fails.
+    pub fn signing_bytes(&self) -> Result<Vec<u8>, PolicyBundleError> {
+        let signable = PolicyBundleSignable {
+            format: self.format.clone(),
+            schema_version: self.schema_version.clone(),
+            bundle_id: self.bundle_id.clone(),
+            zone_id: self.zone_id.clone(),
+            policy_seq: self.policy_seq,
+            created_at: self.created_at,
+            previous_bundle: self.previous_bundle.clone(),
+            hash_algo: self.hash_algo.clone(),
+            bundle_hash: self.bundle_hash.clone(),
+            policies: self.policies.clone(),
+        };
+
+        let cbor = to_deterministic_cbor(&signable).map_err(|err| {
+            PolicyBundleError::CanonicalizationFailed {
+                reason: err.to_string(),
+            }
+        })?;
+        Ok(canonical_signing_bytes(POLICY_BUNDLE_SCHEMA_ID, &cbor))
+    }
+
+    /// Validate the policy bundle structure.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PolicyBundleError::InvalidBundle`] if validation fails.
+    pub fn validate(&self) -> Result<(), PolicyBundleError> {
+        if self.format != POLICY_BUNDLE_FORMAT {
+            return Err(PolicyBundleError::InvalidBundle {
+                reason: format!(
+                    "format must be '{POLICY_BUNDLE_FORMAT}', got '{}'",
+                    self.format
+                ),
+            });
+        }
+        if self.schema_version != POLICY_BUNDLE_SCHEMA_VERSION {
+            return Err(PolicyBundleError::InvalidBundle {
+                reason: format!(
+                    "schema_version must be '{POLICY_BUNDLE_SCHEMA_VERSION}', got '{}'",
+                    self.schema_version
+                ),
+            });
+        }
+        if self.bundle_id.is_empty() {
+            return Err(PolicyBundleError::InvalidBundle {
+                reason: "bundle_id cannot be empty".to_string(),
+            });
+        }
+        if self.hash_algo != POLICY_BUNDLE_HASH_ALGO {
+            return Err(PolicyBundleError::InvalidBundle {
+                reason: format!(
+                    "hash_algo must be '{POLICY_BUNDLE_HASH_ALGO}', got '{}'",
+                    self.hash_algo
+                ),
+            });
+        }
+        if !hash_has_blake3_prefix(&self.bundle_hash) {
+            return Err(PolicyBundleError::InvalidBundle {
+                reason: "bundle_hash must be in format 'blake3-256:<hex>'".to_string(),
+            });
+        }
+        if self.policies.is_empty() {
+            return Err(PolicyBundleError::InvalidBundle {
+                reason: "policies cannot be empty".to_string(),
+            });
+        }
+        for policy in &self.policies {
+            policy.validate()?;
+        }
+        self.signature.validate()?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PolicyBundleSignable {
+    format: String,
+    schema_version: String,
+    bundle_id: String,
+    zone_id: ZoneId,
+    policy_seq: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    previous_bundle: Option<String>,
+    hash_algo: String,
+    bundle_hash: String,
+    policies: Vec<PolicyBundlePolicyRef>,
+}
+
+/// Reference to a policy object within a bundle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyBundlePolicyRef {
+    pub object_id: String,
+    pub schema_id: String,
+    pub object_hash: String,
+}
+
+impl PolicyBundlePolicyRef {
+    /// Validate the policy reference structure.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PolicyBundleError::InvalidBundle`] if validation fails.
+    pub fn validate(&self) -> Result<(), PolicyBundleError> {
+        if self.object_id.is_empty() {
+            return Err(PolicyBundleError::InvalidBundle {
+                reason: "policies.object_id cannot be empty".to_string(),
+            });
+        }
+        if self.schema_id.is_empty() {
+            return Err(PolicyBundleError::InvalidBundle {
+                reason: "policies.schema_id cannot be empty".to_string(),
+            });
+        }
+        if !hash_has_blake3_prefix(&self.object_hash) {
+            return Err(PolicyBundleError::InvalidBundle {
+                reason: "policies.object_hash must be in format 'blake3-256:<hex>'".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Ed25519 signature for policy bundles.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyBundleSignature {
+    /// Signature algorithm (always "ed25519").
+    pub algorithm: String,
+
+    /// Key identifier used for signing.
+    pub key_id: String,
+
+    /// Base64 or hex encoded signature.
+    pub signature: String,
+
+    /// Fields that were signed.
+    pub signed_fields: Vec<String>,
+}
+
+impl PolicyBundleSignature {
+    /// Create a new Ed25519 signature.
+    #[must_use]
+    pub fn new(
+        key_id: impl Into<String>,
+        signature: impl Into<String>,
+        signed_fields: Vec<String>,
+    ) -> Self {
+        Self {
+            algorithm: "ed25519".to_string(),
+            key_id: key_id.into(),
+            signature: signature.into(),
+            signed_fields,
+        }
+    }
+
+    /// Validate the signature structure.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PolicyBundleError::InvalidBundle`] if validation fails.
+    pub fn validate(&self) -> Result<(), PolicyBundleError> {
+        if self.algorithm != "ed25519" {
+            return Err(PolicyBundleError::InvalidBundle {
+                reason: format!("algorithm must be 'ed25519', got '{}'", self.algorithm),
+            });
+        }
+        if self.key_id.is_empty() {
+            return Err(PolicyBundleError::InvalidBundle {
+                reason: "key_id cannot be empty".to_string(),
+            });
+        }
+        if self.signature.is_empty() {
+            return Err(PolicyBundleError::InvalidBundle {
+                reason: "signature cannot be empty".to_string(),
+            });
+        }
+        if self.signed_fields.is_empty() {
+            return Err(PolicyBundleError::InvalidBundle {
+                reason: "signed_fields cannot be empty".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Builder for [`PolicyBundle`].
+#[derive(Debug, Clone)]
+pub struct PolicyBundleBuilder {
+    bundle_id: String,
+    zone_id: ZoneId,
+    policy_seq: u64,
+    created_at: Option<DateTime<Utc>>,
+    previous_bundle: Option<String>,
+    bundle_hash: Option<String>,
+    policies: Option<Vec<PolicyBundlePolicyRef>>,
+    signature: Option<PolicyBundleSignature>,
+}
+
+impl PolicyBundleBuilder {
+    fn new(bundle_id: impl Into<String>, zone_id: ZoneId, policy_seq: u64) -> Self {
+        Self {
+            bundle_id: bundle_id.into(),
+            zone_id,
+            policy_seq,
+            created_at: None,
+            previous_bundle: None,
+            bundle_hash: None,
+            policies: None,
+            signature: None,
+        }
+    }
+
+    /// Set creation timestamp.
+    #[must_use]
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn created_at(mut self, created_at: DateTime<Utc>) -> Self {
+        self.created_at = Some(created_at);
+        self
+    }
+
+    /// Set previous bundle ID.
+    #[must_use]
+    pub fn previous_bundle(mut self, previous_bundle: impl Into<String>) -> Self {
+        self.previous_bundle = Some(previous_bundle.into());
+        self
+    }
+
+    /// Set bundle hash.
+    #[must_use]
+    pub fn bundle_hash(mut self, bundle_hash: impl Into<String>) -> Self {
+        self.bundle_hash = Some(bundle_hash.into());
+        self
+    }
+
+    /// Set policy references.
+    #[must_use]
+    pub fn policies(mut self, policies: Vec<PolicyBundlePolicyRef>) -> Self {
+        self.policies = Some(policies);
+        self
+    }
+
+    /// Set the signature.
+    #[must_use]
+    pub fn signature(mut self, signature: PolicyBundleSignature) -> Self {
+        self.signature = Some(signature);
+        self
+    }
+
+    /// Build the policy bundle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PolicyBundleError::InvalidBundle`] if required fields are missing.
+    pub fn build(self) -> Result<PolicyBundle, PolicyBundleError> {
+        let bundle_hash = self
+            .bundle_hash
+            .ok_or_else(|| PolicyBundleError::InvalidBundle {
+                reason: "bundle_hash is required".to_string(),
+            })?;
+        let policies = self
+            .policies
+            .ok_or_else(|| PolicyBundleError::InvalidBundle {
+                reason: "policies are required".to_string(),
+            })?;
+        let signature = self
+            .signature
+            .ok_or_else(|| PolicyBundleError::InvalidBundle {
+                reason: "signature is required".to_string(),
+            })?;
+
+        let bundle = PolicyBundle {
+            format: POLICY_BUNDLE_FORMAT.to_string(),
+            schema_version: POLICY_BUNDLE_SCHEMA_VERSION.to_string(),
+            bundle_id: self.bundle_id,
+            zone_id: self.zone_id,
+            policy_seq: self.policy_seq,
+            created_at: self.created_at,
+            previous_bundle: self.previous_bundle,
+            hash_algo: POLICY_BUNDLE_HASH_ALGO.to_string(),
+            bundle_hash,
+            policies,
+            signature,
+        };
+
+        bundle.validate()?;
+        Ok(bundle)
+    }
+}
+
+/// Errors that can occur during policy bundle operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolicyBundleError {
+    /// Invalid policy bundle.
+    InvalidBundle {
+        /// Reason for invalidity.
+        reason: String,
+    },
+
+    /// Canonicalization failed.
+    CanonicalizationFailed {
+        /// Details about the failure.
+        reason: String,
+    },
+}
+
+impl fmt::Display for PolicyBundleError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidBundle { reason } => write!(f, "invalid policy bundle: {reason}"),
+            Self::CanonicalizationFailed { reason } => {
+                write!(f, "canonicalization failed: {reason}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PolicyBundleError {}
+
+fn hash_has_blake3_prefix(value: &str) -> bool {
+    value.strip_prefix("blake3-256:").is_some_and(|hex| {
+        hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1379,6 +1780,94 @@ mod tests {
         assert!(policy.allows(TransportMode::Lan));
         assert!(policy.allows(TransportMode::Derp));
         assert!(policy.allows(TransportMode::Funnel));
+    }
+
+    // ── PolicyBundle ────────────────────────────────────────────────────────
+
+    fn test_bundle_hash() -> String {
+        format!("blake3-256:{}", "a".repeat(64))
+    }
+
+    fn test_policy_ref() -> PolicyBundlePolicyRef {
+        PolicyBundlePolicyRef {
+            object_id: "obj-001".to_string(),
+            schema_id: "fcp.core:ZonePolicy@1.0".to_string(),
+            object_hash: test_bundle_hash(),
+        }
+    }
+
+    fn test_bundle_signature() -> PolicyBundleSignature {
+        PolicyBundleSignature::new(
+            "key-001",
+            "sig-data",
+            vec![
+                "bundle_id".to_string(),
+                "zone_id".to_string(),
+                "policy_seq".to_string(),
+                "bundle_hash".to_string(),
+            ],
+        )
+    }
+
+    #[test]
+    fn policy_bundle_validate_accepts_minimal() {
+        let bundle = PolicyBundle::builder("bundle-001", ZoneId::work(), 1)
+            .bundle_hash(test_bundle_hash())
+            .policies(vec![test_policy_ref()])
+            .signature(test_bundle_signature())
+            .build()
+            .expect("bundle build");
+
+        assert!(bundle.validate().is_ok());
+    }
+
+    #[test]
+    fn policy_bundle_validate_rejects_bad_hash() {
+        let mut bundle = PolicyBundle::builder("bundle-001", ZoneId::work(), 1)
+            .bundle_hash(test_bundle_hash())
+            .policies(vec![test_policy_ref()])
+            .signature(test_bundle_signature())
+            .build()
+            .expect("bundle build");
+
+        bundle.bundle_hash = "sha256:deadbeef".to_string();
+        let err = bundle.validate().expect_err("expected invalid bundle");
+        assert!(err.to_string().contains("bundle_hash must be in format"));
+    }
+
+    #[test]
+    fn policy_bundle_signing_bytes_deterministic() {
+        let bundle = PolicyBundle::builder("bundle-001", ZoneId::work(), 1)
+            .bundle_hash(test_bundle_hash())
+            .policies(vec![test_policy_ref()])
+            .signature(test_bundle_signature())
+            .build()
+            .expect("bundle build");
+
+        let bytes1 = bundle.signing_bytes().expect("signing bytes");
+        let bytes2 = bundle.signing_bytes().expect("signing bytes");
+        assert_eq!(bytes1, bytes2);
+    }
+
+    #[test]
+    fn policy_bundle_signing_bytes_change_with_seq() {
+        let bundle1 = PolicyBundle::builder("bundle-001", ZoneId::work(), 1)
+            .bundle_hash(test_bundle_hash())
+            .policies(vec![test_policy_ref()])
+            .signature(test_bundle_signature())
+            .build()
+            .expect("bundle build");
+
+        let bundle2 = PolicyBundle::builder("bundle-001", ZoneId::work(), 2)
+            .bundle_hash(test_bundle_hash())
+            .policies(vec![test_policy_ref()])
+            .signature(test_bundle_signature())
+            .build()
+            .expect("bundle build");
+
+        let bytes1 = bundle1.signing_bytes().expect("signing bytes");
+        let bytes2 = bundle2.signing_bytes().expect("signing bytes");
+        assert_ne!(bytes1, bytes2);
     }
 
     #[test]

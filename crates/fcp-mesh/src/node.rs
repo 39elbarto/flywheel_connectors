@@ -989,7 +989,7 @@ mod tests {
                         source_node: Some(1),
                         stored_at: 0,
                     },
-                    data: bytes::Bytes::from(vec![u8::try_from(esi).unwrap_or(0); 8]),
+                    data: bytes::Bytes::from(vec![u8::try_from(esi).unwrap_or(0); 64]),
                 };
                 node.symbol_store
                     .put_symbol(symbol)

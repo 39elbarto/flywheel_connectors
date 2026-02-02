@@ -129,6 +129,7 @@ mod meshnode {
 
     async fn seed_symbols(store: &Arc<dyn SymbolStore>, meta: &ObjectSymbolMeta, source_node: u64) {
         store.put_object_meta(meta.clone()).await.unwrap();
+        let symbol_size = meta.oti.symbol_size as usize;
 
         for esi in 0..meta.source_symbols {
             let esi_byte = u8::try_from(esi).expect("esi fits in u8");
@@ -140,7 +141,7 @@ mod meshnode {
                     source_node: Some(source_node),
                     stored_at: 0,
                 },
-                data: Bytes::from(vec![esi_byte; 16]),
+                data: Bytes::from(vec![esi_byte; symbol_size]),
             };
             store.put_symbol(symbol).await.unwrap();
         }
@@ -178,8 +179,8 @@ mod meshnode {
             first_symbol_at: 0,
         };
 
+        let symbol_size = meta.oti.symbol_size as usize;
         symbol_store.put_object_meta(meta).await.unwrap();
-
         for esi in 0..4u32 {
             let esi_byte = u8::try_from(esi).expect("esi fits in u8");
             let symbol = StoredSymbol {
@@ -190,7 +191,7 @@ mod meshnode {
                     source_node: Some(1),
                     stored_at: 0,
                 },
-                data: Bytes::from(vec![esi_byte; 16]),
+                data: Bytes::from(vec![esi_byte; symbol_size]),
             };
             symbol_store.put_symbol(symbol).await.unwrap();
         }
@@ -302,6 +303,7 @@ mod meshnode {
         let mut node = MeshNode::new(config, object_store, symbol_store.clone(), quarantine_store);
 
         let oti = ObjectTransmissionInformation::new(1024, 256, 1, 1, 1);
+        let symbol_size = oti.symbol_size() as usize;
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
@@ -322,7 +324,7 @@ mod meshnode {
                     source_node: Some(1),
                     stored_at: 0,
                 },
-                data: Bytes::from(vec![esi_byte; 16]),
+                data: Bytes::from(vec![esi_byte; symbol_size]),
             };
             symbol_store.put_symbol(symbol).await.unwrap();
         }
@@ -371,6 +373,7 @@ mod meshnode {
         let mut node = MeshNode::new(config, object_store, symbol_store.clone(), quarantine_store);
 
         let oti = ObjectTransmissionInformation::new(1024, 256, 1, 1, 1);
+        let symbol_size = oti.symbol_size() as usize;
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
@@ -391,7 +394,7 @@ mod meshnode {
                     source_node: Some(1),
                     stored_at: 0,
                 },
-                data: Bytes::from(vec![esi_byte; 16]),
+                data: Bytes::from(vec![esi_byte; symbol_size]),
             };
             symbol_store.put_symbol(symbol).await.unwrap();
         }
@@ -429,6 +432,7 @@ mod meshnode {
         let mut node = MeshNode::new(config, object_store, symbol_store.clone(), quarantine_store);
 
         let oti = ObjectTransmissionInformation::new(1024, 256, 1, 1, 1);
+        let symbol_size = oti.symbol_size() as usize;
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
@@ -449,7 +453,7 @@ mod meshnode {
                     source_node: Some(1),
                     stored_at: 0,
                 },
-                data: Bytes::from(vec![esi_byte; 16]),
+                data: Bytes::from(vec![esi_byte; symbol_size]),
             };
             symbol_store.put_symbol(symbol).await.unwrap();
         }
@@ -489,6 +493,7 @@ mod meshnode {
         let mut node = MeshNode::new(config, object_store, symbol_store.clone(), quarantine_store);
 
         let oti = ObjectTransmissionInformation::new(1024, 256, 1, 1, 1);
+        let symbol_size = oti.symbol_size() as usize;
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
@@ -509,7 +514,7 @@ mod meshnode {
                     source_node: Some(1),
                     stored_at: 0,
                 },
-                data: Bytes::from(vec![esi_byte; 16]),
+                data: Bytes::from(vec![esi_byte; symbol_size]),
             };
             symbol_store.put_symbol(symbol).await.unwrap();
         }
@@ -548,6 +553,7 @@ mod meshnode {
         let mut node = MeshNode::new(config, object_store, symbol_store.clone(), quarantine_store);
 
         let oti = ObjectTransmissionInformation::new(1024, 256, 1, 1, 1);
+        let symbol_size = oti.symbol_size() as usize;
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
@@ -568,7 +574,7 @@ mod meshnode {
                     source_node: Some(1),
                     stored_at: 0,
                 },
-                data: Bytes::from(vec![esi_byte; 16]),
+                data: Bytes::from(vec![esi_byte; symbol_size]),
             };
             symbol_store.put_symbol(symbol).await.unwrap();
         }
@@ -606,6 +612,7 @@ mod meshnode {
         let mut node = MeshNode::new(config, object_store, symbol_store.clone(), quarantine_store);
 
         let oti = ObjectTransmissionInformation::new(1024, 256, 1, 1, 1);
+        let symbol_size = oti.symbol_size() as usize;
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
@@ -626,7 +633,7 @@ mod meshnode {
                     source_node: Some(1),
                     stored_at: 0,
                 },
-                data: Bytes::from(vec![esi_byte; 16]),
+                data: Bytes::from(vec![esi_byte; symbol_size]),
             };
             symbol_store.put_symbol(symbol).await.unwrap();
         }
@@ -665,6 +672,7 @@ mod meshnode {
         let mut node = MeshNode::new(config, object_store, symbol_store.clone(), quarantine_store);
 
         let oti = ObjectTransmissionInformation::new(1024, 256, 1, 1, 1);
+        let symbol_size = oti.symbol_size() as usize;
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
@@ -685,7 +693,7 @@ mod meshnode {
                     source_node: Some(1),
                     stored_at: 0,
                 },
-                data: Bytes::from(vec![esi_byte; 16]),
+                data: Bytes::from(vec![esi_byte; symbol_size]),
             };
             symbol_store.put_symbol(symbol).await.unwrap();
         }
@@ -803,6 +811,7 @@ mod meshnode {
         );
 
         let oti = ObjectTransmissionInformation::new(512, 128, 1, 1, 1);
+        let symbol_size = oti.symbol_size() as usize;
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
@@ -822,7 +831,7 @@ mod meshnode {
                     source_node: Some(1),
                     stored_at: 0,
                 },
-                data: Bytes::from(vec![esi_byte; 16]),
+                data: Bytes::from(vec![esi_byte; symbol_size]),
             };
             symbol_store.put_symbol(symbol).await.unwrap();
         }
@@ -883,6 +892,7 @@ mod meshnode {
         );
 
         let oti = ObjectTransmissionInformation::new(512, 128, 1, 1, 1);
+        let symbol_size = oti.symbol_size() as usize;
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
@@ -902,7 +912,7 @@ mod meshnode {
                     source_node: Some(1),
                     stored_at: 0,
                 },
-                data: Bytes::from(vec![esi_byte; 16]),
+                data: Bytes::from(vec![esi_byte; symbol_size]),
             };
             symbol_store.put_symbol(symbol).await.unwrap();
         }

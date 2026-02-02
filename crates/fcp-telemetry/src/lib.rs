@@ -29,6 +29,7 @@ mod context;
 mod export;
 mod logging;
 pub mod metrics;
+pub mod trace_capture;
 mod tracing_layer;
 mod usage;
 

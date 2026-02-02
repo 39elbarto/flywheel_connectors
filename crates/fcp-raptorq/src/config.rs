@@ -133,9 +133,12 @@ impl RaptorQConfig {
     ///
     /// `repair_ratio_bps = 500` means 5% overhead.
     /// For K source symbols, generate K + K×500/10000 = K×1.05 total symbols.
+    ///
+    /// Uses saturating conversion to avoid truncation on extreme inputs.
     #[must_use]
     pub fn repair_symbols(&self, source_symbols: u32) -> u32 {
-        (u64::from(source_symbols) * u64::from(self.repair_ratio_bps) / 10000) as u32
+        let repair = u64::from(source_symbols) * u64::from(self.repair_ratio_bps) / 10000;
+        u32::try_from(repair).unwrap_or(u32::MAX)
     }
 
     /// Calculate K (source symbols) needed for a payload.
@@ -284,6 +287,18 @@ mod tests {
         assert_eq!(config.repair_symbols(1000), 50);
         // 0 source symbols -> 0 repair symbols
         assert_eq!(config.repair_symbols(0), 0);
+    }
+
+    #[test]
+    fn repair_symbols_saturates_on_extreme_values() {
+        // Test that extreme values saturate to u32::MAX instead of truncating
+        let config = RaptorQConfig {
+            repair_ratio_bps: u16::MAX, // 655% overhead
+            ..RaptorQConfig::default()
+        };
+        // u32::MAX * 65535 / 10000 = ~28 billion, exceeds u32::MAX
+        // Should saturate to u32::MAX instead of wrapping
+        assert_eq!(config.repair_symbols(u32::MAX), u32::MAX);
     }
 
     #[test]

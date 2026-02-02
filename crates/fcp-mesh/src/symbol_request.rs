@@ -652,9 +652,11 @@ impl SymbolResponseBuilder {
 
     /// Build the response.
     #[must_use]
-    pub fn build(self, total_available: u32) -> SymbolResponse {
+    pub fn build(self, total_available: u32, already_sent: usize) -> SymbolResponse {
         let sent_count = self.selected_esis.len() as u32;
-        let is_final = sent_count >= total_available || self.selected_esis.is_empty();
+        let already_sent = u32::try_from(already_sent).unwrap_or(u32::MAX);
+        let total_sent = sent_count.saturating_add(already_sent);
+        let is_final = total_sent >= total_available || self.selected_esis.is_empty();
 
         SymbolResponse {
             object_id: self.object_id,
@@ -1029,7 +1031,7 @@ mod tests {
             25, // Builder limit smaller than request limit (50) to force bounding
         )
         .add_from_repair_engine(&engine, &request, &HashSet::new())
-        .build(1000);
+        .build(1000, 0);
 
         // Should be bounded to 25
         assert_eq!(response.symbol_count(), 25);
@@ -1059,11 +1061,40 @@ mod tests {
             request.max_response_symbols,
         )
         .add_from_repair_engine(&engine, &request, &HashSet::new())
-        .build(100);
+        .build(100, 0);
 
         assert_eq!(response.symbol_count(), 10);
         assert!(response.was_bounded);
         assert!(!response.is_final);
+    }
+
+    #[test]
+    fn response_builder_marks_final_when_all_symbols_sent() {
+        let mut engine = TargetedRepairEngine::new();
+        let object_id = ObjectId::from_bytes([0x11; 32]);
+        let zone_id = test_zone_id();
+
+        engine.register_available(object_id.clone(), 0..2);
+
+        let request = ValidatedRequest {
+            request: test_symbol_request(1, None),
+            is_authenticated: true,
+            max_response_symbols: 1,
+            has_proof_of_need: false,
+        };
+
+        let already_sent: HashSet<_> = vec![0].into_iter().collect();
+        let response = SymbolResponseBuilder::new(
+            object_id,
+            zone_id,
+            ZoneKeyId::from_bytes([0x22; 8]),
+            request.max_response_symbols,
+        )
+        .add_from_repair_engine(&engine, &request, &already_sent)
+        .build(2, already_sent.len());
+
+        assert_eq!(response.symbol_count(), 1);
+        assert!(response.is_final);
     }
 
     #[test]
@@ -1197,7 +1228,7 @@ mod tests {
             50,
         )
         .add_from_repair_engine(&engine, &request, &HashSet::new())
-        .build(0);
+        .build(0, 0);
 
         assert_eq!(response.symbol_count(), 0);
         assert!(response.is_final);

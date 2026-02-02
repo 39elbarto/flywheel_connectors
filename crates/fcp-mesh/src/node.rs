@@ -608,6 +608,7 @@ impl MeshNode {
 
         sent_entry.0 = now_ms; // Update timestamp
         let already_sent = &mut sent_entry.1;
+        let already_sent_count = already_sent.len();
 
         let builder = SymbolResponseBuilder::new(
             request.object_id,
@@ -618,7 +619,7 @@ impl MeshNode {
 
         let response = builder
             .add_from_repair_engine(&engine, &validated, already_sent)
-            .build(available.len() as u32);
+            .build(available.len() as u32, already_sent_count);
 
         debug!(
             object_id = %response.object_id,

@@ -257,6 +257,14 @@ impl SymbolStore for MemorySymbolStore {
                 ),
             });
         }
+        if symbol.meta.zone_id != obj.meta.zone_id {
+            return Err(SymbolStoreError::InvalidSymbol {
+                reason: format!(
+                    "Symbol zone mismatch: expected {}, got {}",
+                    obj.meta.zone_id, symbol.meta.zone_id
+                ),
+            });
+        }
 
         // Check for duplicate ESI
         if obj.symbols.contains_key(&symbol.meta.esi) {
@@ -804,6 +812,35 @@ mod tests {
                 ..StoreLogData::default()
             }
         });
+    }
+
+    #[test]
+    fn symbol_zone_mismatch_rejected() {
+        run_store_test(
+            "symbol_zone_mismatch_rejected",
+            "verify",
+            "write",
+            1,
+            || async {
+                let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+                store.put_object_meta(test_object_meta()).await.unwrap();
+
+                let mut bad_symbol = test_symbol(0);
+                bad_symbol.meta.zone_id = "z:other".parse().expect("zone parse");
+
+                let result = store.put_symbol(bad_symbol).await;
+                assert!(matches!(
+                    result,
+                    Err(SymbolStoreError::InvalidSymbol { .. })
+                ));
+
+                StoreLogData {
+                    object_id: Some(test_object_id()),
+                    details: Some(json!({"error": "zone_mismatch"})),
+                    ..StoreLogData::default()
+                }
+            },
+        );
     }
 
     #[test]

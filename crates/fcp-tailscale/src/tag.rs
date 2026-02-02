@@ -253,7 +253,10 @@ impl ZoneAclGenerator {
     /// Generate an ACL rule allowing zone members to access zone ports.
     ///
     /// Returns a JSON-compatible ACL rule structure.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the zone ID is invalid.
     pub fn zone_access_rule(&self, zone_id: &str) -> TailscaleResult<ZoneAclRule> {
         let tag = ZoneTagMapping::zone_to_tag(zone_id)?;
         Ok(ZoneAclRule {
@@ -267,7 +270,10 @@ impl ZoneAclGenerator {
     }
 
     /// Generate ACL rules for all standard zones.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any standard zone ID is invalid.
     pub fn all_zone_rules(&self) -> TailscaleResult<Vec<ZoneAclRule>> {
         ZoneTagMapping::standard_zones()
             .iter()

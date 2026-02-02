@@ -151,11 +151,11 @@ impl RedactionPolicy {
 
     /// Redact a value, optionally hashing it.
     #[must_use]
-    pub fn redact_value(&self, _original: &str) -> String {
+    pub fn redact_value(&self, original: &str) -> String {
         if self.hash_redacted {
             // Use first 8 chars of SHA-256 for correlation
             use sha2::{Digest, Sha256};
-            let hash = Sha256::digest(_original.as_bytes());
+            let hash = Sha256::digest(original.as_bytes());
             format!("[REDACTED:{}]", hex::encode(&hash[..4]))
         } else {
             self.redaction_marker.clone()
@@ -168,7 +168,7 @@ impl RedactionPolicy {
 // ============================================================================
 
 /// A mesh trace event for capture and replay.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "event_type", rename_all = "snake_case")]
 pub enum TraceEvent {
     /// Routing decision for symbol or control-plane message.
@@ -227,7 +227,7 @@ impl TraceEvent {
 }
 
 /// Routing decision for symbol or control-plane message delivery.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RoutingDecision {
     /// Timestamp in milliseconds since epoch.
     pub timestamp: u64,
@@ -255,7 +255,7 @@ impl RoutingDecision {
 }
 
 /// Admission control outcome for incoming request.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AdmissionOutcome {
     /// Timestamp in milliseconds since epoch.
     pub timestamp: u64,
@@ -263,7 +263,7 @@ pub struct AdmissionOutcome {
     pub trace_id: String,
     /// Peer node ID.
     pub peer_node: String,
-    /// Request type (symbol_request, invoke, gossip).
+    /// Request type (`symbol_request`, `invoke`, `gossip`).
     pub request_type: String,
     /// Decision outcome (admit, reject, throttle, quarantine).
     pub decision: String,
@@ -283,7 +283,7 @@ impl AdmissionOutcome {
 }
 
 /// Gossip state change event.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GossipEvent {
     /// Timestamp in milliseconds since epoch.
     pub timestamp: u64,
@@ -306,7 +306,7 @@ impl GossipEvent {
 }
 
 /// Lease operation event.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LeaseEvent {
     /// Timestamp in milliseconds since epoch.
     pub timestamp: u64,
@@ -316,7 +316,7 @@ pub struct LeaseEvent {
     pub operation: String,
     /// Subject object ID.
     pub subject_id: String,
-    /// Lease purpose (singleton_writer, operation, coordinator).
+    /// Lease purpose (`singleton_writer`, `operation`, `coordinator`).
     pub purpose: String,
     /// Node holding/requesting the lease.
     pub node_id: String,
@@ -333,7 +333,7 @@ impl LeaseEvent {
 }
 
 /// Session establishment event.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionEvent {
     /// Timestamp in milliseconds since epoch.
     pub timestamp: u64,
@@ -363,7 +363,7 @@ impl SessionEvent {
 }
 
 /// Policy enforcement decision.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PolicyDecision {
     /// Timestamp in milliseconds since epoch.
     pub timestamp: u64,
@@ -474,7 +474,11 @@ impl CapturedTrace {
             started_at: self.started_at,
             ended_at: self.ended_at,
             capturing_node: self.capturing_node.clone(),
-            events: self.events.iter().map(|e| e.with_redaction(policy)).collect(),
+            events: self
+                .events
+                .iter()
+                .map(|e| e.with_redaction(policy))
+                .collect(),
             redacted: true,
         }
     }
@@ -618,8 +622,7 @@ pub enum TraceError {
 fn current_time_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 // ============================================================================

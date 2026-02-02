@@ -16,7 +16,7 @@
 //!
 //! // Map a zone to its Tailscale tag
 //! let zone_id = "z:work".to_string();
-//! let tag = ZoneTagMapping::zone_to_tag(&zone_id);
+//! let tag = ZoneTagMapping::zone_to_tag(&zone_id).unwrap();
 //! assert_eq!(tag.as_str(), "tag:fcp-work");
 //!
 //! // Reverse mapping

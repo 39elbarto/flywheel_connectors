@@ -248,6 +248,12 @@ impl SymbolRequestHandler {
             ));
         }
 
+        if request.zone_id != request.header.zone_id {
+            return Err(SymbolRequestError::InvalidRequest {
+                reason: "request zone_id does not match header zone_id".to_string(),
+            });
+        }
+
         // Validate hint bounds
         if let Some(ref hints) = request.missing_hint {
             if hints.len() > MAX_MISSING_HINT_ENTRIES {
@@ -733,6 +739,10 @@ mod tests {
         "z:test-zone".parse().expect("zone parse")
     }
 
+    fn test_zone_id_alt() -> ZoneId {
+        "z:alt-zone".parse().expect("zone parse")
+    }
+
     fn test_object_header() -> ObjectHeader {
         let zone_id = test_zone_id();
         ObjectHeader {
@@ -778,6 +788,30 @@ mod tests {
         assert!(validated.is_authenticated);
         assert_eq!(validated.max_response_symbols, 100);
         assert!(!validated.has_proof_of_need);
+    }
+
+    #[test]
+    fn reject_zone_id_mismatch() {
+        let handler = SymbolRequestHandler::with_default_policy();
+        let mut admission = AdmissionController::with_default_policy();
+        let peer = NodeId::new("peer-zone-mismatch");
+
+        let header = test_object_header();
+        let request = SymbolRequest::new(
+            header,
+            ObjectId::from_bytes([0x11; 32]),
+            test_zone_id_alt(),
+            ZoneKeyId::from_bytes([0x22; 8]),
+            1000,
+            10,
+            0,
+        );
+
+        let result = handler.validate_request(&request, true, &mut admission, &peer, 0, 64);
+        assert!(matches!(
+            result,
+            Err(SymbolRequestError::InvalidRequest { .. })
+        ));
     }
 
     #[test]

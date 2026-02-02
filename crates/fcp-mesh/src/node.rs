@@ -566,6 +566,15 @@ impl MeshNode {
                 },
             })?;
 
+        if meta.zone_id != request.zone_id {
+            return Err(SymbolRequestError::InvalidRequest {
+                reason: format!(
+                    "request zone_id {} does not match stored object zone_id {}",
+                    request.zone_id, meta.zone_id
+                ),
+            });
+        }
+
         let authenticated = is_authenticated || self.is_peer_authenticated(peer);
         self.admission
             .set_authenticated(peer, authenticated, now_ms);

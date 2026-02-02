@@ -108,7 +108,7 @@ impl std::fmt::Display for TailscaleTag {
 /// use fcp_tailscale::{ZoneTagMapping, TailscaleTag};
 ///
 /// // Zone to tag
-/// let tag = ZoneTagMapping::zone_to_tag("z:work");
+/// let tag = ZoneTagMapping::zone_to_tag("z:work").unwrap();
 /// assert_eq!(tag.as_str(), "tag:fcp-work");
 ///
 /// // Tag to zone
@@ -124,15 +124,11 @@ impl ZoneTagMapping {
 
     /// Convert a zone ID to its Tailscale tag.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the zone ID doesn't start with `z:`.
-    #[must_use]
-    pub fn zone_to_tag(zone_id: &str) -> TailscaleTag {
-        let suffix = zone_id
-            .strip_prefix(Self::ZONE_PREFIX)
-            .unwrap_or_else(|| panic!("zone ID must start with 'z:': {zone_id}"));
-        TailscaleTag::fcp_tag(suffix)
+    /// Returns an error if the zone ID doesn't start with `z:`.
+    pub fn zone_to_tag(zone_id: &str) -> TailscaleResult<TailscaleTag> {
+        Self::try_zone_to_tag(zone_id)
     }
 
     /// Try to convert a zone ID to its Tailscale tag.
@@ -258,21 +254,21 @@ impl ZoneAclGenerator {
     ///
     /// Returns a JSON-compatible ACL rule structure.
     #[must_use]
-    pub fn zone_access_rule(&self, zone_id: &str) -> ZoneAclRule {
-        let tag = ZoneTagMapping::zone_to_tag(zone_id);
-        ZoneAclRule {
+    pub fn zone_access_rule(&self, zone_id: &str) -> TailscaleResult<ZoneAclRule> {
+        let tag = ZoneTagMapping::zone_to_tag(zone_id)?;
+        Ok(ZoneAclRule {
             action: "accept".to_string(),
             src: vec![tag.to_string()],
             dst: vec![
                 format!("{}:{}", tag, self.symbol_port),
                 format!("{}:{}", tag, self.control_port),
             ],
-        }
+        })
     }
 
     /// Generate ACL rules for all standard zones.
     #[must_use]
-    pub fn all_zone_rules(&self) -> Vec<ZoneAclRule> {
+    pub fn all_zone_rules(&self) -> TailscaleResult<Vec<ZoneAclRule>> {
         ZoneTagMapping::standard_zones()
             .iter()
             .map(|zone| self.zone_access_rule(zone))
@@ -332,10 +328,10 @@ mod tests {
 
     #[test]
     fn test_zone_to_tag() {
-        let tag = ZoneTagMapping::zone_to_tag("z:work");
+        let tag = ZoneTagMapping::zone_to_tag("z:work").unwrap();
         assert_eq!(tag.as_str(), "tag:fcp-work");
 
-        let tag = ZoneTagMapping::zone_to_tag("z:owner");
+        let tag = ZoneTagMapping::zone_to_tag("z:owner").unwrap();
         assert_eq!(tag.as_str(), "tag:fcp-owner");
     }
 
@@ -401,7 +397,7 @@ mod tests {
     #[test]
     fn test_roundtrip_zone_tag() {
         for zone in ZoneTagMapping::standard_zones() {
-            let tag = ZoneTagMapping::zone_to_tag(zone);
+            let tag = ZoneTagMapping::zone_to_tag(zone).unwrap();
             let recovered_zone = ZoneTagMapping::tag_to_zone(&tag).unwrap();
             assert_eq!(&recovered_zone, zone);
         }
@@ -410,7 +406,7 @@ mod tests {
     #[test]
     fn test_zone_acl_generator() {
         let generator = ZoneAclGenerator::default();
-        let rule = generator.zone_access_rule("z:work");
+        let rule = generator.zone_access_rule("z:work").unwrap();
 
         assert_eq!(rule.action, "accept");
         assert_eq!(rule.src, vec!["tag:fcp-work"]);
@@ -421,7 +417,7 @@ mod tests {
     #[test]
     fn test_zone_acl_generator_custom_ports() {
         let generator = ZoneAclGenerator::new(8080, 8081);
-        let rule = generator.zone_access_rule("z:private");
+        let rule = generator.zone_access_rule("z:private").unwrap();
 
         assert!(rule.dst.contains(&"tag:fcp-private:8080".to_string()));
         assert!(rule.dst.contains(&"tag:fcp-private:8081".to_string()));
@@ -430,7 +426,7 @@ mod tests {
     #[test]
     fn test_all_zone_rules() {
         let generator = ZoneAclGenerator::default();
-        let rules = generator.all_zone_rules();
+        let rules = generator.all_zone_rules().unwrap();
 
         assert_eq!(rules.len(), 5);
     }

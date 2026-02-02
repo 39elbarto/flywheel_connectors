@@ -711,6 +711,19 @@ impl SymbolRequest {
         self.missing_hint.as_ref().is_some_and(|h| !h.is_empty())
     }
 
+    /// Validate that `missing_hint` is bounded (`DoS` resistance).
+    ///
+    /// # Errors
+    /// Returns `FrameError::SymbolCountOverflow` if hint exceeds maximum entries.
+    pub fn validate_hint_bounds(&self) -> Result<(), FrameError> {
+        if let Some(ref hints) = self.missing_hint {
+            if hints.len() > MAX_MISSING_HINT_ENTRIES {
+                return Err(FrameError::SymbolCountOverflow);
+            }
+        }
+        Ok(())
+    }
+
     /// Compute the signature transcript bytes (signature excluded).
     #[must_use]
     pub fn transcript_bytes(&self) -> Vec<u8> {
@@ -1283,5 +1296,50 @@ mod tests {
             signature: Ed25519Signature::from_bytes(&[0u8; 64]),
         };
         assert!(status_bad.validate_hint_bounds().is_err());
+    }
+
+    #[test]
+    fn symbol_request_hint_bounds_validated() {
+        use fcp_cbor::SchemaId;
+        use fcp_core::Provenance;
+        use semver::Version;
+
+        let zone_id: ZoneId = "z:bounds".parse().expect("zone parse");
+        let header = ObjectHeader {
+            schema: SchemaId::new("fcp.test", "TestObject", Version::new(1, 0, 0)),
+            zone_id: zone_id.clone(),
+            created_at: 0,
+            provenance: Provenance::new(zone_id.clone()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        };
+
+        // Valid: exactly at the limit
+        let request_ok = SymbolRequest::new(
+            header.clone(),
+            ObjectId::from_bytes([0; 32]),
+            zone_id.clone(),
+            ZoneKeyId::from_bytes([0; 8]),
+            1,
+            32,
+            1,
+        )
+        .with_missing_hint(vec![0; MAX_MISSING_HINT_ENTRIES]);
+        request_ok.validate_hint_bounds().expect("at limit is ok");
+
+        // Invalid: exceeds limit
+        let request_bad = SymbolRequest::new(
+            header,
+            ObjectId::from_bytes([0; 32]),
+            zone_id,
+            ZoneKeyId::from_bytes([0; 8]),
+            1,
+            32,
+            1,
+        )
+        .with_missing_hint(vec![0; MAX_MISSING_HINT_ENTRIES + 1]);
+        assert!(request_bad.validate_hint_bounds().is_err());
     }
 }

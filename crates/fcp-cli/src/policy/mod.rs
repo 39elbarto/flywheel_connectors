@@ -15,10 +15,10 @@ use clap::{Args, Subcommand};
 use fcp_cbor::SchemaId;
 use fcp_core::{
     CapabilityObject, DecisionReceipt, DecisionReceiptPolicy, InvokeRequest, ObjectId,
-    PolicyBundle, PolicyBundleObject, PolicyBundlePolicyRef, PolicyBundleResolved,
-    PolicyBundleSignature, PolicyPreviewSample, PolicySimulationError, PolicySimulationInput,
-    Provenance, ResourceObject, RoleObject, ZoneDefinitionObject, ZoneId, ZonePolicyObject,
-    compute_policy_bundle_hash, diff_policy_bundles, preview_policy_bundles,
+    POLICY_BUNDLE_SIGNED_FIELDS, PolicyBundle, PolicyBundleObject, PolicyBundlePolicyRef,
+    PolicyBundleResolved, PolicyBundleSignature, PolicyPreviewSample, PolicySimulationError,
+    PolicySimulationInput, Provenance, ResourceObject, RoleObject, ZoneDefinitionObject, ZoneId,
+    ZonePolicyObject, compute_policy_bundle_hash, diff_policy_bundles, preview_policy_bundles,
 };
 use fcp_crypto::ed25519::{Ed25519SigningKey, SECRET_KEY_SIZE};
 use hex::decode as hex_decode;
@@ -334,22 +334,10 @@ fn run_bundle_create(args: &BundleCreateArgs) -> Result<()> {
     .map_err(|err| anyhow::anyhow!("failed to compute bundle hash: {err}"))?;
 
     let signing_key = load_signing_key(args)?;
-    let mut signed_fields = vec![
-        "format".to_string(),
-        "schema_version".to_string(),
-        "bundle_id".to_string(),
-        "zone_id".to_string(),
-        "policy_seq".to_string(),
-        "hash_algo".to_string(),
-        "bundle_hash".to_string(),
-        "policies".to_string(),
-    ];
-    if created_at.is_some() {
-        signed_fields.push("created_at".to_string());
-    }
-    if args.previous_bundle.is_some() {
-        signed_fields.push("previous_bundle".to_string());
-    }
+    let signed_fields = POLICY_BUNDLE_SIGNED_FIELDS
+        .iter()
+        .map(|field| (*field).to_string())
+        .collect::<Vec<_>>();
 
     let placeholder_signature =
         PolicyBundleSignature::new(args.key_id.clone(), "pending", signed_fields.clone());

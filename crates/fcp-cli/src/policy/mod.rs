@@ -11,8 +11,10 @@ use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use fcp_cbor::SchemaId;
 use fcp_core::{
-    DecisionReceipt, DecisionReceiptPolicy, InvokeRequest, ObjectId, PolicySimulationError,
-    PolicySimulationInput, Provenance, ZoneDefinitionObject, ZonePolicyObject,
+    CapabilityObject, DecisionReceipt, DecisionReceiptPolicy, InvokeRequest, ObjectId,
+    PolicyBundle, PolicyBundleObject, PolicyBundleResolved, PolicySimulationError,
+    PolicySimulationInput, Provenance, ResourceObject, RoleObject, ZoneDefinitionObject,
+    ZonePolicyObject, diff_policy_bundles,
 };
 use semver::Version;
 use serde::Serialize;
@@ -34,6 +36,8 @@ pub enum PolicyCommands {
     Diff(DiffArgs),
     /// Generate a rollback plan between two policy objects.
     Rollback(RollbackArgs),
+    /// Policy bundle workflows.
+    Bundle(BundleArgs),
 }
 
 /// Arguments for `fcp policy simulate`.
@@ -88,12 +92,51 @@ pub struct RollbackArgs {
     pub json: bool,
 }
 
+/// Arguments for policy bundle workflows.
+#[derive(Args, Debug)]
+pub struct BundleArgs {
+    #[command(subcommand)]
+    pub command: BundleCommands,
+}
+
+/// Policy bundle subcommands.
+#[derive(Subcommand, Debug)]
+pub enum BundleCommands {
+    /// Diff two policy bundles (resolved objects required).
+    Diff(BundleDiffArgs),
+}
+
+/// Arguments for `fcp policy bundle diff`.
+#[derive(Args, Debug)]
+pub struct BundleDiffArgs {
+    /// Path to the "before" bundle JSON.
+    #[arg(long)]
+    pub before: PathBuf,
+
+    /// Path to the "after" bundle JSON.
+    #[arg(long)]
+    pub after: PathBuf,
+
+    /// JSON map of `object_id` -> policy object for the "before" bundle.
+    #[arg(long)]
+    pub objects_before: PathBuf,
+
+    /// JSON map of `object_id` -> policy object for the "after" bundle.
+    #[arg(long)]
+    pub objects_after: PathBuf,
+
+    /// Output JSON diff. Default true.
+    #[arg(long, default_value_t = true)]
+    pub json: bool,
+}
+
 /// Run the policy command.
 pub fn run(args: &PolicyArgs) -> Result<()> {
     match &args.command {
         PolicyCommands::Simulate(sim_args) => run_simulate(sim_args),
         PolicyCommands::Diff(diff_args) => run_diff(diff_args),
         PolicyCommands::Rollback(rollback_args) => run_rollback(rollback_args),
+        PolicyCommands::Bundle(bundle_args) => run_bundle(bundle_args),
     }
 }
 
@@ -103,6 +146,12 @@ fn run_simulate(args: &SimulateArgs) -> Result<()> {
     match fcp_core::simulate_policy_decision(&input) {
         Ok(receipt) => output_receipt(&receipt, args.json),
         Err(err) => output_error(&err, args.json),
+    }
+}
+
+fn run_bundle(args: &BundleArgs) -> Result<()> {
+    match &args.command {
+        BundleCommands::Diff(diff_args) => run_bundle_diff(diff_args),
     }
 }
 
@@ -116,6 +165,89 @@ fn read_input(path: &PathBuf) -> Result<String> {
     }
 
     fs::read_to_string(path).with_context(|| format!("failed to read input {}", path.display()))
+}
+
+fn run_bundle_diff(args: &BundleDiffArgs) -> Result<()> {
+    let before_bundle = load_policy_bundle(&args.before)?;
+    let after_bundle = load_policy_bundle(&args.after)?;
+    let before_objects_raw = load_object_map(&args.objects_before)?;
+    let after_objects_raw = load_object_map(&args.objects_after)?;
+
+    let before_objects = resolve_bundle_objects(&before_bundle, &before_objects_raw)?;
+    let after_objects = resolve_bundle_objects(&after_bundle, &after_objects_raw)?;
+
+    let before_resolved = PolicyBundleResolved::new(before_bundle, before_objects);
+    let after_resolved = PolicyBundleResolved::new(after_bundle, after_objects);
+
+    let diff = diff_policy_bundles(&before_resolved, &after_resolved)
+        .map_err(|err| anyhow::anyhow!("policy bundle diff failed: {err}"))?;
+
+    output_json_or_human(&diff, args.json)
+}
+
+fn load_policy_bundle(path: &PathBuf) -> Result<PolicyBundle> {
+    let raw = read_input(path)?;
+    let bundle: PolicyBundle = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse policy bundle {}", path.display()))?;
+    bundle
+        .validate()
+        .map_err(|err| anyhow::anyhow!("invalid policy bundle {}: {err}", path.display()))?;
+    Ok(bundle)
+}
+
+fn load_object_map(path: &PathBuf) -> Result<BTreeMap<String, Value>> {
+    let raw = read_input(path)?;
+    let map: BTreeMap<String, Value> = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse object map {}", path.display()))?;
+    Ok(map)
+}
+
+fn resolve_bundle_objects(
+    bundle: &PolicyBundle,
+    raw_objects: &BTreeMap<String, Value>,
+) -> Result<BTreeMap<String, PolicyBundleObject>> {
+    let mut resolved = BTreeMap::new();
+    for policy_ref in &bundle.policies {
+        let Some(value) = raw_objects.get(&policy_ref.object_id) else {
+            continue;
+        };
+        let object = parse_bundle_object(&policy_ref.schema_id, value)
+            .with_context(|| format!("object_id {}", policy_ref.object_id))?;
+        resolved.insert(policy_ref.object_id.clone(), object);
+    }
+    Ok(resolved)
+}
+
+fn parse_bundle_object(schema_id: &str, value: &Value) -> Result<PolicyBundleObject> {
+    if schema_id.starts_with("fcp.core:ZonePolicy@") {
+        let policy: ZonePolicyObject =
+            serde_json::from_value(value.clone()).context("failed to parse ZonePolicy object")?;
+        return Ok(PolicyBundleObject::ZonePolicy(policy));
+    }
+    if schema_id.starts_with("fcp.core:ZoneDefinition@") {
+        let definition: ZoneDefinitionObject = serde_json::from_value(value.clone())
+            .context("failed to parse ZoneDefinition object")?;
+        return Ok(PolicyBundleObject::ZoneDefinition(definition));
+    }
+    if schema_id.starts_with("fcp.core:RoleObject@") {
+        let role: RoleObject =
+            serde_json::from_value(value.clone()).context("failed to parse RoleObject")?;
+        return Ok(PolicyBundleObject::Role(role));
+    }
+    if schema_id.starts_with("fcp.core:ResourceObject@") {
+        let resource: ResourceObject =
+            serde_json::from_value(value.clone()).context("failed to parse ResourceObject")?;
+        return Ok(PolicyBundleObject::Resource(resource));
+    }
+    if schema_id.starts_with("fcp.core:CapabilityObject@") {
+        let capability: CapabilityObject =
+            serde_json::from_value(value.clone()).context("failed to parse CapabilityObject")?;
+        return Ok(PolicyBundleObject::Capability(capability));
+    }
+
+    Err(anyhow::anyhow!(
+        "unsupported policy bundle schema_id {schema_id}"
+    ))
 }
 
 fn parse_simulation_input(raw: &str) -> Result<PolicySimulationInput> {

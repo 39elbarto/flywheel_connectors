@@ -551,29 +551,7 @@ impl MeshNode {
         }
 
         // Fetch metadata first to get accurate symbol size for admission control
-        let meta = self
-            .symbol_store
-            .get_object_meta(&request.object_id)
-            .await
-            .map_err(|err| match err {
-                fcp_store::SymbolStoreError::ObjectNotFound(_) => {
-                    SymbolRequestError::ObjectNotFound {
-                        object_id: request.object_id.to_string(),
-                    }
-                }
-                other => SymbolRequestError::InvalidRequest {
-                    reason: format!("symbol store error: {other}"),
-                },
-            })?;
-
-        if meta.zone_id != request.zone_id {
-            return Err(SymbolRequestError::InvalidRequest {
-                reason: format!(
-                    "request zone_id {} does not match stored object zone_id {}",
-                    request.zone_id, meta.zone_id
-                ),
-            });
-        }
+        let meta = self.load_symbol_meta(&request).await?;
 
         let authenticated = is_authenticated || self.is_peer_authenticated(peer);
         self.admission
@@ -656,6 +634,37 @@ impl MeshNode {
             .record_symbols_sent(response.symbol_count(), request.missing_hint.is_some());
 
         Ok(response)
+    }
+
+    async fn load_symbol_meta(
+        &self,
+        request: &SymbolRequest,
+    ) -> Result<fcp_store::ObjectSymbolMeta, SymbolRequestError> {
+        let meta = self
+            .symbol_store
+            .get_object_meta(&request.object_id)
+            .await
+            .map_err(|err| match err {
+                fcp_store::SymbolStoreError::ObjectNotFound(_) => {
+                    SymbolRequestError::ObjectNotFound {
+                        object_id: request.object_id.to_string(),
+                    }
+                }
+                other => SymbolRequestError::InvalidRequest {
+                    reason: format!("symbol store error: {other}"),
+                },
+            })?;
+
+        if meta.zone_id != request.zone_id {
+            return Err(SymbolRequestError::InvalidRequest {
+                reason: format!(
+                    "request zone_id {} does not match stored object zone_id {}",
+                    request.zone_id, meta.zone_id
+                ),
+            });
+        }
+
+        Ok(meta)
     }
 
     /// Apply a decode status update (targeted repair feedback).

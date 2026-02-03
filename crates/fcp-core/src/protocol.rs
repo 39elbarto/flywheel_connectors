@@ -12,7 +12,8 @@ use std::collections::HashMap;
 use crate::{
     ApprovalToken, CapabilityGrant, CapabilityId, CapabilityToken, ConnectorId, CorrelationId,
     EventAck, EventNack, FcpError, IdempotencyClass, InstanceId, ObjectId, OperationId, Provenance,
-    RiskLevel, SafetyTier, SessionId, TailscaleNodeId, ZoneId,
+    ProvisioningProgress, ProvisioningRecipe, ProvisioningState, ProvisioningValidation, RecipeId,
+    RiskLevel, SafetyTier, SessionId, SetupDescriptor, StepId, TailscaleNodeId, ZoneId,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1212,6 +1213,166 @@ impl ResourceAvailability {
         self.details = Some(details.into());
         self
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Provisioning Payloads (Section 12.2)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Provisioning session identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ProvisioningSessionId(pub String);
+
+impl ProvisioningSessionId {
+    /// Create a new provisioning session ID.
+    #[must_use]
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    /// Generate a random provisioning session ID.
+    #[must_use]
+    pub fn random() -> Self {
+        Self(format!("prov_{}", uuid::Uuid::new_v4()))
+    }
+
+    /// Get the session ID as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ProvisioningSessionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl<S: Into<String>> From<S> for ProvisioningSessionId {
+    fn from(value: S) -> Self {
+        Self(value.into())
+    }
+}
+
+/// Input payload for `fcp.provision.start`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProvisioningStartInput {
+    /// Optional recipe identifier (default recipe if omitted).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recipe_id: Option<RecipeId>,
+
+    /// Optional connector-specific configuration hints (non-secret).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config: Option<serde_json::Value>,
+}
+
+/// Result payload for `fcp.provision.start`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProvisioningStartOutput {
+    /// Provisioning session identifier (if the connector tracks sessions).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<ProvisioningSessionId>,
+
+    /// Current provisioning state.
+    pub state: ProvisioningState,
+
+    /// Optional progress summary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<ProvisioningProgress>,
+
+    /// Optional recipe definition.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recipe: Option<ProvisioningRecipe>,
+
+    /// Optional setup descriptor for host UI.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub setup: Option<SetupDescriptor>,
+
+    /// Connector-specific details.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
+}
+
+/// Input payload for `fcp.provision.poll`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProvisioningPollInput {
+    /// Provisioning session identifier (if applicable).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<ProvisioningSessionId>,
+}
+
+/// Result payload for `fcp.provision.poll`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProvisioningPollOutput {
+    /// Current provisioning state.
+    pub state: ProvisioningState,
+
+    /// Optional progress summary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<ProvisioningProgress>,
+
+    /// Connector-specific details.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
+}
+
+/// Input value for provisioning completion.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProvisioningInput {
+    /// Step identifier that produced the value.
+    pub step_id: StepId,
+
+    /// User-provided value or redacted reference.
+    ///
+    /// Secrets SHOULD be represented as references (IDs) rather than raw bytes.
+    pub value: serde_json::Value,
+}
+
+/// Input payload for `fcp.provision.complete`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProvisioningCompleteInput {
+    /// Provisioning session identifier (if applicable).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<ProvisioningSessionId>,
+
+    /// Inputs collected from human prompts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<ProvisioningInput>,
+}
+
+/// Result payload for `fcp.provision.complete`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProvisioningCompleteOutput {
+    /// Current provisioning state.
+    pub state: ProvisioningState,
+
+    /// Validation result after completion.
+    pub validation: ProvisioningValidation,
+
+    /// Connector-specific details.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
+}
+
+/// Input payload for `fcp.provision.abort`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProvisioningAbortInput {
+    /// Provisioning session identifier (if applicable).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<ProvisioningSessionId>,
+
+    /// Optional reason for aborting.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Result payload for `fcp.provision.abort`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProvisioningAbortOutput {
+    /// Current provisioning state.
+    pub state: ProvisioningState,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

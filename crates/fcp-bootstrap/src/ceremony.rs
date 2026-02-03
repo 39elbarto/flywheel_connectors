@@ -641,6 +641,24 @@ mod tests {
         }
     }
 
+    fn test_commitment(index: u32) -> FrostCommitment {
+        let index_u8 = u8::try_from(index).expect("participant index must fit in u8");
+        FrostCommitment {
+            participant_index: index,
+            commitment: vec![index_u8; 32],
+            proof: vec![0u8; 64],
+        }
+    }
+
+    fn test_shares(from_index: u32, to_index: u32) -> Vec<EncryptedShare> {
+        let from_u8 = u8::try_from(from_index).expect("participant index must fit in u8");
+        vec![EncryptedShare {
+            from_index,
+            to_index,
+            ciphertext: vec![from_u8; 32],
+        }]
+    }
+
     #[test]
     fn test_ceremony_creation() {
         let ceremony = ThresholdCeremony::new(2, 3);
@@ -677,6 +695,39 @@ mod tests {
     }
 
     #[test]
+    fn test_commitments_transition_to_round2() {
+        let mut ceremony = ThresholdCeremony::new(2, 2);
+
+        ceremony.add_participant(test_participant(1)).unwrap();
+        ceremony.add_participant(test_participant(2)).unwrap();
+
+        ceremony.add_commitment(test_commitment(1)).unwrap();
+        ceremony.add_commitment(test_commitment(2)).unwrap();
+
+        assert!(matches!(ceremony.phase, CeremonyPhase::Round2Shares { .. }));
+    }
+
+    #[test]
+    fn test_shares_transition_to_complete() {
+        let mut ceremony = ThresholdCeremony::new(2, 2);
+
+        ceremony.add_participant(test_participant(1)).unwrap();
+        ceremony.add_participant(test_participant(2)).unwrap();
+
+        ceremony.add_commitment(test_commitment(1)).unwrap();
+        ceremony.add_commitment(test_commitment(2)).unwrap();
+
+        ceremony
+            .add_shares(1, test_shares(1, 2))
+            .expect("shares from participant 1");
+        ceremony
+            .add_shares(2, test_shares(2, 1))
+            .expect("shares from participant 2");
+
+        assert!(matches!(ceremony.phase, CeremonyPhase::Complete { .. }));
+    }
+
+    #[test]
     fn test_abort_and_resume() {
         let mut ceremony = ThresholdCeremony::new(2, 3);
         ceremony.add_participant(test_participant(1)).unwrap();
@@ -697,5 +748,36 @@ mod tests {
 
         let result = ceremony.add_participant(test_participant(1));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resume_rejects_expired_checkpoint() {
+        let mut ceremony = ThresholdCeremony::new(2, 2);
+        ceremony.add_participant(test_participant(1)).unwrap();
+
+        let mut checkpoint = ceremony.create_checkpoint();
+        checkpoint.phase_deadline = Utc::now() - Duration::seconds(1);
+
+        let result = ThresholdCeremony::resume(checkpoint);
+        assert!(matches!(
+            result,
+            Err(CeremonyResumeError::CheckpointExpired)
+        ));
+    }
+
+    #[test]
+    fn test_resume_rejects_non_resumable_phase() {
+        let mut ceremony = ThresholdCeremony::new(2, 2);
+        ceremony.add_participant(test_participant(1)).unwrap();
+        ceremony.add_participant(test_participant(2)).unwrap();
+        ceremony.add_commitment(test_commitment(1)).unwrap();
+        ceremony.add_commitment(test_commitment(2)).unwrap();
+
+        let checkpoint = ceremony.create_checkpoint();
+        let result = ThresholdCeremony::resume(checkpoint);
+        assert!(matches!(
+            result,
+            Err(CeremonyResumeError::NonResumablePhase(_))
+        ));
     }
 }

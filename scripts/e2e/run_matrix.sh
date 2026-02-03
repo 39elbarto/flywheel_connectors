@@ -116,6 +116,7 @@ SCENARIOS=(
   "admission_control|./admission_control_flow.sh|Admission control budgets + limits|true"
   "policy_enforcement|./policy_enforcement_flow.sh|Policy enforcement allow/deny decisions|true"
   "routing|./routing_flow.sh|Routing selection and locality scoring|true"
+  "meshnode_control_plane|./meshnode_control_plane_flow.sh|MeshNode control-plane and multi-node flows|true"
   "budget|./budget_flow.sh|Budget enforcement flow|false"
   "egress_denial|./egress_denial.sh|Sandbox egress denial|true"
 )

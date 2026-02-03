@@ -1,9 +1,11 @@
 //! OpenAI API client.
 
+use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
+use fcp_core::CredentialId;
 use futures_util::StreamExt;
 use reqwest::{Client, Response, StatusCode};
 use tokio_stream::Stream;
@@ -18,13 +20,52 @@ use crate::{
 };
 
 /// Default API base URL.
-const DEFAULT_BASE_URL: &str = "https://api.openai.com";
+pub const DEFAULT_BASE_URL: &str = "https://api.openai.com";
+
+/// Authentication mode for OpenAI API access.
+#[derive(Clone)]
+pub enum OpenAIAuth {
+    /// Direct API key (legacy; avoided in secretless deployments).
+    ApiKey(String),
+    /// Secretless credential reference (egress proxy injection).
+    CredentialId(CredentialId),
+}
+
+impl OpenAIAuth {
+    /// Render a redacted label suitable for logs/diagnostics.
+    #[must_use]
+    pub fn redacted_label(&self) -> String {
+        match self {
+            Self::ApiKey(_) => "api_key:redacted".to_string(),
+            Self::CredentialId(id) => {
+                let id_str = id.to_string();
+                let prefix = id_str.chars().take(8).collect::<String>();
+                format!("credential_id:{prefix}…")
+            }
+        }
+    }
+
+    /// True if this uses secretless credential injection.
+    #[must_use]
+    pub const fn is_secretless(&self) -> bool {
+        matches!(self, Self::CredentialId(_))
+    }
+}
+
+impl fmt::Debug for OpenAIAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ApiKey(_) => f.debug_tuple("ApiKey").field(&"<redacted>").finish(),
+            Self::CredentialId(id) => f.debug_tuple("CredentialId").field(id).finish(),
+        }
+    }
+}
 
 /// OpenAI API client.
 #[derive(Debug)]
 pub struct OpenAIClient {
     client: Client,
-    api_key: String,
+    auth: OpenAIAuth,
     base_url: String,
     organization: Option<String>,
     max_retries: u32,
@@ -38,6 +79,11 @@ pub struct OpenAIClient {
 impl OpenAIClient {
     /// Create a new OpenAI client.
     pub fn new(api_key: impl Into<String>) -> OpenAIResult<Self> {
+        Self::new_with_auth(OpenAIAuth::ApiKey(api_key.into()))
+    }
+
+    /// Create a new OpenAI client with explicit auth mode.
+    pub fn new_with_auth(auth: OpenAIAuth) -> OpenAIResult<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(120))
             .build()
@@ -45,7 +91,7 @@ impl OpenAIClient {
 
         Ok(Self {
             client,
-            api_key: api_key.into(),
+            auth,
             base_url: DEFAULT_BASE_URL.into(),
             organization: None,
             max_retries: 3,
@@ -102,18 +148,29 @@ impl OpenAIClient {
         self.total_completion_tokens.store(0, Ordering::Relaxed);
     }
 
+    fn apply_auth(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        let request = match &self.auth {
+            OpenAIAuth::ApiKey(key) => request.header("Authorization", format!("Bearer {key}")),
+            OpenAIAuth::CredentialId(credential_id) => {
+                request.header("X-FCP-Credential-ID", credential_id.to_string())
+            }
+        };
+
+        if let Some(org) = &self.organization {
+            request.header("OpenAI-Organization", org)
+        } else {
+            request
+        }
+    }
+
     /// Perform a lightweight credentials/availability check.
     pub async fn health_check(&self) -> OpenAIResult<()> {
         let url = format!("{}/v1/models", self.base_url);
-        let mut request = self
+        let request = self
             .client
             .get(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json");
-
-        if let Some(org) = &self.organization {
-            request = request.header("OpenAI-Organization", org);
-        }
+        let request = self.apply_auth(request);
 
         let response = request.send().await?;
         let status = response.status();
@@ -246,15 +303,12 @@ impl OpenAIClient {
             attempts += 1;
             debug!(attempt = attempts, endpoint, "Making OpenAI API request");
 
-            let mut request = self
+            let request = self
                 .client
                 .post(&url)
-                .header("Authorization", format!("Bearer {}", self.api_key))
                 .header("Content-Type", "application/json");
 
-            if let Some(org) = &self.organization {
-                request = request.header("OpenAI-Organization", org);
-            }
+            let request = self.apply_auth(request);
 
             let result = request.json(body).send().await;
 
@@ -302,15 +356,12 @@ impl OpenAIClient {
     {
         let url = format!("{}{endpoint}", self.base_url);
 
-        let mut request = self
+        let request = self
             .client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json");
 
-        if let Some(org) = &self.organization {
-            request = request.header("OpenAI-Organization", org);
-        }
+        let request = self.apply_auth(request);
 
         let response = request.json(body).send().await?;
 

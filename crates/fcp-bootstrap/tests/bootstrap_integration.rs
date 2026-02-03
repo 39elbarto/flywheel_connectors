@@ -5,12 +5,13 @@
 
 use chrono::Utc;
 use fcp_bootstrap::{
-    BootstrapConfig, BootstrapError, BootstrapMode, BootstrapWorkflow, ColdRecovery, GenesisState,
-    GenesisValidationError, RecoveryPhrase, RecoveryPhraseError,
+    BootstrapConfig, BootstrapError, BootstrapMode, BootstrapWorkflow, ColdRecovery, DetectedToken,
+    GenesisState, GenesisValidationError, RecoveryPhrase, RecoveryPhraseError,
 };
 use fcp_core::Uuid;
 use fcp_crypto::Ed25519SigningKey;
 use serde::Serialize;
+use std::path::PathBuf;
 use tempfile::TempDir;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -518,6 +519,122 @@ fn test_bootstrap_workflow_detects_existing_genesis() {
     assert!(
         already_exists,
         "re-bootstrap must detect existing genesis and return AlreadyExists error"
+    );
+}
+
+#[test]
+fn test_bootstrap_workflow_import_mode() {
+    let mut log = TestLogEntry::new("test_bootstrap_workflow_import_mode", "execute");
+
+    let temp_dir = TempDir::new().expect("create temp dir");
+    let phrase_str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
+    let phrase = RecoveryPhrase::from_mnemonic(phrase_str).expect("valid phrase");
+
+    let config = BootstrapConfig::builder()
+        .data_dir(temp_dir.path())
+        .mode(BootstrapMode::Import {
+            phrase: phrase.clone(),
+        })
+        .skip_time_validation(true)
+        .build()
+        .expect("build config");
+
+    let workflow = BootstrapWorkflow::new(config).expect("create workflow");
+    let genesis = workflow.run().expect("import bootstrap succeeds");
+
+    let expected = GenesisState::create_deterministic(&phrase.derive_owner_keypair().public());
+
+    log = log
+        .with_genesis_objects(vec!["genesis_state", "owner_key"])
+        .with_fingerprint(&genesis.fingerprint())
+        .with_result(if genesis.fingerprint() == expected.fingerprint() {
+            "pass"
+        } else {
+            "fail"
+        });
+    log.emit();
+
+    assert_eq!(
+        genesis.fingerprint(),
+        expected.fingerprint(),
+        "import mode should produce deterministic genesis fingerprint"
+    );
+
+    let stored = std::fs::read(temp_dir.path().join("genesis.cbor"))
+        .expect("genesis.cbor should be written");
+    let restored = GenesisState::from_cbor(&stored).expect("genesis.cbor should decode");
+    assert_eq!(
+        restored.fingerprint(),
+        genesis.fingerprint(),
+        "stored genesis must match returned genesis"
+    );
+}
+
+#[test]
+fn test_bootstrap_workflow_multi_device_returns_ceremony_error() {
+    let mut log = TestLogEntry::new(
+        "test_bootstrap_workflow_multi_device_returns_ceremony_error",
+        "execute",
+    );
+
+    let temp_dir = TempDir::new().expect("create temp dir");
+    let config = BootstrapConfig::builder()
+        .data_dir(temp_dir.path())
+        .mode(BootstrapMode::MultiDevice {
+            device_count: 2,
+            threshold: 2,
+        })
+        .skip_time_validation(true)
+        .build()
+        .expect("build config");
+
+    let workflow = BootstrapWorkflow::new(config).expect("create workflow");
+    let result = workflow.run();
+
+    let is_ceremony_error = matches!(result, Err(BootstrapError::Ceremony(_)));
+    log = log.with_result(if is_ceremony_error { "pass" } else { "fail" });
+    log.emit();
+
+    assert!(
+        is_ceremony_error,
+        "multi-device bootstrap should return ceremony error until implemented"
+    );
+}
+
+#[test]
+fn test_bootstrap_workflow_hardware_token_returns_error() {
+    let mut log = TestLogEntry::new(
+        "test_bootstrap_workflow_hardware_token_returns_error",
+        "execute",
+    );
+
+    let temp_dir = TempDir::new().expect("create temp dir");
+    let token = DetectedToken {
+        provider: PathBuf::from("/dev/null"),
+        slot: 0,
+        label: "test-token".to_string(),
+        manufacturer: "test-manufacturer".to_string(),
+        serial: "test-serial".to_string(),
+        mechanisms: vec!["ED25519".to_string()],
+    };
+
+    let config = BootstrapConfig::builder()
+        .data_dir(temp_dir.path())
+        .mode(BootstrapMode::HardwareToken { token })
+        .skip_time_validation(true)
+        .build()
+        .expect("build config");
+
+    let workflow = BootstrapWorkflow::new(config).expect("create workflow");
+    let result = workflow.run();
+
+    let is_token_error = matches!(result, Err(BootstrapError::HardwareToken(_)));
+    log = log.with_result(if is_token_error { "pass" } else { "fail" });
+    log.emit();
+
+    assert!(
+        is_token_error,
+        "hardware token bootstrap should return hardware token error until implemented"
     );
 }
 

@@ -274,4 +274,22 @@ mod tests {
         ));
         assert!(validation.drift.is_some());
     }
+
+    #[test]
+    fn test_is_error() {
+        assert!(!TimeValidationResult::Valid.is_error());
+        assert!(
+            !TimeValidationResult::DriftWarning {
+                drift: Duration::from_secs(60)
+            }
+            .is_error()
+        );
+        assert!(!TimeValidationResult::CannotValidate.is_error());
+        assert!(
+            TimeValidationResult::DriftError {
+                drift: Duration::from_secs(600)
+            }
+            .is_error()
+        );
+    }
 }

@@ -354,7 +354,7 @@ pub struct HeldLease {
 }
 
 /// Simplified lease purpose for planner decisions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LeasePurpose {
     /// Exclusive write access for singleton-writer connector state.
     SingletonWriter,

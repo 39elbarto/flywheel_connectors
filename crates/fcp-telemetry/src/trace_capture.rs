@@ -39,6 +39,7 @@
 //! ```
 
 use std::collections::HashSet;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -521,6 +522,26 @@ impl CapturedTrace {
     pub fn from_json(json: &str) -> Result<Self, TraceError> {
         serde_json::from_str(json).map_err(|e| TraceError::Deserialization(e.to_string()))
     }
+
+    /// Write JSON trace output to a file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if serialization or IO fails.
+    pub fn write_json<P: AsRef<Path>>(&self, path: P) -> Result<(), TraceError> {
+        let json = self.to_json()?;
+        std::fs::write(path, json.as_bytes()).map_err(|e| TraceError::Io(e.to_string()))
+    }
+
+    /// Write CBOR trace output to a file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if serialization or IO fails.
+    pub fn write_cbor<P: AsRef<Path>>(&self, path: P) -> Result<(), TraceError> {
+        let bytes = self.to_cbor()?;
+        std::fs::write(path, bytes).map_err(|e| TraceError::Io(e.to_string()))
+    }
 }
 
 // ============================================================================
@@ -575,6 +596,13 @@ impl TraceCaptureConfig {
         self
     }
 
+    /// Set maximum trace size in bytes.
+    #[must_use]
+    pub const fn with_max_size_bytes(mut self, max_bytes: usize) -> Self {
+        self.max_size_bytes = max_bytes;
+        self
+    }
+
     /// Set sampling rate.
     #[must_use]
     pub const fn with_sample_rate(mut self, rate: f64) -> Self {
@@ -612,6 +640,153 @@ pub enum TraceError {
     /// Invalid trace version.
     #[error("Unsupported trace version: {0}")]
     UnsupportedVersion(u32),
+
+    /// IO error while writing trace output.
+    #[error("Trace IO error: {0}")]
+    Io(String),
+}
+
+// ============================================================================
+// Trace Capture
+// ============================================================================
+
+/// Trace export format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceExportFormat {
+    /// Pretty JSON format.
+    Json,
+    /// Canonical CBOR format.
+    Cbor,
+}
+
+/// Trace capture buffer with sampling and size caps.
+#[derive(Debug, Clone)]
+pub struct TraceCapture {
+    config: TraceCaptureConfig,
+    trace: CapturedTrace,
+    trace_id: String,
+    event_bytes: usize,
+}
+
+impl TraceCapture {
+    /// Create a new trace capture buffer with the given ID and config.
+    #[must_use]
+    pub fn new(id: impl Into<String>, config: TraceCaptureConfig) -> Self {
+        let id = id.into();
+        Self {
+            config,
+            trace: CapturedTrace::new(id.clone()),
+            trace_id: id,
+            event_bytes: 0,
+        }
+    }
+
+    /// Set the capturing node ID.
+    #[must_use]
+    pub fn with_node(mut self, node_id: impl Into<String>) -> Self {
+        self.trace.capturing_node = Some(node_id.into());
+        self
+    }
+
+    /// Trace ID used for events in this capture.
+    #[must_use]
+    pub fn trace_id(&self) -> &str {
+        &self.trace_id
+    }
+
+    /// Capture ID for this trace buffer.
+    #[must_use]
+    pub fn capture_id(&self) -> &str {
+        &self.trace.id
+    }
+
+    /// Access the capture configuration.
+    #[must_use]
+    pub const fn config(&self) -> &TraceCaptureConfig {
+        &self.config
+    }
+
+    /// Record a trace event if sampling and buffer limits allow.
+    ///
+    /// # Errors
+    ///
+    /// Returns `TraceError::BufferFull` if the buffer is full.
+    pub fn record(&mut self, event: TraceEvent) -> Result<(), TraceError> {
+        if !self.config.enabled {
+            return Ok(());
+        }
+
+        if !self.should_sample() {
+            return Ok(());
+        }
+
+        if self.trace.events.len() >= self.config.max_events {
+            return Err(TraceError::BufferFull);
+        }
+
+        let event_bytes = serde_json::to_vec(&event)
+            .map_err(|e| TraceError::Serialization(e.to_string()))?
+            .len();
+
+        if self.event_bytes.saturating_add(event_bytes) > self.config.max_size_bytes {
+            return Err(TraceError::BufferFull);
+        }
+
+        self.event_bytes = self.event_bytes.saturating_add(event_bytes);
+        self.trace.events.push(event);
+        Ok(())
+    }
+
+    /// Mark the capture as complete.
+    pub fn finish(&mut self) {
+        self.trace.finish();
+    }
+
+    /// Snapshot the current trace (unredacted).
+    #[must_use]
+    pub fn snapshot(&self) -> CapturedTrace {
+        self.trace.clone()
+    }
+
+    /// Snapshot the current trace with redaction applied.
+    #[must_use]
+    pub fn redacted_snapshot(&self) -> CapturedTrace {
+        self.trace.with_redaction(&self.config.redaction_policy)
+    }
+
+    /// Export the trace to a file in the chosen format.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if serialization or IO fails.
+    pub fn export_to_path<P: AsRef<Path>>(
+        &self,
+        path: P,
+        redacted: bool,
+        format: TraceExportFormat,
+    ) -> Result<(), TraceError> {
+        let trace = if redacted {
+            self.redacted_snapshot()
+        } else {
+            self.snapshot()
+        };
+
+        match format {
+            TraceExportFormat::Json => trace.write_json(path),
+            TraceExportFormat::Cbor => trace.write_cbor(path),
+        }
+    }
+
+    fn should_sample(&self) -> bool {
+        let rate = self.config.sample_rate.clamp(0.0, 1.0);
+        if rate <= 0.0 {
+            return false;
+        }
+        if rate >= 1.0 {
+            return true;
+        }
+        rand::random::<f64>() <= rate
+    }
 }
 
 // ============================================================================
@@ -871,6 +1046,65 @@ mod tests {
     }
 
     #[test]
+    fn test_trace_capture_records_event() {
+        let config = TraceCaptureConfig::new().enabled();
+        let mut capture = TraceCapture::new("trace-1", config);
+
+        let event = TraceEvent::Admission(AdmissionOutcome {
+            timestamp: 1,
+            trace_id: "trace-1".to_string(),
+            peer_node: "peer-1".to_string(),
+            request_type: "symbol_request".to_string(),
+            decision: "admit".to_string(),
+            reason_code: None,
+            budget_remaining: None,
+            authenticated: true,
+        });
+
+        capture.record(event).expect("record event");
+        let snapshot = capture.snapshot();
+        assert_eq!(snapshot.events.len(), 1);
+    }
+
+    #[test]
+    fn test_trace_capture_respects_max_events() {
+        let config = TraceCaptureConfig::new().enabled().with_max_events(1);
+        let mut capture = TraceCapture::new("trace-2", config);
+
+        let event = TraceEvent::Gossip(GossipEvent {
+            timestamp: 2,
+            trace_id: "trace-2".to_string(),
+            gossip_type: "announce".to_string(),
+            object_count: 1,
+            peer_node: None,
+            success: true,
+        });
+
+        capture.record(event.clone()).expect("first event");
+        let err = capture.record(event).expect_err("buffer should be full");
+        assert!(matches!(err, TraceError::BufferFull));
+    }
+
+    #[test]
+    fn test_trace_capture_sampling_zero_drops() {
+        let config = TraceCaptureConfig::new().enabled().with_sample_rate(0.0);
+        let mut capture = TraceCapture::new("trace-3", config);
+
+        let event = TraceEvent::Session(SessionEvent {
+            timestamp: 3,
+            trace_id: "trace-3".to_string(),
+            session_id: "sess".to_string(),
+            kind: "hello".to_string(),
+            peer_node: "peer-1".to_string(),
+            suite: None,
+            failure_reason: None,
+        });
+
+        capture.record(event).expect("record ok");
+        assert!(capture.snapshot().events.is_empty());
+    }
+
+    #[test]
     fn test_trace_error_display() {
         let err = TraceError::Serialization("test".to_string());
         assert!(format!("{err}").contains("serialization"));
@@ -880,6 +1114,9 @@ mod tests {
 
         let err = TraceError::UnsupportedVersion(99);
         assert!(format!("{err}").contains("99"));
+
+        let err = TraceError::Io("io".to_string());
+        assert!(format!("{err}").contains("IO"));
     }
 
     #[test]

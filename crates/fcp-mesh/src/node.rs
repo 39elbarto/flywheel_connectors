@@ -10,6 +10,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::Arc;
 
 use fcp_core::{
@@ -21,6 +22,12 @@ use fcp_protocol::{DecodeStatus, SymbolAck, SymbolRequest};
 use fcp_raptorq::RaptorQConfig;
 use fcp_store::{ObjectStore, QuarantineStore, SymbolStore};
 use fcp_tailscale::NodeId;
+use fcp_telemetry::TraceContext;
+use fcp_telemetry::trace_capture::{
+    AdmissionOutcome, CapturedTrace, GossipEvent, LeaseEvent, RoutingDecision, SessionEvent,
+    TraceCapture, TraceCaptureConfig, TraceEvent, TraceExportFormat,
+};
+use hex::encode;
 use thiserror::Error;
 use tracing::debug;
 
@@ -39,7 +46,7 @@ use crate::planner::{
 use crate::session::MeshSession;
 use crate::symbol_request::{
     SymbolRequestError, SymbolRequestHandler, SymbolRequestMetrics, SymbolRequestPolicy,
-    SymbolResponse, SymbolResponseBuilder, TargetedRepairEngine,
+    SymbolResponse, SymbolResponseBuilder, TargetedRepairEngine, ValidatedRequest,
 };
 use crate::transport::{RankedPath, TransportPath, TransportSelector};
 
@@ -58,6 +65,10 @@ pub struct MeshNodeConfig {
     pub raptorq_config: RaptorQConfig,
     /// Sender instance ID for degraded-mode frames (reboot-safety).
     pub sender_instance_id: u64,
+    /// Trace capture configuration.
+    pub trace_capture: TraceCaptureConfig,
+    /// Optional allowlist of zones to capture.
+    pub trace_capture_zones: Option<HashSet<ZoneId>>,
 }
 
 impl MeshNodeConfig {
@@ -71,6 +82,8 @@ impl MeshNodeConfig {
             symbol_request_policy: SymbolRequestPolicy::default(),
             raptorq_config: RaptorQConfig::default(),
             sender_instance_id: rand::random::<u64>(),
+            trace_capture: TraceCaptureConfig::default(),
+            trace_capture_zones: None,
         }
     }
 
@@ -108,6 +121,23 @@ impl MeshNodeConfig {
         self.sender_instance_id = sender_instance_id;
         self
     }
+
+    /// Override trace capture configuration.
+    #[must_use]
+    pub fn with_trace_capture_config(mut self, config: TraceCaptureConfig) -> Self {
+        self.trace_capture = config;
+        self
+    }
+
+    /// Override trace capture zone allowlist.
+    #[must_use]
+    pub fn with_trace_capture_zones<I>(mut self, zones: I) -> Self
+    where
+        I: IntoIterator<Item = ZoneId>,
+    {
+        self.trace_capture_zones = Some(zones.into_iter().collect());
+        self
+    }
 }
 
 /// MeshNode errors for orchestration surfaces.
@@ -140,6 +170,14 @@ pub enum MeshNodeError {
     /// Enforcement error.
     #[error("enforcement error: {0}")]
     Enforcement(#[from] MeshNodeEnforcementError),
+
+    /// Trace capture not enabled.
+    #[error("trace capture not enabled")]
+    TraceNotEnabled,
+
+    /// Trace export error.
+    #[error("trace export error: {0}")]
+    TraceExport(#[from] fcp_telemetry::trace_capture::TraceError),
 }
 
 /// Enforcement errors for control-plane requests.
@@ -230,6 +268,8 @@ pub struct MeshNode {
     local_leases: Vec<HeldLease>,
     sent_symbols: HashMap<ObjectId, (u64, HashSet<u32>)>,
     metrics: MeshNodeMetrics,
+    trace_capture: Option<TraceCapture>,
+    trace_capture_zones: Option<HashSet<ZoneId>>,
 }
 
 impl MeshNode {
@@ -243,6 +283,15 @@ impl MeshNode {
     ) -> Self {
         let local_node = NodeId::new(config.node_id.clone());
         let local_node_ts = TailscaleNodeId::new(config.node_id.clone());
+        let trace_capture = if config.trace_capture.enabled {
+            let capture_id = encode(TraceContext::generate().trace_id);
+            Some(
+                TraceCapture::new(capture_id, config.trace_capture.clone())
+                    .with_node(config.node_id.clone()),
+            )
+        } else {
+            None
+        };
 
         Self {
             admission: AdmissionController::new(config.admission_policy),
@@ -268,6 +317,8 @@ impl MeshNode {
             local_leases: Vec::new(),
             sent_symbols: HashMap::new(),
             metrics: MeshNodeMetrics::default(),
+            trace_capture,
+            trace_capture_zones: config.trace_capture_zones,
         }
     }
 
@@ -283,6 +334,157 @@ impl MeshNode {
         &self.local_node_ts
     }
 
+    fn trace_id(&self) -> Option<String> {
+        self.trace_capture
+            .as_ref()
+            .map(|capture| capture.trace_id().to_string())
+    }
+
+    fn trace_zone_enabled(&self, zone_id: Option<&ZoneId>) -> bool {
+        let Some(zone_id) = zone_id else {
+            return true;
+        };
+
+        match &self.trace_capture_zones {
+            None => true,
+            Some(zones) => zones.contains(zone_id),
+        }
+    }
+
+    fn record_trace_event(&mut self, event: TraceEvent) {
+        if let Some(capture) = self.trace_capture.as_mut() {
+            if let Err(err) = capture.record(event) {
+                debug!(error = %err, "trace capture dropped event");
+            }
+        }
+    }
+
+    fn record_admission_outcome(
+        &mut self,
+        peer: &NodeId,
+        decision: &str,
+        reason_code: Option<&str>,
+        authenticated: bool,
+        zone_id: Option<&ZoneId>,
+        now_ms: u64,
+    ) {
+        if !self.trace_zone_enabled(zone_id) {
+            return;
+        }
+
+        let Some(trace_id) = self.trace_id() else {
+            return;
+        };
+
+        self.record_trace_event(TraceEvent::Admission(AdmissionOutcome {
+            timestamp: now_ms,
+            trace_id,
+            peer_node: peer.as_str().to_string(),
+            request_type: "symbol_request".to_string(),
+            decision: decision.to_string(),
+            reason_code: reason_code.map(str::to_string),
+            budget_remaining: None,
+            authenticated,
+        }));
+    }
+
+    fn record_lease_deltas(
+        &mut self,
+        node_id: &NodeId,
+        previous: &[HeldLease],
+        next: &[HeldLease],
+        now_ms: u64,
+    ) {
+        let Some(trace_id) = self.trace_id() else {
+            return;
+        };
+
+        let mut previous_map = HashMap::new();
+        for lease in previous {
+            previous_map.insert((lease.subject_id, lease.purpose), lease.expires_at);
+        }
+
+        let mut next_map = HashMap::new();
+        for lease in next {
+            next_map.insert((lease.subject_id, lease.purpose), lease.expires_at);
+        }
+
+        for (key, next_expiry) in next_map {
+            let (subject_id, purpose) = key;
+            match previous_map.remove(&key) {
+                None => {
+                    self.record_trace_event(TraceEvent::Lease(LeaseEvent {
+                        timestamp: now_ms,
+                        trace_id: trace_id.clone(),
+                        operation: "acquire".to_string(),
+                        subject_id: subject_id.to_string(),
+                        purpose: purpose.to_string(),
+                        node_id: node_id.as_str().to_string(),
+                        success: true,
+                        conflict_holder: None,
+                    }));
+                }
+                Some(prev_expiry) if prev_expiry != next_expiry => {
+                    self.record_trace_event(TraceEvent::Lease(LeaseEvent {
+                        timestamp: now_ms,
+                        trace_id: trace_id.clone(),
+                        operation: "renew".to_string(),
+                        subject_id: subject_id.to_string(),
+                        purpose: purpose.to_string(),
+                        node_id: node_id.as_str().to_string(),
+                        success: true,
+                        conflict_holder: None,
+                    }));
+                }
+                _ => {}
+            }
+        }
+
+        for (key, _) in previous_map {
+            let (subject_id, purpose) = key;
+            self.record_trace_event(TraceEvent::Lease(LeaseEvent {
+                timestamp: now_ms,
+                trace_id: trace_id.clone(),
+                operation: "release".to_string(),
+                subject_id: subject_id.to_string(),
+                purpose: purpose.to_string(),
+                node_id: node_id.as_str().to_string(),
+                success: true,
+                conflict_holder: None,
+            }));
+        }
+    }
+
+    fn admission_reason_code(err: &AdmissionError) -> &'static str {
+        match err {
+            AdmissionError::ByteBudgetExceeded { .. } => "byte_budget_exceeded",
+            AdmissionError::SymbolBudgetExceeded { .. } => "symbol_budget_exceeded",
+            AdmissionError::AuthFailureBudgetExceeded { .. } => "auth_failure_budget_exceeded",
+            AdmissionError::DecodeCapacityExceeded { .. } => "decode_capacity_exceeded",
+            AdmissionError::DecodeCpuBudgetExceeded { .. } => "decode_cpu_budget_exceeded",
+            AdmissionError::AmplificationViolation { .. } => "amplification_violation",
+            AdmissionError::AuthenticationRequired => "authentication_required",
+            AdmissionError::ProofOfNeedRequired => "proof_of_need_required",
+            AdmissionError::ObjectQuarantined { .. } => "object_quarantined",
+            AdmissionError::NotReachable { .. } => "not_reachable",
+            AdmissionError::QuarantineQuotaExceeded { .. } => "quarantine_quota_exceeded",
+        }
+    }
+
+    fn symbol_request_reason_code(err: &SymbolRequestError) -> &'static str {
+        match err {
+            SymbolRequestError::InvalidRequest { .. } => "invalid_request",
+            SymbolRequestError::BoundsExceeded { .. } => "bounds_exceeded",
+            SymbolRequestError::HintTooLarge { .. } => "hint_too_large",
+            SymbolRequestError::AdmissionRejected(admission) => {
+                Self::admission_reason_code(admission)
+            }
+            SymbolRequestError::ObjectNotFound { .. } => "object_not_found",
+            SymbolRequestError::SignatureInvalid => "signature_invalid",
+            SymbolRequestError::AlreadyComplete { .. } => "already_complete",
+        }
+    }
+
     /// Update local device profile and symbol/lease state.
     pub fn update_local_state(
         &mut self,
@@ -290,6 +492,10 @@ impl MeshNode {
         local_symbols: HashSet<ObjectId>,
         held_leases: Vec<HeldLease>,
     ) {
+        let now_ms = current_time_ms();
+        let previous_leases = self.local_leases.clone();
+        let local_node = self.local_node.clone();
+        self.record_lease_deltas(&local_node, &previous_leases, &held_leases, now_ms);
         self.local_profile = Some(profile);
         self.local_symbols = local_symbols;
         self.local_leases = held_leases;
@@ -304,6 +510,12 @@ impl MeshNode {
         held_leases: Vec<HeldLease>,
         now_ms: u64,
     ) {
+        let previous_leases = self
+            .peers
+            .get(&node_id)
+            .map(|state| state.held_leases.clone())
+            .unwrap_or_default();
+        self.record_lease_deltas(&node_id, &previous_leases, &held_leases, now_ms);
         let state = PeerState {
             profile,
             local_symbols,
@@ -340,12 +552,40 @@ impl MeshNode {
     pub fn register_session(&mut self, session: MeshSession, now_ms: u64) {
         self.admission
             .set_authenticated(&session.peer_id, true, now_ms);
-        self.sessions.insert(session.peer_id.clone(), session);
+        let peer_id = session.peer_id.clone();
+        let session_id = encode(session.session_id.as_bytes());
+        let suite = session.suite.as_str().to_string();
+        self.sessions.insert(peer_id.clone(), session);
+
+        let Some(trace_id) = self.trace_id() else {
+            return;
+        };
+        self.record_trace_event(TraceEvent::Session(SessionEvent {
+            timestamp: now_ms,
+            trace_id,
+            session_id,
+            kind: "established".to_string(),
+            peer_node: peer_id.as_str().to_string(),
+            suite: Some(suite),
+            failure_reason: None,
+        }));
     }
 
     /// Remove a mesh session for a peer (marks unauthenticated).
     pub fn remove_session(&mut self, peer_id: &NodeId, now_ms: u64) {
-        self.sessions.remove(peer_id);
+        if let Some(session) = self.sessions.remove(peer_id) {
+            if let Some(trace_id) = self.trace_id() {
+                self.record_trace_event(TraceEvent::Session(SessionEvent {
+                    timestamp: now_ms,
+                    trace_id,
+                    session_id: encode(session.session_id.as_bytes()),
+                    kind: "closed".to_string(),
+                    peer_node: peer_id.as_str().to_string(),
+                    suite: Some(session.suite.as_str().to_string()),
+                    failure_reason: None,
+                }));
+            }
+        }
         self.admission.set_authenticated(peer_id, false, now_ms);
     }
 
@@ -512,6 +752,18 @@ impl MeshNode {
             .announce_object(zone_id, object_id, admission, now_ms / 1000);
         if added {
             self.metrics.gossip_announcements += 1;
+            if self.trace_zone_enabled(Some(zone_id)) {
+                if let Some(trace_id) = self.trace_id() {
+                    self.record_trace_event(TraceEvent::Gossip(GossipEvent {
+                        timestamp: now_ms,
+                        trace_id,
+                        gossip_type: "announce_object".to_string(),
+                        object_count: 1,
+                        peer_node: None,
+                        success: true,
+                    }));
+                }
+            }
         }
         added
     }
@@ -534,6 +786,18 @@ impl MeshNode {
             .announce_symbol(zone_id, object_id, esi, admission, now_ms / 1000);
         if added {
             self.metrics.gossip_announcements += 1;
+            if self.trace_zone_enabled(Some(zone_id)) {
+                if let Some(trace_id) = self.trace_id() {
+                    self.record_trace_event(TraceEvent::Gossip(GossipEvent {
+                        timestamp: now_ms,
+                        trace_id,
+                        gossip_type: "announce_symbol".to_string(),
+                        object_count: 1,
+                        peer_node: None,
+                        success: true,
+                    }));
+                }
+            }
         }
         added
     }
@@ -549,13 +813,77 @@ impl MeshNode {
         is_authenticated: bool,
         now_ms: u64,
     ) -> Result<SymbolResponse, SymbolRequestError> {
+        let (validated, meta) = self
+            .validate_symbol_request(&request, peer, is_authenticated, now_ms)
+            .await?;
+
+        let response = match self
+            .build_symbol_response(&request, &validated, &meta, now_ms)
+            .await
+        {
+            Ok(response) => response,
+            Err(err) => {
+                self.record_admission_outcome(
+                    peer,
+                    "reject",
+                    Some(Self::symbol_request_reason_code(&err)),
+                    validated.is_authenticated,
+                    Some(&request.zone_id),
+                    now_ms,
+                );
+                return Err(err);
+            }
+        };
+
+        self.record_admission_outcome(
+            peer,
+            "admit",
+            None,
+            validated.is_authenticated,
+            Some(&request.zone_id),
+            now_ms,
+        );
+        Ok(response)
+    }
+
+    fn check_symbol_request_gate(
+        &mut self,
+        request: &SymbolRequest,
+        peer: &NodeId,
+        authenticated: bool,
+        now_ms: u64,
+    ) -> Result<(), SymbolRequestError> {
         if self.symbol_requests.should_stop(&request.object_id) {
+            self.record_admission_outcome(
+                peer,
+                "reject",
+                Some(Self::symbol_request_reason_code(
+                    &SymbolRequestError::AlreadyComplete {
+                        object_id: request.object_id.to_string(),
+                    },
+                )),
+                authenticated,
+                Some(&request.zone_id),
+                now_ms,
+            );
             return Err(SymbolRequestError::AlreadyComplete {
                 object_id: request.object_id.to_string(),
             });
         }
 
         if self.quarantine_store.contains(&request.object_id) {
+            self.record_admission_outcome(
+                peer,
+                "reject",
+                Some(Self::admission_reason_code(
+                    &AdmissionError::ObjectQuarantined {
+                        object_id: request.object_id.to_string(),
+                    },
+                )),
+                authenticated,
+                Some(&request.zone_id),
+                now_ms,
+            );
             return Err(SymbolRequestError::AdmissionRejected(
                 AdmissionError::ObjectQuarantined {
                     object_id: request.object_id.to_string(),
@@ -563,18 +891,57 @@ impl MeshNode {
             ));
         }
 
-        // Fetch metadata first to get accurate symbol size for admission control
-        let meta = self.load_symbol_meta(&request).await?;
+        Ok(())
+    }
 
+    async fn validate_symbol_request(
+        &mut self,
+        request: &SymbolRequest,
+        peer: &NodeId,
+        is_authenticated: bool,
+        now_ms: u64,
+    ) -> Result<(ValidatedRequest, fcp_store::ObjectSymbolMeta), SymbolRequestError> {
         let mut authenticated = is_authenticated || self.is_peer_authenticated(peer);
+
+        self.check_symbol_request_gate(request, peer, authenticated, now_ms)?;
+
+        // Fetch metadata first to get accurate symbol size for admission control
+        let meta = match self.load_symbol_meta(request).await {
+            Ok(meta) => meta,
+            Err(err) => {
+                self.record_admission_outcome(
+                    peer,
+                    "reject",
+                    Some(Self::symbol_request_reason_code(&err)),
+                    authenticated,
+                    Some(&request.zone_id),
+                    now_ms,
+                );
+                return Err(err);
+            }
+        };
+
         if !authenticated {
-            authenticated = self.verify_symbol_request_signature(peer, &request)?;
+            authenticated = match self.verify_symbol_request_signature(peer, request) {
+                Ok(is_authenticated) => is_authenticated,
+                Err(err) => {
+                    self.record_admission_outcome(
+                        peer,
+                        "reject",
+                        Some(Self::symbol_request_reason_code(&err)),
+                        authenticated,
+                        Some(&request.zone_id),
+                        now_ms,
+                    );
+                    return Err(err);
+                }
+            };
         }
         self.admission
             .set_authenticated(peer, authenticated, now_ms);
 
         let validated = match self.symbol_requests.validate_request(
-            &request,
+            request,
             authenticated,
             &mut self.admission,
             peer,
@@ -590,6 +957,19 @@ impl MeshNode {
                 max_allowed,
             }) => {
                 self.symbol_metrics.record_bounds_rejection();
+                self.record_admission_outcome(
+                    peer,
+                    "reject",
+                    Some(Self::symbol_request_reason_code(
+                        &SymbolRequestError::BoundsExceeded {
+                            requested,
+                            max_allowed,
+                        },
+                    )),
+                    authenticated,
+                    Some(&request.zone_id),
+                    now_ms,
+                );
                 return Err(SymbolRequestError::BoundsExceeded {
                     requested,
                     max_allowed,
@@ -597,11 +977,39 @@ impl MeshNode {
             }
             Err(SymbolRequestError::AdmissionRejected(err)) => {
                 self.symbol_metrics.record_admission_rejection();
+                self.record_admission_outcome(
+                    peer,
+                    "reject",
+                    Some(Self::admission_reason_code(&err)),
+                    authenticated,
+                    Some(&request.zone_id),
+                    now_ms,
+                );
                 return Err(SymbolRequestError::AdmissionRejected(err));
             }
-            Err(err) => return Err(err),
+            Err(err) => {
+                self.record_admission_outcome(
+                    peer,
+                    "reject",
+                    Some(Self::symbol_request_reason_code(&err)),
+                    authenticated,
+                    Some(&request.zone_id),
+                    now_ms,
+                );
+                return Err(err);
+            }
         };
 
+        Ok((validated, meta))
+    }
+
+    async fn build_symbol_response(
+        &mut self,
+        request: &SymbolRequest,
+        validated: &ValidatedRequest,
+        meta: &fcp_store::ObjectSymbolMeta,
+        now_ms: u64,
+    ) -> Result<SymbolResponse, SymbolRequestError> {
         let symbols = self.symbol_store.get_all_symbols(&request.object_id).await;
         let mut available = HashSet::new();
         for symbol in symbols {
@@ -634,7 +1042,7 @@ impl MeshNode {
         );
 
         let response = builder
-            .add_from_repair_engine(&engine, &validated, already_sent)
+            .add_from_repair_engine(&engine, validated, already_sent)
             .build(available.len() as u32, already_sent_count);
 
         debug!(
@@ -646,7 +1054,7 @@ impl MeshNode {
 
         already_sent.extend(response.symbol_esis.iter().copied());
         self.symbol_requests
-            .track_transfer(&request, response.symbol_esis.iter().copied(), now_ms);
+            .track_transfer(request, response.symbol_esis.iter().copied(), now_ms);
         self.symbol_metrics
             .record_symbols_sent(response.symbol_count(), request.missing_hint.is_some());
 
@@ -791,6 +1199,40 @@ impl MeshNode {
         metrics
     }
 
+    /// Snapshot trace capture (if enabled).
+    #[must_use]
+    pub fn trace_snapshot(&self) -> Option<CapturedTrace> {
+        self.trace_capture.as_ref().map(TraceCapture::snapshot)
+    }
+
+    /// Snapshot trace capture with redaction (if enabled).
+    #[must_use]
+    pub fn trace_redacted_snapshot(&self) -> Option<CapturedTrace> {
+        self.trace_capture
+            .as_ref()
+            .map(TraceCapture::redacted_snapshot)
+    }
+
+    /// Export trace capture to a file.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MeshNodeError::TraceNotEnabled` if capture is disabled or
+    /// `MeshNodeError::TraceExport` if serialization/IO fails.
+    pub fn export_trace_to_path<P: AsRef<Path>>(
+        &self,
+        path: P,
+        redacted: bool,
+        format: TraceExportFormat,
+    ) -> Result<(), MeshNodeError> {
+        let Some(capture) = self.trace_capture.as_ref() else {
+            return Err(MeshNodeError::TraceNotEnabled);
+        };
+
+        capture.export_to_path(path, redacted, format)?;
+        Ok(())
+    }
+
     /// Rank candidate transport paths according to zone policy.
     #[must_use]
     pub fn rank_transport_paths(
@@ -814,14 +1256,46 @@ impl MeshNode {
     /// Select deterministic multipath routes for a symbol.
     #[must_use]
     pub fn select_transport_paths(
-        &self,
+        &mut self,
         policy: &ZoneTransportPolicy,
         paths: &[TransportPath],
         object_id: &ObjectId,
         symbol_index: u32,
         fanout: usize,
     ) -> Vec<TransportPath> {
-        TransportSelector::select_multipath(paths, policy, object_id, symbol_index, fanout)
+        let selected =
+            TransportSelector::select_multipath(paths, policy, object_id, symbol_index, fanout);
+
+        if let Some(trace_id) = self.trace_id() {
+            let now_ms = current_time_ms();
+            if selected.is_empty() {
+                self.record_trace_event(TraceEvent::Routing(RoutingDecision {
+                    timestamp: now_ms,
+                    trace_id,
+                    source_node: self.local_node.as_str().to_string(),
+                    target_node: None,
+                    object_id: object_id.to_string(),
+                    path_type: "none".to_string(),
+                    decision: "dropped".to_string(),
+                    reason: Some("no_eligible_path".to_string()),
+                }));
+            } else {
+                for path in &selected {
+                    self.record_trace_event(TraceEvent::Routing(RoutingDecision {
+                        timestamp: now_ms,
+                        trace_id: trace_id.clone(),
+                        source_node: self.local_node.as_str().to_string(),
+                        target_node: Some(path.peer.as_str().to_string()),
+                        object_id: object_id.to_string(),
+                        path_type: transport_path_kind_label(path.kind).to_string(),
+                        decision: "routed".to_string(),
+                        reason: None,
+                    }));
+                }
+            }
+        }
+
+        selected
     }
 
     /// Access underlying gossip state (mutable).
@@ -851,6 +1325,21 @@ impl MeshNode {
     pub fn quarantine_store(&self) -> &Arc<QuarantineStore> {
         &self.quarantine_store
     }
+}
+
+fn transport_path_kind_label(kind: crate::transport::TransportPathKind) -> &'static str {
+    match kind {
+        crate::transport::TransportPathKind::Direct => "direct",
+        crate::transport::TransportPathKind::Mesh => "mesh",
+        crate::transport::TransportPathKind::Derp => "derp",
+        crate::transport::TransportPathKind::Funnel => "funnel",
+    }
+}
+
+fn current_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 // ============================================================================
@@ -886,6 +1375,21 @@ mod tests {
         let quarantine_store = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
         MeshNode::new(
             MeshNodeConfig::new(name).with_sender_instance_id(42),
+            object_store,
+            symbol_store,
+            quarantine_store,
+        )
+    }
+
+    fn test_node_with_trace(name: &str) -> MeshNode {
+        let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+        let symbol_store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig::default()));
+        let quarantine_store = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
+        let trace_config = TraceCaptureConfig::new().enabled();
+        MeshNode::new(
+            MeshNodeConfig::new(name)
+                .with_sender_instance_id(42)
+                .with_trace_capture_config(trace_config),
             object_store,
             symbol_store,
             quarantine_store,
@@ -934,7 +1438,7 @@ mod tests {
 
     #[test]
     fn meshnode_transport_helpers_respect_policy() {
-        let node = test_node("node-1");
+        let mut node = test_node("node-1");
         let policy = ZoneTransportPolicy {
             allow_lan: true,
             allow_derp: false,
@@ -973,6 +1477,76 @@ mod tests {
         let selection = node.select_transport_paths(&policy, &paths, &object_id, 1, 1);
         assert_eq!(selection.len(), 1);
         assert_eq!(selection[0].kind, TransportPathKind::Direct);
+    }
+
+    #[test]
+    fn trace_capture_records_session_events() {
+        let mut node = test_node_with_trace("node-1");
+        let session = test_session("peer-1");
+        let peer_id = session.peer_id.clone();
+
+        node.register_session(session, 1000);
+        node.remove_session(&peer_id, 2000);
+
+        let snapshot = node.trace_snapshot().expect("trace capture enabled");
+        assert_eq!(snapshot.events.len(), 2);
+        assert!(matches!(snapshot.events[0], TraceEvent::Session(_)));
+        assert!(matches!(snapshot.events[1], TraceEvent::Session(_)));
+    }
+
+    #[test]
+    fn trace_capture_respects_zone_allowlist() {
+        let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+        let symbol_store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig::default()));
+        let quarantine_store = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
+        let trace_config = TraceCaptureConfig::new().enabled();
+        let mut node = MeshNode::new(
+            MeshNodeConfig::new("node-1")
+                .with_sender_instance_id(42)
+                .with_trace_capture_config(trace_config)
+                .with_trace_capture_zones([ZoneId::work()]),
+            object_store,
+            symbol_store,
+            quarantine_store,
+        );
+
+        let object_id_work = test_object_id("trace-zone-work");
+        let object_id_private = test_object_id("trace-zone-private");
+        node.announce_object(
+            &ZoneId::work(),
+            &object_id_work,
+            ObjectAdmissionClass::Admitted,
+            10,
+        );
+        node.announce_object(
+            &ZoneId::private(),
+            &object_id_private,
+            ObjectAdmissionClass::Admitted,
+            20,
+        );
+
+        let snapshot = node.trace_snapshot().expect("trace capture enabled");
+        assert_eq!(snapshot.events.len(), 1);
+    }
+
+    #[test]
+    fn trace_capture_records_lease_deltas() {
+        let mut node = test_node_with_trace("node-1");
+        let lease = HeldLease {
+            subject_id: test_object_id("lease-1"),
+            purpose: LeasePurpose::SingletonWriter,
+            expires_at: 100,
+        };
+
+        node.update_local_state(test_device_profile("node-1"), HashSet::new(), vec![lease]);
+
+        let snapshot = node.trace_snapshot().expect("trace capture enabled");
+        assert!(
+            snapshot
+                .events
+                .iter()
+                .any(|event| matches!(event, TraceEvent::Lease(_)))
+        );
     }
 
     #[test]

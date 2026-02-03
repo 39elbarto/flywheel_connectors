@@ -9,6 +9,7 @@ use fcp_core::{
     IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
     SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
 
@@ -207,6 +208,57 @@ fn normalize_base_url(base_url: &str) -> FcpResult<String> {
     Ok(trimmed.trim_end_matches('/').to_string())
 }
 
+/// Doctor check result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DoctorResult {
+    /// Overall status.
+    status: DoctorStatus,
+    /// Individual check results.
+    checks: Vec<DoctorCheck>,
+}
+
+/// Doctor status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum DoctorStatus {
+    /// All checks passed.
+    Healthy,
+    /// Some non-critical checks failed.
+    Degraded,
+    /// Critical checks failed.
+    Unhealthy,
+}
+
+/// Individual doctor check.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DoctorCheck {
+    /// Check name.
+    name: String,
+    /// Check passed.
+    passed: bool,
+    /// Check message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+    /// Whether this check is critical.
+    critical: bool,
+}
+
+impl DoctorResult {
+    /// Create a new doctor result from checks.
+    #[must_use]
+    fn from_checks(checks: Vec<DoctorCheck>) -> Self {
+        let status = if checks.iter().any(|c| c.critical && !c.passed) {
+            DoctorStatus::Unhealthy
+        } else if checks.iter().any(|c| !c.passed) {
+            DoctorStatus::Degraded
+        } else {
+            DoctorStatus::Healthy
+        };
+
+        Self { status, checks }
+    }
+}
+
 /// FCP OpenAI Connector.
 pub struct OpenAIConnector {
     base: Arc<BaseConnector>,
@@ -274,7 +326,7 @@ impl OpenAIConnector {
         }
 
         let auth_label = config.auth.redacted_label();
-        let deployment_profile = config.deployment_profile_name();
+        let deployment_profile = config.deployment_profile_name().map(str::to_string);
 
         self.client = Some(client);
         self.config = Some(config);
@@ -370,6 +422,81 @@ impl OpenAIConnector {
                 "total_cost_usd": self.total_cost()
             }
         }))
+    }
+
+    /// Handle doctor checks.
+    pub async fn handle_doctor(&self) -> FcpResult<serde_json::Value> {
+        let result = self.build_doctor_result();
+        serde_json::to_value(result).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize doctor result: {e}"),
+        })
+    }
+
+    fn build_doctor_result(&self) -> DoctorResult {
+        let mut checks = Vec::new();
+
+        let configured = self.config.is_some();
+        checks.push(DoctorCheck {
+            name: "configuration".into(),
+            passed: configured,
+            message: Some(if configured {
+                "Configuration loaded".into()
+            } else {
+                "Not configured - run configure first".into()
+            }),
+            critical: true,
+        });
+
+        let Some(config) = &self.config else {
+            return DoctorResult::from_checks(checks);
+        };
+
+        checks.push(DoctorCheck {
+            name: "client_initialized".into(),
+            passed: self.client.is_some(),
+            message: Some(if self.client.is_some() {
+                "HTTP client initialized".into()
+            } else {
+                "HTTP client missing; re-run configure".into()
+            }),
+            critical: true,
+        });
+
+        let scheme = if config.base_url.starts_with("https://") {
+            "https"
+        } else if config.base_url.starts_with("http://") {
+            "http"
+        } else {
+            "unknown"
+        };
+
+        checks.push(DoctorCheck {
+            name: "base_url".into(),
+            passed: true,
+            message: Some(format!("Base URL ({scheme}): {}", config.base_url)),
+            critical: false,
+        });
+
+        checks.push(DoctorCheck {
+            name: "auth_mode".into(),
+            passed: true,
+            message: Some(format!("Auth: {}", config.auth.redacted_label())),
+            critical: true,
+        });
+
+        let secretless = config.auth.is_secretless();
+        checks.push(DoctorCheck {
+            name: "credential_injection".into(),
+            passed: !secretless,
+            message: Some(if secretless {
+                "Credential injection required via egress proxy".into()
+            } else {
+                "Direct API key configured".into()
+            }),
+            critical: false,
+        });
+
+        DoctorResult::from_checks(checks)
     }
 
     /// Handle connector self-check.
@@ -891,10 +1018,108 @@ impl Default for OpenAIConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{Duration, Utc};
+    use chrono::{Duration, SecondsFormat, Utc};
     use fcp_core::CredentialId;
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
+    use fcp_testkit::LogCapture;
+    use std::time::Instant;
+    use uuid::Uuid;
+
+    struct TestLog {
+        test_name: &'static str,
+        module: &'static str,
+        correlation_id: String,
+        start: Instant,
+        assertions_passed: u32,
+        assertions_failed: u32,
+        capture: LogCapture,
+    }
+
+    impl TestLog {
+        fn new(test_name: &'static str) -> Self {
+            Self {
+                test_name,
+                module: "fcp-openai-connector",
+                correlation_id: Uuid::new_v4().to_string(),
+                start: Instant::now(),
+                assertions_passed: 0,
+                assertions_failed: 0,
+                capture: LogCapture::new(),
+            }
+        }
+
+        fn check(&mut self, condition: bool, message: &str) -> Result<(), String> {
+            if !condition {
+                self.assertions_failed = self.assertions_failed.saturating_add(1);
+                return Err(message.to_string());
+            }
+            self.assertions_passed = self.assertions_passed.saturating_add(1);
+            Ok(())
+        }
+
+        fn check_eq<T: std::fmt::Debug + PartialEq>(
+            &mut self,
+            left: T,
+            right: T,
+            context: &str,
+        ) -> Result<(), String> {
+            if left != right {
+                self.assertions_failed = self.assertions_failed.saturating_add(1);
+                return Err(format!("{context}: left={left:?} right={right:?}"));
+            }
+            self.assertions_passed = self.assertions_passed.saturating_add(1);
+            Ok(())
+        }
+
+        fn emit(&mut self, phase: &str, result: &str, context: serde_json::Value) {
+            let duration_ms = u64::try_from(self.start.elapsed().as_millis()).unwrap_or(u64::MAX);
+            let entry = serde_json::json!({
+                "timestamp": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+                "log_version": "v1",
+                "level": "info",
+                "test_name": self.test_name,
+                "module": self.module,
+                "phase": phase,
+                "correlation_id": self.correlation_id,
+                "result": result,
+                "duration_ms": duration_ms,
+                "assertions": {
+                    "passed": self.assertions_passed,
+                    "failed": self.assertions_failed
+                },
+                "context": context
+            });
+
+            let serialized = serde_json::to_string(&entry).unwrap_or_else(|err| {
+                self.assertions_failed = self.assertions_failed.saturating_add(1);
+                format!("{{\"error\":\"log_serialization_failed\",\"detail\":\"{err}\"}}")
+            });
+            println!("{serialized}");
+            let _ = self.capture.push_value(&entry);
+            if !std::thread::panicking() {
+                self.capture.assert_valid();
+            }
+        }
+    }
+
+    impl Drop for TestLog {
+        fn drop(&mut self) {
+            let result = if std::thread::panicking() {
+                if self.assertions_failed == 0 {
+                    self.assertions_failed = 1;
+                }
+                "fail"
+            } else {
+                "pass"
+            };
+            self.emit(
+                "verify",
+                result,
+                serde_json::json!({ "connector_id": "openai" }),
+            );
+        }
+    }
 
     fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> CapabilityToken {
         let now = Utc::now();
@@ -990,6 +1215,78 @@ mod tests {
         let result = connector.handle_health().await.unwrap();
 
         assert_eq!(result["status"], "not_configured");
+    }
+
+    #[tokio::test]
+    async fn test_doctor_not_configured() -> Result<(), String> {
+        let mut log = TestLog::new("openai_doctor_not_configured");
+        let connector = OpenAIConnector::new();
+        let value = connector
+            .handle_doctor()
+            .await
+            .map_err(|err| format!("doctor failed: {err}"))?;
+        let result: DoctorResult =
+            serde_json::from_value(value).map_err(|err| format!("doctor parse failed: {err}"))?;
+
+        log.check_eq(result.status, DoctorStatus::Unhealthy, "status")?;
+        let config_check = result
+            .checks
+            .iter()
+            .find(|check| check.name == "configuration")
+            .ok_or("missing configuration check")?;
+        log.check(!config_check.passed, "configuration should be unhealthy")?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_doctor_configured_api_key() -> Result<(), String> {
+        let mut log = TestLog::new("openai_doctor_configured_api_key");
+        let mut connector = OpenAIConnector::new();
+        connector
+            .handle_configure(json!({ "api_key": "test-key" }))
+            .await
+            .map_err(|err| format!("configure failed: {err}"))?;
+
+        let value = connector
+            .handle_doctor()
+            .await
+            .map_err(|err| format!("doctor failed: {err}"))?;
+        let result: DoctorResult =
+            serde_json::from_value(value).map_err(|err| format!("doctor parse failed: {err}"))?;
+
+        log.check_eq(result.status, DoctorStatus::Healthy, "status")?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_doctor_configured_credential_id() -> Result<(), String> {
+        let mut log = TestLog::new("openai_doctor_configured_credential_id");
+        let mut connector = OpenAIConnector::new();
+        connector
+            .handle_configure(json!({
+                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00"
+            }))
+            .await
+            .map_err(|err| format!("configure failed: {err}"))?;
+
+        let value = connector
+            .handle_doctor()
+            .await
+            .map_err(|err| format!("doctor failed: {err}"))?;
+        let result: DoctorResult =
+            serde_json::from_value(value).map_err(|err| format!("doctor parse failed: {err}"))?;
+
+        log.check_eq(result.status, DoctorStatus::Degraded, "status")?;
+        let injection_check = result
+            .checks
+            .iter()
+            .find(|check| check.name == "credential_injection")
+            .ok_or("missing credential_injection check")?;
+        log.check(
+            !injection_check.passed,
+            "credential_injection should be marked not passed",
+        )?;
+        Ok(())
     }
 
     #[tokio::test]

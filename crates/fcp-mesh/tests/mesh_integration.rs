@@ -13,7 +13,9 @@
 #![allow(clippy::redundant_clone)]
 #![allow(clippy::unreadable_literal)]
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
 use chrono::{SecondsFormat, Utc};
 use fcp_core::{
@@ -31,6 +33,7 @@ use fcp_mesh::planner::{
 };
 use fcp_mesh::transport::{TransportPath, TransportPathKind, TransportSelector};
 use fcp_tailscale::NodeId;
+use fcp_testkit::LogCapture;
 
 // ============================================================================
 // Test Utilities
@@ -40,17 +43,27 @@ use fcp_tailscale::NodeId;
 #[derive(Debug, serde::Serialize)]
 struct TestEvent {
     timestamp: String,
+    log_version: &'static str,
+    level: &'static str,
     module: &'static str,
     phase: &'static str,
     correlation_id: String,
     test_name: &'static str,
-    category: &'static str,
-    status: &'static str,
+    result: &'static str,
+    duration_ms: u64,
+    assertions: TestAssertions,
     #[serde(skip_serializing_if = "Option::is_none")]
-    result: Option<&'static str>,
-    details: serde_json::Value,
+    context: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
+    details: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_code: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct TestAssertions {
+    passed: u32,
+    failed: u32,
 }
 
 // ============================================================================
@@ -1451,7 +1464,16 @@ mod transport_selection {
 
 impl TestEvent {
     fn emit(&self) {
-        println!("{}", serde_json::to_string(self).unwrap());
+        let value = serde_json::to_value(self).expect("serialize test event");
+        println!("{}", serde_json::to_string(&value).unwrap());
+
+        let capture = log_capture();
+        if let Err(err) = capture.push_value(&value) {
+            panic!("failed to push log event: {err}");
+        }
+        if !std::thread::panicking() {
+            capture.assert_valid();
+        }
     }
 }
 
@@ -1462,51 +1484,101 @@ fn test_correlation_id(test_name: &str, category: &str) -> String {
     hasher.finalize().to_hex().to_string()
 }
 
+fn log_capture() -> &'static LogCapture {
+    static CAPTURE: OnceLock<LogCapture> = OnceLock::new();
+    CAPTURE.get_or_init(LogCapture::new)
+}
+
+fn test_start_times() -> &'static Mutex<HashMap<String, Instant>> {
+    static STARTS: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+    STARTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn start_timer(correlation_id: &str) {
+    let mut starts = test_start_times()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    starts.insert(correlation_id.to_string(), Instant::now());
+}
+
+fn finish_timer(correlation_id: &str) -> u64 {
+    let mut starts = test_start_times()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    starts.remove(correlation_id).map_or(0, |start| {
+        u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+    })
+}
+
 fn emit_test_start(test_name: &'static str, category: &'static str) {
+    let correlation_id = test_correlation_id(test_name, category);
+    start_timer(&correlation_id);
     TestEvent {
         timestamp: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        log_version: "v2",
+        level: "info",
         module: "fcp-mesh",
         phase: "start",
-        correlation_id: test_correlation_id(test_name, category),
+        correlation_id,
         test_name,
-        category,
-        status: "started",
-        result: None,
-        details: serde_json::json!({}),
-        error: None,
+        result: "pass",
+        duration_ms: 0,
+        assertions: TestAssertions {
+            passed: 0,
+            failed: 0,
+        },
+        context: Some(serde_json::json!({ "category": category, "status": "started" })),
+        details: Some(serde_json::json!({})),
+        error_code: None,
     }
     .emit();
 }
 
 fn emit_test_pass(test_name: &'static str, category: &'static str, details: serde_json::Value) {
+    let correlation_id = test_correlation_id(test_name, category);
+    let duration_ms = finish_timer(&correlation_id);
     TestEvent {
         timestamp: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        log_version: "v2",
+        level: "info",
         module: "fcp-mesh",
         phase: "complete",
-        correlation_id: test_correlation_id(test_name, category),
+        correlation_id,
         test_name,
-        category,
-        status: "passed",
-        result: Some("pass"),
-        details,
-        error: None,
+        result: "pass",
+        duration_ms,
+        assertions: TestAssertions {
+            passed: 1,
+            failed: 0,
+        },
+        context: Some(serde_json::json!({ "category": category, "status": "passed" })),
+        details: Some(details),
+        error_code: None,
     }
     .emit();
 }
 
 #[allow(dead_code)]
 fn emit_test_fail(test_name: &'static str, category: &'static str, error: &str) {
+    let correlation_id = test_correlation_id(test_name, category);
+    let duration_ms = finish_timer(&correlation_id);
     TestEvent {
         timestamp: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        log_version: "v2",
+        level: "info",
         module: "fcp-mesh",
         phase: "complete",
-        correlation_id: test_correlation_id(test_name, category),
+        correlation_id,
         test_name,
-        category,
-        status: "failed",
-        result: Some("fail"),
-        details: serde_json::json!({}),
-        error: Some(error.to_string()),
+        result: "fail",
+        duration_ms,
+        assertions: TestAssertions {
+            passed: 0,
+            failed: 1,
+        },
+        context: Some(serde_json::json!({ "category": category, "status": "failed" })),
+        details: Some(serde_json::json!({})),
+        error_code: Some(error.to_string()),
     }
     .emit();
 }

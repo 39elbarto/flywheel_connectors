@@ -1936,6 +1936,8 @@ dependencies = [
  "fcp-raptorq",
  "fcp-store",
  "fcp-tailscale",
+ "fcp-telemetry",
+ "fcp-testkit",
  "hex",
  "hkdf",
  "hmac",

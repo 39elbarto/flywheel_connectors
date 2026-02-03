@@ -21,6 +21,7 @@ fcp-crypto = { path = "../fcp-crypto" }
 fcp-protocol = { path = "../fcp-protocol" }
 fcp-raptorq = { path = "../fcp-raptorq" }
 fcp-store = { path = "../fcp-store" }
+fcp-telemetry = { path = "../fcp-telemetry" }
 raptorq.workspace = true
 fcp-tailscale = { path = "../fcp-tailscale" }
 hex.workspace = true
@@ -39,6 +40,7 @@ zeroize.workspace = true
 ciborium.workspace = true
 criterion.workspace = true
 fcp-cbor = { path = "../fcp-cbor" }
+fcp-testkit = { path = "../fcp-testkit" }
 semver.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

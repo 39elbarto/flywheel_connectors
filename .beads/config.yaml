@@ -9,7 +9,7 @@
 issue_prefix: "flywheel_connectors"
 
 # Primary SQLite database for this repo (relative to .beads/)
-db: "beads_flywheel_connectors_v2.db"
+db: ".beads/beads_flywheel_connectors_v3.db"
 
 # Use no-db mode: load from JSONL, no SQLite, write back after each command
 # When true, bd will use .beads/issues.jsonl as the source of truth

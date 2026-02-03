@@ -1,4 +1,4 @@
 {
-  "database": "beads_flywheel_connectors_v3.db",
+  "database": "beads_flywheel_connectors_v4.db",
   "jsonl_export": "issues.jsonl"
 }

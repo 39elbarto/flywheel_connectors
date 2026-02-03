@@ -111,6 +111,7 @@ SCENARIOS=(
   "gossip_bounds|./gossip_bounds_flow.sh|Gossip request bounds + config enforcement|true"
   "transport_path_matrix|./transport_path_matrix.sh|Transport path selection + multipath determinism|true"
   "targeted_repair_flow|./targeted_repair_flow.sh|Targeted repair symbol requests + decode status/ack|true"
+  "lease_coordination|./lease_coordination_flow.sh|Lease coordination selection + conflict handling|true"
   "budget|./budget_flow.sh|Budget enforcement flow|false"
   "egress_denial|./egress_denial.sh|Sandbox egress denial|true"
 )

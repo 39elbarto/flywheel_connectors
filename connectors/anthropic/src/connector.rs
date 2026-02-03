@@ -335,8 +335,6 @@ impl AnthropicConnector {
 
     /// Handle invoke method.
     pub async fn handle_invoke(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
-        self.base.record_request(true);
-
         let result = self.handle_invoke_internal(params).await;
         self.base.record_request(result.is_ok());
         result

@@ -109,6 +109,8 @@ SCENARIOS=(
   "cancellation_flow|./cancellation_flow.sh|Operation cancellation flow|true"
   "rate_limit|./rate_limit_flow.sh|Rate limit enforcement flow|true"
   "gossip_bounds|./gossip_bounds_flow.sh|Gossip request bounds + config enforcement|true"
+  "transport_path_matrix|./transport_path_matrix.sh|Transport path selection + multipath determinism|true"
+  "targeted_repair_flow|./targeted_repair_flow.sh|Targeted repair symbol requests + decode status/ack|true"
   "budget|./budget_flow.sh|Budget enforcement flow|false"
   "egress_denial|./egress_denial.sh|Sandbox egress denial|true"
 )

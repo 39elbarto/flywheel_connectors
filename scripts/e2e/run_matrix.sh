@@ -112,6 +112,10 @@ SCENARIOS=(
   "transport_path_matrix|./transport_path_matrix.sh|Transport path selection + multipath determinism|true"
   "targeted_repair_flow|./targeted_repair_flow.sh|Targeted repair symbol requests + decode status/ack|true"
   "lease_coordination|./lease_coordination_flow.sh|Lease coordination selection + conflict handling|true"
+  "mesh_integration|./mesh_integration_flow.sh|Mesh integration scenarios (routing/admission/gossip)|true"
+  "admission_control|./admission_control_flow.sh|Admission control budgets + limits|true"
+  "policy_enforcement|./policy_enforcement_flow.sh|Policy enforcement allow/deny decisions|true"
+  "routing|./routing_flow.sh|Routing selection and locality scoring|true"
   "budget|./budget_flow.sh|Budget enforcement flow|false"
   "egress_denial|./egress_denial.sh|Sandbox egress denial|true"
 )

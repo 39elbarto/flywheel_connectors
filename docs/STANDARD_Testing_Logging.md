@@ -13,6 +13,8 @@ This document defines **mandatory** testing and logging standards for the FCP2 p
 
 **Goal**: Failures are diagnosable from CI artifacts alone. A new contributor can debug any failure without rerunning tests locally.
 
+**Connector-specific requirements**: See `STANDARD_Connector_Testing.md` for additional connector-only quality gates.
+
 ---
 
 ## 1. Quality Gates (Required for All PRs)

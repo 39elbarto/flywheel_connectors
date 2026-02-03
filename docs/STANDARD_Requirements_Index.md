@@ -569,6 +569,7 @@ This doc is the connector-facing "how to implement correctly in Rust" view.
 | Interop | `flywheel_connectors-1n78.21.3` |
 | System E2E | `flywheel_connectors-1n78.21.4` |
 | Connector Compliance | `flywheel_connectors-1n78.21.5` |
+| Connector Testing Standard | `flywheel_connectors-h32` |
 
 ---
 
@@ -590,4 +591,5 @@ This standard is satisfied when:
 - README.md (overview)
 - docs/fcp_model_connectors_rust.md (connector implementation guide)
 - STANDARD_Connector_Compliance.md (compliance checklist)
+- STANDARD_Connector_Testing.md (connector testing requirements)
 - STANDARD_Testing_Logging.md (testing requirements)

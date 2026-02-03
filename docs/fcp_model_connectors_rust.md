@@ -2111,6 +2111,9 @@ value_from = "bot_token"
 scope = "connector:fcp.telegram"
 ```
 
+Implementation note: core recipe/types live in `fcp_core::ProvisioningRecipe`,
+`ProvisioningStep`, and `ProvisioningStepType`.
+
 ### 13.2 Provisioning Interface
 
 | Operation | Purpose |
@@ -2119,6 +2122,10 @@ scope = "connector:fcp.telegram"
 | `fcp.provision.poll` | Check status |
 | `fcp.provision.complete` | Finalize credentials |
 | `fcp.provision.abort` | Cancel and cleanup |
+
+Implementation note: the connector-facing interface is defined as
+`fcp_core::ProvisioningInterface`, with `ProvisioningState` and
+`ProvisioningStepResult` used for status reporting.
 
 ---
 

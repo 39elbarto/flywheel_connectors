@@ -685,6 +685,7 @@ fcp.<service> (epic)
 | Document | Purpose |
 |----------|---------|
 | STANDARD_Connector_Compliance.md | Full compliance checklist |
+| STANDARD_Connector_Testing.md | Connector testing requirements + quality gates |
 | STANDARD_Testing_Logging.md | Testing and logging requirements |
 | STANDARD_Requirements_Index.md | Spec-to-implementation matrix |
 | FCP_Specification_V2.md | Canonical protocol specification |

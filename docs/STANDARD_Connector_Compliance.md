@@ -310,6 +310,10 @@ pub struct SanitizerReceipt {
 
 ## 8. Testing Requirements (NORMATIVE)
 
+Full connector testing requirements and quality gates live in
+`STANDARD_Connector_Testing.md`. The checklist below highlights the
+minimum compliance-focused tests that must be present.
+
 ### 8.1 Unit Tests (Mock-Only)
 
 - MUST NOT make real API calls
@@ -467,5 +471,6 @@ This standard is satisfied when:
 
 - FCP_Specification_V2.md (canonical spec)
 - docs/fcp_model_connectors_rust.md (connector implementation guide)
+- STANDARD_Connector_Testing.md (connector testing requirements)
 - STANDARD_Testing_Logging.md (testing requirements)
 - STANDARD: Connector Spec Template (flywheel_connectors-lszk.5)

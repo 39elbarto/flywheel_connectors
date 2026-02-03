@@ -240,37 +240,149 @@ impl DoctorResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{SecondsFormat, Utc};
+    use fcp_testkit::LogCapture;
     use serde_json::json;
+    use std::time::Instant;
 
-    #[test]
-    fn test_provider_allowed_hosts() {
-        assert!(
-            VectorDbProvider::Pinecone
-                .allowed_hosts()
-                .contains(&"*.pinecone.io")
-        );
-        assert!(
-            VectorDbProvider::Qdrant
-                .allowed_hosts()
-                .contains(&"*.qdrant.io")
-        );
+    struct TestLog {
+        test_name: &'static str,
+        module: &'static str,
+        correlation_id: String,
+        start: Instant,
+        assertions_passed: u32,
+        assertions_failed: u32,
+        capture: LogCapture,
+    }
+
+    impl TestLog {
+        fn new(test_name: &'static str) -> Self {
+            Self {
+                test_name,
+                module: "fcp-vectordb-config",
+                correlation_id: uuid::Uuid::new_v4().to_string(),
+                start: Instant::now(),
+                assertions_passed: 0,
+                assertions_failed: 0,
+                capture: LogCapture::new(),
+            }
+        }
+
+        fn check(&mut self, condition: bool, message: &str) -> Result<(), String> {
+            if !condition {
+                self.assertions_failed = self.assertions_failed.saturating_add(1);
+                return Err(message.to_string());
+            }
+            self.assertions_passed = self.assertions_passed.saturating_add(1);
+            Ok(())
+        }
+
+        fn check_eq<T: std::fmt::Debug + PartialEq>(
+            &mut self,
+            left: T,
+            right: T,
+            context: &str,
+        ) -> Result<(), String> {
+            if left != right {
+                self.assertions_failed = self.assertions_failed.saturating_add(1);
+                return Err(format!("{context}: left={left:?} right={right:?}"));
+            }
+            self.assertions_passed = self.assertions_passed.saturating_add(1);
+            Ok(())
+        }
+
+        fn emit(&mut self, phase: &str, result: &str, context: serde_json::Value) {
+            let duration_ms = u64::try_from(self.start.elapsed().as_millis()).unwrap_or(u64::MAX);
+            let entry = serde_json::json!({
+                "timestamp": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+                "log_version": "v1",
+                "level": "info",
+                "test_name": self.test_name,
+                "module": self.module,
+                "phase": phase,
+                "correlation_id": self.correlation_id,
+                "result": result,
+                "duration_ms": duration_ms,
+                "assertions": {
+                    "passed": self.assertions_passed,
+                    "failed": self.assertions_failed
+                },
+                "context": context
+            });
+
+            let serialized = serde_json::to_string(&entry).unwrap_or_else(|err| {
+                self.assertions_failed = self.assertions_failed.saturating_add(1);
+                format!("{{\"error\":\"log_serialization_failed\",\"detail\":\"{err}\"}}")
+            });
+            println!("{serialized}");
+            let _ = self.capture.push_value(&entry);
+            if !std::thread::panicking() {
+                self.capture.assert_valid();
+            }
+        }
+    }
+
+    impl Drop for TestLog {
+        fn drop(&mut self) {
+            let result = if std::thread::panicking() {
+                if self.assertions_failed == 0 {
+                    self.assertions_failed = 1;
+                }
+                "fail"
+            } else {
+                "pass"
+            };
+            self.emit(
+                "verify",
+                result,
+                serde_json::json!({ "connector_id": "vectordb" }),
+            );
+        }
     }
 
     #[test]
-    fn test_config_from_params() {
+    fn test_provider_allowed_hosts() -> Result<(), String> {
+        let mut log = TestLog::new("vectordb_provider_allowed_hosts");
+        log.check(
+            VectorDbProvider::Pinecone
+                .allowed_hosts()
+                .contains(&"*.pinecone.io"),
+            "pinecone host pattern missing",
+        )?;
+        log.check(
+            VectorDbProvider::Qdrant
+                .allowed_hosts()
+                .contains(&"*.qdrant.io"),
+            "qdrant host pattern missing",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_config_from_params() -> Result<(), String> {
+        let mut log = TestLog::new("vectordb_config_from_params");
         let params = json!({
             "provider": "pinecone",
             "endpoint": "my-index-abc123.svc.us-east-1.pinecone.io",
             "credential_id": "11223344-5566-7788-99aa-bbccddeeff00"
         });
 
-        let config = VectorDbConfig::from_params(&params).unwrap();
-        assert_eq!(config.provider, VectorDbProvider::Pinecone);
-        assert!(config.use_tls);
+        let config = VectorDbConfig::from_params(&params).map_err(|err| {
+            log.assertions_failed = log.assertions_failed.saturating_add(1);
+            format!("expected config to parse: {err}")
+        })?;
+        log.check_eq(
+            config.provider,
+            VectorDbProvider::Pinecone,
+            "provider mismatch",
+        )?;
+        log.check(config.use_tls, "use_tls default should be true")?;
+        Ok(())
     }
 
     #[test]
-    fn test_config_validation_empty_endpoint() {
+    fn test_config_validation_empty_endpoint() -> Result<(), String> {
+        let mut log = TestLog::new("vectordb_config_empty_endpoint");
         let config = VectorDbConfig {
             provider: VectorDbProvider::Pinecone,
             endpoint: String::new(),
@@ -281,11 +393,16 @@ mod tests {
             request_timeout_ms: 60_000,
         };
 
-        assert!(config.validate().is_err());
+        log.check(
+            config.validate().is_err(),
+            "empty endpoint should be invalid",
+        )?;
+        Ok(())
     }
 
     #[test]
-    fn test_config_validation_protocol_in_endpoint() {
+    fn test_config_validation_protocol_in_endpoint() -> Result<(), String> {
+        let mut log = TestLog::new("vectordb_config_protocol_endpoint");
         let config = VectorDbConfig {
             provider: VectorDbProvider::Pinecone,
             endpoint: "https://my-index.pinecone.io".into(),
@@ -296,11 +413,16 @@ mod tests {
             request_timeout_ms: 60_000,
         };
 
-        assert!(config.validate().is_err());
+        log.check(
+            config.validate().is_err(),
+            "protocol prefix should be invalid",
+        )?;
+        Ok(())
     }
 
     #[test]
-    fn test_config_validation_pinecone_requires_tls() {
+    fn test_config_validation_pinecone_requires_tls() -> Result<(), String> {
+        let mut log = TestLog::new("vectordb_config_pinecone_tls");
         let config = VectorDbConfig {
             provider: VectorDbProvider::Pinecone,
             endpoint: "my-index.pinecone.io".into(),
@@ -311,11 +433,13 @@ mod tests {
             request_timeout_ms: 60_000,
         };
 
-        assert!(config.validate().is_err());
+        log.check(config.validate().is_err(), "pinecone must require tls")?;
+        Ok(())
     }
 
     #[test]
-    fn test_config_url() {
+    fn test_config_url() -> Result<(), String> {
+        let mut log = TestLog::new("vectordb_config_url");
         let config = VectorDbConfig {
             provider: VectorDbProvider::Qdrant,
             endpoint: "localhost:6333".into(),
@@ -326,11 +450,17 @@ mod tests {
             request_timeout_ms: 60_000,
         };
 
-        assert_eq!(config.url(), "http://localhost:6333");
+        log.check_eq(
+            config.url(),
+            "http://localhost:6333".to_string(),
+            "url mismatch",
+        )?;
+        Ok(())
     }
 
     #[test]
-    fn test_endpoint_allowed_pinecone() {
+    fn test_endpoint_allowed_pinecone() -> Result<(), String> {
+        let mut log = TestLog::new("vectordb_endpoint_allowed_pinecone");
         let config = VectorDbConfig {
             provider: VectorDbProvider::Pinecone,
             endpoint: "my-index-abc.svc.us-east-1.pinecone.io".into(),
@@ -341,11 +471,13 @@ mod tests {
             request_timeout_ms: 60_000,
         };
 
-        assert!(config.is_endpoint_allowed());
+        log.check(config.is_endpoint_allowed(), "endpoint should be allowed")?;
+        Ok(())
     }
 
     #[test]
-    fn test_endpoint_not_allowed() {
+    fn test_endpoint_not_allowed() -> Result<(), String> {
+        let mut log = TestLog::new("vectordb_endpoint_not_allowed");
         let config = VectorDbConfig {
             provider: VectorDbProvider::Pinecone,
             endpoint: "evil.com".into(),
@@ -356,11 +488,13 @@ mod tests {
             request_timeout_ms: 60_000,
         };
 
-        assert!(!config.is_endpoint_allowed());
+        log.check(!config.is_endpoint_allowed(), "endpoint should be rejected")?;
+        Ok(())
     }
 
     #[test]
-    fn test_doctor_result_healthy() {
+    fn test_doctor_result_healthy() -> Result<(), String> {
+        let mut log = TestLog::new("vectordb_doctor_result_healthy");
         let checks = vec![
             DoctorCheck {
                 name: "config".into(),
@@ -377,11 +511,13 @@ mod tests {
         ];
 
         let result = DoctorResult::from_checks(checks);
-        assert!(result.is_healthy());
+        log.check(result.is_healthy(), "doctor result should be healthy")?;
+        Ok(())
     }
 
     #[test]
-    fn test_doctor_result_unhealthy() {
+    fn test_doctor_result_unhealthy() -> Result<(), String> {
+        let mut log = TestLog::new("vectordb_doctor_result_unhealthy");
         let checks = vec![
             DoctorCheck {
                 name: "config".into(),
@@ -398,12 +534,14 @@ mod tests {
         ];
 
         let result = DoctorResult::from_checks(checks);
-        assert!(!result.is_healthy());
-        assert_eq!(result.status, DoctorStatus::Unhealthy);
+        log.check(!result.is_healthy(), "doctor result should be unhealthy")?;
+        log.check_eq(result.status, DoctorStatus::Unhealthy, "status mismatch")?;
+        Ok(())
     }
 
     #[test]
-    fn test_doctor_result_degraded() {
+    fn test_doctor_result_degraded() -> Result<(), String> {
+        let mut log = TestLog::new("vectordb_doctor_result_degraded");
         let checks = vec![
             DoctorCheck {
                 name: "config".into(),
@@ -420,7 +558,8 @@ mod tests {
         ];
 
         let result = DoctorResult::from_checks(checks);
-        assert!(!result.is_healthy());
-        assert_eq!(result.status, DoctorStatus::Degraded);
+        log.check(!result.is_healthy(), "doctor result should be degraded")?;
+        log.check_eq(result.status, DoctorStatus::Degraded, "status mismatch")?;
+        Ok(())
     }
 }

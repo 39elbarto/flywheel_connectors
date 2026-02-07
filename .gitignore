@@ -62,5 +62,11 @@ fuzz/target/
 # NTM agent coordination
 .ntm/
 
+# Build output directories
+out/
+
+# Beads local databases
+beads_*.db
+
 # Compiled binaries
 a.out

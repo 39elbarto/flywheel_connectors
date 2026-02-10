@@ -500,6 +500,7 @@ dependencies = [
 name = "fcp-fuzz"
 version = "0.0.0"
 dependencies = [
+ "ciborium",
  "fcp-core",
  "fcp-crypto",
  "fcp-protocol",

@@ -1,2 +1,3 @@
 issue_prefix: flywheel_connectors
 db: .beads/beads_flywheel_connectors_v4.db
+sync-branch: "main"

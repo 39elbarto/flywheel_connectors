@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// Signing context for manifest signatures.
+
 pub const MANIFEST_SIGNATURE_CONTEXT: &[u8] = b"fcp.registry.manifest.v1";
 
 /// Registry verification failures.
@@ -789,6 +790,7 @@ struct ConnectorBinaryObject {
 ///
 /// # Errors
 /// Returns `RegistryError` if serialization fails.
+
 pub fn manifest_signing_bytes(manifest: &ConnectorManifest) -> Result<Vec<u8>, RegistryError> {
     let mut value = serde_json::to_value(manifest).map_err(|_| RegistryError::SignatureBytes)?;
     if let Some(object) = value.as_object_mut() {
@@ -876,6 +878,7 @@ fn signature_from_entry(sig: &Base64Bytes) -> Result<Ed25519Signature, RegistryE
 }
 
 /// Build the message to sign/verify: `signing_bytes || binary_hash`.
+
 #[must_use]
 pub fn signature_message(signing_bytes: &[u8], binary_hash: &str) -> Vec<u8> {
     let mut message = Vec::with_capacity(signing_bytes.len() + binary_hash.len());

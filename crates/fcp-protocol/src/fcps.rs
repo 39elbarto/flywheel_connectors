@@ -529,23 +529,25 @@ impl DecodeStatus {
 // SymbolAck - Stop Condition (NORMATIVE)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Reason for stopping symbol transmission (NORMATIVE).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SymbolAckReason {
-    /// Object reconstructed successfully.
-    Complete,
-    /// Transfer canceled by receiver (e.g., no longer needed).
-    Canceled,
-    /// Receiver exhausted resources (backpressure).
-    ResourceExhausted,
-    /// Decode failed permanently (e.g. hash mismatch).
-    DecodeFailed,
-}
-
-/// Symbol acknowledgment/stop message (NORMATIVE).
+/// Symbol acknowledgment for stop condition (NORMATIVE).
 ///
-/// Receiver sends this to tell sender to STOP sending symbols.
-/// This is critical for bandwidth efficiency in fountain codes.
+/// Sent by a receiver to tell the sender to stop transmitting symbols for
+/// an object. This is typically sent when the object has been fully
+/// reconstructed or when the receiver no longer needs the object.
+///
+/// # Wire Format
+///
+/// This is a control-plane object (ephemeral retention) sent via FCPC.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use fcp_protocol::fcps::SymbolAck;
+///
+/// let ack = SymbolAck::new(header, object_id, zone_id, zone_key_id, epoch_id, reason);
+/// ack.sign(&signing_key);
+/// // Send via FCPC control plane
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SymbolAck {
     /// Object header for context.
@@ -558,21 +560,31 @@ pub struct SymbolAck {
     pub zone_key_id: ZoneKeyId,
     /// Epoch ID for replay protection.
     pub epoch_id: u64,
-    /// Reason for acknowledgment.
+    /// Reason for the acknowledgment.
     pub reason: SymbolAckReason,
-    /// Final unique symbol count received (for stats).
+    /// Final count of unique symbols received (for metrics).
     pub final_symbol_count: u32,
-    /// Optional: reconstructed payload object ID (if verified).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reconstructed_object_id: Option<ObjectId>,
     /// Ed25519 signature by the receiving node.
     pub signature: Ed25519Signature,
 }
 
+/// Reason for symbol acknowledgment (NORMATIVE).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SymbolAckReason {
+    /// Object successfully reconstructed.
+    Complete,
+    /// Receiver no longer needs the object (cancelled).
+    Cancelled,
+    /// Receiver detected duplicate/redundant transmission.
+    Duplicate,
+    /// Receiver's decode budget exceeded.
+    BudgetExceeded,
+}
+
 impl SymbolAck {
-    /// Create a new `SymbolAck`.
+    /// Create a new symbol acknowledgment.
     #[must_use]
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         header: ObjectHeader,
         object_id: ObjectId,
@@ -590,8 +602,7 @@ impl SymbolAck {
             epoch_id,
             reason,
             final_symbol_count,
-            reconstructed_object_id: None,
-            signature: Ed25519Signature::from_bytes(&[0u8; 64]), // Placeholder until signed
+            signature: Ed25519Signature::from_bytes(&[0u8; 64]),
         }
     }
 
@@ -604,33 +615,18 @@ impl SymbolAck {
         buf.extend_from_slice(self.zone_id.as_bytes());
         buf.extend_from_slice(self.zone_key_id.as_bytes());
         buf.extend_from_slice(&self.epoch_id.to_le_bytes());
-
-        // Manual serialization for determinism
-        let reason_byte = match self.reason {
-            SymbolAckReason::Complete => 0,
-            SymbolAckReason::Canceled => 1,
-            SymbolAckReason::ResourceExhausted => 2,
-            SymbolAckReason::DecodeFailed => 3,
-        };
-        buf.push(reason_byte);
-
+        buf.push(self.reason as u8);
         buf.extend_from_slice(&self.final_symbol_count.to_le_bytes());
-        if let Some(ref reconstructed) = self.reconstructed_object_id {
-            buf.push(1);
-            buf.extend_from_slice(reconstructed.as_bytes());
-        } else {
-            buf.push(0);
-        }
         buf
     }
 
-    /// Sign the symbol ack in-place.
+    /// Sign the symbol acknowledgment in-place.
     pub fn sign(&mut self, signing_key: &Ed25519SigningKey) {
         let transcript = self.transcript_bytes();
         self.signature = signing_key.sign(&transcript);
     }
 
-    /// Verify the symbol ack signature.
+    /// Verify the symbol acknowledgment signature.
     ///
     /// # Errors
     /// Returns `CryptoError` if signature verification fails.
@@ -641,18 +637,31 @@ impl SymbolAck {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SymbolRequest - Pull Mechanism (NORMATIVE)
+// SymbolRequest - Bounded Request (NORMATIVE)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Request for symbols (pull-based flow control).
+/// Default maximum symbols for authenticated requests (NORMATIVE).
+pub const DEFAULT_MAX_SYMBOLS_AUTHENTICATED: u32 = 1000;
+
+/// Bounded symbol request (NORMATIVE).
 ///
-/// Used when a receiver wants to actively pull symbols (e.g. gap filling
-/// or initial fetch) rather than waiting for push.
+/// A requester MUST bound requests with `max_symbols` and/or `missing_hint`.
+/// A responder MUST NOT send more than `max_symbols` symbols in response.
+///
+/// # Anti-Amplification Rule (NORMATIVE)
+///
+/// Unauthenticated requests MUST be capped tighter (default 32 symbols)
+/// unless zone policy allows. Accounting: request processing counts against
+/// the requester's `PeerBudget` (bytes + CPU + inflight decodes).
+///
+/// # Wire Format
+///
+/// This is a control-plane object sent via FCPC.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SymbolRequest {
     /// Object header for context.
     pub header: ObjectHeader,
-    /// Content-addressed object ID.
+    /// Content-addressed object ID being requested.
     pub object_id: ObjectId,
     /// Zone for the object.
     pub zone_id: ZoneId,
@@ -660,22 +669,21 @@ pub struct SymbolRequest {
     pub zone_key_id: ZoneKeyId,
     /// Epoch ID for replay protection.
     pub epoch_id: u64,
-    /// Maximum symbols to send in response.
+    /// Maximum symbols the requester wants (NORMATIVE bound).
     pub max_symbols: u32,
-    /// Priority level (higher = more urgent).
-    pub priority: u8,
-    /// Optional hint about missing ESIs for targeted repair.
+    /// Optional hint about specific ESIs needed (proof-of-need).
     /// MUST be bounded (max `MAX_MISSING_HINT_ENTRIES` entries).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub missing_hint: Option<Vec<u32>>,
+    /// Current unique symbols the requester already has.
+    pub current_symbols: u32,
     /// Ed25519 signature by the requesting node.
     pub signature: Ed25519Signature,
 }
 
 impl SymbolRequest {
-    /// Create a new `SymbolRequest`.
+    /// Create a new symbol request.
     #[must_use]
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         header: ObjectHeader,
         object_id: ObjectId,
@@ -683,7 +691,7 @@ impl SymbolRequest {
         zone_key_id: ZoneKeyId,
         epoch_id: u64,
         max_symbols: u32,
-        priority: u8,
+        current_symbols: u32,
     ) -> Self {
         Self {
             header,
@@ -692,50 +700,32 @@ impl SymbolRequest {
             zone_key_id,
             epoch_id,
             max_symbols,
-            priority,
             missing_hint: None,
-            signature: Ed25519Signature::from_bytes(&[0u8; 64]), // Placeholder until signed
+            current_symbols,
+            signature: Ed25519Signature::from_bytes(&[0u8; 64]),
         }
     }
 
-    /// Add missing hint.
+    /// Create a request with specific missing symbols (targeted repair).
     #[must_use]
     pub fn with_missing_hint(mut self, hint: Vec<u32>) -> Self {
         self.missing_hint = Some(hint);
         self
     }
 
-    /// Check if request has proof-of-need (non-empty missing hint).
-    #[must_use]
-    pub fn has_proof_of_need(&self) -> bool {
-        self.missing_hint.as_ref().is_some_and(|h| !h.is_empty())
-    }
-
-    /// Validate that `missing_hint` is bounded (`DoS` resistance).
-    ///
-    /// # Errors
-    /// Returns `FrameError::SymbolCountOverflow` if hint exceeds maximum entries.
-    pub fn validate_hint_bounds(&self) -> Result<(), FrameError> {
-        if let Some(ref hints) = self.missing_hint {
-            if hints.len() > MAX_MISSING_HINT_ENTRIES {
-                return Err(FrameError::SymbolCountOverflow);
-            }
-        }
-        Ok(())
-    }
-
     /// Compute the signature transcript bytes (signature excluded).
     #[must_use]
     pub fn transcript_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::new();
-        buf.extend_from_slice(b"FCP2-SYMBOL-REQUEST-V1");
+        buf.extend_from_slice(b"FCP2-SYMBOL-REQ-V1");
         buf.extend_from_slice(self.object_id.as_bytes());
         buf.extend_from_slice(self.zone_id.as_bytes());
         buf.extend_from_slice(self.zone_key_id.as_bytes());
         buf.extend_from_slice(&self.epoch_id.to_le_bytes());
         buf.extend_from_slice(&self.max_symbols.to_le_bytes());
-        buf.push(self.priority);
+        buf.extend_from_slice(&self.current_symbols.to_le_bytes());
 
+        // Include missing_hint count and entries if present
         if let Some(ref hints) = self.missing_hint {
             let hint_len = u32::try_from(hints.len()).unwrap_or(u32::MAX);
             buf.extend_from_slice(&hint_len.to_le_bytes());
@@ -745,6 +735,7 @@ impl SymbolRequest {
         } else {
             buf.extend_from_slice(&0u32.to_le_bytes());
         }
+
         buf
     }
 
@@ -761,6 +752,46 @@ impl SymbolRequest {
     pub fn verify(&self, verifying_key: &Ed25519VerifyingKey) -> Result<(), CryptoError> {
         let transcript = self.transcript_bytes();
         verifying_key.verify(&transcript, &self.signature)
+    }
+
+    /// Validate that `missing_hint` is bounded (`DoS` resistance).
+    ///
+    /// # Errors
+    /// Returns `FrameError::SymbolCountOverflow` if hint exceeds maximum entries.
+    pub fn validate_hint_bounds(&self) -> Result<(), FrameError> {
+        if let Some(ref hints) = self.missing_hint {
+            if hints.len() > MAX_MISSING_HINT_ENTRIES {
+                return Err(FrameError::SymbolCountOverflow);
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate the request bounds (NORMATIVE).
+    ///
+    /// # Errors
+    /// Returns `FrameError` if bounds are violated.
+    pub fn validate_bounds(&self, is_authenticated: bool) -> Result<(), FrameError> {
+        self.validate_hint_bounds()?;
+
+        // Unauthenticated requests have stricter limits
+        let max_allowed = if is_authenticated {
+            DEFAULT_MAX_SYMBOLS_AUTHENTICATED
+        } else {
+            DEFAULT_MAX_SYMBOLS_UNAUTHENTICATED
+        };
+
+        if self.max_symbols > max_allowed {
+            return Err(FrameError::SymbolCountOverflow);
+        }
+
+        Ok(())
+    }
+
+    /// Check if the request has proof-of-need (missing_hint present).
+    #[must_use]
+    pub const fn has_proof_of_need(&self) -> bool {
+        self.missing_hint.is_some()
     }
 }
 
@@ -1298,15 +1329,172 @@ mod tests {
         assert!(status_bad.validate_hint_bounds().is_err());
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // SymbolAck Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
     #[test]
-    fn symbol_request_hint_bounds_validated() {
+    fn symbol_ack_sign_and_verify() {
         use fcp_cbor::SchemaId;
         use fcp_core::Provenance;
         use semver::Version;
 
-        let zone_id: ZoneId = "z:bounds".parse().expect("zone parse");
+        let signing_key = Ed25519SigningKey::generate();
+        let zone_id: ZoneId = "z:ack-test".parse().expect("zone parse");
+
         let header = ObjectHeader {
-            schema: SchemaId::new("fcp.test", "TestObject", Version::new(1, 0, 0)),
+            schema: SchemaId::new("fcp.protocol", "SymbolAck", Version::new(1, 0, 0)),
+            zone_id: zone_id.clone(),
+            created_at: 1_704_067_200,
+            provenance: Provenance::new(zone_id.clone()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        };
+
+        let mut ack = SymbolAck::new(
+            header,
+            ObjectId::from_bytes([0x11; 32]),
+            zone_id,
+            ZoneKeyId::from_bytes([0x22; 8]),
+            1000,
+            SymbolAckReason::Complete,
+            500,
+        );
+
+        ack.sign(&signing_key);
+        ack.verify(&signing_key.verifying_key()).expect("verify ok");
+    }
+
+    #[test]
+    fn symbol_ack_rejects_wrong_key() {
+        use fcp_cbor::SchemaId;
+        use fcp_core::Provenance;
+        use semver::Version;
+
+        let signing_key = Ed25519SigningKey::generate();
+        let wrong_key = Ed25519SigningKey::generate();
+        let zone_id: ZoneId = "z:ack-wrong".parse().expect("zone parse");
+
+        let header = ObjectHeader {
+            schema: SchemaId::new("fcp.protocol", "SymbolAck", Version::new(1, 0, 0)),
+            zone_id: zone_id.clone(),
+            created_at: 1_704_067_200,
+            provenance: Provenance::new(zone_id.clone()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        };
+
+        let mut ack = SymbolAck::new(
+            header,
+            ObjectId::from_bytes([0x33; 32]),
+            zone_id,
+            ZoneKeyId::from_bytes([0x44; 8]),
+            2000,
+            SymbolAckReason::Cancelled,
+            250,
+        );
+
+        ack.sign(&signing_key);
+        assert!(ack.verify(&wrong_key.verifying_key()).is_err());
+    }
+
+    #[test]
+    fn symbol_ack_reason_variants() {
+        // Ensure all reason variants map to distinct u8 values
+        assert_ne!(SymbolAckReason::Complete as u8, SymbolAckReason::Cancelled as u8);
+        assert_ne!(SymbolAckReason::Complete as u8, SymbolAckReason::Duplicate as u8);
+        assert_ne!(SymbolAckReason::Complete as u8, SymbolAckReason::BudgetExceeded as u8);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // SymbolRequest Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn symbol_request_sign_and_verify() {
+        use fcp_cbor::SchemaId;
+        use fcp_core::Provenance;
+        use semver::Version;
+
+        let signing_key = Ed25519SigningKey::generate();
+        let zone_id: ZoneId = "z:req-test".parse().expect("zone parse");
+
+        let header = ObjectHeader {
+            schema: SchemaId::new("fcp.protocol", "SymbolRequest", Version::new(1, 0, 0)),
+            zone_id: zone_id.clone(),
+            created_at: 1_704_067_200,
+            provenance: Provenance::new(zone_id.clone()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        };
+
+        let mut request = SymbolRequest::new(
+            header,
+            ObjectId::from_bytes([0x11; 32]),
+            zone_id,
+            ZoneKeyId::from_bytes([0x22; 8]),
+            1000,
+            100, // max_symbols
+            50,  // current_symbols
+        );
+
+        request.sign(&signing_key);
+        request.verify(&signing_key.verifying_key()).expect("verify ok");
+    }
+
+    #[test]
+    fn symbol_request_with_missing_hint() {
+        use fcp_cbor::SchemaId;
+        use fcp_core::Provenance;
+        use semver::Version;
+
+        let signing_key = Ed25519SigningKey::generate();
+        let zone_id: ZoneId = "z:req-hint".parse().expect("zone parse");
+
+        let header = ObjectHeader {
+            schema: SchemaId::new("fcp.protocol", "SymbolRequest", Version::new(1, 0, 0)),
+            zone_id: zone_id.clone(),
+            created_at: 1_704_067_200,
+            provenance: Provenance::new(zone_id.clone()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        };
+
+        let mut request = SymbolRequest::new(
+            header,
+            ObjectId::from_bytes([0x55; 32]),
+            zone_id,
+            ZoneKeyId::from_bytes([0x66; 8]),
+            3000,
+            50,
+            25,
+        )
+        .with_missing_hint(vec![10, 20, 30, 40, 50]);
+
+        assert!(request.has_proof_of_need());
+        request.validate_hint_bounds().expect("within bounds");
+
+        request.sign(&signing_key);
+        request.verify(&signing_key.verifying_key()).expect("verify ok");
+    }
+
+    #[test]
+    fn symbol_request_validates_hint_bounds() {
+        use fcp_cbor::SchemaId;
+        use fcp_core::Provenance;
+        use semver::Version;
+
+        let zone_id: ZoneId = "z:req-bounds".parse().expect("zone parse");
+        let header = ObjectHeader {
+            schema: SchemaId::new("fcp.protocol", "SymbolRequest", Version::new(1, 0, 0)),
             zone_id: zone_id.clone(),
             created_at: 0,
             provenance: Provenance::new(zone_id.clone()),
@@ -1316,30 +1504,129 @@ mod tests {
             placement: None,
         };
 
-        // Valid: exactly at the limit
+        // Valid: exactly at limit
         let request_ok = SymbolRequest::new(
             header.clone(),
             ObjectId::from_bytes([0; 32]),
             zone_id.clone(),
             ZoneKeyId::from_bytes([0; 8]),
-            1,
+            0,
             32,
-            1,
+            0,
         )
         .with_missing_hint(vec![0; MAX_MISSING_HINT_ENTRIES]);
-        request_ok.validate_hint_bounds().expect("at limit is ok");
+        request_ok.validate_hint_bounds().expect("at limit ok");
 
-        // Invalid: exceeds limit
+        // Invalid: exceeds hint limit
         let request_bad = SymbolRequest::new(
             header,
             ObjectId::from_bytes([0; 32]),
             zone_id,
             ZoneKeyId::from_bytes([0; 8]),
-            1,
+            0,
             32,
-            1,
+            0,
         )
         .with_missing_hint(vec![0; MAX_MISSING_HINT_ENTRIES + 1]);
         assert!(request_bad.validate_hint_bounds().is_err());
+    }
+
+    #[test]
+    fn symbol_request_validates_max_symbols_unauthenticated() {
+        use fcp_cbor::SchemaId;
+        use fcp_core::Provenance;
+        use semver::Version;
+
+        let zone_id: ZoneId = "z:req-unauth".parse().expect("zone parse");
+        let header = ObjectHeader {
+            schema: SchemaId::new("fcp.protocol", "SymbolRequest", Version::new(1, 0, 0)),
+            zone_id: zone_id.clone(),
+            created_at: 0,
+            provenance: Provenance::new(zone_id.clone()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        };
+
+        // Valid for unauthenticated: at default limit
+        let request_ok = SymbolRequest::new(
+            header.clone(),
+            ObjectId::from_bytes([0; 32]),
+            zone_id.clone(),
+            ZoneKeyId::from_bytes([0; 8]),
+            0,
+            DEFAULT_MAX_SYMBOLS_UNAUTHENTICATED,
+            0,
+        );
+        request_ok.validate_bounds(false).expect("unauth at limit ok");
+
+        // Invalid for unauthenticated: exceeds limit
+        let request_bad = SymbolRequest::new(
+            header.clone(),
+            ObjectId::from_bytes([0; 32]),
+            zone_id.clone(),
+            ZoneKeyId::from_bytes([0; 8]),
+            0,
+            DEFAULT_MAX_SYMBOLS_UNAUTHENTICATED + 1,
+            0,
+        );
+        assert!(request_bad.validate_bounds(false).is_err());
+
+        // Valid for authenticated: higher limit allowed
+        let request_auth = SymbolRequest::new(
+            header,
+            ObjectId::from_bytes([0; 32]),
+            zone_id,
+            ZoneKeyId::from_bytes([0; 8]),
+            0,
+            DEFAULT_MAX_SYMBOLS_AUTHENTICATED,
+            0,
+        );
+        request_auth.validate_bounds(true).expect("auth at limit ok");
+    }
+
+    #[test]
+    fn symbol_request_proof_of_need_detection() {
+        use fcp_cbor::SchemaId;
+        use fcp_core::Provenance;
+        use semver::Version;
+
+        let zone_id: ZoneId = "z:req-pon".parse().expect("zone parse");
+        let header = ObjectHeader {
+            schema: SchemaId::new("fcp.protocol", "SymbolRequest", Version::new(1, 0, 0)),
+            zone_id: zone_id.clone(),
+            created_at: 0,
+            provenance: Provenance::new(zone_id.clone()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        };
+
+        // No hint = no proof of need
+        let request_no_hint = SymbolRequest::new(
+            header.clone(),
+            ObjectId::from_bytes([0; 32]),
+            zone_id.clone(),
+            ZoneKeyId::from_bytes([0; 8]),
+            0,
+            32,
+            0,
+        );
+        assert!(!request_no_hint.has_proof_of_need());
+
+        // With hint = has proof of need
+        let request_with_hint = SymbolRequest::new(
+            header,
+            ObjectId::from_bytes([0; 32]),
+            zone_id,
+            ZoneKeyId::from_bytes([0; 8]),
+            0,
+            32,
+            0,
+        )
+        .with_missing_hint(vec![1, 2, 3]);
+        assert!(request_with_hint.has_proof_of_need());
     }
 }

@@ -3,6 +3,7 @@
 //! Provides content-addressed storage for complete mesh objects.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use fcp_core::{ObjectHeader, ObjectId, RetentionClass, StorageMeta, StoredObject, ZoneId};
@@ -89,7 +90,7 @@ impl Default for MemoryObjectStoreConfig {
 pub struct MemoryObjectStore {
     objects: RwLock<HashMap<ObjectId, StoredObject>>,
     config: MemoryObjectStoreConfig,
-    used_bytes: RwLock<u64>,
+    used_bytes: AtomicU64,
 }
 
 impl MemoryObjectStore {
@@ -99,7 +100,7 @@ impl MemoryObjectStore {
         Self {
             objects: RwLock::new(HashMap::new()),
             config,
-            used_bytes: RwLock::new(0),
+            used_bytes: AtomicU64::new(0),
         }
     }
 
@@ -116,23 +117,27 @@ impl ObjectStore for MemoryObjectStore {
     async fn put(&self, object: StoredObject) -> Result<(), ObjectStoreError> {
         let size = Self::object_size(&object);
 
-        let mut objects = self.objects.write();
-
-        if objects.contains_key(&object.object_id) {
-            return Err(ObjectStoreError::AlreadyExists(object.object_id));
-        }
-
-        let mut used_bytes = self.used_bytes.write();
-        if *used_bytes + size > self.config.max_bytes {
+        // Optimistically increment quota
+        let prev_used = self.used_bytes.fetch_add(size, Ordering::SeqCst);
+        if prev_used + size > self.config.max_bytes {
+            // Rollback if exceeded
+            self.used_bytes.fetch_sub(size, Ordering::SeqCst);
             return Err(ObjectStoreError::QuotaExceeded {
-                used: *used_bytes,
+                used: prev_used,
                 max: self.config.max_bytes,
             });
         }
 
+        let mut objects = self.objects.write();
+
+        if objects.contains_key(&object.object_id) {
+            // Rollback if duplicate
+            self.used_bytes.fetch_sub(size, Ordering::SeqCst);
+            return Err(ObjectStoreError::AlreadyExists(object.object_id));
+        }
+
         let id = object.object_id;
         objects.insert(id, object);
-        *used_bytes += size;
 
         Ok(())
     }
@@ -154,8 +159,7 @@ impl ObjectStore for MemoryObjectStore {
         let obj = objects.remove(id).ok_or(ObjectStoreError::NotFound(*id))?;
 
         let size = Self::object_size(&obj);
-        let mut used = self.used_bytes.write();
-        *used = used.saturating_sub(size);
+        self.used_bytes.fetch_sub(size, Ordering::SeqCst);
 
         Ok(())
     }
@@ -198,7 +202,7 @@ impl ObjectStore for MemoryObjectStore {
     }
 
     async fn storage_used(&self) -> u64 {
-        *self.used_bytes.read()
+        self.used_bytes.load(Ordering::SeqCst)
     }
 
     async fn storage_quota(&self) -> u64 {

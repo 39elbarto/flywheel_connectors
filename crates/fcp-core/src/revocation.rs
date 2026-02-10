@@ -400,9 +400,11 @@ impl BloomFilter {
 
     /// Insert an item into the bloom filter.
     pub fn insert(&mut self, item: &[u8]) {
+        let (h1, h2) = Self::hash_item(item);
         for i in 0..self.num_hashes {
-            let hash = Self::hash(item, i);
-            let index = hash % self.num_bits;
+            // Double hashing: h_i = (h1 + i * h2) % m
+            let hash = h1.wrapping_add(u64::from(i).wrapping_mul(h2));
+            let index = (hash as usize) % self.num_bits;
             self.bits[index / 64] |= 1u64 << (index % 64);
         }
     }
@@ -412,9 +414,10 @@ impl BloomFilter {
     /// Returns `false` if definitely not present, `true` if possibly present.
     #[must_use]
     pub fn might_contain(&self, item: &[u8]) -> bool {
+        let (h1, h2) = Self::hash_item(item);
         for i in 0..self.num_hashes {
-            let hash = Self::hash(item, i);
-            let index = hash % self.num_bits;
+            let hash = h1.wrapping_add(u64::from(i).wrapping_mul(h2));
+            let index = (hash as usize) % self.num_bits;
             if self.bits[index / 64] & (1u64 << (index % 64)) == 0 {
                 return false;
             }
@@ -422,30 +425,14 @@ impl BloomFilter {
         true
     }
 
-    /// Hash function using BLAKE3 with seed.
-    fn hash(item: &[u8], seed: u8) -> usize {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(&[seed]);
-        hasher.update(item);
-        let hash = hasher.finalize();
+    /// Hash function using BLAKE3 to generate two 64-bit hashes for Double Hashing.
+    fn hash_item(item: &[u8]) -> (u64, u64) {
+        let hash = blake3::hash(item);
         let bytes = hash.as_bytes();
-        // Use first 8 bytes as u64 to avoid platform dependence (usize is 4 bytes on 32-bit)
-        let val = u64::from_le_bytes([
-            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-        ]);
-        // We return usize because it's used as an index, but the caller usually modulos it anyway.
-        // However, looking at the usage: `let index = hash % self.num_bits;`
-        // We should probably return u64 here, but the signature returns usize.
-        // Since we are returning a "hash" that will be modulo'd by num_bits (usize),
-        // we can cast here but we might lose entropy on 32-bit if we just cast val as usize.
-        // A better approach is to return u64 from this function and update call sites,
-        // OR just truncate here. Given this is a simple bloom filter, truncation is acceptable but suboptimal.
-        // BUT, `BloomFilter::insert` does `let index = hash % self.num_bits`.
-        // If `hash` is usize, and we are on 32-bit, we are limited to 4 billion bits (500MB).
-        // That seems fine for this "simple" implementation.
-        #[allow(clippy::cast_possible_truncation)]
-        let result = val as usize;
-        result
+        let h1 = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+        let h2 = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+
+        (h1, h2)
     }
 
     /// Clear the bloom filter.

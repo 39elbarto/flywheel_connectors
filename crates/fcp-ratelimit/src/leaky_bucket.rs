@@ -84,10 +84,10 @@ impl LeakyBucket {
         let level = *self.level.lock();
         let capacity = f64::from(self.capacity);
 
-        if level + LEVEL_GUARD < capacity {
+        if level <= capacity - 1.0 {
             Duration::ZERO
         } else {
-            let overflow = level - capacity + 1.0;
+            let overflow = level - (capacity - 1.0);
             Duration::from_secs_f64(overflow / self.leak_rate)
         }
     }
@@ -96,13 +96,18 @@ impl LeakyBucket {
 #[async_trait]
 impl RateLimiter for LeakyBucket {
     async fn try_acquire(&self) -> bool {
+        self.try_acquire_n(1).await
+    }
+
+    async fn try_acquire_n(&self, permits: u32) -> bool {
         self.leak();
 
         let mut level = self.level.lock();
         let capacity = f64::from(self.capacity);
+        let amount = f64::from(permits);
 
-        if *level + LEVEL_GUARD < capacity {
-            *level += 1.0;
+        if *level + amount <= capacity {
+            *level += amount;
             true
         } else {
             false
@@ -127,7 +132,7 @@ impl RateLimiter for LeakyBucket {
                 });
             }
 
-            sleep(wait_time.min(Duration::from_millis(10))).await;
+            sleep(wait_time).await;
         }
     }
 

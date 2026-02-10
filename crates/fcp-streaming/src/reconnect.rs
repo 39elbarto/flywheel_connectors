@@ -136,6 +136,11 @@ impl ReconnectHandler {
         self.attempts
     }
 
+    /// Record a failure (increment attempt count).
+    pub fn record_failure(&mut self) {
+        self.attempts += 1;
+    }
+
     /// Check if reconnection is allowed.
     #[must_use]
     #[allow(clippy::missing_const_for_fn)]

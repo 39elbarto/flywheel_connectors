@@ -2,7 +2,7 @@
 //!
 //! Implements the object admission pipeline from `FCP_Specification_V2.md` §8.4.1.
 
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BTreeSet, HashMap};
 
 use bytes::Bytes;
 use fcp_core::{ObjectId, ZoneId};
@@ -98,12 +98,18 @@ struct EvictionEntry {
 impl Ord for EvictionEntry {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // Priority order: oldest first, then lowest reputation, then largest
-        // We use reverse ordering because BinaryHeap is a max-heap
-        other
-            .received_at
-            .cmp(&self.received_at)
-            .then_with(|| other.peer_reputation.cmp(&self.peer_reputation))
-            .then_with(|| self.size.cmp(&other.size))
+        // We order such that the "worst" items (to be evicted) are smallest (Min),
+        // so we can efficiently pop_first() from BTreeSet.
+
+        // Oldest (smallest timestamp) is min -> evict first
+        self.received_at
+            .cmp(&other.received_at)
+            // Lowest reputation (smallest value) is min -> evict first
+            .then_with(|| self.peer_reputation.cmp(&other.peer_reputation))
+            // Largest size is min -> evict first (so we reverse compare)
+            .then_with(|| other.size.cmp(&self.size))
+            // Tie-breaker to ensure unique entries in Set
+            .then_with(|| self.object_id.as_bytes().cmp(other.object_id.as_bytes()))
     }
 }
 
@@ -118,7 +124,7 @@ impl PartialOrd for EvictionEntry {
 struct ZoneQuarantine {
     objects: HashMap<ObjectId, QuarantinedObject>,
     used_bytes: u64,
-    eviction_queue: BinaryHeap<EvictionEntry>,
+    eviction_queue: BTreeSet<EvictionEntry>,
 }
 
 impl ZoneQuarantine {
@@ -126,7 +132,7 @@ impl ZoneQuarantine {
         Self {
             objects: HashMap::new(),
             used_bytes: 0,
-            eviction_queue: BinaryHeap::new(),
+            eviction_queue: BTreeSet::new(),
         }
     }
 }
@@ -173,7 +179,7 @@ impl QuarantineStore {
         while zone.objects.len() as u32 >= self.policy.max_quarantine_objects_per_zone
             || zone.used_bytes + obj_size > self.policy.max_quarantine_bytes_per_zone
         {
-            if let Some(entry) = zone.eviction_queue.pop() {
+            if let Some(entry) = zone.eviction_queue.pop_first() {
                 if let Some(evicted) = zone.objects.remove(&entry.object_id) {
                     #[allow(clippy::cast_possible_truncation)]
                     let evicted_size = evicted.data.len() as u64;
@@ -193,7 +199,7 @@ impl QuarantineStore {
         }
 
         // Add eviction entry
-        zone.eviction_queue.push(EvictionEntry {
+        zone.eviction_queue.insert(EvictionEntry {
             object_id: obj.object_id,
             received_at: obj.received_at,
             peer_reputation: obj.peer_reputation,
@@ -227,8 +233,17 @@ impl QuarantineStore {
             if let Some(obj) = zone.objects.remove(object_id) {
                 #[allow(clippy::cast_possible_truncation)]
                 let obj_size = obj.data.len() as u64;
+
+                // Construct entry to remove from set
+                let entry = EvictionEntry {
+                    object_id: *object_id,
+                    received_at: obj.received_at,
+                    peer_reputation: obj.peer_reputation,
+                    size: obj_size,
+                };
+                zone.eviction_queue.remove(&entry);
+
                 zone.used_bytes = zone.used_bytes.saturating_sub(obj_size);
-                // Note: eviction_queue entry will be orphaned but harmless
                 return Ok(obj);
             }
         }
@@ -350,6 +365,15 @@ impl QuarantineStore {
                 if let Some(obj) = zone.objects.remove(&id) {
                     #[allow(clippy::cast_possible_truncation)]
                     let obj_size = obj.data.len() as u64;
+
+                    let entry = EvictionEntry {
+                        object_id: id,
+                        received_at: obj.received_at,
+                        peer_reputation: obj.peer_reputation,
+                        size: obj_size,
+                    };
+                    zone.eviction_queue.remove(&entry);
+
                     zone.used_bytes = zone.used_bytes.saturating_sub(obj_size);
                     evicted += 1;
                 }

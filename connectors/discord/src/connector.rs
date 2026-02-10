@@ -602,12 +602,12 @@ impl DiscordConnector {
 
                 // Validate content length
                 if let Some(content) = content {
-                    if content.len() > MAX_CONTENT_LENGTH {
+                    if content.chars().count() > MAX_CONTENT_LENGTH {
                         return Err(FcpError::InvalidRequest {
                             code: 1004,
                             message: format!(
                                 "Message content exceeds {MAX_CONTENT_LENGTH} character limit (got {} characters)",
-                                content.len()
+                                content.chars().count()
                             ),
                         });
                     }
@@ -798,12 +798,12 @@ impl DiscordConnector {
 
         // Validate message content length (Discord limit: 2000 characters)
         if let Some(content) = content {
-            if content.len() > MAX_CONTENT_LENGTH {
+            if content.chars().count() > MAX_CONTENT_LENGTH {
                 return Err(FcpError::InvalidRequest {
                     code: 1004,
                     message: format!(
                         "Message content exceeds {MAX_CONTENT_LENGTH} character limit (got {} characters)",
-                        content.len()
+                        content.chars().count()
                     ),
                 });
             }
@@ -829,7 +829,7 @@ impl DiscordConnector {
             let mut total_chars = 0;
             for (i, embed) in embeds.iter().enumerate() {
                 if let Some(ref title) = embed.title {
-                    if title.len() > MAX_EMBED_TITLE {
+                    if title.chars().count() > MAX_EMBED_TITLE {
                         return Err(FcpError::InvalidRequest {
                             code: 1004,
                             message: format!(
@@ -838,10 +838,10 @@ impl DiscordConnector {
                             ),
                         });
                     }
-                    total_chars += title.len();
+                    total_chars += title.chars().count();
                 }
                 if let Some(ref desc) = embed.description {
-                    if desc.len() > MAX_EMBED_DESCRIPTION {
+                    if desc.chars().count() > MAX_EMBED_DESCRIPTION {
                         return Err(FcpError::InvalidRequest {
                             code: 1004,
                             message: format!(
@@ -850,16 +850,16 @@ impl DiscordConnector {
                             ),
                         });
                     }
-                    total_chars += desc.len();
+                    total_chars += desc.chars().count();
                 }
                 for field in &embed.fields {
-                    total_chars += field.name.len() + field.value.len();
+                    total_chars += field.name.chars().count() + field.value.chars().count();
                 }
                 if let Some(ref footer) = embed.footer {
-                    total_chars += footer.text.len();
+                    total_chars += footer.text.chars().count();
                 }
                 if let Some(ref author) = embed.author {
-                    total_chars += author.name.len();
+                    total_chars += author.name.chars().count();
                 }
             }
 
@@ -919,12 +919,12 @@ impl DiscordConnector {
 
         // Validate message content length (Discord limit: 2000 characters)
         if let Some(content) = content {
-            if content.len() > MAX_CONTENT_LENGTH {
+            if content.chars().count() > MAX_CONTENT_LENGTH {
                 return Err(FcpError::InvalidRequest {
                     code: 1004,
                     message: format!(
                         "Message content exceeds {MAX_CONTENT_LENGTH} character limit (got {} characters)",
-                        content.len()
+                        content.chars().count()
                     ),
                 });
             }
@@ -950,7 +950,7 @@ impl DiscordConnector {
             let mut total_chars = 0;
             for (i, embed) in embeds.iter().enumerate() {
                 if let Some(ref title) = embed.title {
-                    if title.len() > MAX_EMBED_TITLE {
+                    if title.chars().count() > MAX_EMBED_TITLE {
                         return Err(FcpError::InvalidRequest {
                             code: 1004,
                             message: format!(
@@ -959,10 +959,10 @@ impl DiscordConnector {
                             ),
                         });
                     }
-                    total_chars += title.len();
+                    total_chars += title.chars().count();
                 }
                 if let Some(ref desc) = embed.description {
-                    if desc.len() > MAX_EMBED_DESCRIPTION {
+                    if desc.chars().count() > MAX_EMBED_DESCRIPTION {
                         return Err(FcpError::InvalidRequest {
                             code: 1004,
                             message: format!(
@@ -971,16 +971,16 @@ impl DiscordConnector {
                             ),
                         });
                     }
-                    total_chars += desc.len();
+                    total_chars += desc.chars().count();
                 }
                 for field in &embed.fields {
-                    total_chars += field.name.len() + field.value.len();
+                    total_chars += field.name.chars().count() + field.value.chars().count();
                 }
                 if let Some(ref footer) = embed.footer {
-                    total_chars += footer.text.len();
+                    total_chars += footer.text.chars().count();
                 }
                 if let Some(ref author) = embed.author {
-                    total_chars += author.name.len();
+                    total_chars += author.name.chars().count();
                 }
             }
 

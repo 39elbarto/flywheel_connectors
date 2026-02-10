@@ -257,7 +257,10 @@ impl LocalApiClient {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            // Limit body size for error messages to prevent DoS
+            let body_bytes = response.bytes().await.unwrap_or_default();
+            let body =
+                String::from_utf8_lossy(&body_bytes[..body_bytes.len().min(4096)]).into_owned();
             return Err(TailscaleError::LocalApiError(format!("{status}: {body}")));
         }
 

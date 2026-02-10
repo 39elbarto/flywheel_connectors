@@ -2708,22 +2708,25 @@ fn pattern_matches(pattern: &str, value: &str) -> bool {
         return pattern == value;
     }
 
-    let parts: Vec<&str> = pattern.split('*').collect();
-    if parts.is_empty() {
-        return true;
+    let mut parts = pattern.split('*');
+    let mut index = 0usize;
+
+    // Handle first part (prefix match)
+    if let Some(first) = parts.next() {
+        if !first.is_empty() {
+            if !value.starts_with(first) {
+                return false;
+            }
+            index += first.len();
+        }
     }
 
-    let mut index = 0usize;
-    for (idx, part) in parts.iter().enumerate() {
+    // Handle middle parts
+    let mut last_part = "";
+    for part in parts {
+        last_part = part;
         if part.is_empty() {
             continue;
-        }
-
-        if idx == 0 && !pattern.starts_with('*') && !value.starts_with(part) {
-            return false;
-        }
-        if idx == parts.len() - 1 && !pattern.ends_with('*') && !value.ends_with(part) {
-            return false;
         }
 
         match value[index..].find(part) {
@@ -2732,6 +2735,21 @@ fn pattern_matches(pattern: &str, value: &str) -> bool {
             }
             None => return false,
         }
+    }
+
+    // Handle last part (suffix match) - if pattern doesn't end with *, the last part must match the end
+    if !pattern.ends_with('*') {
+        // If we consumed everything, we are good if the last part matched the end.
+        // But the loop logic above greedily matches the *first* occurrence.
+        // We need to ensure the *end* of the string matches the last part.
+        // Actually, split iterator gives us the last part.
+        // If pattern is "a*b", parts are "a", "b".
+        // Loop handled "a".
+        // Loop handled "b" (found it).
+        // But "b" must be at the END.
+        // A simpler logic without allocation:
+        
+        return value.ends_with(last_part);
     }
 
     true
@@ -4336,5 +4354,6 @@ mod tests {
         };
         assert!(pat.matches("abcxyz"));
         assert!(!pat.matches("xyzabc"));
+
     }
 }

@@ -524,12 +524,14 @@ impl TelegramConnector {
             "telegram.send_message" => {
                 let text = input.get("text").and_then(|v| v.as_str());
                 if let Some(text) = text {
-                    if text.len() > MAX_TEXT_LENGTH {
+                    // Telegram limit is 4096 characters, not bytes.
+                    // Using chars().count() correctly handles multi-byte characters (e.g. emojis).
+                    if text.chars().count() > MAX_TEXT_LENGTH {
                         return Err(FcpError::InvalidRequest {
                             code: 1004,
                             message: format!(
                                 "Message text exceeds {MAX_TEXT_LENGTH} character limit (got {} characters)",
-                                text.len()
+                                text.chars().count()
                             ),
                         });
                     }
@@ -1027,6 +1029,42 @@ impl Default for TelegramConnector {
 mod tests {
     use super::*;
     use crate::types::{Chat, User};
+    use serde_json::json;
+
+    #[test]
+    fn test_validate_input_early_unicode_length() {
+        // Create a string that is < 4096 chars but > 4096 bytes.
+        // '€' is 3 bytes. 2000 chars * 3 = 6000 bytes.
+        let text = "€".repeat(2000);
+        assert!(text.len() > 4096);
+        assert!(text.chars().count() < 4096);
+
+        let input = json!({
+            "chat_id": "123",
+            "text": text
+        });
+
+        let result = TelegramConnector::validate_input_early("telegram.send_message", &input);
+        assert!(
+            result.is_ok(),
+            "Validation failed for valid Unicode string: {:?}",
+            result.err()
+        );
+
+        // Test actual overflow
+        let long_text = "a".repeat(4097);
+        let input_long = json!({
+            "chat_id": "123",
+            "text": long_text
+        });
+        let result_long =
+            TelegramConnector::validate_input_early("telegram.send_message", &input_long);
+        assert!(
+            result_long.is_err(),
+            "Validation should fail for > 4096 chars"
+        );
+    }
+
     use chrono::{Duration, Utc};
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;

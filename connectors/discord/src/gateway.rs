@@ -315,12 +315,18 @@ async fn run_gateway_loop_inner(
     // Wait for Hello
     let hello = match read.next().await {
         Some(Ok(WsMessage::Text(text))) => {
-            let payload: GatewayPayload = serde_json::from_str(&text)?;
-            if payload.op != GatewayOpcode::Hello as i32 {
-                return Err(DiscordError::Gateway("Expected Hello opcode".into()));
+            match serde_json::from_str::<GatewayPayload>(&text) {
+                Ok(payload) => {
+                    if payload.op != GatewayOpcode::Hello as i32 {
+                        return Err(DiscordError::Gateway("Expected Hello opcode".into()));
+                    }
+                    match serde_json::from_value::<GatewayHello>(payload.d.unwrap_or_default()) {
+                        Ok(h) => h,
+                        Err(e) => return Err(e.into())),
+                    }
+                }
+                Err(e) => return Err(e.into())),
             }
-            let hello: GatewayHello = serde_json::from_value(payload.d.unwrap_or_default())?;
-            hello
         }
         Some(Ok(msg)) => {
             return Err(DiscordError::Gateway(format!(
@@ -353,17 +359,25 @@ async fn run_gateway_loop_inner(
 
         let resume_payload = GatewayPayload {
             op: GatewayOpcode::Resume as i32,
-            d: Some(serde_json::to_value(&resume)?),
+            d: Some(match serde_json::to_value(&resume) {
+                Ok(v) => v,
+                Err(e) => return Err(e.into())),
+            }),
             s: None,
             t: None,
         };
 
-        write
+        if let Err(e) = write
             .send(WsMessage::Text(
-                serde_json::to_string(&resume_payload)?.into(),
+                match serde_json::to_string(&resume_payload) {
+                    Ok(s) => s.into(),
+                    Err(e) => return Err(e.into())),
+                },
             ))
             .await
-            .map_err(|e| DiscordError::Gateway(format!("Failed to send Resume: {e}")))?;
+        {
+            return Err(DiscordError::Gateway(format!("Failed to send Resume: {e}")));
+        }
     } else {
         // Fresh connection - send Identify
         let identify = GatewayIdentify {
@@ -379,17 +393,25 @@ async fn run_gateway_loop_inner(
 
         let identify_payload = GatewayPayload {
             op: GatewayOpcode::Identify as i32,
-            d: Some(serde_json::to_value(&identify)?),
+            d: Some(match serde_json::to_value(&identify) {
+                Ok(v) => v,
+                Err(e) => return Err(e.into())),
+            }),
             s: None,
             t: None,
         };
 
-        write
+        if let Err(e) = write
             .send(WsMessage::Text(
-                serde_json::to_string(&identify_payload)?.into(),
+                match serde_json::to_string(&identify_payload) {
+                    Ok(s) => s.into(),
+                    Err(e) => return Err(e.into())),
+                },
             ))
             .await
-            .map_err(|e| DiscordError::Gateway(format!("Failed to send Identify: {e}")))?;
+        {
+            return Err(DiscordError::Gateway(format!("Failed to send Identify: {e}")));
+        }
     }
 
     // Main event loop

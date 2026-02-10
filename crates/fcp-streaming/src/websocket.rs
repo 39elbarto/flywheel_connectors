@@ -13,6 +13,7 @@ use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 use url::Url;
 
+use crate::reconnect::ReconnectHandler;
 use crate::{StreamError, StreamResult};
 
 /// WebSocket message types.
@@ -239,6 +240,7 @@ impl WsConfig {
 }
 
 /// WebSocket client.
+#[derive(Clone)]
 pub struct WsClient {
     url: String,
     config: WsConfig,
@@ -296,6 +298,11 @@ impl WsClient {
     #[must_use]
     pub const fn config(&self) -> &WsConfig {
         &self.config
+    }
+
+    /// Create a reconnecting stream.
+    pub fn stream(&self) -> ReconnectingWsStream {
+        ReconnectingWsStream::new(self.clone())
     }
 }
 
@@ -449,6 +456,117 @@ impl Stream for WsConnection {
                 Poll::Ready(None)
             }
             Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+/// Reconnecting WebSocket stream.
+pub struct ReconnectingWsStream {
+    client: WsClient,
+    handler: ReconnectHandler,
+    state: ReconnectState,
+}
+
+enum ReconnectState {
+    /// Initial state or between attempts.
+    Idle,
+    /// Waiting for backoff delay.
+    Waiting(Pin<Box<tokio::time::Sleep>>),
+    /// Connection attempt in progress.
+    Connecting(Pin<Box<dyn std::future::Future<Output = StreamResult<WsConnection>> + Send>>),
+    /// Active connection.
+    Connected(WsConnection),
+}
+
+impl ReconnectingWsStream {
+    fn new(client: WsClient) -> Self {
+        let config = crate::reconnect::ReconnectConfig::new()
+            .with_max_attempts(if client.config.auto_reconnect {
+                client.config.max_reconnect_attempts.unwrap_or(u32::MAX)
+            } else {
+                0
+            })
+            .with_initial_delay(client.config.reconnect_delay);
+
+        Self {
+            handler: ReconnectHandler::new(config),
+            client,
+            state: ReconnectState::Idle,
+        }
+    }
+}
+
+impl Stream for ReconnectingWsStream {
+    type Item = StreamResult<WsMessage>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            match &mut self.state {
+                ReconnectState::Idle => {
+                    // Start connecting
+                    let client_clone = WsClient {
+                        url: self.client.url.clone(),
+                        config: self.client.config.clone(),
+                    };
+                    // We need a way to clone the client future or spawn it?
+                    // connect is async.
+                    let future = Box::pin(async move { client_clone.connect().await });
+                    self.state = ReconnectState::Connecting(future);
+                }
+                ReconnectState::Waiting(delay) => match delay.as_mut().poll(cx) {
+                    Poll::Ready(_) => {
+                        self.state = ReconnectState::Idle;
+                    }
+                    Poll::Pending => return Poll::Pending,
+                },
+                ReconnectState::Connecting(future) => match future.as_mut().poll(cx) {
+                    Poll::Ready(Ok(conn)) => {
+                        self.handler.reset();
+                        self.state = ReconnectState::Connected(conn);
+                    }
+                    Poll::Ready(Err(e)) => {
+                        if !self.handler.can_reconnect() {
+                            return Poll::Ready(Some(Err(e)));
+                        }
+
+                        let attempt = self.handler.attempts();
+                        let delay_duration = self.handler.config().delay_for_attempt(attempt);
+                        self.handler.record_failure(); // Increment attempts
+
+                        let sleep = Box::pin(tokio::time::sleep(delay_duration));
+                        self.state = ReconnectState::Waiting(sleep);
+                    }
+                    Poll::Pending => return Poll::Pending,
+                },
+                ReconnectState::Connected(conn) => match Pin::new(conn).poll_next(cx) {
+                    Poll::Ready(Some(Ok(msg))) => return Poll::Ready(Some(Ok(msg))),
+                    Poll::Ready(Some(Err(e))) => {
+                        if !self.handler.can_reconnect() {
+                            return Poll::Ready(Some(Err(e)));
+                        }
+
+                        let attempt = self.handler.attempts();
+                        let delay_duration = self.handler.config().delay_for_attempt(attempt);
+                        self.handler.record_failure();
+
+                        let sleep = Box::pin(tokio::time::sleep(delay_duration));
+                        self.state = ReconnectState::Waiting(sleep);
+                    }
+                    Poll::Ready(None) => {
+                        if !self.handler.can_reconnect() {
+                            return Poll::Ready(None);
+                        }
+
+                        let attempt = self.handler.attempts();
+                        let delay_duration = self.handler.config().delay_for_attempt(attempt);
+                        self.handler.record_failure();
+
+                        let sleep = Box::pin(tokio::time::sleep(delay_duration));
+                        self.state = ReconnectState::Waiting(sleep);
+                    }
+                    Poll::Pending => return Poll::Pending,
+                },
+            }
         }
     }
 }

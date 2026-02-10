@@ -9,6 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+ciborium = "0.2.2"
 
 fcp-core = { path = "../crates/fcp-core" }
 fcp-crypto = { path = "../crates/fcp-crypto" }
@@ -52,6 +53,13 @@ bench = false
 [[bin]]
 name = "fuzz_session_transcript"
 path = "fuzz_targets/session_transcript.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_zone_key_manifest"
+path = "fuzz_targets/zone_key_manifest.rs"
 test = false
 doc = false
 bench = false

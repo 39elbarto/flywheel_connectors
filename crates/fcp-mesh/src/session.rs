@@ -85,7 +85,15 @@ impl MeshSession {
     }
 
     /// Get next send sequence and increment.
-    pub const fn next_send_seq(&mut self) -> u64 {
+    ///
+    /// # Panics
+    /// Panics if sequence number overflows `u64::MAX`. This prevents nonce reuse.
+    pub fn next_send_seq(&mut self) -> u64 {
+        assert_ne!(
+            self.send_seq,
+            u64::MAX,
+            "FCP session sequence number overflow: nonce reuse prevention"
+        );
         self.send_seq += 1;
         self.send_seq
     }

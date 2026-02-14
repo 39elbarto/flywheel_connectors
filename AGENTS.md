@@ -4,7 +4,7 @@
 
 ---
 
-## RULE 0 - THE FUNDAMENTAL OVERRIDE PEROGATIVE
+## RULE 0 - THE FUNDAMENTAL OVERRIDE PREROGATIVE
 
 If I tell you to do something, even if it goes against what follows below, YOU MUST LISTEN TO ME. I AM IN CHARGE, NOT YOU.
 
@@ -28,30 +28,57 @@ If I tell you to do something, even if it goes against what follows below, YOU M
 
 ---
 
+## Git Branch: ONLY Use `main`, NEVER `master`
+
+**The default branch is `main`. The `master` branch exists only for legacy URL compatibility.**
+
+- **All work happens on `main`** — commits, PRs, feature branches all merge to `main`
+- **Never reference `master` in code or docs** — if you see `master` anywhere, it's a bug that needs fixing
+- **The `master` branch must stay synchronized with `main`** — after pushing to `main`, also push to `master`:
+  ```bash
+  git push origin main:master
+  ```
+
+**If you see `master` referenced anywhere:**
+1. Update it to `main`
+2. Ensure `master` is synchronized: `git push origin main:master`
+
+---
+
 ## Toolchain: Rust & Cargo
 
 We only use **Cargo** in this project, NEVER any other package manager.
 
 - **Edition:** Rust 2024 (nightly required — see `rust-toolchain.toml`)
 - **Dependency versions:** Explicit versions for stability
-- **Configuration:** Cargo.toml only
-- **Unsafe code:** Forbidden (`#![forbid(unsafe_code)]`)
+- **Configuration:** Cargo.toml workspace with `workspace = true` pattern
+- **Unsafe code:** Denied at workspace level (`unsafe_code = "deny"`); individual crates that legitimately need unsafe (e.g., `fcp-sandbox`) may override
 
 ### Key Dependencies
 
 | Crate | Purpose |
 |-------|---------|
-| `serde` + `serde_json` | JSON serialization for FCP protocol messages |
-| `tokio` | Async runtime for connector execution |
+| `tokio` | Async runtime (full features) |
 | `async-trait` | Async trait support for connector interfaces |
-| `thiserror` | Error type definitions |
-| `tracing` | Structured logging and observability |
+| `futures-util` | Async stream combinators |
+| `serde` + `serde_json` | JSON serialization for FCP protocol messages |
+| `ciborium` | CBOR serialization for binary protocol |
+| `ed25519-dalek` + `x25519-dalek` | Cryptographic signatures and key exchange |
+| `blake3` | Fast cryptographic hashing |
+| `chacha20poly1305` | AEAD symmetric encryption |
+| `hpke` | Hybrid Public Key Encryption |
+| `coset` | COSE (CBOR Object Signing and Encryption) |
+| `reqwest` | HTTP client for request-response connectors |
+| `tokio-tungstenite` | WebSocket support for streaming connectors |
+| `wasmtime` + `wasmtime-wasi` | WASI sandbox runtime for connector isolation |
+| `raptorq` | Fountain codes for reliable data transfer |
+| `tough` + `sigstore` | Supply-chain hardening (TUF + Sigstore verification) |
 | `uuid` | Unique identifiers for sessions, correlations |
 | `chrono` | Timestamps for capabilities and events |
 | `bytes` | Efficient byte handling for binary protocol |
-| `ed25519-dalek` | Cryptographic signatures for connector verification |
-| `reqwest` | HTTP client for request-response connectors |
-| `tokio-tungstenite` | WebSocket support for streaming connectors |
+| `clap` | CLI argument parsing |
+| `thiserror` | Ergonomic error type derivation |
+| `tracing` | Structured logging and observability |
 
 ### Release Profile
 
@@ -106,11 +133,11 @@ We do not care about backwards compatibility—we're in early development with n
 **After any substantive code changes, you MUST verify no errors were introduced:**
 
 ```bash
-# Check for compiler errors and warnings
-cargo check --all-targets
+# Check for compiler errors and warnings (workspace-wide)
+cargo check --workspace --all-targets
 
 # Check for clippy lints (pedantic + nursery are enabled)
-cargo clippy --all-targets -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 
 # Verify formatting
 cargo fmt --check
@@ -122,19 +149,72 @@ If you see errors, **carefully understand and resolve each issue**. Read suffici
 
 ## Testing
 
+### Testing Policy
+
+Every component crate includes inline `#[cfg(test)]` unit tests alongside the implementation. Tests must cover:
+- Happy path
+- Edge cases (empty input, max values, boundary conditions)
+- Error conditions
+
+Cross-component integration tests live in the workspace `tests/` directory.
+
 ### Unit Tests
 
 ```bash
-# Run all tests
-cargo test
+# Run all tests across the workspace
+cargo test --workspace
 
 # Run with output
-cargo test -- --nocapture
+cargo test --workspace -- --nocapture
+
+# Run tests for a specific crate
+cargo test -p fcp-core
+cargo test -p fcp-protocol
+cargo test -p fcp-crypto
+cargo test -p fcp-sandbox
+cargo test -p fcp-manifest
+cargo test -p fcp-sdk
+cargo test -p fcp-conformance
 
 # Run specific connector tests
-cargo test telegram_connector
-cargo test gmail_connector
+cargo test -p fcp-connector-telegram
+cargo test -p fcp-connector-discord
+
+# Run tests with all features enabled
+cargo test --workspace --all-features
 ```
+
+### Test Categories
+
+| Crate | Focus Areas |
+|-------|-------------|
+| `fcp-core` | Zone model, capability types, principal identity, error types |
+| `fcp-protocol` | FCP message framing, serialization round-trips, version negotiation |
+| `fcp-crypto` | Ed25519 signing, X25519 key exchange, HPKE encryption, COSE token construction |
+| `fcp-cbor` | CBOR encoding/decoding, deterministic serialization |
+| `fcp-manifest` | Manifest parsing, validation, capability declaration |
+| `fcp-sandbox` | WASI isolation, filesystem filtering, network policy enforcement |
+| `fcp-ratelimit` | Token bucket, sliding window, burst allowance |
+| `fcp-oauth` | OAuth2 flows, token refresh, redirect handling |
+| `fcp-registry` | Connector discovery, version resolution, signature verification |
+| `fcp-sdk` | SDK ergonomics, connector lifecycle, trait contracts |
+| `fcp-conformance` | Cross-crate protocol conformance, interop validation |
+| `fcp-host` | Gateway orchestration, zone routing, capability enforcement |
+| `fcp-mesh` | Multi-node connector mesh, routing, discovery |
+| `fcp-store` | Persistent state, key-value storage, migration |
+| `fcp-audit` | Audit log generation, tamper detection |
+| `fcp-streaming` | Event stream framing, backpressure, reconnection |
+| `fcp-webhook` | Webhook delivery, retry, signature verification |
+| `fcp-graphql` | GraphQL schema, resolver contracts |
+| `fcp-tailscale` | Tailscale integration, ACL mapping |
+| `fcp-telemetry` | Metrics export, span propagation |
+| `fcp-raptorq` | Fountain code encoding/decoding, loss recovery |
+| `fcp-bootstrap` | First-run setup, credential provisioning |
+| `fcp-e2e` | End-to-end integration scenarios |
+| `fcp-testkit` | Shared test helpers, mock connectors, fixtures |
+| `connectors/*` | Per-connector unit + integration tests |
+| `fuzz/` | Fuzz targets for protocol parsing and CBOR handling |
+| `tests/` | Cross-component integration, test vectors |
 
 ### Mock External Services
 
@@ -147,13 +227,67 @@ Use mock servers for external APIs in tests:
 
 ## Third-Party Library Usage
 
-If you aren't 100% sure how to use a third-party library, **SEARCH ONLINE** to find the latest documentation and mid-2025 best practices.
+If you aren't 100% sure how to use a third-party library, **SEARCH ONLINE** to find the latest documentation and current best practices.
 
 ---
 
 ## FCP (Flywheel Connector Protocol) — This Project
 
 **This is the project you're working on.** FCP is a secure, modular, high-performance framework for integrating external services into the Agent Flywheel ecosystem. It enables AI coding agents to safely interact with messaging platforms, cloud services, productivity tools, and other external systems while maintaining strict security boundaries.
+
+### What It Does
+
+Provides a zone-based, capability-gated connector architecture where self-contained binaries implement the FCP interface to bridge AI agents with external services (messaging, cloud, databases, browsers) through a central Gateway with cryptographic verification and WASI sandboxing.
+
+### Architecture
+
+```
+Gateway -> Zone Check -> Capability Check -> Connector -> External Service
+                                                |
+                                    Sandbox (isolated filesystem, filtered network)
+```
+
+### Workspace Structure
+
+```
+flywheel_connectors/
+|-- Cargo.toml                         # Workspace root
+|-- crates/
+|   |-- fcp-core/                      # Zone model, capabilities, principals, errors
+|   |-- fcp-protocol/                  # FCP wire protocol, message framing
+|   |-- fcp-crypto/                    # Ed25519, X25519, HPKE, COSE, Blake3
+|   |-- fcp-cbor/                      # CBOR serialization layer
+|   |-- fcp-manifest/                  # Connector manifest parsing and validation
+|   |-- fcp-sandbox/                   # WASI runtime isolation
+|   |-- fcp-sdk/                       # Connector SDK (trait-based interface)
+|   |-- fcp-host/                      # Gateway orchestrator
+|   |-- fcp-mesh/                      # Multi-node connector mesh
+|   |-- fcp-registry/                  # Connector discovery and versioning
+|   |-- fcp-oauth/                     # OAuth2 flow support
+|   |-- fcp-ratelimit/                 # Rate limiting primitives
+|   |-- fcp-store/                     # Persistent state storage
+|   |-- fcp-streaming/                 # Event stream support
+|   |-- fcp-webhook/                   # Webhook delivery and verification
+|   |-- fcp-graphql/                   # GraphQL schema layer
+|   |-- fcp-audit/                     # Audit logging
+|   |-- fcp-telemetry/                 # Metrics and tracing export
+|   |-- fcp-tailscale/                 # Tailscale network integration
+|   |-- fcp-raptorq/                   # Fountain codes for reliable transfer
+|   |-- fcp-bootstrap/                 # First-run setup and provisioning
+|   |-- fcp-cli/                       # CLI tooling
+|   |-- fcp-conformance/               # Protocol conformance test suite
+|   |-- fcp-testkit/                   # Shared test utilities
+|   +-- fcp-e2e/                       # End-to-end test harness
+|-- connectors/
+|   |-- anthropic/                     # Anthropic API connector
+|   |-- discord/                       # Discord bot connector
+|   |-- openai/                        # OpenAI API connector
+|   |-- telegram/                      # Telegram Bot API connector
+|   |-- twitter/                       # Twitter/X API connector
+|   +-- vectordb/                      # Vector database connector
+|-- tests/                             # Cross-component integration tests
++-- fuzz/                              # Fuzz testing targets
+```
 
 ### Core Concepts
 
@@ -165,14 +299,6 @@ If you aren't 100% sure how to use a third-party library, **SEARCH ONLINE** to f
 | **Manifest** | Embedded metadata describing connector properties |
 | **Gateway** | The Flywheel component orchestrating connectors |
 | **Principal** | An identity (user, agent, or service) making requests |
-
-### Architecture
-
-```
-Gateway → Zone Check → Capability Check → Connector → External Service
-                                              ↓
-                                    Sandbox (isolated filesystem, filtered network)
-```
 
 ### Key Principles
 
@@ -187,26 +313,26 @@ When implementing connectors, identify which archetype(s) apply:
 
 | Archetype | Pattern | Examples |
 |-----------|---------|----------|
-| **Request-Response** | Agent → Service → Agent | REST APIs, GraphQL, gRPC |
-| **Streaming** | Service → Agent (continuous) | WebSocket, SSE, log tailing |
-| **Bidirectional** | Agent ↔ Service | Chat protocols, collaborative apps |
-| **Polling** | Agent → Service (periodic) | Email IMAP, RSS feeds |
-| **Webhook** | Service → Agent (push) | GitHub hooks, Stripe events |
-| **Queue/Pub-Sub** | Agent ↔ Broker | Redis, NATS, Kafka |
-| **File/Blob** | Agent → Storage | S3, GCS, local filesystem |
-| **Database** | Agent → DB (query) | PostgreSQL, vector DBs |
-| **CLI/Process** | Agent → spawn → Process | git, kubectl, terraform |
-| **Browser** | Agent → CDP → Browser | Automation, scraping |
+| **Request-Response** | Agent -> Service -> Agent | REST APIs, GraphQL, gRPC |
+| **Streaming** | Service -> Agent (continuous) | WebSocket, SSE, log tailing |
+| **Bidirectional** | Agent <-> Service | Chat protocols, collaborative apps |
+| **Polling** | Agent -> Service (periodic) | Email IMAP, RSS feeds |
+| **Webhook** | Service -> Agent (push) | GitHub hooks, Stripe events |
+| **Queue/Pub-Sub** | Agent <-> Broker | Redis, NATS, Kafka |
+| **File/Blob** | Agent -> Storage | S3, GCS, local filesystem |
+| **Database** | Agent -> DB (query) | PostgreSQL, vector DBs |
+| **CLI/Process** | Agent -> spawn -> Process | git, kubectl, terraform |
+| **Browser** | Agent -> CDP -> Browser | Automation, scraping |
 
 ### Standard Zone Hierarchy
 
 ```
-z:owner         → Full owner access (personal private data)
-z:private       → Personal email, calendar, files
-z:work          → Work services, internal systems
-z:project:<name>→ Per-project isolation
-z:community     → Semi-trusted communities (Discord servers)
-z:public        → Public/untrusted inputs
+z:owner          -> Full owner access (personal private data)
+z:private        -> Personal email, calendar, files
+z:work           -> Work services, internal systems
+z:project:<name> -> Per-project isolation
+z:community      -> Semi-trusted communities (Discord servers)
+z:public         -> Public/untrusted inputs
 ```
 
 ### Zone Rules
@@ -214,6 +340,35 @@ z:public        → Public/untrusted inputs
 1. **Single-zone binding**: A connector instance MUST bind to exactly one zone
 2. **Default deny**: If a capability isn't granted to a zone, it's impossible to invoke
 3. **No cross-connector calling**: All composition goes through the Gateway
+
+### Performance Targets
+
+Connectors must be "unbelievably fast and reliable":
+
+| Metric | Target |
+|--------|--------|
+| Cold start | < 50ms |
+| Request latency overhead | < 1ms |
+| Memory footprint | < 10MB idle |
+| Binary size | < 20MB (compressed) |
+
+Achieve this through:
+- Zero-copy parsing where possible
+- Connection pooling for HTTP clients
+- Lazy initialization of expensive resources
+- Static dispatch over dynamic dispatch
+
+### Key Design Decisions
+
+- **Self-contained binaries** — one binary + one manifest file per connector, no interpreted runtimes
+- **WASI sandboxing** via wasmtime for filesystem and network isolation
+- **Ed25519 + X25519 + HPKE** for signing, key exchange, and hybrid encryption
+- **CBOR wire format** with deterministic serialization for protocol messages
+- **Supply-chain hardening** via TUF (tough) and Sigstore for connector verification
+- **Fountain codes** (RaptorQ) for reliable data transfer over lossy channels
+- **Zone-first security model** — every operation scoped to exactly one zone
+- **Capability tokens** — cryptographically scoped, time-bounded permissions
+- **Structured tracing** throughout — every connector operation emits spans with latency and context
 
 ---
 
@@ -237,10 +392,10 @@ git clone https://github.com/example/bird /tmp/fcp-analysis/bird
 ```
 
 Examples of libraries to port:
-- **gog** (Google services) → `fcp-google`
-- **bird** (messaging platforms) → `fcp-telegram`, `fcp-discord`, etc.
-- **whisperX** (voice recognition) → `fcp-whisper`
-- **qmd** (markdown processing) → `fcp-markdown`
+- **gog** (Google services) -> `fcp-google`
+- **bird** (messaging platforms) -> `fcp-telegram`, `fcp-discord`, etc.
+- **whisperX** (voice recognition) -> `fcp-whisper`
+- **qmd** (markdown processing) -> `fcp-markdown`
 
 ### Automate Everything
 
@@ -268,23 +423,6 @@ FCP connectors MUST be self-contained binaries. The following are **explicitly f
 - Cross-platform distribution becomes a nightmare
 
 A valid FCP connector is: **one binary + one manifest file**.
-
-### Performance Requirements
-
-Connectors must be "unbelievably fast and reliable":
-
-| Metric | Target |
-|--------|--------|
-| Cold start | < 50ms |
-| Request latency overhead | < 1ms |
-| Memory footprint | < 10MB idle |
-| Binary size | < 20MB (compressed) |
-
-Achieve this through:
-- Zero-copy parsing where possible
-- Connection pooling for HTTP clients
-- Lazy initialization of expensive resources
-- Static dispatch over dynamic dispatch
 
 ### Security-First Implementation
 
@@ -349,9 +487,9 @@ A mail-like layer that lets coding agents coordinate asynchronously via MCP tool
 
 ## Beads (br) — Dependency-Aware Issue Tracking
 
-Beads provides a lightweight, dependency-aware issue database and CLI (`br` / beads_rust) for selecting "ready work," setting priorities, and tracking status. It complements MCP Agent Mail's messaging and file reservations.
+Beads provides a lightweight, dependency-aware issue database and CLI (`br` - beads_rust) for selecting "ready work," setting priorities, and tracking status. It complements MCP Agent Mail's messaging and file reservations.
 
-**Note:** br (beads_rust) is non-invasive and never executes git commands. You must manually stage and commit `.beads/` changes after using br commands.
+**Important:** `br` is non-invasive—it NEVER runs git commands automatically. You must manually commit changes after `br sync --flush-only`.
 
 ### Conventions
 
@@ -380,7 +518,8 @@ Beads provides a lightweight, dependency-aware issue database and CLI (`br` / be
 
 5. **Complete and release:**
    ```bash
-   br close br-123 --reason "Completed"
+   br close 123 --reason "Completed"
+   br sync --flush-only  # Export to JSONL (no git operations)
    ```
    ```
    release_file_reservations(project_key, agent_name, paths=["src/**"])
@@ -504,21 +643,21 @@ ubs .                                   # Whole project (ignores target/, Cargo.
 ### Output Format
 
 ```
-⚠️  Category (N errors)
-    file.rs:42:5 – Issue description
-    💡 Suggested fix
+Warning  Category (N errors)
+    file.rs:42:5 - Issue description
+    Suggested fix
 Exit code: 1
 ```
 
-Parse: `file:line:col` → location | 💡 → how to fix | Exit 0/1 → pass/fail
+Parse: `file:line:col` -> location | Suggested fix -> how to fix | Exit 0/1 -> pass/fail
 
 ### Fix Workflow
 
-1. Read finding → category + fix suggestion
-2. Navigate `file:line:col` → view context
+1. Read finding -> category + fix suggestion
+2. Navigate `file:line:col` -> view context
 3. Verify real issue (not false positive)
 4. Fix root cause (not symptom)
-5. Re-run `ubs <file>` → exit 0
+5. Re-run `ubs <file>` -> exit 0
 6. Commit
 
 ### Bug Severity
@@ -526,6 +665,33 @@ Parse: `file:line:col` → location | 💡 → how to fix | Exit 0/1 → pass/fa
 - **Critical (always fix):** Memory safety, use-after-free, data races, SQL injection
 - **Important (production):** Unwrap panics, resource leaks, overflow checks
 - **Contextual (judgment):** TODO/FIXME, println! debugging
+
+---
+
+## RCH — Remote Compilation Helper
+
+RCH offloads `cargo build`, `cargo test`, `cargo clippy`, and other compilation commands to a fleet of 8 remote Contabo VPS workers instead of building locally. This prevents compilation storms from overwhelming csd when many agents run simultaneously.
+
+**RCH is installed at `~/.local/bin/rch` and is hooked into Claude Code's PreToolUse automatically.** Most of the time you don't need to do anything if you are Claude Code — builds are intercepted and offloaded transparently.
+
+To manually offload a build:
+```bash
+rch exec -- cargo build --release
+rch exec -- cargo test
+rch exec -- cargo clippy
+```
+
+Quick commands:
+```bash
+rch doctor                    # Health check
+rch workers probe --all       # Test connectivity to all 8 workers
+rch status                    # Overview of current state
+rch queue                     # See active/waiting builds
+```
+
+If rch or its workers are unavailable, it fails open — builds run locally as normal.
+
+**Note for Codex/GPT-5.2:** Codex does not have the automatic PreToolUse hook, but you can (and should) still manually offload compute-intensive compilation commands using `rch exec -- <command>`. This avoids local resource contention when multiple agents are building simultaneously.
 
 ---
 
@@ -544,8 +710,8 @@ Parse: `file:line:col` → location | 💡 → how to fix | Exit 0/1 → pass/fa
 
 ### Rule of Thumb
 
-- Need correctness or **applying changes** → `ast-grep`
-- Need raw speed or **hunting text** → `rg`
+- Need correctness or **applying changes** -> `ast-grep`
+- Need raw speed or **hunting text** -> `rg`
 - Often combine: `rg` to shortlist files, then `ast-grep` to match/modify
 
 ### Rust Examples
@@ -588,18 +754,16 @@ rg -l -t rust 'unwrap\(' | xargs ast-grep run -l Rust -p '$X.unwrap()' --json
 
 ```
 mcp__morph-mcp__warp_grep(
-  repoPath: "/path/to/fcp",
+  repoPath: "/dp/flywheel_connectors",
   query: "How does capability validation work?"
 )
 ```
 
-Returns structured results with file paths, line ranges, and extracted code snippets.
-
 ### Anti-Patterns
 
-- **Don't** use `warp_grep` to find a specific function name → use `ripgrep`
-- **Don't** use `ripgrep` to understand "how does X work" → wastes time with manual reads
-- **Don't** use `ripgrep` for codemods → risks collateral edits
+- **Don't** use `warp_grep` to find a specific function name -> use `ripgrep`
+- **Don't** use `ripgrep` to understand "how does X work" -> wastes time with manual reads
+- **Don't** use `ripgrep` for codemods -> risks collateral edits
 
 <!-- bv-agent-instructions-v1 -->
 
@@ -607,7 +771,9 @@ Returns structured results with file paths, line ranges, and extracted code snip
 
 ## Beads Workflow Integration
 
-This project uses [beads_viewer](https://github.com/Dicklesworthstone/beads_viewer) for issue tracking. Issues are stored in `.beads/` and tracked in git.
+This project uses [beads_rust](https://github.com/Dicklesworthstone/beads_rust) (`br`) for issue tracking. Issues are stored in `.beads/` and tracked in git.
+
+**Important:** `br` is non-invasive—it NEVER executes git commands. After `br sync --flush-only`, you must manually run `git add .beads/ && git commit`.
 
 ### Essential Commands
 
@@ -621,9 +787,9 @@ br list --status=open # All open issues
 br show <id>          # Full issue details with dependencies
 br create --title="..." --type=task --priority=2
 br update <id> --status=in_progress
-br close <id> --reason="Completed"
+br close <id> --reason "Completed"
 br close <id1> <id2>  # Close multiple issues at once
-br sync --flush-only  # Flush changes to .beads/ (does NOT run git)
+br sync --flush-only  # Export to JSONL (NO git operations)
 ```
 
 ### Workflow Pattern
@@ -632,7 +798,7 @@ br sync --flush-only  # Flush changes to .beads/ (does NOT run git)
 2. **Claim**: Use `br update <id> --status=in_progress`
 3. **Work**: Implement the task
 4. **Complete**: Use `br close <id>`
-5. **Sync**: Run `br sync --flush-only`, then manually `git add .beads/ && git commit`
+5. **Sync**: Run `br sync --flush-only` then manually commit
 
 ### Key Concepts
 
@@ -648,49 +814,34 @@ br sync --flush-only  # Flush changes to .beads/ (does NOT run git)
 ```bash
 git status              # Check what changed
 git add <files>         # Stage code changes
-br sync --flush-only    # Flush beads changes to .beads/
+br sync --flush-only    # Export beads to JSONL
 git add .beads/         # Stage beads changes
-git commit -m "..."     # Commit code and beads together
+git commit -m "..."     # Commit everything together
 git push                # Push to remote
 ```
 
 ### Best Practices
 
 - Check `br ready` at session start to find available work
-- Update status as you work (in_progress → closed)
+- Update status as you work (in_progress -> closed)
 - Create new issues with `br create` when you discover tasks
 - Use descriptive titles and set appropriate priority/type
-- Always `br sync --flush-only` then `git add .beads/` before ending session
+- Always `br sync --flush-only && git add .beads/` before ending session
 
 <!-- end-bv-agent-instructions -->
 
 ## Landing the Plane (Session Completion)
 
-**When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
+**When ending a work session**, you MUST complete ALL steps below.
 
 **MANDATORY WORKFLOW:**
 
 1. **File issues for remaining work** - Create issues for anything that needs follow-up
 2. **Run quality gates** (if code changed) - Tests, linters, builds
 3. **Update issue status** - Close finished work, update in-progress items
-4. **PUSH TO REMOTE** - This is MANDATORY:
-   ```bash
-   git pull --rebase
-   br sync --flush-only
-   git add .beads/
-   git commit -m "Update beads"
-   git push
-   git status  # MUST show "up to date with origin"
-   ```
-5. **Clean up** - Clear stashes, prune remote branches
-6. **Verify** - All changes committed AND pushed
-7. **Hand off** - Provide context for next session
+4. **Sync beads** - `br sync --flush-only` to export to JSONL
+5. **Hand off** - Provide context for next session
 
-**CRITICAL RULES:**
-- Work is NOT complete until `git push` succeeds
-- NEVER stop before pushing - that leaves work stranded locally
-- NEVER say "ready to push when you are" - YOU must push
-- If push fails, resolve and retry until it succeeds
 
 ---
 

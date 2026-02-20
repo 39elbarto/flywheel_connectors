@@ -30,7 +30,6 @@ pub struct SessionGoldenVector {
     /// Responder ephemeral secret key (32 bytes hex) - for computing shared secret.
     pub responder_ephemeral_sk: String,
     /// Responder ephemeral public key (32 bytes hex).
-
     pub responder_ephemeral_pk: String,
     /// Hello nonce (16 bytes hex).
     pub hello_nonce: String,
@@ -267,7 +266,6 @@ impl SessionGoldenVector {
         }
 
         Ok(())
-
     }
 }
 
@@ -409,6 +407,5 @@ mod tests {
             okm1, okm2,
             "Different session IDs must produce different keys"
         );
-
     }
 }

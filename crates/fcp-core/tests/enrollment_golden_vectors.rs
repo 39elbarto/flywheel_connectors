@@ -87,10 +87,10 @@ fn create_test_manifest(_owner_key: &Ed25519SigningKey) -> ZoneKeyManifest {
     let valid_from = now_ts_u64();
 
     let mut zone_key_id_bytes = [0u8; 8];
-    rand::rngs::OsRng.fill_bytes(&mut zone_key_id_bytes);
+    rand::rng().fill_bytes(&mut zone_key_id_bytes);
 
     let mut object_id_key_id_bytes = [0u8; 8];
-    rand::rngs::OsRng.fill_bytes(&mut object_id_key_id_bytes);
+    rand::rng().fill_bytes(&mut object_id_key_id_bytes);
 
     let signature = NodeSignature::new(NodeId::new("owner"), [0u8; 64], valid_from);
 

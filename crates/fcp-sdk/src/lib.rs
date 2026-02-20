@@ -232,7 +232,7 @@ impl SchemaValidator {
             .validator
             .iter_errors(value)
             .map(|error| {
-                let path = error.instance_path.to_string();
+                let path = error.instance_path().to_string();
                 let message = error.masked().to_string();
                 if path.is_empty() {
                     message

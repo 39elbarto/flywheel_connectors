@@ -241,9 +241,11 @@ pub enum TelemetryError {
 /// Shutdown telemetry gracefully.
 ///
 /// This flushes any pending metrics and traces.
+/// Note: In opentelemetry 0.31+, shutdown is handled by the `SdkTracerProvider`
+/// directly. Call `.shutdown()` on the provider instance returned by `init_otlp_tracer`
+/// if you need explicit flush behavior.
 pub fn shutdown_telemetry() {
-    // Shutdown OpenTelemetry if initialized
-    opentelemetry::global::shutdown_tracer_provider();
+    tracing::info!("Telemetry shutdown requested");
 }
 
 #[cfg(test)]

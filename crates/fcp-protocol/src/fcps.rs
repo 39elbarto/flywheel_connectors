@@ -1405,9 +1405,18 @@ mod tests {
     #[test]
     fn symbol_ack_reason_variants() {
         // Ensure all reason variants map to distinct u8 values
-        assert_ne!(SymbolAckReason::Complete as u8, SymbolAckReason::Cancelled as u8);
-        assert_ne!(SymbolAckReason::Complete as u8, SymbolAckReason::Duplicate as u8);
-        assert_ne!(SymbolAckReason::Complete as u8, SymbolAckReason::BudgetExceeded as u8);
+        assert_ne!(
+            SymbolAckReason::Complete as u8,
+            SymbolAckReason::Cancelled as u8
+        );
+        assert_ne!(
+            SymbolAckReason::Complete as u8,
+            SymbolAckReason::Duplicate as u8
+        );
+        assert_ne!(
+            SymbolAckReason::Complete as u8,
+            SymbolAckReason::BudgetExceeded as u8
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1445,7 +1454,9 @@ mod tests {
         );
 
         request.sign(&signing_key);
-        request.verify(&signing_key.verifying_key()).expect("verify ok");
+        request
+            .verify(&signing_key.verifying_key())
+            .expect("verify ok");
     }
 
     #[test]
@@ -1483,7 +1494,9 @@ mod tests {
         request.validate_hint_bounds().expect("within bounds");
 
         request.sign(&signing_key);
-        request.verify(&signing_key.verifying_key()).expect("verify ok");
+        request
+            .verify(&signing_key.verifying_key())
+            .expect("verify ok");
     }
 
     #[test]
@@ -1559,7 +1572,9 @@ mod tests {
             DEFAULT_MAX_SYMBOLS_UNAUTHENTICATED,
             0,
         );
-        request_ok.validate_bounds(false).expect("unauth at limit ok");
+        request_ok
+            .validate_bounds(false)
+            .expect("unauth at limit ok");
 
         // Invalid for unauthenticated: exceeds limit
         let request_bad = SymbolRequest::new(
@@ -1583,7 +1598,9 @@ mod tests {
             DEFAULT_MAX_SYMBOLS_AUTHENTICATED,
             0,
         );
-        request_auth.validate_bounds(true).expect("auth at limit ok");
+        request_auth
+            .validate_bounds(true)
+            .expect("auth at limit ok");
     }
 
     #[test]

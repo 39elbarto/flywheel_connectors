@@ -5,7 +5,9 @@
 //! - Device fitness calculation (execution planning)
 //! - Session MAC operations (authenticate each frame)
 
-use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use std::hint::black_box;
+
 use fcp_core::{ConnectorId, ObjectId};
 use fcp_mesh::{
     admission::{AdmissionController, AdmissionPolicy},

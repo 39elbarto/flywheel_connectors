@@ -55,7 +55,7 @@ fn validate_file(validator: &Validator, path: &PathBuf) -> Result<(), Vec<String
     } else {
         let errors: Vec<String> = validator
             .iter_errors(&instance)
-            .map(|e| format!("{} at {}", e, e.instance_path))
+            .map(|e| format!("{} at {}", e, e.instance_path()))
             .collect();
         Err(errors)
     }

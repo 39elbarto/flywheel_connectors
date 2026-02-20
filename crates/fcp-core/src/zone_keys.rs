@@ -196,10 +196,10 @@ impl ZoneKeyManifest {
         use rand::RngCore;
 
         let mut zone_key_id = [0u8; 8];
-        rand::rngs::OsRng.fill_bytes(&mut zone_key_id);
+        rand::rng().fill_bytes(&mut zone_key_id);
 
         let mut object_id_key_id = [0u8; 8];
-        rand::rngs::OsRng.fill_bytes(&mut object_id_key_id);
+        rand::rng().fill_bytes(&mut object_id_key_id);
 
         // We need to sign a dummy payload or just return a valid signed structure?
         // The structure needs to be signed.
@@ -492,13 +492,13 @@ mod tests {
 
     fn random_zone_key() -> ZoneKey {
         let mut bytes = [0u8; ZONE_KEY_LEN];
-        rand::rngs::OsRng.fill_bytes(&mut bytes);
+        rand::rng().fill_bytes(&mut bytes);
         ZoneKey::from_bytes(bytes)
     }
 
     fn random_object_id_key() -> ObjectIdKey {
         let mut bytes = [0u8; ZONE_KEY_LEN];
-        rand::rngs::OsRng.fill_bytes(&mut bytes);
+        rand::rng().fill_bytes(&mut bytes);
         ObjectIdKey::from_bytes(bytes)
     }
 

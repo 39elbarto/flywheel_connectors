@@ -3,7 +3,9 @@
 //! These benchmarks measure the performance of FCPC frame encoding/decoding
 //! and AEAD seal/open operations as required by the FCP2 control plane.
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use std::hint::black_box;
+
 use fcp_protocol::{
     FCPC_HEADER_LEN, FCPC_TAG_LEN, FcpcFrame, FcpcFrameFlags, FcpcFrameHeader, MeshSessionId,
     SessionDirection,

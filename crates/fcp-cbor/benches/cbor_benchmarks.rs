@@ -5,7 +5,9 @@
 //! - Canonical serialization (content addressing)
 //! - Deserialization with schema verification
 
-use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use std::hint::black_box;
+
 use fcp_cbor::{CanonicalSerializer, SchemaId, to_canonical_cbor};
 use semver::Version;
 use serde::{Deserialize, Serialize};

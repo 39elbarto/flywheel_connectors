@@ -16,7 +16,7 @@ unsafe_code = "forbid"
 fcp-core = { path = "../fcp-core" }
 
 # Async runtime
-tokio = { version = "1.44", features = ["full"] }
+tokio = { version = "1.49", features = ["full"] }
 async-trait = "0.1"
 
 # Serialization
@@ -36,10 +36,10 @@ tracing = "0.1"
 semver = { version = "1", features = ["serde"] }
 
 # HTTP server (doctor endpoint)
-axum = { version = "0.7", features = ["json"] }
+axum = { version = "0.8", features = ["json"] }
 
 [dev-dependencies]
 fcp-conformance = { path = "../fcp-conformance" }
 fcp-e2e = { path = "../fcp-e2e" }
 fcp-testkit = { path = "../fcp-testkit" }
-tokio = { version = "1.44", features = ["rt-multi-thread", "macros", "test-util"] }
+tokio = { version = "1.49", features = ["rt-multi-thread", "macros", "test-util"] }

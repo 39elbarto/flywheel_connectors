@@ -3,7 +3,9 @@
 //! These benchmarks measure the performance of FCPS frame encoding/decoding
 //! as required by the FCP2 data plane acceptance criteria.
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use std::hint::black_box;
+
 use fcp_core::{ObjectId, ZoneIdHash, ZoneKeyId};
 use fcp_protocol::{
     FCPS_HEADER_LEN, FcpsDatagram, FcpsFrame, FcpsFrameHeader, FrameFlags, MeshSessionId,

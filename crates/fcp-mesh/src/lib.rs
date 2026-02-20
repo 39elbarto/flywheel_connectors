@@ -8,7 +8,6 @@
 //! - [`symbol_request`] - Symbol request handling with bounded requests and targeted repair
 //! - [`transport`] - Transport path ranking + deterministic multipath selection
 
-
 #![forbid(unsafe_code)]
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
 #![allow(clippy::module_name_repetitions)]
@@ -46,4 +45,3 @@ pub use planner::*;
 pub use session::*;
 pub use symbol_request::*;
 pub use transport::*;
-

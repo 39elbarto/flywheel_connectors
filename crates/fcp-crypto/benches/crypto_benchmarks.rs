@@ -9,12 +9,13 @@
 //! - COSE token signing/verification (capability tokens)
 
 use chrono::{Duration, Utc};
-use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use fcp_crypto::{
     AeadKey, ChaCha20Nonce, Ed25519SigningKey, Fcp2Aad, MacKey, X25519SecretKey, blake3_mac,
     blake3_mac_verify, chacha20_decrypt, chacha20_encrypt, cose::CapabilityTokenBuilder, hpke_open,
     hpke_seal,
 };
+use std::hint::black_box;
 
 // ============================================================================
 // Ed25519 Benchmarks

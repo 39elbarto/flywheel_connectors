@@ -62,7 +62,7 @@ use wasmtime::{
     Config, Engine, Store,
     component::{Component, Linker, ResourceTable},
 };
-use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiView};
+use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::egress::{EgressGuard, EgressHttpRequest, EgressRequest, EgressTcpConnectRequest};
 use crate::sandbox::{CompiledPolicy, SandboxError};
@@ -588,12 +588,11 @@ impl WasiHostState {
 }
 
 impl WasiView for WasiHostState {
-    fn ctx(&mut self) -> &mut WasiCtx {
-        &mut self.wasi_ctx
-    }
-
-    fn table(&mut self) -> &mut ResourceTable {
-        &mut self.resource_table
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView {
+            ctx: &mut self.wasi_ctx,
+            table: &mut self.resource_table,
+        }
     }
 }
 
@@ -670,7 +669,7 @@ impl WasiRuntime {
 
         // Create linker with WASI bindings
         let mut linker: Linker<WasiHostState> = Linker::new(&engine);
-        wasmtime_wasi::add_to_linker_async(&mut linker)
+        wasmtime_wasi::p2::add_to_linker_async(&mut linker)
             .map_err(|e| WasiError::EngineCreation(format!("failed to add WASI: {e}")))?;
 
         info!(

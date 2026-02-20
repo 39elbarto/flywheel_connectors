@@ -2748,7 +2748,7 @@ fn pattern_matches(pattern: &str, value: &str) -> bool {
         // Loop handled "b" (found it).
         // But "b" must be at the END.
         // A simpler logic without allocation:
-        
+
         return value.ends_with(last_part);
     }
 
@@ -4354,6 +4354,5 @@ mod tests {
         };
         assert!(pat.matches("abcxyz"));
         assert!(!pat.matches("xyzabc"));
-
     }
 }

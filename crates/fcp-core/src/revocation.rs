@@ -399,12 +399,15 @@ impl BloomFilter {
     }
 
     /// Insert an item into the bloom filter.
+    #[allow(clippy::cast_possible_truncation)]
     pub fn insert(&mut self, item: &[u8]) {
         let (h1, h2) = Self::hash_item(item);
+        let m = self.num_bits as u64;
         for i in 0..self.num_hashes {
             // Double hashing: h_i = (h1 + i * h2) % m
             let hash = h1.wrapping_add(u64::from(i).wrapping_mul(h2));
-            let index = (hash as usize) % self.num_bits;
+            // Truncation is safe: hash % m < m, and m fits in usize (it came from usize)
+            let index = (hash % m) as usize;
             self.bits[index / 64] |= 1u64 << (index % 64);
         }
     }
@@ -413,11 +416,13 @@ impl BloomFilter {
     ///
     /// Returns `false` if definitely not present, `true` if possibly present.
     #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
     pub fn might_contain(&self, item: &[u8]) -> bool {
         let (h1, h2) = Self::hash_item(item);
+        let m = self.num_bits as u64;
         for i in 0..self.num_hashes {
             let hash = h1.wrapping_add(u64::from(i).wrapping_mul(h2));
-            let index = (hash as usize) % self.num_bits;
+            let index = (hash % m) as usize;
             if self.bits[index / 64] & (1u64 << (index % 64)) == 0 {
                 return false;
             }

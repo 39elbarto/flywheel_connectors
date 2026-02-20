@@ -8,8 +8,8 @@ use metrics_exporter_prometheus::PrometheusBuilder;
 use opentelemetry::KeyValue;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{
-    Resource, runtime,
-    trace::{RandomIdGenerator, Sampler, TracerProvider},
+    Resource,
+    trace::{RandomIdGenerator, Sampler, SdkTracerProvider},
 };
 
 use crate::TelemetryError;
@@ -47,13 +47,12 @@ pub fn init_otlp_tracer(service_name: &str, endpoint: &str) -> Result<(), Teleme
         .build()
         .map_err(|e| TelemetryError::TracingInit(e.to_string()))?;
 
-    let resource = Resource::new(vec![KeyValue::new(
-        "service.name",
-        service_name.to_string(),
-    )]);
+    let resource = Resource::builder_empty()
+        .with_attributes([KeyValue::new("service.name", service_name.to_string())])
+        .build();
 
-    let provider = TracerProvider::builder()
-        .with_batch_exporter(exporter, runtime::Tokio)
+    let provider = SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
         .with_sampler(Sampler::AlwaysOn)
         .with_id_generator(RandomIdGenerator::default())
         .with_resource(resource)

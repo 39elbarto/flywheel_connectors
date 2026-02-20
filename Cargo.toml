@@ -66,7 +66,7 @@ authors = ["Flywheel Core Team <core@flywheel.dev>"]
 
 [workspace.dependencies]
 # Async runtime
-tokio = { version = "1.43", features = ["full"] }
+tokio = { version = "1.49", features = ["full"] }
 async-trait = "0.1"
 futures-util = "0.3"
 parking_lot = "0.12"
@@ -76,7 +76,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 ciborium = "0.2.2"
 semver = { version = "1.0.27", features = ["serde"] }
-toml = "0.8"
+toml = "1.0"
 
 # Error handling
 thiserror = "2.0"
@@ -95,35 +95,35 @@ hkdf = "0.12"
 sha2 = "0.10"
 chacha20poly1305 = "0.10"
 hpke = "0.12"
-coset = "0.3"
+coset = "0.4"
 zeroize = { version = "1.8", features = ["derive"] }
 subtle = "2.6"
 rand = "0.8"
 rand_core = "0.6"
 
 # Identifiers
-uuid = { version = "1.11", features = ["v4", "serde"] }
+uuid = { version = "1.21", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 # Bytes
-bytes = "1.9"
+bytes = "1.11"
 hex = { version = "0.4", features = ["serde"] }
 base64 = "0.22"
-bitflags = "2.6"
+bitflags = "2.11"
 percent-encoding = "2.3"
 
 # Fountain codes
 raptorq = "2.0"
 
 # WASI runtime
-wasmtime = { version = "29.0", features = ["component-model"] }
-wasmtime-wasi = "29.0"
+wasmtime = { version = "41.0", features = ["component-model"] }
+wasmtime-wasi = "41.0"
 
 # HTTP client
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+reqwest = { version = "0.13", features = ["json", "rustls"], default-features = false }
 
 # WebSocket
-tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
 
 # Streams
 tokio-stream = "0.1"
@@ -131,10 +131,10 @@ tokio-stream = "0.1"
 # Testing
 wiremock = "0.6"
 pretty_assertions = "1.4"
-jsonschema = "0.29"
-regex = "1.11"
-proptest = "1.6"
-criterion = { version = "0.5", features = ["html_reports"] }
+jsonschema = "0.42"
+regex = "1.12"
+proptest = "1.10"
+criterion = { version = "0.8", features = ["html_reports"] }
 
 # CLI
 clap = { version = "4.5", features = ["derive"] }
@@ -142,7 +142,7 @@ clap = { version = "4.5", features = ["derive"] }
 # Supply-chain hardening
 tough = { version = "0.21.0", features = ["http"] }
 sigstore = { version = "0.13.0", default-features = false, features = ["cosign", "verify", "rekor", "sigstore-trust-root", "rustls-tls"] }
-sigstore-trust-root = { version = "0.4.0", features = ["tuf"] }
+sigstore-trust-root = { version = "0.6", features = ["tuf"] }
 url = "2.5"
 
 # Internal crates

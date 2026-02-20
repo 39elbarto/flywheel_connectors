@@ -4,12 +4,13 @@
 //! as required by the FCP2 store acceptance criteria.
 
 use bytes::Bytes;
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use fcp_core::{ObjectId, ZoneId};
 use fcp_store::{
     MemorySymbolStore, MemorySymbolStoreConfig, ObjectSymbolMeta, ObjectTransmissionInfo,
     StoredSymbol, SymbolMeta, SymbolStore,
 };
+use std::hint::black_box;
 use tokio::runtime::Runtime;
 
 fn test_zone() -> ZoneId {

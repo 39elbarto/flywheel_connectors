@@ -55,7 +55,6 @@ pub struct FcpsGoldenVector {
     /// Expected encoded header (114 bytes hex).
     pub expected_header: String,
     /// Expected total frame (hex).
-
     pub expected_frame: String,
 }
 
@@ -408,7 +407,6 @@ fn vector_3_flags_variation() -> FcpsGoldenVector {
         }],
         expected_header: expected_header.to_string(),
         expected_frame,
-
     }
 }
 
@@ -528,6 +526,5 @@ mod tests {
             u64::from_le_bytes(header_bytes[106..114].try_into().unwrap()),
             1
         );
-
     }
 }

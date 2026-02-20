@@ -38,4 +38,4 @@ ciborium.workspace = true
 fcp-testkit = { path = "../fcp-testkit" }
 semver.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-rand = "0.8"
+rand = "0.9"

@@ -986,4 +986,4 @@ apr integrate 5 -c  # Copy integration prompt to clipboard
 
 ## License
 
-MIT
+MIT License (with OpenAI/Anthropic Rider). See [LICENSE](LICENSE).

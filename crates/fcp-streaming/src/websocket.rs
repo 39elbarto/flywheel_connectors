@@ -301,6 +301,7 @@ impl WsClient {
     }
 
     /// Create a reconnecting stream.
+    #[must_use]
     pub fn stream(&self) -> ReconnectingWsStream {
         ReconnectingWsStream::new(self.clone())
     }
@@ -475,7 +476,7 @@ enum ReconnectState {
     /// Connection attempt in progress.
     Connecting(Pin<Box<dyn std::future::Future<Output = StreamResult<WsConnection>> + Send>>),
     /// Active connection.
-    Connected(WsConnection),
+    Connected(Box<WsConnection>),
 }
 
 impl ReconnectingWsStream {
@@ -514,7 +515,7 @@ impl Stream for ReconnectingWsStream {
                     self.state = ReconnectState::Connecting(future);
                 }
                 ReconnectState::Waiting(delay) => match delay.as_mut().poll(cx) {
-                    Poll::Ready(_) => {
+                    Poll::Ready(()) => {
                         self.state = ReconnectState::Idle;
                     }
                     Poll::Pending => return Poll::Pending,
@@ -522,7 +523,7 @@ impl Stream for ReconnectingWsStream {
                 ReconnectState::Connecting(future) => match future.as_mut().poll(cx) {
                     Poll::Ready(Ok(conn)) => {
                         self.handler.reset();
-                        self.state = ReconnectState::Connected(conn);
+                        self.state = ReconnectState::Connected(Box::new(conn));
                     }
                     Poll::Ready(Err(e)) => {
                         if !self.handler.can_reconnect() {
@@ -538,7 +539,7 @@ impl Stream for ReconnectingWsStream {
                     }
                     Poll::Pending => return Poll::Pending,
                 },
-                ReconnectState::Connected(conn) => match Pin::new(conn).poll_next(cx) {
+                ReconnectState::Connected(conn) => match Pin::new(conn.as_mut()).poll_next(cx) {
                     Poll::Ready(Some(Ok(msg))) => return Poll::Ready(Some(Ok(msg))),
                     Poll::Ready(Some(Err(e))) => {
                         if !self.handler.can_reconnect() {
@@ -712,15 +713,15 @@ mod tests {
 
     #[test]
     fn test_ws_message_ping_pong() {
-        let ping = WsMessage::Ping(vec![1, 2, 3]);
-        assert!(!ping.is_text());
-        assert!(!ping.is_binary());
-        assert!(!ping.is_close());
+        let ping_msg = WsMessage::Ping(vec![1, 2, 3]);
+        assert!(!ping_msg.is_text());
+        assert!(!ping_msg.is_binary());
+        assert!(!ping_msg.is_close());
 
-        let pong = WsMessage::Pong(vec![4, 5, 6]);
-        assert!(!pong.is_text());
-        assert!(!pong.is_binary());
-        assert!(!pong.is_close());
+        let pong_frame = WsMessage::Pong(vec![4, 5, 6]);
+        assert!(!pong_frame.is_text());
+        assert!(!pong_frame.is_binary());
+        assert!(!pong_frame.is_close());
     }
 
     #[test]

@@ -1435,10 +1435,9 @@ mod tests {
 
             with_context(inner_ctx, async {
                 // Inside inner context, we should see inner values
-                let zone = current_context()
+                current_context()
                     .and_then(|c| c.zone_id.clone())
-                    .unwrap_or_default();
-                zone
+                    .unwrap_or_default()
             })
             .await
         })

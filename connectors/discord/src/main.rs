@@ -5,6 +5,27 @@
 
 #![forbid(unsafe_code)]
 #![allow(dead_code)] // Connector API types/methods wired incrementally
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::float_cmp,
+    clippy::future_not_send,
+    clippy::large_enum_variant,
+    clippy::map_unwrap_or,
+    clippy::match_same_arms,
+    clippy::match_wildcard_for_single_variants,
+    clippy::missing_errors_doc,
+    clippy::option_if_let_else,
+    clippy::or_fun_call,
+    clippy::redundant_closure_for_method_calls,
+    clippy::assertions_on_constants,
+    clippy::struct_field_names,
+    clippy::too_many_lines,
+    clippy::unnecessary_wraps,
+    clippy::unreadable_literal,
+    clippy::unused_async,
+    clippy::wildcard_imports
+)]
 
 use std::io::{BufRead, Write};
 

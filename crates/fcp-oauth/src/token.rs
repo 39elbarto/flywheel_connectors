@@ -31,7 +31,7 @@ pub struct TokenResponse {
     #[serde(default)]
     pub scope: Option<String>,
 
-    /// ID token (OpenID Connect).
+    /// ID token (`OpenID Connect`).
     #[serde(default)]
     pub id_token: Option<String>,
 }
@@ -54,7 +54,7 @@ pub struct OAuthTokens {
     /// Granted scopes.
     scopes: Vec<String>,
 
-    /// ID token (OpenID Connect).
+    /// ID token (`OpenID Connect`).
     id_token: Option<String>,
 
     /// When the tokens were issued.
@@ -68,7 +68,7 @@ impl OAuthTokens {
         let now = Utc::now();
         let expires_at = response
             .expires_in
-            .map(|secs| now + chrono::Duration::seconds(secs as i64));
+            .map(|secs| now + chrono::Duration::seconds(i64::try_from(secs).unwrap_or(i64::MAX)));
 
         let scopes = response
             .scope
@@ -119,9 +119,7 @@ impl OAuthTokens {
     /// Check if the token has expired.
     #[must_use]
     pub fn is_expired(&self) -> bool {
-        self.expires_at
-            .map(|exp| Utc::now() >= exp)
-            .unwrap_or(false)
+        self.expires_at.is_some_and(|exp| Utc::now() >= exp)
     }
 
     /// Check if the token needs refresh (within threshold of expiry).
@@ -134,14 +132,13 @@ impl OAuthTokens {
     #[must_use]
     pub fn needs_refresh_within(&self, threshold: Duration) -> bool {
         self.expires_at
-            .map(|exp| {
+            .is_some_and(|exp| {
                 // Use saturating conversion to avoid panic on extreme durations
                 let threshold_chrono =
                     chrono::Duration::from_std(threshold).unwrap_or(chrono::TimeDelta::MAX);
                 let threshold_time = Utc::now() + threshold_chrono;
                 threshold_time >= exp
             })
-            .unwrap_or(false)
     }
 
     /// Get time until expiration.
@@ -171,7 +168,7 @@ impl OAuthTokens {
         self.token_type = response.token_type;
         self.expires_at = response
             .expires_in
-            .map(|secs| now + chrono::Duration::seconds(secs as i64));
+            .map(|secs| now + chrono::Duration::seconds(i64::try_from(secs).unwrap_or(i64::MAX)));
         self.issued_at = now;
 
         // Only update refresh token if a new one is provided
@@ -276,16 +273,20 @@ impl TokenStore {
     /// Check if tokens exist and are valid.
     #[must_use]
     pub fn has_valid_token(&self, key: &str) -> bool {
-        self.get(key).map(|t| !t.is_expired()).unwrap_or(false)
+        self.get(key).is_some_and(|t| !t.is_expired())
     }
 
     /// Remove tokens by key.
+    #[must_use]
     pub fn remove(&self, key: &str) -> Option<OAuthTokens> {
         let mut store = self.tokens.write();
         store.remove(key).map(|s| s.tokens)
     }
 
     /// Update tokens (used after refresh).
+    ///
+    /// # Errors
+    /// Returns [`OAuthError::TokenNotFound`] when no tokens are stored for `key`.
     pub fn update(&self, key: &str, tokens: OAuthTokens) -> OAuthResult<()> {
         let mut store = self.tokens.write();
         if let Some(stored) = store.get_mut(key) {
@@ -315,8 +316,7 @@ impl TokenStore {
         };
 
         if should_cleanup {
-            let mut store = self.tokens.write();
-            store.retain(|_, v| !v.tokens.is_expired());
+            self.tokens.write().retain(|_, v| !v.tokens.is_expired());
             *self.last_cleanup.write() = Instant::now();
         }
     }
@@ -397,7 +397,7 @@ mod tests {
         assert_eq!(retrieved.access_token(), tokens.access_token());
 
         // Remove
-        store.remove("user1");
+        let _ = store.remove("user1");
         assert!(!store.has_valid_token("user1"));
     }
 

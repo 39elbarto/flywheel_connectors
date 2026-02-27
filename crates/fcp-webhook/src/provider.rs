@@ -59,6 +59,10 @@ impl GitHubWebhook {
     }
 
     /// Verify and parse a GitHub webhook.
+    ///
+    /// # Errors
+    /// Returns an error when required headers are missing, signature verification fails,
+    /// or the JSON payload cannot be parsed.
     pub fn verify_and_parse(
         &self,
         headers: &HashMap<String, String>,
@@ -120,6 +124,10 @@ impl StripeWebhook {
     }
 
     /// Verify and parse a Stripe webhook.
+    ///
+    /// # Errors
+    /// Returns an error when required headers are missing, the signature/timestamp is invalid,
+    /// or the JSON payload cannot be parsed.
     pub fn verify_and_parse(
         &self,
         headers: &HashMap<String, String>,
@@ -132,7 +140,7 @@ impl StripeWebhook {
             .ok_or_else(|| WebhookError::MissingSignature("Stripe-Signature".into()))?;
 
         // Parse signature header (format: t=timestamp,v1=signature)
-        let (timestamp, signature) = self.parse_stripe_signature(signature_header)?;
+        let (timestamp, signature) = Self::parse_stripe_signature(signature_header)?;
 
         // Validate timestamp
         self.validate_timestamp(timestamp)?;
@@ -168,7 +176,7 @@ impl StripeWebhook {
     }
 
     /// Parse Stripe signature header.
-    fn parse_stripe_signature(&self, header: &str) -> WebhookResult<(i64, String)> {
+    fn parse_stripe_signature(header: &str) -> WebhookResult<(i64, String)> {
         let mut timestamp = None;
         let mut signature = None;
 
@@ -191,7 +199,7 @@ impl StripeWebhook {
     /// Validate timestamp is within tolerance.
     fn validate_timestamp(&self, timestamp: i64) -> WebhookResult<()> {
         let now = Utc::now().timestamp();
-        let tolerance = self.timestamp_tolerance.as_secs() as i64;
+        let tolerance = i64::try_from(self.timestamp_tolerance.as_secs()).unwrap_or(i64::MAX);
 
         if (now - timestamp).abs() > tolerance {
             return Err(WebhookError::TimestampValidation {
@@ -224,6 +232,10 @@ impl SlackWebhook {
     }
 
     /// Verify and parse a Slack webhook.
+    ///
+    /// # Errors
+    /// Returns an error when required headers are missing, signature/timestamp checks fail,
+    /// or the JSON payload cannot be parsed.
     pub fn verify_and_parse(
         &self,
         headers: &HashMap<String, String>,
@@ -246,7 +258,8 @@ impl SlackWebhook {
 
         // Validate timestamp
         let now = Utc::now().timestamp();
-        if (now - timestamp).abs() > self.timestamp_tolerance.as_secs() as i64 {
+        let tolerance = i64::try_from(self.timestamp_tolerance.as_secs()).unwrap_or(i64::MAX);
+        if (now - timestamp).abs() > tolerance {
             return Err(WebhookError::TimestampValidation {
                 reason: "Timestamp outside tolerance".into(),
                 timestamp: Some(timestamp),
@@ -299,6 +312,10 @@ impl LinearWebhook {
     }
 
     /// Verify and parse a Linear webhook.
+    ///
+    /// # Errors
+    /// Returns an error when required headers are missing, signature verification fails,
+    /// or the JSON payload cannot be parsed.
     pub fn verify_and_parse(
         &self,
         headers: &HashMap<String, String>,
@@ -359,11 +376,7 @@ mod tests {
 
     #[test]
     fn test_stripe_signature_parsing() {
-        let handler = StripeWebhook::new("secret");
-
-        let (ts, sig) = handler
-            .parse_stripe_signature("t=1234567890,v1=abc123")
-            .unwrap();
+        let (ts, sig) = StripeWebhook::parse_stripe_signature("t=1234567890,v1=abc123").unwrap();
 
         assert_eq!(ts, 1_234_567_890);
         assert_eq!(sig, "abc123");
@@ -422,17 +435,13 @@ mod tests {
 
     #[test]
     fn test_stripe_invalid_signature_format() {
-        let handler = StripeWebhook::new("secret");
-
-        let result = handler.parse_stripe_signature("invalid-format");
+        let result = StripeWebhook::parse_stripe_signature("invalid-format");
         assert!(matches!(result, Err(WebhookError::InvalidPayload(_))));
     }
 
     #[test]
     fn test_stripe_missing_v1() {
-        let handler = StripeWebhook::new("secret");
-
-        let result = handler.parse_stripe_signature("t=12345");
+        let result = StripeWebhook::parse_stripe_signature("t=12345");
         assert!(matches!(result, Err(WebhookError::InvalidPayload(_))));
     }
 

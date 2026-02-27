@@ -193,8 +193,8 @@ impl AnthropicClient {
     /// Make a POST request.
     async fn post<T, R>(&self, endpoint: &str, body: &T) -> AnthropicResult<R>
     where
-        T: serde::Serialize,
-        R: serde::de::DeserializeOwned,
+        T: serde::Serialize + Sync,
+        R: serde::de::DeserializeOwned + Send,
     {
         let url = format!("{}{endpoint}", self.base_url);
         let mut delay = Duration::from_millis(self.initial_delay_ms);
@@ -254,7 +254,7 @@ impl AnthropicClient {
     /// Make a streaming POST request.
     async fn post_stream<T>(&self, endpoint: &str, body: &T) -> AnthropicResult<Response>
     where
-        T: serde::Serialize,
+        T: serde::Serialize + Sync,
     {
         let url = format!("{}{endpoint}", self.base_url);
 
@@ -280,7 +280,7 @@ impl AnthropicClient {
     /// Handle a response.
     async fn handle_response<R>(&self, response: Response) -> AnthropicResult<R>
     where
-        R: serde::de::DeserializeOwned,
+        R: serde::de::DeserializeOwned + Send,
     {
         let status = response.status();
         let bytes = response.bytes().await?;

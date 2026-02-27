@@ -471,7 +471,7 @@ mod tests {
             CapabilityId::from_static("fcp.example.read"),
         );
         let aggregate = CapabilityUsageAggregate {
-            key: key.clone(),
+            key,
             total: 5,
             allowed: 5,
             denied: 0,
@@ -686,6 +686,6 @@ mod tests {
         let json = report.to_json().expect("json export");
         assert!(json.contains("\"recommendations\""));
         let json_pretty = report.to_json_pretty().expect("pretty json export");
-        assert!(json_pretty.contains("\n"));
+        assert!(json_pretty.contains('\n'));
     }
 }

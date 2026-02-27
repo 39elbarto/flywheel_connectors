@@ -788,7 +788,7 @@ impl SymbolRequest {
         Ok(())
     }
 
-    /// Check if the request has proof-of-need (missing_hint present).
+    /// Check if the request has proof-of-need (`missing_hint` present).
     #[must_use]
     pub const fn has_proof_of_need(&self) -> bool {
         self.missing_hint.is_some()

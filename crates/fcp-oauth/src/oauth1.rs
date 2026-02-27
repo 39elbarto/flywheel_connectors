@@ -109,6 +109,10 @@ impl OAuth1Client {
     }
 
     /// Step 1: Get a request token.
+    ///
+    /// # Errors
+    /// Returns an error when signing fails, the HTTP request fails, or the provider
+    /// returns an unsuccessful response / malformed token payload.
     pub async fn get_request_token(&self) -> OAuthResult<RequestToken> {
         let mut params = BTreeMap::new();
         params.insert(
@@ -147,6 +151,10 @@ impl OAuth1Client {
     }
 
     /// Step 3: Exchange the request token for an access token.
+    ///
+    /// # Errors
+    /// Returns an error when signing fails, the HTTP request fails, or the provider
+    /// returns an unsuccessful response / malformed token payload.
     pub async fn get_access_token(
         &self,
         request_token: &RequestToken,
@@ -183,6 +191,9 @@ impl OAuth1Client {
     }
 
     /// Sign a request with OAuth 1.0a.
+    ///
+    /// # Errors
+    /// Returns an error when URL parsing or signature construction fails.
     pub fn sign_request(
         &self,
         method: &str,

@@ -137,7 +137,7 @@ impl ReconnectHandler {
     }
 
     /// Record a failure (increment attempt count).
-    pub fn record_failure(&mut self) {
+    pub const fn record_failure(&mut self) {
         self.attempts += 1;
     }
 

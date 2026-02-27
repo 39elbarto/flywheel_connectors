@@ -18,7 +18,7 @@ use crate::{
 pub enum AuthStyle {
     /// HTTP Basic Authentication (Authorization header).
     Basic,
-    /// Request body parameters (client_id/client_secret).
+    /// Request body parameters (`client_id/client_secret`).
     #[default]
     Post,
 }
@@ -209,7 +209,10 @@ impl OAuth2Client {
 
     /// Generate authorization URL without PKCE.
     ///
-    /// Returns (authorization_url, state).
+    /// Returns (`authorization_url`, `state`).
+    ///
+    /// # Errors
+    /// Returns an error when the configured authorization endpoint is invalid.
     pub fn authorization_url(&self, scopes: &[&str]) -> OAuthResult<(String, String)> {
         let state = generate_state();
         let url = self.build_auth_url(scopes, &state, None)?;
@@ -218,7 +221,10 @@ impl OAuth2Client {
 
     /// Generate authorization URL with PKCE.
     ///
-    /// Returns (authorization_url, state, pkce).
+    /// Returns (`authorization_url`, `state`, `pkce`).
+    ///
+    /// # Errors
+    /// Returns an error when the configured authorization endpoint is invalid.
     pub fn authorization_url_with_pkce(
         &self,
         scopes: &[&str],
@@ -283,11 +289,17 @@ impl OAuth2Client {
     }
 
     /// Exchange authorization code for tokens.
+    ///
+    /// # Errors
+    /// Returns an error when token exchange fails or the response is invalid.
     pub async fn exchange_code(&self, code: &str) -> OAuthResult<OAuthTokens> {
         self.exchange_code_internal(code, None).await
     }
 
     /// Exchange authorization code for tokens with PKCE verification.
+    ///
+    /// # Errors
+    /// Returns an error when token exchange fails or the response is invalid.
     pub async fn exchange_code_with_pkce(
         &self,
         code: &str,
@@ -323,6 +335,10 @@ impl OAuth2Client {
     }
 
     /// Get tokens using client credentials flow.
+    ///
+    /// # Errors
+    /// Returns an error when client credentials are misconfigured, token exchange fails,
+    /// or the token response is invalid.
     pub async fn client_credentials(&self, scopes: &[&str]) -> OAuthResult<OAuthTokens> {
         // Only require secret if not public client (though client creds usually implies confidential)
         // If public client tries client creds, it might fail at provider, but we shouldn't block it here if secret is None
@@ -357,6 +373,9 @@ impl OAuth2Client {
     }
 
     /// Refresh tokens using a refresh token.
+    ///
+    /// # Errors
+    /// Returns an error when token refresh fails or the token response is invalid.
     pub async fn refresh_tokens(&self, refresh_token: &str) -> OAuthResult<OAuthTokens> {
         let mut params = HashMap::new();
         params.insert("grant_type", GrantType::RefreshToken.to_string());
@@ -447,12 +466,18 @@ pub struct AuthorizationCallback {
 
 impl AuthorizationCallback {
     /// Parse callback from query string.
+    ///
+    /// # Errors
+    /// Returns an error when the query string cannot be deserialized into callback fields.
     pub fn from_query(query: &str) -> OAuthResult<Self> {
         serde_urlencoded::from_str(query)
             .map_err(|e| OAuthError::InvalidTokenResponse(e.to_string()))
     }
 
     /// Parse callback from URL.
+    ///
+    /// # Errors
+    /// Returns an error when the URL is invalid or callback parameters cannot be parsed.
     pub fn from_url(url: &str) -> OAuthResult<Self> {
         let parsed = Url::parse(url)?;
         let query = parsed.query().unwrap_or("");
@@ -460,6 +485,9 @@ impl AuthorizationCallback {
     }
 
     /// Validate the callback and extract the code.
+    ///
+    /// # Errors
+    /// Returns an error for provider error callbacks, state mismatches, or missing `code`.
     pub fn validate(&self, expected_state: &str) -> OAuthResult<String> {
         // Check for errors first
         if let Some(error) = &self.error {

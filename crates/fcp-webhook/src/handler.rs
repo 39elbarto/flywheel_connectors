@@ -124,6 +124,10 @@ impl<V: SignatureVerifier> WebhookHandler<V> {
     }
 
     /// Verify a webhook signature.
+    ///
+    /// # Errors
+    /// Returns [`WebhookError::PayloadTooLarge`] when `body` exceeds configured limits,
+    /// or verifier-specific signature errors when signature verification fails.
     pub fn verify(&self, body: &[u8], signature: &str) -> WebhookResult<()> {
         // Check payload size
         if body.len() > self.config.max_payload_size {
@@ -137,6 +141,9 @@ impl<V: SignatureVerifier> WebhookHandler<V> {
     }
 
     /// Check IP against allowlist.
+    ///
+    /// # Errors
+    /// Returns [`WebhookError::IpNotAllowed`] when `ip` is not present in a non-empty allowlist.
     pub fn check_ip(&self, ip: &str) -> WebhookResult<()> {
         if self.config.ip_allowlist.is_empty() {
             return Ok(());
@@ -150,6 +157,9 @@ impl<V: SignatureVerifier> WebhookHandler<V> {
     }
 
     /// Check for replay (duplicate event).
+    ///
+    /// # Errors
+    /// Returns [`WebhookError::ReplayDetected`] when `event_id` was already seen.
     pub fn check_replay(&self, event_id: &str) -> WebhookResult<()> {
         if !self.config.idempotency_enabled {
             return Ok(());
@@ -178,6 +188,9 @@ impl<V: SignatureVerifier> WebhookHandler<V> {
 
     /// Check for replay and record the event in one atomic operation.
     /// Returns `Err(ReplayDetected)` if already seen.
+    ///
+    /// # Errors
+    /// Returns [`WebhookError::ReplayDetected`] when `event_id` was already claimed.
     pub fn claim_event(&self, event_id: &str) -> WebhookResult<()> {
         if !self.config.idempotency_enabled {
             return Ok(());
@@ -228,7 +241,7 @@ impl<V: SignatureVerifier + std::fmt::Debug> std::fmt::Debug for WebhookHandler<
             .field("verifier", &self.verifier)
             .field("provider", &self.provider)
             .field("config", &self.config)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -428,7 +441,7 @@ mod tests {
         let event_id = "race_event";
 
         // Simulate two concurrent requests
-        let h1 = handler.clone();
+        let h1 = Arc::clone(&handler);
         let t1 = thread::spawn(move || {
             if h1.claim_event(event_id).is_ok() {
                 // Simulate processing time
@@ -439,9 +452,8 @@ mod tests {
             }
         });
 
-        let h2 = handler.clone();
         let t2 = thread::spawn(move || {
-            if h2.claim_event(event_id).is_ok() {
+            if handler.claim_event(event_id).is_ok() {
                 // Simulate processing time
                 thread::sleep(std::time::Duration::from_millis(50));
                 true

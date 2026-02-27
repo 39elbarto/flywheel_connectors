@@ -4,6 +4,27 @@
 //! Uses polling (getUpdates) for receiving messages and the Bot API for sending.
 
 #![forbid(unsafe_code)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::collapsible_if,
+    clippy::doc_markdown,
+    clippy::field_reassign_with_default,
+    clippy::future_not_send,
+    clippy::large_enum_variant,
+    clippy::manual_let_else,
+    clippy::map_unwrap_or,
+    clippy::missing_const_for_fn,
+    clippy::missing_errors_doc,
+    clippy::option_if_let_else,
+    clippy::or_fun_call,
+    clippy::redundant_closure_for_method_calls,
+    clippy::single_match,
+    clippy::struct_field_names,
+    clippy::too_many_lines,
+    clippy::unused_async,
+    clippy::wildcard_imports
+)]
 
 use std::io::{BufRead, Write};
 

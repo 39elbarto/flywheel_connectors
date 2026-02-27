@@ -870,7 +870,7 @@ mod tests {
     #[test]
     fn test_routing_decision() {
         let event = TraceEvent::Routing(RoutingDecision {
-            timestamp: 1706832000000,
+            timestamp: 1_706_832_000_000,
             trace_id: "abc123".to_string(),
             source_node: "node-1".to_string(),
             target_node: Some("node-2".to_string()),
@@ -880,14 +880,14 @@ mod tests {
             reason: None,
         });
 
-        assert_eq!(event.timestamp(), 1706832000000);
+        assert_eq!(event.timestamp(), 1_706_832_000_000);
         assert_eq!(event.trace_id(), "abc123");
     }
 
     #[test]
     fn test_admission_outcome() {
         let event = TraceEvent::Admission(AdmissionOutcome {
-            timestamp: 1706832001000,
+            timestamp: 1_706_832_001_000,
             trace_id: "def456".to_string(),
             peer_node: "node-3".to_string(),
             request_type: "symbol_request".to_string(),
@@ -897,7 +897,7 @@ mod tests {
             authenticated: true,
         });
 
-        assert_eq!(event.timestamp(), 1706832001000);
+        assert_eq!(event.timestamp(), 1_706_832_001_000);
         assert_eq!(event.trace_id(), "def456");
     }
 

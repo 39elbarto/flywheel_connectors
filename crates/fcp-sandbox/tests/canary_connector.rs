@@ -7,9 +7,7 @@
 //! - Network blocking verification
 //! - Platform-specific sandbox availability
 
-use std::net::Shutdown;
 use std::path::PathBuf;
-use std::process::Command;
 use std::time::Duration;
 
 use fcp_manifest::{SandboxProfile, SandboxSection};

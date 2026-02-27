@@ -76,6 +76,7 @@ fn get_os_version() -> String {
     "unknown".to_string()
 }
 
+#[allow(clippy::missing_const_for_fn)]
 fn get_memory_bytes() -> Option<u64> {
     #[cfg(target_os = "linux")]
     {

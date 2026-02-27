@@ -254,7 +254,7 @@ impl ProviderEndpoints {
         self
     }
 
-    /// Build OAuth2Config from these endpoints.
+    /// Build `OAuth2Config` from these endpoints.
     #[must_use]
     pub fn to_oauth2_config(&self, client_id: &str, client_secret: &str) -> OAuth2Config {
         OAuth2Config::new(

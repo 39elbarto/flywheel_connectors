@@ -3850,7 +3850,7 @@ mod tests {
 
         /// Generate a random `IntegrityLevel`.
         fn random_integrity(rng: &mut impl Rng) -> IntegrityLevel {
-            match rng.gen_range(0..5) {
+            match rng.random_range(0..5) {
                 0 => IntegrityLevel::Untrusted,
                 1 => IntegrityLevel::Community,
                 2 => IntegrityLevel::Work,
@@ -3861,7 +3861,7 @@ mod tests {
 
         /// Generate a random `ConfidentialityLevel`.
         fn random_confidentiality(rng: &mut impl Rng) -> ConfidentialityLevel {
-            match rng.gen_range(0..5) {
+            match rng.random_range(0..5) {
                 0 => ConfidentialityLevel::Public,
                 1 => ConfidentialityLevel::Community,
                 2 => ConfidentialityLevel::Work,
@@ -3882,10 +3882,10 @@ mod tests {
                 TaintFlag::AiGenerated,
                 TaintFlag::CrossZoneUnapproved,
             ];
-            let num_flags = rng.gen_range(0..=3);
+            let num_flags = rng.random_range(0..=3);
             let mut flags = TaintFlags::new();
             for _ in 0..num_flags {
-                let idx = rng.gen_range(0..all_flags.len());
+                let idx = rng.random_range(0..all_flags.len());
                 flags.insert(all_flags[idx]);
             }
             flags
@@ -3893,7 +3893,7 @@ mod tests {
 
         /// Generate a random `ZoneId`.
         fn random_zone(rng: &mut impl Rng) -> ZoneId {
-            match rng.gen_range(0..5) {
+            match rng.random_range(0..5) {
                 0 => ZoneId::public(),
                 1 => ZoneId::community(),
                 2 => ZoneId::work(),
@@ -4013,7 +4013,7 @@ mod tests {
             let zone = ZoneId::work();
 
             for i in 0..NUM_ITERATIONS {
-                let records: Vec<ProvenanceRecord> = (0..rng.gen_range(1..=5))
+                let records: Vec<ProvenanceRecord> = (0..rng.random_range(1..=5))
                     .map(|_| random_provenance(&mut rng))
                     .collect();
                 let refs: Vec<&ProvenanceRecord> = records.iter().collect();
@@ -4048,7 +4048,7 @@ mod tests {
             let zone = ZoneId::work();
 
             for i in 0..NUM_ITERATIONS {
-                let records: Vec<ProvenanceRecord> = (0..rng.gen_range(1..=5))
+                let records: Vec<ProvenanceRecord> = (0..rng.random_range(1..=5))
                     .map(|_| random_provenance(&mut rng))
                     .collect();
                 let refs: Vec<&ProvenanceRecord> = records.iter().collect();
@@ -4086,7 +4086,7 @@ mod tests {
             let zone = ZoneId::work();
 
             for i in 0..NUM_ITERATIONS {
-                let records: Vec<ProvenanceRecord> = (0..rng.gen_range(1..=5))
+                let records: Vec<ProvenanceRecord> = (0..rng.random_range(1..=5))
                     .map(|_| random_provenance(&mut rng))
                     .collect();
                 let refs: Vec<&ProvenanceRecord> = records.iter().collect();

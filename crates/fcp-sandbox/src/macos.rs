@@ -22,6 +22,7 @@
 #![cfg(target_os = "macos")]
 
 use std::ffi::CString;
+use std::fmt::Write as _;
 use std::path::Path;
 
 use tracing::{debug, info, warn};
@@ -42,14 +43,14 @@ pub struct MacOsSandbox {
 impl MacOsSandbox {
     /// Create a new macOS sandbox.
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             _cached_profile: None,
         }
     }
 
     /// Generate a seatbelt profile (SBPL) from the compiled policy.
-    fn generate_profile(&self, policy: &CompiledPolicy) -> String {
+    fn generate_profile(policy: &CompiledPolicy) -> String {
         let mut profile = String::new();
 
         // Version header
@@ -96,7 +97,7 @@ impl MacOsSandbox {
         if !policy.readonly_paths.is_empty() {
             profile.push_str("(allow file-read*\n");
             for path in &policy.readonly_paths {
-                profile.push_str(&format!("  (subpath \"{}\")\n", path.display()));
+                let _ = writeln!(profile, "  (subpath \"{}\")", path.display());
             }
             profile.push_str(")\n");
         }
@@ -105,7 +106,7 @@ impl MacOsSandbox {
         if !policy.writable_paths.is_empty() {
             profile.push_str("(allow file-read* file-write*\n");
             for path in &policy.writable_paths {
-                profile.push_str(&format!("  (subpath \"{}\")\n", path.display()));
+                let _ = writeln!(profile, "  (subpath \"{}\")", path.display());
             }
             profile.push_str(")\n");
         }
@@ -152,11 +153,12 @@ impl MacOsSandbox {
         profile.push_str("(allow ipc-posix-shm-write-data)\n\n");
 
         // Resource limits
-        profile.push_str(&format!(
-            ";; Resource limits: memory={}MB, cpu={}%\n",
+        let _ = writeln!(
+            profile,
+            ";; Resource limits: memory={}MB, cpu={}%",
             policy.memory_limit_bytes / (1024 * 1024),
             policy.cpu_percent
-        ));
+        );
         // Note: macOS sandbox doesn't have direct rlimit support in profiles
         // We apply these via setrlimit separately
 
@@ -169,7 +171,7 @@ impl MacOsSandbox {
     }
 
     /// Apply resource limits using setrlimit.
-    fn apply_rlimits(&self, policy: &CompiledPolicy) -> Result<(), SandboxError> {
+    fn apply_rlimits(policy: &CompiledPolicy) {
         // Memory limit
         let memory_limit = libc::rlimit {
             rlim_cur: policy.memory_limit_bytes,
@@ -244,7 +246,6 @@ impl MacOsSandbox {
         }
 
         info!("Applied resource limits via setrlimit");
-        Ok(())
     }
 }
 
@@ -261,10 +262,10 @@ impl Sandbox for MacOsSandbox {
         );
 
         // Step 1: Apply resource limits
-        self.apply_rlimits(policy)?;
+        Self::apply_rlimits(policy);
 
         // Step 2: Generate and apply sandbox profile
-        let profile = self.generate_profile(policy);
+        let profile = Self::generate_profile(policy);
 
         // Convert profile to C string
         let c_profile = CString::new(profile.as_bytes())
@@ -282,15 +283,15 @@ impl Sandbox for MacOsSandbox {
         };
 
         if result != 0 {
-            let error_msg = if !errorbuf.is_null() {
+            let error_msg = if errorbuf.is_null() {
+                "unknown error".to_string()
+            } else {
                 let err = unsafe { std::ffi::CStr::from_ptr(errorbuf) };
                 let msg = err.to_string_lossy().to_string();
                 unsafe {
                     sandbox_free_error(errorbuf);
                 }
                 msg
-            } else {
-                "unknown error".to_string()
             };
 
             return Err(SandboxError::ApplyFailed(format!(
@@ -377,16 +378,13 @@ impl Sandbox for MacOsSandbox {
 // FFI Bindings
 // ============================================================================
 
-/// sandbox_init flags.
-const SANDBOX_NAMED: u64 = 0x0001;
-
 // SAFETY: These are FFI bindings to macOS sandbox APIs.
 // sandbox_init and sandbox_free_error are documented Apple APIs.
 unsafe extern "C" {
     /// Initialize sandbox with a profile string.
     fn sandbox_init(profile: *const i8, flags: u64, errorbuf: *mut *mut i8) -> i32;
 
-    /// Free error buffer from sandbox_init.
+    /// Free error buffer from `sandbox_init`.
     fn sandbox_free_error(errorbuf: *mut i8);
 }
 
@@ -414,7 +412,7 @@ mod tests {
             deny_ptrace: true,
             block_direct_network: true,
             state_dir: Some(PathBuf::from("/tmp/test")),
-            platform_flags: Default::default(),
+            platform_flags: crate::sandbox::PlatformFlags::default(),
         }
     }
 
@@ -427,9 +425,8 @@ mod tests {
 
     #[test]
     fn test_generate_profile_structure() {
-        let sandbox = MacOsSandbox::new();
         let policy = test_policy();
-        let profile = sandbox.generate_profile(&policy);
+        let profile = MacOsSandbox::generate_profile(&policy);
 
         // Check basic structure
         assert!(profile.contains("(version 1)"));
@@ -451,12 +448,11 @@ mod tests {
 
     #[test]
     fn test_generate_profile_permissive() {
-        let sandbox = MacOsSandbox::new();
         let mut policy = test_policy();
         policy.block_direct_network = false;
         policy.deny_exec = false;
 
-        let profile = sandbox.generate_profile(&policy);
+        let profile = MacOsSandbox::generate_profile(&policy);
 
         // Check network is allowed
         assert!(profile.contains("(allow network*)"));

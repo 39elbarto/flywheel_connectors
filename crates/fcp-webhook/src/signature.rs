@@ -32,6 +32,10 @@ impl std::fmt::Display for SignatureAlgorithm {
 /// Trait for signature verification.
 pub trait SignatureVerifier: Send + Sync {
     /// Verify a signature against the payload.
+    ///
+    /// # Errors
+    /// Returns [`WebhookError::InvalidSignature`] (or provider-specific parse errors)
+    /// when the supplied signature does not validate for `payload`.
     fn verify(&self, payload: &[u8], signature: &str) -> WebhookResult<()>;
 
     /// Get the algorithm used.
@@ -54,6 +58,9 @@ impl HmacSha256Verifier {
     }
 
     /// Compute signature for a payload.
+    ///
+    /// # Panics
+    /// Panics only if the underlying HMAC implementation rejects key initialization.
     #[must_use]
     pub fn compute(&self, payload: &[u8]) -> String {
         let mut mac =
@@ -111,6 +118,9 @@ impl HmacSha1Verifier {
     }
 
     /// Compute signature for a payload.
+    ///
+    /// # Panics
+    /// Panics only if the underlying HMAC implementation rejects key initialization.
     #[must_use]
     pub fn compute(&self, payload: &[u8]) -> String {
         let mut mac =
@@ -154,6 +164,10 @@ pub struct Ed25519Verifier {
 
 impl Ed25519Verifier {
     /// Create from a hex-encoded public key.
+    ///
+    /// # Errors
+    /// Returns [`WebhookError::InvalidSignature`] when the key is invalid or wrong length.
+    /// Returns decode errors when `public_key_hex` is not valid hex.
     pub fn from_hex(public_key_hex: &str) -> WebhookResult<Self> {
         let key_bytes = hex::decode(public_key_hex)?;
         let key_array: [u8; 32] = key_bytes
@@ -167,6 +181,9 @@ impl Ed25519Verifier {
     }
 
     /// Create from raw bytes.
+    ///
+    /// # Errors
+    /// Returns [`WebhookError::InvalidSignature`] when bytes do not form a valid Ed25519 key.
     pub fn from_bytes(bytes: &[u8; 32]) -> WebhookResult<Self> {
         let public_key = ed25519_dalek::VerifyingKey::from_bytes(bytes)
             .map_err(|_| WebhookError::InvalidSignature)?;

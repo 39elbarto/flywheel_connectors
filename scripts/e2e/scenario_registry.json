@@ -258,6 +258,56 @@
       "archetype": "request_response",
       "failure_class": "network_policy_denial",
       "user_impact_category": "security"
+    },
+    {
+      "key": "streaming_reconnect_storm",
+      "scenario_id": "asupersync.e2e.streaming_reconnect_storm",
+      "script": "scripts/e2e/streaming_reconnect_storm.sh",
+      "required": true,
+      "contract_id": "contract.ws_reconnect_storm_bounded_recovery",
+      "archetype": "streaming",
+      "failure_class": "reconnect_storm_unbounded",
+      "user_impact_category": "availability"
+    },
+    {
+      "key": "streaming_backpressure_stress",
+      "scenario_id": "asupersync.e2e.streaming_backpressure_stress",
+      "script": "scripts/e2e/streaming_backpressure_stress.sh",
+      "required": true,
+      "contract_id": "contract.stream_backpressure_bounded_queues",
+      "archetype": "streaming",
+      "failure_class": "backpressure_queue_overflow",
+      "user_impact_category": "availability"
+    },
+    {
+      "key": "bidirectional_cancel_chain",
+      "scenario_id": "asupersync.e2e.bidirectional_cancel_chain",
+      "script": "scripts/e2e/bidirectional_cancel_chain.sh",
+      "required": true,
+      "contract_id": "contract.bidirectional_cancel_chain_clean_shutdown",
+      "archetype": "bidirectional",
+      "failure_class": "cancel_cascade_resource_leak",
+      "user_impact_category": "availability"
+    },
+    {
+      "key": "sse_reconnect_ordering",
+      "scenario_id": "asupersync.e2e.sse_reconnect_ordering",
+      "script": "scripts/e2e/sse_reconnect_ordering.sh",
+      "required": true,
+      "contract_id": "contract.sse_reconnect_ordering_continuity",
+      "archetype": "streaming",
+      "failure_class": "sse_event_ordering_violation",
+      "user_impact_category": "correctness"
+    },
+    {
+      "key": "integration_gate",
+      "scenario_id": "asupersync.e2e.integration_gate",
+      "script": "scripts/e2e/integration_gate_executor.sh",
+      "required": true,
+      "contract_id": "contract.integration_gate_coverage_drift",
+      "archetype": "cli_process",
+      "failure_class": "coverage_gap_drift_regression",
+      "user_impact_category": "correctness"
     }
   ]
 }

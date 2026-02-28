@@ -15,9 +15,10 @@ use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 use fcp_graphql::{
     CursorPage, CursorPageInfo, GraphqlClientBuilder, GraphqlClientError, GraphqlOperation,
-    GraphqlSubscriptionClient, OffsetPage, PageLimit, PaginationError, RetryPolicy, RetryStrategy,
-    SchemaValidationMode, paginate_cursor, paginate_offset,
+    GraphqlSubscriptionClient, GraphqlSubscriptionConfig, OffsetPage, PageLimit, PaginationError,
+    RetryPolicy, RetryStrategy, SchemaValidationMode, paginate_cursor, paginate_offset,
 };
+use fcp_streaming::WsConfig;
 
 #[derive(Debug, Serialize)]
 struct EmptyVars {}
@@ -900,4 +901,230 @@ async fn subscription_receives_next_message() {
 
     server_task.await.expect("server task");
     ctx.finalize("pass", Some(serde_json::json!({"subscription": "next"})));
+}
+
+#[tokio::test]
+async fn subscription_reconnects_after_disconnect() {
+    let mut ctx = TestContext::new("subscription_reconnects_after_disconnect");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+
+    let server_task = tokio::spawn(async move {
+        for connection_idx in 0..2 {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let mut ws = accept_async(stream).await.expect("accept ws");
+
+            let init = ws.next().await.expect("init message").expect("init ok");
+            let init_text = init.into_text().expect("init text");
+            let init_value: serde_json::Value =
+                serde_json::from_str(&init_text).expect("init payload");
+            assert_eq!(
+                init_value.get("type").and_then(serde_json::Value::as_str),
+                Some("connection_init")
+            );
+
+            ws.send(Message::Text(
+                serde_json::json!({ "type": "connection_ack" })
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .expect("ack send");
+
+            let subscribe = ws
+                .next()
+                .await
+                .expect("subscribe message")
+                .expect("subscribe ok");
+            let subscribe_text = subscribe.into_text().expect("subscribe text");
+            let subscribe_value: serde_json::Value =
+                serde_json::from_str(&subscribe_text).expect("subscribe payload");
+            assert_eq!(
+                subscribe_value
+                    .get("type")
+                    .and_then(serde_json::Value::as_str),
+                Some("subscribe")
+            );
+
+            if connection_idx == 0 {
+                ws.close(None).await.expect("close first connection");
+                continue;
+            }
+
+            let next = serde_json::json!({
+                "type": "next",
+                "id": "1",
+                "payload": {
+                    "data": { "viewer": { "id": "reconnect-1" } }
+                }
+            });
+            ws.send(Message::Text(next.to_string().into()))
+                .await
+                .expect("next send");
+
+            ws.send(Message::Text(
+                serde_json::json!({ "type": "complete", "id": "1" })
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .expect("complete send");
+        }
+    });
+
+    let url = format!("ws://{}", addr);
+    let mut ws = WsConfig::new()
+        .with_connect_timeout(Duration::from_secs(2))
+        .with_auto_reconnect(true);
+    ws.reconnect_delay = Duration::from_millis(20);
+    ws.max_reconnect_attempts = Some(3);
+
+    let client =
+        GraphqlSubscriptionClient::new(url, "test").with_config(GraphqlSubscriptionConfig {
+            ws,
+            init_payload: None,
+            ack_timeout: Duration::from_secs(2),
+        });
+
+    let mut stream = client
+        .subscribe::<ViewerQuery>(EmptyVars {})
+        .await
+        .expect("subscribe");
+    let response = stream
+        .next()
+        .await
+        .expect("stream item")
+        .expect("subscription response");
+    let data = response.data.expect("missing data");
+    ctx.assert_eq(
+        data.viewer.id,
+        "reconnect-1".to_string(),
+        "unexpected id after reconnect",
+    );
+
+    server_task.await.expect("server task");
+    ctx.finalize("pass", Some(serde_json::json!({ "reconnects": 1 })));
+}
+
+#[tokio::test]
+async fn subscription_disconnect_without_reconnect_emits_error() {
+    let mut ctx = TestContext::new("subscription_disconnect_without_reconnect_emits_error");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+
+    let server_task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept");
+        let mut ws = accept_async(stream).await.expect("accept ws");
+
+        let _init = ws.next().await.expect("init message").expect("init ok");
+        ws.send(Message::Text(
+            serde_json::json!({ "type": "connection_ack" })
+                .to_string()
+                .into(),
+        ))
+        .await
+        .expect("ack send");
+
+        let _subscribe = ws
+            .next()
+            .await
+            .expect("subscribe message")
+            .expect("subscribe ok");
+
+        ws.close(None).await.expect("close connection");
+    });
+
+    let url = format!("ws://{}", addr);
+    let ws = WsConfig::new()
+        .with_connect_timeout(Duration::from_secs(2))
+        .with_auto_reconnect(false);
+    let client =
+        GraphqlSubscriptionClient::new(url, "test").with_config(GraphqlSubscriptionConfig {
+            ws,
+            init_payload: None,
+            ack_timeout: Duration::from_secs(2),
+        });
+
+    let mut stream = client
+        .subscribe::<ViewerQuery>(EmptyVars {})
+        .await
+        .expect("subscribe");
+    let err = stream
+        .next()
+        .await
+        .expect("stream error item")
+        .expect_err("expected disconnect error");
+    match err {
+        GraphqlClientError::Protocol { message } => ctx.assert_true(
+            message.contains("reconnect exhausted"),
+            "expected reconnect exhaustion message",
+        ),
+        other => panic!("unexpected error: {other:?}"),
+    }
+
+    server_task.await.expect("server task");
+    ctx.finalize("pass", Some(serde_json::json!({ "reconnect": "disabled" })));
+}
+
+#[tokio::test]
+async fn subscription_drop_sends_complete_frame() {
+    let mut ctx = TestContext::new("subscription_drop_sends_complete_frame");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+
+    let server_task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept");
+        let mut ws = accept_async(stream).await.expect("accept ws");
+
+        let _init = ws.next().await.expect("init message").expect("init ok");
+        ws.send(Message::Text(
+            serde_json::json!({ "type": "connection_ack" })
+                .to_string()
+                .into(),
+        ))
+        .await
+        .expect("ack send");
+
+        let _subscribe = ws
+            .next()
+            .await
+            .expect("subscribe message")
+            .expect("subscribe ok");
+
+        let complete = tokio::time::timeout(Duration::from_secs(2), ws.next())
+            .await
+            .expect("complete timeout")
+            .expect("complete frame")
+            .expect("complete frame ok");
+        let complete_text = complete.into_text().expect("complete text");
+        let complete_value: serde_json::Value =
+            serde_json::from_str(&complete_text).expect("complete payload");
+        assert_eq!(
+            complete_value
+                .get("type")
+                .and_then(serde_json::Value::as_str),
+            Some("complete")
+        );
+    });
+
+    let url = format!("ws://{}", addr);
+    let ws = WsConfig::new().with_connect_timeout(Duration::from_secs(2));
+    let client =
+        GraphqlSubscriptionClient::new(url, "test").with_config(GraphqlSubscriptionConfig {
+            ws,
+            init_payload: None,
+            ack_timeout: Duration::from_secs(2),
+        });
+
+    let stream = client
+        .subscribe::<ViewerQuery>(EmptyVars {})
+        .await
+        .expect("subscribe");
+    drop(stream);
+
+    server_task.await.expect("server task");
+    ctx.finalize(
+        "pass",
+        Some(serde_json::json!({ "cancel": "complete-sent" })),
+    );
 }

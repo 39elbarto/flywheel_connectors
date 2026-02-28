@@ -46,3 +46,4 @@ path = "src/bin/reqcheck.rs"
 pretty_assertions.workspace = true
 fcp-testkit = { path = "../fcp-testkit" }
 tokio = { workspace = true, features = ["rt", "macros"] }
+async-trait.workspace = true

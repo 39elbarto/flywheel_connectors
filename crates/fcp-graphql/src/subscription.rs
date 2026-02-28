@@ -6,8 +6,11 @@ use std::time::Duration;
 use fcp_async_core::{channel::mpsc, task, time};
 use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::ReceiverStream;
+use tracing::debug;
 
-use fcp_streaming::{StreamError, WsClient, WsConfig, WsMessage};
+use fcp_streaming::{
+    ReconnectConfig, ReconnectHandler, StreamError, WsClient, WsConfig, WsConnection, WsMessage,
+};
 
 use crate::error::{GraphqlClientError, GraphqlError};
 use crate::operation::{GraphqlOperation, GraphqlResponse};
@@ -22,6 +25,8 @@ struct GraphqlWsMessage {
     #[serde(default)]
     payload: Option<serde_json::Value>,
 }
+
+const SUBSCRIPTION_ID: &str = "1";
 
 /// Subscription configuration.
 #[derive(Debug, Clone)]
@@ -96,83 +101,116 @@ impl GraphqlSubscriptionClient {
             ws_config.headers.insert(key.clone(), value.clone());
         }
         let client = WsClient::with_config(self.url.clone(), ws_config);
-        let mut connection =
-            client
-                .connect()
-                .await
-                .map_err(|err| GraphqlClientError::Protocol {
-                    message: format!("{} websocket connect failed: {err}", self.service_name),
-                })?;
-
-        let init = GraphqlWsMessage {
-            message_type: "connection_init".to_string(),
-            id: None,
-            payload: self.config.init_payload.clone(),
-        };
-        connection
-            .send_json(&init)
-            .await
-            .map_err(|err| GraphqlClientError::Protocol {
-                message: format!("{} connection_init failed: {err}", self.service_name),
-            })?;
-
-        let ack_timeout = self.config.ack_timeout;
-        let ack = time::timeout(ack_timeout, connection.recv()).await;
-        match ack {
-            Ok(Ok(Some(message))) => {
-                let ack_msg = decode_ws_message(message)?;
-                if ack_msg.message_type != "connection_ack" {
-                    return Err(GraphqlClientError::Protocol {
-                        message: format!("expected connection_ack, got {}", ack_msg.message_type),
-                    });
-                }
-            }
-            Ok(Ok(None)) => {
-                return Err(GraphqlClientError::Protocol {
-                    message: "connection closed before ack".to_string(),
-                });
-            }
-            Ok(Err(err)) => {
-                return Err(GraphqlClientError::Protocol {
-                    message: format!("{} connection error: {err}", self.service_name),
-                });
-            }
-            Err(_) => {
-                return Err(GraphqlClientError::Protocol {
-                    message: format!("{} connection_ack timeout", self.service_name),
-                });
-            }
-        }
-
         let payload = serde_json::json!({
             "query": O::QUERY,
             "operationName": O::OPERATION_NAME,
             "variables": variables,
         });
-        let subscribe = GraphqlWsMessage {
-            message_type: "subscribe".to_string(),
-            id: Some("1".to_string()),
-            payload: Some(payload),
-        };
-        connection
-            .send_json(&subscribe)
-            .await
-            .map_err(|err| GraphqlClientError::Protocol {
-                message: format!("{} subscribe failed: {err}", self.service_name),
-            })?;
+        let mut connection = establish_subscription(
+            &client,
+            &self.service_name,
+            self.config.init_payload.clone(),
+            self.config.ack_timeout,
+            &payload,
+        )
+        .await?;
 
         let (tx, rx) = mpsc::channel(16);
+        let service_name = self.service_name.clone();
+        let init_payload = self.config.init_payload.clone();
+        let ack_timeout = self.config.ack_timeout;
+        let reconnect_config = reconnect_config_from_ws(client.config());
 
         task::spawn(async move {
             let mut conn = connection;
-            while let Ok(Some(message)) = conn.recv().await {
+            let mut reconnect_handler = ReconnectHandler::new(reconnect_config);
+            loop {
+                fcp_async_core::select! {
+                    _ = tx.closed() => {
+                        send_complete_and_close(&mut conn).await;
+                        break;
+                    }
+                    recv = conn.recv() => {
+                        let message = match recv {
+                            Ok(Some(message)) => message,
+                            Ok(None) => {
+                                match reconnect_connection(
+                                    &client,
+                                    &service_name,
+                                    init_payload.clone(),
+                                    ack_timeout,
+                                    &payload,
+                                    &mut reconnect_handler,
+                                    "connection closed",
+                                )
+                                .await
+                                {
+                                    Ok(new_conn) => {
+                                        conn = new_conn;
+                                        continue;
+                                    }
+                                    Err(err) => {
+                                        let _ = tx.send(Err(err)).await;
+                                        break;
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                match reconnect_connection(
+                                    &client,
+                                    &service_name,
+                                    init_payload.clone(),
+                                    ack_timeout,
+                                    &payload,
+                                    &mut reconnect_handler,
+                                    &format!("connection error: {err}"),
+                                )
+                                .await
+                                {
+                                    Ok(new_conn) => {
+                                        conn = new_conn;
+                                        continue;
+                                    }
+                                    Err(reconnect_err) => {
+                                        let _ = tx.send(Err(reconnect_err)).await;
+                                        break;
+                                    }
+                                }
+                            }
+                        };
+
                 match message {
                     WsMessage::Ping(payload) => {
                         let _ = conn.send(WsMessage::Pong(payload)).await;
                         continue;
                     }
                     WsMessage::Pong(_) => continue,
-                    WsMessage::Close(_) => break,
+                    WsMessage::Close(frame) => {
+                        let close_detail = frame
+                            .map_or_else(|| "close frame".to_string(), |f| {
+                                format!("close frame {} {}", f.code, f.reason)
+                            });
+                        match reconnect_connection(
+                            &client,
+                            &service_name,
+                            init_payload.clone(),
+                            ack_timeout,
+                            &payload,
+                            &mut reconnect_handler,
+                            &close_detail,
+                        )
+                        .await
+                        {
+                            Ok(new_conn) => {
+                                conn = new_conn;
+                                continue;
+                            }
+                            Err(err) => {
+                                let _ = tx.send(Err(err)).await;
+                                break;
+                            }
+                        }
+                    }
                     WsMessage::Text(_) | WsMessage::Binary(_) => {}
                 }
 
@@ -185,13 +223,18 @@ impl GraphqlSubscriptionClient {
                                 match parsed {
                                     Ok(response) => {
                                         if tx.send(Ok(response)).await.is_err() {
+                                            send_complete_and_close(&mut conn).await;
                                             break;
                                         }
                                     }
                                     Err(err) => {
-                                        let _ = tx
+                                        if tx
                                             .send(Err(GraphqlClientError::Json(err.to_string())))
-                                            .await;
+                                            .await
+                                            .is_err()
+                                        {
+                                            send_complete_and_close(&mut conn).await;
+                                        }
                                         break;
                                     }
                                 }
@@ -245,11 +288,155 @@ impl GraphqlSubscriptionClient {
                         break;
                     }
                 }
+                    }
+                }
             }
         });
 
         Ok(ReceiverStream::new(rx))
     }
+}
+
+fn reconnect_config_from_ws(config: &WsConfig) -> ReconnectConfig {
+    let reconnect_config = ReconnectConfig::new().with_initial_delay(config.reconnect_delay);
+    if !config.auto_reconnect {
+        return reconnect_config.with_max_attempts(0);
+    }
+    match config.max_reconnect_attempts {
+        Some(max_attempts) => reconnect_config.with_max_attempts(max_attempts),
+        None => reconnect_config.with_unlimited_attempts(),
+    }
+}
+
+async fn establish_subscription(
+    client: &WsClient,
+    service_name: &str,
+    init_payload: Option<serde_json::Value>,
+    ack_timeout: Duration,
+    payload: &serde_json::Value,
+) -> Result<WsConnection, GraphqlClientError> {
+    let mut connection = client
+        .connect()
+        .await
+        .map_err(|err| GraphqlClientError::Protocol {
+            message: format!("{service_name} websocket connect failed: {err}"),
+        })?;
+
+    let init = GraphqlWsMessage {
+        message_type: "connection_init".to_string(),
+        id: None,
+        payload: init_payload,
+    };
+    connection
+        .send_json(&init)
+        .await
+        .map_err(|err| GraphqlClientError::Protocol {
+            message: format!("{service_name} connection_init failed: {err}"),
+        })?;
+
+    let ack = time::timeout(ack_timeout, connection.recv()).await;
+    match ack {
+        Ok(Ok(Some(message))) => {
+            let ack_msg = decode_ws_message(message)?;
+            if ack_msg.message_type != "connection_ack" {
+                return Err(GraphqlClientError::Protocol {
+                    message: format!("expected connection_ack, got {}", ack_msg.message_type),
+                });
+            }
+        }
+        Ok(Ok(None)) => {
+            return Err(GraphqlClientError::Protocol {
+                message: "connection closed before ack".to_string(),
+            });
+        }
+        Ok(Err(err)) => {
+            return Err(GraphqlClientError::Protocol {
+                message: format!("{service_name} connection error: {err}"),
+            });
+        }
+        Err(_) => {
+            return Err(GraphqlClientError::Protocol {
+                message: format!("{service_name} connection_ack timeout"),
+            });
+        }
+    }
+
+    let subscribe = GraphqlWsMessage {
+        message_type: "subscribe".to_string(),
+        id: Some(SUBSCRIPTION_ID.to_string()),
+        payload: Some(payload.clone()),
+    };
+    connection
+        .send_json(&subscribe)
+        .await
+        .map_err(|err| GraphqlClientError::Protocol {
+            message: format!("{service_name} subscribe failed: {err}"),
+        })?;
+
+    Ok(connection)
+}
+
+async fn reconnect_connection(
+    client: &WsClient,
+    service_name: &str,
+    init_payload: Option<serde_json::Value>,
+    ack_timeout: Duration,
+    payload: &serde_json::Value,
+    reconnect_handler: &mut ReconnectHandler,
+    disconnect_reason: &str,
+) -> Result<WsConnection, GraphqlClientError> {
+    loop {
+        if !reconnect_handler.can_reconnect() {
+            return Err(GraphqlClientError::Protocol {
+                message: format!(
+                    "{service_name} subscription disconnected ({disconnect_reason}); reconnect exhausted after {} attempts",
+                    reconnect_handler.attempts()
+                ),
+            });
+        }
+
+        reconnect_handler
+            .wait_for_reconnect()
+            .await
+            .map_err(GraphqlClientError::from)?;
+
+        match establish_subscription(
+            client,
+            service_name,
+            init_payload.clone(),
+            ack_timeout,
+            payload,
+        )
+        .await
+        {
+            Ok(connection) => {
+                reconnect_handler.reset();
+                debug!(service = service_name, "graphql subscription reconnected");
+                return Ok(connection);
+            }
+            Err(err) => {
+                debug!(
+                    service = service_name,
+                    attempt = reconnect_handler.attempts(),
+                    error = %err,
+                    "graphql subscription reconnect attempt failed"
+                );
+                if !reconnect_handler.can_reconnect() {
+                    return Err(err);
+                }
+            }
+        }
+    }
+}
+
+async fn send_complete_and_close(connection: &mut WsConnection) {
+    let complete = GraphqlWsMessage {
+        message_type: "complete".to_string(),
+        id: Some(SUBSCRIPTION_ID.to_string()),
+        payload: None,
+    };
+    let _ = connection.send_json(&complete).await;
+    let _ = connection.close().await;
 }
 
 fn decode_ws_message(message: WsMessage) -> Result<GraphqlWsMessage, GraphqlClientError> {

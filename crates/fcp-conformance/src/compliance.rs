@@ -409,7 +409,7 @@ const fn is_capability_denial(err: &FcpError) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{CheckStatus, StaticCompliance};
+    use super::*;
     use fcp_manifest::ConnectorManifest;
 
     fn with_computed_interface_hash(raw: &str) -> String {
@@ -454,5 +454,400 @@ mod tests {
                 .any(|finding| finding.status == CheckStatus::Fail),
             "expected at least one failure"
         );
+    }
+
+    // ── ComplianceFinding tests ──
+
+    #[test]
+    fn finding_pass_has_correct_status() {
+        let f = ComplianceFinding::pass("test.check", "all good");
+        assert_eq!(f.status, CheckStatus::Pass);
+        assert_eq!(f.check, "test.check");
+        assert_eq!(f.message, "all good");
+    }
+
+    #[test]
+    fn finding_fail_has_correct_status() {
+        let f = ComplianceFinding::fail("test.check", "not good");
+        assert_eq!(f.status, CheckStatus::Fail);
+        assert_eq!(f.check, "test.check");
+    }
+
+    #[test]
+    fn finding_skipped_has_correct_status() {
+        let f = ComplianceFinding::skipped("test.check", "not applicable");
+        assert_eq!(f.status, CheckStatus::Skipped);
+    }
+
+    // ── CheckStatus serialization ──
+
+    #[test]
+    fn check_status_serialization() {
+        assert_eq!(
+            serde_json::to_string(&CheckStatus::Pass).unwrap(),
+            "\"pass\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CheckStatus::Fail).unwrap(),
+            "\"fail\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CheckStatus::Skipped).unwrap(),
+            "\"skipped\""
+        );
+    }
+
+    #[test]
+    fn check_status_round_trip() {
+        for status in [CheckStatus::Pass, CheckStatus::Fail, CheckStatus::Skipped] {
+            let json = serde_json::to_string(&status).unwrap();
+            let deserialized: CheckStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(deserialized, status);
+        }
+    }
+
+    // ── StaticCompliance tests ──
+
+    #[test]
+    fn static_empty_toml_fails() {
+        let report = StaticCompliance::run_manifest("");
+        assert!(!report.passed);
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].status, CheckStatus::Fail);
+        assert_eq!(report.findings[0].check, "manifest.parse_validate");
+    }
+
+    #[test]
+    fn static_garbage_toml_fails() {
+        let report = StaticCompliance::run_manifest("{{{{not valid toml at all}}}}");
+        assert!(!report.passed);
+    }
+
+    #[test]
+    fn static_findings_contain_check_id() {
+        let raw = include_str!("../../../tests/vectors/manifest/manifest_valid.toml");
+        let materialized = with_computed_interface_hash(raw);
+        let report = StaticCompliance::run_manifest(&materialized);
+        assert!(report
+            .findings
+            .iter()
+            .all(|f| f.check == "manifest.parse_validate"));
+    }
+
+    // ── DynamicSuite tests ──
+
+    #[test]
+    fn dynamic_suite_minimal_defaults() {
+        let hs = HandshakeRequest {
+            protocol_version: "2.0".into(),
+            zone: "z:test".parse().unwrap(),
+            zone_dir: None,
+            host_public_key: [0u8; 32],
+            nonce: [0u8; 32],
+            capabilities_requested: vec![],
+            host: None,
+            transport_caps: None,
+            requested_instance_id: None,
+        };
+        let suite = DynamicSuite::minimal(hs);
+        assert!(suite.invoke.is_none());
+        assert!(suite.simulate.is_none());
+        assert!(!suite.expect_invoke_error);
+        assert!(suite.expect_simulate_would_succeed.is_none());
+        assert!(!suite.require_simulate_denial_details);
+        assert!(!suite.require_capability_denial);
+        assert!(!suite.require_decision_receipt);
+        assert_eq!(suite.config, serde_json::json!({}));
+    }
+
+    // ── DynamicCompliance tests ──
+
+    #[test]
+    fn dynamic_skipped_is_passing() {
+        let dc = DynamicCompliance::skipped("no connector available");
+        assert!(dc.passed);
+        assert_eq!(dc.findings.len(), 1);
+        assert_eq!(dc.findings[0].status, CheckStatus::Skipped);
+        assert_eq!(dc.findings[0].check, "dynamic.skip");
+    }
+
+    // ── ComplianceReport tests ──
+
+    #[test]
+    fn compliance_report_passed_when_both_pass() {
+        let report = ComplianceReport {
+            static_checks: StaticCompliance {
+                passed: true,
+                findings: vec![],
+            },
+            dynamic_checks: DynamicCompliance {
+                passed: true,
+                findings: vec![],
+            },
+        };
+        assert!(report.passed());
+    }
+
+    #[test]
+    fn compliance_report_fails_when_static_fails() {
+        let report = ComplianceReport {
+            static_checks: StaticCompliance {
+                passed: false,
+                findings: vec![ComplianceFinding::fail("x", "y")],
+            },
+            dynamic_checks: DynamicCompliance {
+                passed: true,
+                findings: vec![],
+            },
+        };
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn compliance_report_fails_when_dynamic_fails() {
+        let report = ComplianceReport {
+            static_checks: StaticCompliance {
+                passed: true,
+                findings: vec![],
+            },
+            dynamic_checks: DynamicCompliance {
+                passed: false,
+                findings: vec![ComplianceFinding::fail("x", "y")],
+            },
+        };
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn compliance_report_json_serializable() {
+        let report = ComplianceReport {
+            static_checks: StaticCompliance {
+                passed: true,
+                findings: vec![ComplianceFinding::pass("check1", "ok")],
+            },
+            dynamic_checks: DynamicCompliance::skipped("none"),
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(json.contains("\"pass\""));
+        assert!(json.contains("check1"));
+    }
+
+    // ── run_dynamic_checks tests (with mock connector) ──
+
+    use std::collections::HashMap;
+
+    use fcp_core::{
+        ConnectorId, ConnectorMetrics, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
+        HealthSnapshot, HealthState, Introspection, InvokeRequest, InvokeResponse,
+        RequestId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
+        SubscribeResponse, SubscribeResult, UnsubscribeRequest,
+    };
+
+    struct MockConnector {
+        configure_ok: bool,
+        handshake_accepted: bool,
+        health_ok: bool,
+    }
+
+    impl MockConnector {
+        fn healthy() -> Self {
+            Self {
+                configure_ok: true,
+                handshake_accepted: true,
+                health_ok: true,
+            }
+        }
+
+        fn failing_configure() -> Self {
+            Self {
+                configure_ok: false,
+                ..Self::healthy()
+            }
+        }
+
+        fn failing_handshake() -> Self {
+            Self {
+                handshake_accepted: false,
+                ..Self::healthy()
+            }
+        }
+
+        fn unhealthy() -> Self {
+            Self {
+                health_ok: false,
+                ..Self::healthy()
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl FcpConnector for MockConnector {
+        fn id(&self) -> &ConnectorId {
+            static ID: std::sync::LazyLock<ConnectorId> =
+                std::sync::LazyLock::new(|| ConnectorId::from_static("test.mock:utility:1.0.0"));
+            &ID
+        }
+
+        async fn configure(&mut self, _config: serde_json::Value) -> FcpResult<()> {
+            if self.configure_ok {
+                Ok(())
+            } else {
+                Err(FcpError::NotConfigured)
+            }
+        }
+
+        async fn handshake(&mut self, req: HandshakeRequest) -> FcpResult<HandshakeResponse> {
+            Ok(HandshakeResponse {
+                status: if self.handshake_accepted {
+                    "accepted".into()
+                } else {
+                    "rejected".into()
+                },
+                capabilities_granted: vec![],
+                session_id: fcp_core::SessionId::new(),
+                manifest_hash: "sha256:mock".into(),
+                nonce: req.nonce,
+                event_caps: None,
+                auth_caps: None,
+                op_catalog_hash: None,
+            })
+        }
+
+        async fn health(&self) -> HealthSnapshot {
+            HealthSnapshot {
+                status: if self.health_ok {
+                    HealthState::Ready
+                } else {
+                    HealthState::Error {
+                        reason: "test error".into(),
+                    }
+                },
+                uptime_ms: 1000,
+                load: None,
+                details: None,
+                rate_limit: None,
+            }
+        }
+
+        fn metrics(&self) -> ConnectorMetrics {
+            ConnectorMetrics::default()
+        }
+
+        async fn shutdown(&mut self, _req: ShutdownRequest) -> FcpResult<()> {
+            Ok(())
+        }
+
+        fn introspect(&self) -> Introspection {
+            Introspection {
+                operations: vec![],
+                events: vec![],
+                resource_types: vec![],
+                auth_caps: None,
+                event_caps: None,
+            }
+        }
+
+        async fn invoke(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
+            Ok(InvokeResponse::ok(req.id, serde_json::json!({"ok": true})))
+        }
+
+        async fn simulate(&self, req: SimulateRequest) -> FcpResult<SimulateResponse> {
+            Ok(SimulateResponse::allowed(req.id))
+        }
+
+        async fn subscribe(&self, _req: SubscribeRequest) -> FcpResult<SubscribeResponse> {
+            Ok(SubscribeResponse {
+                r#type: "response".into(),
+                id: RequestId("sub_mock".into()),
+                result: SubscribeResult {
+                    confirmed_topics: vec![],
+                    cursors: HashMap::new(),
+                    replay_supported: false,
+                    buffer: None,
+                },
+            })
+        }
+
+        async fn unsubscribe(&self, _req: UnsubscribeRequest) -> FcpResult<()> {
+            Ok(())
+        }
+    }
+
+    fn make_handshake() -> HandshakeRequest {
+        HandshakeRequest {
+            protocol_version: "2.0".into(),
+            zone: "z:test".parse().unwrap(),
+            zone_dir: None,
+            host_public_key: [0u8; 32],
+            nonce: [0u8; 32],
+            capabilities_requested: vec![],
+            host: None,
+            transport_caps: None,
+            requested_instance_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn dynamic_healthy_connector_passes() {
+        let mut connector = MockConnector::healthy();
+        let suite = DynamicSuite::minimal(make_handshake());
+        let result = run_dynamic_checks(&mut connector, suite).await;
+        assert!(result.passed);
+        // Should have: configure, handshake, introspect, health
+        assert_eq!(result.findings.len(), 4);
+        assert!(result.findings.iter().all(|f| f.status == CheckStatus::Pass));
+    }
+
+    #[tokio::test]
+    async fn dynamic_configure_failure_reported() {
+        let mut connector = MockConnector::failing_configure();
+        let suite = DynamicSuite::minimal(make_handshake());
+        let result = run_dynamic_checks(&mut connector, suite).await;
+        assert!(!result.passed);
+        let configure_finding = result.findings.iter().find(|f| f.check == "configure").unwrap();
+        assert_eq!(configure_finding.status, CheckStatus::Fail);
+    }
+
+    #[tokio::test]
+    async fn dynamic_handshake_rejection_reported() {
+        let mut connector = MockConnector::failing_handshake();
+        let suite = DynamicSuite::minimal(make_handshake());
+        let result = run_dynamic_checks(&mut connector, suite).await;
+        assert!(!result.passed);
+        let hs_finding = result.findings.iter().find(|f| f.check == "handshake").unwrap();
+        assert_eq!(hs_finding.status, CheckStatus::Fail);
+        assert!(hs_finding.message.contains("rejected"));
+    }
+
+    #[tokio::test]
+    async fn dynamic_unhealthy_connector_reported() {
+        let mut connector = MockConnector::unhealthy();
+        let suite = DynamicSuite::minimal(make_handshake());
+        let result = run_dynamic_checks(&mut connector, suite).await;
+        assert!(!result.passed);
+        let health_finding = result.findings.iter().find(|f| f.check == "health").unwrap();
+        assert_eq!(health_finding.status, CheckStatus::Fail);
+    }
+
+    #[tokio::test]
+    async fn dynamic_introspect_always_passes() {
+        let mut connector = MockConnector::healthy();
+        let suite = DynamicSuite::minimal(make_handshake());
+        let result = run_dynamic_checks(&mut connector, suite).await;
+        let intro_finding = result.findings.iter().find(|f| f.check == "introspect").unwrap();
+        assert_eq!(intro_finding.status, CheckStatus::Pass);
+        assert!(intro_finding.message.contains("operations=0"));
+    }
+
+    #[tokio::test]
+    async fn dynamic_findings_have_correct_check_ids() {
+        let mut connector = MockConnector::healthy();
+        let suite = DynamicSuite::minimal(make_handshake());
+        let result = run_dynamic_checks(&mut connector, suite).await;
+        let check_ids: Vec<&str> = result.findings.iter().map(|f| f.check.as_str()).collect();
+        assert!(check_ids.contains(&"configure"));
+        assert!(check_ids.contains(&"handshake"));
+        assert!(check_ids.contains(&"introspect"));
+        assert!(check_ids.contains(&"health"));
     }
 }

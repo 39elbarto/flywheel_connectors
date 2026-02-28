@@ -102,7 +102,7 @@ impl CapabilityTokenGoldenVector {
         Self {
             description: "Capability with holder_node + checkpoint (sk=[0x02;32])".into(),
             signing_key: "0202020202020202020202020202020202020202020202020202020202020202".into(),
-            expected_public_key: "3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29"
+            expected_public_key: "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394"
                 .into(),
             expected_kid: "".into(),
             capability_id: "cap:s3.read".into(),
@@ -130,7 +130,7 @@ impl CapabilityTokenGoldenVector {
         Self {
             description: "Multi-operation capability in z:public (sk=[0x03;32])".into(),
             signing_key: "0303030303030303030303030303030303030303030303030303030303030303".into(),
-            expected_public_key: "fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025"
+            expected_public_key: "ed4928c628d1c2c6eae90338905995612959273a5c63f93636c14614ac8737d1"
                 .into(),
             expected_kid: "".into(),
             capability_id: "cap:github.manage".into(),
@@ -225,7 +225,7 @@ impl CapabilityTokenGoldenVector {
         }
 
         // Add optional checkpoint
-        if let (Some(ref chk_id_hex), Some(chk_seq)) = (&self.checkpoint_id, self.checkpoint_seq) {
+        if let (Some(chk_id_hex), Some(chk_seq)) = (&self.checkpoint_id, self.checkpoint_seq) {
             let chk_id_bytes =
                 hex::decode(chk_id_hex).map_err(|e| format!("invalid checkpoint_id hex: {e}"))?;
             claims = claims.checkpoint(&chk_id_bytes, chk_seq);

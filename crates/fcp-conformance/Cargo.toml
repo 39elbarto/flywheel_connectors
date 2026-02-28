@@ -21,6 +21,8 @@ uuid.workspace = true
 jsonschema.workspace = true
 clap = { workspace = true, features = ["derive"] }
 ciborium.workspace = true
+rand.workspace = true
+rand_chacha = "0.3"
 
 # FCP crates (for types and encoding)
 fcp-core = { path = "../fcp-core" }

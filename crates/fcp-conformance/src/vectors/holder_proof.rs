@@ -155,9 +155,9 @@ impl HolderProofGoldenVector {
     ///
     /// Returns an error message if any step fails.
     pub fn verify(&self) -> Result<(), String> {
+        use fcp_core::HolderProof;
         use fcp_core::OperationId;
-        use fcp_core::protocol::HolderProof;
-        use fcp_core::protocol::RequestId;
+        use fcp_core::RequestId;
         use fcp_crypto::ed25519::Ed25519SigningKey;
 
         // 1. Parse signing key

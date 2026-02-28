@@ -10,7 +10,7 @@
 use std::time::Duration;
 
 use fcp_async_core::AsyncError;
-use fcp_core::error::{ErrorCategory, FcpError};
+use fcp_core::{ErrorCategory, FcpError};
 use fcp_sdk::migration::{HttpRetryConfig, classify_http_status, map_async_to_fcp_error};
 use fcp_sdk::retry::RetryDecision;
 
@@ -634,27 +634,26 @@ fn retry_after_zero_ms_is_valid() {
 #[test]
 fn http_retry_config_defaults_are_sane() {
     let config = HttpRetryConfig::default();
-    assert!(config.max_attempts > 0, "must have at least 1 attempt");
+    assert!(config.max_retries > 0, "must have at least 1 retry");
     assert!(
-        config.initial_delay > Duration::ZERO,
+        config.initial_delay_ms > 0,
         "initial delay must be positive"
     );
     assert!(
-        config.max_delay >= config.initial_delay,
+        config.max_delay_ms >= config.initial_delay_ms,
         "max delay must be >= initial"
     );
-    assert!(
-        config.backoff_multiplier >= 1.0,
-        "backoff multiplier must be >= 1.0"
-    );
+    assert!(config.jitter_enabled, "jitter should be enabled by default");
 }
 
 #[test]
 fn http_retry_config_serializes_to_json() {
     let config = HttpRetryConfig::default();
     let json = serde_json::to_value(&config).expect("serialize");
-    assert!(json.get("max_attempts").is_some());
-    assert!(json.get("backoff_multiplier").is_some());
+    assert!(json.get("max_retries").is_some());
+    assert!(json.get("initial_delay_ms").is_some());
+    assert!(json.get("max_delay_ms").is_some());
+    assert!(json.get("jitter_enabled").is_some());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

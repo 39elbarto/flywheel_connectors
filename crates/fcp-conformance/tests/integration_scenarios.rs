@@ -83,7 +83,7 @@ fn emit_scenario_log<E: Serialize>(
 /// - All nodes converge on same `AuditHead`
 /// - No duplicate operations executed
 /// - Gossip reconciliation completes
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn scenario_partition_heal_convergence() {
     let mut harness = TestHarness::new(3, 0xDEAD_BEEF);
     harness.start_all().expect("start all nodes");
@@ -153,7 +153,7 @@ async fn scenario_partition_heal_convergence() {
 
 /// Scenario: Split-Brain Prevention
 /// Both partitions attempt quorum ops, only one succeeds.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn scenario_split_brain_prevention() {
     let mut harness = TestHarness::new(5, 0xCAFE_BABE);
     harness.start_all().expect("start all nodes");
@@ -202,7 +202,7 @@ async fn scenario_split_brain_prevention() {
 /// Scenario: Stale Node Rejoins
 /// Node offline for longer than revocation freshness window must catch up
 /// before accepting operations.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn scenario_stale_node_rejoins() {
     let mut harness = TestHarness::new(3, 0x1234_5678);
     harness.start_all().expect("start all nodes");
@@ -255,7 +255,7 @@ async fn scenario_stale_node_rejoins() {
 
 /// Scenario: Graceful Shutdown
 /// Node announces shutdown, leases transferred, no operation loss.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn scenario_graceful_shutdown() {
     let mut harness = TestHarness::new(3, 0xABCD_EF01);
     harness.start_all().expect("start all nodes");
@@ -304,7 +304,7 @@ async fn scenario_graceful_shutdown() {
 /// - Incomplete `OperationIntent` is detected
 /// - No duplicate side effects
 /// - Lease is released after timeout
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn scenario_crash_recovery() {
     let mut harness = TestHarness::new(3, 0xFEED_FACE);
     harness.start_all().expect("start all nodes");
@@ -358,7 +358,7 @@ async fn scenario_crash_recovery() {
 
 /// Scenario: Multi-Node Failure
 /// Lose f nodes (within quorum tolerance), operations continue.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn scenario_multi_node_failure_within_tolerance() {
     // 5-node quorum: f = 2, so losing 2 nodes should still work
     let mut harness = TestHarness::new(5, 0x5AFE_5AFE);
@@ -403,7 +403,7 @@ async fn scenario_multi_node_failure_within_tolerance() {
 
 /// Scenario: Quorum Loss
 /// Lose more than f nodes, operations fail closed with clear error.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn scenario_quorum_loss() {
     // 5-node quorum: f = 2, so losing 3 nodes should halt operations
     let mut harness = TestHarness::new(5, 0xDEAD_C0DE);
@@ -456,7 +456,7 @@ async fn scenario_quorum_loss() {
 /// - Only one succeeds
 /// - Loser gets FCP-4320 (`LeaseConflict`)
 /// - Winner produces receipt
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn scenario_lease_contention() {
     let mut harness = TestHarness::new(3, 0xC0FF_EE42);
     harness.start_all().expect("start all nodes");
@@ -498,7 +498,7 @@ async fn scenario_lease_contention() {
 /// - Fork is detected
 /// - Audit event emitted
 /// - Operations paused pending resolution
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn scenario_state_fork_detection() {
     let mut harness = TestHarness::new(3, 0xF0F0_F0F0);
     harness.start_all().expect("start all nodes");
@@ -544,7 +544,7 @@ async fn scenario_state_fork_detection() {
 /// - Existing tokens from that issuer rejected within freshness window
 /// - New tokens cannot be issued
 /// - Audit trail shows revocation
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn scenario_issuer_key_revocation() {
     let mut harness = TestHarness::new(3, 0xBAD_0E11);
     harness.start_all().expect("start all nodes");
@@ -585,7 +585,7 @@ async fn scenario_issuer_key_revocation() {
 /// Revoke capability object, verify:
 /// - Tokens referencing revoked grant rejected
 /// - `DecisionReceipt` cites revocation as reason
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn scenario_capability_revocation() {
     let mut harness = TestHarness::new(3, 0xCA9_EE0CE);
     harness.start_all().expect("start all nodes");
@@ -627,7 +627,7 @@ async fn scenario_capability_revocation() {
 /// - Zone keys rotated
 /// - Removed node cannot issue tokens
 /// - Removed node cannot participate in gossip
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn scenario_node_removal() {
     let mut harness = TestHarness::new(3, 0x0FF_B0A8D);
     harness.start_all().expect("start all nodes");
@@ -677,7 +677,7 @@ async fn scenario_node_removal() {
 /// - In-flight operations complete with old key
 /// - New operations use new key
 /// - No operation loss
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn scenario_hot_key_rotation() {
     let mut harness = TestHarness::new(3, 0x0080_1A7E);
     harness.start_all().expect("start all nodes");
@@ -723,7 +723,7 @@ async fn scenario_hot_key_rotation() {
 /// Reduce symbol availability below threshold.
 /// - Operations that need those symbols report partial availability
 /// - Repair loop activates and improves coverage
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn scenario_degraded_symbol_availability() {
     let mut harness = TestHarness::new(3, 0x5CAFE);
     harness.start_all().expect("start all nodes");

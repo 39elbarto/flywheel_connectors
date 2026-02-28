@@ -519,7 +519,7 @@ mod tests {
         assert!(matches!(result, Err(BootstrapError::AlreadyExists { .. })));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_single_device_bootstrap() {
         let dir = tempdir().unwrap();
         let config = BootstrapConfig::builder()

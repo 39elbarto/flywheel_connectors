@@ -10,7 +10,7 @@
 #![allow(clippy::option_if_let_else)]
 #![allow(clippy::cast_possible_truncation)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::panic::{self, AssertUnwindSafe};
 use std::time::{Duration, Instant};
 
@@ -828,6 +828,157 @@ fn reconstruct_from_repair_symbols_only() {
                     "source_k": source_k,
                     "repair_only_count": repair_only.len(),
                     "reconstructed": success,
+                })),
+                ..StoreLogData::default()
+            }
+        },
+    );
+}
+
+/// Adversarial input: corrupted symbols must never yield a valid payload
+/// reconstruction, and decode should remain bounded by timeout budget.
+#[test]
+fn adversarial_corrupted_symbols_reject_valid_reconstruction() {
+    run_store_test(
+        "adversarial_corrupted_symbols_reject_valid_reconstruction",
+        "integration",
+        "adversarial",
+        3,
+        || async {
+            let config = RaptorQConfig {
+                decode_timeout: Duration::from_millis(100),
+                ..test_raptorq_config()
+            };
+            let payload = make_payload(640);
+            let object_id = test_object_id();
+
+            let (symbols, oti, source_k) = encode_payload(&payload, &config);
+            let source_only: Vec<_> = symbols
+                .iter()
+                .filter(|(esi, _)| *esi < source_k)
+                .cloned()
+                .collect();
+            assert!(!source_only.is_empty(), "source symbols should exist");
+
+            let corrupted_source: Vec<_> = source_only
+                .iter()
+                .map(|(esi, data)| {
+                    let mut corrupted = data.clone();
+                    if let Some(first) = corrupted.first_mut() {
+                        *first ^= 0xA5;
+                    }
+                    (*esi, corrupted)
+                })
+                .collect();
+
+            let store = MemorySymbolStore::new(MemorySymbolStoreConfig {
+                max_bytes: 1024 * 1024,
+                local_node_id: 1,
+            });
+            store_symbols(&store, object_id, oti, source_k, &corrupted_source, 1).await;
+
+            let all = store.get_all_symbols(&object_id).await;
+            let mut decoder = RaptorQDecoder::new(oti, &config);
+            let mut reconstructed = None;
+            for sym in &all {
+                if let Some(data) = decoder
+                    .add_symbol(sym.meta.esi, sym.data.to_vec())
+                    .expect("bounded adversarial decode should not timeout")
+                {
+                    reconstructed = Some(data);
+                    break;
+                }
+            }
+
+            let valid_reconstruction = reconstructed.as_ref().is_some_and(|d| *d == payload);
+            assert!(
+                !valid_reconstruction,
+                "corrupted symbol stream must not reconstruct original payload"
+            );
+            assert!(
+                !decoder.is_timed_out(),
+                "adversarial decode should complete within timeout budget"
+            );
+
+            StoreLogData {
+                object_id: Some(object_id),
+                object_size: Some(payload.len() as u64),
+                symbol_count: Some(
+                    u32::try_from(corrupted_source.len()).expect("symbol count fits in u32"),
+                ),
+                details: Some(json!({
+                    "source_k": source_k,
+                    "corrupted_symbols": corrupted_source.len(),
+                    "decode_budget_ms": config.decode_timeout.as_millis(),
+                    "received_unique": decoder.received_count(),
+                    "valid_reconstruction": valid_reconstruction,
+                })),
+                ..StoreLogData::default()
+            }
+        },
+    );
+}
+
+/// Adversarial delivery: reordered symbols with duplicates should still
+/// reconstruct, and duplicate ESIs must not inflate unique symbol accounting.
+#[test]
+fn adversarial_reordered_duplicate_symbols_reconstruct() {
+    run_store_test(
+        "adversarial_reordered_duplicate_symbols_reconstruct",
+        "integration",
+        "adversarial",
+        3,
+        || async {
+            let config = test_raptorq_config();
+            let payload = make_payload(640);
+
+            let (symbols, oti, _) = encode_payload(&payload, &config);
+            let unique_esis: HashSet<u32> = symbols.iter().map(|(esi, _)| *esi).collect();
+
+            let mut adversarial_stream = symbols;
+            adversarial_stream.reverse(); // reorder
+            let duplicate_tail: Vec<_> = adversarial_stream.iter().take(3).cloned().collect();
+            adversarial_stream.extend(duplicate_tail); // duplicate ESIs
+
+            let mut decoder = RaptorQDecoder::new(oti, &config);
+            let mut reconstructed = None;
+            for (esi, data) in adversarial_stream {
+                if let Some(payload) = decoder
+                    .add_symbol(esi, data)
+                    .expect("decode should stay within budget")
+                {
+                    reconstructed = Some(payload);
+                    break;
+                }
+            }
+
+            let reconstructed_payload =
+                reconstructed.expect("reordered + duplicate stream should reconstruct");
+            assert_eq!(
+                reconstructed_payload, payload,
+                "decoded payload must match original"
+            );
+
+            let unique_count =
+                u32::try_from(unique_esis.len()).expect("unique symbol count fits in u32");
+            assert!(
+                decoder.received_count() <= unique_count,
+                "duplicate ESIs should not increase unique count"
+            );
+            assert!(
+                !decoder.is_timed_out(),
+                "decode should finish within configured budget"
+            );
+
+            StoreLogData {
+                object_size: Some(payload.len() as u64),
+                symbol_count: Some(unique_count),
+                details: Some(json!({
+                    "decode_budget_ms": config.decode_timeout.as_millis(),
+                    "unique_symbols": unique_count,
+                    "received_unique": decoder.received_count(),
+                    "reordered": true,
+                    "duplicates_injected": 3,
                 })),
                 ..StoreLogData::default()
             }

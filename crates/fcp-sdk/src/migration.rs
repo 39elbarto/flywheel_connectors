@@ -57,9 +57,9 @@
 //! - [ ] `cargo check --workspace --all-targets` passes.
 //! - [ ] `cargo clippy --workspace --all-targets` passes.
 //!
-//! # Reference Migration: OpenAI Connector
+//! # Reference Migration: `OpenAI` Connector
 //!
-//! Below is a condensed before/after showing how the OpenAI connector's
+//! Below is a condensed before/after showing how the `OpenAI` connector's
 //! `post()` method migrates from hand-rolled retry to this framework.
 //!
 //! ## Before (hand-rolled retry loop)
@@ -230,7 +230,7 @@ use crate::retry::{RetryDecision, RetryPolicy};
 /// // On shutdown:
 /// runtime.shutdown();
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ConnectorRuntime {
     config: ConnectorRuntimeConfig,
     background_ctx: ExecutionContext,

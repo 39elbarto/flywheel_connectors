@@ -106,7 +106,7 @@ impl GraphqlSubscriptionClient {
             "operationName": O::OPERATION_NAME,
             "variables": variables,
         });
-        let mut connection = establish_subscription(
+        let connection = establish_subscription(
             &client,
             &self.service_name,
             self.config.init_payload.clone(),
@@ -126,7 +126,7 @@ impl GraphqlSubscriptionClient {
             let mut reconnect_handler = ReconnectHandler::new(reconnect_config);
             loop {
                 fcp_async_core::select! {
-                    _ = tx.closed() => {
+                    () = tx.closed() => {
                         send_complete_and_close(&mut conn).await;
                         break;
                     }

@@ -528,10 +528,12 @@ mod tests {
         let raw = include_str!("../../../tests/vectors/manifest/manifest_valid.toml");
         let materialized = with_computed_interface_hash(raw);
         let report = StaticCompliance::run_manifest(&materialized);
-        assert!(report
-            .findings
-            .iter()
-            .all(|f| f.check == "manifest.parse_validate"));
+        assert!(
+            report
+                .findings
+                .iter()
+                .all(|f| f.check == "manifest.parse_validate")
+        );
     }
 
     // ── DynamicSuite tests ──
@@ -638,9 +640,9 @@ mod tests {
 
     use fcp_core::{
         ConnectorId, ConnectorMetrics, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-        HealthSnapshot, HealthState, Introspection, InvokeRequest, InvokeResponse,
-        RequestId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
-        SubscribeResponse, SubscribeResult, UnsubscribeRequest,
+        HealthSnapshot, HealthState, Introspection, InvokeRequest, InvokeResponse, RequestId,
+        ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
+        SubscribeResult, UnsubscribeRequest,
     };
 
     struct MockConnector {
@@ -787,7 +789,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn dynamic_healthy_connector_passes() {
         let mut connector = MockConnector::healthy();
         let suite = DynamicSuite::minimal(make_handshake());
@@ -795,51 +797,72 @@ mod tests {
         assert!(result.passed);
         // Should have: configure, handshake, introspect, health
         assert_eq!(result.findings.len(), 4);
-        assert!(result.findings.iter().all(|f| f.status == CheckStatus::Pass));
+        assert!(
+            result
+                .findings
+                .iter()
+                .all(|f| f.status == CheckStatus::Pass)
+        );
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn dynamic_configure_failure_reported() {
         let mut connector = MockConnector::failing_configure();
         let suite = DynamicSuite::minimal(make_handshake());
         let result = run_dynamic_checks(&mut connector, suite).await;
         assert!(!result.passed);
-        let configure_finding = result.findings.iter().find(|f| f.check == "configure").unwrap();
+        let configure_finding = result
+            .findings
+            .iter()
+            .find(|f| f.check == "configure")
+            .unwrap();
         assert_eq!(configure_finding.status, CheckStatus::Fail);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn dynamic_handshake_rejection_reported() {
         let mut connector = MockConnector::failing_handshake();
         let suite = DynamicSuite::minimal(make_handshake());
         let result = run_dynamic_checks(&mut connector, suite).await;
         assert!(!result.passed);
-        let hs_finding = result.findings.iter().find(|f| f.check == "handshake").unwrap();
+        let hs_finding = result
+            .findings
+            .iter()
+            .find(|f| f.check == "handshake")
+            .unwrap();
         assert_eq!(hs_finding.status, CheckStatus::Fail);
         assert!(hs_finding.message.contains("rejected"));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn dynamic_unhealthy_connector_reported() {
         let mut connector = MockConnector::unhealthy();
         let suite = DynamicSuite::minimal(make_handshake());
         let result = run_dynamic_checks(&mut connector, suite).await;
         assert!(!result.passed);
-        let health_finding = result.findings.iter().find(|f| f.check == "health").unwrap();
+        let health_finding = result
+            .findings
+            .iter()
+            .find(|f| f.check == "health")
+            .unwrap();
         assert_eq!(health_finding.status, CheckStatus::Fail);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn dynamic_introspect_always_passes() {
         let mut connector = MockConnector::healthy();
         let suite = DynamicSuite::minimal(make_handshake());
         let result = run_dynamic_checks(&mut connector, suite).await;
-        let intro_finding = result.findings.iter().find(|f| f.check == "introspect").unwrap();
+        let intro_finding = result
+            .findings
+            .iter()
+            .find(|f| f.check == "introspect")
+            .unwrap();
         assert_eq!(intro_finding.status, CheckStatus::Pass);
         assert!(intro_finding.message.contains("operations=0"));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn dynamic_findings_have_correct_check_ids() {
         let mut connector = MockConnector::healthy();
         let suite = DynamicSuite::minimal(make_handshake());

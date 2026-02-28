@@ -1115,6 +1115,35 @@ impl MeshGossip {
     pub fn peer_count(&self) -> usize {
         self.peer_states.len()
     }
+
+    /// Remove peer states that have gone stale.
+    ///
+    /// This is used by integration/e2e flows to model peer leave/partition
+    /// recovery with bounded gossip state.
+    ///
+    /// Returns the number of peer entries removed.
+    pub fn prune_stale_peers(&mut self, now: u64) -> usize {
+        let ttl_secs = self.config.summary_ttl_secs;
+        let mut removed = 0usize;
+
+        self.peer_states.retain(|peer_id, state| {
+            let stale = state.is_stale(now, ttl_secs);
+            if stale {
+                removed += 1;
+                warn!(
+                    component = "mesh.gossip",
+                    event = "peer_pruned",
+                    peer_id = %peer_id.as_str(),
+                    ttl_seconds = ttl_secs,
+                    age_seconds = now.saturating_sub(state.last_updated),
+                    failed_attempts = state.failed_attempts()
+                );
+            }
+            !stale
+        });
+
+        removed
+    }
 }
 
 /// Gossip statistics.
@@ -1480,6 +1509,51 @@ mod tests {
         };
 
         gossip.handle_summary(summary, 1000);
+        assert_eq!(gossip.peer_count(), 1);
+    }
+
+    #[test]
+    fn mesh_gossip_prunes_stale_peers() {
+        let config = GossipConfig {
+            summary_ttl_secs: 10,
+            ..GossipConfig::default()
+        };
+        let mut gossip = MeshGossip::new(test_node("local"), config);
+
+        let initial_summary = GossipSummary {
+            from: test_node("peer-1"),
+            zone_id: test_zone(),
+            epoch_id: test_epoch(),
+            object_filter_digest: [0; 32],
+            symbol_filter_digest: [0; 32],
+            object_count: 1,
+            symbol_count: 1,
+            iblt: vec![],
+            timestamp: 100,
+            signature: None,
+        };
+
+        gossip.handle_summary(initial_summary, 100);
+        assert_eq!(gossip.peer_count(), 1);
+
+        let removed = gossip.prune_stale_peers(111);
+        assert_eq!(removed, 1);
+        assert_eq!(gossip.peer_count(), 0);
+
+        let fresh_summary = GossipSummary {
+            from: test_node("peer-1"),
+            zone_id: test_zone(),
+            epoch_id: test_epoch(),
+            object_filter_digest: [1; 32],
+            symbol_filter_digest: [2; 32],
+            object_count: 2,
+            symbol_count: 2,
+            iblt: vec![],
+            timestamp: 112,
+            signature: None,
+        };
+
+        gossip.handle_summary(fresh_summary, 112);
         assert_eq!(gossip.peer_count(), 1);
     }
 

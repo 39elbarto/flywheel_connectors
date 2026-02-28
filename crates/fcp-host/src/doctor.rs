@@ -325,8 +325,7 @@ mod tests {
     // ── Mock Registry ──
 
     struct TestRegistry {
-        self_check_fn:
-            Box<dyn Fn(&ConnectorId) -> Option<SelfCheckReport> + Send + Sync>,
+        self_check_fn: Box<dyn Fn(&ConnectorId) -> Option<SelfCheckReport> + Send + Sync>,
     }
 
     impl TestRegistry {
@@ -352,7 +351,12 @@ mod tests {
 
         fn degraded() -> Self {
             Self {
-                self_check_fn: Box::new(|_| Some(SelfCheckReport::degraded("test_degraded", "degraded reason"))),
+                self_check_fn: Box::new(|_| {
+                    Some(SelfCheckReport::degraded(
+                        "test_degraded",
+                        "degraded reason",
+                    ))
+                }),
             }
         }
     }

@@ -353,7 +353,7 @@ fn test_base_connector_mixed_recording() {
 // FcpConnector Trait Tests
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_minimal_connector_lifecycle() {
     let mut connector = MinimalConnector::new();
 
@@ -395,7 +395,7 @@ fn test_self_check_report_from_error() {
     assert_eq!(report.reason_code.as_deref(), Some("FCP-5002"));
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_connector_invoke() {
     let connector = MinimalConnector::new();
 
@@ -424,7 +424,7 @@ async fn test_connector_invoke() {
     assert_eq!(response.status, InvokeStatus::Ok);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_connector_simulate() {
     let connector = MinimalConnector::new();
 
@@ -449,7 +449,7 @@ async fn test_connector_simulate() {
     assert!(response.would_succeed);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_connector_introspect() {
     let connector = MinimalConnector::new();
 
@@ -463,7 +463,7 @@ async fn test_connector_introspect() {
 // Streaming Connector Tests
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_streaming_connector_handshake_includes_event_caps() {
     let mut connector = StreamingConnector::new();
 
@@ -480,7 +480,7 @@ async fn test_streaming_connector_handshake_includes_event_caps() {
     assert_eq!(caps.min_buffer_events, 100);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_streaming_connector_introspect_includes_events() {
     let connector = StreamingConnector::new();
 
@@ -497,7 +497,7 @@ async fn test_streaming_connector_introspect_includes_events() {
     assert!(topics.contains(&"events.created"));
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_streaming_connector_subscribe() {
     let connector = StreamingConnector::new();
 

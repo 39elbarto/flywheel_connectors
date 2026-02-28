@@ -421,7 +421,7 @@ mod tests {
         assert_eq!(eval.snapshot.budgets[0].status, BudgetStatus::Exceeded);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn budget_policy_engine_denies_on_exceeded_preflight() {
         let engine = BudgetPolicyEngine::new();
         let zone = ZoneId::work();

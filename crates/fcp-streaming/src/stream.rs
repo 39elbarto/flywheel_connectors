@@ -278,7 +278,7 @@ mod tests {
     use futures_util::stream::{self, StreamExt as _};
     use tokio::pin;
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_counting_stream() {
         let stream = stream::iter(vec![1, 2, 3, 4, 5]);
         let mut counting = CountingStream::new(stream);
@@ -290,7 +290,7 @@ mod tests {
         assert_eq!(counting.items_count(), 5);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_timeout_stream_success() {
         let stream = stream::iter(vec![1, 2, 3]);
         let timeout_stream = TimeoutStream::new(stream, Duration::from_secs(1));
@@ -306,7 +306,7 @@ mod tests {
 
     // ── New tests ──
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_counting_stream_empty() {
         let stream = stream::empty::<i32>();
         let mut counting = CountingStream::new(stream);
@@ -314,7 +314,7 @@ mod tests {
         assert_eq!(counting.items_count(), 0);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_counting_stream_increments() {
         let stream = stream::iter(vec![10, 20]);
         let mut counting = CountingStream::new(stream);
@@ -326,7 +326,7 @@ mod tests {
         assert_eq!(counting.items_count(), 2);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_rate_limited_stream() {
         let stream = stream::iter(vec![1, 2, 3]);
         let rate_limited = RateLimitedStream::new(stream, Duration::from_millis(1));
@@ -339,7 +339,7 @@ mod tests {
         assert_eq!(results, vec![1, 2, 3]);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_stream_ext_with_timeout() {
         let stream = stream::iter(vec![1, 2, 3]);
         let timeout_stream = super::StreamExt::with_timeout(stream, Duration::from_secs(1));
@@ -352,7 +352,7 @@ mod tests {
         assert_eq!(results, vec![1, 2, 3]);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_timeout_stream_empty() {
         let stream = stream::empty::<i32>();
         let timeout_stream = TimeoutStream::new(stream, Duration::from_secs(1));

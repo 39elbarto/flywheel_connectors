@@ -1,0 +1,16 @@
+[package]
+name = "fcp-async-core"
+description = "Shared async runtime substrate for FCP crates"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio = { workspace = true, features = ["full"] }
+thiserror.workspace = true

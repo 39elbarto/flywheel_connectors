@@ -6,6 +6,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
+use fcp_async_core::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use fcp_async_core::net::TcpListener;
+use fcp_async_core::process::{Child, ChildStdin, ChildStdout, Command};
+use fcp_async_core::sync::Mutex;
+use fcp_async_core::task::{self, JoinHandle};
 use fcp_core::{
     ConnectorHealth, ConnectorId, HealthSnapshot, Introspection, RequestId, SafetyTier,
     SelfCheckReport,
@@ -17,10 +22,6 @@ use fcp_host::{
 use fcp_host::{HostError, HostResult};
 use serde::Deserialize;
 use serde_json::json;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-use tokio::sync::Mutex;
-use tokio::task::JoinHandle;
 
 #[derive(Debug, Deserialize)]
 struct ConnectorConfig {
@@ -253,7 +254,7 @@ impl ConnectorProcessRunner {
             .take()
             .ok_or_else(|| std::io::Error::other("connector stderr unavailable"))?;
 
-        let stderr_task = tokio::spawn(async move {
+        let stderr_task = task::spawn(async move {
             let mut reader = BufReader::new(stderr);
             let mut line = String::new();
             loop {
@@ -339,7 +340,7 @@ fn resolve_self_check_timeout() -> HostResult<Option<Duration>> {
     Ok(Some(Duration::from_millis(millis)))
 }
 
-#[tokio::main]
+#[fcp_async_core::runtime::main]
 async fn main() -> HostResult<()> {
     let addr: SocketAddr = std::env::var("FCP_HOST_BIND")
         .unwrap_or_else(|_| "127.0.0.1:9090".to_string())
@@ -361,7 +362,7 @@ async fn main() -> HostResult<()> {
         .route("/doctor", post(doctor_handler::<SubprocessRegistry>))
         .with_state(service);
 
-    let listener = tokio::net::TcpListener::bind(addr)
+    let listener = TcpListener::bind(addr)
         .await
         .map_err(|err| HostError::Internal(format!("bind error: {err}")))?;
 

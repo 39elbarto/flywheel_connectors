@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/fcp-async-core",
     "crates/fcp-audit",
     "crates/fcp-bootstrap",
     "crates/fcp-cbor",
@@ -36,6 +37,7 @@ members = [
 
 # Default to the FCP2 platform core crates (connectors are explicitly targeted).
 default-members = [
+    "crates/fcp-async-core",
     "crates/fcp-audit",
     "crates/fcp-bootstrap",
     "crates/fcp-cbor",
@@ -146,6 +148,7 @@ sigstore-trust-root = { version = "0.6", features = ["tuf"] }
 url = "2.5"
 
 # Internal crates
+fcp-async-core = { path = "crates/fcp-async-core" }
 fcp-audit = { path = "crates/fcp-audit" }
 fcp-bootstrap = { path = "crates/fcp-bootstrap" }
 fcp-cbor = { path = "crates/fcp-cbor" }

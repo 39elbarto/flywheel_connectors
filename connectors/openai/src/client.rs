@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
+use fcp_async_core::time::sleep;
 use fcp_core::CredentialId;
 use futures_util::StreamExt;
 use reqwest::{Client, Response, StatusCode};
@@ -325,7 +326,7 @@ impl OpenAIClient {
                             error = %e,
                             "Retrying OpenAI API request"
                         );
-                        tokio::time::sleep(delay).await;
+                        sleep(delay).await;
                         delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
                     }
                     Err(e) => return Err(e),
@@ -338,7 +339,7 @@ impl OpenAIClient {
                             error = %e,
                             "Retrying after connection error"
                         );
-                        tokio::time::sleep(delay).await;
+                        sleep(delay).await;
                         delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
                     } else {
                         return Err(OpenAIError::Http(e));

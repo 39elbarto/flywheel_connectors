@@ -8,7 +8,7 @@ use reqwest::Client;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn retry_policy_example_with_wiremock() {
     let server = MockServer::start().await;
 

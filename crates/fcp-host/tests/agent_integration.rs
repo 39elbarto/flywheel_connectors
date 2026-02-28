@@ -150,7 +150,7 @@ fn make_operation(id: &str) -> OperationInfo {
     }
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn introspection_includes_required_fields_for_agents() {
     let start = Instant::now();
     let capture = LogCapture::new();

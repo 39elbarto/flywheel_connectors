@@ -4,9 +4,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use fcp_async_core::time::timeout;
 use fcp_core::{ConnectorId, SelfCheckReport, SelfCheckStatus, ZoneId};
 use serde::{Deserialize, Serialize};
-use tokio::time::timeout;
 
 use crate::{ConnectorRegistry, HostError, HostResult};
 

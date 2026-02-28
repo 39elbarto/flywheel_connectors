@@ -1178,7 +1178,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn discovery_cache_reuses_within_ttl() {
         let calls = Arc::new(AtomicUsize::new(0));
         let summary = make_summary(
@@ -1199,7 +1199,7 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn discovery_cache_refreshes_when_expired() {
         let calls = Arc::new(AtomicUsize::new(0));
         let summary = make_summary(
@@ -1219,7 +1219,7 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn discovery_endpoint_invalidate_cache_forces_refresh() {
         let calls = Arc::new(AtomicUsize::new(0));
         let summary = make_summary(
@@ -1247,7 +1247,7 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn discovery_endpoint_introspect_missing_connector() {
         let calls = Arc::new(AtomicUsize::new(0));
         let registry = CountingRegistry::new(vec![], Arc::clone(&calls));
@@ -1258,7 +1258,7 @@ mod tests {
         assert!(matches!(err, HostError::ConnectorNotFound(_)));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn discovery_endpoint_defaults_archetype() {
         let calls = Arc::new(AtomicUsize::new(0));
         let summary = make_summary(
@@ -1276,7 +1276,7 @@ mod tests {
         assert_eq!(response.archetype, ConnectorArchetype::RequestResponse);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn discovery_endpoint_self_check_missing_connector() {
         let calls = Arc::new(AtomicUsize::new(0));
         let registry = CountingRegistry::new(vec![], Arc::clone(&calls));
@@ -1287,7 +1287,7 @@ mod tests {
         assert!(matches!(err, HostError::ConnectorNotFound(_)));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn discovery_endpoint_self_check_ok() {
         let calls = Arc::new(AtomicUsize::new(0));
         let summary = make_summary(
@@ -1306,7 +1306,7 @@ mod tests {
         assert_eq!(response.report.status, SelfCheckStatus::Ok);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn discovery_endpoint_preflight_passthrough() {
         let calls = Arc::new(AtomicUsize::new(0));
         let registry = CountingRegistry::new(vec![], Arc::clone(&calls));
@@ -1651,7 +1651,7 @@ mod tests {
     // Endpoint: discover with strict filter returns empty
     // ─────────────────────────────────────────────────────────────────────────
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn discovery_endpoint_discover_all_filtered_out() {
         let calls = Arc::new(AtomicUsize::new(0));
         let summary = make_summary(
@@ -1677,7 +1677,7 @@ mod tests {
         assert_eq!(response.registry_version, 1);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn discovery_endpoint_discover_no_filter_returns_all() {
         let calls = Arc::new(AtomicUsize::new(0));
         let s1 = make_summary(

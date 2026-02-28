@@ -249,7 +249,7 @@ impl FcpConnector for MockConnector {
 // Standard Method Signature Tests
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_invoke_method_signature_correct() {
     let connector = MockConnector::new("test:mock:v1");
     let req = test_invoke_request("test:mock:v1", "test.operation");
@@ -263,7 +263,7 @@ async fn test_invoke_method_signature_correct() {
     assert_eq!(connector.invoke_count(), 1);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_simulate_method_signature_correct() {
     let connector = MockConnector::new("test:mock:v1");
     let req = test_simulate_request("test:mock:v1", "test.operation");
@@ -276,7 +276,7 @@ async fn test_simulate_method_signature_correct() {
     assert_eq!(connector.simulate_count(), 1);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_subscribe_method_signature_correct() {
     let connector = MockConnector::new("test:mock:v1");
     let req = test_subscribe_request();
@@ -289,7 +289,7 @@ async fn test_subscribe_method_signature_correct() {
     assert_eq!(connector.subscribe_count(), 1);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_introspect_returns_correct_schema() {
     let connector = MockConnector::new("test:mock:v1");
 
@@ -304,7 +304,7 @@ async fn test_introspect_returns_correct_schema() {
 // Lifecycle Tests
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_connector_lifecycle_configure_then_handshake() {
     let mut connector = MockConnector::new("test:lifecycle:v1");
 
@@ -326,7 +326,7 @@ async fn test_connector_lifecycle_configure_then_handshake() {
     assert!(connector.base.check_ready().is_ok());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_connector_health_check() {
     let connector = MockConnector::new("test:health:v1");
 
@@ -335,7 +335,7 @@ async fn test_connector_health_check() {
     assert!(health.is_ready());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_connector_health_check_unhealthy() {
     let connector = MockConnector::new("test:health:v1").with_failure();
 
@@ -344,7 +344,7 @@ async fn test_connector_health_check_unhealthy() {
     assert!(!health.is_healthy());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_connector_metrics_tracking() {
     let connector = MockConnector::new("test:metrics:v1");
 
@@ -368,7 +368,7 @@ async fn test_connector_metrics_tracking() {
 // Error Handling Tests
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_invoke_error_handling() {
     let connector = MockConnector::new("test:error:v1").with_failure();
     let req = test_invoke_request("test:error:v1", "test.operation");
@@ -380,7 +380,7 @@ async fn test_invoke_error_handling() {
     assert!(matches!(err, FcpError::Internal { .. }));
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_configure_error_handling() {
     let mut connector = MockConnector::new("test:error:v1").with_failure();
 
@@ -389,7 +389,7 @@ async fn test_configure_error_handling() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_handshake_error_handling() {
     let mut connector = MockConnector::new("test:error:v1").with_failure();
 
@@ -400,7 +400,7 @@ async fn test_handshake_error_handling() {
     assert!(matches!(err, FcpError::Unauthorized { .. }));
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_subscribe_error_handling() {
     let connector = MockConnector::new("test:error:v1").with_failure();
     let req = test_subscribe_request();
@@ -416,7 +416,7 @@ async fn test_subscribe_error_handling() {
 // Simulate with CostEstimate Tests
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_simulate_with_cost_estimate() {
     let connector = MockConnector::new("test:cost:v1");
     let mut req = test_simulate_request("test:cost:v1", "test.operation");
@@ -432,7 +432,7 @@ async fn test_simulate_with_cost_estimate() {
     assert_eq!(cost.api_credits, Some(10));
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_simulate_with_availability_check() {
     let connector = MockConnector::new("test:avail:v1");
     let mut req = test_simulate_request("test:avail:v1", "test.operation");
@@ -449,7 +449,7 @@ async fn test_simulate_with_availability_check() {
     assert_eq!(avail.rate_limit_remaining, Some(100));
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_simulate_denied_returns_reason() {
     let connector = MockConnector::new("test:denied:v1").with_failure();
     let req = test_simulate_request("test:denied:v1", "test.operation");

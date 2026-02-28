@@ -242,7 +242,7 @@ fn build_invoke_request(connector_id: ConnectorId) -> (InvokeRequest, Correlatio
     (request, correlation_id)
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn host_discovery_with_subprocess_connectors() -> Result<(), Box<dyn std::error::Error>> {
     let connector_a_id = ConnectorId::from_static("fcp.test.echo:utility:1.0.0");
     let connector_b_id = ConnectorId::from_static("fcp.test.ping:utility:1.0.0");

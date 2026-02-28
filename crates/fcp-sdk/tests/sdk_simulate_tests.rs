@@ -168,7 +168,7 @@ impl FcpConnector for WriteDetectingConnector {
 // Core Simulate Tests
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_simulate_never_calls_write() {
     let connector = WriteDetectingConnector::new();
     let req = test_simulate_request("db.insert");
@@ -188,7 +188,7 @@ async fn test_simulate_never_calls_write() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_invoke_does_call_write() {
     let connector = WriteDetectingConnector::new();
     let req = fcp_sdk::InvokeRequest {
@@ -220,7 +220,7 @@ async fn test_invoke_does_call_write() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_cost_estimate_deterministic() {
     let connector = WriteDetectingConnector::new();
 
@@ -241,7 +241,7 @@ async fn test_cost_estimate_deterministic() {
     assert_eq!(cost1.estimated_bytes, cost2.estimated_bytes);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_cost_estimate_varies_with_input() {
     let connector = WriteDetectingConnector::new();
 
@@ -265,7 +265,7 @@ async fn test_cost_estimate_varies_with_input() {
     assert!(cost_large.api_credits > cost_small.api_credits);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_availability_check_returns_rate_limit_info() {
     let connector = WriteDetectingConnector::new();
 
@@ -385,7 +385,7 @@ impl FcpConnector for CapabilityCheckingConnector {
     }
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_simulate_reports_missing_capabilities() {
     let connector = CapabilityCheckingConnector::new(vec!["email.send", "email.read"]);
 
@@ -419,7 +419,7 @@ async fn test_simulate_reports_missing_capabilities() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_simulate_missing_capabilities_ordering_stable() {
     let connector = CapabilityCheckingConnector::new(vec!["b.cap", "a.cap", "c.cap"]);
 
@@ -539,7 +539,7 @@ impl FcpConnector for TimeoutConnector {
     }
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_simulate_timeout_no_secret_leak() {
     let connector = TimeoutConnector::new();
 
@@ -680,7 +680,7 @@ impl FcpConnector for PolicyConnector {
     }
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_simulate_policy_denied_for_restricted_path() {
     let connector = PolicyConnector::new(vec!["/sensitive/", "/secrets/"]);
 
@@ -708,7 +708,7 @@ async fn test_simulate_policy_denied_for_restricted_path() {
     assert_eq!(result.denial_code, Some("FCP-4002".to_string()));
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_simulate_policy_allowed_for_safe_path() {
     let connector = PolicyConnector::new(vec!["/sensitive/", "/secrets/"]);
 

@@ -292,7 +292,7 @@ mod tests {
         assert_eq!(handler.attempts(), 0);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_with_retry_success() {
         let config = ReconnectConfig::new().with_max_attempts(3);
         let mut attempts = 0;
@@ -313,7 +313,7 @@ mod tests {
         assert_eq!(attempts, 2);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_with_retry_exhausted() {
         let config = ReconnectConfig::new()
             .with_max_attempts(2)
@@ -381,7 +381,7 @@ mod tests {
         assert_eq!(handler.config().max_attempts, Some(7));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_wait_for_reconnect_exhausted() {
         let config = ReconnectConfig::new()
             .with_max_attempts(0)
@@ -395,7 +395,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_wait_for_reconnect_increments_attempts() {
         let config = ReconnectConfig::new()
             .with_max_attempts(3)

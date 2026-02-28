@@ -33,8 +33,8 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use fcp_async_core::channel::{mpsc, watch};
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
 
 #[cfg(feature = "cursor-store-object-store")]
 use fcp_cbor::CanonicalSerializer;
@@ -852,28 +852,9 @@ impl ObjectStoreCursorBackend {
     fn block_on_store<T>(
         fut: impl std::future::Future<Output = Result<T, fcp_store::ObjectStoreError>>,
     ) -> Result<T, CursorStoreError> {
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
-                return tokio::task::block_in_place(|| handle.block_on(fut))
-                    .map_err(|err| CursorStoreError::Storage(err.to_string()));
-            }
-        } else {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|err| CursorStoreError::Storage(err.to_string()))?;
-            return runtime
-                .block_on(fut)
-                .map_err(|err| CursorStoreError::Storage(err.to_string()));
-        }
-
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|err| CursorStoreError::Storage(err.to_string()))?;
-        runtime
-            .block_on(fut)
+        fcp_async_core::runtime::block_on_sync(fut)
             .map_err(|err| CursorStoreError::Storage(err.to_string()))
+            .and_then(|result| result.map_err(|err| CursorStoreError::Storage(err.to_string())))
     }
 
     fn decode_state_object(
@@ -1281,7 +1262,7 @@ pub struct StreamingConnection<E> {
     /// Stream of events emitted by the connection.
     pub events: mpsc::Receiver<E>,
     /// Join handle for the underlying stream task.
-    pub join_handle: tokio::task::JoinHandle<Result<(), StreamingError>>,
+    pub join_handle: fcp_async_core::task::JoinHandle<Result<(), StreamingError>>,
 }
 
 /// Statistics from a streaming supervisor run.
@@ -1455,7 +1436,7 @@ impl<S: StreamingSession> StreamingSupervisor<S> {
     #[allow(clippy::too_many_lines)]
     pub async fn run<E, ConnectF, ConnectFut, HandleF, HandleFut>(
         &mut self,
-        mut shutdown: tokio::sync::watch::Receiver<bool>,
+        mut shutdown: watch::Receiver<bool>,
         connect_fn: ConnectF,
         mut handle_event: HandleF,
     ) -> SupervisorOutcome
@@ -1552,8 +1533,8 @@ impl<S: StreamingSession> StreamingSupervisor<S> {
                     self.stats.backoff_time_ms +=
                         u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
 
-                    tokio::select! {
-                        () = tokio::time::sleep(delay) => {}
+                    fcp_async_core::select! {
+                        () = fcp_async_core::time::sleep(delay) => {}
                         _ = shutdown.changed() => {
                             if *shutdown.borrow() {
                                 let (heartbeat_seq, ack_seq, missed_heartbeats, reconnect_count) =
@@ -1579,14 +1560,16 @@ impl<S: StreamingSession> StreamingSupervisor<S> {
 
             let mut events = connection.events;
             let mut join_handle = connection.join_handle;
-            let mut heartbeat_interval =
-                self.config.heartbeat_interval().map(tokio::time::interval);
+            let mut heartbeat_interval = self
+                .config
+                .heartbeat_interval()
+                .map(fcp_async_core::time::interval);
 
             let mut exit_message = "stream ended".to_string();
             let mut exit_fatal = false;
 
             loop {
-                tokio::select! {
+                fcp_async_core::select! {
                     _ = shutdown.changed() => {
                         if *shutdown.borrow() {
                             let (heartbeat_seq, ack_seq, missed_heartbeats, reconnect_count) =
@@ -1706,8 +1689,8 @@ impl<S: StreamingSession> StreamingSupervisor<S> {
             let delay = self.compute_backoff_delay(consecutive_failures - 1);
             self.stats.backoff_time_ms += u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
 
-            tokio::select! {
-                () = tokio::time::sleep(delay) => {}
+            fcp_async_core::select! {
+                () = fcp_async_core::time::sleep(delay) => {}
                 _ = shutdown.changed() => {
                     if *shutdown.borrow() {
                         if let Err(e) = self.session.persist() {
@@ -1826,7 +1809,7 @@ pub struct PollingSupervisorStats {
 ///
 /// ```ignore
 /// use fcp_sdk::runtime::{PollingSupervisor, PollResult, SupervisorConfig, InMemoryPollingCursor};
-/// use tokio::sync::watch;
+/// use fcp_async_core::channel::watch;
 ///
 /// let config = SupervisorConfig::default();
 /// let cursor = InMemoryPollingCursor::new();
@@ -1934,7 +1917,7 @@ impl<C: PollingCursor> PollingSupervisor<C> {
     #[allow(clippy::too_many_lines)]
     pub async fn run<T, F, Fut, P>(
         &mut self,
-        mut shutdown: tokio::sync::watch::Receiver<bool>,
+        mut shutdown: watch::Receiver<bool>,
         poll_interval_ms: u64,
         poll_fn: F,
         mut process_fn: P,
@@ -2008,8 +1991,8 @@ impl<C: PollingCursor> PollingSupervisor<C> {
                     );
 
                     // Wait for poll interval, checking for shutdown
-                    tokio::select! {
-                        () = tokio::time::sleep(poll_interval) => {}
+                    fcp_async_core::select! {
+                        () = fcp_async_core::time::sleep(poll_interval) => {}
                         _ = shutdown.changed() => {
                             if *shutdown.borrow() {
                                 if let Err(e) = self.cursor.persist() {
@@ -2066,8 +2049,8 @@ impl<C: PollingCursor> PollingSupervisor<C> {
                     );
 
                     // Wait for backoff, checking for shutdown
-                    tokio::select! {
-                        () = tokio::time::sleep(delay) => {}
+                    fcp_async_core::select! {
+                        () = fcp_async_core::time::sleep(delay) => {}
                         _ = shutdown.changed() => {
                             if *shutdown.borrow() {
                                 if let Err(e) = self.cursor.persist() {
@@ -2478,7 +2461,7 @@ mod tests {
     // StreamingSupervisor tests
     // ─────────────────────────────────────────────────────────────────────────
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn streaming_supervisor_shutdown_signal() {
         let config = SupervisorConfig::default();
         let session = InMemoryStreamingSession::new();
@@ -2498,7 +2481,7 @@ mod tests {
         assert!(matches!(outcome, SupervisorOutcome::Shutdown));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn streaming_supervisor_restores_and_persists_on_shutdown() {
         let config = SupervisorConfig::default();
         let session = TestStreamingSession::default();
@@ -2520,7 +2503,7 @@ mod tests {
         assert_eq!(supervisor.session().persist_calls(), 1);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn streaming_supervisor_max_failures() {
         let config = SupervisorConfig::default()
             .with_max_consecutive_failures(2)
@@ -2544,7 +2527,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn streaming_supervisor_persists_on_max_failures() {
         let config = SupervisorConfig::default()
             .with_max_consecutive_failures(1)
@@ -2570,7 +2553,7 @@ mod tests {
         assert_eq!(supervisor.session().persist_calls(), 1);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn streaming_supervisor_fatal_event_handler() {
         let config = SupervisorConfig::default().with_base_backoff_ms(1);
         let session = InMemoryStreamingSession::new();
@@ -2600,7 +2583,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn streaming_supervisor_heartbeat_timeout_transitions_and_logs() {
         let config = SupervisorConfig {
             heartbeat_interval_ms: 10,
@@ -2667,7 +2650,7 @@ mod tests {
         assert_eq!(log["reconnect_count"], 0);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn streaming_supervisor_resume_fallback_to_full_connect() {
         let config = SupervisorConfig::default()
             .with_base_backoff_ms(1)
@@ -2806,7 +2789,7 @@ mod tests {
         assert_eq!(stats.backoff_time_ms, 0);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn polling_supervisor_shutdown_signal() {
         let config = SupervisorConfig::default();
         let cursor = InMemoryPollingCursor::new();
@@ -2827,7 +2810,7 @@ mod tests {
         assert!(matches!(outcome, SupervisorOutcome::Shutdown));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn polling_supervisor_fatal_error_stops() {
         let config = SupervisorConfig::default();
         let cursor = InMemoryPollingCursor::new();
@@ -2852,7 +2835,7 @@ mod tests {
         assert_eq!(supervisor.stats().failed_polls, 0); // Fatal errors don't increment failed_polls
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn polling_supervisor_max_failures() {
         let config = SupervisorConfig::default()
             .with_max_consecutive_failures(2)

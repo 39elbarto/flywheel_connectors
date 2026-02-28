@@ -184,7 +184,7 @@ fn make_operation(name: &str, rate_limit_scope: Option<&str>) -> OperationInfo {
 // Integration Tests
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_introspect_returns_rate_limits() {
     let mut registry = MockConnectorRegistry::new();
 
@@ -237,7 +237,7 @@ async fn test_introspect_returns_rate_limits() {
     }
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_introspect_connector_without_rate_limits() {
     let mut registry = MockConnectorRegistry::new();
 
@@ -261,7 +261,7 @@ async fn test_introspect_connector_without_rate_limits() {
     assert!(response.tools[0].rate_limits.is_empty());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_multiple_connectors_with_different_rate_limits() {
     let mut registry = MockConnectorRegistry::new();
 
@@ -333,7 +333,7 @@ async fn test_multiple_connectors_with_different_rate_limits() {
     assert!(has_tokens, "OpenAI should have token-based limit");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_tool_with_multiple_rate_limit_pools() {
     let mut registry = MockConnectorRegistry::new();
 
@@ -369,7 +369,7 @@ async fn test_tool_with_multiple_rate_limit_pools() {
     assert!(upload_pools.contains(&"bandwidth".to_string()));
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_rate_limit_enforcement_modes() {
     let mut registry = MockConnectorRegistry::new();
 
@@ -463,7 +463,7 @@ async fn test_rate_limit_enforcement_modes() {
     assert_eq!(advisory.enforcement, RateLimitEnforcement::Advisory);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_rate_limit_scopes() {
     let mut registry = MockConnectorRegistry::new();
 
@@ -540,7 +540,7 @@ async fn test_rate_limit_scopes() {
     assert_eq!(global.scope, RateLimitScope::Global);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_discovery_lists_connectors_regardless_of_rate_limits() {
     let mut registry = MockConnectorRegistry::new();
 
@@ -567,7 +567,7 @@ async fn test_discovery_lists_connectors_regardless_of_rate_limits() {
     assert_eq!(discovery.connectors.len(), 2);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_rate_limit_json_serialization_roundtrip() {
     let mut registry = MockConnectorRegistry::new();
 

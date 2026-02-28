@@ -210,6 +210,24 @@ sanitizer_receipt = {
 }
 
 ; ─────────────────────────────────────────────────────────────────────────────
+; FCPS Datagram Envelope (binary, NOT CBOR)
+; ─────────────────────────────────────────────────────────────────────────────
+;
+; Wire format (40-byte header + variable payload):
+;   session_id:  bstr .size 16    ; bytes 0-15
+;   seq:         uint .size 8     ; bytes 16-23  (u64 LE)
+;   mac:         bstr .size 16    ; bytes 24-39  (truncated HMAC-SHA256 or BLAKE3)
+;   frame_bytes: bstr             ; bytes 40+    (FCPS frame payload, may be empty)
+;
+; MAC input = session_id || direction_byte || seq_le || frame_bytes
+;   Suite1: HMAC-SHA256(mac_key, mac_input)[0..16]
+;   Suite2: BLAKE3_keyed(mac_key, mac_input)[0..16]
+;
+; Constraints:
+;   - Total length >= 40 (FCPS_DATAGRAM_HEADER_LEN)
+;   - Total length <= max_datagram_bytes (default 1200)
+
+; ─────────────────────────────────────────────────────────────────────────────
 ; Session Handshake (CBOR)
 ; ─────────────────────────────────────────────────────────────────────────────
 

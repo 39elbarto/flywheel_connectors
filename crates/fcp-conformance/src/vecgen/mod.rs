@@ -241,6 +241,24 @@ pub fn core_schema_registrations() -> Vec<SchemaRegistration> {
             Version::new(1, 1, 0),
             "Streaming event wrapper",
         ),
+        SchemaRegistration::new(
+            "fcp.zone",
+            "ZoneKeyManifest",
+            Version::new(1, 0, 0),
+            "Zone key distribution manifest",
+        ),
+        SchemaRegistration::new(
+            "fcp.zone",
+            "ZoneDefinition",
+            Version::new(1, 0, 0),
+            "Zone configuration and membership",
+        ),
+        SchemaRegistration::new(
+            "fcp.mesh",
+            "GossipSummary",
+            Version::new(1, 0, 0),
+            "Mesh gossip protocol summary",
+        ),
     ]
 }
 

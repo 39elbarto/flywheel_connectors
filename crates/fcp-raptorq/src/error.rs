@@ -61,6 +61,10 @@ pub enum DecodeError {
     #[error("decode timed out")]
     Timeout,
 
+    /// Decode operation was cancelled by execution context.
+    #[error("decode cancelled")]
+    Cancelled,
+
     /// Not enough symbols received for reconstruction.
     #[error("insufficient symbols: received {received}, need approximately {needed}")]
     InsufficientSymbols {
@@ -106,6 +110,13 @@ pub enum DecodeError {
     #[error("invalid transmission info: {reason}")]
     InvalidTransmissionInfo {
         /// Reason the OTI is invalid.
+        reason: String,
+    },
+
+    /// Decode runtime orchestration failure.
+    #[error("decode runtime failure: {reason}")]
+    Runtime {
+        /// Runtime failure reason.
         reason: String,
     },
 }
@@ -156,6 +167,9 @@ mod tests {
         let err = DecodeError::Timeout;
         assert_eq!(err.to_string(), "decode timed out");
 
+        let err = DecodeError::Cancelled;
+        assert_eq!(err.to_string(), "decode cancelled");
+
         let err = DecodeError::InsufficientSymbols {
             received: 50,
             needed: 100,
@@ -183,6 +197,11 @@ mod tests {
             reason: "wrong size".into(),
         };
         assert!(err.to_string().contains("wrong size"));
+
+        let err = DecodeError::Runtime {
+            reason: "join failed".into(),
+        };
+        assert!(err.to_string().contains("runtime failure"));
     }
 
     #[test]

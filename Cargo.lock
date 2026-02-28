@@ -2053,6 +2053,7 @@ dependencies = [
  "blake3",
  "bytes",
  "chrono",
+ "fcp-async-core",
  "fcp-cbor",
  "fcp-core",
  "fcp-crypto",

@@ -160,6 +160,16 @@
       "user_impact_category": "availability"
     },
     {
+      "key": "gossip_bootstrap_partition",
+      "scenario_id": "asupersync.e2e.gossip_bootstrap_partition",
+      "script": "scripts/e2e/gossip_bootstrap_partition.sh",
+      "required": true,
+      "contract_id": "contract.gossip_bootstrap_partition_recovery",
+      "archetype": "queue_pubsub",
+      "failure_class": "gossip_partition_recovery",
+      "user_impact_category": "availability"
+    },
+    {
       "key": "transport_path_matrix",
       "scenario_id": "asupersync.e2e.transport_path_matrix",
       "script": "scripts/e2e/transport_path_matrix.sh",
@@ -308,6 +318,36 @@
       "archetype": "cli_process",
       "failure_class": "coverage_gap_drift_regression",
       "user_impact_category": "correctness"
+    },
+    {
+      "key": "request_response_user_flow",
+      "scenario_id": "asupersync.e2e.request_response_user_flow",
+      "script": "scripts/e2e/request_response_user_flow.sh",
+      "required": true,
+      "contract_id": "contract.request_response_user_journey",
+      "archetype": "request_response",
+      "failure_class": "user_journey_request_response",
+      "user_impact_category": "correctness"
+    },
+    {
+      "key": "polling_user_flow",
+      "scenario_id": "asupersync.e2e.polling_user_flow",
+      "script": "scripts/e2e/polling_user_flow.sh",
+      "required": true,
+      "contract_id": "contract.polling_user_journey",
+      "archetype": "polling",
+      "failure_class": "polling_cursor_continuity",
+      "user_impact_category": "correctness"
+    },
+    {
+      "key": "webhook_delivery_flow",
+      "scenario_id": "asupersync.e2e.webhook_delivery_flow",
+      "script": "scripts/e2e/webhook_delivery_flow.sh",
+      "required": true,
+      "contract_id": "contract.webhook_delivery_user_journey",
+      "archetype": "webhook",
+      "failure_class": "webhook_signature_idempotency",
+      "user_impact_category": "security"
     }
   ]
 }

@@ -353,6 +353,7 @@ SCENARIOS=(
   "cancellation_flow|cancellation_flow.sh|Operation cancellation flow|true"
   "rate_limit|rate_limit_flow.sh|Rate limit enforcement flow|true"
   "gossip_bounds|gossip_bounds_flow.sh|Gossip request bounds + config enforcement|true"
+  "gossip_bootstrap_partition|gossip_bootstrap_partition.sh|Gossip bootstrap + partition/rejoin convergence|true"
   "transport_path_matrix|transport_path_matrix.sh|Transport path selection + multipath determinism|true"
   "targeted_repair_flow|targeted_repair_flow.sh|Targeted repair symbol requests + decode status/ack|true"
   "lease_coordination|lease_coordination_flow.sh|Lease coordination selection + conflict handling|true"
@@ -363,6 +364,14 @@ SCENARIOS=(
   "meshnode_control_plane|meshnode_control_plane_flow.sh|MeshNode control-plane and multi-node flows|true"
   "budget|budget_flow.sh|Budget enforcement flow|false"
   "egress_denial|egress_denial.sh|Sandbox egress denial|true"
+  "streaming_reconnect_storm|streaming_reconnect_storm.sh|WebSocket reconnect storm bounded recovery|true"
+  "streaming_backpressure_stress|streaming_backpressure_stress.sh|Stream backpressure bounded queues|true"
+  "bidirectional_cancel_chain|bidirectional_cancel_chain.sh|Bidirectional cancel chain clean shutdown|true"
+  "sse_reconnect_ordering|sse_reconnect_ordering.sh|SSE reconnect ordering continuity|true"
+  "integration_gate|integration_gate_executor.sh|Integration gate coverage drift check|true"
+  "request_response_user_flow|request_response_user_flow.sh|Request-response user journey e2e|true"
+  "polling_user_flow|polling_user_flow.sh|Polling archetype user journey e2e|true"
+  "webhook_delivery_flow|webhook_delivery_flow.sh|Webhook delivery user journey e2e|true"
 )
 
 for entry in "${SCENARIOS[@]}"; do

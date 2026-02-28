@@ -1,28 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_NAME="e2e_targeted_repair_flow"
-SEED="0xDEC0DE"
+SCRIPT_NAME="e2e_gossip_bootstrap_partition"
+SEED="0xG0551P"
 OUT_DIR="${OUT_DIR:-./out/${SCRIPT_NAME}}"
 LOG_JSONL="${LOG_JSONL:-${OUT_DIR}/${SCRIPT_NAME}.jsonl}"
 
 EXPECTED_FAILURE=""
 ACTUAL_FAILURE=""
 STEP_CONTEXT="null"
+CARGO_CMD="${CARGO_CMD:-cargo}"
+read -r -a CARGO_CMD_ARR <<< "${CARGO_CMD}"
+CARGO_BIN="${CARGO_CMD_ARR[0]}"
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
     echo "Missing required command: $1" >&2
     exit 1
   fi
-}
-
-run_cargo() {
-  if command -v rch >/dev/null 2>&1; then
-    rch exec -- cargo "$@"
-    return $?
-  fi
-  cargo "$@"
 }
 
 now_ms() {
@@ -69,13 +64,14 @@ json_or_null() {
 }
 
 details_json() {
-  if [[ -z "${EXPECTED_FAILURE}" && -z "${ACTUAL_FAILURE}" ]]; then
+  if [[ -z "${EXPECTED_FAILURE}" && -z "${ACTUAL_FAILURE}" && "${STEP_CONTEXT}" == "null" ]]; then
     printf 'null'
     return 0
   fi
-  printf '{"expected_failure":%s,"actual_failure":%s}' \
+  printf '{"expected_failure":%s,"actual_failure":%s,"context":%s}' \
     "$(json_or_null "${EXPECTED_FAILURE}")" \
-    "$(json_or_null "${ACTUAL_FAILURE}")"
+    "$(json_or_null "${ACTUAL_FAILURE}")" \
+    "${STEP_CONTEXT}"
 }
 
 log_step() {
@@ -93,8 +89,8 @@ log_step() {
   details="$(details_json)"
 
   mkdir -p "$(dirname "${LOG_JSONL}")"
-  printf '{"timestamp":"%s","script":"%s","step":"%s","step_number":%s,"correlation_id":"%s","duration_ms":%s,"result":"%s","artifacts":%s,"context":%s,"details":%s}\n' \
-    "${timestamp}" "${SCRIPT_NAME}" "${step}" "${step_number}" "${correlation_id}" "${duration_ms}" "${result}" "${artifacts_json}" "${STEP_CONTEXT}" "${details}" >> "${LOG_JSONL}"
+  printf '{"timestamp":"%s","log_version":"v2","script":"%s","step":"%s","step_number":%s,"correlation_id":"%s","duration_ms":%s,"result":"%s","artifacts":%s,"details":%s}\n' \
+    "${timestamp}" "${SCRIPT_NAME}" "${step}" "${step_number}" "${correlation_id}" "${duration_ms}" "${result}" "${artifacts_json}" "${details}" >> "${LOG_JSONL}"
 }
 
 run_step() {
@@ -134,39 +130,28 @@ step_prepare() {
   mkdir -p "${OUT_DIR}"
 }
 
-step_run_symbol_request_tests() {
-  run_cargo test -p fcp-mesh --test mesh_integration meshnode_symbol_ -- --nocapture
+step_run_bootstrap_test() {
+  "${CARGO_CMD_ARR[@]}" test -p fcp-mesh --test mesh_integration gossip_bootstrap_convergence -- --nocapture
 }
 
-step_run_decode_status_tests() {
-  run_cargo test -p fcp-mesh --test mesh_integration meshnode_decode_status -- --nocapture
+step_run_partition_rejoin_test() {
+  "${CARGO_CMD_ARR[@]}" test -p fcp-mesh --test mesh_integration gossip_partition_prune_and_rejoin -- --nocapture
 }
 
-step_run_store_adversarial_tests() {
-  run_cargo test -p fcp-store --test store_repair_integration adversarial_ -- --nocapture
-}
+require_cmd "${CARGO_BIN}"
 
-require_cmd cargo
-
-run_step "prepare_output" 1 "{}" "" "{}" step_prepare
+run_step "prepare_output" 1 "[]" "" "{}" step_prepare
 run_step \
-  "run_symbol_request_tests" \
+  "run_gossip_bootstrap_test" \
   2 \
-  '{"crate":"fcp-mesh","target":"mesh_integration","filter":"meshnode_symbol_"}' \
+  '["crate:fcp-mesh target:mesh_integration filter:gossip_bootstrap_convergence"]' \
   "" \
-  '{"category":"symbol_request","purpose":"targeted_repair"}' \
-  step_run_symbol_request_tests
+  '{"category":"gossip","purpose":"bootstrap_convergence"}' \
+  step_run_bootstrap_test
 run_step \
-  "run_decode_status_tests" \
+  "run_gossip_partition_rejoin_test" \
   3 \
-  '{"crate":"fcp-mesh","target":"mesh_integration","filter":"meshnode_decode_status"}' \
+  '["crate:fcp-mesh target:mesh_integration filter:gossip_partition_prune_and_rejoin"]' \
   "" \
-  '{"category":"decode_status","purpose":"targeted_repair"}' \
-  step_run_decode_status_tests
-run_step \
-  "run_store_adversarial_tests" \
-  4 \
-  '{"crate":"fcp-store","target":"store_repair_integration","filter":"adversarial_"}' \
-  "" \
-  '{"category":"store_repair","purpose":"adversarial_recovery"}' \
-  step_run_store_adversarial_tests
+  '{"category":"gossip","purpose":"partition_rejoin"}' \
+  step_run_partition_rejoin_test

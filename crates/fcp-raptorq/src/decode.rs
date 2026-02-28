@@ -8,10 +8,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use fcp_async_core::{AsyncError, ExecutionContext};
 use raptorq::{Decoder, EncodingPacket, ObjectTransmissionInformation, PayloadId};
 
 use crate::config::RaptorQConfig;
 use crate::error::DecodeError;
+
+const COOPERATIVE_YIELD_INTERVAL: usize = 32;
 
 /// `RaptorQ` decoder for reconstructing payload from symbols.
 pub struct RaptorQDecoder {
@@ -232,6 +235,71 @@ impl DecodeAdmissionController {
             })
     }
 
+    /// Run a decode job under context cancellation/deadline controls.
+    ///
+    /// Symbols are replayed in ascending ESI order to preserve deterministic epoch behavior.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - `DecodeError::AdmissionDenied` if no decode slots are available
+    /// - `DecodeError::Cancelled` if the execution context is cancelled
+    /// - `DecodeError::Timeout` if the execution context deadline expires
+    /// - `DecodeError::InsufficientSymbols` if replay completes without reconstruction
+    pub async fn decode_with_context<I>(
+        &self,
+        context: &ExecutionContext,
+        decoder: &mut RaptorQDecoder,
+        symbols: I,
+    ) -> Result<Vec<u8>, DecodeError>
+    where
+        I: IntoIterator<Item = (u32, Vec<u8>)>,
+    {
+        if context.is_cancelled() {
+            return Err(DecodeError::Cancelled);
+        }
+
+        let mut permit = self.acquire()?;
+        let mut ordered_symbols: Vec<(u32, Vec<u8>)> = symbols.into_iter().collect();
+        ordered_symbols.sort_unstable_by_key(|(esi, _)| *esi);
+
+        match context
+            .run(async {
+                for (index, (esi, data)) in ordered_symbols.into_iter().enumerate() {
+                    permit.try_buffer_symbol(data.len())?;
+
+                    if let Some(payload) = decoder.add_symbol(esi, data)? {
+                        return Ok(payload);
+                    }
+
+                    // Keep long symbol loops cancellable and deadline-aware.
+                    if index % COOPERATIVE_YIELD_INTERVAL == COOPERATIVE_YIELD_INTERVAL - 1 {
+                        fcp_async_core::time::sleep(Duration::ZERO).await;
+                    }
+                }
+
+                Err(DecodeError::InsufficientSymbols {
+                    received: decoder.received_count(),
+                    needed: decoder.needed(),
+                })
+            })
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => Err(Self::map_async_error(error)),
+        }
+    }
+
+    fn map_async_error(error: AsyncError) -> DecodeError {
+        match error {
+            AsyncError::Cancelled => DecodeError::Cancelled,
+            AsyncError::Timeout { .. } => DecodeError::Timeout,
+            other => DecodeError::Runtime {
+                reason: other.to_string(),
+            },
+        }
+    }
+
     /// Get the number of active decode operations.
     #[must_use]
     pub fn active_count(&self) -> usize {
@@ -342,6 +410,7 @@ impl Drop for DecodePermit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::RaptorQEncoder;
 
     fn test_config() -> RaptorQConfig {
         RaptorQConfig {
@@ -661,5 +730,104 @@ mod tests {
         }
 
         assert_eq!(controller.active_count(), 0);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn decode_with_context_roundtrip_orders_symbols() {
+        let config = test_config();
+        let payload: Vec<u8> = (0..4096_u32)
+            .map(|i| u8::try_from(i % 256).expect("payload byte fits u8"))
+            .collect();
+
+        let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
+        let oti = encoder.transmission_info();
+        let mut symbols = encoder.encode_all();
+        symbols.reverse();
+
+        let controller = DecodeAdmissionController::new(&config);
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+        let context = ExecutionContext::request_scoped(Duration::from_secs(5));
+
+        let decoded = controller
+            .decode_with_context(&context, &mut decoder, symbols)
+            .await
+            .unwrap();
+
+        assert_eq!(decoded, payload);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn decode_with_context_cancelled_context() {
+        let config = test_config();
+        let controller = DecodeAdmissionController::new(&config);
+        let context = ExecutionContext::request_scoped(Duration::from_secs(5));
+        context.cancel();
+
+        let mut decoder = RaptorQDecoder::with_expected_symbols(4, 256, 64, &config);
+        let symbols = vec![(0, vec![0u8; 64]), (1, vec![0u8; 64])];
+
+        let err = controller
+            .decode_with_context(&context, &mut decoder, symbols)
+            .await
+            .expect_err("cancelled context should fail decode");
+        assert!(matches!(err, DecodeError::Cancelled));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn decode_with_context_deadline_timeout() {
+        let config = test_config();
+        let controller =
+            DecodeAdmissionController::with_limits(4, 1024 * 1024, Duration::from_secs(30), 10000);
+        let context = ExecutionContext::request_scoped(Duration::from_millis(1));
+        fcp_async_core::time::sleep(Duration::from_millis(5)).await;
+
+        let mut decoder = RaptorQDecoder::with_expected_symbols(1000, 64_000, 64, &config);
+        let symbols: Vec<(u32, Vec<u8>)> = (0..256).map(|esi| (esi, vec![0u8; 64])).collect();
+
+        let err = controller
+            .decode_with_context(&context, &mut decoder, symbols)
+            .await
+            .expect_err("expired deadline should fail decode");
+        assert!(matches!(err, DecodeError::Timeout));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn decode_with_context_admission_denied() {
+        let config = test_config();
+        let controller =
+            DecodeAdmissionController::with_limits(0, 1024 * 1024, Duration::from_secs(30), 1024);
+        let context = ExecutionContext::request_scoped(Duration::from_secs(5));
+
+        let mut decoder = RaptorQDecoder::with_expected_symbols(4, 256, 64, &config);
+        let symbols = vec![(0, vec![0u8; 64]), (1, vec![0u8; 64])];
+
+        let err = controller
+            .decode_with_context(&context, &mut decoder, symbols)
+            .await
+            .expect_err("admission limit should reject decode");
+        assert!(matches!(err, DecodeError::AdmissionDenied { .. }));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn decode_with_context_returns_insufficient_symbols() {
+        let config = test_config();
+        let controller = DecodeAdmissionController::new(&config);
+        let context = ExecutionContext::request_scoped(Duration::from_secs(5));
+
+        let mut decoder = RaptorQDecoder::with_expected_symbols(128, 8192, 64, &config);
+        let symbols = vec![(0, vec![0u8; 64]), (1, vec![0u8; 64]), (2, vec![0u8; 64])];
+
+        let err = controller
+            .decode_with_context(&context, &mut decoder, symbols)
+            .await
+            .expect_err("insufficient symbols should be surfaced");
+
+        match err {
+            DecodeError::InsufficientSymbols { received, needed } => {
+                assert_eq!(received, 3);
+                assert!(needed >= 128);
+            }
+            other => panic!("expected insufficient symbols, got {other:?}"),
+        }
     }
 }

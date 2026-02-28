@@ -334,6 +334,50 @@ E2E matrix artifact contract (bead `flywheel_connectors-235t.26.4.1`):
 - Matrix root emits `results.jsonl`, `summary.json`, `manifest.json`, `scenario_plan.json`, and `replay.sh`.
 - Each scenario emits `scenarios/<scenario>/command.txt`, `execution.log`, and `scenario.json` plus scenario-local artifacts.
 
+### CI/RCH Lane Topology (bead `flywheel_connectors-235t.6`)
+
+CI now supports explicit migration lanes via `workflow_dispatch` input `lane`:
+- `smoke`: fast formatting + targeted compile + tokio guardrails
+- `focused`: crate-scoped check/clippy/test using `focus_crate`
+- `full`: existing full-gate matrix (lint, tests, vectors, security, msrv, build, docs, connectors)
+
+Recommended local command mirrors (all cargo-heavy commands routed through `rch`):
+
+```bash
+# smoke
+rch exec -- cargo fmt --check
+rch exec -- cargo check -p fcp-core --all-targets
+rch exec -- cargo check -p fcp-conformance --all-targets
+
+# focused (replace crate)
+rch exec -- cargo check -p <crate> --all-targets
+rch exec -- cargo clippy -p <crate> --all-targets -- -D warnings
+rch exec -- cargo test -p <crate> --all-targets -- --nocapture
+
+# full gate
+rch exec -- cargo check --workspace --all-targets
+rch exec -- cargo clippy --workspace --all-targets -- -D warnings
+rch exec -- cargo test --workspace --all-targets -- --nocapture
+```
+
+RCH fail-open policy:
+- Keep `rch exec -- ...` prefixes in all scripted commands and replay artifacts.
+- If a worker is unavailable and command falls back local, record that fallback in run logs/artifact summaries.
+
+---
+
+## ASUPERSYNC E2E Journey Registry (flywheel_connectors-235t.26.6.1)
+
+Machine-consumable scenario governance artifacts:
+- `scripts/e2e/scenario_registry.json` (stable scenario IDs, script mapping, contract mapping, archetype, user impact category)
+- `scripts/e2e/validate_scenario_registry.sh` (enforces ID/path patterns, uniqueness constraints, and parity with `run_matrix.sh` scenarios)
+
+Validation command:
+
+```bash
+bash scripts/e2e/validate_scenario_registry.sh
+```
+
 ---
 
 ## ASUPERSYNC Shared Async Harness (flywheel_connectors-235t.26.1)

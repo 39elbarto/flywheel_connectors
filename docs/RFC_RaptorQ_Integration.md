@@ -1,817 +1,231 @@
-# RFC: RaptorQ Deep Integration into FCP
+# ASUPERSYNC RaptorQ Architecture Contract (P7)
 
-## Abstract
-
-This RFC proposes integrating RaptorQ (RFC 6330) fountain codes as a fundamental primitive throughout the Flywheel Connector Protocol. RaptorQ's unique property of **data fungibility** - where any K' symbols (K' ≈ K + 0.2% overhead) can reconstruct K source symbols - enables powerful capabilities for fault tolerance, multipath transport, distributed storage, and efficient multicast.
-
-## Motivation
-
-### The Magic of RaptorQ
-
-RaptorQ is a rateless erasure code with remarkable properties:
-
-1. **Fountain Property**: Generate unlimited encoding symbols from source data
-2. **Symbol Fungibility**: ANY K' symbols can decode - no specific symbols required
-3. **Systematic Encoding**: First K symbols ARE the original data (zero overhead if no loss)
-4. **Linear Complexity**: O(n) encoding and decoding
-5. **Low Overhead**: ~0.2% extra symbols needed beyond source size
-
-```
-Traditional: Need packets [1,2,3,4,5] specifically
-RaptorQ:     Need ANY 5+ symbols from [1,2,3,4,5,6,7,8,...]
-```
-
-### Why This Matters for FCP
-
-FCP's architecture has several areas where RaptorQ's fungibility transforms the design:
-
-| FCP Component | Current Approach | With RaptorQ |
-|---------------|------------------|--------------|
-| Large frame transport | Retransmit lost segments | Collect ANY symbols from ANY source |
-| Event replay buffer | Sequential log on single node | Distributed symbols across nodes |
-| Connector distribution | HTTP download with resume | Parallel from CDN + P2P + multicast |
-| Audit log archival | Replicated storage | k-of-n redundancy with minimal overhead |
-| Multipath transport | Primary + failover | Aggregate bandwidth from ALL paths |
+> Status: Normative migration contract
+> Owner bead: `flywheel_connectors-235t.20`
+> Program epic: `flywheel_connectors-235t`
+> Downstream beads: `235t.21`, `235t.22`, `235t.23`, `235t.24`, `235t.25`
 
 ---
 
-## Design
+## 1. Purpose
 
-### Core Concept: Object-Symbol Model
+Define one canonical architecture contract for the RaptorQ pipeline during ASUPERSYNC migration so all downstream implementation beads preserve the same symbol, decode, repair, and replay semantics.
 
-Instead of treating data as indivisible blobs, FCP-RQ (RaptorQ mode) treats data as **objects** that can be encoded into fungible **symbols**.
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    OBJECT-SYMBOL MODEL                       │
-├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│   Object (e.g., FCP Message, Event Batch, Binary)          │
-│   ┌─────────────────────────────────────────────┐          │
-│   │  Original Data (K source symbols worth)     │          │
-│   └─────────────────────────────────────────────┘          │
-│                        │                                    │
-│                   RaptorQ Encode                            │
-│                        │                                    │
-│                        ▼                                    │
-│   ┌─────┬─────┬─────┬─────┬─────┬─────┬─────┬─────┐       │
-│   │ S₀  │ S₁  │ S₂  │ ... │ Sₖ  │Sₖ₊₁ │ ... │ Sₙ  │       │
-│   └─────┴─────┴─────┴─────┴─────┴─────┴─────┴─────┘       │
-│     ▲                       ▲                               │
-│     │                       │                               │
-│     │    Systematic         │    Repair symbols             │
-│     │    (= original)       │    (unlimited)                │
-│                                                             │
-│   ANY K' symbols (K' ≈ K × 1.002) → Decode → Original      │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### Object Identifier
-
-Every object has a content-addressed identifier:
-
-```rust
-/// Object identifier (content-addressed)
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ObjectId([u8; 32]); // SHA256(canonical_bytes)
-
-impl ObjectId {
-    pub fn from_data(data: &[u8]) -> Self {
-        use sha2::{Sha256, Digest};
-        Self(Sha256::digest(data).into())
-    }
-}
-
-/// Symbol identifier within an object
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SymbolId {
-    pub object_id: ObjectId,
-    pub encoding_symbol_id: u32, // ESI from RaptorQ
-}
-```
-
-### Encoded Symbol
-
-```rust
-/// A single encoded symbol
-#[derive(Clone, Serialize, Deserialize)]
-pub struct EncodedSymbol {
-    /// Which object this symbol belongs to
-    pub object_id: ObjectId,
-
-    /// Encoding Symbol ID (ESI) - uniquely identifies this symbol
-    pub esi: u32,
-
-    /// The encoded data
-    pub data: Vec<u8>,
-}
-```
+This contract is the P7 baseline from `docs/ASUPERSYNC_Capability_Matrix.md`.
 
 ---
 
-## Integration Points
+## 2. Scope and Boundaries
 
-### 1. Wire Protocol: RaptorQ Frame Mode (FCP1-RQ)
+This contract covers runtime behavior across four crate surfaces:
 
-Add a new frame flag and frame type for RaptorQ-encoded messages:
+| Surface | Current Primary Modules | Contract Responsibility |
+|---|---|---|
+| RaptorQ core | `crates/fcp-raptorq/src/config.rs`, `encode.rs`, `decode.rs`, `chunk.rs` | Symbol policy, chunking policy, decode admission bounds |
+| Mesh transport/admission | `crates/fcp-mesh/src/admission.rs`, `symbol_request.rs`, `degraded.rs` | Peer budgets, anti-amplification, bounded repair transport |
+| Store + repair orchestration | `crates/fcp-store/src/symbol_store.rs`, `coverage.rs`, `repair.rs` | Coverage accounting, repair eligibility, deterministic scheduling |
+| CLI repair workflow | `crates/fcp-cli/src/repair/mod.rs`, `types.rs` | Stable operator-facing status schema and exit semantics |
 
-```rust
-bitflags! {
-    pub struct FrameFlags: u16 {
-        // ... existing flags ...
-
-        /// Frame contains RaptorQ symbol(s), not complete message
-        const RAPTORQ = 0b0100_0000_0000;
-    }
-}
-```
-
-**RaptorQ Frame Format:**
-
-```
-┌────────────────────────────────────────────────────────────────┐
-│                  FCP RAPTORQ FRAME FORMAT                       │
-├────────────────────────────────────────────────────────────────┤
-│                                                                │
-│  Bytes 0-3:   Magic (0x46 0x43 0x50 0x31 = "FCP1")            │
-│  Bytes 4-5:   Version (u16 LE)                                 │
-│  Bytes 6-7:   Flags (u16 LE) - RAPTORQ bit set                │
-│  Bytes 8-11:  Sequence (u32 LE)                                │
-│  Bytes 12-15: Payload Length (u32 LE)                          │
-│  Bytes 16-23: Timestamp (u64 LE)                               │
-│  Bytes 24-39: Correlation ID (UUID)                            │
-│  ────────────────────────────────────────────────────────────  │
-│  Bytes 40-71: Object ID (32 bytes, SHA256)                     │
-│  Bytes 72-75: Object Size (u32 LE, original bytes)             │
-│  Bytes 76-77: Symbol Size (u16 LE)                             │
-│  Bytes 78-79: Symbols in Frame (u16 LE, count)                 │
-│  Bytes 80+:   Symbol entries: [ESI (u32) + Data (symbol_size)] │
-│  Final 8:     Checksum (XXH3-64)                               │
-│                                                                │
-└────────────────────────────────────────────────────────────────┘
-```
-
-**Usage: Large Message Transport**
-
-For messages larger than a threshold (e.g., 64KB), the sender encodes to symbols:
-
-```rust
-impl RaptorQTransport {
-    pub fn send_large(&mut self, message: &FcpMessage) -> Result<()> {
-        let bytes = serialize(message)?;
-        let object_id = ObjectId::from_data(&bytes);
-
-        // Encode to symbols (systematic + repair)
-        let encoder = Encoder::new(&bytes, SYMBOL_SIZE);
-        let symbols: Vec<EncodedSymbol> = encoder
-            .get_encoded_packets(REPAIR_SYMBOL_COUNT)
-            .map(|p| EncodedSymbol {
-                object_id,
-                esi: p.encoding_symbol_id(),
-                data: p.data().to_vec(),
-            })
-            .collect();
-
-        // Send symbols (can be over multiple paths/connections)
-        for symbol in symbols {
-            self.send_symbol_frame(symbol)?;
-        }
-        Ok(())
-    }
-}
-```
-
-**Receiver Reconstruction:**
-
-```rust
-impl RaptorQTransport {
-    pub fn receive(&mut self) -> Result<Option<FcpMessage>> {
-        let frame = self.recv_frame()?;
-
-        if frame.flags.contains(FrameFlags::RAPTORQ) {
-            let symbols = parse_symbols(&frame);
-            for symbol in symbols {
-                let decoder = self.decoders
-                    .entry(symbol.object_id)
-                    .or_insert_with(|| Decoder::new(frame.object_size));
-
-                decoder.add_symbol(symbol.esi, &symbol.data);
-
-                if let Some(data) = decoder.try_decode() {
-                    self.decoders.remove(&symbol.object_id);
-                    return Ok(Some(deserialize(&data)?));
-                }
-            }
-            Ok(None) // Need more symbols
-        } else {
-            // Regular frame
-            Ok(Some(deserialize(&frame.payload)?))
-        }
-    }
-}
-```
-
-**Benefits:**
-- Lossy transport tolerance (UDP, unreliable networks)
-- Multipath aggregation (combine WiFi + cellular + wired)
-- No retransmission protocol needed
-- Natural congestion response (send more symbols if loss detected)
+Non-goal: this bead does not implement full runtime cutover in all crates; it defines the normative contract that downstream beads must implement.
 
 ---
 
-### 2. Event Streaming: Epoch-Based RaptorQ Buffers
+## 3. Normative Inputs
 
-Transform the event replay buffer from a sequential log to a distributed symbol store:
+All behavior in this contract is constrained by:
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│              EPOCH-BASED RAPTORQ EVENT BUFFER                   │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  Event Stream:  E₁ → E₂ → E₃ │ E₄ → E₅ → E₆ │ E₇ → E₈ → ...  │
-│                 └─────────────┘ └─────────────┘                 │
-│                    Epoch 1         Epoch 2                      │
-│                        │               │                        │
-│                   RaptorQ          RaptorQ                      │
-│                   Encode           Encode                       │
-│                        │               │                        │
-│                        ▼               ▼                        │
-│                   [S₁₁..S₁ₙ]     [S₂₁..S₂ₙ]                    │
-│                        │               │                        │
-│              ┌─────────┼───────────────┼─────────┐             │
-│              ▼         ▼               ▼         ▼             │
-│           Node A    Node B          Node C    Node D           │
-│           [S₁₁,S₂₃] [S₁₂,S₂₁]     [S₁₃,S₂₂] [S₁₄,S₂₄]        │
-│                                                                 │
-│  Replay: Collect K' symbols for epoch → Decode → Events        │
-│          Can fetch from ANY subset of nodes!                    │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-```
+- `docs/ADR_ASUPERSYNC_Runtime_Baseline.md`
+- `docs/ASUPERSYNC_Capability_Matrix.md`
+- `docs/ASUPERSYNC_Feature_Parity_Baseline.md`
+- `docs/ASUPERSYNC_Logging_Forensics_Standard.md`
+- `FCP_Specification_V2.md`
 
-**Implementation:**
-
-```rust
-/// Epoch-based RaptorQ event buffer
-pub struct RaptorQEventBuffer {
-    /// Duration of each epoch
-    epoch_duration: Duration,
-
-    /// Current epoch being written
-    current_epoch: RwLock<EpochWriter>,
-
-    /// Finalized epochs (symbols distributed)
-    finalized_epochs: RwLock<HashMap<u64, EpochMetadata>>,
-
-    /// Local symbol storage
-    local_symbols: RwLock<HashMap<(u64, u32), Vec<u8>>>,
-
-    /// Peer connections for symbol distribution/retrieval
-    peers: Vec<PeerConnection>,
-}
-
-struct EpochMetadata {
-    epoch_id: u64,
-    start_time: DateTime<Utc>,
-    event_count: u32,
-    object_id: ObjectId,
-    original_size: u32,
-    symbol_count: u32,
-}
-
-impl RaptorQEventBuffer {
-    /// Finalize current epoch and distribute symbols
-    async fn finalize_epoch(&self) -> Result<()> {
-        let epoch = self.current_epoch.write().await.take();
-        let events_cbor = serialize_events(&epoch.events)?;
-        let object_id = ObjectId::from_data(&events_cbor);
-
-        // Encode to symbols
-        let encoder = Encoder::new(&events_cbor, SYMBOL_SIZE);
-        let symbols: Vec<_> = encoder.get_encoded_packets(REPAIR_RATIO)
-            .collect();
-
-        // Distribute symbols across self + peers (round-robin or hash-based)
-        for (i, symbol) in symbols.iter().enumerate() {
-            let target = i % (self.peers.len() + 1);
-            if target == 0 {
-                self.local_symbols.write().await
-                    .insert((epoch.id, symbol.esi), symbol.data.clone());
-            } else {
-                self.peers[target - 1]
-                    .store_symbol(epoch.id, symbol.esi, &symbol.data)
-                    .await?;
-            }
-        }
-
-        // Record metadata
-        self.finalized_epochs.write().await.insert(epoch.id, EpochMetadata {
-            epoch_id: epoch.id,
-            object_id,
-            symbol_count: symbols.len() as u32,
-            // ...
-        });
-
-        Ok(())
-    }
-
-    /// Replay events from a cursor
-    pub async fn replay(&self, since: &str) -> impl Stream<Item = EventEnvelope> {
-        let start_epoch = parse_cursor_epoch(since);
-
-        stream::iter(start_epoch..)
-            .then(|epoch_id| self.reconstruct_epoch(epoch_id))
-            .flat_map(|events| stream::iter(events))
-    }
-
-    /// Reconstruct an epoch from distributed symbols
-    async fn reconstruct_epoch(&self, epoch_id: u64) -> Vec<EventEnvelope> {
-        let meta = self.finalized_epochs.read().await.get(&epoch_id).cloned();
-        let meta = match meta {
-            Some(m) => m,
-            None => return vec![],
-        };
-
-        let mut decoder = Decoder::new(meta.original_size as usize);
-
-        // Fetch from local first
-        for (key, data) in self.local_symbols.read().await.iter() {
-            if key.0 == epoch_id {
-                decoder.add_symbol(key.1, data);
-                if let Some(decoded) = decoder.try_decode() {
-                    return deserialize_events(&decoded);
-                }
-            }
-        }
-
-        // Fetch from peers in parallel (race for K' symbols)
-        let peer_symbols = futures::future::join_all(
-            self.peers.iter().map(|p| p.fetch_symbols(epoch_id))
-        ).await;
-
-        for symbols in peer_symbols {
-            for (esi, data) in symbols {
-                decoder.add_symbol(esi, &data);
-                if let Some(decoded) = decoder.try_decode() {
-                    return deserialize_events(&decoded);
-                }
-            }
-        }
-
-        vec![] // Insufficient symbols
-    }
-}
-```
-
-**Benefits:**
-- **Fault tolerance**: Any k-of-n nodes can reconstruct
-- **Load balancing**: Fetch symbols from least-loaded nodes
-- **Bandwidth efficiency**: ~0.2% overhead for erasure coding
-- **Flexible replication**: Adjust symbol distribution for different redundancy levels
-- **No coordination**: Nodes don't need to agree on which symbols to store
+For Wave D (`235t.20`-`235t.25`), parity contracts `PAR-RAPTORQ-001`, `PAR-RAPTORQ-002`, `PAR-RAPTORQ-003`, and `PAR-RUNTIME-003` are mandatory.
 
 ---
 
-### 3. Connector Binary Distribution
+## 4. Symbol Sizing and Chunking Policy
 
-Connector binaries (< 20MB target) are perfect for RaptorQ distribution:
+### 4.1 Path and MTU policy
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│            RAPTORQ CONNECTOR DISTRIBUTION                        │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│   Binary (20MB)                                                 │
-│        │                                                        │
-│        ▼                                                        │
-│   RaptorQ Encode (1KB symbols)                                  │
-│        │                                                        │
-│        ▼                                                        │
-│   ~20,500 symbols (20,000 systematic + 500 repair)             │
-│        │                                                        │
-│        ▼                                                        │
-│   ┌─────────────────────────────────────────────────────────┐  │
-│   │                   DISTRIBUTION                           │  │
-│   │                                                          │  │
-│   │   CDN Edge ──────┐                                       │  │
-│   │   (symbols 0-5000)│                                      │  │
-│   │                   │                                      │  │
-│   │   P2P Peers ─────┼────► Connector fetches from ALL      │  │
-│   │   (random symbols)│      First 20,100+ symbols wins!    │  │
-│   │                   │                                      │  │
-│   │   Multicast ─────┘                                       │  │
-│   │   (repair symbols)                                       │  │
-│   │                                                          │  │
-│   └─────────────────────────────────────────────────────────┘  │
-│                                                                 │
-│   Verification: SHA256(decoded) == expected_hash               │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-```
+Symbol sizing MUST be derived from `RaptorQPreset` + MTU safety guardrails:
 
-**Implementation:**
+- `DEFAULT_MAX_DATAGRAM_BYTES = 1200`
+- `DEFAULT_SYMBOLS_PER_FRAME = 1`
+- Symbol size is clamped via `RaptorQConfig::mtu_safe_symbol_size` / `bound_symbol_size`.
 
-```rust
-/// Connector update client using RaptorQ
-pub struct ConnectorUpdater {
-    sources: Vec<SymbolSource>,
-    local_cache: PathBuf,
-}
+Path presets currently supported:
 
-enum SymbolSource {
-    Cdn { base_url: String },
-    Peer { addr: SocketAddr },
-    Multicast { group: Ipv4Addr, port: u16 },
-}
+- `Lan` (default preset)
+- `Derp` (default preset)
 
-impl ConnectorUpdater {
-    pub async fn fetch(&self, manifest: &UpdateManifest) -> Result<Vec<u8>> {
-        let mut decoder = Decoder::new(manifest.size);
+Both start with `preferred_symbol_size=1024` and `repair_ratio_bps=500`, then clamp to MTU-safe limits.
 
-        // Start fetching from all sources in parallel
-        let mut symbol_streams: Vec<_> = self.sources.iter()
-            .map(|s| s.fetch_symbols(manifest.object_id))
-            .collect();
+### 4.2 Object and chunk policy
 
-        let mut combined = futures::stream::select_all(symbol_streams);
+`RaptorQConfig` defaults are normative until explicitly changed by a future contract revision:
 
-        while let Some(symbol) = combined.next().await {
-            decoder.add_symbol(symbol.esi, &symbol.data);
+- `symbol_size = 1024`
+- `repair_ratio_bps = 500` (5%)
+- `max_object_size = 64 MiB`
+- `decode_timeout = 30s`
+- `max_chunk_threshold = 256 KiB`
+- `chunk_size = 64 KiB`
 
-            // Progress: symbols_received / symbols_needed
-            let progress = decoder.symbols_received() as f64
-                / decoder.symbols_needed() as f64;
+Objects above `max_chunk_threshold` MUST use `ChunkedObjectManifest` and be reconstructed chunk-wise, not as a monolithic decode operation.
 
-            if let Some(data) = decoder.try_decode() {
-                // Verify hash
-                if ObjectId::from_data(&data) != manifest.object_id {
-                    return Err(Error::HashMismatch);
-                }
-                return Ok(data);
-            }
-        }
+### 4.3 Symbol count formulas
 
-        Err(Error::InsufficientSymbols)
-    }
-}
-```
+For payload length `L` and symbol size `S`:
 
-**Benefits:**
-- **Parallel download**: All sources contribute simultaneously
-- **Heterogeneous sources**: CDN + P2P + multicast all help
-- **Resumable**: No bookmark needed - any symbols help
-- **Efficient multicast**: One broadcast, all receivers decode
-- **DoS resistance**: Can't block specific critical symbols
+- `K = ceil(L / S)` source symbols
+- `repair = floor(K * repair_ratio_bps / 10000)`
+- `total = K + repair`
+
+Downstream beads MUST avoid ad hoc symbol math; they must use these shared config helpers.
 
 ---
 
-### 4. Distributed Audit Log Archival
+## 5. Decode Admission Safety Bounds
 
-Audit logs require durable, tamper-evident storage:
+Decode safety bounds MUST be explicit and fail-closed.
 
-```rust
-/// Archive audit logs using RaptorQ for distributed redundancy
-pub struct RaptorQAuditArchive {
-    /// Storage nodes for symbol distribution
-    storage_nodes: Vec<StorageNode>,
+### 5.1 Core decode admission (`fcp-raptorq`)
 
-    /// Archive metadata
-    archives: HashMap<ArchiveId, ArchiveMetadata>,
-}
+`DecodeAdmissionController::new(config)` currently defines:
 
-struct ArchiveMetadata {
-    id: ArchiveId,
-    time_range: (DateTime<Utc>, DateTime<Utc>),
-    merkle_root: [u8; 32],
-    object_id: ObjectId,
-    symbol_distribution: HashMap<NodeId, Vec<u32>>, // node -> ESIs
-}
+- `max_concurrent = 16`
+- `max_memory_per_decode = config.max_object_size`
+- `timeout = config.decode_timeout`
+- `max_symbols_buffered = config.total_symbols(config.max_object_size) + 1000`
 
-impl RaptorQAuditArchive {
-    /// Archive a batch of audit entries
-    pub async fn archive(&mut self, entries: Vec<AuditEntry>) -> Result<ArchiveId> {
-        // Build Merkle tree for tamper evidence
-        let merkle_tree = MerkleTree::from_entries(&entries);
-        let data = serialize_with_merkle(&entries, &merkle_tree)?;
-        let object_id = ObjectId::from_data(&data);
+A decode permit MUST reject work when any bound is exceeded:
 
-        // Encode to symbols
-        let encoder = Encoder::new(&data, SYMBOL_SIZE);
-        let symbols: Vec<_> = encoder
-            .get_encoded_packets(ARCHIVE_REPAIR_RATIO)
-            .collect();
+- timeout -> `DecodeError::Timeout`
+- symbol cap -> `DecodeError::SymbolBufferExceeded`
+- memory cap -> `DecodeError::MemoryLimitExceeded`
+- concurrency cap -> `DecodeError::AdmissionDenied`
 
-        // Distribute to storage nodes (ensuring k-of-n can recover)
-        let distribution = self.distribute_symbols(&symbols).await?;
+### 5.2 Mesh peer decode budgets (`fcp-mesh`)
 
-        let archive_id = ArchiveId::new();
-        self.archives.insert(archive_id, ArchiveMetadata {
-            id: archive_id,
-            merkle_root: merkle_tree.root(),
-            object_id,
-            symbol_distribution: distribution,
-            // ...
-        });
+Admission policy and peer budgets MUST additionally enforce per-peer runtime limits:
 
-        Ok(archive_id)
-    }
+- `DEFAULT_MAX_INFLIGHT_DECODES = 32`
+- `DEFAULT_MAX_DECODE_CPU_MS_PER_MIN = 5000`
+- Symbol and byte budgets from `AdmissionPolicy` and `PeerBudget`
 
-    /// Retrieve and verify archived audit log
-    pub async fn retrieve(&self, archive_id: ArchiveId) -> Result<Vec<AuditEntry>> {
-        let meta = self.archives.get(&archive_id)
-            .ok_or(Error::ArchiveNotFound)?;
-
-        let mut decoder = Decoder::new(meta.original_size);
-
-        // Fetch symbols from available nodes
-        for (node_id, esis) in &meta.symbol_distribution {
-            if let Ok(symbols) = self.fetch_from_node(*node_id, esis).await {
-                for (esi, data) in symbols {
-                    decoder.add_symbol(esi, &data);
-                    if let Some(data) = decoder.try_decode() {
-                        // Verify Merkle root
-                        let (entries, tree) = deserialize_with_merkle(&data)?;
-                        if tree.root() != meta.merkle_root {
-                            return Err(Error::TamperDetected);
-                        }
-                        return Ok(entries);
-                    }
-                }
-            }
-        }
-
-        Err(Error::InsufficientSymbols)
-    }
-}
-```
+RaptorQ decode and repair flows MUST pass through both layers: per-decode admission in `fcp-raptorq` and per-peer admission in `fcp-mesh`.
 
 ---
 
-### 5. Multipath Transport Layer
+## 6. Epoch Buffering and Replay Strategy
 
-For connectors in challenging network environments (IoT, mobile, edge):
+Epoch replay behavior MUST be deterministic and testable.
 
-```rust
-/// Multipath transport using RaptorQ symbol aggregation
-pub struct MultipathTransport {
-    paths: Vec<TransportPath>,
-    pending_objects: HashMap<ObjectId, ObjectDecoder>,
-}
+### 6.1 Buffer identity and ordering
 
-enum TransportPath {
-    Tcp(TcpStream),
-    Udp(UdpSocket),
-    Quic(QuicConnection),
-    WebSocket(WsStream),
-}
+Buffer/replay identity is bound by `(zone_id, epoch_id, object_id)`.
 
-impl MultipathTransport {
-    /// Send message over all available paths
-    pub async fn send(&mut self, msg: &FcpMessage) -> Result<()> {
-        let data = serialize(msg)?;
-        let object_id = ObjectId::from_data(&data);
+Replay order MUST be stable:
 
-        let encoder = Encoder::new(&data, SYMBOL_SIZE);
-        let symbols: Vec<_> = encoder.get_encoded_packets(REPAIR_COUNT).collect();
+1. ascending `epoch_id`
+2. ascending `object_id` (byte-order)
+3. ascending `esi` within each object
 
-        // Distribute symbols across paths
-        for (i, symbol) in symbols.iter().enumerate() {
-            let path_idx = i % self.paths.len();
-            self.paths[path_idx].send_symbol(object_id, symbol).await?;
-        }
+### 6.2 Completion and timeout rules
 
-        Ok(())
-    }
+- Epoch/object decode is complete only when decoder returns payload.
+- Incomplete decodes exceeding `decode_timeout` fail closed and emit structured failure logs.
+- Partial symbols may remain staged for targeted repair requests while within timeout and retention windows.
 
-    /// Receive from all paths, reconstruct when K' symbols arrive
-    pub async fn recv(&mut self) -> Result<FcpMessage> {
-        loop {
-            // Race all paths for next symbol
-            let symbol = futures::select_biased! {
-                s = self.paths[0].recv_symbol() => s?,
-                s = self.paths[1].recv_symbol() => s?,
-                // ... for all paths
-            };
+### 6.3 Degraded control-plane fallback
 
-            let decoder = self.pending_objects
-                .entry(symbol.object_id)
-                .or_insert_with(|| ObjectDecoder::new(symbol.object_size));
-
-            decoder.add_symbol(symbol.esi, &symbol.data);
-
-            if let Some(data) = decoder.try_decode() {
-                self.pending_objects.remove(&symbol.object_id);
-                return Ok(deserialize(&data)?);
-            }
-        }
-    }
-}
-```
-
-**Benefits:**
-- Aggregate bandwidth from all network interfaces
-- Automatic failover (paths can die, symbols still arrive)
-- Latency optimization (first K' arrivals win)
-- No complex multipath coordination protocol
+When FCPC is unavailable, `fcp-mesh::degraded` uses FCPS `CONTROL_PLANE` symbol transport. This path MUST preserve the same decode admission and replay ordering guarantees as normal flows.
 
 ---
 
-## New Crate: `fcp-raptorq`
+## 7. Deterministic Repair Scheduling Semantics
 
-### Module Structure
+Repair orchestration MUST be bounded, convergent, and deterministic.
 
-```
-crates/fcp-raptorq/
-├── Cargo.toml
-└── src/
-    ├── lib.rs           # Public API
-    ├── object.rs        # ObjectId, SymbolId types
-    ├── encoder.rs       # RaptorQ encoding wrapper
-    ├── decoder.rs       # RaptorQ decoding wrapper
-    ├── frame.rs         # FCP1-RQ frame format
-    ├── transport.rs     # RaptorQ transport layer
-    ├── buffer.rs        # Epoch-based event buffer
-    ├── store.rs         # Distributed symbol storage
-    └── update.rs        # Connector update protocol
-```
+### 7.1 Eligibility and priority
 
-### Dependencies
+`RepairController` eligibility is derived from `CoverageEvaluation` + `ObjectPlacementPolicy`:
 
-```toml
-[dependencies]
-raptorq = "2.0"          # Core RaptorQ implementation
-sha2 = "0.10"            # Object ID hashing
-fcp-core = { path = "../fcp-core" }
-tokio = { version = "1", features = ["full"] }
-futures = "0.3"
-bytes = "1"
-```
+- `Unavailable` -> always repair
+- `Degraded` -> repair on diversity deficit or coverage deficit above threshold
+- `Healthy` -> no repair
 
-### Public API
+Priority ranges:
 
-```rust
-// crates/fcp-raptorq/src/lib.rs
+- Unavailable: `1000 + deficit/100`
+- Degraded with diversity deficit: `200 + 10*diversity_deficit + deficit/100`
+- Degraded without diversity deficit: `100 + deficit/100`
+- Healthy: `0`
 
-pub mod object;
-pub mod encoder;
-pub mod decoder;
-pub mod frame;
-pub mod transport;
-pub mod buffer;
-pub mod store;
-pub mod update;
+### 7.2 Queue ordering contract
 
-// Re-exports
-pub use object::{ObjectId, SymbolId, EncodedSymbol};
-pub use encoder::RaptorQEncoder;
-pub use decoder::RaptorQDecoder;
-pub use frame::{RaptorQFrame, parse_rq_frame, build_rq_frame};
-pub use transport::RaptorQTransport;
-pub use buffer::RaptorQEventBuffer;
-pub use store::DistributedSymbolStore;
-pub use update::ConnectorUpdater;
+Repair queue ordering MUST be deterministic:
 
-/// Configuration for RaptorQ operations
-#[derive(Clone)]
-pub struct RaptorQConfig {
-    /// Symbol size in bytes (default: 1024)
-    pub symbol_size: u16,
+- primary sort: descending `priority`
+- tie-break: ascending `object_id`
 
-    /// Repair symbol ratio (default: 0.05 = 5% extra)
-    pub repair_ratio: f32,
+Queue semantics:
 
-    /// Maximum object size (default: 64MB)
-    pub max_object_size: u32,
+- deduplicate by `object_id`
+- bounded dequeue by rate limiter + concurrent permits
 
-    /// Decoder timeout (default: 30s)
-    pub decode_timeout: Duration,
-}
+### 7.3 Fairness and bounds
 
-impl Default for RaptorQConfig {
-    fn default() -> Self {
-        Self {
-            symbol_size: 1024,
-            repair_ratio: 0.05,
-            max_object_size: 64 * 1024 * 1024,
-            decode_timeout: Duration::from_secs(30),
-        }
-    }
-}
-```
+- `max_repairs_per_minute` token bucket controls dequeue rate.
+- `max_concurrent_repairs` controls parallelism.
+- `max_symbols_per_repair` bounds per-repair transfer pressure.
+- `TargetedRepairRequest` SHOULD prefer missing ESIs and source-diversity-improving peers.
 
 ---
 
-## Protocol Extensions
+## 8. CLI Repair Contract
 
-### Handshake Configuration
+`fcp repair status` must remain machine-consumable and operator-safe:
 
-RaptorQ is fundamental to FCP - all data flows as fungible symbols. Handshake includes symbol configuration:
+- Stable JSON schema via `RepairReport` types
+- Exit semantics:
+  - `0`: healthy
+  - `1`: critical/unavailable
+  - `2`: degraded
 
-```json
-{
-  "protocol_version": "1.0.0",
-  "transport_caps": {
-    "compression": ["zstd"],
-    "max_frame_size": 65536,
-    "raptorq": {
-      "symbol_sizes": [512, 1024, 2048],
-      "preferred_symbol_size": 1024,
-      "max_object_size": 67108864
-    }
-  }
-}
-```
-
-### Subscribe Configuration
-
-Event subscriptions include epoch configuration for symbol buffering:
-
-```json
-{
-  "type": "subscribe",
-  "id": "sub_123",
-  "topics": ["connector.events"],
-  "raptorq": {
-    "epoch_duration_ms": 1000,
-    "symbol_size": 1024
-  }
-}
-```
-
-### Frame Flag
-
-The `RAPTORQ` frame flag is set on all data frames:
-
-```rust
-bitflags! {
-    pub struct FrameFlags: u16 {
-        // ... existing ...
-        const RAPTORQ = 0b0100_0000_0000;  // RaptorQ symbols (always set for data frames)
-    }
-}
-```
+Current implementation still contains simulation placeholders in `crates/fcp-cli/src/repair/mod.rs`; bead `235t.24` MUST replace placeholders with real mesh/store-backed data without breaking schema or exit-code semantics.
 
 ---
 
-## Performance Characteristics
+## 9. Observability and Forensics Contract
 
-### Encoding/Decoding Overhead
+All failure paths in decode/repair/replay MUST emit structured logs compatible with:
 
-| Operation | Complexity | Typical Throughput |
-|-----------|------------|-------------------|
-| Encode | O(K) | ~1 GB/s per core |
-| Decode | O(K) | ~500 MB/s per core |
-| Symbol generation | O(1) per symbol | Millions/sec |
+- `docs/ASUPERSYNC_Logging_Forensics_Standard.md`
+- `docs/testing/e2e_log_schema.md`
 
-### Space Overhead
-
-| Redundancy | Symbol Overhead | Storage Overhead |
-|------------|-----------------|------------------|
-| k-of-k (no redundancy) | 0.2% | 0.2% |
-| k-of-n where n=1.5k | 50% repair | 50% per node, k nodes survive |
-| k-of-n where n=2k | 100% repair | 50% per node, any k of 2k survive |
-
-### Network Efficiency
-
-For a 1MB object over 10% loss network:
-
-| Approach | Bytes Transmitted | Round Trips |
-|----------|-------------------|-------------|
-| TCP retransmit | ~1.2MB | 10-20 |
-| RaptorQ (5% repair) | ~1.05MB | 1 |
+Minimum required fields include run/scenario correlation, operation phase, bounded-resource reason codes, and deterministic replay artifact pointers.
 
 ---
 
-## Security Considerations
+## 10. Downstream Bead Integration Requirements
 
-1. **Object ID Verification**: Always verify `SHA256(decoded) == object_id`
-2. **Symbol Authentication**: Consider HMAC per symbol for untrusted sources
-3. **Replay Protection**: Include nonce/timestamp in object data
-4. **Resource Limits**: Cap decoder memory, timeout stale decoders
+| Bead | Must Consume From This Contract |
+|---|---|
+| `235t.21` (`fcp-raptorq` migration) | Sections 4, 5, 6 |
+| `235t.22` (`fcp-store` migration) | Sections 4, 7 |
+| `235t.23` (`fcp-mesh` degraded + repair loop) | Sections 5, 6, 7 |
+| `235t.24` (`fcp-cli` async repair flows) | Sections 4, 8, 9 |
+| `235t.25` (vectors + adversarial suite) | Sections 4, 5, 6, 7, 9 |
 
----
-
-## Implementation Phases
-
-1. **Phase 1**: Add `fcp-raptorq` crate with core types
-2. **Phase 2**: Implement RaptorQ frame mode in wire protocol
-3. **Phase 3**: Add epoch-based event buffer infrastructure
-4. **Phase 4**: Implement connector update protocol
-5. **Phase 5**: Add multipath transport support
-
-RaptorQ capabilities are declared during handshake via `transport_caps.raptorq`. See FCP Specification Section 9.4 (Frame Flags) and Section 9.9 (Streaming, Replay, and Backpressure) for protocol integration.
+Each downstream bead must link this document in completion evidence and demonstrate parity against Wave D contracts.
 
 ---
 
-## Conclusion
+## 11. Acceptance Checklist for `235t.20`
 
-RaptorQ is not an optional feature but the foundational primitive of FCP. The protocol operates on **fungible symbol flows**, not discrete messages. This fundamental design choice enables:
+- Architecture contract is explicit for symbol sizing, decode admission, epoch buffering/replay, and deterministic repair semantics.
+- Contract is linked in ASUPERSYNC baseline docs.
+- Deterministic repair scheduling behavior is encoded in implementation/tests.
 
-- **Fault tolerance without coordination** (any k-of-n symbols work)
-- **Multipath without complexity** (all paths contribute equally)
-- **Distribution without assignment** (no need to track who has what)
-- **Efficiency without waste** (~0.2% overhead)
-- **Universal resilience** (every data flow is inherently erasure-coded)
-
-By making RaptorQ fundamental rather than optional, FCP achieves true data fungibility everywhere - enabling the sovereign mesh architecture where any subset of devices can reconstruct any data.

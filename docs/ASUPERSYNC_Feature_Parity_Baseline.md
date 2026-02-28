@@ -139,6 +139,7 @@ Any additional command used for a contract must be recorded in `contract-index.j
 ### Wave D: RaptorQ + Repair (`235t.20` to `235t.25`)
 - Parity references required: `PAR-RAPTORQ-*`, plus `PAR-RUNTIME-003` for deny/failure paths
 - Degraded-mode and partial-symbol scenarios are mandatory
+- Contract baseline required: `docs/RFC_RaptorQ_Integration.md`
 
 ### Wave E: Validation/Cutover (`235t.26` to `235t.34`)
 - Parity references required: all contracts
@@ -168,4 +169,3 @@ Before a migration bead is closed:
 Before a migration PR is approved:
 1. PR description must include a `Parity Contracts` section.
 2. The section must list affected `PAR-*` IDs and evidence links.
-

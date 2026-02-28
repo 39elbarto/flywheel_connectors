@@ -113,7 +113,7 @@ Notes:
 | `P4` | Timers/deadlines | Sleep/timeout spread across connectors and libs | Direct replacement | Deadline-aware timers can map to shared substrate APIs | `235t.4`, `235t.7`, `235t.9` |
 | `P5` | WebSocket transport | `tokio-tungstenite` + reconnect behavior coupling | Requires adapter | Behavior-preserving wrapper needed before direct cutover | `235t.9`, `235t.10`, `235t.16-18` |
 | `P6` | HTTP+TLS client stack | Broad `reqwest` coupling across crates/connectors | Staged workaround | Keep existing client behind adapter first, then swap transport | `235t.11`, `235t.31`, connector beads |
-| `P7` | RaptorQ pipeline | Split across `fcp-raptorq`, mesh, store, cli | Staged workaround | Needs architecture contract and phased cutover | `235t.20`, `235t.21`, `235t.22`, `235t.23`, `235t.24` |
+| `P7` | RaptorQ pipeline | Split across `fcp-raptorq`, mesh, store, cli | Staged workaround | Needs architecture contract (`docs/RFC_RaptorQ_Integration.md`) and phased cutover | `235t.20`, `235t.21`, `235t.22`, `235t.23`, `235t.24` |
 | `P8` | Test runtime harness | 314 Tokio async test attributes | Requires adapter | Requires unified test macro/harness with deterministic behavior | `235t.26`, `235t.32` |
 | `P9` | Cancellation/context | Inconsistent explicit cancellation edges | Requires adapter | Must enforce uniform context+deadline propagation | `235t.4`, `235t.30`, `235t.31` |
 
@@ -132,7 +132,7 @@ Classification summary:
 | `R2` | HTTP/TLS transport replacement drift (`P6`) | Retry/timeout regressions and inconsistent TLS behavior | `235t.31` | Adapter phase preserving `reqwest` behavior; parity contract checks before swap | 2026-03-10 |
 | `R3` | WebSocket reconnection semantic drift (`P5`) | Stream ordering/recovery regressions user-visible | `235t.9` | Build behavior-locking adapter + scripted E2E stream scenarios | 2026-03-10 |
 | `R4` | Async test harness migration scale (`P8`) | False confidence from partial migration and flaky tests | `235t.26` | Introduce migration test macro, enforce no new `#[tokio::test]` | 2026-03-12 |
-| `R5` | RaptorQ pipeline coupling across crates (`P7`) | Data loss/repair regressions in degraded paths | `235t.20` | Ship architecture contract first, then staged crate migration with vectors + adversarial tests | 2026-03-14 |
+| `R5` | RaptorQ pipeline coupling across crates (`P7`) | Data loss/repair regressions in degraded paths | `235t.20` | Ship architecture contract first (`docs/RFC_RaptorQ_Integration.md`), then staged crate migration with vectors + adversarial tests | 2026-03-14 |
 | `R6` | Cancellation edge inconsistency (`P9`) | Orphan tasks, leaked work, and timeout ambiguity | `235t.4` | Formal cancellation model + context propagation contract and lints | 2026-03-08 |
 | `R7` | Guardrail gaps allow Tokio reintroduction (`P1-P9`) | Migration churn and policy backsliding | `235t.5` | Enforce `scripts/ci/asupersync_tokio_guard.sh` with `.config/asupersync/tokio_exception_ledger.json` in CI + local workflow | 2026-03-06 |
 | `R8` | Telemetry runtime coupling | Observability regressions and context propagation breaks | `235t.12` | Isolate telemetry runtime boundary behind substrate facade | 2026-03-11 |

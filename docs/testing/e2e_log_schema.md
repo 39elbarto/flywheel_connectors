@@ -149,13 +149,35 @@ Scenario Matrix Runner
 Run the full E2E script matrix via:
 
 ```bash
-./scripts/e2e/run_matrix.sh
+./scripts/e2e/run_matrix.sh --run-id 235t-e2e-baseline
 ```
 
 The runner writes:
-- `out/e2e_matrix_runner/summary.jsonl` (one record per scenario)
-- `out/e2e_matrix_runner/summary.json` (aggregate summary)
+- `artifacts/asupersync/e2e/<run-id>/results.jsonl` (one record per scenario)
+- `artifacts/asupersync/e2e/<run-id>/summary.json` (aggregate summary)
+- `artifacts/asupersync/e2e/<run-id>/manifest.json` (run envelope + totals)
+- `artifacts/asupersync/e2e/<run-id>/scenario_plan.json` (scenario id/seed/replay contract)
+- `artifacts/asupersync/e2e/<run-id>/replay.sh` (deterministic full + per-scenario replay commands)
+- `artifacts/asupersync/e2e/<run-id>/scenarios/<scenario>/...` (command.txt, execution.log, scenario.json, artifacts/)
 
 Required scenarios are listed in `scripts/e2e/run_matrix.sh` and should exit
 `pass` with schema-valid JSONL logs. Optional scenarios may be skipped until
 the underlying harness APIs are implemented.
+
+Scenario ID Governance
+----------------------
+
+The canonical machine-consumable registry is:
+
+- `scripts/e2e/scenario_registry.json`
+
+Validation command:
+
+```bash
+./scripts/e2e/validate_scenario_registry.sh
+```
+
+Governance guarantees:
+- Stable scenario IDs (`asupersync.e2e.<key>`) for every matrix scenario.
+- One-to-one mapping of scenario -> script -> contract id.
+- Duplicate/ambiguous keys, IDs, scripts, or contracts are rejected.

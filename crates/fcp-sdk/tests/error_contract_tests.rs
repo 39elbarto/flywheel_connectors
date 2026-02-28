@@ -582,7 +582,7 @@ fn retry_after_present_for_rate_limited() {
         retry_after_ms: 5000,
         violation: None,
     };
-    assert_eq!(err.retry_after(), Some(Duration::from_millis(5000)));
+    assert_eq!(err.retry_after(), Some(Duration::from_millis(5_000)));
 }
 
 #[test]

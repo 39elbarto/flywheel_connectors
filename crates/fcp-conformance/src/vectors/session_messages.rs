@@ -77,7 +77,7 @@ impl HelloRetryGoldenVector {
             to: "initiator.mesh.ts.net".into(),
             cookie: "deadbeefcafebabedeadbeefcafebabedeadbeefcafebabedeadbeefcafebabe".into(),
             timestamp: 1_700_000_000,
-            expected_cbor: "".into(), // Computed at verification time
+            expected_cbor: "a462746f75696e69746961746f722e6d6573682e74732e6e65746466726f6d75726573706f6e6465722e6d6573682e74732e6e657466636f6f6b69655820deadbeefcafebabedeadbeefcafebabedeadbeefcafebabedeadbeefcafebabe6974696d657374616d701a6553f100".into(),
         }
     }
 
@@ -90,7 +90,7 @@ impl HelloRetryGoldenVector {
             to: "node-b.mesh.ts.net".into(),
             cookie: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".into(),
             timestamp: 1_700_086_400,
-            expected_cbor: "".into(),
+            expected_cbor: "a462746f726e6f64652d622e6d6573682e74732e6e65746466726f6d726e6f64652d612e6d6573682e74732e6e657466636f6f6b69655820ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff6974696d657374616d701a65554280".into(),
         }
     }
 
@@ -188,7 +188,7 @@ impl TransportLimitsGoldenVector {
             timestamp: 1_700_000_000,
             suites: vec![1],
             max_datagram_bytes: 1400,
-            expected_transcript: "".into(), // Computed at verification time
+            expected_transcript: "464350322d48454c4c4f2d563175696e69746961746f722e6d6573682e74732e6e657475726573706f6e6465722e6d6573682e74732e6e65745820a4e09292b651c278b9772c569f5fa9bb13d906b46ab68c9df9dc2b4409f8a2095000000000000000000000000000000001f61a6553f1008101190578".into(),
             expected_effective_max: 1400,
         }
     }
@@ -206,7 +206,7 @@ impl TransportLimitsGoldenVector {
             timestamp: 1_700_000_000,
             suites: vec![1],
             max_datagram_bytes: 0, // 0 means None
-            expected_transcript: "".into(),
+            expected_transcript: "464350322d48454c4c4f2d563175696e69746961746f722e6d6573682e74732e6e657475726573706f6e6465722e6d6573682e74732e6e65745820a4e09292b651c278b9772c569f5fa9bb13d906b46ab68c9df9dc2b4409f8a2095000000000000000000000000000000001f61a6553f1008101f6".into(),
             expected_effective_max: 1200, // Default
         }
     }
@@ -228,7 +228,7 @@ impl TransportLimitsGoldenVector {
             timestamp: 1_700_086_400,
             suites: vec![1, 2],
             max_datagram_bytes: 65535, // Use a non-zero, non-default to distinguish from vector 2
-            expected_transcript: "".into(),
+            expected_transcript: "464350322d48454c4c4f2d563175696e69746961746f722e6d6573682e74732e6e657475726573706f6e6465722e6d6573682e74732e6e65745820ce8d3ad1ccb633ec7b70c17814a5c76ecd029685050d344745ba05870e587d5950ffffffffffffffffffffffffffffffff5820deadbeefcafebabedeadbeefcafebabedeadbeefcafebabedeadbeefcafebabe1a6555428082010219ffff".into(),
             expected_effective_max: 65535,
         }
     }

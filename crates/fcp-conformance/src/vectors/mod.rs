@@ -9,5 +9,7 @@ pub mod datagram;
 pub mod fcpc;
 pub mod fcps;
 pub mod holder_proof;
+pub mod hpke;
 pub mod session;
+pub mod session_messages;
 pub mod signing;

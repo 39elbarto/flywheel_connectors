@@ -6,8 +6,9 @@
 //! - Deterministic validation behavior
 
 use super::{
-    CAPABILITY_USAGE_V1_SCHEMA, E2E_LOG_V1_SCHEMA, E2E_LOG_V2_SCHEMA, FZPF_V01_SCHEMA,
-    RELEASE_MANIFEST_V1_SCHEMA, ROLLOUT_POLICY_V1_SCHEMA, TRACE_V1_SCHEMA,
+    ASUPERSYNC_FORENSICS_V1_SCHEMA, CAPABILITY_USAGE_V1_SCHEMA, E2E_LOG_V1_SCHEMA,
+    E2E_LOG_V2_SCHEMA, FZPF_V01_SCHEMA, RELEASE_MANIFEST_V1_SCHEMA, ROLLOUT_POLICY_V1_SCHEMA,
+    TRACE_V1_SCHEMA,
 };
 use fcp_cbor::to_canonical_cbor;
 use fcp_core::ObjectId;
@@ -237,6 +238,12 @@ fn load_release_manifest_schema() -> Validator {
     let schema: Value = serde_json::from_str(RELEASE_MANIFEST_V1_SCHEMA)
         .expect("ReleaseManifest schema should be valid JSON");
     Validator::new(&schema).expect("ReleaseManifest schema should be a valid JSON Schema")
+}
+
+fn load_asupersync_forensics_schema() -> Validator {
+    let schema: Value = serde_json::from_str(ASUPERSYNC_FORENSICS_V1_SCHEMA)
+        .expect("ASUPERSYNC forensics schema should be valid JSON");
+    Validator::new(&schema).expect("ASUPERSYNC forensics schema should be a valid JSON Schema")
 }
 
 fn load_rollout_policy_schema() -> Validator {
@@ -619,6 +626,163 @@ fn v2_required_fields_preserved_in_dispatch() {
         validate_e2e_log_entry(&invalid_doc).is_err(),
         "v2 entry missing required fields should fail"
     );
+}
+
+// ============================================================================
+// ASUPERSYNC Forensics Schema Validation
+// ============================================================================
+
+fn sample_asupersync_forensics_entry() -> Value {
+    serde_json::json!({
+        "schema_version": "asupersync-forensics/v1",
+        "run_id": "run-001",
+        "scenario_id": "asupersync.e2e.happy_path",
+        "trace_id": "trace-001",
+        "correlation_id": "trace-001",
+        "connector": "fcp.example",
+        "zone": "z:work",
+        "operation": "invoke",
+        "attempt": 1,
+        "timeout_budget_ms": 5000,
+        "cancellation_reason": null,
+        "queue_depth": null,
+        "decode_budget": null,
+        "outcome": "pass",
+        "elapsed_ms": 12
+    })
+}
+
+#[test]
+fn asupersync_forensics_schema_is_valid_json_schema() {
+    let _ = load_asupersync_forensics_schema();
+}
+
+#[test]
+fn valid_asupersync_forensics_entry_passes() {
+    use super::validate_asupersync_forensics_entry;
+
+    let doc = sample_asupersync_forensics_entry();
+    assert!(
+        validate_asupersync_forensics_entry(&doc, Some("run-001")).is_ok(),
+        "valid forensics entry should pass"
+    );
+}
+
+#[test]
+fn reject_missing_asupersync_trace_id_with_rule_id() {
+    use super::validate_asupersync_forensics_entry;
+
+    let mut doc = sample_asupersync_forensics_entry();
+    doc.as_object_mut()
+        .expect("sample entry should be object")
+        .remove("trace_id");
+
+    let err = validate_asupersync_forensics_entry(&doc, Some("run-001"))
+        .expect_err("missing trace_id must fail");
+    assert_eq!(
+        err.rule_id(),
+        Some("asupersync.forensics.v1.trace_id"),
+        "missing trace_id should map to deterministic rule id"
+    );
+}
+
+#[test]
+fn reject_asupersync_attempt_zero_with_rule_id() {
+    use super::validate_asupersync_forensics_entry;
+
+    let mut doc = sample_asupersync_forensics_entry();
+    doc.as_object_mut()
+        .expect("sample entry should be object")
+        .insert("attempt".to_string(), serde_json::json!(0));
+
+    let err = validate_asupersync_forensics_entry(&doc, Some("run-001"))
+        .expect_err("attempt=0 must fail");
+    assert_eq!(
+        err.rule_id(),
+        Some("asupersync.forensics.v1.attempt"),
+        "attempt range violation should map to deterministic rule id"
+    );
+}
+
+#[test]
+fn reject_asupersync_invalid_outcome_with_rule_id() {
+    use super::validate_asupersync_forensics_entry;
+
+    let mut doc = sample_asupersync_forensics_entry();
+    doc.as_object_mut()
+        .expect("sample entry should be object")
+        .insert("outcome".to_string(), serde_json::json!("unknown"));
+
+    let err = validate_asupersync_forensics_entry(&doc, Some("run-001"))
+        .expect_err("unknown outcome must fail");
+    assert_eq!(
+        err.rule_id(),
+        Some("asupersync.forensics.v1.outcome"),
+        "outcome enum violation should map to deterministic rule id"
+    );
+}
+
+#[test]
+fn reject_asupersync_invalid_optional_span_id() {
+    use super::validate_asupersync_forensics_entry;
+
+    let mut doc = sample_asupersync_forensics_entry();
+    doc.as_object_mut()
+        .expect("sample entry should be object")
+        .insert("span_id".to_string(), serde_json::json!("xyz"));
+
+    let err = validate_asupersync_forensics_entry(&doc, Some("run-001"))
+        .expect_err("invalid span_id must fail");
+    assert_eq!(
+        err.rule_id(),
+        Some("asupersync.forensics.v1.span_id"),
+        "optional span_id format violation should map to deterministic rule id"
+    );
+}
+
+#[test]
+fn asupersync_jsonl_reports_line_and_rule_id() {
+    use super::validate_asupersync_forensics_jsonl;
+
+    let mut invalid = sample_asupersync_forensics_entry();
+    invalid
+        .as_object_mut()
+        .expect("sample entry should be object")
+        .insert("outcome".to_string(), serde_json::json!("mismatch"));
+
+    let jsonl = format!(
+        "{}\n{}\n",
+        serde_json::to_string(&sample_asupersync_forensics_entry()).unwrap(),
+        serde_json::to_string(&invalid).unwrap()
+    );
+
+    let err = validate_asupersync_forensics_jsonl(&jsonl, Some("run-001"))
+        .expect_err("second line should fail");
+    assert_eq!(err.line(), Some(2), "error should include failing line");
+    assert_eq!(
+        err.rule_id(),
+        Some("asupersync.forensics.v1.outcome"),
+        "error should include deterministic rule id"
+    );
+}
+
+#[test]
+fn asupersync_jsonl_reports_invalid_json_line_number() {
+    use super::validate_asupersync_forensics_jsonl;
+
+    let jsonl = format!(
+        "{}\n{{not-json}}\n",
+        serde_json::to_string(&sample_asupersync_forensics_entry()).unwrap()
+    );
+
+    let err = validate_asupersync_forensics_jsonl(&jsonl, Some("run-001"))
+        .expect_err("invalid json line must fail");
+    assert_eq!(
+        err.line(),
+        Some(2),
+        "invalid JSON should report line number"
+    );
+    assert_eq!(err.rule_id(), None, "invalid JSON has no rule id");
 }
 
 #[test]

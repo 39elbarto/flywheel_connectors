@@ -67,16 +67,16 @@ impl HpkeSealedBoxGoldenVector {
         Self {
             description: "Zone key seal (sk=[0x10;32], seed=[0xAA;32])".into(),
             recipient_sk: "1010101010101010101010101010101010101010101010101010101010101010".into(),
-            expected_recipient_pk: "".into(), // Computed at verification time
+            expected_recipient_pk: "781faab908430150daccdd6f9d6c5086e34f73a93ebbaa271765e5036edfc519".into(),
             rng_seed: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
             plaintext: "deadbeefcafebabedeadbeefcafebabedeadbeefcafebabedeadbeefcafebabe".into(),
             zone_id: hex::encode(b"z:work"),
             recipient_node_id: hex::encode(b"node:laptop.mesh.ts.net"),
             purpose: "FCP2-ZONE-KEY".into(),
             issued_at: 1_700_000_000,
-            expected_aad_cbor: "".into(), // Computed at verification time
-            expected_enc: "".into(),      // Populated after first run
-            expected_ciphertext: "".into(), // Populated after first run
+            expected_aad_cbor: "a467707572706f73654d464350322d5a4f4e452d4b4559677a6f6e655f6964467a3a776f726b696973737565645f61741a6553f10071726563697069656e745f6e6f64655f6964576e6f64653a6c6170746f702e6d6573682e74732e6e6574".into(),
+            expected_enc: "812bdf224bf70d7ae7ef4505be7678dd3282dfe762e6e16af542e58672314b00".into(),
+            expected_ciphertext: "2c309bb932b1952b52d08b27271866bf6572da7dc7b8616bde176dfeebfdf8c274f5d57296ea937d88f7be725d3d3eda".into(),
         }
     }
 
@@ -89,16 +89,16 @@ impl HpkeSealedBoxGoldenVector {
         Self {
             description: "ObjectId key seal (sk=[0x20;32], seed=[0xBB;32])".into(),
             recipient_sk: "2020202020202020202020202020202020202020202020202020202020202020".into(),
-            expected_recipient_pk: "".into(),
+            expected_recipient_pk: "06453fcd9cef5a1f53acc4f942104c0c8e9e27d5c7b37f5507cdcd1628105963".into(),
             rng_seed: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             plaintext: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
             zone_id: hex::encode(b"z:private"),
             recipient_node_id: hex::encode(b"node:server.mesh.ts.net"),
             purpose: "FCP2-OBJECTID-KEY".into(),
             issued_at: 1_700_086_400,
-            expected_aad_cbor: "".into(),
-            expected_enc: "".into(),
-            expected_ciphertext: "".into(),
+            expected_aad_cbor: "a467707572706f736551464350322d4f424a45435449442d4b4559677a6f6e655f6964497a3a70726976617465696973737565645f61741a6555428071726563697069656e745f6e6f64655f6964576e6f64653a7365727665722e6d6573682e74732e6e6574".into(),
+            expected_enc: "289e8e7e39cbcbc92b38a3f85ebfad2774ab877ba4a1ae5f9401b734c0edf914".into(),
+            expected_ciphertext: "376c149d54dfb5caf5f527c52e3a75071e2368581c1e9f6bc39a698b0e488c1d8e621933ef2772f31cf0a5b1d2210c53".into(),
         }
     }
 
@@ -111,16 +111,16 @@ impl HpkeSealedBoxGoldenVector {
         Self {
             description: "Secret share seal (sk=[0x30;32], seed=[0xCC;32])".into(),
             recipient_sk: "3030303030303030303030303030303030303030303030303030303030303030".into(),
-            expected_recipient_pk: "".into(),
+            expected_recipient_pk: "e50c239bc204f1341664c9d9c50c6a0d0fff6fc79d9301f1e713aab2e0344b3f".into(),
             rng_seed: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into(),
             plaintext: "feedfacedeadbeeffeedfacedeadbeef".into(), // 16 bytes
             zone_id: hex::encode(b"z:public"),
             recipient_node_id: hex::encode(b"node:ci-runner.mesh.ts.net"),
             purpose: "FCP2-SECRET-SHARE".into(),
             issued_at: 1_700_172_800,
-            expected_aad_cbor: "".into(),
-            expected_enc: "".into(),
-            expected_ciphertext: "".into(),
+            expected_aad_cbor: "a467707572706f736551464350322d5345435245542d5348415245677a6f6e655f6964487a3a7075626c6963696973737565645f61741a6556940071726563697069656e745f6e6f64655f6964581a6e6f64653a63692d72756e6e65722e6d6573682e74732e6e6574".into(),
+            expected_enc: "5b6a4a5000e2ae7bd20abc3a76e6cca5c068dc4ec0b2c4a8ba019d6f624d815b".into(),
+            expected_ciphertext: "af016ffd986cfd6733141e52b65fa218054a01d40b0182fc91072b1b4756e6d9".into(),
         }
     }
 
@@ -137,7 +137,7 @@ impl HpkeSealedBoxGoldenVector {
     ///
     /// Returns an error message if any step fails.
     pub fn verify(&self) -> Result<(), String> {
-        use fcp_crypto::hpke_seal::{hpke_open, hpke_seal_with_rng, Fcp2Aad, HpkeSealedBox};
+        use fcp_crypto::hpke_seal::{Fcp2Aad, HpkeSealedBox, hpke_open, hpke_seal_with_rng};
         use fcp_crypto::x25519::X25519SecretKey;
         use rand::SeedableRng;
         use rand_chacha::ChaCha20Rng;
@@ -286,7 +286,7 @@ mod tests {
 
     #[test]
     fn deterministic_rng_produces_identical_output() {
-        use fcp_crypto::hpke_seal::{hpke_seal_with_rng, Fcp2Aad};
+        use fcp_crypto::hpke_seal::{Fcp2Aad, hpke_seal_with_rng};
         use fcp_crypto::x25519::X25519SecretKey;
         use rand::SeedableRng;
         use rand_chacha::ChaCha20Rng;
@@ -340,7 +340,7 @@ mod tests {
 
     #[test]
     fn aad_zone_id_binding() {
-        use fcp_crypto::hpke_seal::{hpke_open, hpke_seal, Fcp2Aad};
+        use fcp_crypto::hpke_seal::{Fcp2Aad, hpke_open, hpke_seal};
         use fcp_crypto::x25519::X25519SecretKey;
 
         let sk = X25519SecretKey::from_bytes([0x10; 32]);
@@ -360,7 +360,7 @@ mod tests {
 
     #[test]
     fn ciphertext_length_correctness() {
-        use fcp_crypto::hpke_seal::{hpke_seal, Fcp2Aad, HPKE_ENC_SIZE, HPKE_TAG_SIZE};
+        use fcp_crypto::hpke_seal::{Fcp2Aad, HPKE_ENC_SIZE, HPKE_TAG_SIZE, hpke_seal};
         use fcp_crypto::x25519::X25519SecretKey;
 
         let sk = X25519SecretKey::from_bytes([0x10; 32]);

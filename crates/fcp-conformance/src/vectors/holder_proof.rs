@@ -74,12 +74,12 @@ impl HolderProofGoldenVector {
             description: "Basic holder proof (sk=[0x04;32], simple request)".into(),
             holder_signing_key: "0404040404040404040404040404040404040404040404040404040404040404"
                 .into(),
-            expected_holder_pk: "".into(), // Computed at verification time
+            expected_holder_pk: "ca93ac1705187071d67b83c7ff0efe8108e8ec4530575d7726879333dbdabe7c".into(),
             request_id: "req_001".into(),
             operation_id: "discord.send_message".into(),
             token_jti: "deadbeef".into(),
             expected_signable_bytes: hex::encode(&expected_bytes),
-            expected_signature: "".into(), // Computed at verification time
+            expected_signature: "6c7d4643067154a0114d32efd348ae94108948eeb76cdf9c046bc44f8e9bde945e0b441fb88570c5d421decd7ef4e8d4a410d4a42b2a7c7468763b0c44d1d504".into(),
         }
     }
 
@@ -104,12 +104,12 @@ impl HolderProofGoldenVector {
             description: "Holder proof with UUID request ID (sk=[0x05;32])".into(),
             holder_signing_key: "0505050505050505050505050505050505050505050505050505050505050505"
                 .into(),
-            expected_holder_pk: "".into(),
+            expected_holder_pk: "6e7a1cdd29b0b78fd13af4c5598feff4ef2a97166e3ca6f2e4fbfccd80505bf1".into(),
             request_id: "550e8400-e29b-41d4-a716-446655440000".into(),
             operation_id: "s3.get_object".into(),
             token_jti: "0123456789abcdef".into(),
             expected_signable_bytes: hex::encode(&expected_bytes),
-            expected_signature: "".into(),
+            expected_signature: "5c08f233d587da600db334518da70f2ddefa7432df821d08b692eb9a456b13d26627104e9fe31f9e3322a3bc7a6b9ec9944da2f0f37553451b8320bc2d8c7a04".into(),
         }
     }
 
@@ -134,12 +134,12 @@ impl HolderProofGoldenVector {
             description: "Holder proof with 16-byte JTI (sk=[0x06;32])".into(),
             holder_signing_key: "0606060606060606060606060606060606060606060606060606060606060606"
                 .into(),
-            expected_holder_pk: "".into(),
+            expected_holder_pk: "8a875fff1eb38451577acd5afee405456568dd7c89e090863a0557bc7af49f17".into(),
             request_id: "req_42".into(),
             operation_id: "github.create_pr".into(),
             token_jti: "00112233445566778899aabbccddeeff".into(),
             expected_signable_bytes: hex::encode(&expected_bytes),
-            expected_signature: "".into(),
+            expected_signature: "37a7ad3f05474925481bae3714d61678e27f6dad8c2019a3ba214b7a655bd9d781b019b565f5485ee527ccd1324742befa3ba446cdf94e38023ef6e221ea080e".into(),
         }
     }
 

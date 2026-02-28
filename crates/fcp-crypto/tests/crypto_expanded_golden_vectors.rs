@@ -1,17 +1,18 @@
 //! Expanded golden vector tests for fcp-crypto.
 //!
 //! Covers:
-//! - COSE_Sign1 capability token signing + verification with deterministic Ed25519 keys
+//! - `COSE_Sign1` capability token signing + verification with deterministic Ed25519 keys
 //! - HPKE AAD encoding determinism and purpose string validation
 //! - Canonical signing-bytes construction and schema hash stability
 
 use fcp_crypto::canonicalize::{
-    canonical_signing_bytes, schema_hash, to_deterministic_cbor, SCHEMA_HASH_SIZE, SIGNING_DOMAIN,
+    SCHEMA_HASH_SIZE, SIGNING_DOMAIN, canonical_signing_bytes, schema_hash, to_deterministic_cbor,
 };
-use fcp_crypto::cose::{CoseToken, CwtClaims, COSE_ALG_EDDSA};
+use fcp_crypto::cose::{COSE_ALG_EDDSA, CoseToken, CwtClaims};
 use fcp_crypto::ed25519::Ed25519SigningKey;
+use fcp_crypto::hpke_seal::purpose;
 use fcp_crypto::hpke_seal::{
-    hpke_open, hpke_seal, Fcp2Aad, HpkeSealedBox, HPKE_ENC_SIZE, HPKE_TAG_SIZE,
+    Fcp2Aad, HPKE_ENC_SIZE, HPKE_TAG_SIZE, HpkeSealedBox, hpke_open, hpke_seal,
 };
 use fcp_crypto::x25519::X25519SecretKey;
 use serde::Deserialize;
@@ -25,9 +26,11 @@ use std::fs;
 #[derive(Debug, Deserialize)]
 struct SigningBytesVectors {
     constants: SigningConstants,
-    schema_hash_vectors: Vec<SchemaHashVector>,
+    #[serde(rename = "schema_hash_vectors")]
+    schema_hashes: Vec<SchemaHashVector>,
     schema_hash_properties: Vec<SchemaHashProperty>,
-    signing_bytes_vectors: Vec<SigningBytesVector>,
+    #[serde(rename = "signing_bytes_vectors")]
+    signing_vectors: Vec<SigningBytesVector>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -108,10 +111,13 @@ struct CoseCapabilityVectors {
 
 #[derive(Debug, Deserialize)]
 struct SigningKeyInfo {
-    secret_key_hex: String,
+    #[serde(rename = "secret_key_hex")]
+    secret_key: String,
     #[allow(dead_code)]
-    public_key_hex: String,
-    key_id_hex: String,
+    #[serde(rename = "public_key_hex")]
+    public_key: String,
+    #[serde(rename = "key_id_hex")]
+    key_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -133,9 +139,8 @@ fn hex_to_bytes(hex: &str) -> Vec<u8> {
 }
 
 fn load_signing_bytes_vectors() -> SigningBytesVectors {
-    let content =
-        fs::read_to_string("tests/vectors/canonicalize/signing_bytes_vectors.json")
-            .expect("Failed to read signing_bytes_vectors.json");
+    let content = fs::read_to_string("tests/vectors/canonicalize/signing_bytes_vectors.json")
+        .expect("Failed to read signing_bytes_vectors.json");
     serde_json::from_str(&content).expect("Failed to parse signing_bytes_vectors.json")
 }
 
@@ -152,9 +157,7 @@ fn load_cose_capability_vectors() -> CoseCapabilityVectors {
 }
 
 fn signing_key_from_rfc8032_tv1() -> Ed25519SigningKey {
-    let bytes = hex_to_bytes(
-        "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
-    );
+    let bytes = hex_to_bytes("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60");
     let arr: [u8; 32] = bytes.try_into().expect("key must be 32 bytes");
     Ed25519SigningKey::from_bytes(&arr).expect("valid RFC 8032 TV1 key")
 }
@@ -190,7 +193,7 @@ fn test_signing_domain_constant() {
 fn test_schema_hashes_from_vectors() {
     let vectors = load_signing_bytes_vectors();
 
-    for v in &vectors.schema_hash_vectors {
+    for v in &vectors.schema_hashes {
         let hash = schema_hash(&v.schema_id);
         let hash_hex = hex::encode(hash);
 
@@ -239,7 +242,7 @@ fn test_schema_hash_sensitivity_properties() {
 fn test_signing_bytes_construction() {
     let vectors = load_signing_bytes_vectors();
 
-    for v in &vectors.signing_bytes_vectors {
+    for v in &vectors.signing_vectors {
         let cbor = hex_to_bytes(&v.cbor_hex);
         let signing_bytes = canonical_signing_bytes(&v.schema_id, &cbor);
         let signing_bytes_hex = hex::encode(&signing_bytes);
@@ -313,7 +316,10 @@ fn test_deterministic_cbor_map_key_ordering() {
     let cbor1 = to_deterministic_cbor(&map1).unwrap();
     let cbor2 = to_deterministic_cbor(&map2).unwrap();
 
-    assert_eq!(cbor1, cbor2, "CBOR encoding must be insertion-order independent");
+    assert_eq!(
+        cbor1, cbor2,
+        "CBOR encoding must be insertion-order independent"
+    );
 
     // CBOR must start with map marker
     assert_eq!(cbor1[0] & 0xe0, 0xa0, "must be a CBOR map (major type 5)");
@@ -335,7 +341,6 @@ fn test_hpke_size_invariants() {
 #[test]
 fn test_hpke_purpose_strings() {
     let vectors = load_hpke_vectors();
-    use fcp_crypto::hpke_seal::purpose;
 
     for ps in &vectors.purpose_strings {
         let actual_bytes = match ps.name.as_str() {
@@ -413,9 +418,18 @@ fn test_hpke_different_purposes_different_aad() {
     let aad_obj = Fcp2Aad::for_objectid_key(zone_id, node_id, ts).encode();
     let aad_share = Fcp2Aad::for_secret_share(zone_id, node_id, ts).encode();
 
-    assert_ne!(aad_zone, aad_obj, "ZONE_KEY vs OBJECTID_KEY AAD must differ");
-    assert_ne!(aad_zone, aad_share, "ZONE_KEY vs SECRET_SHARE AAD must differ");
-    assert_ne!(aad_obj, aad_share, "OBJECTID_KEY vs SECRET_SHARE AAD must differ");
+    assert_ne!(
+        aad_zone, aad_obj,
+        "ZONE_KEY vs OBJECTID_KEY AAD must differ"
+    );
+    assert_ne!(
+        aad_zone, aad_share,
+        "ZONE_KEY vs SECRET_SHARE AAD must differ"
+    );
+    assert_ne!(
+        aad_obj, aad_share,
+        "OBJECTID_KEY vs SECRET_SHARE AAD must differ"
+    );
 }
 
 #[test]
@@ -449,11 +463,7 @@ fn test_hpke_roundtrip_from_vectors() {
 
         // Verify roundtrip
         let opened = hpke_open(&sk, &sealed, &aad).unwrap();
-        assert_eq!(
-            opened, plaintext,
-            "roundtrip mismatch for '{}'",
-            tc.name
-        );
+        assert_eq!(opened, plaintext, "roundtrip mismatch for '{}'", tc.name);
     }
 }
 
@@ -487,19 +497,31 @@ fn test_hpke_aad_binding_enforced() {
 
     // Wrong zone_id
     let aad_bad_zone = Fcp2Aad::for_zone_key(b"z:private", b"node-123", 1_700_000_000);
-    assert!(hpke_open(&sk, &sealed, &aad_bad_zone).is_err(), "wrong zone_id must fail");
+    assert!(
+        hpke_open(&sk, &sealed, &aad_bad_zone).is_err(),
+        "wrong zone_id must fail"
+    );
 
     // Wrong node_id
     let aad_bad_node = Fcp2Aad::for_zone_key(b"z:work", b"node-456", 1_700_000_000);
-    assert!(hpke_open(&sk, &sealed, &aad_bad_node).is_err(), "wrong node_id must fail");
+    assert!(
+        hpke_open(&sk, &sealed, &aad_bad_node).is_err(),
+        "wrong node_id must fail"
+    );
 
     // Wrong purpose
     let aad_bad_purpose = Fcp2Aad::for_objectid_key(b"z:work", b"node-123", 1_700_000_000);
-    assert!(hpke_open(&sk, &sealed, &aad_bad_purpose).is_err(), "wrong purpose must fail");
+    assert!(
+        hpke_open(&sk, &sealed, &aad_bad_purpose).is_err(),
+        "wrong purpose must fail"
+    );
 
     // Wrong timestamp
     let aad_bad_ts = Fcp2Aad::for_zone_key(b"z:work", b"node-123", 1_700_000_001);
-    assert!(hpke_open(&sk, &sealed, &aad_bad_ts).is_err(), "wrong timestamp must fail");
+    assert!(
+        hpke_open(&sk, &sealed, &aad_bad_ts).is_err(),
+        "wrong timestamp must fail"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -532,10 +554,7 @@ fn test_cose_token_deterministic_with_rfc8032_key() {
         "COSE minimal: claims_cbor_hex = \"{}\"",
         hex::encode(&claims_cbor)
     );
-    eprintln!(
-        "COSE minimal: token_cbor_hex = \"{}\"",
-        hex::encode(&cbor1)
-    );
+    eprintln!("COSE minimal: token_cbor_hex = \"{}\"", hex::encode(&cbor1));
     eprintln!("COSE minimal: token_cbor_len = {}", cbor1.len());
 
     // Verify roundtrip
@@ -682,13 +701,13 @@ fn test_cose_algorithm_is_eddsa() {
 #[test]
 fn test_cose_token_vectors_from_file() {
     let vectors = load_cose_capability_vectors();
-    let sk_bytes = hex_to_bytes(&vectors.signing_key.secret_key_hex);
+    let sk_bytes = hex_to_bytes(&vectors.signing_key.secret_key);
     let sk_arr: [u8; 32] = sk_bytes.try_into().expect("key must be 32 bytes");
     let sk = Ed25519SigningKey::from_bytes(&sk_arr).expect("valid key");
     let pk = sk.verifying_key();
 
     // Verify key_id matches
-    let expected_kid = hex_to_bytes(&vectors.signing_key.key_id_hex);
+    let expected_kid = hex_to_bytes(&vectors.signing_key.key_id);
     assert_eq!(
         sk.key_id().as_bytes(),
         expected_kid.as_slice(),
@@ -736,9 +755,7 @@ fn test_signing_bytes_used_by_cose_are_consistent() {
     let sk = signing_key_from_rfc8032_tv1();
     let pk = sk.verifying_key();
 
-    let claims = CwtClaims::new()
-        .issuer("test")
-        .capability_id("cap:test");
+    let claims = CwtClaims::new().issuer("test").capability_id("cap:test");
 
     // The token's TBS (to-be-signed) uses Sig_structure per COSE, not our signing_bytes.
     // But we can verify that our canonical_signing_bytes function produces a
@@ -802,7 +819,10 @@ fn generate_all_golden_vector_hex_values() {
     eprintln!("  objectid_key_aad: \"{}\"", hex::encode(aad_obj.encode()));
 
     let aad_share = Fcp2Aad::for_secret_share(b"z:work", b"node-123", 1_700_000_000);
-    eprintln!("  secret_share_aad: \"{}\"", hex::encode(aad_share.encode()));
+    eprintln!(
+        "  secret_share_aad: \"{}\"",
+        hex::encode(aad_share.encode())
+    );
 
     let aad_owner = Fcp2Aad {
         zone_id: b"z:owner".to_vec(),
@@ -848,14 +868,8 @@ fn generate_all_golden_vector_hex_values() {
     let full_claims_cbor = full_claims.to_cbor().unwrap();
     let full_token = CoseToken::sign(&sk, &full_claims).unwrap();
     let full_token_cbor = full_token.to_cbor().unwrap();
-    eprintln!(
-        "  full_claims_cbor: \"{}\"",
-        hex::encode(&full_claims_cbor)
-    );
-    eprintln!(
-        "  full_token_cbor: \"{}\"",
-        hex::encode(&full_token_cbor)
-    );
+    eprintln!("  full_claims_cbor: \"{}\"", hex::encode(&full_claims_cbor));
+    eprintln!("  full_token_cbor: \"{}\"", hex::encode(&full_token_cbor));
 
     eprintln!("\n============================================================");
 }

@@ -177,10 +177,7 @@ impl DatagramMacGoldenVector {
         let mac_key: [u8; 32] = mac_key_bytes.try_into().unwrap();
 
         let session_id_hex = "deadbeefcafebabe0123456789abcdef";
-        let session_id_bytes: [u8; 16] = hex::decode(session_id_hex)
-            .unwrap()
-            .try_into()
-            .unwrap();
+        let session_id_bytes: [u8; 16] = hex::decode(session_id_hex).unwrap().try_into().unwrap();
         let session_id = MeshSessionId(session_id_bytes);
 
         let frame_payload = b"test-frame-payload";

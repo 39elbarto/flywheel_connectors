@@ -27,7 +27,7 @@ use fcp_mesh::device::{
     AvailabilityProfile, CpuArch, DeviceProfile, GpuProfile, GpuVendor, InstalledConnector,
     LatencyClass, PowerSource,
 };
-use fcp_mesh::gossip::{GossipConfig, GossipRequest, GossipState, MeshGossip};
+use fcp_mesh::gossip::{GossipConfig, GossipRequest, GossipState, GossipSummary, MeshGossip};
 use fcp_mesh::planner::{
     ExecutionPlanner, HeldLease, LeasePurpose, NodeInfo, PlannerContext, PlannerInput,
 };
@@ -1794,6 +1794,69 @@ mod routing {
         );
     }
 
+    /// Test: Routing selection updates when topology changes.
+    #[test]
+    fn test_routing_updates_on_topology_change() {
+        const TEST_NAME: &str = "routing_updates_on_topology_change";
+        const CATEGORY: &str = "routing";
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let connector_id = test_connector_id("github:connector:1.0.0");
+        let hot_symbol = test_object_id("routing-topology-hot-symbol");
+
+        let initial_nodes = vec![
+            NodeInfo {
+                profile: {
+                    let mut p =
+                        create_profile_with_connector("node-primary", &connector_id, "1.0.0");
+                    p.memory_mb = 65536;
+                    p.cpu_cores = 32;
+                    p
+                },
+                local_symbols: HashSet::from([hot_symbol]),
+                held_leases: vec![],
+            },
+            NodeInfo {
+                profile: {
+                    let mut p =
+                        create_profile_with_connector("node-backup", &connector_id, "1.0.0");
+                    p.memory_mb = 16384;
+                    p.cpu_cores = 8;
+                    p
+                },
+                local_symbols: HashSet::new(),
+                held_leases: vec![],
+            },
+        ];
+
+        let context = PlannerContext::new(connector_id.clone())
+            .with_min_memory_mb(8192)
+            .with_preferred_symbols(vec![hot_symbol]);
+        let planner = ExecutionPlanner::new();
+
+        let before = planner.plan(&PlannerInput::new(initial_nodes.clone(), 1000), &context);
+        assert!(!before.is_empty());
+        assert_eq!(before[0].node_id.as_str(), "node-primary");
+
+        let after_nodes: Vec<NodeInfo> = initial_nodes
+            .into_iter()
+            .filter(|node| node.profile.node_id.as_str() != "node-primary")
+            .collect();
+        let after = planner.plan(&PlannerInput::new(after_nodes, 2000), &context);
+        assert!(!after.is_empty());
+        assert_eq!(after[0].node_id.as_str(), "node-backup");
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "selected_before": before[0].node_id.as_str(),
+                "selected_after": after[0].node_id.as_str(),
+                "topology_changed": true,
+            }),
+        );
+    }
+
     /// Test: Load balancing distributes across capable nodes.
     #[test]
     fn test_load_balancing_capability_aware() {
@@ -2268,6 +2331,48 @@ mod policy_enforcement {
         );
     }
 
+    /// Test: Capability requirement enforced before forwarding.
+    #[test]
+    fn test_capability_verification_before_forwarding() {
+        const TEST_NAME: &str = "capability_verification_before_forwarding";
+        const CATEGORY: &str = "policy_enforcement";
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let required_connector = test_connector_id("payments:connector:1.0.0");
+        let wrong_connector = test_connector_id("search:connector:1.0.0");
+
+        let nodes = vec![NodeInfo {
+            profile: create_profile_with_connector(
+                "node-wrong-capability",
+                &wrong_connector,
+                "1.0.0",
+            ),
+            local_symbols: HashSet::new(),
+            held_leases: vec![],
+        }];
+
+        let input = PlannerInput::new(nodes, 1000);
+        let context = PlannerContext::new(required_connector.clone());
+
+        let planner = ExecutionPlanner::new();
+        let candidates = planner.plan(&input, &context);
+
+        assert!(
+            candidates.is_empty(),
+            "Nodes lacking required connector capability must not be selected"
+        );
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "required_connector": required_connector.as_str(),
+                "eligible_count": candidates.len(),
+                "forwarding_blocked": true,
+            }),
+        );
+    }
+
     /// Test: Singleton writer lease enforcement.
     #[test]
     fn test_singleton_writer_lease_enforcement() {
@@ -2589,6 +2694,48 @@ mod gossip_integration {
         );
     }
 
+    /// Test: Stale gossip summaries are rejected.
+    #[test]
+    fn test_stale_gossip_summary_rejected() {
+        const TEST_NAME: &str = "stale_gossip_summary_rejected";
+        const CATEGORY: &str = "gossip";
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let zone_id = ZoneId::work();
+        let config = GossipConfig {
+            summary_ttl_secs: 60,
+            ..GossipConfig::default()
+        };
+        let mut gossip = MeshGossip::new(TailscaleNodeId::new("node-local"), config);
+
+        let stale_summary = GossipSummary {
+            from: TailscaleNodeId::new("node-stale"),
+            zone_id: zone_id.clone(),
+            epoch_id: EpochId::new("epoch-stale"),
+            object_filter_digest: [1u8; 32],
+            symbol_filter_digest: [2u8; 32],
+            object_count: 2,
+            symbol_count: 5,
+            iblt: Vec::new(),
+            timestamp: 10,
+            signature: None,
+        };
+
+        gossip.handle_summary(stale_summary, 200);
+
+        assert_eq!(gossip.peer_count(), 0);
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "zone": zone_id.as_str(),
+                "peer_count": gossip.peer_count(),
+                "rejected_reason": "stale",
+            }),
+        );
+    }
+
     /// Test: Object removal from gossip state.
     #[test]
     fn test_object_removal_from_gossip() {
@@ -2722,6 +2869,49 @@ mod gossip_integration {
                 "zone": zone_id.as_str(),
                 "requested_objects": 2,
                 "bounded_objects": request.object_ids.len(),
+            }),
+        );
+    }
+
+    /// Test: Oversized gossip summaries are rejected.
+    #[test]
+    fn test_oversized_gossip_summary_rejected() {
+        const TEST_NAME: &str = "oversized_gossip_summary_rejected";
+        const CATEGORY: &str = "gossip";
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let zone_id = ZoneId::work();
+        let config = GossipConfig {
+            max_objects_per_summary: 4,
+            max_symbols_per_summary: 8,
+            ..GossipConfig::default()
+        };
+        let mut gossip = MeshGossip::new(TailscaleNodeId::new("node-local"), config);
+
+        let oversized_summary = GossipSummary {
+            from: TailscaleNodeId::new("node-oversized"),
+            zone_id: zone_id.clone(),
+            epoch_id: EpochId::new("epoch-oversized"),
+            object_filter_digest: [3u8; 32],
+            symbol_filter_digest: [4u8; 32],
+            object_count: 9,
+            symbol_count: 20,
+            iblt: Vec::new(),
+            timestamp: 100,
+            signature: None,
+        };
+
+        gossip.handle_summary(oversized_summary, 120);
+
+        assert_eq!(gossip.peer_count(), 0);
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "zone": zone_id.as_str(),
+                "peer_count": gossip.peer_count(),
+                "rejected_reason": "oversized",
             }),
         );
     }
@@ -2903,6 +3093,55 @@ mod lease_coordination {
             serde_json::json!({
                 "holder": "node-1",
                 "conflicting_node_excluded": true,
+            }),
+        );
+    }
+
+    /// Test: Lease holder transfer updates singleton routing.
+    #[test]
+    fn test_lease_transfer_on_holder_change() {
+        const TEST_NAME: &str = "lease_transfer_on_holder_change";
+        const CATEGORY: &str = "lease_coordination";
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let connector_id = test_connector_id("state:connector:1.0.0");
+        let nodes = vec![
+            NodeInfo {
+                profile: create_profile_with_connector("node-a", &connector_id, "1.0.0"),
+                local_symbols: HashSet::new(),
+                held_leases: vec![],
+            },
+            NodeInfo {
+                profile: create_profile_with_connector("node-b", &connector_id, "1.0.0"),
+                local_symbols: HashSet::new(),
+                held_leases: vec![],
+            },
+        ];
+
+        let context = PlannerContext::new(connector_id.clone()).with_singleton_writer();
+        let planner = ExecutionPlanner::new();
+
+        let before = planner.plan(
+            &PlannerInput::new(nodes.clone(), 1000).with_singleton_holder("node-a"),
+            &context,
+        );
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].node_id.as_str(), "node-a");
+
+        let after = planner.plan(
+            &PlannerInput::new(nodes, 2000).with_singleton_holder("node-b"),
+            &context,
+        );
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].node_id.as_str(), "node-b");
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "holder_before": before[0].node_id.as_str(),
+                "holder_after": after[0].node_id.as_str(),
+                "transfer_enforced": true,
             }),
         );
     }
@@ -3094,6 +3333,55 @@ mod integration_scenarios {
                 "admission_passed": true,
                 "routing_completed": true,
                 "target_node": candidates[0].node_id.as_str(),
+            }),
+        );
+    }
+
+    /// Test: Admission denial path blocks over-budget requests.
+    #[test]
+    fn test_admission_routing_denies_over_budget() {
+        const TEST_NAME: &str = "admission_routing_denies_over_budget";
+        const CATEGORY: &str = "integration";
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let policy = AdmissionPolicy {
+            per_peer: PeerBudget {
+                max_bytes_per_min: 1200,
+                ..PeerBudget::default()
+            },
+            ..AdmissionPolicy::default()
+        };
+        let mut admission = AdmissionController::new(policy);
+        let peer = NodeId::new("requesting-peer-over-budget");
+        let now_ms = 1000u64;
+
+        admission.record_bytes(&peer, 1000, now_ms);
+        let denied = admission.check_admission(&peer, 400, 5, true, now_ms);
+        assert!(matches!(
+            denied,
+            Err(AdmissionError::ByteBudgetExceeded { .. })
+        ));
+
+        let connector_id = test_connector_id("route:connector:1.0.0");
+        let nodes = vec![NodeInfo {
+            profile: create_profile_with_connector("node-target", &connector_id, "1.0.0"),
+            local_symbols: HashSet::new(),
+            held_leases: vec![],
+        }];
+        let planner = ExecutionPlanner::new();
+        let candidates = planner.plan(
+            &PlannerInput::new(nodes, now_ms),
+            &PlannerContext::new(connector_id.clone()),
+        );
+        assert!(!candidates.is_empty());
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "admission_denied": true,
+                "deny_reason": "byte_budget_exceeded",
+                "routing_candidates_available": candidates.len(),
             }),
         );
     }

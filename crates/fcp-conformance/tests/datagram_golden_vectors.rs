@@ -47,10 +47,8 @@ fn datagram_encode_matches_golden_vectors() {
 fn datagram_decode_matches_golden_vectors() {
     for v in DatagramGoldenVector::load_all() {
         let encoded = hex_to_bytes(&v.expected_encoded);
-        let decoded =
-            FcpsDatagram::decode(&encoded, 1200).unwrap_or_else(|e| {
-                panic!("decode failed for '{}': {e}", v.description)
-            });
+        let decoded = FcpsDatagram::decode(&encoded, 1200)
+            .unwrap_or_else(|e| panic!("decode failed for '{}': {e}", v.description));
 
         assert_eq!(
             hex::encode(decoded.session_id.as_bytes()),
@@ -124,8 +122,9 @@ fn datagram_mac_matches_golden_vectors() {
             other => panic!("unknown direction: {other}"),
         };
 
-        let computed = compute_session_mac(suite, &mac_key, &session_id, direction, v.seq, &frame_bytes)
-            .unwrap_or_else(|e| panic!("MAC compute failed for '{}': {e}", v.description));
+        let computed =
+            compute_session_mac(suite, &mac_key, &session_id, direction, v.seq, &frame_bytes)
+                .unwrap_or_else(|e| panic!("MAC compute failed for '{}': {e}", v.description));
 
         assert_eq!(
             hex::encode(computed),
@@ -157,8 +156,16 @@ fn datagram_mac_verify_roundtrip() {
         };
 
         // Verify the expected MAC passes verification
-        verify_session_mac(suite, &mac_key, &session_id, direction, v.seq, &frame_bytes, &expected_mac)
-            .unwrap_or_else(|e| panic!("MAC verify failed for '{}': {e}", v.description));
+        verify_session_mac(
+            suite,
+            &mac_key,
+            &session_id,
+            direction,
+            v.seq,
+            &frame_bytes,
+            &expected_mac,
+        )
+        .unwrap_or_else(|e| panic!("MAC verify failed for '{}': {e}", v.description));
     }
 }
 

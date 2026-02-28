@@ -5,6 +5,21 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      lane:
+        description: "CI lane to run"
+        required: true
+        default: "full"
+        type: choice
+        options:
+          - full
+          - smoke
+          - focused
+      focus_crate:
+        description: "Workspace crate for focused lane (e.g. fcp-conformance)"
+        required: false
+        default: "fcp-conformance"
+        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -18,6 +33,7 @@ env:
   RUST_BACKTRACE: 1
   CARGO_NET_RETRY: 10
   CARGO_INCREMENTAL: 0
+  ASUPERSYNC_CI_LANE: ${{ github.event_name == 'workflow_dispatch' && inputs.lane || 'full' }}
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────────────
@@ -25,6 +41,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   lint:
     name: Lint
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.lane == 'full' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -72,10 +89,319 @@ jobs:
           retention-days: 7
 
   # ─────────────────────────────────────────────────────────────────────────────
+  # ASUPERSYNC lane: smoke (fast signal for migration churn)
+  # ─────────────────────────────────────────────────────────────────────────────
+  migration-smoke:
+    name: ASUPERSYNC Smoke Lane
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.lane == 'smoke' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: asupersync-smoke
+
+      - name: Smoke formatting gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/asupersync/smoke
+          start_epoch="$(date +%s)"
+          cargo fmt --all -- --check
+          end_epoch="$(date +%s)"
+          jq -cn \
+            --arg step "smoke_fmt_check" \
+            --argjson duration_sec "$((end_epoch - start_epoch))" \
+            '{step: $step, duration_sec: $duration_sec}' \
+            >> artifacts/asupersync/smoke/step_durations.jsonl
+
+      - name: Smoke compile gate (core)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/asupersync/smoke
+          start_epoch="$(date +%s)"
+          cargo check -p fcp-core --all-targets
+          end_epoch="$(date +%s)"
+          jq -cn \
+            --arg step "smoke_check_fcp_core" \
+            --argjson duration_sec "$((end_epoch - start_epoch))" \
+            '{step: $step, duration_sec: $duration_sec}' \
+            >> artifacts/asupersync/smoke/step_durations.jsonl
+
+      - name: Smoke compile gate (conformance)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/asupersync/smoke
+          start_epoch="$(date +%s)"
+          cargo check -p fcp-conformance --all-targets
+          end_epoch="$(date +%s)"
+          jq -cn \
+            --arg step "smoke_check_fcp_conformance" \
+            --argjson duration_sec "$((end_epoch - start_epoch))" \
+            '{step: $step, duration_sec: $duration_sec}' \
+            >> artifacts/asupersync/smoke/step_durations.jsonl
+
+      - name: Smoke Tokio guardrail report
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/asupersync/smoke
+          start_epoch="$(date +%s)"
+          bash scripts/ci/asupersync_tokio_guard.sh \
+            --ledger .config/asupersync/tokio_exception_ledger.json \
+            --report artifacts/asupersync/smoke/tokio_guard_report.json
+          end_epoch="$(date +%s)"
+          jq -cn \
+            --arg step "smoke_tokio_guardrail" \
+            --argjson duration_sec "$((end_epoch - start_epoch))" \
+            '{step: $step, duration_sec: $duration_sec}' \
+            >> artifacts/asupersync/smoke/step_durations.jsonl
+
+      - name: Smoke throughput metrics
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/asupersync/smoke
+          jq -s \
+            --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+            '{
+              schema_version: 1,
+              generated_at: $generated_at,
+              lane: "smoke",
+              steps: .,
+              total_duration_sec: (map(.duration_sec) | add // 0)
+            }' \
+            artifacts/asupersync/smoke/step_durations.jsonl \
+            > artifacts/asupersync/smoke/throughput_metrics.json
+
+      - name: Upload smoke artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: asupersync-smoke
+          path: artifacts/asupersync/smoke/
+          retention-days: 7
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # ASUPERSYNC lane: focused crate validation
+  # ─────────────────────────────────────────────────────────────────────────────
+  focused-suite:
+    name: Focused Suite (${{ inputs.focus_crate }})
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.lane == 'focused' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: asupersync-focused-${{ inputs.focus_crate }}
+
+      - name: Validate focused crate input
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${{ inputs.focus_crate }}" ]]; then
+            echo "::error::focus_crate input is required for focused lane"
+            exit 2
+          fi
+          echo "Focused crate: ${{ inputs.focus_crate }}"
+
+      - name: Focused check
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/asupersync/focused
+          start_epoch="$(date +%s)"
+          cargo check -p ${{ inputs.focus_crate }} --all-targets
+          end_epoch="$(date +%s)"
+          jq -cn \
+            --arg step "focused_check" \
+            --argjson duration_sec "$((end_epoch - start_epoch))" \
+            '{step: $step, duration_sec: $duration_sec}' \
+            >> artifacts/asupersync/focused/step_durations.jsonl
+
+      - name: Focused clippy
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/asupersync/focused
+          start_epoch="$(date +%s)"
+          cargo clippy -p ${{ inputs.focus_crate }} --all-targets -- -D warnings
+          end_epoch="$(date +%s)"
+          jq -cn \
+            --arg step "focused_clippy" \
+            --argjson duration_sec "$((end_epoch - start_epoch))" \
+            '{step: $step, duration_sec: $duration_sec}' \
+            >> artifacts/asupersync/focused/step_durations.jsonl
+
+      - name: Focused tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/asupersync/focused
+          start_epoch="$(date +%s)"
+          cargo test -p ${{ inputs.focus_crate }} --all-targets -- --nocapture
+          end_epoch="$(date +%s)"
+          jq -cn \
+            --arg step "focused_test" \
+            --argjson duration_sec "$((end_epoch - start_epoch))" \
+            '{step: $step, duration_sec: $duration_sec}' \
+            >> artifacts/asupersync/focused/step_durations.jsonl
+
+      - name: Focused throughput metrics
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/asupersync/focused
+          jq -s \
+            --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+            --arg focus_crate "${{ inputs.focus_crate }}" \
+            '{
+              schema_version: 1,
+              generated_at: $generated_at,
+              lane: "focused",
+              focus_crate: $focus_crate,
+              steps: .,
+              total_duration_sec: (map(.duration_sec) | add // 0)
+            }' \
+            artifacts/asupersync/focused/step_durations.jsonl \
+            > artifacts/asupersync/focused/throughput_metrics.json
+
+      - name: Upload focused artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: asupersync-focused
+          path: artifacts/asupersync/focused/
+          retention-days: 7
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # ASUPERSYNC migration dashboard artifact
+  # ─────────────────────────────────────────────────────────────────────────────
+  asupersync-migration-dashboard:
+    name: ASUPERSYNC Migration Dashboard
+    needs: [asupersync-guardrails]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - name: Build dashboard artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p artifacts/asupersync/dashboard
+
+          bash scripts/ci/asupersync_tokio_guard.sh \
+            --ledger .config/asupersync/tokio_exception_ledger.json \
+            --report artifacts/asupersync/dashboard/tokio_guard_report.json
+
+          METADATA_JSON="$(mktemp)"
+          cargo metadata --format-version 1 --no-deps > "${METADATA_JSON}"
+
+          TOTAL_CRATES="$(jq '[.packages[] | select(.manifest_path | test("/(crates|connectors)/"))] | length' "${METADATA_JSON}")"
+          TOKIO_DEP_CRATES="$(jq '[.packages[] | select(.manifest_path | test("/(crates|connectors)/")) | select(any(.dependencies[]?; .name == "tokio"))] | length' "${METADATA_JSON}")"
+          TOKIO_FREE_CRATES="$((TOTAL_CRATES - TOKIO_DEP_CRATES))"
+
+          TOKIO_TEST_ANNOTATIONS="$( (rg -n --no-heading '#\\[tokio::test\\]' crates connectors || true) | wc -l | tr -d '[:space:]' )"
+          TOKIO_SELECT_USES="$( (rg -n --no-heading 'tokio::select!' crates connectors || true) | wc -l | tr -d '[:space:]' )"
+          TOKIO_SPAWN_USES="$( (rg -n --no-heading 'tokio::spawn' crates connectors || true) | wc -l | tr -d '[:space:]' )"
+
+          GUARD_MISSING="$(jq '.summary.missing_dependency_exceptions' artifacts/asupersync/dashboard/tokio_guard_report.json)"
+          GUARD_EXPIRED="$(jq '.summary.expired_dependency_exceptions' artifacts/asupersync/dashboard/tokio_guard_report.json)"
+          GUARD_FAILED_INVARIANTS="$(jq '.summary.failed_source_invariants' artifacts/asupersync/dashboard/tokio_guard_report.json)"
+          GUARD_PASSED="$(jq '.passed' artifacts/asupersync/dashboard/tokio_guard_report.json)"
+
+          GENERATED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          LANE="${{ github.event_name == 'workflow_dispatch' && inputs.lane || 'full' }}"
+          FOCUS_CRATE="${{ github.event_name == 'workflow_dispatch' && inputs.focus_crate || '' }}"
+
+          jq -n \
+            --arg generated_at "${GENERATED_AT}" \
+            --arg lane "${LANE}" \
+            --arg focus_crate "${FOCUS_CRATE}" \
+            --arg workflow "${GITHUB_WORKFLOW}" \
+            --arg run_id "${GITHUB_RUN_ID}" \
+            --arg run_attempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg sha "${GITHUB_SHA}" \
+            --arg ref_name "${GITHUB_REF_NAME}" \
+            --argjson total_crates "${TOTAL_CRATES}" \
+            --argjson tokio_dependency_crates "${TOKIO_DEP_CRATES}" \
+            --argjson tokio_free_crates "${TOKIO_FREE_CRATES}" \
+            --argjson tokio_test_annotations "${TOKIO_TEST_ANNOTATIONS}" \
+            --argjson tokio_select_uses "${TOKIO_SELECT_USES}" \
+            --argjson tokio_spawn_uses "${TOKIO_SPAWN_USES}" \
+            --argjson guard_passed "${GUARD_PASSED}" \
+            --argjson guard_missing_dependency_exceptions "${GUARD_MISSING}" \
+            --argjson guard_expired_dependency_exceptions "${GUARD_EXPIRED}" \
+            --argjson guard_failed_source_invariants "${GUARD_FAILED_INVARIANTS}" \
+            '{
+              schema_version: 1,
+              generated_at: $generated_at,
+              ci: {
+                workflow: $workflow,
+                run_id: $run_id,
+                run_attempt: $run_attempt,
+                sha: $sha,
+                ref_name: $ref_name
+              },
+              lane: {
+                selected: $lane,
+                focus_crate: $focus_crate
+              },
+              migration_progress: {
+                total_workspace_crates: $total_crates,
+                tokio_dependency_crates: $tokio_dependency_crates,
+                tokio_free_crates: $tokio_free_crates,
+                tokio_test_annotations: $tokio_test_annotations,
+                tokio_select_uses: $tokio_select_uses,
+                tokio_spawn_uses: $tokio_spawn_uses
+              },
+              guardrail_status: {
+                passed: $guard_passed,
+                missing_dependency_exceptions: $guard_missing_dependency_exceptions,
+                expired_dependency_exceptions: $guard_expired_dependency_exceptions,
+                failed_source_invariants: $guard_failed_source_invariants
+              }
+            }' > artifacts/asupersync/dashboard/ci_migration_dashboard.json
+
+          {
+            echo "## ASUPERSYNC Migration Dashboard"
+            echo ""
+            echo "- Lane: ${LANE}"
+            echo "- Focus crate: ${FOCUS_CRATE:-n/a}"
+            echo "- Tokio-free crates: ${TOKIO_FREE_CRATES}/${TOTAL_CRATES}"
+            echo "- Tokio test annotations remaining: ${TOKIO_TEST_ANNOTATIONS}"
+            echo "- Tokio guardrails passed: ${GUARD_PASSED}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload migration dashboard artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: asupersync-migration-dashboard
+          path: artifacts/asupersync/dashboard/
+          retention-days: 7
+
+  # ─────────────────────────────────────────────────────────────────────────────
   # Test: Matrix across OS
   # ─────────────────────────────────────────────────────────────────────────────
   test:
     name: Test (${{ matrix.os }})
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.lane == 'full' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -100,6 +426,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   golden-vectors:
     name: Golden Vectors
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.lane == 'full' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -149,6 +476,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   security:
     name: Security Audit
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.lane == 'full' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -173,6 +501,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   msrv:
     name: MSRV (1.85)
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.lane == 'full' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -192,6 +521,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   build:
     name: Build (${{ matrix.target }})
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.lane == 'full' }}
     needs: [lint, test, security]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -235,6 +565,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   docs:
     name: Documentation
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.lane == 'full' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -259,6 +590,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   coverage:
     name: Coverage
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.lane == 'full' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -296,6 +628,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   connectors:
     name: Connectors
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.lane == 'full' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -324,22 +657,69 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   ci-success:
     name: CI Success
-    needs: [lint, asupersync-guardrails, test, golden-vectors, security, msrv, build, docs, connectors]
+    needs: [lint, asupersync-guardrails, migration-smoke, focused-suite, asupersync-migration-dashboard, test, golden-vectors, security, msrv, build, docs, connectors]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Check all jobs
+        env:
+          LANE: ${{ github.event_name == 'workflow_dispatch' && inputs.lane || 'full' }}
+          LINT_RESULT: ${{ needs.lint.result }}
+          GUARDRAILS_RESULT: ${{ needs.asupersync-guardrails.result }}
+          SMOKE_RESULT: ${{ needs.migration-smoke.result }}
+          FOCUSED_RESULT: ${{ needs.focused-suite.result }}
+          DASHBOARD_RESULT: ${{ needs.asupersync-migration-dashboard.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          GOLDEN_RESULT: ${{ needs.golden-vectors.result }}
+          SECURITY_RESULT: ${{ needs.security.result }}
+          MSRV_RESULT: ${{ needs.msrv.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          DOCS_RESULT: ${{ needs.docs.result }}
+          CONNECTORS_RESULT: ${{ needs.connectors.result }}
         run: |
-          if [[ "${{ needs.lint.result }}" != "success" ]] ||
-             [[ "${{ needs.asupersync-guardrails.result }}" != "success" ]] ||
-             [[ "${{ needs.test.result }}" != "success" ]] ||
-             [[ "${{ needs.golden-vectors.result }}" != "success" ]] ||
-             [[ "${{ needs.security.result }}" != "success" ]] ||
-             [[ "${{ needs.msrv.result }}" != "success" ]] ||
-             [[ "${{ needs.build.result }}" != "success" ]] ||
-             [[ "${{ needs.docs.result }}" != "success" ]] ||
-             [[ "${{ needs.connectors.result }}" != "success" ]]; then
-            echo "::error::One or more required jobs failed"
+          set -euo pipefail
+
+          failure=0
+          require_success() {
+            local job_name="$1"
+            local job_result="$2"
+            if [[ "${job_result}" != "success" ]]; then
+              echo "::error::Required job '${job_name}' did not succeed (result=${job_result})"
+              failure=1
+            fi
+          }
+
+          case "${LANE}" in
+            smoke)
+              require_success "asupersync-guardrails" "${GUARDRAILS_RESULT}"
+              require_success "migration-smoke" "${SMOKE_RESULT}"
+              require_success "asupersync-migration-dashboard" "${DASHBOARD_RESULT}"
+              ;;
+            focused)
+              require_success "asupersync-guardrails" "${GUARDRAILS_RESULT}"
+              require_success "focused-suite" "${FOCUSED_RESULT}"
+              require_success "asupersync-migration-dashboard" "${DASHBOARD_RESULT}"
+              ;;
+            full)
+              require_success "lint" "${LINT_RESULT}"
+              require_success "asupersync-guardrails" "${GUARDRAILS_RESULT}"
+              require_success "asupersync-migration-dashboard" "${DASHBOARD_RESULT}"
+              require_success "test" "${TEST_RESULT}"
+              require_success "golden-vectors" "${GOLDEN_RESULT}"
+              require_success "security" "${SECURITY_RESULT}"
+              require_success "msrv" "${MSRV_RESULT}"
+              require_success "build" "${BUILD_RESULT}"
+              require_success "docs" "${DOCS_RESULT}"
+              require_success "connectors" "${CONNECTORS_RESULT}"
+              ;;
+            *)
+              echo "::error::Unknown lane '${LANE}'"
+              exit 2
+              ;;
+          esac
+
+          if [[ "${failure}" -ne 0 ]]; then
             exit 1
           fi
-          echo "All CI checks passed!"
+
+          echo "All required checks passed for lane '${LANE}'."

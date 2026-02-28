@@ -1,0 +1,263 @@
+{
+  "schema_version": "asupersync-e2e-scenario-registry/v1",
+  "registry_version": 1,
+  "program_epic": "flywheel_connectors-235t",
+  "owner_bead": "flywheel_connectors-235t.26.6.1",
+  "governance_rules": {
+    "scenario_id_pattern": "^asupersync\\.e2e\\.[a-z0-9_]+$",
+    "script_path_pattern": "^scripts/e2e/[a-z0-9_]+\\.sh$",
+    "contract_id_pattern": "^contract\\.[a-z0-9_]+$",
+    "required_fields": [
+      "key",
+      "scenario_id",
+      "script",
+      "required",
+      "contract_id",
+      "archetype",
+      "failure_class",
+      "user_impact_category"
+    ],
+    "uniqueness_constraints": [
+      "key",
+      "scenario_id",
+      "script",
+      "contract_id"
+    ],
+    "allowed_archetypes": [
+      "request_response",
+      "streaming",
+      "bidirectional",
+      "queue_pubsub",
+      "polling",
+      "webhook",
+      "database",
+      "file_blob",
+      "cli_process",
+      "browser"
+    ],
+    "allowed_user_impact_categories": [
+      "security",
+      "availability",
+      "correctness",
+      "performance",
+      "cost_control"
+    ],
+    "versioning_policy": {
+      "breaking_id_change_requires_registry_version_bump": true,
+      "new_scenarios_require_contract_mapping": true,
+      "duplicate_ids_or_scripts_forbidden": true
+    }
+  },
+  "scenarios": [
+    {
+      "key": "happy_path",
+      "scenario_id": "asupersync.e2e.happy_path",
+      "script": "scripts/e2e/happy_path.sh",
+      "required": true,
+      "contract_id": "contract.install_invoke_receipt_audit",
+      "archetype": "request_response",
+      "failure_class": "baseline_happy_path",
+      "user_impact_category": "correctness"
+    },
+    {
+      "key": "denial_path",
+      "scenario_id": "asupersync.e2e.denial_path",
+      "script": "scripts/e2e/denial_path.sh",
+      "required": true,
+      "contract_id": "contract.capability_denial_decision_receipt",
+      "archetype": "request_response",
+      "failure_class": "authorization_denial",
+      "user_impact_category": "security"
+    },
+    {
+      "key": "revocation_flow",
+      "scenario_id": "asupersync.e2e.revocation_flow",
+      "script": "scripts/e2e/revocation_flow.sh",
+      "required": true,
+      "contract_id": "contract.revocation_enforcement",
+      "archetype": "request_response",
+      "failure_class": "revocation_freshness",
+      "user_impact_category": "security"
+    },
+    {
+      "key": "taint_approval",
+      "scenario_id": "asupersync.e2e.taint_approval",
+      "script": "scripts/e2e/taint_approval.sh",
+      "required": true,
+      "contract_id": "contract.taint_approval_gate",
+      "archetype": "request_response",
+      "failure_class": "approval_gating",
+      "user_impact_category": "security"
+    },
+    {
+      "key": "offline_repair",
+      "scenario_id": "asupersync.e2e.offline_repair",
+      "script": "scripts/e2e/offline_repair_flow.sh",
+      "required": true,
+      "contract_id": "contract.offline_repair_recovery",
+      "archetype": "queue_pubsub",
+      "failure_class": "degraded_availability",
+      "user_impact_category": "availability"
+    },
+    {
+      "key": "epoch_replay_mirror",
+      "scenario_id": "asupersync.e2e.epoch_replay_mirror",
+      "script": "scripts/e2e/epoch_replay_mirror_install.sh",
+      "required": true,
+      "contract_id": "contract.epoch_replay_mirror_install",
+      "archetype": "queue_pubsub",
+      "failure_class": "epoch_replay_gap",
+      "user_impact_category": "availability"
+    },
+    {
+      "key": "batch_invoke",
+      "scenario_id": "asupersync.e2e.batch_invoke",
+      "script": "scripts/e2e/batch_invoke_flow.sh",
+      "required": true,
+      "contract_id": "contract.batch_invoke",
+      "archetype": "request_response",
+      "failure_class": "batch_execution_integrity",
+      "user_impact_category": "performance"
+    },
+    {
+      "key": "progress_streaming",
+      "scenario_id": "asupersync.e2e.progress_streaming",
+      "script": "scripts/e2e/progress_streaming_flow.sh",
+      "required": true,
+      "contract_id": "contract.progress_streaming",
+      "archetype": "streaming",
+      "failure_class": "stream_progress_delivery",
+      "user_impact_category": "correctness"
+    },
+    {
+      "key": "cancellation_flow",
+      "scenario_id": "asupersync.e2e.cancellation_flow",
+      "script": "scripts/e2e/cancellation_flow.sh",
+      "required": true,
+      "contract_id": "contract.cancellation_propagation",
+      "archetype": "bidirectional",
+      "failure_class": "cancellation_storm",
+      "user_impact_category": "availability"
+    },
+    {
+      "key": "rate_limit",
+      "scenario_id": "asupersync.e2e.rate_limit",
+      "script": "scripts/e2e/rate_limit_flow.sh",
+      "required": true,
+      "contract_id": "contract.rate_limit_enforcement",
+      "archetype": "request_response",
+      "failure_class": "rate_limit_exhaustion",
+      "user_impact_category": "cost_control"
+    },
+    {
+      "key": "gossip_bounds",
+      "scenario_id": "asupersync.e2e.gossip_bounds",
+      "script": "scripts/e2e/gossip_bounds_flow.sh",
+      "required": true,
+      "contract_id": "contract.gossip_bounds_enforcement",
+      "archetype": "queue_pubsub",
+      "failure_class": "gossip_oversubscription",
+      "user_impact_category": "availability"
+    },
+    {
+      "key": "transport_path_matrix",
+      "scenario_id": "asupersync.e2e.transport_path_matrix",
+      "script": "scripts/e2e/transport_path_matrix.sh",
+      "required": true,
+      "contract_id": "contract.transport_path_multipath",
+      "archetype": "queue_pubsub",
+      "failure_class": "path_selection_regression",
+      "user_impact_category": "performance"
+    },
+    {
+      "key": "targeted_repair_flow",
+      "scenario_id": "asupersync.e2e.targeted_repair_flow",
+      "script": "scripts/e2e/targeted_repair_flow.sh",
+      "required": true,
+      "contract_id": "contract.targeted_symbol_repair",
+      "archetype": "queue_pubsub",
+      "failure_class": "symbol_repair_failure",
+      "user_impact_category": "availability"
+    },
+    {
+      "key": "lease_coordination",
+      "scenario_id": "asupersync.e2e.lease_coordination",
+      "script": "scripts/e2e/lease_coordination_flow.sh",
+      "required": true,
+      "contract_id": "contract.lease_coordination",
+      "archetype": "queue_pubsub",
+      "failure_class": "distributed_lease_contention",
+      "user_impact_category": "correctness"
+    },
+    {
+      "key": "mesh_integration",
+      "scenario_id": "asupersync.e2e.mesh_integration",
+      "script": "scripts/e2e/mesh_integration_flow.sh",
+      "required": true,
+      "contract_id": "contract.mesh_integration_routing_admission_gossip",
+      "archetype": "queue_pubsub",
+      "failure_class": "mesh_integration_regression",
+      "user_impact_category": "availability"
+    },
+    {
+      "key": "admission_control",
+      "scenario_id": "asupersync.e2e.admission_control",
+      "script": "scripts/e2e/admission_control_flow.sh",
+      "required": true,
+      "contract_id": "contract.admission_budget_enforcement",
+      "archetype": "queue_pubsub",
+      "failure_class": "admission_budget_exhaustion",
+      "user_impact_category": "availability"
+    },
+    {
+      "key": "policy_enforcement",
+      "scenario_id": "asupersync.e2e.policy_enforcement",
+      "script": "scripts/e2e/policy_enforcement_flow.sh",
+      "required": true,
+      "contract_id": "contract.policy_allow_deny",
+      "archetype": "request_response",
+      "failure_class": "policy_ceiling_violation",
+      "user_impact_category": "security"
+    },
+    {
+      "key": "routing",
+      "scenario_id": "asupersync.e2e.routing",
+      "script": "scripts/e2e/routing_flow.sh",
+      "required": true,
+      "contract_id": "contract.routing_locality_selection",
+      "archetype": "queue_pubsub",
+      "failure_class": "routing_determinism_regression",
+      "user_impact_category": "performance"
+    },
+    {
+      "key": "meshnode_control_plane",
+      "scenario_id": "asupersync.e2e.meshnode_control_plane",
+      "script": "scripts/e2e/meshnode_control_plane_flow.sh",
+      "required": true,
+      "contract_id": "contract.meshnode_control_plane",
+      "archetype": "bidirectional",
+      "failure_class": "control_plane_degradation",
+      "user_impact_category": "availability"
+    },
+    {
+      "key": "budget",
+      "scenario_id": "asupersync.e2e.budget",
+      "script": "scripts/e2e/budget_flow.sh",
+      "required": false,
+      "contract_id": "contract.zone_budget_enforcement",
+      "archetype": "request_response",
+      "failure_class": "budget_threshold_behavior",
+      "user_impact_category": "cost_control"
+    },
+    {
+      "key": "egress_denial",
+      "scenario_id": "asupersync.e2e.egress_denial",
+      "script": "scripts/e2e/egress_denial.sh",
+      "required": true,
+      "contract_id": "contract.sandbox_egress_denial",
+      "archetype": "request_response",
+      "failure_class": "network_policy_denial",
+      "user_impact_category": "security"
+    }
+  ]
+}

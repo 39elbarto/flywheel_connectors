@@ -9,6 +9,9 @@ LOG_JSONL="${LOG_JSONL:-${OUT_DIR}/${SCRIPT_NAME}.jsonl}"
 EXPECTED_FAILURE=""
 ACTUAL_FAILURE=""
 STEP_CONTEXT="null"
+CARGO_CMD="${CARGO_CMD:-cargo}"
+read -r -a CARGO_CMD_ARR <<< "${CARGO_CMD}"
+CARGO_BIN="${CARGO_CMD_ARR[0]}"
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -61,13 +64,14 @@ json_or_null() {
 }
 
 details_json() {
-  if [[ -z "${EXPECTED_FAILURE}" && -z "${ACTUAL_FAILURE}" ]]; then
+  if [[ -z "${EXPECTED_FAILURE}" && -z "${ACTUAL_FAILURE}" && "${STEP_CONTEXT}" == "null" ]]; then
     printf 'null'
     return 0
   fi
-  printf '{"expected_failure":%s,"actual_failure":%s}' \
+  printf '{"expected_failure":%s,"actual_failure":%s,"context":%s}' \
     "$(json_or_null "${EXPECTED_FAILURE}")" \
-    "$(json_or_null "${ACTUAL_FAILURE}")"
+    "$(json_or_null "${ACTUAL_FAILURE}")" \
+    "${STEP_CONTEXT}"
 }
 
 log_step() {
@@ -85,8 +89,8 @@ log_step() {
   details="$(details_json)"
 
   mkdir -p "$(dirname "${LOG_JSONL}")"
-  printf '{"timestamp":"%s","script":"%s","step":"%s","step_number":%s,"correlation_id":"%s","duration_ms":%s,"result":"%s","artifacts":%s,"context":%s,"details":%s}\n' \
-    "${timestamp}" "${SCRIPT_NAME}" "${step}" "${step_number}" "${correlation_id}" "${duration_ms}" "${result}" "${artifacts_json}" "${STEP_CONTEXT}" "${details}" >> "${LOG_JSONL}"
+  printf '{"timestamp":"%s","log_version":"v2","script":"%s","step":"%s","step_number":%s,"correlation_id":"%s","duration_ms":%s,"result":"%s","artifacts":%s,"details":%s}\n' \
+    "${timestamp}" "${SCRIPT_NAME}" "${step}" "${step_number}" "${correlation_id}" "${duration_ms}" "${result}" "${artifacts_json}" "${details}" >> "${LOG_JSONL}"
 }
 
 run_step() {
@@ -127,16 +131,16 @@ step_prepare() {
 }
 
 step_run_lease_tests() {
-  cargo test -p fcp-mesh --test mesh_integration lease_coordination -- --nocapture
+  "${CARGO_CMD_ARR[@]}" test -p fcp-mesh --test mesh_integration lease_coordination -- --nocapture
 }
 
-require_cmd cargo
+require_cmd "${CARGO_BIN}"
 
-run_step "prepare_output" 1 "{}" "" "{}" step_prepare
+run_step "prepare_output" 1 "[]" "" "{}" step_prepare
 run_step \
   "run_lease_coordination_tests" \
   2 \
-  '{"crate":"fcp-mesh","target":"mesh_integration","filter":"lease_coordination"}' \
+  '["crate:fcp-mesh target:mesh_integration filter:lease_coordination"]' \
   "" \
   '{"category":"lease","purpose":"coordination"}' \
   step_run_lease_tests

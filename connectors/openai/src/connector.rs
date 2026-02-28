@@ -987,12 +987,13 @@ impl OpenAIConnector {
         } else {
             (0, 0)
         };
+        let requests_total = self.total_requests().saturating_add(1);
 
         Ok(json!({
             "total_prompt_tokens": prompt_tokens,
             "total_completion_tokens": completion_tokens,
             "total_cost_usd": self.total_cost(),
-            "requests_total": self.total_requests(),
+            "requests_total": requests_total,
             "requests_error": self.total_errors()
         }))
     }

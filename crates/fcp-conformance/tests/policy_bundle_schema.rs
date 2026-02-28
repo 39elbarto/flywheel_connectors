@@ -25,6 +25,7 @@ fn emit_log(
 ) {
     let mut entry = json!({
         "timestamp": Utc::now().to_rfc3339(),
+        "log_version": "v2",
         "test_name": test_name,
         "module": MODULE,
         "phase": "validate",
@@ -35,7 +36,9 @@ fn emit_log(
             "passed": i32::from(result == "pass"),
             "failed": i32::from(result != "pass"),
         },
-        "bundle_id": bundle_id,
+        "context": {
+            "bundle_id": bundle_id,
+        },
     });
     if let Some(extra) = details {
         entry["details"] = extra;

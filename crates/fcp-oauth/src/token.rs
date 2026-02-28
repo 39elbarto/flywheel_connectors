@@ -131,14 +131,13 @@ impl OAuthTokens {
     /// Check if the token needs refresh within a given threshold.
     #[must_use]
     pub fn needs_refresh_within(&self, threshold: Duration) -> bool {
-        self.expires_at
-            .is_some_and(|exp| {
-                // Use saturating conversion to avoid panic on extreme durations
-                let threshold_chrono =
-                    chrono::Duration::from_std(threshold).unwrap_or(chrono::TimeDelta::MAX);
-                let threshold_time = Utc::now() + threshold_chrono;
-                threshold_time >= exp
-            })
+        self.expires_at.is_some_and(|exp| {
+            // Use saturating conversion to avoid panic on extreme durations
+            let threshold_chrono =
+                chrono::Duration::from_std(threshold).unwrap_or(chrono::TimeDelta::MAX);
+            let threshold_time = Utc::now() + threshold_chrono;
+            threshold_time >= exp
+        })
     }
 
     /// Get time until expiration.

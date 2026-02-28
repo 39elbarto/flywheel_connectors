@@ -18,6 +18,13 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::all, clippy::pedantic)]
 #![allow(clippy::module_name_repetitions)]
+#![allow(
+    clippy::manual_let_else,
+    clippy::needless_pass_by_value,
+    clippy::redundant_closure_for_method_calls,
+    clippy::single_match_else,
+    clippy::unreadable_literal
+)]
 
 pub mod config;
 

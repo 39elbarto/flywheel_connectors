@@ -456,15 +456,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn leaky_bucket_try_acquire_n_only_supports_one() {
-        let limiter = LeakyBucket::new(10, 1.0);
+    async fn leaky_bucket_try_acquire_n_supports_batch_permits() {
+        let limiter = LeakyBucket::new(3, 0.001);
 
-        // n=1 delegates to try_acquire
+        // Batch acquisition succeeds when there is enough room.
+        assert!(limiter.try_acquire_n(2).await);
+
+        // A second batch requiring 2 permits should fail (only 1 remaining).
+        assert!(!limiter.try_acquire_n(2).await);
+
+        // Single permit still succeeds.
         assert!(limiter.try_acquire_n(1).await);
 
-        // n>1 always returns false (default RateLimiter impl)
-        assert!(!limiter.try_acquire_n(2).await);
-        assert!(!limiter.try_acquire_n(5).await);
+        // Bucket is full now.
+        assert!(!limiter.try_acquire_n(1).await);
     }
 
     #[tokio::test]

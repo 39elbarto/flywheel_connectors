@@ -115,29 +115,24 @@ impl MemoryObjectStore {
 #[async_trait]
 impl ObjectStore for MemoryObjectStore {
     async fn put(&self, object: StoredObject) -> Result<(), ObjectStoreError> {
-        let size = Self::object_size(&object);
+        let mut objects = self.objects.write();
 
-        // Optimistically increment quota
-        let prev_used = self.used_bytes.fetch_add(size, Ordering::SeqCst);
-        if prev_used + size > self.config.max_bytes {
-            // Rollback if exceeded
-            self.used_bytes.fetch_sub(size, Ordering::SeqCst);
+        if objects.contains_key(&object.object_id) {
+            return Err(ObjectStoreError::AlreadyExists(object.object_id));
+        }
+
+        let size = Self::object_size(&object);
+        let used = self.used_bytes.load(Ordering::SeqCst);
+        if used + size > self.config.max_bytes {
             return Err(ObjectStoreError::QuotaExceeded {
-                used: prev_used,
+                used,
                 max: self.config.max_bytes,
             });
         }
 
-        let mut objects = self.objects.write();
-
-        if objects.contains_key(&object.object_id) {
-            // Rollback if duplicate
-            self.used_bytes.fetch_sub(size, Ordering::SeqCst);
-            return Err(ObjectStoreError::AlreadyExists(object.object_id));
-        }
-
         let id = object.object_id;
         objects.insert(id, object);
+        self.used_bytes.fetch_add(size, Ordering::SeqCst);
 
         Ok(())
     }

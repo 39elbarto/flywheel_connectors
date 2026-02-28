@@ -567,9 +567,19 @@ mod tests {
     }
 
     #[test]
-    fn test_create_sandbox_returns_linux() {
+    fn test_create_sandbox_returns_platform_backend() {
         let sandbox = create_sandbox().unwrap();
-        assert_eq!(sandbox.platform_name(), "linux");
+        let expected = if cfg!(target_os = "linux") {
+            "linux"
+        } else if cfg!(target_os = "macos") {
+            "macos"
+        } else if cfg!(target_os = "windows") {
+            "windows"
+        } else {
+            panic!("test_create_sandbox_returns_platform_backend is unsupported on this platform");
+        };
+
+        assert_eq!(sandbox.platform_name(), expected);
         assert!(sandbox.is_available());
     }
 

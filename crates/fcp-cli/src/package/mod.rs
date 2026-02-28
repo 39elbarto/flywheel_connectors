@@ -130,6 +130,7 @@ fn find_manifest(crate_path: &Path) -> Result<PathBuf> {
 fn build_connector(crate_path: &Path, args: &PackageArgs) -> Result<PathBuf> {
     let mut cmd = Command::new("cargo");
     cmd.arg("build");
+    let target_root = crate_path.join("target");
 
     if args.release {
         cmd.arg("--release");
@@ -138,6 +139,8 @@ fn build_connector(crate_path: &Path, args: &PackageArgs) -> Result<PathBuf> {
     // Add deterministic build flags
     cmd.env("CARGO_INCREMENTAL", "0");
     cmd.env("RUSTFLAGS", "-C debuginfo=0");
+    // Keep packaging builds isolated from parent-process target-dir settings.
+    cmd.env("CARGO_TARGET_DIR", &target_root);
 
     // Add any extra cargo flags
     for flag in &args.cargo_flags {
@@ -153,7 +156,7 @@ fn build_connector(crate_path: &Path, args: &PackageArgs) -> Result<PathBuf> {
 
     // Find the built binary
     let profile = if args.release { "release" } else { "debug" };
-    let target_dir = crate_path.join("target").join(profile);
+    let target_dir = resolve_target_dir(crate_path, profile);
 
     // Get crate name from Cargo.toml
     let cargo_toml = fs::read_to_string(crate_path.join("Cargo.toml"))?;
@@ -182,6 +185,10 @@ fn build_connector(crate_path: &Path, args: &PackageArgs) -> Result<PathBuf> {
         "Built binary not found at expected location: {}",
         target_dir.display()
     );
+}
+
+fn resolve_target_dir(crate_path: &Path, profile: &str) -> PathBuf {
+    crate_path.join("target").join(profile)
 }
 
 /// Compute SHA-256 hash of a file.
@@ -358,4 +365,17 @@ fn print_human_output(output: &PackageOutput) {
         "  Build metadata:   {}",
         output.build_metadata_path.display()
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_target_dir;
+    use std::path::Path;
+
+    #[test]
+    fn resolve_target_dir_defaults_to_crate_target() {
+        let crate_path = Path::new("/tmp/fcp-example");
+        let resolved = resolve_target_dir(crate_path, "release");
+        assert_eq!(resolved, Path::new("/tmp/fcp-example/target/release"));
+    }
 }

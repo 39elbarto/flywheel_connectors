@@ -19,10 +19,15 @@
     clippy::option_if_let_else,
     clippy::or_fun_call,
     clippy::redundant_closure_for_method_calls,
+    clippy::single_match_else,
     clippy::single_match,
+    clippy::assertions_on_constants,
+    clippy::match_same_arms,
     clippy::struct_field_names,
     clippy::too_many_lines,
+    clippy::unreadable_literal,
     clippy::unused_async,
+    clippy::use_self,
     clippy::wildcard_imports
 )]
 

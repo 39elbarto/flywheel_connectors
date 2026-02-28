@@ -597,12 +597,13 @@ impl AnthropicConnector {
         } else {
             (0, 0)
         };
+        let requests_total = self.total_requests().saturating_add(1);
 
         Ok(json!({
             "total_input_tokens": input_tokens,
             "total_output_tokens": output_tokens,
             "total_cost_usd": self.total_cost(),
-            "requests_total": self.total_requests(),
+            "requests_total": requests_total,
             "requests_error": self.total_errors()
         }))
     }

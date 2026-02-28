@@ -56,9 +56,10 @@ The ASUPERSYNC migration program has an additional normative architecture contra
 - **Capability Matrix**: `docs/ASUPERSYNC_Capability_Matrix.md`
 - **Feature Parity Baseline**: `docs/ASUPERSYNC_Feature_Parity_Baseline.md`
 - **Transport/Runtime Replacement Plan**: `docs/ASUPERSYNC_Transport_Runtime_Replacement_Plan.md`
+- **Structured Logging + Failure Forensics Standard**: `docs/ASUPERSYNC_Logging_Forensics_Standard.md`
 - **Performance/Reliability Framework**: `docs/ASUPERSYNC_Performance_Reliability_Framework.md`
 - **Tokio Guardrail Ledger**: `.config/asupersync/tokio_exception_ledger.json`
-- **Owner Beads**: `flywheel_connectors-235t.1`, `flywheel_connectors-235t.2`, `flywheel_connectors-235t.5`, `flywheel_connectors-235t.28`, `flywheel_connectors-235t.30`, `flywheel_connectors-235t.31`
+- **Owner Beads**: `flywheel_connectors-235t.1`, `flywheel_connectors-235t.2`, `flywheel_connectors-235t.5`, `flywheel_connectors-235t.28`, `flywheel_connectors-235t.30`, `flywheel_connectors-235t.31`, `flywheel_connectors-235t.32`
 - **Program Epic**: `flywheel_connectors-235t`
 
 All beads under `flywheel_connectors-235t.*` MUST treat that ADR as the runtime and policy baseline, including:
@@ -73,6 +74,7 @@ All beads under `flywheel_connectors-235t.*` MUST treat that ADR as the runtime 
 - Performance/reliability execution framework ownership from `flywheel_connectors-235t.28`
 - Golden behavior contract and no-regression baseline ownership from `flywheel_connectors-235t.30`
 - Transport/runtime replacement ownership and adapter debt register from `flywheel_connectors-235t.31`
+- Structured forensics schema + replayable evidence artifact ownership from `flywheel_connectors-235t.32`
 
 ---
 

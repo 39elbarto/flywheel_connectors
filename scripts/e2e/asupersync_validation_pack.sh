@@ -10,6 +10,7 @@ DRY_RUN=false
 SKIP_CONFORMANCE=false
 SKIP_E2E=false
 SKIP_FUZZ=false
+FORENSICS_SCHEMA_VERSION="asupersync-forensics/v1"
 
 usage() {
   cat <<'EOF'
@@ -55,15 +56,40 @@ record_step() {
   local reason="$8"
 
   jq -c -n \
+    --arg schema_version "${FORENSICS_SCHEMA_VERSION}" \
+    --arg run_id "${RUN_ID}" \
     --arg step "${step}" \
+    --arg scenario_id "${step}" \
+    --arg trace_id "${RUN_ID}:${step}" \
+    --arg correlation_id "${RUN_ID}:${step}" \
+    --arg connector "n/a" \
+    --arg zone "n/a" \
+    --arg operation "${step}" \
     --arg description "${description}" \
     --arg command "${command}" \
     --arg status "${status}" \
     --arg log_path "${log_path}" \
     --arg reason "${reason}" \
     --argjson required "${required}" \
+    --argjson attempt 1 \
+    --argjson timeout_budget_ms 0 \
     --argjson duration_ms "${duration_ms}" \
     '{
+      schema_version: $schema_version,
+      run_id: $run_id,
+      scenario_id: $scenario_id,
+      trace_id: $trace_id,
+      correlation_id: $correlation_id,
+      connector: $connector,
+      zone: $zone,
+      operation: $operation,
+      attempt: $attempt,
+      timeout_budget_ms: $timeout_budget_ms,
+      cancellation_reason: (if ($reason | startswith("cancel")) then $reason else null end),
+      queue_depth: null,
+      decode_budget: null,
+      outcome: $status,
+      elapsed_ms: $duration_ms,
       step: $step,
       description: $description,
       required: $required,
@@ -71,8 +97,47 @@ record_step() {
       status: $status,
       duration_ms: $duration_ms,
       log_path: $log_path,
-      reason: ($reason | select(length > 0))
+      reason: (if ($reason | length) > 0 then $reason else null end)
     }' >> "${STEPS_JSONL}"
+}
+
+validate_step_record() {
+  local record="$1"
+  local line_no="$2"
+
+  if ! jq -e \
+    --arg expected_run_id "${RUN_ID}" \
+    --arg expected_schema "${FORENSICS_SCHEMA_VERSION}" \
+    '{
+      ok: (
+        .schema_version == $expected_schema
+        and .run_id == $expected_run_id
+        and (.scenario_id | type == "string")
+        and (.trace_id | type == "string")
+        and (.correlation_id | type == "string")
+        and (.connector | type == "string")
+        and (.zone | type == "string")
+        and (.operation | type == "string")
+        and (.attempt | type == "number")
+        and (.timeout_budget_ms | type == "number")
+        and (.outcome | IN("pass", "fail", "planned"))
+        and (.elapsed_ms | type == "number")
+      )
+    } | .ok' <<< "${record}" >/dev/null; then
+    echo "Invalid forensics step record at line ${line_no}: ${record}" >&2
+    exit 1
+  fi
+}
+
+validate_steps_jsonl() {
+  local line_no=0
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    line_no=$((line_no + 1))
+    if [[ -z "${line//[[:space:]]/}" ]]; then
+      continue
+    fi
+    validate_step_record "${line}" "${line_no}"
+  done < "${STEPS_JSONL}"
 }
 
 run_step() {
@@ -193,7 +258,7 @@ if [[ "${SKIP_CONFORMANCE}" != "true" ]]; then
 fi
 
 if [[ "${SKIP_E2E}" != "true" ]]; then
-  E2E_CMD="OUT_ROOT=\"${OUT_ROOT}/e2e\" bash \"${SCRIPT_DIR}/run_matrix.sh\""
+  E2E_CMD="bash \"${SCRIPT_DIR}/run_matrix.sh\" --run-id \"${RUN_ID}-e2e-matrix\" --seed \"${RUN_ID}\" --out-root \"${OUT_ROOT}/scenarios/e2e-matrix\""
   echo "${E2E_CMD}" >> "${REPLAY_SH}"
   run_step \
     "e2e_matrix" \
@@ -213,6 +278,7 @@ if [[ "${SKIP_FUZZ}" != "true" ]]; then
 fi
 
 chmod +x "${REPLAY_SH}"
+validate_steps_jsonl
 
 overall_passed=true
 required_failed=false
@@ -230,6 +296,7 @@ done < "${STEPS_JSONL}"
 
 jq -s \
   --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --arg schema_version "${FORENSICS_SCHEMA_VERSION}" \
   --arg run_id "${RUN_ID}" \
   --arg out_root "${OUT_ROOT}" \
   --arg replay_sh "${REPLAY_SH}" \
@@ -237,6 +304,7 @@ jq -s \
   --argjson passed "$([[ "${overall_passed}" == "true" ]] && echo true || echo false)" \
   --argjson required_failed "$([[ "${required_failed}" == "true" ]] && echo true || echo false)" \
   '{
+    schema_version: $schema_version,
     generated_at: $generated_at,
     run_id: $run_id,
     out_root: $out_root,

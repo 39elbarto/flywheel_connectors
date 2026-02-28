@@ -312,10 +312,13 @@ artifacts/asupersync/validation/<id>/
 
 Required artifacts:
 - `summary.json` - machine-readable run verdict + step status.
-- `steps.jsonl` - per-step status records with command, duration, and log path.
+- `steps.jsonl` - per-step forensics records (`schema_version: asupersync-forensics/v1`) with run/scenario/trace correlation fields.
 - `replay.sh` - deterministic replay script with exact commands.
 - `<step>/command.txt` - frozen command for each step.
 - `<step>/execution.log` - stdout/stderr for each executed step.
+
+Forensics schema contract reference:
+- `docs/ASUPERSYNC_Logging_Forensics_Standard.md` (owner bead `flywheel_connectors-235t.32`)
 
 ### Step Coverage
 
@@ -325,6 +328,29 @@ Validation pack currently orchestrates:
 3. Fuzz boundary compile gate: `rch exec -- cargo check --manifest-path fuzz/Cargo.toml --bins`
 
 All cargo-intensive steps are intentionally routed through `rch exec -- ...`.
+
+E2E matrix artifact contract (bead `flywheel_connectors-235t.26.4.1`):
+- Validation pack executes matrix into `artifacts/asupersync/validation/<id>/scenarios/e2e-matrix/`.
+- Matrix root emits `results.jsonl`, `summary.json`, `manifest.json`, `scenario_plan.json`, and `replay.sh`.
+- Each scenario emits `scenarios/<scenario>/command.txt`, `execution.log`, and `scenario.json` plus scenario-local artifacts.
+
+---
+
+## ASUPERSYNC Shared Async Harness (flywheel_connectors-235t.26.1)
+
+`fcp-testkit` now provides shared async harness fixtures in `fcp_testkit::AsyncTestContext` and helpers in `fcp_testkit::async_harness` for:
+- deterministic `run_id` / `scenario_id` / `correlation_id` generation
+- request-scoped timeout/cancellation helpers (`run_with_timeout`, `spawn_cancel_after`)
+- bounded queue + shutdown channel setup for runtime/backpressure tests
+
+Adoption anchors:
+- Core crate suite: `crates/fcp-host/tests/agent_integration.rs`
+- Connector suite: `connectors/openai/src/client.rs` (`test_logs_redact_api_key_and_prompt`)
+
+Maintenance guidance:
+- New migrated async tests should call `AsyncTestContext::for_scenario("<crate>.<suite>.<case>")`.
+- Structured test logs should include `run_id`, `scenario_id`, and `correlation_id` fields.
+- Prefer harness helpers over ad hoc timeout/channel/cancellation setup in individual tests.
 
 ---
 

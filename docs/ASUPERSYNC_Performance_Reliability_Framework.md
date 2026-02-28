@@ -29,6 +29,10 @@ No terminal performance freeze is valid unless these dependency gates are comple
 
 Interim benchmark/soak dry-runs are allowed before those gates, but must be marked `pre-gate`.
 
+Normative schema details for item (1) are defined in:
+
+- `docs/ASUPERSYNC_Logging_Forensics_Standard.md` (`schema_version: asupersync-forensics/v1`)
+
 ---
 
 ## 3. Canonical Metric Contract
@@ -94,7 +98,13 @@ Every scenario must produce deterministic replay instructions.
 ```text
 artifacts/asupersync/perf/<run-id>/
   manifest.json
+  steps.jsonl
+  summary.json
   metrics.jsonl
+  metrics_template.json
+  normalized_summary.json
+  delta_summary.json
+  scenario_plan.json
   scenarios/
   tuning/
   gate/
@@ -107,6 +117,7 @@ artifacts/asupersync/perf/<run-id>/
 - environment fingerprint (toolchain/runtime profile)
 - scenario list
 - pass/fail summary
+- metric normalization classification and missing-required-metric count
 
 `replay.sh` must be executable and reproduce the measurement run from the same repo state.
 
@@ -137,8 +148,13 @@ with machine-readable rationale.
 Use offloaded commands for CPU-intensive benchmark/soak gates:
 
 ```bash
-# Orchestrated perf/reliability pack (supports --dry-run and --pre-gate)
-bash scripts/e2e/asupersync_performance_pack.sh --pre-gate
+# Orchestrated baseline run (pre-gate allowed)
+bash scripts/e2e/asupersync_performance_pack.sh --phase baseline --pre-gate --metrics-input artifacts/asupersync/perf/input/metrics_baseline.jsonl
+
+# Orchestrated delta run (compare against baseline normalized summary)
+bash scripts/e2e/asupersync_performance_pack.sh --phase delta --pre-gate \
+  --metrics-input artifacts/asupersync/perf/input/metrics_delta.jsonl \
+  --baseline-summary artifacts/asupersync/perf/<baseline-run-id>/normalized_summary.json
 
 # Baseline checks
 rch exec -- cargo check --workspace --all-targets

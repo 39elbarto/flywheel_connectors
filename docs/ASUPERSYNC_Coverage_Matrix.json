@@ -1,0 +1,345 @@
+{
+  "$schema": "asupersync-coverage-matrix-v1",
+  "version": "1.0.0",
+  "generated": "2026-02-28T09:40:00Z",
+  "summary": {
+    "total_tests": 6106,
+    "sync_tests": 5673,
+    "async_migrated": 350,
+    "tokio_remaining": 83,
+    "migration_percent": 80.8
+  },
+  "behavior_classes": [
+    "happy-path",
+    "edge-case",
+    "failure",
+    "cancellation-deadline",
+    "reconnect-backpressure",
+    "degraded-repair"
+  ],
+  "crates": [
+    {
+      "id": "fcp-core",
+      "path": "crates/fcp-core",
+      "sync_tests": 1737,
+      "async_migrated": 0,
+      "tokio_remaining": 5,
+      "migration_status": "partial",
+      "tokio_files": ["tests/lifecycle_canary_e2e.rs"],
+      "coverage_rows": [
+        {"contract": "error-serialization", "class": "happy-path", "assertion": "unit"},
+        {"contract": "error-retryability", "class": "edge-case", "assertion": "unit"},
+        {"contract": "error-category-mapping", "class": "happy-path", "assertion": "unit"},
+        {"contract": "lifecycle-canary-e2e", "class": "happy-path", "assertion": "integration"}
+      ]
+    },
+    {
+      "id": "fcp-async-core",
+      "path": "crates/fcp-async-core",
+      "sync_tests": 0,
+      "async_migrated": 0,
+      "tokio_remaining": 6,
+      "migration_status": "not-started",
+      "tokio_files": ["src/lib.rs"],
+      "note": "Runtime substrate crate - tokio::test is appropriate here since it tests tokio re-exports",
+      "coverage_rows": [
+        {"contract": "async-error-taxonomy", "class": "happy-path", "assertion": "unit"},
+        {"contract": "execution-context-lifecycle", "class": "cancellation-deadline", "assertion": "unit"},
+        {"contract": "channel-reexports", "class": "happy-path", "assertion": "unit"}
+      ]
+    },
+    {
+      "id": "fcp-crypto",
+      "path": "crates/fcp-crypto",
+      "sync_tests": 193,
+      "async_migrated": 0,
+      "tokio_remaining": 0,
+      "migration_status": "complete",
+      "coverage_rows": [
+        {"contract": "ed25519-signing", "class": "happy-path", "assertion": "unit"},
+        {"contract": "cose-token-validation", "class": "happy-path", "assertion": "unit"},
+        {"contract": "hpke-sealed-boxes", "class": "happy-path", "assertion": "unit"},
+        {"contract": "key-rotation", "class": "edge-case", "assertion": "unit"},
+        {"contract": "invalid-signatures", "class": "failure", "assertion": "unit"}
+      ]
+    },
+    {
+      "id": "fcp-sdk",
+      "path": "crates/fcp-sdk",
+      "sync_tests": 338,
+      "async_migrated": 48,
+      "tokio_remaining": 0,
+      "migration_status": "complete",
+      "coverage_rows": [
+        {"contract": "retry-loop-execute", "class": "happy-path", "assertion": "unit"},
+        {"contract": "retry-backoff-policy", "class": "edge-case", "assertion": "unit"},
+        {"contract": "retry-deadline-exceeded", "class": "cancellation-deadline", "assertion": "unit"},
+        {"contract": "connector-runtime-lifecycle", "class": "happy-path", "assertion": "unit"},
+        {"contract": "http-retry-config", "class": "happy-path", "assertion": "unit"},
+        {"contract": "attempt-outcome-mapping", "class": "happy-path", "assertion": "unit"},
+        {"contract": "connector-error-mapping", "class": "happy-path", "assertion": "unit"}
+      ]
+    },
+    {
+      "id": "fcp-host",
+      "path": "crates/fcp-host",
+      "sync_tests": 51,
+      "async_migrated": 29,
+      "tokio_remaining": 0,
+      "migration_status": "complete",
+      "coverage_rows": [
+        {"contract": "doctor-service", "class": "happy-path", "assertion": "unit"},
+        {"contract": "budget-enforcement", "class": "edge-case", "assertion": "unit"},
+        {"contract": "discovery-service", "class": "happy-path", "assertion": "unit"},
+        {"contract": "agent-integration", "class": "happy-path", "assertion": "integration"},
+        {"contract": "host-connector-integration", "class": "happy-path", "assertion": "integration"}
+      ]
+    },
+    {
+      "id": "fcp-streaming",
+      "path": "crates/fcp-streaming",
+      "sync_tests": 67,
+      "async_migrated": 11,
+      "tokio_remaining": 0,
+      "migration_status": "complete",
+      "coverage_rows": [
+        {"contract": "websocket-reconnect", "class": "reconnect-backpressure", "assertion": "unit"},
+        {"contract": "sse-stream-parse", "class": "happy-path", "assertion": "unit"},
+        {"contract": "backpressure-handling", "class": "reconnect-backpressure", "assertion": "unit"},
+        {"contract": "stream-cancellation", "class": "cancellation-deadline", "assertion": "unit"}
+      ]
+    },
+    {
+      "id": "fcp-store",
+      "path": "crates/fcp-store",
+      "sync_tests": 117,
+      "async_migrated": 1,
+      "tokio_remaining": 0,
+      "migration_status": "complete",
+      "coverage_rows": [
+        {"contract": "object-store-crud", "class": "happy-path", "assertion": "unit"},
+        {"contract": "symbol-store-crud", "class": "happy-path", "assertion": "unit"},
+        {"contract": "quarantine-policy", "class": "failure", "assertion": "unit"},
+        {"contract": "gc-retention", "class": "edge-case", "assertion": "unit"}
+      ]
+    },
+    {
+      "id": "fcp-raptorq",
+      "path": "crates/fcp-raptorq",
+      "sync_tests": 97,
+      "async_migrated": 5,
+      "tokio_remaining": 0,
+      "migration_status": "complete",
+      "coverage_rows": [
+        {"contract": "encode-decode-roundtrip", "class": "happy-path", "assertion": "unit"},
+        {"contract": "insufficient-symbols", "class": "degraded-repair", "assertion": "unit"},
+        {"contract": "chunked-object-manifest", "class": "happy-path", "assertion": "unit"},
+        {"contract": "memory-bounded-decode", "class": "edge-case", "assertion": "unit"}
+      ]
+    },
+    {
+      "id": "fcp-conformance",
+      "path": "crates/fcp-conformance",
+      "sync_tests": 293,
+      "async_migrated": 0,
+      "tokio_remaining": 23,
+      "migration_status": "partial",
+      "tokio_files": ["src/compliance.rs", "src/harness.rs", "tests/integration_scenarios.rs"],
+      "coverage_rows": [
+        {"contract": "golden-vectors", "class": "happy-path", "assertion": "unit"},
+        {"contract": "compliance-checks", "class": "happy-path", "assertion": "integration"},
+        {"contract": "harness-simulation", "class": "happy-path", "assertion": "integration"},
+        {"contract": "forensics-schema", "class": "happy-path", "assertion": "unit"}
+      ]
+    },
+    {
+      "id": "fcp-graphql",
+      "path": "crates/fcp-graphql",
+      "sync_tests": 0,
+      "async_migrated": 0,
+      "tokio_remaining": 17,
+      "migration_status": "not-started",
+      "tokio_files": ["tests/client.rs"],
+      "coverage_rows": [
+        {"contract": "graphql-query", "class": "happy-path", "assertion": "integration"},
+        {"contract": "graphql-subscription-reconnect", "class": "reconnect-backpressure", "assertion": "integration"},
+        {"contract": "graphql-cancellation", "class": "cancellation-deadline", "assertion": "integration"}
+      ]
+    },
+    {
+      "id": "fcp-mesh",
+      "path": "crates/fcp-mesh",
+      "sync_tests": 231,
+      "async_migrated": 0,
+      "tokio_remaining": 20,
+      "migration_status": "partial",
+      "tokio_files": ["tests/mesh_integration.rs"],
+      "coverage_rows": [
+        {"contract": "routing-multipath", "class": "happy-path", "assertion": "unit"},
+        {"contract": "gossip-convergence", "class": "happy-path", "assertion": "integration"},
+        {"contract": "admission-control", "class": "edge-case", "assertion": "unit"},
+        {"contract": "degraded-symbol-repair", "class": "degraded-repair", "assertion": "integration"}
+      ]
+    },
+    {
+      "id": "fcp-ratelimit",
+      "path": "crates/fcp-ratelimit",
+      "sync_tests": 26,
+      "async_migrated": 59,
+      "tokio_remaining": 0,
+      "migration_status": "complete",
+      "coverage_rows": [
+        {"contract": "token-bucket", "class": "happy-path", "assertion": "unit"},
+        {"contract": "sliding-window", "class": "happy-path", "assertion": "unit"},
+        {"contract": "rate-limit-exceeded", "class": "failure", "assertion": "unit"}
+      ]
+    },
+    {
+      "id": "fcp-telemetry",
+      "path": "crates/fcp-telemetry",
+      "sync_tests": 254,
+      "async_migrated": 9,
+      "tokio_remaining": 0,
+      "migration_status": "complete",
+      "coverage_rows": [
+        {"contract": "metrics-emission", "class": "happy-path", "assertion": "unit"},
+        {"contract": "trace-propagation", "class": "happy-path", "assertion": "unit"}
+      ]
+    },
+    {
+      "id": "fcp-cli",
+      "path": "crates/fcp-cli",
+      "sync_tests": 234,
+      "async_migrated": 8,
+      "tokio_remaining": 0,
+      "migration_status": "complete",
+      "coverage_rows": [
+        {"contract": "install-mirror", "class": "happy-path", "assertion": "unit"},
+        {"contract": "new-scaffold-generation", "class": "happy-path", "assertion": "unit"},
+        {"contract": "bench-runner", "class": "happy-path", "assertion": "unit"},
+        {"contract": "doctor-checks", "class": "happy-path", "assertion": "unit"}
+      ]
+    },
+    {
+      "id": "fcp-testkit",
+      "path": "crates/fcp-testkit",
+      "sync_tests": 28,
+      "async_migrated": 4,
+      "tokio_remaining": 9,
+      "migration_status": "partial",
+      "tokio_files": ["src/mock_server.rs", "src/supervisor_examples.rs", "src/tracing_config.rs"],
+      "coverage_rows": [
+        {"contract": "mock-server", "class": "happy-path", "assertion": "unit"},
+        {"contract": "test-harness", "class": "happy-path", "assertion": "unit"}
+      ]
+    }
+  ],
+  "connectors": [
+    {
+      "id": "openai",
+      "path": "connectors/openai",
+      "sync_tests": 3,
+      "async_migrated": 20,
+      "tokio_remaining": 0,
+      "migration_status": "complete",
+      "coverage_rows": [
+        {"contract": "chat-completion", "class": "happy-path", "assertion": "unit"},
+        {"contract": "streaming-sse", "class": "happy-path", "assertion": "unit"},
+        {"contract": "rate-limited-retry", "class": "failure", "assertion": "unit"},
+        {"contract": "auth-unauthorized", "class": "failure", "assertion": "unit"},
+        {"contract": "log-redaction", "class": "edge-case", "assertion": "unit"},
+        {"contract": "connector-lifecycle", "class": "happy-path", "assertion": "unit"}
+      ]
+    },
+    {
+      "id": "anthropic",
+      "path": "connectors/anthropic",
+      "sync_tests": 4,
+      "async_migrated": 12,
+      "tokio_remaining": 0,
+      "migration_status": "complete",
+      "coverage_rows": [
+        {"contract": "chat-completion", "class": "happy-path", "assertion": "unit"},
+        {"contract": "streaming-sse", "class": "happy-path", "assertion": "unit"},
+        {"contract": "rate-limited-retry", "class": "failure", "assertion": "unit"},
+        {"contract": "auth-unauthorized", "class": "failure", "assertion": "unit"},
+        {"contract": "connector-lifecycle", "class": "happy-path", "assertion": "unit"}
+      ]
+    },
+    {
+      "id": "discord",
+      "path": "connectors/discord",
+      "sync_tests": 7,
+      "async_migrated": 18,
+      "tokio_remaining": 0,
+      "migration_status": "complete",
+      "coverage_rows": [
+        {"contract": "rest-api-crud", "class": "happy-path", "assertion": "unit"},
+        {"contract": "gateway-events", "class": "happy-path", "assertion": "unit"},
+        {"contract": "rate-limited-retry", "class": "failure", "assertion": "unit"},
+        {"contract": "log-redaction", "class": "edge-case", "assertion": "unit"},
+        {"contract": "message-validation", "class": "edge-case", "assertion": "unit"},
+        {"contract": "capability-auth", "class": "failure", "assertion": "unit"}
+      ]
+    },
+    {
+      "id": "telegram",
+      "path": "connectors/telegram",
+      "sync_tests": 5,
+      "async_migrated": 18,
+      "tokio_remaining": 0,
+      "migration_status": "complete",
+      "coverage_rows": [
+        {"contract": "bot-api-crud", "class": "happy-path", "assertion": "unit"},
+        {"contract": "polling-cursor", "class": "happy-path", "assertion": "unit"},
+        {"contract": "rate-limited-retry", "class": "failure", "assertion": "unit"},
+        {"contract": "log-redaction", "class": "edge-case", "assertion": "unit"},
+        {"contract": "message-validation", "class": "edge-case", "assertion": "unit"}
+      ]
+    },
+    {
+      "id": "twitter",
+      "path": "connectors/twitter",
+      "sync_tests": 15,
+      "async_migrated": 6,
+      "tokio_remaining": 0,
+      "migration_status": "complete",
+      "coverage_rows": [
+        {"contract": "rest-api-crud", "class": "happy-path", "assertion": "unit"},
+        {"contract": "oauth-signing", "class": "happy-path", "assertion": "unit"},
+        {"contract": "filtered-stream", "class": "happy-path", "assertion": "unit"},
+        {"contract": "error-mapping", "class": "failure", "assertion": "unit"},
+        {"contract": "rate-limited-retry", "class": "failure", "assertion": "unit"}
+      ]
+    },
+    {
+      "id": "vectordb",
+      "path": "connectors/vectordb",
+      "sync_tests": 18,
+      "async_migrated": 9,
+      "tokio_remaining": 0,
+      "migration_status": "complete",
+      "coverage_rows": [
+        {"contract": "config-validation", "class": "happy-path", "assertion": "unit"},
+        {"contract": "connector-lifecycle", "class": "happy-path", "assertion": "unit"},
+        {"contract": "endpoint-allowlist", "class": "edge-case", "assertion": "unit"},
+        {"contract": "introspection", "class": "happy-path", "assertion": "unit"}
+      ]
+    }
+  ],
+  "migration_blockers": {
+    "tokio_test_remaining_by_crate": {
+      "fcp-conformance": 23,
+      "fcp-mesh": 20,
+      "fcp-graphql": 17,
+      "fcp-testkit": 9,
+      "fcp-tailscale": 9,
+      "fcp-e2e": 9,
+      "fcp-async-core": 6,
+      "fcp-core": 5,
+      "fcp-bootstrap": 1
+    },
+    "total_tokio_remaining": 83,
+    "connectors_fully_migrated": true
+  }
+}

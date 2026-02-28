@@ -17,17 +17,16 @@ thiserror.workspace = true
 tracing.workspace = true
 serde = { workspace = true, features = ["derive"] }
 parking_lot.workspace = true
-tokio = { workspace = true, features = ["sync", "time"] }
 async-trait.workspace = true
 raptorq.workspace = true
 
 # Internal crates
+fcp-async-core = { path = "../fcp-async-core" }
 fcp-core = { path = "../fcp-core" }
 fcp-raptorq = { path = "../fcp-raptorq" }
 fcp-telemetry = { path = "../fcp-telemetry" }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 semver.workspace = true
 fcp-cbor = { path = "../fcp-cbor" }
 serde_json.workspace = true

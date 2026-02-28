@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use tracing::Span;
 use uuid::Uuid;
 
-tokio::task_local! {
+fcp_async_core::task_local! {
     static CONTEXT: Arc<TelemetryContext>;
 }
 
@@ -833,7 +833,7 @@ mod tests {
         let _guard = ContextGuard::new(&ctx, "test_operation");
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_with_context_async() {
         let ctx = TelemetryContext::new().correlation_id("async-test-123");
 
@@ -847,14 +847,14 @@ mod tests {
         assert_eq!(result, "async-test-123");
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_current_context_outside_scope() {
         // Outside of with_context, current_context should return None
         let ctx = current_context();
         assert!(ctx.is_none());
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_current_connector_id() {
         let ctx = TelemetryContext::new().connector_id("my-connector-123");
 
@@ -863,7 +863,7 @@ mod tests {
         assert_eq!(result, "my-connector-123");
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_current_request_id() {
         let uuid = Uuid::new_v4();
         let ctx = TelemetryContext::new().request_id(uuid);
@@ -1165,7 +1165,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_current_trace_context() {
         let ctx = TelemetryContext::with_trace();
         let expected_trace_id = ctx.trace_context.as_ref().unwrap().trace_id_hex();
@@ -1178,7 +1178,7 @@ mod tests {
         assert_eq!(result, Some(expected_trace_id));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_current_trace_id() {
         let ctx = TelemetryContext::with_trace();
         let expected_trace_id = ctx.trace_context.as_ref().unwrap().trace_id_hex();
@@ -1188,7 +1188,7 @@ mod tests {
         assert_eq!(result, Some(expected_trace_id));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_current_span_id() {
         let ctx = TelemetryContext::with_trace();
         let expected_span_id = ctx.trace_context.as_ref().unwrap().span_id_hex();
@@ -1425,7 +1425,7 @@ mod tests {
         let _guard = ContextGuard::new(&ctx, "test_operation_with_all_fields");
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_nested_context_propagation() {
         let outer_ctx = TelemetryContext::with_trace().zone_id("outer-zone");
         let outer_trace_id = outer_ctx.trace_context.as_ref().unwrap().trace_id_hex();
@@ -1450,7 +1450,7 @@ mod tests {
         let _ = outer_trace_id; // Just verify we captured it
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_context_not_leaked_after_scope() {
         let ctx = TelemetryContext::new().zone_id("scoped-zone");
 

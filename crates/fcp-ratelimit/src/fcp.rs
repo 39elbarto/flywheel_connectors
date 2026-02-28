@@ -9,8 +9,8 @@
 use std::time::Duration;
 
 use crate::{RateLimitConfig, RateLimitError, RateLimitState, RateLimiter};
+use fcp_async_core::sync::{OwnedSemaphorePermit, Semaphore};
 use std::sync::Arc;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// Backpressure thresholds expressed in basis points (bps).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -357,7 +357,7 @@ mod tests {
         assert!(err.to_string().contains("bytes_per_token"));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn config_from_core_maps_burst_as_additional_capacity() {
         let core = fcp_core::RateLimit {
             max: 100,
@@ -409,7 +409,7 @@ mod tests {
         assert!(err.to_string().contains("burst overflow"));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn enforce_emits_soft_backpressure_without_rejecting() {
         // Create a limiter with small capacity so we can push utilization > 95% without full
         // rejection.
@@ -436,7 +436,7 @@ mod tests {
         assert!(out.violation.is_none());
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn enforce_rejects_and_emits_throttle_violation_at_hard_limit() {
         let limiter = TokenBucket::new(2, Duration::from_secs(60));
         assert!(limiter.try_acquire().await);
@@ -581,7 +581,7 @@ mod tests {
         assert!(signal.retry_after_ms.is_some());
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn enforce_quota_violation_includes_retry_after() {
         let limiter = TokenBucket::new(1, Duration::from_millis(50));
         assert!(limiter.try_acquire().await);

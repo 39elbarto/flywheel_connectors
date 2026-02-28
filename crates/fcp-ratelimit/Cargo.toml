@@ -13,9 +13,8 @@ workspace = true
 
 [dependencies]
 fcp-core = { path = "../fcp-core" }
+fcp-async-core = { path = "../fcp-async-core" }
 
-# Async runtime
-tokio = { workspace = true, features = ["sync", "time"] }
 async-trait.workspace = true
 
 # Synchronization
@@ -40,4 +39,4 @@ rand = "0.9"
 [dev-dependencies]
 ciborium.workspace = true
 uuid.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync"] }

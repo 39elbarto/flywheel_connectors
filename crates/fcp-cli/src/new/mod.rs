@@ -488,7 +488,7 @@ chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = {{ workspace = true, features = ["full"] }}
+fcp-async-core = {{ path = "../../crates/fcp-async-core" }}
 tokio-stream.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -675,17 +675,23 @@ fn run_fcp_loop() -> Result<()> {{
     let mut stdout = std::io::stdout();
     let mut connector = {struct_name}Connector::new();
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-
     for line in stdin.lock().lines() {{
         let line = line?;
         if line.is_empty() {{
             continue;
         }}
 
-        let response = runtime.block_on(async {{ handle_message(&mut connector, &line).await }});
+        let response =
+            fcp_async_core::runtime::block_on_sync(handle_message(&mut connector, &line))
+                .unwrap_or_else(|e| {{
+                    serde_json::json!({{
+                        "jsonrpc": "2.0",
+                        "error": {{
+                            "code": "FCP-9001",
+                            "message": format!("Runtime error: {{e}}")
+                        }}
+                    }})
+                }});
 
         let response_json = serde_json::to_string(&response)?;
         writeln!(stdout, "{{response_json}}")?;
@@ -937,7 +943,7 @@ fn generate_api_rs(short_name: &str) -> String {
 use std::future::Future;
 use std::time::Duration;
 
-use tokio::time::sleep;
+use fcp_async_core::time::sleep;
 
 use crate::error::{struct_name}Error;
 
@@ -1628,7 +1634,7 @@ mod tests {{
         }}
     }}
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_handshake() {{
         let mut connector = {struct_name}Connector::new();
         let result = connector.handshake(base_handshake()).await;
@@ -1637,7 +1643,7 @@ mod tests {{
         assert_eq!(response.status, "accepted");
     }}
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_invoke_placeholder() {{
         let mut connector = {struct_name}Connector::new();
         // Must handshake first to initialize verifier
@@ -1730,7 +1736,7 @@ fn base_invoke(connector_id: &ConnectorId, operation: &str) -> InvokeRequest {{
 // Happy path tests
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_happy_path_placeholder() {{
     let mut connector = {struct_name}Connector::new();
 
@@ -1751,7 +1757,7 @@ async fn test_happy_path_placeholder() {{
 // Capability denial tests
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_missing_capability_denied() {{
     // TODO: Test that operations fail without proper capability tokens
     // This verifies the default-deny security model
@@ -1761,7 +1767,7 @@ async fn test_missing_capability_denied() {{
 // Network constraint tests
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_network_constraints_enforced() {{
     // TODO: Test that network requests to non-allowed hosts are blocked
     // This verifies the default-deny NetworkConstraints
@@ -1771,7 +1777,7 @@ async fn test_network_constraints_enforced() {{
 // Secret redaction tests
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_secrets_not_logged() {{
     // TODO: Verify that sensitive data is never logged
     // - Capture tracing output
@@ -1790,7 +1796,7 @@ async fn test_secrets_not_logged() {{
 // Error taxonomy tests
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_error_codes_correct() {{
     let connector = {struct_name}Connector::new();
 

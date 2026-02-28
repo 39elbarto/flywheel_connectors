@@ -1597,12 +1597,7 @@ mod tests {
             1,
         );
 
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-
-        runtime.block_on(async {
+        fcp_async_core::runtime::block_on_sync(async {
             node.symbol_store
                 .put_object_meta(meta)
                 .await
@@ -1629,7 +1624,8 @@ mod tests {
                 .handle_symbol_request(request, &NodeId::new("peer-1"), true, 0)
                 .await
                 .expect("symbol request");
-        });
+        })
+        .expect("runtime");
 
         assert_eq!(node.symbol_requests.active_transfer_count(), 1);
         assert!(node.sent_symbols.contains_key(&object_id));
@@ -1670,16 +1666,12 @@ mod tests {
             1,
         );
 
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-
-        let err = runtime.block_on(async {
+        let err = fcp_async_core::runtime::block_on_sync(async {
             node.handle_symbol_request(request, &NodeId::new("peer-1"), true, 0)
                 .await
                 .expect_err("quarantined request should fail")
-        });
+        })
+        .expect("runtime");
 
         assert!(matches!(
             err,
@@ -1718,12 +1710,7 @@ mod tests {
         request.sign(&signing_key);
         node.register_peer_signing_key(peer_id.clone(), signing_key.verifying_key());
 
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-
-        let result = runtime.block_on(async {
+        let result = fcp_async_core::runtime::block_on_sync(async {
             node.symbol_store
                 .put_object_meta(meta)
                 .await
@@ -1748,7 +1735,8 @@ mod tests {
 
             node.handle_symbol_request(request, &peer_id, false, 0)
                 .await
-        });
+        })
+        .expect("runtime");
 
         assert!(result.is_ok());
     }
@@ -1785,39 +1773,34 @@ mod tests {
         request.sign(&wrong_key);
         node.register_peer_signing_key(peer_id.clone(), signing_key.verifying_key());
 
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
+        let err = fcp_async_core::runtime::block_on_sync(async {
+            node.symbol_store
+                .put_object_meta(meta)
+                .await
+                .expect("store meta");
 
-        let err = runtime
-            .block_on(async {
+            for esi in 0..2u32 {
+                let symbol = StoredSymbol {
+                    meta: SymbolMeta {
+                        object_id,
+                        esi,
+                        zone_id: zone_id.clone(),
+                        source_node: Some(1),
+                        stored_at: 0,
+                    },
+                    data: bytes::Bytes::from(vec![u8::try_from(esi).unwrap_or(0); 64]),
+                };
                 node.symbol_store
-                    .put_object_meta(meta)
+                    .put_symbol(symbol)
                     .await
-                    .expect("store meta");
+                    .expect("store symbol");
+            }
 
-                for esi in 0..2u32 {
-                    let symbol = StoredSymbol {
-                        meta: SymbolMeta {
-                            object_id,
-                            esi,
-                            zone_id: zone_id.clone(),
-                            source_node: Some(1),
-                            stored_at: 0,
-                        },
-                        data: bytes::Bytes::from(vec![u8::try_from(esi).unwrap_or(0); 64]),
-                    };
-                    node.symbol_store
-                        .put_symbol(symbol)
-                        .await
-                        .expect("store symbol");
-                }
-
-                node.handle_symbol_request(request, &peer_id, false, 0)
-                    .await
-            })
-            .expect_err("invalid signature should fail");
+            node.handle_symbol_request(request, &peer_id, false, 0)
+                .await
+        })
+        .expect("runtime")
+        .expect_err("invalid signature should fail");
 
         assert!(matches!(err, SymbolRequestError::SignatureInvalid));
     }

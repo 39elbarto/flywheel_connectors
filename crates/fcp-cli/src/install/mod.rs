@@ -95,13 +95,7 @@ pub struct InstallArgs {
 ///
 /// Returns an error if installation fails.
 pub fn run(args: InstallArgs) -> Result<()> {
-    // Create a tokio runtime for async operations
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("failed to create tokio runtime")?;
-
-    runtime.block_on(run_async(args))
+    fcp_async_core::runtime::block_on_sync(run_async(args)).context("async runtime failure")?
 }
 
 /// Async implementation of the install command.
@@ -846,7 +840,7 @@ mod tests {
         assert!(details.publisher_signature_verified);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn mirror_to_store_success() {
         let target = parse_target_triple("x86_64-unknown-linux-gnu");
         let (bundle, keys) = fetch_connector_bundle("fcp.telegram:base:v1", None, &target).unwrap();

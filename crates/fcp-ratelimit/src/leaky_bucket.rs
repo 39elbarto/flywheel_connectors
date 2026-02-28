@@ -4,8 +4,8 @@
 
 use std::time::{Duration, Instant};
 
+use fcp_async_core::time::sleep;
 use parking_lot::Mutex;
-use tokio::time::sleep;
 
 use async_trait::async_trait;
 
@@ -298,7 +298,7 @@ mod tests {
 
     // ── LeakyBucket tests ─────────────────────────────────────────────
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_leaky_bucket_basic() {
         let limiter = LeakyBucket::new(5, 10.0); // 5 capacity, 10/sec leak
 
@@ -318,7 +318,7 @@ mod tests {
         assert!(limiter.try_acquire().await);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn leaky_bucket_from_window() {
         // 60 requests per 60 seconds → leak_rate = 1.0/sec, capacity = 60
         let limiter = LeakyBucket::from_window(60, Duration::from_secs(60));
@@ -326,7 +326,7 @@ mod tests {
         assert!((limiter.leak_rate - 1.0).abs() < f64::EPSILON);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn leaky_bucket_rejects_when_full() {
         let limiter = LeakyBucket::new(3, 0.001); // very slow leak
 
@@ -340,7 +340,7 @@ mod tests {
         assert!(!limiter.try_acquire().await);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn leaky_bucket_remaining_reflects_level() {
         let limiter = LeakyBucket::new(10, 0.001); // very slow leak
 
@@ -354,7 +354,7 @@ mod tests {
         assert_eq!(limiter.remaining(), 7);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn leaky_bucket_state_not_limited_when_empty() {
         let limiter = LeakyBucket::new(5, 1.0);
         let state = limiter.state();
@@ -365,7 +365,7 @@ mod tests {
         assert_eq!(state.reset_after, Duration::ZERO);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn leaky_bucket_state_limited_when_full() {
         let limiter = LeakyBucket::new(2, 0.001);
 
@@ -379,7 +379,7 @@ mod tests {
         assert!(state.reset_after > Duration::ZERO);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn leaky_bucket_reset_clears_level() {
         let limiter = LeakyBucket::new(5, 0.001);
 
@@ -397,13 +397,13 @@ mod tests {
         assert!(limiter.try_acquire().await);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn leaky_bucket_wait_time_zero_when_room() {
         let limiter = LeakyBucket::new(5, 1.0);
         assert_eq!(limiter.wait_time().await, Duration::ZERO);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn leaky_bucket_wait_time_positive_when_full() {
         let limiter = LeakyBucket::new(2, 0.001);
 
@@ -417,7 +417,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn leaky_bucket_acquire_succeeds_within_limit() {
         let limiter = LeakyBucket::new(5, 1.0);
         let waited = limiter.acquire(Duration::from_secs(1)).await.unwrap();
@@ -425,7 +425,7 @@ mod tests {
         assert!(waited < Duration::from_millis(50));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn leaky_bucket_acquire_waits_and_succeeds() {
         // Capacity 1, leak rate 100/sec → refills in ~10ms
         let limiter = LeakyBucket::new(1, 100.0);
@@ -439,7 +439,7 @@ mod tests {
         assert!(waited < Duration::from_millis(200));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn leaky_bucket_acquire_exceeds_max_wait() {
         let limiter = LeakyBucket::new(1, 0.001); // very slow leak
 
@@ -455,7 +455,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn leaky_bucket_try_acquire_n_supports_batch_permits() {
         let limiter = LeakyBucket::new(3, 0.001);
 
@@ -472,7 +472,7 @@ mod tests {
         assert!(!limiter.try_acquire_n(1).await);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn leaky_bucket_leak_recovers_capacity() {
         // High leak rate so test is fast: 100/sec
         let limiter = LeakyBucket::new(3, 100.0);
@@ -492,7 +492,7 @@ mod tests {
 
     // ── SmoothPacer tests ─────────────────────────────────────────────
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_smooth_pacer() {
         let pacer = SmoothPacer::new(Duration::from_millis(50));
 
@@ -507,7 +507,7 @@ mod tests {
         assert!(pacer.try_acquire().await);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn smooth_pacer_from_rate() {
         // 10 requests/sec → 100ms min interval
         let pacer = SmoothPacer::from_rate(10.0);
@@ -519,14 +519,14 @@ mod tests {
         assert!(pacer.try_acquire().await);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn smooth_pacer_remaining_before_any_request() {
         let pacer = SmoothPacer::new(Duration::from_millis(100));
         // No request made yet → remaining should be 1
         assert_eq!(pacer.remaining(), 1);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn smooth_pacer_remaining_zero_after_request() {
         let pacer = SmoothPacer::new(Duration::from_millis(500));
         pacer.try_acquire().await;
@@ -534,7 +534,7 @@ mod tests {
         assert_eq!(pacer.remaining(), 0);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn smooth_pacer_remaining_recovers_after_interval() {
         let pacer = SmoothPacer::new(Duration::from_millis(20));
         pacer.try_acquire().await;
@@ -542,7 +542,7 @@ mod tests {
         assert_eq!(pacer.remaining(), 1);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn smooth_pacer_state_before_any_request() {
         let pacer = SmoothPacer::new(Duration::from_millis(100));
         let state = pacer.state();
@@ -553,7 +553,7 @@ mod tests {
         assert_eq!(state.reset_after, Duration::ZERO);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn smooth_pacer_state_limited_after_request() {
         let pacer = SmoothPacer::new(Duration::from_millis(500));
         pacer.try_acquire().await;
@@ -565,7 +565,7 @@ mod tests {
         assert!(state.reset_after > Duration::ZERO);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn smooth_pacer_reset_allows_immediate_request() {
         let pacer = SmoothPacer::new(Duration::from_millis(500));
 
@@ -578,13 +578,13 @@ mod tests {
         assert!(pacer.try_acquire().await);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn smooth_pacer_wait_time_zero_before_any_request() {
         let pacer = SmoothPacer::new(Duration::from_millis(100));
         assert_eq!(pacer.wait_time().await, Duration::ZERO);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn smooth_pacer_wait_time_positive_after_request() {
         let pacer = SmoothPacer::new(Duration::from_millis(500));
         pacer.try_acquire().await;
@@ -596,14 +596,14 @@ mod tests {
         assert!(wait <= Duration::from_millis(500));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn smooth_pacer_acquire_succeeds_immediately_when_fresh() {
         let pacer = SmoothPacer::new(Duration::from_millis(100));
         let waited = pacer.acquire(Duration::from_secs(1)).await.unwrap();
         assert!(waited < Duration::from_millis(50));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn smooth_pacer_acquire_waits_for_interval() {
         let pacer = SmoothPacer::new(Duration::from_millis(30));
         pacer.try_acquire().await;
@@ -613,7 +613,7 @@ mod tests {
         assert!(waited >= Duration::from_millis(10));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn smooth_pacer_acquire_exceeds_max_wait() {
         let pacer = SmoothPacer::new(Duration::from_millis(500));
         pacer.try_acquire().await;
@@ -628,7 +628,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn smooth_pacer_try_acquire_n_only_supports_one() {
         let pacer = SmoothPacer::new(Duration::from_millis(100));
 

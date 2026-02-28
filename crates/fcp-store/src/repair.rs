@@ -6,11 +6,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use fcp_async_core::sync::{OwnedSemaphorePermit, Semaphore};
 use fcp_core::{ObjectId, ObjectPlacementPolicy, ZoneId};
 use fcp_telemetry::metrics;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use tokio::sync::Semaphore;
 
 use crate::coverage::{CoverageEvaluation, CoverageHealth};
 use crate::symbol_store::SymbolStore;
@@ -394,7 +394,7 @@ impl RepairController {
 
 /// RAII permit for concurrent repair operations.
 pub struct RepairPermit {
-    _permit: tokio::sync::OwnedSemaphorePermit,
+    _permit: OwnedSemaphorePermit,
 }
 
 /// Targeted repair request for specific symbols.
@@ -483,11 +483,7 @@ mod tests {
     {
         let start = Instant::now();
         let result = panic::catch_unwind(AssertUnwindSafe(|| {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_time()
-                .build()
-                .expect("runtime");
-            rt.block_on(f())
+            fcp_async_core::runtime::block_on_sync(f()).expect("runtime")
         }));
         let duration_us = start.elapsed().as_micros();
 
@@ -890,7 +886,7 @@ mod tests {
         assert!(stats.rate_limited > 0);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn concurrent_permits() {
         let config = RepairControllerConfig {
             max_concurrent_repairs: 2,

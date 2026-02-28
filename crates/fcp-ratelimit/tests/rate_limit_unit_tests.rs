@@ -8,6 +8,7 @@
 
 use std::time::Duration;
 
+use fcp_async_core::time::sleep;
 use fcp_core::{BackpressureLevel, LimitType, ThrottleViolation, ThrottleViolationInput};
 use fcp_ratelimit::{
     BackpressureThresholds, ConcurrencyLimiter, RateLimitConfig, RateLimiter, ThrottleContext,
@@ -18,7 +19,7 @@ use fcp_ratelimit::{
 // ThrottleViolation Detection Tests
 // ============================================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn throttle_violation_includes_all_required_fields() {
     // Given a rate limiter at capacity
     let limiter = TokenBucket::new(1, Duration::from_secs(60));
@@ -56,7 +57,7 @@ async fn throttle_violation_includes_all_required_fields() {
     assert!(violation.retry_after_ms > 0);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn throttle_violation_retry_after_reflects_reset_time() {
     // Given a limiter with a short window
     let limiter = TokenBucket::new(1, Duration::from_millis(100));
@@ -80,7 +81,7 @@ async fn throttle_violation_retry_after_reflects_reset_time() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn throttle_violation_distinguishes_limit_types() {
     // Test RPM limit type
     let violation_rpm = ThrottleViolation::new(ThrottleViolationInput {
@@ -139,7 +140,7 @@ async fn throttle_violation_distinguishes_limit_types() {
 // Backpressure Signal Tests
 // ============================================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn backpressure_warning_at_80_percent() {
     let limiter = TokenBucket::new(100, Duration::from_secs(60));
 
@@ -161,7 +162,7 @@ async fn backpressure_warning_at_80_percent() {
     assert!(outcome.backpressure.utilization_bps >= 8000);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn backpressure_soft_limit_at_95_percent() {
     let limiter = TokenBucket::new(100, Duration::from_secs(60));
 
@@ -183,7 +184,7 @@ async fn backpressure_soft_limit_at_95_percent() {
     assert!(outcome.backpressure.retry_after_ms.is_some());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn backpressure_hard_limit_at_100_percent() {
     let limiter = TokenBucket::new(10, Duration::from_secs(60));
 
@@ -205,7 +206,7 @@ async fn backpressure_hard_limit_at_100_percent() {
     assert!(outcome.violation.is_some());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn backpressure_clears_after_refill() {
     let limiter = TokenBucket::new(2, Duration::from_millis(50));
 
@@ -215,7 +216,7 @@ async fn backpressure_clears_after_refill() {
     assert!(!limiter.try_acquire().await);
 
     // Wait for refill
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    sleep(Duration::from_millis(60)).await;
 
     let ctx = ThrottleContext {
         zone_id: "z:work".parse().unwrap(),
@@ -233,7 +234,7 @@ async fn backpressure_clears_after_refill() {
 // Per-Connector/Zone/Operation Quota Enforcement Tests
 // ============================================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn different_zones_have_independent_quotas() {
     // Simulate separate limiters per zone (as would be done in real enforcement)
     let limiter_work = TokenBucket::new(5, Duration::from_secs(60));
@@ -286,7 +287,7 @@ async fn different_zones_have_independent_quotas() {
     assert!(outcome_private.allowed);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn different_connectors_tracked_in_violations() {
     let limiter = TokenBucket::new(1, Duration::from_secs(60));
     assert!(limiter.try_acquire().await);
@@ -312,7 +313,7 @@ async fn different_connectors_tracked_in_violations() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn different_operations_tracked_in_violations() {
     let limiter = TokenBucket::new(1, Duration::from_secs(60));
     assert!(limiter.try_acquire().await);
@@ -336,7 +337,7 @@ async fn different_operations_tracked_in_violations() {
 // Burst Handling Tests
 // ============================================================================
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn token_bucket_allows_configured_burst() {
     // Create a bucket with base rate 10/min but burst capacity of 20
     let limiter = TokenBucket::with_burst(10, Duration::from_secs(60), 20);
@@ -356,7 +357,7 @@ async fn token_bucket_allows_configured_burst() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn burst_capacity_is_configurable() {
     let config_no_burst = RateLimitConfig::new(10, Duration::from_secs(60));
     let limiter_no_burst = TokenBucket::from_config(&config_no_burst);
@@ -377,7 +378,7 @@ async fn burst_capacity_is_configurable() {
     assert!(!limiter_with_burst.try_acquire().await);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn burst_doesnt_exceed_hard_limit() {
     // Even with burst configured, cannot exceed capacity
     let limiter = TokenBucket::with_burst(5, Duration::from_secs(60), 10);
@@ -389,7 +390,7 @@ async fn burst_doesnt_exceed_hard_limit() {
     assert_eq!(limiter.remaining(), 10);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn burst_refill_rate_is_correct() {
     // TokenBucket::new refills the entire bucket after the window, not smoothly.
     // Use a small window to test refill behavior
@@ -402,7 +403,7 @@ async fn burst_refill_rate_is_correct() {
     assert_eq!(limiter.remaining(), 0);
 
     // Wait for full window refill
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    sleep(Duration::from_millis(60)).await;
 
     // Should have tokens again
     assert!(

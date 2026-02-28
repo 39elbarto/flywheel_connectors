@@ -332,11 +332,7 @@ mod tests {
     {
         let start = Instant::now();
         let result = panic::catch_unwind(AssertUnwindSafe(|| {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_time()
-                .build()
-                .expect("runtime");
-            rt.block_on(f())
+            fcp_async_core::runtime::block_on_sync(f()).expect("runtime")
         }));
         let duration_us = start.elapsed().as_micros();
 

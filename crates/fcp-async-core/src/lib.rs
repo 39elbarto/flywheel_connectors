@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 
 pub use tokio::select;
+pub use tokio::task_local;
 
 /// Unified async failure taxonomy for substrate consumers.
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
@@ -86,6 +87,7 @@ pub mod runtime {
     use super::{AsyncError, Future};
 
     pub use tokio::main;
+    pub use tokio::runtime::{Builder, Runtime};
     pub use tokio::test;
 
     /// Execute a future from sync context.
@@ -338,7 +340,7 @@ pub mod channel {
 
     use super::{AsyncError, Instrumentation, NoopInstrumentation};
 
-    pub use tokio::sync::{mpsc, watch};
+    pub use tokio::sync::{broadcast, mpsc, watch};
 
     /// Bounded sender with queue instrumentation hooks.
     #[derive(Clone)]
@@ -503,7 +505,7 @@ pub mod shutdown {
 
 /// Synchronization re-exports.
 pub mod sync {
-    pub use tokio::sync::{Mutex, RwLock};
+    pub use tokio::sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
 }
 
 /// Task re-exports.

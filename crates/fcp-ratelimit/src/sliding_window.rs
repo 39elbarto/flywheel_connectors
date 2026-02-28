@@ -5,8 +5,8 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+use fcp_async_core::time::sleep;
 use parking_lot::Mutex;
-use tokio::time::sleep;
 
 use async_trait::async_trait;
 
@@ -292,7 +292,7 @@ impl RateLimiter for FixedWindow {
 mod tests {
     use super::*;
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_sliding_window_basic() {
         let limiter = SlidingWindow::new(5, Duration::from_secs(1));
 
@@ -302,7 +302,7 @@ mod tests {
         assert!(!limiter.try_acquire().await);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_sliding_window_expiry() {
         let limiter = SlidingWindow::new(2, Duration::from_millis(100));
 
@@ -315,7 +315,7 @@ mod tests {
         assert!(limiter.try_acquire().await);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_fixed_window_basic() {
         let limiter = FixedWindow::new(3, Duration::from_secs(1));
 
@@ -325,7 +325,7 @@ mod tests {
         assert!(!limiter.try_acquire().await);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_fixed_window_reset() {
         let limiter = FixedWindow::new(2, Duration::from_millis(100));
 
@@ -339,7 +339,7 @@ mod tests {
         assert!(limiter.try_acquire().await);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_sliding_window_wait_time() {
         let limiter = SlidingWindow::new(1, Duration::from_millis(100));
 
@@ -361,7 +361,7 @@ mod tests {
         assert!(limiter.try_acquire().await);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_fixed_window_wait_time() {
         let limiter = FixedWindow::new(1, Duration::from_millis(100));
 

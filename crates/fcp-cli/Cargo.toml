@@ -27,7 +27,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 textwrap = "0.16"
-tokio.workspace = true
+fcp-async-core = { path = "../fcp-async-core" }
 toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -48,6 +48,7 @@ ed25519-dalek.workspace = true
 
 [dev-dependencies]
 assert_cmd = "2.0"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 insta = { version = "1.40", features = ["json", "redactions"] }
 predicates = "3.1"
 tempfile = "3.14"

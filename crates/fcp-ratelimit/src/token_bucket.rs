@@ -5,8 +5,8 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
+use fcp_async_core::time::sleep;
 use parking_lot::Mutex;
-use tokio::time::sleep;
 
 use async_trait::async_trait;
 
@@ -279,7 +279,7 @@ impl RateLimiter for TokenBucket {
 mod tests {
     use super::*;
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_token_bucket_basic() {
         let limiter = TokenBucket::new(5, Duration::from_secs(1));
 
@@ -292,7 +292,7 @@ mod tests {
         assert!(!limiter.try_acquire().await);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_token_bucket_refill() {
         let limiter = TokenBucket::new(2, Duration::from_millis(100));
 
@@ -308,7 +308,7 @@ mod tests {
         assert!(limiter.try_acquire().await);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_token_bucket_state() {
         let limiter = TokenBucket::new(10, Duration::from_secs(1));
 
@@ -326,7 +326,7 @@ mod tests {
         assert_eq!(state.remaining, 3);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_token_bucket_acquire_with_wait() {
         let limiter = TokenBucket::new(1, Duration::from_millis(50));
 
@@ -339,7 +339,7 @@ mod tests {
         assert!(waited >= Duration::from_millis(40));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_token_bucket_try_acquire_n_is_atomic() {
         let limiter = TokenBucket::new(2, Duration::from_secs(1));
 
@@ -352,7 +352,7 @@ mod tests {
         assert_eq!(limiter.remaining(), 0);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_token_bucket_zero_window_safety() {
         // Ensure we don't panic if window is zero (e.g. from bad config)
         let config = RateLimitConfig {

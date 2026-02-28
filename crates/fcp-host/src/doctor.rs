@@ -505,7 +505,7 @@ mod tests {
         let service = DoctorService::new(registry);
 
         let request = DoctorRequest {
-            zone_id: "zone.test".to_string(),
+            zone_id: "z:test".to_string(),
             connectors: vec![],
             self_check: false,
         };
@@ -521,7 +521,7 @@ mod tests {
         let service = DoctorService::new(registry);
 
         let request = DoctorRequest {
-            zone_id: "zone.test".to_string(),
+            zone_id: "z:test".to_string(),
             connectors: vec!["test.doctor:utility:1.0.0".to_string()],
             self_check: true,
         };
@@ -541,7 +541,7 @@ mod tests {
         let service = DoctorService::new(registry);
 
         let request = DoctorRequest {
-            zone_id: "zone.test".to_string(),
+            zone_id: "z:test".to_string(),
             connectors: vec!["test.doctor:utility:1.0.0".to_string()],
             self_check: true,
         };
@@ -561,7 +561,7 @@ mod tests {
         let service = DoctorService::new(registry);
 
         let request = DoctorRequest {
-            zone_id: "zone.test".to_string(),
+            zone_id: "z:test".to_string(),
             connectors: vec!["test.doctor:utility:1.0.0".to_string()],
             self_check: true,
         };
@@ -576,7 +576,7 @@ mod tests {
         let service = DoctorService::new(registry);
 
         let request = DoctorRequest {
-            zone_id: "zone.test".to_string(),
+            zone_id: "z:test".to_string(),
             connectors: vec!["test.doctor:utility:1.0.0".to_string()],
             self_check: true,
         };
@@ -611,7 +611,7 @@ mod tests {
         let service = DoctorService::new(registry);
 
         let request = DoctorRequest {
-            zone_id: "zone.test".to_string(),
+            zone_id: "z:test".to_string(),
             connectors: vec![
                 "test.a:utility:1.0.0".to_string(),
                 "test.b:utility:1.0.0".to_string(),
@@ -630,7 +630,7 @@ mod tests {
         let service = DoctorService::with_timeout(registry, Duration::from_secs(1));
 
         let request = DoctorRequest {
-            zone_id: "zone.test".to_string(),
+            zone_id: "z:test".to_string(),
             connectors: vec!["test.doctor:utility:1.0.0".to_string()],
             self_check: true,
         };

@@ -1,8 +1,8 @@
+use fcp_async_core::time::sleep;
 use fcp_ratelimit::{RateLimiter, TokenBucket};
 use std::time::Duration;
-use tokio::time::sleep;
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_token_bucket_drift() {
     // 10 tokens per second (100ms interval)
     // Capacity 1 (no burst storage beyond 1)

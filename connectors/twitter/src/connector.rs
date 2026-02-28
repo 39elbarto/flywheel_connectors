@@ -6,6 +6,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use fcp_async_core::channel::{broadcast, watch};
+use fcp_async_core::sync::RwLock;
 use fcp_core::{
     BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     EventCaps, FcpError, HandshakeRequest, HandshakeResponse, SessionId, SimulateRequest,
@@ -16,7 +18,6 @@ use fcp_sdk::runtime::{
     SupervisorConfig,
 };
 use serde_json::{Value, json};
-use tokio::sync::{RwLock, broadcast, watch};
 use tracing::{debug, info, instrument};
 
 use crate::{
@@ -59,7 +60,7 @@ pub struct TwitterConnector {
     stream_shutdown_tx: Option<watch::Sender<bool>>,
 
     /// Stream supervisor task
-    stream_task: Option<tokio::task::JoinHandle<()>>,
+    stream_task: Option<fcp_async_core::task::JoinHandle<()>>,
 }
 
 impl TwitterConnector {
@@ -388,7 +389,7 @@ impl TwitterConnector {
                 InMemoryStreamingSession::new(),
             );
 
-            let task = tokio::spawn(async move {
+            let task = fcp_async_core::task::spawn(async move {
                 let outcome = supervisor
                     .run(
                         shutdown_rx,
@@ -399,7 +400,7 @@ impl TwitterConnector {
                                     .connect_once()
                                     .await
                                     .map_err(|e| -> StreamingError { Box::new(e) })?;
-                                let join_handle = tokio::spawn(async move {
+                                let join_handle = fcp_async_core::task::spawn(async move {
                                     match handle.join_handle.await {
                                         Ok(Ok(())) => Ok(()),
                                         Ok(Err(e)) => Err(Box::new(e) as StreamingError),

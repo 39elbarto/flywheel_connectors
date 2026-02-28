@@ -5,6 +5,8 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use fcp_async_core::channel::{broadcast, watch};
+use fcp_async_core::sync::RwLock;
 use fcp_core::*;
 use fcp_sdk::{
     ErrorClass, FormatMode, Formatter, Limits, classify_error_message,
@@ -12,7 +14,6 @@ use fcp_sdk::{
     validate_input_with_limits, validate_output_with_limits,
 };
 use serde_json::json;
-use tokio::sync::{RwLock, broadcast, watch};
 use tracing::{info, warn};
 
 use crate::client::{SendMessageOptions, TelegramClient, TelegramError};
@@ -95,7 +96,7 @@ pub struct TelegramConnector {
 
     // Polling state
     poll_running: Arc<RwLock<bool>>,
-    poll_task: Option<tokio::task::JoinHandle<()>>,
+    poll_task: Option<fcp_async_core::task::JoinHandle<()>>,
     poll_shutdown_tx: Option<watch::Sender<bool>>,
 
     // Event broadcast
@@ -878,7 +879,7 @@ impl TelegramConnector {
 
         *poll_running.write().await = true;
 
-        let task = tokio::spawn(async move {
+        let task = fcp_async_core::task::spawn(async move {
             info!("Starting Telegram polling loop");
 
             let mut supervisor =
@@ -1221,7 +1222,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_capability_mismatch_denied() {
         let (connector, token, _server) = setup_connector_with_token("telegram.get_file").await;
 
@@ -1253,7 +1254,7 @@ mod tests {
         }
     }
 
-    #[tokio::test(flavor = "current_thread")]
+    #[fcp_async_core::runtime::test]
     async fn test_logs_redact_token_and_message_text() {
         let capture = LogCapture::new();
         let _guard = capture.install_json_with_filter("debug");
@@ -1331,7 +1332,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_send_message_text_too_long() {
         let (connector, token, _server) = setup_connector_with_token("telegram.send_message").await;
 
@@ -1360,7 +1361,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_send_message_text_at_limit() {
         let (connector, token, _server) = setup_connector_with_token("telegram.send_message").await;
 
@@ -1402,7 +1403,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_send_message_parse_error_falls_back() {
         let (connector, token, server) = setup_connector_with_token("telegram.send_message").await;
 
@@ -1463,7 +1464,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_send_message_missing_text() {
         let (connector, token, _server) = setup_connector_with_token("telegram.send_message").await;
 
@@ -1487,7 +1488,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_send_message_missing_chat_id() {
         let (connector, token, _server) = setup_connector_with_token("telegram.send_message").await;
 

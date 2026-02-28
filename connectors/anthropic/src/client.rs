@@ -4,10 +4,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
-use futures_util::StreamExt;
+use fcp_async_core::time::sleep;
+use futures_util::{Stream, StreamExt};
 use reqwest::{Client, Response, StatusCode};
 use serde::Deserialize;
-use tokio_stream::Stream;
 use tracing::{debug, instrument, warn};
 
 use crate::{
@@ -227,7 +227,7 @@ impl AnthropicClient {
                             error = %e,
                             "Retrying Anthropic API request"
                         );
-                        tokio::time::sleep(delay).await;
+                        sleep(delay).await;
                         delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
                     }
                     Err(e) => return Err(e),
@@ -240,7 +240,7 @@ impl AnthropicClient {
                             error = %e,
                             "Retrying after connection error"
                         );
-                        tokio::time::sleep(delay).await;
+                        sleep(delay).await;
                         delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
                     } else {
                         return Err(AnthropicError::Http(e));
@@ -423,7 +423,7 @@ mod tests {
         matchers::{header, method, path},
     };
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_chat_success() {
         let mock_server = MockServer::start().await;
 
@@ -460,7 +460,7 @@ mod tests {
         assert_eq!(client.total_output_tokens(), 5);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_unauthorized() {
         let mock_server = MockServer::start().await;
 
@@ -486,7 +486,7 @@ mod tests {
         assert!(matches!(result.unwrap_err(), AnthropicError::InvalidApiKey));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_rate_limited() {
         let mock_server = MockServer::start().await;
 
@@ -515,7 +515,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_overloaded() {
         let mock_server = MockServer::start().await;
 
@@ -544,7 +544,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_context_length_exceeded() {
         let mock_server = MockServer::start().await;
 
@@ -573,7 +573,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test(flavor = "current_thread")]
+    #[fcp_async_core::runtime::test(flavor = "current_thread")]
     async fn test_logs_redact_api_key_and_prompt() {
         let capture = LogCapture::new();
         let _guard = capture.install_json_with_filter("debug");
@@ -648,7 +648,7 @@ mod tests {
         assert!(event.is_none());
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_model_pricing() {
         assert_eq!(Model::ClaudeOpus4_5.input_price_per_million(), 15.0);
         assert_eq!(Model::ClaudeOpus4_5.output_price_per_million(), 75.0);
@@ -658,7 +658,7 @@ mod tests {
         assert_eq!(Model::Claude3_5Haiku.output_price_per_million(), 1.25);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_usage_cost_calculation() {
         let usage = Usage {
             input_tokens: 1000,

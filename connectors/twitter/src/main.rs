@@ -57,17 +57,22 @@ fn run_fcp_loop() -> Result<()> {
     let mut stdout = std::io::stdout();
     let mut connector = TwitterConnector::new();
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-
     for line in stdin.lock().lines() {
         let line = line?;
         if line.is_empty() {
             continue;
         }
 
-        let response = runtime.block_on(async { handle_message(&mut connector, &line).await });
+        let response =
+            fcp_async_core::runtime::block_on_sync(handle_message(&mut connector, &line))
+                .unwrap_or_else(|e| {
+                    serde_json::json!({
+                        "error": {
+                            "code": "FCP-9001",
+                            "message": format!("Runtime error: {e}")
+                        }
+                    })
+                });
 
         let response_json = serde_json::to_string(&response)?;
         writeln!(stdout, "{response_json}")?;

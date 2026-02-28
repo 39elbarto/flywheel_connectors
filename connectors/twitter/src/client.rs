@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use fcp_async_core::time::sleep;
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use reqwest::{Client, Response, StatusCode};
 use serde::de::DeserializeOwned;
@@ -170,7 +171,7 @@ impl TwitterApiClient {
                             error = %e,
                             "Retrying Twitter API request"
                         );
-                        tokio::time::sleep(delay).await;
+                        sleep(delay).await;
                         delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
                     }
                     Err(e) => return Err(e),
@@ -183,7 +184,7 @@ impl TwitterApiClient {
                             error = %e,
                             "Retrying after connection error"
                         );
-                        tokio::time::sleep(delay).await;
+                        sleep(delay).await;
                         delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
                     } else {
                         return Err(TwitterError::Http(e));
@@ -240,7 +241,7 @@ impl TwitterApiClient {
                             error = %e,
                             "Retrying Twitter API request"
                         );
-                        tokio::time::sleep(delay).await;
+                        sleep(delay).await;
                         delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
                     }
                     Err(e) => return Err(e),
@@ -253,7 +254,7 @@ impl TwitterApiClient {
                             error = %e,
                             "Retrying after connection error"
                         );
-                        tokio::time::sleep(delay).await;
+                        sleep(delay).await;
                         delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
                     } else {
                         return Err(TwitterError::Http(e));
@@ -635,7 +636,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_get_me_success() {
         let mock_server = MockServer::start().await;
 
@@ -661,7 +662,7 @@ mod tests {
         assert_eq!(user.username, "testuser");
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_create_tweet_success() {
         let mock_server = MockServer::start().await;
 
@@ -690,7 +691,7 @@ mod tests {
         assert_eq!(response.data.text, "Hello, Twitter!");
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_rate_limited() {
         let mock_server = MockServer::start().await;
 
@@ -718,7 +719,7 @@ mod tests {
         assert!(matches!(err, TwitterError::RateLimited { .. }));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_search_recent_success() {
         let mock_server = MockServer::start().await;
 
@@ -760,7 +761,7 @@ mod tests {
         assert_eq!(tweets[0].text, "Hello world");
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_delete_tweet_success() {
         let mock_server = MockServer::start().await;
 
@@ -782,7 +783,7 @@ mod tests {
         assert!(response.data.deleted);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_error_unauthorized() {
         let mock_server = MockServer::start().await;
 
@@ -806,7 +807,7 @@ mod tests {
         assert!(matches!(err, TwitterError::Api { status: 401, .. }));
     }
 
-    #[tokio::test(flavor = "current_thread")]
+    #[fcp_async_core::runtime::test(flavor = "current_thread")]
     async fn test_logs_redact_credentials_and_tweet_text() {
         let capture = LogCapture::new();
         let _guard = capture.install_json_with_filter("debug");

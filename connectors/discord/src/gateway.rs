@@ -3,10 +3,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use fcp_async_core::channel::mpsc;
+use fcp_async_core::net::TcpStream;
+use fcp_async_core::sync::Mutex;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
-use tokio::net::TcpStream;
-use tokio::sync::{Mutex, mpsc};
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async, tungstenite::protocol::Message as WsMessage,
 };
@@ -231,7 +232,7 @@ impl GatewayConnection {
             .await
             .map_err(|e| DiscordError::Gateway(format!("Failed to connect WS: {e}")))?;
 
-        let join_handle = tokio::spawn(async move {
+        let join_handle = fcp_async_core::task::spawn(async move {
             run_gateway_loop(ws_stream, config, event_tx, state_snapshot, state_store).await
         });
 
@@ -287,7 +288,7 @@ fn dispatch_event(
 /// Handle for a single gateway connection attempt.
 pub struct GatewayStream {
     pub events: mpsc::Receiver<GatewayEvent>,
-    pub join_handle: tokio::task::JoinHandle<DiscordResult<()>>,
+    pub join_handle: fcp_async_core::task::JoinHandle<DiscordResult<()>>,
 }
 
 /// Run the gateway event loop.
@@ -416,12 +417,12 @@ async fn run_gateway_loop_inner(
 
     // Main event loop
     let mut heartbeat_acked = true;
-    let mut heartbeat_interval_timer = tokio::time::interval(heartbeat_interval);
+    let mut heartbeat_interval_timer = fcp_async_core::time::interval(heartbeat_interval);
     // Skip the first tick which fires immediately
     heartbeat_interval_timer.tick().await;
 
     loop {
-        tokio::select! {
+        fcp_async_core::select! {
             // Handle heartbeat timer
             _ = heartbeat_interval_timer.tick() => {
                 if !heartbeat_acked {

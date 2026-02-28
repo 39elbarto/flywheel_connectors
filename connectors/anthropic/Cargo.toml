@@ -17,6 +17,7 @@ workspace = true
 
 [dependencies]
 fcp-core = { path = "../../crates/fcp-core" }
+fcp-async-core = { path = "../../crates/fcp-async-core" }
 
 anyhow.workspace = true
 async-stream = "0.3"
@@ -28,8 +29,6 @@ reqwest = { workspace = true, features = ["stream"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["full"] }
-tokio-stream.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true

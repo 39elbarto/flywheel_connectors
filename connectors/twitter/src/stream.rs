@@ -6,8 +6,8 @@
 use std::time::Duration;
 
 use bytes::Bytes;
+use fcp_async_core::channel::mpsc;
 use futures_util::StreamExt;
-use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -45,7 +45,7 @@ pub struct FilteredStream {
 /// Handle for a single stream connection attempt.
 pub struct StreamHandle {
     pub events: mpsc::Receiver<StreamEvent>,
-    pub join_handle: tokio::task::JoinHandle<TwitterResult<()>>,
+    pub join_handle: fcp_async_core::task::JoinHandle<TwitterResult<()>>,
 }
 
 impl FilteredStream {
@@ -69,8 +69,9 @@ impl FilteredStream {
         let config = self.config.clone();
         let bearer_token = self.bearer_token.clone();
 
-        let join_handle =
-            tokio::spawn(async move { run_stream_once(config, bearer_token, event_tx).await });
+        let join_handle = fcp_async_core::task::spawn(async move {
+            run_stream_once(config, bearer_token, event_tx).await
+        });
 
         Ok(StreamHandle {
             events: event_rx,

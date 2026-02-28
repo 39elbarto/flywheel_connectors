@@ -559,7 +559,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_configure_pinecone() -> Result<(), String> {
         let mut log = TestLog::new("vectordb_configure_pinecone");
         let mut connector = VectorDbConnector::new();
@@ -580,7 +580,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_configure_qdrant() -> Result<(), String> {
         let mut log = TestLog::new("vectordb_configure_qdrant");
         let mut connector = VectorDbConnector::new();
@@ -601,7 +601,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_configure_invalid() -> Result<(), String> {
         let mut log = TestLog::new("vectordb_configure_invalid");
         let mut connector = VectorDbConnector::new();
@@ -642,7 +642,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_health_configured() -> Result<(), String> {
         let mut log = TestLog::new("vectordb_health_configured");
         let mut connector = VectorDbConnector::new();
@@ -672,7 +672,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_doctor_not_configured() -> Result<(), String> {
         let mut log = TestLog::new("vectordb_doctor_not_configured");
         let connector = VectorDbConnector::new();
@@ -688,7 +688,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_doctor_configured() -> Result<(), String> {
         let mut log = TestLog::new("vectordb_doctor_configured");
         let mut connector = VectorDbConnector::new();
@@ -875,7 +875,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_configure_rejects_protocol_prefix() -> Result<(), String> {
         let mut log = TestLog::new("vectordb_configure_rejects_protocol");
         let mut connector = VectorDbConnector::new();
@@ -899,7 +899,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_configure_rejects_pinecone_without_tls() -> Result<(), String> {
         let mut log = TestLog::new("vectordb_configure_pinecone_requires_tls");
         let mut connector = VectorDbConnector::new();
@@ -921,7 +921,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_configure_rejects_timeout_bounds() -> Result<(), String> {
         let mut log = TestLog::new("vectordb_configure_timeout_bounds");
         let mut connector = VectorDbConnector::new();

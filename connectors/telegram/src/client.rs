@@ -5,6 +5,7 @@
 
 use std::time::Duration;
 
+use fcp_async_core::time::sleep;
 use reqwest::{Client, StatusCode};
 use serde::{Serialize, de::DeserializeOwned};
 use tracing::{instrument, warn};
@@ -103,7 +104,7 @@ impl TelegramClient {
                                 wait_secs = retry_after,
                                 "Rate limited, retrying"
                             );
-                            tokio::time::sleep(wait).await;
+                            sleep(wait).await;
                             continue;
                         }
                     }
@@ -112,7 +113,7 @@ impl TelegramClient {
                     if status.is_server_error() {
                         if attempts < max_retries {
                             warn!(attempt = attempts, status = %status, "Server error, retrying");
-                            tokio::time::sleep(delay).await;
+                            sleep(delay).await;
                             delay *= 2;
                             continue;
                         }
@@ -137,7 +138,7 @@ impl TelegramClient {
                     // Retry on 429 or 5xx equivalents in logical errors if applicable
                     if err.is_retryable() && attempts < max_retries {
                         warn!(attempt = attempts, error = %err, "Retryable API error");
-                        tokio::time::sleep(delay).await;
+                        sleep(delay).await;
                         delay *= 2;
                         continue;
                     }
@@ -147,7 +148,7 @@ impl TelegramClient {
                 Err(e) => {
                     if (e.is_timeout() || e.is_connect()) && attempts < max_retries {
                         warn!(attempt = attempts, error = %e, "Connection error, retrying");
-                        tokio::time::sleep(delay).await;
+                        sleep(delay).await;
                         delay *= 2;
                         continue;
                     }
@@ -423,7 +424,7 @@ mod tests {
         (mock_server, client)
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_get_me_success() {
         let (mock_server, client) = setup_mock_client().await;
 
@@ -448,7 +449,7 @@ mod tests {
         assert_eq!(bot_info.username.as_deref(), Some("test_bot"));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_get_me_unauthorized() {
         let (mock_server, client) = setup_mock_client().await;
 
@@ -472,7 +473,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_send_message_success() {
         let (mock_server, client) = setup_mock_client().await;
 
@@ -504,7 +505,7 @@ mod tests {
         assert_eq!(message.text.as_deref(), Some("Hello, World!"));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_send_message_with_html_parse_mode() {
         let (mock_server, client) = setup_mock_client().await;
 
@@ -535,7 +536,7 @@ mod tests {
         assert_eq!(message.message_id, 43);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_send_message_with_reply_and_thread() {
         let (mock_server, client) = setup_mock_client().await;
 
@@ -577,7 +578,7 @@ mod tests {
         assert_eq!(message.message_id, 44);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_send_message_rate_limited() {
         let (mock_server, client) = setup_mock_client().await;
 
@@ -604,7 +605,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_get_updates_success() {
         let (mock_server, client) = setup_mock_client().await;
 
@@ -657,7 +658,7 @@ mod tests {
         assert_eq!(updates[1].update_id, 101);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_get_updates_empty() {
         let (mock_server, client) = setup_mock_client().await;
 
@@ -681,7 +682,7 @@ mod tests {
         assert!(updates.is_empty());
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_get_file_success() {
         let (mock_server, client) = setup_mock_client().await;
 
@@ -706,7 +707,7 @@ mod tests {
         assert_eq!(file.file_path.as_deref(), Some("photos/file_0.jpg"));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_file_download_url() {
         let client = TelegramClient::new("my_bot_token").unwrap();
         let url = client.file_download_url("photos/file_0.jpg");
@@ -716,7 +717,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_telegram_error_is_retryable() {
         // Rate limited errors should be retryable
         let rate_limited = TelegramError::Api {

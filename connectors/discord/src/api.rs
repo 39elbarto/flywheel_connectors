@@ -2,9 +2,12 @@
 
 use std::time::Duration;
 
+use fcp_sdk::migration::{
+    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
+};
 use reqwest::{Client, Response, StatusCode};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use tracing::{debug, instrument, warn};
+use tracing::{debug, instrument};
 
 use crate::{
     config::DiscordConfig,
@@ -18,9 +21,8 @@ pub struct DiscordApiClient {
     client: Client,
     base_url: String,
     bot_credential: String,
-    max_retries: u32,
-    initial_delay_ms: u64,
-    max_delay_ms: u64,
+    runtime: ConnectorRuntime,
+    retry_config: HttpRetryConfig,
 }
 
 impl DiscordApiClient {
@@ -42,9 +44,15 @@ impl DiscordApiClient {
             client,
             base_url: config.api_url.trim_end_matches('/').to_string(),
             bot_credential,
-            max_retries: config.retry.max_attempts,
-            initial_delay_ms: config.retry.initial_delay_ms,
-            max_delay_ms: config.retry.max_delay_ms,
+            runtime: ConnectorRuntime::new(
+                ConnectorRuntimeConfig::default().with_request_timeout(config.timeout),
+            ),
+            retry_config: HttpRetryConfig {
+                max_retries: config.retry.max_attempts,
+                initial_delay_ms: config.retry.initial_delay_ms,
+                max_delay_ms: config.retry.max_delay_ms,
+                ..HttpRetryConfig::default()
+            },
         })
     }
 
@@ -83,97 +91,91 @@ impl DiscordApiClient {
     /// Make a request that expects no response body (e.g., DELETE returning 204).
     async fn request_no_response(&self, method: &str, endpoint: &str) -> DiscordResult<()> {
         let url = format!("{}{}", self.base_url, endpoint);
-        let mut delay = Duration::from_millis(self.initial_delay_ms);
-        let mut attempts = 0;
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
+        let bot_credential = &self.bot_credential;
 
-        loop {
-            attempts += 1;
-            debug!(
-                attempt = attempts,
-                method, endpoint, "Making Discord API request (no response expected)"
-            );
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let url = &url;
+            async move {
+                debug!(
+                    attempt,
+                    method, endpoint, "Making Discord API request (no response expected)"
+                );
 
-            let req = match method {
-                "DELETE" => self.client.delete(&url),
-                "POST" => self.client.post(&url),
-                _ => self.client.get(&url),
-            };
+                let req = match method {
+                    "DELETE" => self.client.delete(url),
+                    "POST" => self.client.post(url),
+                    _ => self.client.get(url),
+                };
 
-            let req = req.header("Authorization", format!("Bot {}", self.bot_credential));
-            let result = req.send().await;
+                let req = req.header("Authorization", format!("Bot {bot_credential}"));
 
-            match result {
-                Ok(response) => {
-                    #[derive(Deserialize)]
-                    struct DiscordApiError {
-                        code: Option<i32>,
-                        message: Option<String>,
-                    }
+                match req.send().await {
+                    Ok(response) => {
+                        let status = response.status();
 
-                    let status = response.status();
-
-                    // Handle rate limiting
-                    if status == StatusCode::TOO_MANY_REQUESTS {
-                        let retry_after = response
-                            .headers()
-                            .get("retry-after")
-                            .and_then(|v| v.to_str().ok())
-                            .and_then(|v| v.parse::<f64>().ok())
-                            .unwrap_or(30.0);
-
-                        if attempts < self.max_retries {
-                            delay = Duration::from_secs_f64(retry_after);
-                            warn!(
-                                attempt = attempts,
-                                delay_ms = delay.as_millis(),
-                                "Rate limited, retrying"
-                            );
-                            tokio::time::sleep(delay).await;
-                            continue;
+                        if status == StatusCode::TOO_MANY_REQUESTS {
+                            let retry_after = response
+                                .headers()
+                                .get("retry-after")
+                                .and_then(|v| v.to_str().ok())
+                                .and_then(|v| v.parse::<f64>().ok())
+                                .unwrap_or(30.0);
+                            return AttemptOutcome::Retryable {
+                                error: DiscordError::RateLimited { retry_after },
+                                retry_after: Some(Duration::from_secs_f64(retry_after)),
+                            };
                         }
-                        return Err(DiscordError::RateLimited { retry_after });
+
+                        if status.is_success() {
+                            return AttemptOutcome::Success(());
+                        }
+
+                        #[derive(Deserialize)]
+                        struct DiscordApiError {
+                            code: Option<i32>,
+                            message: Option<String>,
+                        }
+
+                        let bytes = match response.bytes().await {
+                            Ok(b) => b,
+                            Err(e) => return AttemptOutcome::Terminal(DiscordError::Http(e)),
+                        };
+
+                        let error: DiscordApiError =
+                            serde_json::from_slice(&bytes).unwrap_or_else(|_| DiscordApiError {
+                                code: Some(i32::from(status.as_u16())),
+                                message: Some(String::from_utf8_lossy(&bytes).into_owned()),
+                            });
+
+                        let err = DiscordError::Api {
+                            code: error.code.unwrap_or_else(|| i32::from(status.as_u16())),
+                            message: error.message.unwrap_or_else(|| "Unknown error".into()),
+                            retry_after: None,
+                        };
+
+                        if err.is_retryable() {
+                            AttemptOutcome::Retryable {
+                                retry_after: err.retry_after(),
+                                error: err,
+                            }
+                        } else {
+                            AttemptOutcome::Terminal(err)
+                        }
                     }
-
-                    if status.is_success() {
-                        return Ok(());
-                    }
-
-                    // Try to parse error from body
-                    let bytes = response.bytes().await?;
-                    let error: DiscordApiError =
-                        serde_json::from_slice(&bytes).unwrap_or_else(|_| DiscordApiError {
-                            code: Some(i32::from(status.as_u16())),
-                            message: Some(String::from_utf8_lossy(&bytes).into_owned()),
-                        });
-
-                    let err = DiscordError::Api {
-                        code: error.code.unwrap_or_else(|| i32::from(status.as_u16())),
-                        message: error.message.unwrap_or_else(|| "Unknown error".into()),
+                    Err(e) if e.is_timeout() || e.is_connect() => AttemptOutcome::Retryable {
+                        error: DiscordError::Http(e),
                         retry_after: None,
-                    };
-
-                    if err.is_retryable() && attempts < self.max_retries {
-                        warn!(attempt = attempts, delay_ms = delay.as_millis(), error = %err, "Retrying");
-                        tokio::time::sleep(delay).await;
-                        delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                        continue;
-                    }
-                    return Err(err);
+                    },
+                    Err(e) => AttemptOutcome::Terminal(DiscordError::Http(e)),
                 }
-                Err(e) if e.is_timeout() || e.is_connect() => {
-                    if attempts < self.max_retries {
-                        warn!(attempt = attempts, delay_ms = delay.as_millis(), error = %e, "Retrying after connection error");
-                        tokio::time::sleep(delay).await;
-                        delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                    } else {
-                        return Err(DiscordError::Http(e));
-                    }
-                }
-                Err(e) => return Err(DiscordError::Http(e)),
             }
-        }
+        })
+        .await
     }
 
+    /// Make a request with retry via the migration framework.
     async fn request<T: DeserializeOwned, B: Serialize>(
         &self,
         method: &str,
@@ -181,67 +183,47 @@ impl DiscordApiClient {
         body: Option<&B>,
     ) -> DiscordResult<T> {
         let url = format!("{}{}", self.base_url, endpoint);
-        let mut delay = Duration::from_millis(self.initial_delay_ms);
-        let mut attempts = 0;
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
+        let bot_credential = &self.bot_credential;
 
-        loop {
-            attempts += 1;
-            debug!(
-                attempt = attempts,
-                method, endpoint, "Making Discord API request"
-            );
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let url = &url;
+            async move {
+                debug!(attempt, method, endpoint, "Making Discord API request");
 
-            let mut req = match method {
-                "GET" => self.client.get(&url),
-                "POST" => self.client.post(&url),
-                "PATCH" => self.client.patch(&url),
-                "DELETE" => self.client.delete(&url),
-                _ => self.client.get(&url),
-            };
+                let mut req = match method {
+                    "GET" => self.client.get(url),
+                    "POST" => self.client.post(url),
+                    "PATCH" => self.client.patch(url),
+                    "DELETE" => self.client.delete(url),
+                    _ => self.client.get(url),
+                };
 
-            req = req.header("Authorization", format!("Bot {}", self.bot_credential));
+                req = req.header("Authorization", format!("Bot {bot_credential}"));
 
-            if let Some(b) = body {
-                req = req.json(b);
-            }
-
-            let result = req.send().await;
-
-            match result {
-                Ok(response) => match self.handle_response(response).await {
-                    Ok(data) => return Ok(data),
-                    Err(e) if e.is_retryable() && attempts < self.max_retries => {
-                        if let Some(retry_after) = e.retry_after() {
-                            delay = retry_after;
-                        }
-                        warn!(
-                            attempt = attempts,
-                            delay_ms = delay.as_millis(),
-                            error = %e,
-                            "Retrying Discord API request"
-                        );
-                        tokio::time::sleep(delay).await;
-                        delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                    }
-                    Err(e) => return Err(e),
-                },
-                Err(e) if e.is_timeout() || e.is_connect() => {
-                    if attempts < self.max_retries {
-                        warn!(
-                            attempt = attempts,
-                            delay_ms = delay.as_millis(),
-                            error = %e,
-                            "Retrying after connection error"
-                        );
-                        tokio::time::sleep(delay).await;
-                        delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                    } else {
-                        return Err(DiscordError::Http(e));
-                    }
+                if let Some(b) = body {
+                    req = req.json(b);
                 }
-                Err(e) => return Err(DiscordError::Http(e)),
+
+                match req.send().await {
+                    Ok(response) => match self.handle_response(response).await {
+                        Ok(data) => AttemptOutcome::Success(data),
+                        Err(e) if e.is_retryable() => AttemptOutcome::Retryable {
+                            retry_after: e.retry_after(),
+                            error: e,
+                        },
+                        Err(e) => AttemptOutcome::Terminal(e),
+                    },
+                    Err(e) if e.is_timeout() || e.is_connect() => AttemptOutcome::Retryable {
+                        error: DiscordError::Http(e),
+                        retry_after: None,
+                    },
+                    Err(e) => AttemptOutcome::Terminal(DiscordError::Http(e)),
+                }
             }
-        }
+        })
+        .await
     }
 
     async fn handle_response<T: DeserializeOwned>(&self, response: Response) -> DiscordResult<T> {
@@ -432,7 +414,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_get_current_user_success() {
         let mock_server = MockServer::start().await;
 
@@ -457,7 +439,7 @@ mod tests {
         assert!(user.bot);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_get_current_user_unauthorized() {
         let mock_server = MockServer::start().await;
 
@@ -479,7 +461,7 @@ mod tests {
         assert!(matches!(err, DiscordError::Api { .. }));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_create_message_success() {
         let mock_server = MockServer::start().await;
 
@@ -512,7 +494,7 @@ mod tests {
         assert_eq!(message.content, "Hello, world!");
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_create_message_with_embed() {
         let mock_server = MockServer::start().await;
 
@@ -554,7 +536,7 @@ mod tests {
         assert_eq!(message.embeds[0].title.as_deref(), Some("Test Embed"));
     }
 
-    #[tokio::test(flavor = "current_thread")]
+    #[fcp_async_core::runtime::test]
     async fn test_logs_redact_token_and_body() {
         let capture = LogCapture::new();
         let _guard = capture.install_json_with_filter("debug");
@@ -600,7 +582,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_get_channel_success() {
         let mock_server = MockServer::start().await;
 
@@ -626,7 +608,7 @@ mod tests {
         assert_eq!(channel.channel_type, 0);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_get_guild_success() {
         let mock_server = MockServer::start().await;
 
@@ -651,7 +633,7 @@ mod tests {
         assert_eq!(guild.owner_id.as_deref(), Some("222222222"));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_get_gateway_success() {
         let mock_server = MockServer::start().await;
 
@@ -678,7 +660,7 @@ mod tests {
         assert_eq!(gateway_url, "wss://gateway.discord.gg");
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_rate_limited() {
         let mock_server = MockServer::start().await;
 
@@ -705,7 +687,7 @@ mod tests {
         assert!(matches!(err, DiscordError::RateLimited { retry_after } if retry_after == 5.0));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_delete_message_success() {
         let mock_server = MockServer::start().await;
 
@@ -723,7 +705,7 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_bot_credential_normalization() {
         let mock_server = MockServer::start().await;
 
@@ -750,7 +732,7 @@ mod tests {
         assert_eq!(user.id, "123");
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_error_is_retryable() {
         // 429 is retryable
         let rate_limited = DiscordError::RateLimited { retry_after: 5.0 };
@@ -781,7 +763,7 @@ mod tests {
         assert!(!not_found.is_retryable());
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_error_retry_after() {
         let rate_limited = DiscordError::RateLimited { retry_after: 5.0 };
         assert_eq!(

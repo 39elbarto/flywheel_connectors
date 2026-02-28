@@ -16,6 +16,7 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+fcp-async-core = { path = "../../crates/fcp-async-core" }
 fcp-core = { path = "../../crates/fcp-core" }
 fcp-sdk = { path = "../../crates/fcp-sdk" }
 
@@ -28,14 +29,11 @@ reqwest = { workspace = true, features = ["query"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["full"] }
-tokio-stream.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
 wiremock.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 fcp-crypto = { path = "../../crates/fcp-crypto" }
 fcp-testkit = { path = "../../crates/fcp-testkit" }

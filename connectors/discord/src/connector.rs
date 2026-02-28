@@ -5,6 +5,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use fcp_async_core::channel::{broadcast, watch};
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier, ConnectorId,
     EventCaps, EventData, EventEnvelope, EventInfo, FcpError, FcpResult, HandshakeRequest,
@@ -21,7 +22,6 @@ use fcp_sdk::{
     validate_input_with_limits, validate_output_with_limits,
 };
 use serde_json::json;
-use tokio::sync::{broadcast, watch};
 use tracing::info;
 
 use crate::{
@@ -45,7 +45,7 @@ pub struct DiscordConnector {
     event_tx: broadcast::Sender<FcpResult<EventEnvelope>>,
 
     // Gateway task
-    gateway_task: Option<tokio::task::JoinHandle<()>>,
+    gateway_task: Option<fcp_async_core::task::JoinHandle<()>>,
     gateway_shutdown_tx: Option<watch::Sender<bool>>,
 
     // Metrics
@@ -1195,7 +1195,7 @@ impl DiscordConnector {
             InMemoryStreamingSession::new(),
         );
 
-        let task = tokio::spawn(async move {
+        let task = fcp_async_core::task::spawn(async move {
             let outcome = supervisor
                 .run(
                     shutdown_rx,
@@ -1206,7 +1206,7 @@ impl DiscordConnector {
                                 .connect_once()
                                 .await
                                 .map_err(|e| -> StreamingError { Box::new(e) })?;
-                            let join_handle = tokio::spawn(async move {
+                            let join_handle = fcp_async_core::task::spawn(async move {
                                 match stream.join_handle.await {
                                     Ok(Ok(())) => Ok(()),
                                     Ok(Err(e)) => Err(Box::new(e) as StreamingError),
@@ -1424,7 +1424,7 @@ mod tests {
         CapabilityArtifact { raw: cose }
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_send_message_content_too_long() {
         let connector = DiscordConnector::new();
 
@@ -1459,7 +1459,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_send_message_missing_content_and_embeds() {
         let connector = DiscordConnector::new();
 
@@ -1493,7 +1493,7 @@ mod tests {
         assert_eq!(4096, 4096); // MAX_EMBED_DESCRIPTION
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_embed_total_limit_exceeded() {
         let connector = DiscordConnector::new();
 
@@ -1537,7 +1537,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_invoke_missing_capability_token() {
         let connector = DiscordConnector::new();
 
@@ -1559,7 +1559,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_invoke_capability_not_granted() {
         let mut connector = DiscordConnector::new();
 

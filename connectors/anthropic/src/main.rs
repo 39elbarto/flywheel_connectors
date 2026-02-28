@@ -30,6 +30,7 @@
 use std::io::{BufRead, Write};
 
 use anyhow::Result;
+use fcp_async_core::runtime::Builder;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 mod client;
@@ -60,9 +61,7 @@ fn run_fcp_loop() -> Result<()> {
     let mut stdout = std::io::stdout();
     let mut connector = AnthropicConnector::new();
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
+    let runtime = Builder::new_multi_thread().enable_all().build()?;
 
     for line in stdin.lock().lines() {
         let line = line?;

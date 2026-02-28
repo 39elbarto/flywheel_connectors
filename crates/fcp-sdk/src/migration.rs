@@ -1,7 +1,7 @@
-//! Connector migration framework for the AsyncSuperSync transition.
+//! Connector migration framework for the `AsyncSuperSync` transition.
 //!
 //! This module provides shared helpers that all connectors use when migrating
-//! from direct Tokio usage to the `fcp-async-core` substrate. It eliminates
+//! from direct `tokio` usage to the `fcp-async-core` substrate. It eliminates
 //! duplicated runtime bootstrap, retry loop, and error mapping code across
 //! connector crates.
 //!
@@ -38,11 +38,11 @@
 //! - [ ] HTTP status classification delegates to [`classify_http_status()`].
 //! - [ ] `AsyncError` mapping delegates to [`map_async_to_fcp_error()`] for
 //!   the timeout/cancellation/runtime arms.
-//! - [ ] Retry config stored as [`HttpRetryConfig`] (deserializable from TOML/JSON).
+//! - [ ] Retry config stored as [`HttpRetryConfig`] (deserializable from TOML / JSON).
 //!
 //! ## Phase 3: Correctness & Observability
 //!
-//! - [ ] **No direct Tokio imports** — `grep -r "tokio::" connectors/<name>/src/`
+//! - [ ] **No direct tokio imports** — `grep -r "tokio::" connectors/<name>/src/`
 //!   must return zero matches (except `tokio_stream` for SSE if needed).
 //! - [ ] All failure paths emit tracing spans with `error_type`, `attempt`,
 //!   `delay_ms` fields (handled by `RetryLoop` automatically).
@@ -445,7 +445,12 @@ impl RetryLoop {
             // Check if we've exceeded max attempts
             if let Some(max) = policy.max_attempts {
                 if attempt >= max {
-                    return Err(last_error.expect("at least one attempt was made"));
+                    // Safety: at least one attempt ran before `attempt` was incremented
+                    return Err(last_error.unwrap_or_else(|| {
+                        E::from_async_error(AsyncError::Runtime {
+                            message: "retry budget exhausted with no attempts".into(),
+                        })
+                    }));
                 }
             }
 
@@ -461,23 +466,16 @@ impl RetryLoop {
                 AttemptOutcome::Terminal(error) => return Err(error),
                 AttemptOutcome::Retryable { error, retry_after } => {
                     // Compute delay: use retry-after hint or policy backoff
-                    let decision = if let Some(hint) = retry_after {
-                        RetryDecision::After(hint)
-                    } else {
-                        RetryDecision::Backoff
-                    };
+                    let decision = retry_after.map_or(RetryDecision::Backoff, RetryDecision::After);
 
-                    let delay = match policy.next_delay(attempt, decision, retry_after) {
-                        Some(d) => d,
-                        None => {
-                            // Policy says no more retries
-                            return Err(error);
-                        }
+                    let Some(delay) = policy.next_delay(attempt, decision, retry_after) else {
+                        // Policy says no more retries
+                        return Err(error);
                     };
 
                     warn!(
                         attempt,
-                        delay_ms = delay.as_millis() as u64,
+                        delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
                         error = %error,
                         "retrying after transient error"
                     );

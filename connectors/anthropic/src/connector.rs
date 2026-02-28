@@ -645,7 +645,7 @@ mod tests {
         CapabilityToken { raw: cose }
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_handshake() {
         let mut connector = AnthropicConnector::new();
         let result = connector
@@ -663,7 +663,7 @@ mod tests {
         assert_eq!(result["status"], "accepted");
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_health_not_configured() {
         let connector = AnthropicConnector::new();
         let result = connector.handle_health().await.unwrap();
@@ -671,7 +671,7 @@ mod tests {
         assert_eq!(result["status"], "not_configured");
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_invoke_without_config() {
         let mut connector = AnthropicConnector::new();
 
@@ -706,7 +706,7 @@ mod tests {
         assert!(matches!(result.unwrap_err(), FcpError::NotConfigured));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_invoke_missing_message() {
         let mut connector = AnthropicConnector::new();
         // Configure with fake key
@@ -753,7 +753,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_get_usage() {
         let mut connector = AnthropicConnector::new();
 

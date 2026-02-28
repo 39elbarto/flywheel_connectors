@@ -16,8 +16,9 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+fcp-async-core = { path = "../../crates/fcp-async-core" }
 fcp-core = { path = "../../crates/fcp-core" }
-fcp-sdk = { path = "../../crates/fcp-sdk" }
+fcp-sdk = { path = "../../crates/fcp-sdk", features = ["connector-http"] }
 
 anyhow.workspace = true
 async-trait.workspace = true
@@ -28,8 +29,6 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["full"] }
-tokio-stream.workspace = true
 tokio-tungstenite.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -38,5 +37,5 @@ uuid.workspace = true
 [dev-dependencies]
 fcp-crypto = { path = "../../crates/fcp-crypto" }
 fcp-testkit = { path = "../../crates/fcp-testkit" }
-wiremock.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+wiremock.workspace = true

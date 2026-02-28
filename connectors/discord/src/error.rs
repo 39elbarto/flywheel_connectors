@@ -2,7 +2,9 @@
 
 use std::time::Duration;
 
+use fcp_async_core::AsyncError;
 use fcp_core::FcpError;
+use fcp_sdk::migration::ConnectorErrorMapping;
 use thiserror::Error;
 
 /// Discord-specific errors.
@@ -64,6 +66,10 @@ impl DiscordError {
     /// Convert to FCP error.
     #[must_use]
     pub fn to_fcp_error(&self) -> FcpError {
+        ConnectorErrorMapping::to_fcp_error(self)
+    }
+
+    fn fcp_error_impl(&self) -> FcpError {
         match self {
             Self::Http(e) => FcpError::External {
                 service: "discord".into(),
@@ -116,6 +122,46 @@ impl DiscordError {
             Self::Json(e) => FcpError::Internal {
                 message: format!("JSON error: {e}"),
             },
+        }
+    }
+}
+
+impl ConnectorErrorMapping for DiscordError {
+    fn from_async_error(error: AsyncError) -> Self {
+        match error {
+            AsyncError::Timeout { timeout_ms } => Self::Api {
+                code: 408,
+                message: format!("request context deadline exceeded after {timeout_ms}ms"),
+                retry_after: None,
+            },
+            AsyncError::Cancelled => Self::Api {
+                code: 499,
+                message: "request context cancelled".into(),
+                retry_after: None,
+            },
+            other => Self::Gateway(other.to_string()),
+        }
+    }
+
+    fn to_fcp_error(&self) -> FcpError {
+        self.fcp_error_impl()
+    }
+
+    fn is_retryable(&self) -> bool {
+        match self {
+            Self::Http(_) | Self::WebSocket(_) | Self::RateLimited { .. } | Self::Gateway(_) => {
+                true
+            }
+            Self::Api { code, .. } => *code >= 500 || *code == 429,
+            _ => false,
+        }
+    }
+
+    fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Self::RateLimited { retry_after } => Some(Duration::from_secs_f64(*retry_after)),
+            Self::Api { retry_after, .. } => retry_after.map(Duration::from_secs_f64),
+            _ => None,
         }
     }
 }

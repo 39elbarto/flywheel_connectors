@@ -37,6 +37,7 @@ url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 wiremock.workspace = true
 fcp-crypto = { path = "../../crates/fcp-crypto" }
 fcp-testkit = { path = "../../crates/fcp-testkit" }

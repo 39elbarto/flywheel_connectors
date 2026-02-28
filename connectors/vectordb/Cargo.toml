@@ -33,4 +33,5 @@ uuid.workspace = true
 wiremock.workspace = true
 fcp-async-core = { path = "../../crates/fcp-async-core" }
 fcp-testkit = { path = "../../crates/fcp-testkit" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 chrono.workspace = true

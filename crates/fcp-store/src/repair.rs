@@ -886,8 +886,8 @@ mod tests {
         assert!(stats.rate_limited > 0);
     }
 
-    #[fcp_async_core::runtime::test]
-    async fn concurrent_permits() {
+    #[test]
+    fn concurrent_permits() {
         let config = RepairControllerConfig {
             max_concurrent_repairs: 2,
             ..Default::default()

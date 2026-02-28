@@ -5,7 +5,7 @@
 use std::future::Future;
 use std::time::Duration;
 
-use tokio::time::sleep;
+use fcp_async_core::time::sleep;
 use tracing::{debug, warn};
 
 use crate::{DEFAULT_RECONNECT_DELAY, MAX_RECONNECT_DELAY, StreamError, StreamResult};

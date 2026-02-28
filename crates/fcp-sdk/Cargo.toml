@@ -22,15 +22,14 @@ semver = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["sync", "time", "rt", "rt-multi-thread"] }
 tracing.workspace = true
 
 [features]
 cursor-store-object-store = ["dep:fcp-store", "dep:fcp-cbor", "dep:semver"]
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
 async-trait = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
 futures-util = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }

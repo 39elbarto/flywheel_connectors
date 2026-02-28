@@ -7,9 +7,9 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use fcp_async_core::time::{Sleep, sleep};
 use futures_util::stream::Stream;
 use pin_project_lite::pin_project;
-use tokio::time::{Sleep, sleep};
 
 use crate::{StreamError, StreamResult};
 
@@ -275,8 +275,8 @@ impl<S: Stream> Stream for RateLimitedStream<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::pin_mut;
     use futures_util::stream::{self, StreamExt as _};
-    use tokio::pin;
 
     #[fcp_async_core::runtime::test]
     async fn test_counting_stream() {
@@ -294,7 +294,7 @@ mod tests {
     async fn test_timeout_stream_success() {
         let stream = stream::iter(vec![1, 2, 3]);
         let timeout_stream = TimeoutStream::new(stream, Duration::from_secs(1));
-        pin!(timeout_stream);
+        pin_mut!(timeout_stream);
 
         let mut results = Vec::new();
         while let Some(result) = timeout_stream.next().await {
@@ -330,7 +330,7 @@ mod tests {
     async fn test_rate_limited_stream() {
         let stream = stream::iter(vec![1, 2, 3]);
         let rate_limited = RateLimitedStream::new(stream, Duration::from_millis(1));
-        pin!(rate_limited);
+        pin_mut!(rate_limited);
 
         let mut results = Vec::new();
         while let Some(item) = rate_limited.next().await {
@@ -343,7 +343,7 @@ mod tests {
     async fn test_stream_ext_with_timeout() {
         let stream = stream::iter(vec![1, 2, 3]);
         let timeout_stream = super::StreamExt::with_timeout(stream, Duration::from_secs(1));
-        pin!(timeout_stream);
+        pin_mut!(timeout_stream);
 
         let mut results = Vec::new();
         while let Some(result) = timeout_stream.next().await {
@@ -356,7 +356,7 @@ mod tests {
     async fn test_timeout_stream_empty() {
         let stream = stream::empty::<i32>();
         let timeout_stream = TimeoutStream::new(stream, Duration::from_secs(1));
-        pin!(timeout_stream);
+        pin_mut!(timeout_stream);
 
         let result = timeout_stream.next().await;
         assert!(result.is_none());

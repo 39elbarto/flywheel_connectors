@@ -13,10 +13,9 @@ workspace = true
 
 [dependencies]
 fcp-core = { path = "../fcp-core" }
+fcp-async-core = { path = "../fcp-async-core" }
 
 # Async runtime
-tokio = { workspace = true, features = ["sync", "time", "rt"] }
-tokio-stream.workspace = true
 async-trait.workspace = true
 futures-util.workspace = true
 
@@ -43,6 +42,5 @@ url = "2.5"
 rand = "0.9"
 
 [dev-dependencies]
-fcp-async-core = { path = "../fcp-async-core" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 wiremock = "0.6"

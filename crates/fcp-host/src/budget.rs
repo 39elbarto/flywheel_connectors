@@ -6,11 +6,11 @@
 use std::collections::HashMap;
 
 use chrono::Utc;
+use fcp_async_core::sync::{Mutex, RwLock};
 use fcp_core::{
     BudgetEnforcement, BudgetStatus, FcpError, UsageBudgetPolicy, UsageBudgetSnapshot,
     UsageBudgetUsage, UsageMetric, UsageMetricKind, ZoneId,
 };
-use tokio::sync::{Mutex, RwLock};
 
 use crate::{PolicyEngine, PreflightRequest, PreflightResponse};
 

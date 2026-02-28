@@ -17,7 +17,7 @@ use fcp_host::{
     ConnectorArchetype, ConnectorRegistry, ConnectorSummary, DiscoveryEndpoint, PolicyEngine,
     PreflightRequest, PreflightResponse,
 };
-use fcp_testkit::LogCapture;
+use fcp_testkit::{AsyncTestContext, LogCapture};
 use serde_json::json;
 
 struct MockConnectorRegistry {
@@ -154,7 +154,7 @@ fn make_operation(id: &str) -> OperationInfo {
 async fn introspection_includes_required_fields_for_agents() {
     let start = Instant::now();
     let capture = LogCapture::new();
-    let correlation_id = format!("agent-introspection-{}", std::process::id());
+    let scenario = AsyncTestContext::for_scenario("host.agent.introspection_required_fields");
 
     let connector_id = ConnectorId::new("agent-test", "fcp", "v1").expect("connector id");
     let mut registry = MockConnectorRegistry::new();
@@ -194,7 +194,9 @@ async fn introspection_includes_required_fields_for_agents() {
         "test_name": "introspection_includes_required_fields_for_agents",
         "module": "fcp-host::agent_integration",
         "phase": "verify",
-        "correlation_id": correlation_id,
+        "run_id": scenario.run_id(),
+        "scenario_id": scenario.scenario_id(),
+        "correlation_id": scenario.correlation_id(),
         "result": "pass",
         "duration_ms": duration_ms,
         "assertions": { "passed": 14, "failed": 0 },

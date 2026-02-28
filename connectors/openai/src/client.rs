@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
-use fcp_async_core::time::sleep;
+use fcp_async_core::{AsyncError, ExecutionContext};
 use fcp_core::CredentialId;
 use futures_util::StreamExt;
 use reqwest::{Client, Response, StatusCode};
@@ -299,6 +299,7 @@ impl OpenAIClient {
         let url = format!("{}{endpoint}", self.base_url);
         let mut delay = Duration::from_millis(self.initial_delay_ms);
         let mut attempts = 0;
+        let context = ExecutionContext::request_scoped(Duration::from_secs(120));
 
         loop {
             attempts += 1;
@@ -326,7 +327,7 @@ impl OpenAIClient {
                             error = %e,
                             "Retrying OpenAI API request"
                         );
-                        sleep(delay).await;
+                        context.sleep(delay).await.map_err(map_context_error)?;
                         delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
                     }
                     Err(e) => return Err(e),
@@ -339,7 +340,7 @@ impl OpenAIClient {
                             error = %e,
                             "Retrying after connection error"
                         );
-                        sleep(delay).await;
+                        context.sleep(delay).await.map_err(map_context_error)?;
                         delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
                     } else {
                         return Err(OpenAIError::Http(e));
@@ -448,6 +449,26 @@ fn parse_error_response(status: StatusCode, bytes: &Bytes) -> OpenAIError {
     }
 }
 
+fn map_context_error(error: AsyncError) -> OpenAIError {
+    match error {
+        AsyncError::Timeout { timeout_ms } => OpenAIError::Api {
+            error_type: "deadline_timeout".to_string(),
+            message: format!("request context deadline exceeded after {timeout_ms}ms"),
+            status_code: Some(408),
+        },
+        AsyncError::Cancelled => OpenAIError::Api {
+            error_type: "request_cancelled".to_string(),
+            message: "request context cancelled".to_string(),
+            status_code: None,
+        },
+        other => OpenAIError::Api {
+            error_type: "runtime_context".to_string(),
+            message: other.to_string(),
+            status_code: None,
+        },
+    }
+}
+
 /// Parse SSE stream into chunks.
 fn parse_sse_stream(response: Response) -> impl Stream<Item = OpenAIResult<ChatCompletionChunk>> {
     async_stream::stream! {
@@ -507,7 +528,7 @@ fn parse_sse_event(event_str: &str) -> Option<OpenAIResult<ChatCompletionChunk>>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_testkit::LogCapture;
+    use fcp_testkit::{AsyncTestContext, LogCapture};
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{header, method, path},
@@ -712,7 +733,13 @@ mod tests {
     async fn test_logs_redact_api_key_and_prompt() {
         let capture = LogCapture::new();
         let _guard = capture.install_json_with_filter("debug");
-        tracing::debug!("log_capture_ready");
+        let scenario = AsyncTestContext::for_scenario("openai.client.log_redaction");
+        tracing::debug!(
+            run_id = %scenario.run_id(),
+            scenario_id = %scenario.scenario_id(),
+            correlation_id = %scenario.correlation_id(),
+            "log_capture_ready"
+        );
 
         let mock_server = MockServer::start().await;
 
@@ -754,6 +781,10 @@ mod tests {
         assert!(
             logs.contains("log_capture_ready"),
             "expected debug logs to be captured"
+        );
+        assert!(
+            logs.contains(scenario.correlation_id()),
+            "scenario correlation id should be present in logs"
         );
         assert!(
             !logs.contains("test_key"),

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use fcp_async_core::time::timeout;
+use fcp_async_core::{AsyncError, ExecutionContext};
 use fcp_core::{ConnectorId, SelfCheckReport, SelfCheckStatus, ZoneId};
 use serde::{Deserialize, Serialize};
 
@@ -260,22 +260,26 @@ where
                 let connector_id: ConnectorId = connector.parse().map_err(|err| {
                     HostError::InvalidFilter(format!("invalid connector id '{connector}': {err}"))
                 })?;
-                let report = match timeout(
-                    self.self_check_timeout,
-                    self.registry.self_check(&connector_id),
-                )
-                .await
-                {
+                let context = ExecutionContext::request_scoped(self.self_check_timeout);
+                let report = match context.run(self.registry.self_check(&connector_id)).await {
                     Ok(Some(report)) => report,
                     Ok(None) => {
                         return Err(HostError::ConnectorNotFound(connector_id.to_string()));
                     }
-                    Err(_) => SelfCheckReport::failed(
+                    Err(AsyncError::Timeout { .. }) => SelfCheckReport::failed(
                         "self_check_timeout",
                         format!(
                             "self_check exceeded {}ms",
                             self.self_check_timeout.as_millis()
                         ),
+                    ),
+                    Err(AsyncError::Cancelled) => SelfCheckReport::failed(
+                        "self_check_cancelled",
+                        "self_check cancelled by execution context".to_string(),
+                    ),
+                    Err(error) => SelfCheckReport::failed(
+                        "self_check_runtime",
+                        format!("self_check runtime failure: {error}"),
                     ),
                 };
                 self_checks.push(ConnectorSelfCheck {

@@ -13,13 +13,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
+use fcp_async_core::sync::RwLock;
 use fcp_core::{
     AgentHint, ApprovalMode, CapabilityId, ConnectorHealth, ConnectorId, IdempotencyClass,
     Introspection, OperationInfo, RateLimitDeclarations, RiskLevel, SafetyTier, SelfCheckReport,
     UsageBudgetSnapshot, ZoneId,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
 
 use crate::{HostError, HostResult};
 

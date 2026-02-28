@@ -10,7 +10,7 @@
 
 use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
@@ -124,11 +124,11 @@ pub mod time {
 
     use super::AsyncError;
 
-    pub use tokio::time::Interval;
+    pub use tokio::time::{Interval, Sleep};
 
     /// Sleep for a duration.
-    pub async fn sleep(duration: Duration) {
-        tokio::time::sleep(duration).await;
+    pub fn sleep(duration: Duration) -> Sleep {
+        tokio::time::sleep(duration)
     }
 
     /// Create interval ticker.
@@ -151,6 +151,182 @@ pub mod time {
             .map_err(|_| AsyncError::Timeout {
                 timeout_ms: u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
             })
+    }
+}
+
+/// Absolute deadline wrapper used for deterministic timeout budgeting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Deadline {
+    deadline_at: Instant,
+}
+
+impl Deadline {
+    /// Create a deadline relative to now.
+    #[must_use]
+    pub fn after(timeout: Duration) -> Self {
+        let now = Instant::now();
+        Self {
+            deadline_at: now.checked_add(timeout).unwrap_or(now),
+        }
+    }
+
+    /// Create a deadline from an absolute instant.
+    #[must_use]
+    pub const fn at(deadline_at: Instant) -> Self {
+        Self { deadline_at }
+    }
+
+    /// Return the remaining budget before timeout.
+    #[must_use]
+    pub fn remaining(self) -> Duration {
+        self.deadline_at.saturating_duration_since(Instant::now())
+    }
+
+    /// Return true if deadline is already expired.
+    #[must_use]
+    pub fn is_expired(self) -> bool {
+        self.remaining().is_zero()
+    }
+
+    /// Run a future under the deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AsyncError::Timeout`] when deadline budget is exhausted.
+    pub async fn run<T, F>(self, future: F) -> Result<T, AsyncError>
+    where
+        F: Future<Output = T>,
+    {
+        time::timeout(self.remaining(), future).await
+    }
+}
+
+/// Scope classification for execution contexts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContextScope {
+    /// Request-scoped foreground work with explicit deadline budget.
+    Request,
+    /// Background work that may be cancellation-bound without deadline.
+    Background,
+}
+
+/// Propagated async context (cancellation + optional deadline + scope).
+#[derive(Clone, Debug)]
+pub struct ExecutionContext {
+    scope: ContextScope,
+    cancellation: CancellationToken,
+    deadline: Option<Deadline>,
+}
+
+impl ExecutionContext {
+    /// Create a request-scoped context with fixed timeout budget.
+    #[must_use]
+    pub fn request_scoped(timeout: Duration) -> Self {
+        Self {
+            scope: ContextScope::Request,
+            cancellation: CancellationToken::new(),
+            deadline: Some(Deadline::after(timeout)),
+        }
+    }
+
+    /// Create a background context (no deadline by default).
+    #[must_use]
+    pub fn background() -> Self {
+        Self {
+            scope: ContextScope::Background,
+            cancellation: CancellationToken::new(),
+            deadline: None,
+        }
+    }
+
+    /// Create a child context inheriting cancellation and deadline.
+    #[must_use]
+    pub fn child(&self) -> Self {
+        Self {
+            scope: self.scope,
+            cancellation: self.cancellation.clone(),
+            deadline: self.deadline,
+        }
+    }
+
+    /// Set or replace the context deadline.
+    #[must_use]
+    pub fn with_deadline(mut self, timeout: Duration) -> Self {
+        self.deadline = Some(Deadline::after(timeout));
+        self
+    }
+
+    /// Context scope.
+    #[must_use]
+    pub const fn scope(&self) -> ContextScope {
+        self.scope
+    }
+
+    /// Deadline, if present.
+    #[must_use]
+    pub const fn deadline(&self) -> Option<Deadline> {
+        self.deadline
+    }
+
+    /// Remaining timeout budget, if deadline exists.
+    #[must_use]
+    pub fn remaining_budget(&self) -> Option<Duration> {
+        self.deadline.map(Deadline::remaining)
+    }
+
+    /// Trigger cancellation on this context (and its descendants).
+    pub fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+
+    /// Whether the context is already cancelled.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.cancellation.is_cancelled()
+    }
+
+    /// Subscribe to context cancellation.
+    #[must_use]
+    pub fn subscribe(&self) -> CancellationListener {
+        self.cancellation.subscribe()
+    }
+
+    /// Run a future under this context.
+    ///
+    /// Cancellation is deterministic and takes precedence over deadline timeout.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AsyncError::Cancelled`] when cancellation is observed first, or
+    /// [`AsyncError::Timeout`] when deadline expires first.
+    pub async fn run<T, F>(&self, future: F) -> Result<T, AsyncError>
+    where
+        F: Future<Output = T>,
+    {
+        let mut listener = self.subscribe();
+        if listener.is_cancelled() {
+            return Err(AsyncError::Cancelled);
+        }
+
+        tokio::select! {
+            biased;
+            _ = listener.cancelled() => Err(AsyncError::Cancelled),
+            output = async {
+                match self.deadline {
+                    Some(deadline) => deadline.run(future).await,
+                    None => Ok(future.await),
+                }
+            } => output,
+        }
+    }
+
+    /// Sleep for a duration under this context.
+    ///
+    /// # Errors
+    ///
+    /// Returns timeout/cancellation failures according to context semantics.
+    pub async fn sleep(&self, duration: Duration) -> Result<(), AsyncError> {
+        self.run(tokio::time::sleep(duration)).await
     }
 }
 
@@ -277,6 +453,54 @@ pub mod channel {
     }
 }
 
+/// Helpers for watch-based shutdown propagation.
+pub mod shutdown {
+    use std::time::Duration;
+
+    use super::{AsyncError, channel::watch};
+
+    /// Wait until shutdown is signaled (`true`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AsyncError::Cancelled`] when shutdown is observed or sender drops.
+    pub async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) -> Result<(), AsyncError> {
+        if *shutdown.borrow() {
+            return Err(AsyncError::Cancelled);
+        }
+
+        loop {
+            shutdown
+                .changed()
+                .await
+                .map_err(|_| AsyncError::Cancelled)?;
+            if *shutdown.borrow() {
+                return Err(AsyncError::Cancelled);
+            }
+        }
+    }
+
+    /// Sleep until duration elapses unless shutdown arrives first.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AsyncError::Cancelled`] when shutdown is observed before sleep completes.
+    pub async fn sleep_or_shutdown(
+        duration: Duration,
+        shutdown: &mut watch::Receiver<bool>,
+    ) -> Result<(), AsyncError> {
+        if *shutdown.borrow() {
+            return Err(AsyncError::Cancelled);
+        }
+
+        tokio::select! {
+            biased;
+            _ = wait_for_shutdown(shutdown) => Err(AsyncError::Cancelled),
+            () = tokio::time::sleep(duration) => Ok(()),
+        }
+    }
+}
+
 /// Synchronization re-exports.
 pub mod sync {
     pub use tokio::sync::{Mutex, RwLock};
@@ -299,7 +523,7 @@ pub mod process {
 
 /// Tokio net re-exports.
 pub mod net {
-    pub use tokio::net::TcpListener;
+    pub use tokio::net::{TcpListener, TcpStream};
 }
 
 /// Cooperative cancellation token.
@@ -318,7 +542,7 @@ impl CancellationToken {
 
     /// Trigger cancellation.
     pub fn cancel(&self) {
-        let _ = self.sender.send(true);
+        self.sender.send_replace(true);
     }
 
     /// Current cancellation state.
@@ -467,11 +691,7 @@ impl TaskGroup {
             }
         }
 
-        if let Some(error) = first_error {
-            Err(error)
-        } else {
-            Ok(())
-        }
+        first_error.map_or(Ok(()), Err)
     }
 }
 
@@ -484,8 +704,14 @@ impl Default for TaskGroup {
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
+    use std::{
+        sync::Arc,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
 
-    use super::{AsyncError, CancellationToken, TaskGroup, channel};
+    use super::{
+        AsyncError, CancellationToken, ContextScope, ExecutionContext, TaskGroup, channel,
+    };
 
     #[tokio::test]
     async fn cancellation_propagates_to_all_listeners() {
@@ -527,5 +753,56 @@ mod tests {
 
         let result = group.shutdown(Duration::from_millis(250)).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn cancellation_storm_drains_task_group_without_orphans() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let mut group = TaskGroup::new();
+
+        for index in 0..64 {
+            let active = Arc::clone(&active);
+            let mut listener = group.subscribe_cancellation();
+            group.spawn(format!("worker-{index}"), async move {
+                active.fetch_add(1, Ordering::SeqCst);
+                let result = listener.cancelled().await;
+                active.fetch_sub(1, Ordering::SeqCst);
+                result
+            });
+        }
+
+        tokio::task::yield_now().await;
+
+        let shutdown = group.shutdown(Duration::from_secs(1)).await;
+        assert!(shutdown.is_ok());
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn request_context_deadline_times_out() {
+        let context = ExecutionContext::request_scoped(Duration::from_millis(10));
+        let err = context
+            .run(async {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            })
+            .await
+            .expect_err("deadline should timeout");
+        assert!(matches!(err, AsyncError::Timeout { .. }));
+        assert_eq!(context.scope(), ContextScope::Request);
+    }
+
+    #[tokio::test]
+    async fn request_context_cancellation_precedes_deadline() {
+        let context = ExecutionContext::request_scoped(Duration::from_secs(1));
+        context.cancel();
+
+        let err = context
+            .run(async {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            })
+            .await
+            .expect_err("cancelled context should fail");
+
+        assert_eq!(err, AsyncError::Cancelled);
     }
 }

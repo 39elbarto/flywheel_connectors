@@ -340,8 +340,16 @@ fn resolve_self_check_timeout() -> HostResult<Option<Duration>> {
     Ok(Some(Duration::from_millis(millis)))
 }
 
-#[fcp_async_core::runtime::main]
-async fn main() -> HostResult<()> {
+fn main() -> HostResult<()> {
+    match fcp_async_core::runtime::block_on_sync(async_main()) {
+        Ok(result) => result,
+        Err(err) => Err(HostError::Internal(format!(
+            "runtime bootstrap failed: {err}"
+        ))),
+    }
+}
+
+async fn async_main() -> HostResult<()> {
     let addr: SocketAddr = std::env::var("FCP_HOST_BIND")
         .unwrap_or_else(|_| "127.0.0.1:9090".to_string())
         .parse()

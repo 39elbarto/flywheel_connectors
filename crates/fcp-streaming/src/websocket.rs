@@ -7,6 +7,11 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use fcp_async_core::{
+    AsyncError,
+    net::TcpStream,
+    time::{Sleep, sleep, timeout},
+};
 use futures_util::stream::Stream;
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::protocol::Message;
@@ -273,12 +278,15 @@ impl WsClient {
         let url = Url::parse(&self.url)
             .map_err(|e: url::ParseError| StreamError::ConnectionFailed(e.to_string()))?;
 
-        let connect_result =
-            tokio::time::timeout(self.config.connect_timeout, connect_async(url.as_str())).await;
-
-        let Ok(ws_result) = connect_result else {
-            return Err(StreamError::Timeout(self.config.connect_timeout));
-        };
+        let ws_result = timeout(
+            self.config.connect_timeout,
+            Box::pin(connect_async(url.as_str())),
+        )
+        .await
+        .map_err(|error| match error {
+            AsyncError::Timeout { .. } => StreamError::Timeout(self.config.connect_timeout),
+            _ => StreamError::ConnectionFailed(error.to_string()),
+        })?;
 
         let (ws_stream, _response) =
             ws_result.map_err(|e: tokio_tungstenite::tungstenite::Error| {
@@ -309,17 +317,14 @@ impl WsClient {
 
 /// Active WebSocket connection.
 pub struct WsConnection {
-    inner: WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
+    inner: WebSocketStream<MaybeTlsStream<TcpStream>>,
     config: WsConfig,
     closed: bool,
 }
 
 impl WsConnection {
     /// Create a new connection wrapper.
-    const fn new(
-        stream: WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
-        config: WsConfig,
-    ) -> Self {
+    const fn new(stream: WebSocketStream<MaybeTlsStream<TcpStream>>, config: WsConfig) -> Self {
         Self {
             inner: stream,
             config,
@@ -472,7 +477,7 @@ enum ReconnectState {
     /// Initial state or between attempts.
     Idle,
     /// Waiting for backoff delay.
-    Waiting(Pin<Box<tokio::time::Sleep>>),
+    Waiting(Pin<Box<Sleep>>),
     /// Connection attempt in progress.
     Connecting(Pin<Box<dyn std::future::Future<Output = StreamResult<WsConnection>> + Send>>),
     /// Active connection.
@@ -511,7 +516,10 @@ impl Stream for ReconnectingWsStream {
                     };
                     // We need a way to clone the client future or spawn it?
                     // connect is async.
-                    let future = Box::pin(async move { client_clone.connect().await });
+                    let future = Box::pin(async move {
+                        let connect_future = Box::pin(client_clone.connect());
+                        connect_future.await
+                    });
                     self.state = ReconnectState::Connecting(future);
                 }
                 ReconnectState::Waiting(delay) => match delay.as_mut().poll(cx) {
@@ -534,7 +542,7 @@ impl Stream for ReconnectingWsStream {
                         let delay_duration = self.handler.config().delay_for_attempt(attempt);
                         self.handler.record_failure(); // Increment attempts
 
-                        let sleep = Box::pin(tokio::time::sleep(delay_duration));
+                        let sleep = Box::pin(sleep(delay_duration));
                         self.state = ReconnectState::Waiting(sleep);
                     }
                     Poll::Pending => return Poll::Pending,
@@ -550,7 +558,7 @@ impl Stream for ReconnectingWsStream {
                         let delay_duration = self.handler.config().delay_for_attempt(attempt);
                         self.handler.record_failure();
 
-                        let sleep = Box::pin(tokio::time::sleep(delay_duration));
+                        let sleep = Box::pin(sleep(delay_duration));
                         self.state = ReconnectState::Waiting(sleep);
                     }
                     Poll::Ready(None) => {
@@ -562,7 +570,7 @@ impl Stream for ReconnectingWsStream {
                         let delay_duration = self.handler.config().delay_for_attempt(attempt);
                         self.handler.record_failure();
 
-                        let sleep = Box::pin(tokio::time::sleep(delay_duration));
+                        let sleep = Box::pin(sleep(delay_duration));
                         self.state = ReconnectState::Waiting(sleep);
                     }
                     Poll::Pending => return Poll::Pending,

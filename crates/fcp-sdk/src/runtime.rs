@@ -1533,25 +1533,23 @@ impl<S: StreamingSession> StreamingSupervisor<S> {
                     self.stats.backoff_time_ms +=
                         u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
 
-                    fcp_async_core::select! {
-                        () = fcp_async_core::time::sleep(delay) => {}
-                        _ = shutdown.changed() => {
-                            if *shutdown.borrow() {
-                                let (heartbeat_seq, ack_seq, missed_heartbeats, reconnect_count) =
-                                    self.health_log_fields();
-                                if let Err(e) = self.session.persist() {
-                                    tracing::error!(
-                                        error = %e,
-                                        heartbeat_seq,
-                                        ack_seq,
-                                        missed_heartbeats,
-                                        reconnect_count,
-                                        "Failed to persist session on shutdown"
-                                    );
-                                }
-                                return SupervisorOutcome::Shutdown;
-                            }
+                    if fcp_async_core::shutdown::sleep_or_shutdown(delay, &mut shutdown)
+                        .await
+                        .is_err()
+                    {
+                        let (heartbeat_seq, ack_seq, missed_heartbeats, reconnect_count) =
+                            self.health_log_fields();
+                        if let Err(e) = self.session.persist() {
+                            tracing::error!(
+                                error = %e,
+                                heartbeat_seq,
+                                ack_seq,
+                                missed_heartbeats,
+                                reconnect_count,
+                                "Failed to persist session on shutdown"
+                            );
                         }
+                        return SupervisorOutcome::Shutdown;
                     }
 
                     continue;
@@ -1689,16 +1687,14 @@ impl<S: StreamingSession> StreamingSupervisor<S> {
             let delay = self.compute_backoff_delay(consecutive_failures - 1);
             self.stats.backoff_time_ms += u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
 
-            fcp_async_core::select! {
-                () = fcp_async_core::time::sleep(delay) => {}
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() {
-                        if let Err(e) = self.session.persist() {
-                            tracing::error!(error = %e, "Failed to persist session on shutdown");
-                        }
-                        return SupervisorOutcome::Shutdown;
-                    }
+            if fcp_async_core::shutdown::sleep_or_shutdown(delay, &mut shutdown)
+                .await
+                .is_err()
+            {
+                if let Err(e) = self.session.persist() {
+                    tracing::error!(error = %e, "Failed to persist session on shutdown");
                 }
+                return SupervisorOutcome::Shutdown;
             }
         }
     }
@@ -1990,17 +1986,15 @@ impl<C: PollingCursor> PollingSupervisor<C> {
                         "Poll completed successfully"
                     );
 
-                    // Wait for poll interval, checking for shutdown
-                    fcp_async_core::select! {
-                        () = fcp_async_core::time::sleep(poll_interval) => {}
-                        _ = shutdown.changed() => {
-                            if *shutdown.borrow() {
-                                if let Err(e) = self.cursor.persist() {
-                                    tracing::error!(error = %e, "Failed to persist cursor on shutdown");
-                                }
-                                return SupervisorOutcome::Shutdown;
-                            }
+                    // Wait for poll interval, checking for shutdown.
+                    if fcp_async_core::shutdown::sleep_or_shutdown(poll_interval, &mut shutdown)
+                        .await
+                        .is_err()
+                    {
+                        if let Err(e) = self.cursor.persist() {
+                            tracing::error!(error = %e, "Failed to persist cursor on shutdown");
                         }
+                        return SupervisorOutcome::Shutdown;
                     }
                 }
 
@@ -2048,17 +2042,15 @@ impl<C: PollingCursor> PollingSupervisor<C> {
                         "Backing off before retry"
                     );
 
-                    // Wait for backoff, checking for shutdown
-                    fcp_async_core::select! {
-                        () = fcp_async_core::time::sleep(delay) => {}
-                        _ = shutdown.changed() => {
-                            if *shutdown.borrow() {
-                                if let Err(e) = self.cursor.persist() {
-                                    tracing::error!(error = %e, "Failed to persist cursor on shutdown");
-                                }
-                                return SupervisorOutcome::Shutdown;
-                            }
+                    // Wait for backoff, checking for shutdown.
+                    if fcp_async_core::shutdown::sleep_or_shutdown(delay, &mut shutdown)
+                        .await
+                        .is_err()
+                    {
+                        if let Err(e) = self.cursor.persist() {
+                            tracing::error!(error = %e, "Failed to persist cursor on shutdown");
                         }
+                        return SupervisorOutcome::Shutdown;
                     }
                 }
 
@@ -2467,7 +2459,7 @@ mod tests {
         let session = InMemoryStreamingSession::new();
         let mut supervisor = StreamingSupervisor::new(config, session);
 
-        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(true);
+        let (shutdown_tx, shutdown_rx) = fcp_async_core::channel::watch::channel(true);
         let _ = shutdown_tx;
 
         let outcome = supervisor
@@ -2487,7 +2479,7 @@ mod tests {
         let session = TestStreamingSession::default();
         let mut supervisor = StreamingSupervisor::new(config, session);
 
-        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(true);
+        let (shutdown_tx, shutdown_rx) = fcp_async_core::channel::watch::channel(true);
         let _ = shutdown_tx;
 
         let outcome = supervisor
@@ -2511,7 +2503,7 @@ mod tests {
         let session = InMemoryStreamingSession::new();
         let mut supervisor = StreamingSupervisor::new(config, session);
 
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (_shutdown_tx, shutdown_rx) = fcp_async_core::channel::watch::channel(false);
 
         let outcome = supervisor
             .run::<i32, _, _, _, _>(
@@ -2535,7 +2527,7 @@ mod tests {
         let session = TestStreamingSession::default();
         let mut supervisor = StreamingSupervisor::new(config, session);
 
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (_shutdown_tx, shutdown_rx) = fcp_async_core::channel::watch::channel(false);
 
         let outcome = supervisor
             .run::<i32, _, _, _, _>(
@@ -2559,7 +2551,7 @@ mod tests {
         let session = InMemoryStreamingSession::new();
         let mut supervisor = StreamingSupervisor::new(config, session);
 
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (_shutdown_tx, shutdown_rx) = fcp_async_core::channel::watch::channel(false);
 
         let outcome = supervisor
             .run(
@@ -2567,7 +2559,7 @@ mod tests {
                 |_session| async {
                     let (tx, rx) = mpsc::channel(1);
                     let _ = tx.send(42).await;
-                    let join_handle = tokio::spawn(async { Ok(()) });
+                    let join_handle = fcp_async_core::task::spawn(async { Ok(()) });
                     Ok(StreamingConnection {
                         events: rx,
                         join_handle,
@@ -2603,14 +2595,14 @@ mod tests {
         let capture = LogCapture::default();
         let _guard = capture.install_json(EnvFilter::new("warn"));
 
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (_shutdown_tx, shutdown_rx) = fcp_async_core::channel::watch::channel(false);
 
         let outcome = supervisor
             .run::<(), _, _, _, _>(
                 shutdown_rx,
                 |_session| async {
                     let (tx, rx) = mpsc::channel(1);
-                    let join_handle = tokio::spawn(async move {
+                    let join_handle = fcp_async_core::task::spawn(async move {
                         let _tx = tx;
                         std::future::pending::<Result<(), StreamingError>>().await
                     });
@@ -2662,7 +2654,7 @@ mod tests {
         let resume_attempts = Arc::new(AtomicUsize::new(0));
         let full_attempts = Arc::new(AtomicUsize::new(0));
 
-        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (shutdown_tx, shutdown_rx) = fcp_async_core::channel::watch::channel(false);
         let shutdown_tx = Arc::new(shutdown_tx);
 
         let mut supervisor = StreamingSupervisor::new(config, session);
@@ -2693,7 +2685,7 @@ mod tests {
 
                         let (tx, rx) = mpsc::channel(1);
                         drop(tx);
-                        let join_handle = tokio::spawn(async { Ok(()) });
+                        let join_handle = fcp_async_core::task::spawn(async { Ok(()) });
                         Ok(StreamingConnection {
                             events: rx,
                             join_handle,
@@ -2795,7 +2787,7 @@ mod tests {
         let cursor = InMemoryPollingCursor::new();
         let mut supervisor = PollingSupervisor::new(config, cursor);
 
-        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(true); // Start with shutdown
+        let (shutdown_tx, shutdown_rx) = fcp_async_core::channel::watch::channel(true); // Start with shutdown
         let _ = shutdown_tx; // Keep sender alive
 
         let outcome = supervisor
@@ -2816,7 +2808,7 @@ mod tests {
         let cursor = InMemoryPollingCursor::new();
         let mut supervisor = PollingSupervisor::new(config, cursor);
 
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (_shutdown_tx, shutdown_rx) = fcp_async_core::channel::watch::channel(false);
 
         let outcome = supervisor
             .run(
@@ -2843,7 +2835,7 @@ mod tests {
         let cursor = InMemoryPollingCursor::new();
         let mut supervisor = PollingSupervisor::new(config, cursor);
 
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (_shutdown_tx, shutdown_rx) = fcp_async_core::channel::watch::channel(false);
 
         let outcome = supervisor
             .run(

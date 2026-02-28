@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use fcp_async_core::sync::Mutex;
 use fcp_core::{
     CapabilityToken, ConnectorHealth, ConnectorId, CorrelationId, HandshakeRequest, HealthSnapshot,
     Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId, RequestId,
@@ -17,7 +18,6 @@ use fcp_host::{
 };
 use fcp_testkit::LogCapture;
 use serde_json::json;
-use tokio::sync::Mutex;
 
 struct AllowAllPolicy;
 

@@ -17,7 +17,6 @@ fcp-core = { path = "../fcp-core" }
 fcp-async-core = { path = "../fcp-async-core" }
 
 # Async runtime
-tokio = { version = "1.49", features = ["full"] }
 async-trait = "0.1"
 
 # Serialization

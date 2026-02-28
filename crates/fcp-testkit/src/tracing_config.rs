@@ -23,7 +23,7 @@ static INIT: Once = Once::new();
 /// ```rust
 /// use fcp_testkit::init_test_tracing;
 ///
-/// #[tokio::test]
+/// #[fcp_async_core::runtime::test]
 /// async fn my_test() {
 ///     init_test_tracing();
 ///     // ... test code
@@ -53,7 +53,7 @@ pub fn init_test_tracing() {
 /// ```rust
 /// use fcp_testkit::init_test_tracing_with_filter;
 ///
-/// #[tokio::test]
+/// #[fcp_async_core::runtime::test]
 /// async fn my_verbose_test() {
 ///     init_test_tracing_with_filter("debug");
 ///     // ... test code
@@ -82,7 +82,7 @@ pub fn init_test_tracing_with_filter(filter: &str) {
 /// ```rust
 /// use fcp_testkit::init_test_tracing_json;
 ///
-/// #[tokio::test]
+/// #[fcp_async_core::runtime::test]
 /// async fn my_test() {
 ///     init_test_tracing_json();
 ///     // ... test code

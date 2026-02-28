@@ -438,7 +438,7 @@ impl TailscaleClient for MockTailscaleClient {
 mod tests {
     use super::*;
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_mock_client_status() {
         let client = MockTailscaleClient::new();
 
@@ -446,7 +446,7 @@ mod tests {
         assert_eq!(status.backend_state, "Running");
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_mock_client_disconnected() {
         let client = MockTailscaleClient::disconnected();
 
@@ -454,7 +454,7 @@ mod tests {
         assert!(matches!(result, Err(TailscaleError::NotConnected)));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_mock_client_add_peer() {
         let client = MockTailscaleClient::new();
 
@@ -471,7 +471,7 @@ mod tests {
         assert!(status.peer.contains_key("node-123"));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_mock_client_whois() {
         let client = MockTailscaleClient::new();
 
@@ -484,7 +484,7 @@ mod tests {
         assert_eq!(found.host_name, "worker1");
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_mock_client_whois_not_found() {
         let client = MockTailscaleClient::new();
 
@@ -492,7 +492,7 @@ mod tests {
         assert!(matches!(result, Err(TailscaleError::PeerNotFound(_))));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_mock_client_online_peers() {
         let client = MockTailscaleClient::new();
 
@@ -519,7 +519,7 @@ mod tests {
         assert_eq!(online[0].host_name, "online-server");
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_mock_client_set_peer_online() {
         let client = MockTailscaleClient::new();
 
@@ -537,7 +537,7 @@ mod tests {
         assert_eq!(online.len(), 0);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_peer_info_fcp_tags() {
         let peer = MockTailscaleClient::mock_peer(
             "node-1",
@@ -552,7 +552,7 @@ mod tests {
         assert!(fcp_tags.iter().any(|t| t.as_str() == "tag:fcp-private"));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_is_connected() {
         let connected = MockTailscaleClient::new();
         assert!(connected.is_connected().await.unwrap());

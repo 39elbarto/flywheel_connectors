@@ -1665,6 +1665,7 @@ dependencies = [
  "chrono",
  "ciborium",
  "ed25519-dalek",
+ "fcp-async-core",
  "fcp-core",
  "fcp-crypto",
  "hex",
@@ -1751,6 +1752,7 @@ dependencies = [
  "chrono",
  "ciborium",
  "clap",
+ "fcp-async-core",
  "fcp-cbor",
  "fcp-core",
  "fcp-crypto",
@@ -1783,6 +1785,7 @@ dependencies = [
  "chrono",
  "ciborium",
  "ed25519-dalek",
+ "fcp-async-core",
  "fcp-cbor",
  "fcp-crypto",
  "fcp-testkit",
@@ -1861,6 +1864,7 @@ name = "fcp-e2e"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "fcp-async-core",
  "fcp-conformance",
  "fcp-core",
  "fcp-manifest",
@@ -1947,6 +1951,7 @@ dependencies = [
  "ciborium",
  "constant_time_eq",
  "criterion",
+ "fcp-async-core",
  "fcp-cbor",
  "fcp-core",
  "fcp-crypto",
@@ -2217,6 +2222,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
+ "fcp-async-core",
  "fcp-cbor",
  "fcp-core",
  "fcp-crypto",

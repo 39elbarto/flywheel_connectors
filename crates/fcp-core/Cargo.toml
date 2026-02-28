@@ -35,6 +35,7 @@ zeroize = { version = "1.8", features = ["derive"] }
 
 [dev-dependencies]
 ciborium.workspace = true
+fcp-async-core = { path = "../fcp-async-core" }
 fcp-testkit = { path = "../fcp-testkit" }
 semver.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

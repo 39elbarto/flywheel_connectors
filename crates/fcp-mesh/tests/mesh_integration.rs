@@ -170,7 +170,7 @@ mod meshnode {
         (0..total).filter(|esi| !have.contains(esi)).collect()
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn meshnode_symbol_request_smoke() {
         let zone_id = ZoneId::work();
         let zone_key_id = ZoneKeyId::from_bytes([1u8; 8]);
@@ -229,7 +229,7 @@ mod meshnode {
         assert!(response.symbol_esis.len() <= 2);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn meshnode_symbol_request_missing_object() {
         let zone_id = ZoneId::work();
         let zone_key_id = ZoneKeyId::from_bytes([1u8; 8]);
@@ -260,7 +260,7 @@ mod meshnode {
         assert!(matches!(err, SymbolRequestError::ObjectNotFound { .. }));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn meshnode_symbol_request_no_symbols() {
         let zone_id = ZoneId::work();
         let zone_key_id = ZoneKeyId::from_bytes([1u8; 8]);
@@ -302,7 +302,7 @@ mod meshnode {
         assert!(matches!(err, SymbolRequestError::ObjectNotFound { .. }));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn meshnode_symbol_request_no_resend() {
         let zone_id = ZoneId::work();
         let zone_key_id = ZoneKeyId::from_bytes([1u8; 8]);
@@ -372,7 +372,7 @@ mod meshnode {
         assert_eq!(first.len(), 4);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn meshnode_symbol_request_prioritizes_missing_hint() {
         let zone_id = ZoneId::work();
         let zone_key_id = ZoneKeyId::from_bytes([1u8; 8]);
@@ -431,7 +431,7 @@ mod meshnode {
         assert_eq!(response.symbol_esis, vec![3, 1]);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn meshnode_symbol_request_fills_after_missing_hint() {
         let zone_id = ZoneId::work();
         let zone_key_id = ZoneKeyId::from_bytes([1u8; 8]);
@@ -492,7 +492,7 @@ mod meshnode {
         assert!(response.symbol_esis.iter().all(|esi| *esi < 4));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn meshnode_symbol_request_ignores_unavailable_hints() {
         let zone_id = ZoneId::work();
         let zone_key_id = ZoneKeyId::from_bytes([1u8; 8]);
@@ -552,7 +552,7 @@ mod meshnode {
         assert!(response.symbol_esis.iter().all(|esi| *esi < 4));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn meshnode_symbol_request_rejects_oversized_hint() {
         let zone_id = ZoneId::work();
         let zone_key_id = ZoneKeyId::from_bytes([1u8; 8]);
@@ -611,7 +611,7 @@ mod meshnode {
         assert!(matches!(err, SymbolRequestError::InvalidRequest { .. }));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn meshnode_symbol_request_reports_bounded_response() {
         let zone_id = ZoneId::work();
         let zone_key_id = ZoneKeyId::from_bytes([1u8; 8]);
@@ -671,7 +671,7 @@ mod meshnode {
         assert!(!response.is_final);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn meshnode_symbol_request_is_final_when_all_sent() {
         let zone_id = ZoneId::work();
         let zone_key_id = ZoneKeyId::from_bytes([1u8; 8]);
@@ -731,7 +731,7 @@ mod meshnode {
         assert!(response.is_final);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn meshnode_quarantined_object_not_gossiped() {
         let zone_id = ZoneId::work();
         let object_id = test_object_id("meshnode-quarantine-gossip");
@@ -761,7 +761,7 @@ mod meshnode {
         assert!(!node.gossip_mut().has_object(&zone_id, &object_id));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn meshnode_quarantined_symbol_request_rejected() {
         let zone_id = ZoneId::work();
         let zone_key_id = ZoneKeyId::from_bytes([1u8; 8]);
@@ -806,7 +806,7 @@ mod meshnode {
         ));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn meshnode_decode_status_stops_transfer() {
         let zone_id = ZoneId::work();
         let zone_key_id = ZoneKeyId::from_bytes([2u8; 8]);
@@ -887,7 +887,7 @@ mod meshnode {
         assert!(matches!(err, SymbolRequestError::AlreadyComplete { .. }));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn meshnode_symbol_ack_stops_transfer() {
         let zone_id = ZoneId::work();
         let zone_key_id = ZoneKeyId::from_bytes([3u8; 8]);
@@ -965,7 +965,7 @@ mod meshnode {
         assert!(matches!(err, SymbolRequestError::AlreadyComplete { .. }));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn meshnode_unauthenticated_bounds_enforced() {
         let zone_id = ZoneId::work();
         let zone_key_id = ZoneKeyId::from_bytes([4u8; 8]);
@@ -1010,7 +1010,7 @@ mod meshnode {
         assert!(matches!(err, SymbolRequestError::BoundsExceeded { .. }));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn meshnode_degraded_control_plane_roundtrip() {
         let zone_id = ZoneId::work();
         let zone_key_id = ZoneKeyId::from_bytes([5u8; 8]);
@@ -1065,7 +1065,7 @@ mod meshnode {
         assert_eq!(decoded.object_id, object_id);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn meshnode_control_plane_handler_stores_required() {
         let zone_id = ZoneId::work();
         let zone_key_id = ZoneKeyId::from_bytes([6u8; 8]);
@@ -1114,7 +1114,7 @@ mod meshnode {
         assert!(handler.get(&object_id).is_some());
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn meshnode_multi_node_symbol_transfer() {
         const TEST_NAME: &str = "meshnode_multi_node_symbol_transfer";
         const CATEGORY: &str = "meshnode";
@@ -1194,7 +1194,7 @@ mod meshnode {
         );
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn meshnode_multi_node_control_plane_roundtrip() {
         const TEST_NAME: &str = "meshnode_multi_node_control_plane_roundtrip";
         const CATEGORY: &str = "meshnode";
@@ -1266,7 +1266,7 @@ mod meshnode {
         );
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn meshnode_session_auth_allows_larger_request() {
         const TEST_NAME: &str = "meshnode_session_auth_allows_larger_request";
         const CATEGORY: &str = "meshnode";
@@ -2954,6 +2954,106 @@ mod gossip_integration {
                 "zone": zone_id.as_str(),
                 "response_objects": response.have_objects.len(),
                 "response_symbols": response.have_symbols.len(),
+            }),
+        );
+    }
+
+    /// Test: Multi-node bootstrap via summary exchange + bounded reconciliation.
+    #[test]
+    fn test_gossip_bootstrap_convergence() {
+        const TEST_NAME: &str = "gossip_bootstrap_convergence";
+        const CATEGORY: &str = "gossip";
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let zone_id = ZoneId::work();
+        let epoch = EpochId::new("epoch-bootstrap");
+        let config = GossipConfig::default();
+
+        let mut node_a = MeshGossip::new(TailscaleNodeId::new("node-a"), config.clone());
+        let mut node_b = MeshGossip::new(TailscaleNodeId::new("node-b"), config.clone());
+        let mut node_c = MeshGossip::new(TailscaleNodeId::new("node-c"), config);
+
+        let object_id = test_object_id("bootstrap-object");
+        let now = 1000u64;
+
+        node_a.announce_object(&zone_id, &object_id, ObjectAdmissionClass::Admitted, now);
+        node_a.announce_symbol(&zone_id, &object_id, 0, ObjectAdmissionClass::Admitted, now);
+        node_a.announce_symbol(&zone_id, &object_id, 1, ObjectAdmissionClass::Admitted, now);
+
+        let summary = node_a
+            .create_summary(&zone_id, epoch)
+            .expect("node-a summary should exist");
+        node_b.handle_summary(summary.clone(), now + 1);
+        node_c.handle_summary(summary, now + 1);
+
+        assert_eq!(node_b.peer_count(), 1);
+        assert_eq!(node_c.peer_count(), 1);
+
+        let request = node_b.create_request(&zone_id, vec![object_id], now + 2);
+        let response = node_a.handle_request(&request);
+        assert_eq!(response.have_objects, vec![object_id]);
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "zone": zone_id.as_str(),
+                "peer_count_node_b": node_b.peer_count(),
+                "peer_count_node_c": node_c.peer_count(),
+                "objects_reconciled": response.have_objects.len(),
+            }),
+        );
+    }
+
+    /// Test: Partition/leave behavior via stale-peer pruning and rejoin.
+    #[test]
+    fn test_gossip_partition_prune_and_rejoin() {
+        const TEST_NAME: &str = "gossip_partition_prune_and_rejoin";
+        const CATEGORY: &str = "gossip";
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let zone_id = ZoneId::work();
+        let epoch = EpochId::new("epoch-partition");
+        let config = GossipConfig {
+            summary_ttl_secs: 30,
+            ..GossipConfig::default()
+        };
+
+        let mut node_a = MeshGossip::new(TailscaleNodeId::new("node-a"), config.clone());
+        let mut node_b = MeshGossip::new(TailscaleNodeId::new("node-b"), config);
+
+        let object_id = test_object_id("partition-object");
+        node_a.announce_object(&zone_id, &object_id, ObjectAdmissionClass::Admitted, 200);
+
+        let initial_summary = node_a
+            .create_summary(&zone_id, epoch.clone())
+            .expect("initial summary");
+        node_b.handle_summary(initial_summary, 201);
+        assert_eq!(node_b.peer_count(), 1);
+
+        let pruned = node_b.prune_stale_peers(235);
+        assert_eq!(pruned, 1);
+        assert_eq!(node_b.peer_count(), 0);
+
+        node_a.announce_symbol(&zone_id, &object_id, 2, ObjectAdmissionClass::Admitted, 236);
+        let rejoin_summary = node_a
+            .create_summary(&zone_id, epoch)
+            .expect("rejoin summary");
+        node_b.handle_summary(rejoin_summary, 237);
+        assert_eq!(node_b.peer_count(), 1);
+
+        let request = node_b.create_request(&zone_id, vec![object_id], 238);
+        let response = node_a.handle_request(&request);
+        assert_eq!(response.have_objects, vec![object_id]);
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "zone": zone_id.as_str(),
+                "pruned_peers": pruned,
+                "peer_count_after_rejoin": node_b.peer_count(),
+                "objects_reconciled": response.have_objects.len(),
             }),
         );
     }

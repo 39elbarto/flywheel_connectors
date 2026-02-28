@@ -4,10 +4,11 @@ use std::time::Duration;
 use std::time::Instant;
 
 use chrono::Utc;
+use fcp_async_core::net::TcpListener;
+use fcp_async_core::task;
 use fcp_testkit::LogCapture;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use tokio::net::TcpListener;
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
 use wiremock::matchers::{body_json, method, path};
@@ -250,7 +251,7 @@ impl TestContext {
     }
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn execute_query_success() {
     let mut ctx = TestContext::new("execute_query_success");
     let server = MockServer::start().await;
@@ -292,7 +293,7 @@ async fn execute_query_success() {
     ctx.finalize("pass", Some(serde_json::json!({"status": "ok"})));
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn execute_query_with_variables() {
     let mut ctx = TestContext::new("execute_query_with_variables");
     let server = MockServer::start().await;
@@ -343,7 +344,7 @@ async fn execute_query_with_variables() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn execute_query_rejects_invalid_variables() {
     let mut ctx = TestContext::new("execute_query_rejects_invalid_variables");
     let server = MockServer::start().await;
@@ -381,7 +382,7 @@ async fn execute_query_rejects_invalid_variables() {
     ctx.finalize("pass", Some(serde_json::json!({"validation": "variables"})));
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn execute_batch_success() {
     let mut ctx = TestContext::new("execute_batch_success");
     let server = MockServer::start().await;
@@ -451,7 +452,7 @@ async fn execute_batch_success() {
     ctx.finalize("pass", Some(serde_json::json!({"batch_size": 2})));
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn execute_query_dedup_in_flight() {
     let mut ctx = TestContext::new("execute_query_dedup_in_flight");
     let server = MockServer::start().await;
@@ -476,10 +477,11 @@ async fn execute_query_dedup_in_flight() {
         .build()
         .expect("client");
 
-    let (first, second) = tokio::join!(
+    let (first, second) = futures_util::future::join(
         client.execute::<ViewerQuery>(EmptyVars {}),
-        client.execute::<ViewerQuery>(EmptyVars {})
-    );
+        client.execute::<ViewerQuery>(EmptyVars {}),
+    )
+    .await;
 
     let first = first.expect("first response");
     let second = second.expect("second response");
@@ -494,7 +496,7 @@ async fn execute_query_dedup_in_flight() {
     ctx.finalize("pass", Some(serde_json::json!({"dedup": true})));
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn execute_query_graphql_errors() {
     let mut ctx = TestContext::new("execute_query_graphql_errors");
     let server = MockServer::start().await;
@@ -537,7 +539,7 @@ async fn execute_query_graphql_errors() {
     ctx.finalize("pass", Some(serde_json::json!({ "errors": error_len })));
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn execute_query_retries_on_500() {
     let mut ctx = TestContext::new("execute_query_retries_on_500");
     let server = MockServer::start().await;
@@ -580,7 +582,7 @@ async fn execute_query_retries_on_500() {
     ctx.finalize("pass", Some(serde_json::json!({ "attempts": attempts })));
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn execute_query_non_idempotent_no_retry() {
     let mut ctx = TestContext::new("execute_query_non_idempotent_no_retry");
     let server = MockServer::start().await;
@@ -624,7 +626,7 @@ async fn execute_query_non_idempotent_no_retry() {
     ctx.finalize("pass", Some(serde_json::json!({ "attempts": attempts })));
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn schema_validation_rejects_invalid_response() {
     let mut ctx = TestContext::new("schema_validation_rejects_invalid_response");
     let server = MockServer::start().await;
@@ -663,7 +665,7 @@ async fn schema_validation_rejects_invalid_response() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn paginate_cursor_collects_items() {
     let mut ctx = TestContext::new("paginate_cursor_collects_items");
     let counter = Arc::new(AtomicUsize::new(0));
@@ -706,7 +708,7 @@ async fn paginate_cursor_collects_items() {
     ctx.finalize("pass", Some(serde_json::json!({"pages": 2})));
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn paginate_cursor_limit_exceeded() {
     let mut ctx = TestContext::new("paginate_cursor_limit_exceeded");
     let counter = Arc::new(AtomicUsize::new(0));
@@ -755,7 +757,7 @@ async fn paginate_cursor_limit_exceeded() {
     ctx.finalize("pass", Some(serde_json::json!({"limit": 2})));
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn paginate_offset_collects_items() {
     let mut ctx = TestContext::new("paginate_offset_collects_items");
     let counter = Arc::new(AtomicUsize::new(0));
@@ -792,7 +794,7 @@ async fn paginate_offset_collects_items() {
     ctx.finalize("pass", Some(serde_json::json!({"pages": 2})));
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn paginate_offset_limit_exceeded() {
     let mut ctx = TestContext::new("paginate_offset_limit_exceeded");
     let counter = Arc::new(AtomicUsize::new(0));
@@ -831,13 +833,13 @@ async fn paginate_offset_limit_exceeded() {
     ctx.finalize("pass", Some(serde_json::json!({"limit": 2})));
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn subscription_receives_next_message() {
     let mut ctx = TestContext::new("subscription_receives_next_message");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
 
-    let server_task = tokio::spawn(async move {
+    let server_task = task::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept");
         let mut ws = accept_async(stream).await.expect("accept ws");
 
@@ -903,13 +905,13 @@ async fn subscription_receives_next_message() {
     ctx.finalize("pass", Some(serde_json::json!({"subscription": "next"})));
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn subscription_reconnects_after_disconnect() {
     let mut ctx = TestContext::new("subscription_reconnects_after_disconnect");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
 
-    let server_task = tokio::spawn(async move {
+    let server_task = task::spawn(async move {
         for connection_idx in 0..2 {
             let (stream, _) = listener.accept().await.expect("accept");
             let mut ws = accept_async(stream).await.expect("accept ws");
@@ -1006,13 +1008,13 @@ async fn subscription_reconnects_after_disconnect() {
     ctx.finalize("pass", Some(serde_json::json!({ "reconnects": 1 })));
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn subscription_disconnect_without_reconnect_emits_error() {
     let mut ctx = TestContext::new("subscription_disconnect_without_reconnect_emits_error");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
 
-    let server_task = tokio::spawn(async move {
+    let server_task = task::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept");
         let mut ws = accept_async(stream).await.expect("accept ws");
 
@@ -1066,13 +1068,13 @@ async fn subscription_disconnect_without_reconnect_emits_error() {
     ctx.finalize("pass", Some(serde_json::json!({ "reconnect": "disabled" })));
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn subscription_drop_sends_complete_frame() {
-    let mut ctx = TestContext::new("subscription_drop_sends_complete_frame");
+    let ctx = TestContext::new("subscription_drop_sends_complete_frame");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
 
-    let server_task = tokio::spawn(async move {
+    let server_task = task::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept");
         let mut ws = accept_async(stream).await.expect("accept ws");
 
@@ -1091,7 +1093,7 @@ async fn subscription_drop_sends_complete_frame() {
             .expect("subscribe message")
             .expect("subscribe ok");
 
-        let complete = tokio::time::timeout(Duration::from_secs(2), ws.next())
+        let complete = fcp_async_core::time::timeout(Duration::from_secs(2), ws.next())
             .await
             .expect("complete timeout")
             .expect("complete frame")

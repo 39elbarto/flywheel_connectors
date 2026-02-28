@@ -834,7 +834,14 @@ mod tests {
 
     #[test]
     fn log_entry_new_populates_fields() {
-        let entry = LogEntry::new("node-1", "my_test", "setup", "corr-1", "node_started", serde_json::json!({}));
+        let entry = LogEntry::new(
+            "node-1",
+            "my_test",
+            "setup",
+            "corr-1",
+            "node_started",
+            serde_json::json!({}),
+        );
         assert_eq!(entry.node_id, "node-1");
         assert_eq!(entry.test_name, "my_test");
         assert_eq!(entry.phase, "setup");
@@ -845,7 +852,15 @@ mod tests {
     #[test]
     fn log_entry_with_clock_uses_simulated_time() {
         let clock: SharedMockClock = Arc::new(Mutex::new(MockClock::new(42_000)));
-        let entry = LogEntry::new_with_clock(&clock, "node-1", "test", "phase", "id", "event", serde_json::json!({}));
+        let entry = LogEntry::new_with_clock(
+            &clock,
+            "node-1",
+            "test",
+            "phase",
+            "id",
+            "event",
+            serde_json::json!({}),
+        );
         // Simulated time should be 42 seconds from epoch
         assert_eq!(entry.timestamp.timestamp(), 42);
     }
@@ -855,17 +870,52 @@ mod tests {
     #[test]
     fn log_collector_push_and_retrieve() {
         let collector = LogCollector::new();
-        collector.push(LogEntry::new("node-1", "test", "p", "c", "a", serde_json::json!({})));
-        collector.push(LogEntry::new("node-2", "test", "p", "c", "b", serde_json::json!({})));
+        collector.push(LogEntry::new(
+            "node-1",
+            "test",
+            "p",
+            "c",
+            "a",
+            serde_json::json!({}),
+        ));
+        collector.push(LogEntry::new(
+            "node-2",
+            "test",
+            "p",
+            "c",
+            "b",
+            serde_json::json!({}),
+        ));
         assert_eq!(collector.entries().len(), 2);
     }
 
     #[test]
     fn log_collector_for_node_filters() {
         let collector = LogCollector::new();
-        collector.push(LogEntry::new("node-1", "test", "p", "c", "a", serde_json::json!({})));
-        collector.push(LogEntry::new("node-2", "test", "p", "c", "b", serde_json::json!({})));
-        collector.push(LogEntry::new("node-1", "test", "p", "c", "c", serde_json::json!({})));
+        collector.push(LogEntry::new(
+            "node-1",
+            "test",
+            "p",
+            "c",
+            "a",
+            serde_json::json!({}),
+        ));
+        collector.push(LogEntry::new(
+            "node-2",
+            "test",
+            "p",
+            "c",
+            "b",
+            serde_json::json!({}),
+        ));
+        collector.push(LogEntry::new(
+            "node-1",
+            "test",
+            "p",
+            "c",
+            "c",
+            serde_json::json!({}),
+        ));
 
         let node1 = NodeId::new("node-1");
         let filtered = collector.for_node(&node1);
@@ -876,9 +926,30 @@ mod tests {
     #[test]
     fn log_collector_for_event_type_filters() {
         let collector = LogCollector::new();
-        collector.push(LogEntry::new("n", "t", "p", "c", "denial", serde_json::json!({})));
-        collector.push(LogEntry::new("n", "t", "p", "c", "node_started", serde_json::json!({})));
-        collector.push(LogEntry::new("n", "t", "p", "c", "denial", serde_json::json!({})));
+        collector.push(LogEntry::new(
+            "n",
+            "t",
+            "p",
+            "c",
+            "denial",
+            serde_json::json!({}),
+        ));
+        collector.push(LogEntry::new(
+            "n",
+            "t",
+            "p",
+            "c",
+            "node_started",
+            serde_json::json!({}),
+        ));
+        collector.push(LogEntry::new(
+            "n",
+            "t",
+            "p",
+            "c",
+            "denial",
+            serde_json::json!({}),
+        ));
 
         let denials = collector.denials();
         assert_eq!(denials.len(), 2);
@@ -887,8 +958,22 @@ mod tests {
     #[test]
     fn log_collector_for_correlation_filters() {
         let collector = LogCollector::new();
-        collector.push(LogEntry::new("n", "t", "p", "corr-A", "e", serde_json::json!({})));
-        collector.push(LogEntry::new("n", "t", "p", "corr-B", "e", serde_json::json!({})));
+        collector.push(LogEntry::new(
+            "n",
+            "t",
+            "p",
+            "corr-A",
+            "e",
+            serde_json::json!({}),
+        ));
+        collector.push(LogEntry::new(
+            "n",
+            "t",
+            "p",
+            "corr-B",
+            "e",
+            serde_json::json!({}),
+        ));
 
         let filtered = collector.for_correlation("corr-A");
         assert_eq!(filtered.len(), 1);
@@ -898,7 +983,14 @@ mod tests {
     #[test]
     fn log_collector_to_jsonl_format() {
         let collector = LogCollector::new();
-        collector.push(LogEntry::new("node-1", "test", "p", "c", "event", serde_json::json!({"key": "val"})));
+        collector.push(LogEntry::new(
+            "node-1",
+            "test",
+            "p",
+            "c",
+            "event",
+            serde_json::json!({"key": "val"}),
+        ));
         let jsonl = collector.to_jsonl();
         assert!(!jsonl.is_empty());
         // Should be valid JSON
@@ -910,8 +1002,22 @@ mod tests {
     #[test]
     fn log_collector_jsonl_multiple_lines() {
         let collector = LogCollector::new();
-        collector.push(LogEntry::new("a", "t", "p", "c", "e", serde_json::json!({})));
-        collector.push(LogEntry::new("b", "t", "p", "c", "e", serde_json::json!({})));
+        collector.push(LogEntry::new(
+            "a",
+            "t",
+            "p",
+            "c",
+            "e",
+            serde_json::json!({}),
+        ));
+        collector.push(LogEntry::new(
+            "b",
+            "t",
+            "p",
+            "c",
+            "e",
+            serde_json::json!({}),
+        ));
         let jsonl = collector.to_jsonl();
         let lines: Vec<&str> = jsonl.lines().collect();
         assert_eq!(lines.len(), 2);
@@ -1073,8 +1179,22 @@ mod tests {
         network.set_latency(&a, &b, Duration::from_millis(100));
         network.set_latency(&a, &c, Duration::from_millis(50));
 
-        network.send(0, NetworkMessage { from: a.clone(), to: b.clone(), payload: vec![1] });
-        network.send(0, NetworkMessage { from: a.clone(), to: c.clone(), payload: vec![2] });
+        network.send(
+            0,
+            NetworkMessage {
+                from: a.clone(),
+                to: b.clone(),
+                payload: vec![1],
+            },
+        );
+        network.send(
+            0,
+            NetworkMessage {
+                from: a.clone(),
+                to: c.clone(),
+                payload: vec![2],
+            },
+        );
 
         // At t=75, only a→c should be ready
         let ready = network.drain_ready(75);
@@ -1096,7 +1216,14 @@ mod tests {
 
         assert_eq!(network.next_delivery_ms(), None);
 
-        network.send(0, NetworkMessage { from: a.clone(), to: b.clone(), payload: vec![1] });
+        network.send(
+            0,
+            NetworkMessage {
+                from: a.clone(),
+                to: b.clone(),
+                payload: vec![1],
+            },
+        );
         assert_eq!(network.next_delivery_ms(), Some(200));
     }
 
@@ -1115,13 +1242,24 @@ mod tests {
         net2.set_packet_loss(&a, &b, 0.5);
 
         for i in 0u8..20 {
-            let msg1 = NetworkMessage { from: a.clone(), to: b.clone(), payload: vec![i] };
-            let msg2 = NetworkMessage { from: a.clone(), to: b.clone(), payload: vec![i] };
+            let msg1 = NetworkMessage {
+                from: a.clone(),
+                to: b.clone(),
+                payload: vec![i],
+            };
+            let msg2 = NetworkMessage {
+                from: a.clone(),
+                to: b.clone(),
+                payload: vec![i],
+            };
             results1.push(net1.send(0, msg1));
             results2.push(net2.send(0, msg2));
         }
 
-        assert_eq!(results1, results2, "Same seed must produce identical loss patterns");
+        assert_eq!(
+            results1, results2,
+            "Same seed must produce identical loss patterns"
+        );
     }
 
     // ── TestMeshNode tests ──
@@ -1217,7 +1355,10 @@ mod tests {
         let node1 = TestMeshNode::new(42, 3, clock1, logs.clone());
         let node2 = TestMeshNode::new(42, 3, clock2, logs);
 
-        assert_eq!(node1.node_id, node2.node_id, "Same seed+index must produce same node ID");
+        assert_eq!(
+            node1.node_id, node2.node_id,
+            "Same seed+index must produce same node ID"
+        );
     }
 
     // ── TestHarness tests ──
@@ -1287,7 +1428,7 @@ mod tests {
         assert!(harness.network.send(0, msg2));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn harness_convergence_empty_network() {
         let mut harness = TestHarness::new(2, 42);
         // Empty network converges immediately
@@ -1297,7 +1438,7 @@ mod tests {
             .unwrap();
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn harness_convergence_with_pending_messages() {
         let mut harness = TestHarness::new(2, 42);
         let a = harness.nodes[0].node_id.clone();
@@ -1326,7 +1467,7 @@ mod tests {
         assert_eq!(harness.network.pending_len(), 0);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn harness_convergence_timeout() {
         let mut harness = TestHarness::new(2, 42);
         let a = harness.nodes[0].node_id.clone();
@@ -1414,10 +1555,7 @@ mod tests {
             HarnessError::NodeAlreadyRunning.to_string(),
             "node already running"
         );
-        assert_eq!(
-            HarnessError::NodeNotRunning.to_string(),
-            "node not running"
-        );
+        assert_eq!(HarnessError::NodeNotRunning.to_string(), "node not running");
     }
 
     #[test]

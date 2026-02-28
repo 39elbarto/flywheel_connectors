@@ -247,7 +247,7 @@ pub async fn assert_completes_within<F, T>(future: F, timeout: std::time::Durati
 where
     F: std::future::Future<Output = T>,
 {
-    tokio::time::timeout(timeout, future)
+    fcp_async_core::time::timeout(timeout, future)
         .await
         .expect("Operation timed out")
 }

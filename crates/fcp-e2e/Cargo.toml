@@ -18,6 +18,7 @@ tracing = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "macros", "process", "rt", "time"] }
 
 [dev-dependencies]
+fcp-async-core = { workspace = true }
 pretty_assertions = { workspace = true }
 reqwest = { workspace = true }
 fcp-manifest = { workspace = true }

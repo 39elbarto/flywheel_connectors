@@ -772,7 +772,7 @@ mod tests {
         assert!(matches!(api.poll(None), PollResult::FatalError { .. }));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn fake_polling_connector_shutdown() {
         let api = FakePollingApi::always_success(2);
         let connector = FakePollingConnector::new(api);
@@ -780,9 +780,9 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         // Run briefly then shutdown
-        let handle = tokio::spawn(async move { connector.run(shutdown_rx).await });
+        let handle = fcp_async_core::task::spawn(async move { connector.run(shutdown_rx).await });
 
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        fcp_async_core::time::sleep(std::time::Duration::from_millis(50)).await;
         shutdown_tx.send(true).unwrap();
 
         let (outcome, stats) = handle.await.unwrap();
@@ -791,7 +791,7 @@ mod tests {
         assert!(stats.successful_polls > 0);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn fake_polling_connector_fatal_error() {
         let api = FakePollingApi::fail_after(1, FakePollingError::AuthFailed);
         let connector = FakePollingConnector::new(api);
@@ -802,7 +802,7 @@ mod tests {
         assert!(matches!(outcome, SupervisorOutcome::FatalError { .. }));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn fake_polling_connector_max_failures() {
         let api = FakePollingApi::fail_after(0, FakePollingError::NetworkError);
         let connector = FakePollingConnector::new(api)

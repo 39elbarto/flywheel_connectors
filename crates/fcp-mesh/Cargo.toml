@@ -32,13 +32,13 @@ serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
 thiserror.workspace = true
-tokio.workspace = true
 tracing.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
 ciborium.workspace = true
 criterion.workspace = true
+fcp-async-core = { path = "../fcp-async-core" }
 fcp-cbor = { path = "../fcp-cbor" }
 fcp-testkit = { path = "../fcp-testkit" }
 

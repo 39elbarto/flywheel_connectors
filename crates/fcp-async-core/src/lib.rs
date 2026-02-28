@@ -510,7 +510,7 @@ pub mod sync {
 
 /// Task re-exports.
 pub mod task {
-    pub use tokio::task::{JoinHandle, spawn};
+    pub use tokio::task::{JoinHandle, spawn, yield_now};
 }
 
 /// Tokio IO re-exports.
@@ -712,17 +712,18 @@ mod tests {
     };
 
     use super::{
-        AsyncError, CancellationToken, ContextScope, ExecutionContext, TaskGroup, channel,
+        AsyncError, CancellationToken, ContextScope, ExecutionContext, TaskGroup, channel, runtime,
+        task, time,
     };
 
-    #[tokio::test]
+    #[runtime::test]
     async fn cancellation_propagates_to_all_listeners() {
         let token = CancellationToken::new();
         let mut listener_a = token.subscribe();
         let mut listener_b = token.subscribe();
 
-        let task_a = tokio::spawn(async move { listener_a.cancelled().await });
-        let task_b = tokio::spawn(async move { listener_b.cancelled().await });
+        let task_a = task::spawn(async move { listener_a.cancelled().await });
+        let task_b = task::spawn(async move { listener_b.cancelled().await });
 
         token.cancel();
 
@@ -730,7 +731,7 @@ mod tests {
         assert!(task_b.await.expect("join task_b").is_ok());
     }
 
-    #[tokio::test]
+    #[runtime::test]
     async fn bounded_queue_enforces_capacity() {
         let (sender, mut receiver) = channel::bounded::<u8>("test-queue", 1);
 
@@ -743,7 +744,7 @@ mod tests {
         assert_eq!(receiver.recv().await, Some(3));
     }
 
-    #[tokio::test]
+    #[runtime::test]
     async fn task_group_structured_shutdown() {
         let mut group = TaskGroup::new();
         let mut shutdown = group.subscribe_cancellation();
@@ -757,7 +758,7 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    #[tokio::test]
+    #[runtime::test]
     async fn cancellation_storm_drains_task_group_without_orphans() {
         let active = Arc::new(AtomicUsize::new(0));
         let mut group = TaskGroup::new();
@@ -773,19 +774,19 @@ mod tests {
             });
         }
 
-        tokio::task::yield_now().await;
+        task::yield_now().await;
 
         let shutdown = group.shutdown(Duration::from_secs(1)).await;
         assert!(shutdown.is_ok());
         assert_eq!(active.load(Ordering::SeqCst), 0);
     }
 
-    #[tokio::test]
+    #[runtime::test]
     async fn request_context_deadline_times_out() {
         let context = ExecutionContext::request_scoped(Duration::from_millis(10));
         let err = context
             .run(async {
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                time::sleep(Duration::from_millis(50)).await;
             })
             .await
             .expect_err("deadline should timeout");
@@ -793,14 +794,14 @@ mod tests {
         assert_eq!(context.scope(), ContextScope::Request);
     }
 
-    #[tokio::test]
+    #[runtime::test]
     async fn request_context_cancellation_precedes_deadline() {
         let context = ExecutionContext::request_scoped(Duration::from_secs(1));
         context.cancel();
 
         let err = context
             .run(async {
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                time::sleep(Duration::from_secs(5)).await;
             })
             .await
             .expect_err("cancelled context should fail");

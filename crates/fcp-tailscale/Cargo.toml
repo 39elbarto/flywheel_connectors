@@ -25,6 +25,7 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+fcp-async-core = { path = "../fcp-async-core" }
 semver = "1.0"
 fcp-cbor = { path = "../fcp-cbor" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

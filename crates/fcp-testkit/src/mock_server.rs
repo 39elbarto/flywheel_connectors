@@ -321,7 +321,7 @@ impl MockScenarioBuilder {
 mod tests {
     use super::*;
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_mock_server_get() {
         let mock = MockApiServer::start().await;
         mock.expect_get("/api/test", serde_json::json!({"status": "ok"}))
@@ -339,7 +339,7 @@ mod tests {
         assert_eq!(body["status"], "ok");
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_mock_server_post() {
         let mock = MockApiServer::start().await;
         mock.expect_post("/api/create", serde_json::json!({"id": "123"}))
@@ -357,7 +357,7 @@ mod tests {
         mock.assert_received("/api/create").await;
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_mock_server_error() {
         let mock = MockApiServer::start().await;
         mock.expect_error(

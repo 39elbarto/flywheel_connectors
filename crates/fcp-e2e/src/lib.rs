@@ -1168,7 +1168,7 @@ mod tests {
         )
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn runs_minimal_suite() {
         let mut connector = DummyConnector::new();
         let suite = ConnectorSuite::minimal("dummy_suite", test_handshake());
@@ -1182,7 +1182,7 @@ mod tests {
         assert!(!report.logs.is_empty(), "logs should be emitted");
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn logs_denied_invoke() {
         let mut connector = DummyConnector::new();
         let invoke = InvokeRequest {
@@ -1228,7 +1228,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn logs_rate_limit_metadata_from_throttle_violation() {
         let mut connector = DummyConnector::new();
         let invoke = InvokeRequest {
@@ -1297,7 +1297,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn runs_compliance_suite() {
         let raw = include_str!("../../../tests/vectors/manifest/manifest_valid.toml");
         let manifest = with_computed_interface_hash(raw);
@@ -1315,7 +1315,7 @@ mod tests {
         assert!(!report.logs.is_empty(), "logs should be emitted");
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn compliance_checks_simulate_and_decision_receipt() {
         let raw = include_str!("../../../tests/vectors/manifest/manifest_valid.toml");
         let manifest = with_computed_interface_hash(raw);
@@ -1368,7 +1368,7 @@ mod tests {
         assert!(report.passed, "compliance should pass with expected denial");
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn mock_server_smoke() {
         let mock = MockApiServer::start().await;
         mock.expect_get("/health", serde_json::json!({ "ok": true }))
@@ -1386,7 +1386,7 @@ mod tests {
         mock.assert_request_count(1).await;
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn runs_batch_suites() {
         let mut connector = DummyConnector::new();
         let suites = vec![
@@ -1717,7 +1717,7 @@ mod tests {
         assert_eq!(suite.manifest_toml, "manifest_content");
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn runs_echo_invoke_suite() {
         let mut connector = DummyConnector::new();
         let invoke = InvokeRequest {
@@ -1766,7 +1766,7 @@ mod tests {
         assert_eq!(invoke_entry.result, "pass");
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn batch_report_aggregates_pass_status() {
         let mut connector = DummyConnector::new();
         let suites = vec![

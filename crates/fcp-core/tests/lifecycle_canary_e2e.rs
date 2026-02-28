@@ -311,7 +311,7 @@ async fn deploy_to_canary(
 
 /// Test scenario: A healthy canary connector should be automatically promoted to production
 /// once it meets the promotion threshold and minimum sample requirements.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_healthy_canary_promotes_to_production() {
     let mut ctx = E2ETestContext::new("healthy_canary_promotes_to_production");
     let connector_id = test_connector_id();
@@ -420,7 +420,7 @@ async fn test_healthy_canary_promotes_to_production() {
 
 /// Test scenario: An unhealthy canary connector should trigger automatic rollback
 /// when health drops below the rollback threshold.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_unhealthy_canary_triggers_rollback() {
     let mut ctx = E2ETestContext::new("unhealthy_canary_triggers_rollback");
     let connector_id = test_connector_id();
@@ -532,7 +532,7 @@ async fn test_unhealthy_canary_triggers_rollback() {
 /// Test scenario: Deploy v1.0.0 to production, then deploy v1.1.0 as canary.
 /// When v1.1.0 canary fails health checks, rollback should occur and
 /// the connector can be retried or disabled.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 #[allow(clippy::too_many_lines)]
 async fn test_multi_version_canary_rollback() {
     let mut ctx = E2ETestContext::new("multi_version_canary_rollback");
@@ -709,7 +709,7 @@ async fn test_multi_version_canary_rollback() {
 
 /// Test scenario: Canary health is between rollback and promotion thresholds.
 /// System should wait for more data before making a decision.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_canary_gray_zone_waits() {
     let mut ctx = E2ETestContext::new("canary_gray_zone_waits");
     let connector_id = test_connector_id();
@@ -787,7 +787,7 @@ async fn test_canary_gray_zone_waits() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Test scenario: Even with good health, promotion waits for minimum samples.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn test_insufficient_samples_delays_promotion() {
     let mut ctx = E2ETestContext::new("insufficient_samples_delays_promotion");
     let connector_id = test_connector_id();

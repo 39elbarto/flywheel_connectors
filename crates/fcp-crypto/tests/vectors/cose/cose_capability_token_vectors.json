@@ -1,0 +1,116 @@
+{
+  "_comment": "Golden vectors for FCP2 COSE_Sign1 capability tokens with deterministic Ed25519 signatures",
+  "_version": "1.0.0",
+  "_generated": "2026-02-27",
+  "_sources": [
+    "RFC 8152 COSE_Sign1 with EdDSA",
+    "RFC 8392 CWT claims",
+    "FCP2 custom claims in negative key range",
+    "Key: RFC 8032 §7.1 Test Vector 1"
+  ],
+
+  "signing_key": {
+    "description": "RFC 8032 Test Vector 1 key pair used for deterministic token generation",
+    "secret_key_hex": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+    "public_key_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+    "key_id_hex": "__GENERATE__"
+  },
+
+  "cwt_claim_keys": {
+    "description": "Standard CWT (RFC 8392) and FCP2 private claim keys",
+    "standard": {
+      "iss": 1,
+      "sub": 2,
+      "aud": 3,
+      "exp": 4,
+      "nbf": 5,
+      "iat": 6,
+      "cti": 7
+    },
+    "fcp2_private": {
+      "CAPABILITY_ID": -65537,
+      "ZONE_ID": -65538,
+      "OPERATIONS": -65539,
+      "PRINCIPAL_ID": -65540,
+      "DELEGATION_DEPTH": -65541,
+      "PARENT_TOKEN": -65542,
+      "ISS_NODE": -65543,
+      "AUD_BINARY": -65544,
+      "GRANT_OBJECT_IDS": -65545,
+      "HOLDER_NODE": -65546,
+      "CHK_ID": -65547,
+      "CHK_SEQ": -65548,
+      "CONSTRAINTS": -65549,
+      "GRANTS": -65550,
+      "INSTANCE_ID": -65551
+    }
+  },
+
+  "token_vectors": [
+    {
+      "name": "minimal_capability_token",
+      "description": "Token with only issuer, zone_id, and capability_id",
+      "claims": {
+        "iss": "node:primary",
+        "zone_id": "z:work",
+        "capability_id": "cap:test.read"
+      },
+      "claims_cbor_hex": "__GENERATE__",
+      "token_cbor_hex": "__GENERATE__",
+      "token_cbor_len": "__GENERATE__"
+    },
+    {
+      "name": "full_fcp2_capability_token",
+      "description": "Token with standard CWT + FCP2 claims for a Discord send capability",
+      "claims": {
+        "iss": "node:primary",
+        "sub": "agent:claude",
+        "aud": "node:target",
+        "cti_hex": "0102030405060708090a0b0c0d0e0f10",
+        "zone_id": "z:work",
+        "capability_id": "cap:discord.send",
+        "principal_id": "agent:claude",
+        "operations": ["discord.send_message", "discord.read_messages"],
+        "iss_node": "node:primary",
+        "holder_node": "node:mobile"
+      },
+      "claims_cbor_hex": "__GENERATE__",
+      "token_cbor_hex": "__GENERATE__",
+      "token_cbor_len": "__GENERATE__"
+    }
+  ],
+
+  "determinism_properties": [
+    {
+      "name": "claims_order_independent",
+      "description": "BTreeMap ensures claim insertion order does not affect CBOR output"
+    },
+    {
+      "name": "signature_deterministic",
+      "description": "Ed25519 is deterministic: same key + same TBS = same signature"
+    },
+    {
+      "name": "kid_in_protected_header",
+      "description": "KeyId (BLAKE3 truncated 8 bytes) is in the protected header"
+    }
+  ],
+
+  "verification_test_cases": [
+    {
+      "name": "valid_token_roundtrip",
+      "description": "Sign → serialize → deserialize → verify succeeds"
+    },
+    {
+      "name": "wrong_key_fails",
+      "description": "Verify with different public key fails"
+    },
+    {
+      "name": "tampered_payload_fails",
+      "description": "Modifying payload bytes after signing fails verification"
+    },
+    {
+      "name": "kid_routing",
+      "description": "Protected header KID matches signing key's computed KeyId"
+    }
+  ]
+}

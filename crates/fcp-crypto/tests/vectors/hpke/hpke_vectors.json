@@ -1,0 +1,132 @@
+{
+  "_comment": "Golden vectors for FCP2 HPKE sealed boxes (RFC 9180)",
+  "_version": "1.0.0",
+  "_generated": "2026-02-27",
+  "_sources": [
+    "FCP2 spec: DHKEM(X25519, HKDF-SHA256) + HKDF-SHA256 + ChaCha20-Poly1305",
+    "AAD = deterministic CBOR(zone_id, recipient_node_id, purpose, issued_at)",
+    "Info string: b\"FCP2-HPKE\""
+  ],
+
+  "profile": {
+    "kem": "DHKEM(X25519, HKDF-SHA256)",
+    "kdf": "HKDF-SHA256",
+    "aead": "ChaCha20-Poly1305",
+    "info": "FCP2-HPKE",
+    "info_hex": "464350322d48504b45"
+  },
+
+  "size_invariants": {
+    "enc_size": 32,
+    "tag_size": 16,
+    "ciphertext_overhead": 16,
+    "description": "ciphertext.len() == plaintext.len() + tag_size"
+  },
+
+  "purpose_strings": [
+    {
+      "name": "ZONE_KEY",
+      "ascii": "FCP2-ZONE-KEY",
+      "hex": "464350322d5a4f4e452d4b4559"
+    },
+    {
+      "name": "OBJECTID_KEY",
+      "ascii": "FCP2-OBJECTID-KEY",
+      "hex": "464350322d4f424a45435449442d4b4559"
+    },
+    {
+      "name": "OWNER_SHARE",
+      "ascii": "FCP2-OWNER-SHARE",
+      "hex": "464350322d4f574e45522d5348415245"
+    },
+    {
+      "name": "SECRET_SHARE",
+      "ascii": "FCP2-SECRET-SHARE",
+      "hex": "464350322d5345435245542d5348415245"
+    }
+  ],
+
+  "aad_encoding_vectors": [
+    {
+      "name": "zone_key_aad",
+      "description": "AAD for zone key distribution to node-123 in z:work",
+      "zone_id_ascii": "z:work",
+      "zone_id_hex": "7a3a776f726b",
+      "recipient_node_id_ascii": "node-123",
+      "recipient_node_id_hex": "6e6f64652d313233",
+      "purpose": "FCP2-ZONE-KEY",
+      "issued_at": 1700000000,
+      "expected_aad_hex": "__GENERATE__"
+    },
+    {
+      "name": "objectid_key_aad",
+      "description": "AAD for ObjectId key distribution",
+      "zone_id_ascii": "z:work",
+      "zone_id_hex": "7a3a776f726b",
+      "recipient_node_id_ascii": "node-123",
+      "recipient_node_id_hex": "6e6f64652d313233",
+      "purpose": "FCP2-OBJECTID-KEY",
+      "issued_at": 1700000000,
+      "expected_aad_hex": "__GENERATE__"
+    },
+    {
+      "name": "secret_share_aad",
+      "description": "AAD for secret share distribution",
+      "zone_id_ascii": "z:work",
+      "zone_id_hex": "7a3a776f726b",
+      "recipient_node_id_ascii": "node-123",
+      "recipient_node_id_hex": "6e6f64652d313233",
+      "purpose": "FCP2-SECRET-SHARE",
+      "issued_at": 1700000000,
+      "expected_aad_hex": "__GENERATE__"
+    },
+    {
+      "name": "owner_share_aad",
+      "description": "AAD for owner share distribution to primary node",
+      "zone_id_ascii": "z:owner",
+      "zone_id_hex": "7a3a6f776e6572",
+      "recipient_node_id_ascii": "node-primary",
+      "recipient_node_id_hex": "6e6f64652d7072696d617279",
+      "purpose": "FCP2-OWNER-SHARE",
+      "issued_at": 1700000000,
+      "expected_aad_hex": "__GENERATE__"
+    }
+  ],
+
+  "aad_sensitivity_properties": [
+    {
+      "name": "zone_id_binding",
+      "description": "Changing zone_id changes AAD → decryption fails"
+    },
+    {
+      "name": "recipient_binding",
+      "description": "Changing recipient_node_id changes AAD → decryption fails"
+    },
+    {
+      "name": "purpose_binding",
+      "description": "Changing purpose changes AAD → decryption fails"
+    },
+    {
+      "name": "timestamp_binding",
+      "description": "Changing issued_at changes AAD → decryption fails"
+    }
+  ],
+
+  "roundtrip_test_cases": [
+    {
+      "name": "empty_plaintext",
+      "plaintext_hex": "",
+      "expected_ciphertext_len": 16
+    },
+    {
+      "name": "short_plaintext",
+      "plaintext_hex": "736563726574",
+      "expected_ciphertext_len": 22
+    },
+    {
+      "name": "zone_key_material",
+      "plaintext_hex": "2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a",
+      "expected_ciphertext_len": 48
+    }
+  ]
+}

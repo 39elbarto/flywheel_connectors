@@ -1,0 +1,101 @@
+{
+  "_comment": "Golden vectors for FCP2 canonical signing-bytes procedure",
+  "_version": "1.0.0",
+  "_generated": "2026-02-27",
+  "_sources": [
+    "FCP2 spec: signing-bytes = SIGNING_DOMAIN || schema_hash || cbor_bytes",
+    "schema_hash = BLAKE3(schema_id)[0..8]",
+    "SIGNING_DOMAIN = b\"FCP2-SIGN-V1\""
+  ],
+
+  "constants": {
+    "signing_domain_ascii": "FCP2-SIGN-V1",
+    "signing_domain_hex": "464350322d5349474e2d5631",
+    "schema_hash_size": 8,
+    "signing_domain_size": 12
+  },
+
+  "schema_hash_vectors": [
+    {
+      "name": "capability_object",
+      "schema_id": "fcp.core.CapabilityObject/1.0.0",
+      "expected_hash_hex": "28cb6f0e02d0c489"
+    },
+    {
+      "name": "operation_intent",
+      "schema_id": "fcp.core.OperationIntent/1.0.0",
+      "expected_hash_hex": "__GENERATE__"
+    },
+    {
+      "name": "operation_receipt",
+      "schema_id": "fcp.core.OperationReceipt/1.0.0",
+      "expected_hash_hex": "__GENERATE__"
+    },
+    {
+      "name": "audit_event",
+      "schema_id": "fcp.core.AuditEvent/1.0.0",
+      "expected_hash_hex": "__GENERATE__"
+    },
+    {
+      "name": "event_envelope",
+      "schema_id": "fcp.core.EventEnvelope/1.0.0",
+      "expected_hash_hex": "__GENERATE__"
+    },
+    {
+      "name": "zone_key_manifest",
+      "schema_id": "fcp.zone.ZoneKeyManifest/1.0.0",
+      "expected_hash_hex": "__GENERATE__"
+    },
+    {
+      "name": "zone_definition",
+      "schema_id": "fcp.zone.ZoneDefinition/1.0.0",
+      "expected_hash_hex": "__GENERATE__"
+    },
+    {
+      "name": "gossip_summary",
+      "schema_id": "fcp.mesh.GossipSummary/1.0.0",
+      "expected_hash_hex": "__GENERATE__"
+    }
+  ],
+
+  "schema_hash_properties": [
+    {
+      "name": "version_sensitivity",
+      "description": "Changing any version component changes the hash",
+      "schema_id_a": "fcp.core.CapabilityObject/1.0.0",
+      "schema_id_b": "fcp.core.CapabilityObject/1.0.1",
+      "expected": "different_hashes"
+    },
+    {
+      "name": "namespace_sensitivity",
+      "description": "Changing namespace changes the hash",
+      "schema_id_a": "fcp.core.CapabilityObject/1.0.0",
+      "schema_id_b": "fcp.mesh.CapabilityObject/1.0.0",
+      "expected": "different_hashes"
+    },
+    {
+      "name": "name_sensitivity",
+      "description": "Changing name changes the hash",
+      "schema_id_a": "fcp.core.CapabilityObject/1.0.0",
+      "schema_id_b": "fcp.core.OperationIntent/1.0.0",
+      "expected": "different_hashes"
+    }
+  ],
+
+  "signing_bytes_vectors": [
+    {
+      "name": "capability_object_empty_cbor",
+      "description": "Signing bytes for CapabilityObject with empty CBOR payload",
+      "schema_id": "fcp.core.CapabilityObject/1.0.0",
+      "cbor_hex": "",
+      "expected_signing_bytes_hex": "464350322d5349474e2d563128cb6f0e02d0c489"
+    },
+    {
+      "name": "capability_object_minimal_cbor",
+      "description": "Signing bytes with a minimal CBOR map {\"test\": true}",
+      "schema_id": "fcp.core.CapabilityObject/1.0.0",
+      "cbor_hex": "a16474657374f5",
+      "expected_signing_bytes_hex": "__GENERATE__"
+    }
+  ]
+}

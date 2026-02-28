@@ -37,6 +37,7 @@ pub use compliance::{
 };
 pub use vectors::capability::CapabilityTokenGoldenVector;
 pub use vectors::core::{CanonicalPayloadGoldenVector, ObjectIdGoldenVector};
+pub use vectors::datagram::{DatagramErrorVector, DatagramGoldenVector, DatagramMacGoldenVector};
 pub use vectors::fcpc::FcpcGoldenVector;
 pub use vectors::fcps::FcpsGoldenVector;
 pub use vectors::holder_proof::HolderProofGoldenVector;

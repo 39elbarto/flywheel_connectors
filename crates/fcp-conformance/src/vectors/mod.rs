@@ -5,6 +5,7 @@
 
 pub mod capability;
 pub mod core;
+pub mod datagram;
 pub mod fcpc;
 pub mod fcps;
 pub mod holder_proof;

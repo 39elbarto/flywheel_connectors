@@ -1,19 +1,19 @@
 {
   "_comment": "Golden vectors for FCP2 COSE_Sign1 capability tokens with deterministic Ed25519 signatures",
   "_version": "1.0.0",
-  "_generated": "2026-02-27",
+  "_generated": "2026-02-28",
   "_sources": [
     "RFC 8152 COSE_Sign1 with EdDSA",
     "RFC 8392 CWT claims",
     "FCP2 custom claims in negative key range",
-    "Key: RFC 8032 §7.1 Test Vector 1"
+    "Key: RFC 8032 Test Vector 1"
   ],
 
   "signing_key": {
     "description": "RFC 8032 Test Vector 1 key pair used for deterministic token generation",
     "secret_key_hex": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
     "public_key_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
-    "key_id_hex": "__GENERATE__"
+    "key_id_hex": "96a399521a324cbf"
   },
 
   "cwt_claim_keys": {
@@ -55,9 +55,8 @@
         "zone_id": "z:work",
         "capability_id": "cap:test.read"
       },
-      "claims_cbor_hex": "__GENERATE__",
-      "token_cbor_hex": "__GENERATE__",
-      "token_cbor_len": "__GENERATE__"
+      "claims_cbor_hex": "a33a00010001667a3a776f726b3a000100006d6361703a746573742e72656164016c6e6f64653a7072696d617279",
+      "token_cbor_hex": "844da20127044896a399521a324cbfa0582ea33a00010001667a3a776f726b3a000100006d6361703a746573742e72656164016c6e6f64653a7072696d6172795840a98203646e5f53ff223b28cf1c702938e84f3f5f8d645d8aa8fab306326ec71080e86e98d2c81e7a00294ee0a7815d37e6a2dcc62656101a78f85dd3e7dc6306"
     },
     {
       "name": "full_fcp2_capability_token",
@@ -74,9 +73,8 @@
         "iss_node": "node:primary",
         "holder_node": "node:mobile"
       },
-      "claims_cbor_hex": "__GENERATE__",
-      "token_cbor_hex": "__GENERATE__",
-      "token_cbor_len": "__GENERATE__"
+      "claims_cbor_hex": "aa3a000100096b6e6f64653a6d6f62696c653a000100066c6e6f64653a7072696d6172793a000100036c6167656e743a636c617564653a000100028274646973636f72642e73656e645f6d65737361676575646973636f72642e726561645f6d657373616765733a00010001667a3a776f726b3a00010000706361703a646973636f72642e73656e64016c6e6f64653a7072696d617279026c6167656e743a636c61756465036b6e6f64653a74617267657407500102030405060708090a0b0c0d0e0f10",
+      "token_cbor_hex": "844da20127044896a399521a324cbfa058c4aa3a000100096b6e6f64653a6d6f62696c653a000100066c6e6f64653a7072696d6172793a000100036c6167656e743a636c617564653a000100028274646973636f72642e73656e645f6d65737361676575646973636f72642e726561645f6d657373616765733a00010001667a3a776f726b3a00010000706361703a646973636f72642e73656e64016c6e6f64653a7072696d617279026c6167656e743a636c61756465036b6e6f64653a74617267657407500102030405060708090a0b0c0d0e0f10584017663d6dae1b6e3c5ad8d2b24915d23ba1185175e201f366f871e3195d39f5b1e80ca19082ad4a36d861d6e08b83e20b7caec5afe255eba507032de3eaeff605"
     }
   ],
 
@@ -98,7 +96,7 @@
   "verification_test_cases": [
     {
       "name": "valid_token_roundtrip",
-      "description": "Sign → serialize → deserialize → verify succeeds"
+      "description": "Sign then serialize then deserialize then verify succeeds"
     },
     {
       "name": "wrong_key_fails",
@@ -110,7 +108,7 @@
     },
     {
       "name": "kid_routing",
-      "description": "Protected header KID matches signing key's computed KeyId"
+      "description": "Protected header KID matches signing key computed KeyId"
     }
   ]
 }

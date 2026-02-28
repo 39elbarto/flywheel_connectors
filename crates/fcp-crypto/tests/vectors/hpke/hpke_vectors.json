@@ -1,7 +1,7 @@
 {
   "_comment": "Golden vectors for FCP2 HPKE sealed boxes (RFC 9180)",
   "_version": "1.0.0",
-  "_generated": "2026-02-27",
+  "_generated": "2026-02-28",
   "_sources": [
     "FCP2 spec: DHKEM(X25519, HKDF-SHA256) + HKDF-SHA256 + ChaCha20-Poly1305",
     "AAD = deterministic CBOR(zone_id, recipient_node_id, purpose, issued_at)",
@@ -56,7 +56,7 @@
       "recipient_node_id_hex": "6e6f64652d313233",
       "purpose": "FCP2-ZONE-KEY",
       "issued_at": 1700000000,
-      "expected_aad_hex": "__GENERATE__"
+      "expected_aad_hex": "a467707572706f73654d464350322d5a4f4e452d4b4559677a6f6e655f6964467a3a776f726b696973737565645f61741a6553f10071726563697069656e745f6e6f64655f6964486e6f64652d313233"
     },
     {
       "name": "objectid_key_aad",
@@ -67,7 +67,7 @@
       "recipient_node_id_hex": "6e6f64652d313233",
       "purpose": "FCP2-OBJECTID-KEY",
       "issued_at": 1700000000,
-      "expected_aad_hex": "__GENERATE__"
+      "expected_aad_hex": "a467707572706f736551464350322d4f424a45435449442d4b4559677a6f6e655f6964467a3a776f726b696973737565645f61741a6553f10071726563697069656e745f6e6f64655f6964486e6f64652d313233"
     },
     {
       "name": "secret_share_aad",
@@ -78,7 +78,7 @@
       "recipient_node_id_hex": "6e6f64652d313233",
       "purpose": "FCP2-SECRET-SHARE",
       "issued_at": 1700000000,
-      "expected_aad_hex": "__GENERATE__"
+      "expected_aad_hex": "a467707572706f736551464350322d5345435245542d5348415245677a6f6e655f6964467a3a776f726b696973737565645f61741a6553f10071726563697069656e745f6e6f64655f6964486e6f64652d313233"
     },
     {
       "name": "owner_share_aad",
@@ -89,26 +89,26 @@
       "recipient_node_id_hex": "6e6f64652d7072696d617279",
       "purpose": "FCP2-OWNER-SHARE",
       "issued_at": 1700000000,
-      "expected_aad_hex": "__GENERATE__"
+      "expected_aad_hex": "a467707572706f736550464350322d4f574e45522d5348415245677a6f6e655f6964477a3a6f776e6572696973737565645f61741a6553f10071726563697069656e745f6e6f64655f69644c6e6f64652d7072696d617279"
     }
   ],
 
   "aad_sensitivity_properties": [
     {
       "name": "zone_id_binding",
-      "description": "Changing zone_id changes AAD → decryption fails"
+      "description": "Changing zone_id changes AAD and decryption fails"
     },
     {
       "name": "recipient_binding",
-      "description": "Changing recipient_node_id changes AAD → decryption fails"
+      "description": "Changing recipient_node_id changes AAD and decryption fails"
     },
     {
       "name": "purpose_binding",
-      "description": "Changing purpose changes AAD → decryption fails"
+      "description": "Changing purpose changes AAD and decryption fails"
     },
     {
       "name": "timestamp_binding",
-      "description": "Changing issued_at changes AAD → decryption fails"
+      "description": "Changing issued_at changes AAD and decryption fails"
     }
   ],
 

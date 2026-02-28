@@ -1,7 +1,7 @@
 {
   "_comment": "Golden vectors for FCP2 canonical signing-bytes procedure",
   "_version": "1.0.0",
-  "_generated": "2026-02-27",
+  "_generated": "2026-02-28",
   "_sources": [
     "FCP2 spec: signing-bytes = SIGNING_DOMAIN || schema_hash || cbor_bytes",
     "schema_hash = BLAKE3(schema_id)[0..8]",
@@ -24,37 +24,37 @@
     {
       "name": "operation_intent",
       "schema_id": "fcp.core.OperationIntent/1.0.0",
-      "expected_hash_hex": "__GENERATE__"
+      "expected_hash_hex": "90b92a3392632649"
     },
     {
       "name": "operation_receipt",
       "schema_id": "fcp.core.OperationReceipt/1.0.0",
-      "expected_hash_hex": "__GENERATE__"
+      "expected_hash_hex": "cdf14ef8511a10da"
     },
     {
       "name": "audit_event",
       "schema_id": "fcp.core.AuditEvent/1.0.0",
-      "expected_hash_hex": "__GENERATE__"
+      "expected_hash_hex": "202955864cc83247"
     },
     {
       "name": "event_envelope",
       "schema_id": "fcp.core.EventEnvelope/1.0.0",
-      "expected_hash_hex": "__GENERATE__"
+      "expected_hash_hex": "13e8cb14a6eba23d"
     },
     {
       "name": "zone_key_manifest",
       "schema_id": "fcp.zone.ZoneKeyManifest/1.0.0",
-      "expected_hash_hex": "__GENERATE__"
+      "expected_hash_hex": "61076197fdd900bf"
     },
     {
       "name": "zone_definition",
       "schema_id": "fcp.zone.ZoneDefinition/1.0.0",
-      "expected_hash_hex": "__GENERATE__"
+      "expected_hash_hex": "2f128a455e271394"
     },
     {
       "name": "gossip_summary",
       "schema_id": "fcp.mesh.GossipSummary/1.0.0",
-      "expected_hash_hex": "__GENERATE__"
+      "expected_hash_hex": "ccc23dd98cf328bd"
     }
   ],
 
@@ -95,7 +95,7 @@
       "description": "Signing bytes with a minimal CBOR map {\"test\": true}",
       "schema_id": "fcp.core.CapabilityObject/1.0.0",
       "cbor_hex": "a16474657374f5",
-      "expected_signing_bytes_hex": "__GENERATE__"
+      "expected_signing_bytes_hex": "464350322d5349474e2d563128cb6f0e02d0c489a16474657374f5"
     }
   ]
 }

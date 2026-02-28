@@ -8,9 +8,7 @@
 use fcp_crypto::canonicalize::{
     canonical_signing_bytes, schema_hash, to_deterministic_cbor, SCHEMA_HASH_SIZE, SIGNING_DOMAIN,
 };
-use fcp_crypto::cose::{
-    cwt_claims, fcp2_claims, CapabilityTokenBuilder, CoseToken, CwtClaims, COSE_ALG_EDDSA,
-};
+use fcp_crypto::cose::{CoseToken, CwtClaims, COSE_ALG_EDDSA};
 use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_crypto::hpke_seal::{
     hpke_open, hpke_seal, Fcp2Aad, HpkeSealedBox, HPKE_ENC_SIZE, HPKE_TAG_SIZE,
@@ -111,6 +109,7 @@ struct CoseCapabilityVectors {
 #[derive(Debug, Deserialize)]
 struct SigningKeyInfo {
     secret_key_hex: String,
+    #[allow(dead_code)]
     public_key_hex: String,
     key_id_hex: String,
 }
@@ -146,11 +145,18 @@ fn load_hpke_vectors() -> HpkeVectors {
     serde_json::from_str(&content).expect("Failed to parse hpke_vectors.json")
 }
 
+fn load_cose_capability_vectors() -> CoseCapabilityVectors {
+    let content = fs::read_to_string("tests/vectors/cose/cose_capability_token_vectors.json")
+        .expect("Failed to read cose_capability_token_vectors.json");
+    serde_json::from_str(&content).expect("Failed to parse cose_capability_token_vectors.json")
+}
+
 fn signing_key_from_rfc8032_tv1() -> Ed25519SigningKey {
     let bytes = hex_to_bytes(
         "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
     );
-    Ed25519SigningKey::from_bytes(&bytes).expect("valid RFC 8032 TV1 key")
+    let arr: [u8; 32] = bytes.try_into().expect("key must be 32 bytes");
+    Ed25519SigningKey::from_bytes(&arr).expect("valid RFC 8032 TV1 key")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -671,6 +677,54 @@ fn test_cwt_claims_deterministic_insertion_order() {
 #[test]
 fn test_cose_algorithm_is_eddsa() {
     assert_eq!(COSE_ALG_EDDSA, -8, "COSE EdDSA algorithm ID must be -8");
+}
+
+#[test]
+fn test_cose_token_vectors_from_file() {
+    let vectors = load_cose_capability_vectors();
+    let sk_bytes = hex_to_bytes(&vectors.signing_key.secret_key_hex);
+    let sk_arr: [u8; 32] = sk_bytes.try_into().expect("key must be 32 bytes");
+    let sk = Ed25519SigningKey::from_bytes(&sk_arr).expect("valid key");
+    let pk = sk.verifying_key();
+
+    // Verify key_id matches
+    let expected_kid = hex_to_bytes(&vectors.signing_key.key_id_hex);
+    assert_eq!(
+        sk.key_id().as_bytes(),
+        expected_kid.as_slice(),
+        "KID mismatch from vector file"
+    );
+
+    // Verify each token vector
+    for tv in &vectors.token_vectors {
+        let token_bytes = hex_to_bytes(&tv.token_cbor_hex);
+        let parsed = CoseToken::from_cbor(&token_bytes)
+            .unwrap_or_else(|e| panic!("failed to parse token '{}': {e}", tv.name));
+
+        // Must verify with the expected public key
+        let claims = parsed
+            .verify(&pk)
+            .unwrap_or_else(|e| panic!("failed to verify token '{}': {e}", tv.name));
+
+        // Verify claims CBOR matches
+        let claims_cbor = claims.to_cbor().unwrap();
+        assert_eq!(
+            hex::encode(&claims_cbor),
+            tv.claims_cbor_hex,
+            "claims CBOR mismatch for '{}'",
+            tv.name
+        );
+
+        // Re-sign should produce identical token
+        let re_signed = CoseToken::sign(&sk, &claims).unwrap();
+        let re_signed_cbor = re_signed.to_cbor().unwrap();
+        assert_eq!(
+            hex::encode(&re_signed_cbor),
+            tv.token_cbor_hex,
+            "re-signed token CBOR mismatch for '{}' (not deterministic)",
+            tv.name
+        );
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

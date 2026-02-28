@@ -13,6 +13,7 @@ workspace = true
 
 [dependencies]
 # Core FCP types
+fcp-async-core = { path = "../fcp-async-core" }
 fcp-core = { path = "../fcp-core" }
 fcp-conformance = { path = "../fcp-conformance" }
 fcp-sdk = { path = "../fcp-sdk" }
@@ -44,6 +45,7 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 # Identifiers
 uuid.workspace = true
 chrono.workspace = true
+blake3.workspace = true
 
 # HTTP client for test assertions
 reqwest.workspace = true

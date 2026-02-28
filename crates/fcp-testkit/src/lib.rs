@@ -5,6 +5,7 @@
 //!
 //! - [`ConnectorTestHarness`] - A test harness that wraps connectors with assertions
 //! - [`MockApiServer`] - HTTP mock server with request/response recording
+//! - [`AsyncTestContext`] + async helpers for deterministic run/scenario correlation
 //! - Test fixtures for common FCP types
 //! - Assertion helpers for FCP responses
 //! - Tracing configuration for test output
@@ -12,12 +13,13 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use fcp_testkit::{ConnectorTestHarness, MockApiServer, fixtures};
+//! use fcp_testkit::{AsyncTestContext, ConnectorTestHarness, MockApiServer, fixtures};
 //!
-//! #[tokio::test]
+//! #[fcp_async_core::runtime::test]
 //! async fn test_my_connector() {
 //!     // Initialize test tracing
 //!     fcp_testkit::init_test_tracing();
+//!     let scenario = AsyncTestContext::for_scenario("my_connector.happy_path");
 //!
 //!     // Create a mock server
 //!     let mock = MockApiServer::start().await;
@@ -38,6 +40,7 @@
 //!     // Verify health
 //!     let health = harness.health().await;
 //!     assert!(health.is_ready());
+//!     assert!(!scenario.correlation_id().is_empty());
 //! }
 //! ```
 
@@ -46,6 +49,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 mod assertions;
+mod async_harness;
 pub mod fixtures;
 mod harness;
 mod log_scan;
@@ -54,6 +58,7 @@ pub mod supervisor_examples;
 mod tracing_config;
 
 pub use assertions::*;
+pub use async_harness::*;
 pub use harness::*;
 pub use log_scan::*;
 pub use mock_server::*;

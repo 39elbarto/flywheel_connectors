@@ -1,0 +1,203 @@
+//! Shared async test harness helpers for ASUPERSYNC migration work.
+//!
+//! This module centralizes common test utilities so crate and connector suites
+//! can avoid ad hoc runtime setup and unstable correlation conventions.
+
+use std::future::Future;
+use std::time::Duration;
+
+use chrono::Utc;
+use fcp_async_core::{AsyncError, ExecutionContext, channel, shutdown, task, time};
+use uuid::Uuid;
+
+/// Version tag for the shared async harness contract.
+pub const ASUPERSYNC_HARNESS_VERSION: &str = "asupersync-test-harness/v1";
+
+/// Scenario-level context used to correlate logs and artifacts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AsyncTestContext {
+    run: String,
+    scenario: String,
+    correlation: String,
+}
+
+impl AsyncTestContext {
+    /// Build a context from explicit run/scenario IDs.
+    #[must_use]
+    pub fn new(run_id: impl Into<String>, scenario_id: impl Into<String>) -> Self {
+        let run_id = run_id.into();
+        let scenario_id = scenario_id.into();
+        let correlation_id = deterministic_correlation_id(&run_id, &scenario_id);
+        Self {
+            run: run_id,
+            scenario: scenario_id,
+            correlation: correlation_id,
+        }
+    }
+
+    /// Build a context with a timestamp-derived run ID.
+    #[must_use]
+    pub fn for_scenario(scenario_id: impl Into<String>) -> Self {
+        let run_id = Utc::now().format("%Y%m%dT%H%M%S%.3fZ").to_string();
+        Self::new(run_id, scenario_id)
+    }
+
+    /// Stable run identifier.
+    #[must_use]
+    pub fn run_id(&self) -> &str {
+        &self.run
+    }
+
+    /// Stable scenario identifier.
+    #[must_use]
+    pub fn scenario_id(&self) -> &str {
+        &self.scenario
+    }
+
+    /// Deterministic correlation ID derived from run/scenario.
+    #[must_use]
+    pub fn correlation_id(&self) -> &str {
+        &self.correlation
+    }
+
+    /// Standardized JSON fields for structured logs.
+    #[must_use]
+    pub fn as_log_fields(&self) -> serde_json::Value {
+        serde_json::json!({
+            "harness_version": ASUPERSYNC_HARNESS_VERSION,
+            "run_id": self.run,
+            "scenario_id": self.scenario,
+            "correlation_id": self.correlation,
+        })
+    }
+}
+
+/// Deterministic correlation ID generator for test logs/artifacts.
+#[must_use]
+pub fn deterministic_correlation_id(run_id: &str, scenario_id: &str) -> String {
+    let key = format!("{run_id}:{scenario_id}");
+    let digest = blake3::hash(key.as_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest.as_bytes()[..16]);
+    // Preserve UUID variant/version semantics for easier downstream parsing.
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes).to_string()
+}
+
+/// Create a request-scoped execution context with a fixed timeout budget.
+#[must_use]
+pub fn request_context(timeout: Duration) -> ExecutionContext {
+    ExecutionContext::request_scoped(timeout)
+}
+
+/// Run a future with deterministic timeout behavior.
+///
+/// # Errors
+///
+/// Returns [`AsyncError::Timeout`] when the timeout budget is exhausted.
+/// Returns [`AsyncError::Cancelled`] when the context is cancelled first.
+pub async fn run_with_timeout<T, F>(timeout: Duration, future: F) -> Result<T, AsyncError>
+where
+    F: Future<Output = T>,
+{
+    request_context(timeout).run(future).await
+}
+
+/// Spawn a cancellation trigger for a context after the given delay.
+#[must_use]
+pub fn spawn_cancel_after(context: ExecutionContext, delay: Duration) -> task::JoinHandle<()> {
+    task::spawn(async move {
+        time::sleep(delay).await;
+        context.cancel();
+    })
+}
+
+/// Build a bounded queue pair for async backpressure tests.
+#[must_use]
+pub fn bounded_queue<T>(
+    name: impl Into<String>,
+    capacity: usize,
+) -> (channel::BoundedSender<T>, channel::BoundedReceiver<T>) {
+    channel::bounded(name, capacity)
+}
+
+/// Build a watch-based shutdown channel pair for shutdown/cancellation tests.
+#[must_use]
+pub fn shutdown_channel(
+    initial_shutdown: bool,
+) -> (channel::watch::Sender<bool>, channel::watch::Receiver<bool>) {
+    channel::watch::channel(initial_shutdown)
+}
+
+/// Sleep unless shutdown is signaled first.
+///
+/// # Errors
+///
+/// Returns [`AsyncError::Cancelled`] when shutdown is observed before sleep completes.
+pub async fn sleep_or_shutdown(
+    duration: Duration,
+    shutdown_rx: &mut channel::watch::Receiver<bool>,
+) -> Result<(), AsyncError> {
+    shutdown::sleep_or_shutdown(duration, shutdown_rx).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deterministic_correlation_id_is_stable() {
+        let first = deterministic_correlation_id("run-1", "scenario-a");
+        let second = deterministic_correlation_id("run-1", "scenario-a");
+        let third = deterministic_correlation_id("run-2", "scenario-a");
+
+        assert_eq!(first, second);
+        assert_ne!(first, third);
+    }
+
+    #[test]
+    fn context_includes_log_fields() {
+        let context = AsyncTestContext::new("run-123", "scenario-xyz");
+        let fields = context.as_log_fields();
+
+        assert_eq!(fields["harness_version"], ASUPERSYNC_HARNESS_VERSION);
+        assert_eq!(fields["run_id"], "run-123");
+        assert_eq!(fields["scenario_id"], "scenario-xyz");
+        assert_eq!(fields["correlation_id"], context.correlation_id());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn run_with_timeout_times_out() {
+        let result = run_with_timeout(Duration::from_millis(5), async {
+            time::sleep(Duration::from_millis(20)).await;
+            42_u8
+        })
+        .await;
+
+        assert!(matches!(result, Err(AsyncError::Timeout { .. })));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn bounded_queue_sends_and_receives() {
+        let (sender, mut receiver) = bounded_queue("test-queue", 4);
+        sender.send(7_u8).await.expect("send to bounded queue");
+        assert_eq!(receiver.recv().await, Some(7_u8));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn spawn_cancel_after_triggers_cancellation() {
+        let context = request_context(Duration::from_secs(1));
+        let cancel_handle = spawn_cancel_after(context.clone(), Duration::from_millis(5));
+
+        let result = context
+            .run(async {
+                time::sleep(Duration::from_millis(50)).await;
+                "done"
+            })
+            .await;
+
+        cancel_handle.await.expect("cancellation task join");
+        assert!(matches!(result, Err(AsyncError::Cancelled)));
+    }
+}

@@ -89,6 +89,7 @@ impl DiscordApiClient {
     }
 
     /// Make a request that expects no response body (e.g., DELETE returning 204).
+    #[allow(clippy::items_after_statements)]
     async fn request_no_response(&self, method: &str, endpoint: &str) -> DiscordResult<()> {
         let url = format!("{}{}", self.base_url, endpoint);
         let ctx = self.runtime.request_context();
@@ -176,6 +177,7 @@ impl DiscordApiClient {
     }
 
     /// Make a request with retry via the migration framework.
+    #[allow(clippy::items_after_statements)]
     async fn request<T: DeserializeOwned, B: Serialize>(
         &self,
         method: &str,

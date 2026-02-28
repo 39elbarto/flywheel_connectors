@@ -582,7 +582,7 @@ fn retry_after_present_for_rate_limited() {
         retry_after_ms: 5000,
         violation: None,
     };
-    assert_eq!(err.retry_after(), Some(Duration::from_millis(5_000)));
+    assert_eq!(err.retry_after(), Some(Duration::from_secs(5)));
 }
 
 #[test]
@@ -738,6 +738,7 @@ fn all_async_errors_have_nonempty_display() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn all_fcp_errors_produce_valid_responses() {
     let errors: Vec<FcpError> = vec![
         FcpError::InvalidRequest {
@@ -875,9 +876,7 @@ fn category_code_ranges_are_non_overlapping() {
             let (b_min, b_max) = b.code_range();
             assert!(
                 a_max < b_min || b_max < a_min,
-                "Overlapping ranges: {:?} [{a_min}-{a_max}] and {:?} [{b_min}-{b_max}]",
-                a,
-                b
+                "Overlapping ranges: {a:?} [{a_min}-{a_max}] and {b:?} [{b_min}-{b_max}]",
             );
         }
     }

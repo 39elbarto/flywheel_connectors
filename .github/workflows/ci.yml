@@ -46,6 +46,32 @@ jobs:
         run: cargo clippy --workspace --all-features -- -D warnings
 
   # ─────────────────────────────────────────────────────────────────────────────
+  # ASUPERSYNC Guardrails: Tokio prohibition + exception expiry
+  # ─────────────────────────────────────────────────────────────────────────────
+  asupersync-guardrails:
+    name: ASUPERSYNC Guardrails
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - name: Enforce Tokio guardrail policy
+        run: |
+          mkdir -p artifacts/asupersync/guardrails
+          bash scripts/ci/asupersync_tokio_guard.sh \
+            --ledger .config/asupersync/tokio_exception_ledger.json \
+            --report artifacts/asupersync/guardrails/tokio_guard_report.json
+
+      - name: Upload ASUPERSYNC guardrail artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: asupersync-guardrails
+          path: artifacts/asupersync/guardrails/
+          retention-days: 7
+
+  # ─────────────────────────────────────────────────────────────────────────────
   # Test: Matrix across OS
   # ─────────────────────────────────────────────────────────────────────────────
   test:
@@ -298,13 +324,14 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   ci-success:
     name: CI Success
-    needs: [lint, test, golden-vectors, security, msrv, build, docs, connectors]
+    needs: [lint, asupersync-guardrails, test, golden-vectors, security, msrv, build, docs, connectors]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Check all jobs
         run: |
           if [[ "${{ needs.lint.result }}" != "success" ]] ||
+             [[ "${{ needs.asupersync-guardrails.result }}" != "success" ]] ||
              [[ "${{ needs.test.result }}" != "success" ]] ||
              [[ "${{ needs.golden-vectors.result }}" != "success" ]] ||
              [[ "${{ needs.security.result }}" != "success" ]] ||

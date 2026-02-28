@@ -843,6 +843,9 @@ cargo test
 
 # Run clippy
 cargo clippy --all-targets -- -D warnings
+
+# ASUPERSYNC Tokio guardrail (local + CI parity)
+bash scripts/ci/asupersync_tokio_guard.sh
 ```
 
 ### Creating a New Connector

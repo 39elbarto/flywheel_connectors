@@ -288,6 +288,46 @@ Key verified test counts:
 
 ---
 
+## ASUPERSYNC Validation Pack (flywheel_connectors-235t.27)
+
+Use the scripted validation entrypoint for the ASUPERSYNC conformance/E2E/fuzz revalidation track:
+
+```bash
+bash scripts/e2e/asupersync_validation_pack.sh --run-id 235t-27-baseline
+```
+
+Dry-run mode (emit deterministic command plan + artifact contract without executing heavy suites):
+
+```bash
+bash scripts/e2e/asupersync_validation_pack.sh --dry-run --run-id 235t-27-plan
+```
+
+### Artifact Contract
+
+For run `<id>`, output is rooted at:
+
+```text
+artifacts/asupersync/validation/<id>/
+```
+
+Required artifacts:
+- `summary.json` - machine-readable run verdict + step status.
+- `steps.jsonl` - per-step status records with command, duration, and log path.
+- `replay.sh` - deterministic replay script with exact commands.
+- `<step>/command.txt` - frozen command for each step.
+- `<step>/execution.log` - stdout/stderr for each executed step.
+
+### Step Coverage
+
+Validation pack currently orchestrates:
+1. Conformance revalidation: `rch exec -- cargo test -p fcp-conformance --all-targets`
+2. Cross-component E2E matrix: `scripts/e2e/run_matrix.sh`
+3. Fuzz boundary compile gate: `rch exec -- cargo check --manifest-path fuzz/Cargo.toml --bins`
+
+All cargo-intensive steps are intentionally routed through `rch exec -- ...`.
+
+---
+
 ## Manual Connector Integration Suites (bd-3m2a)
 
 These are **manual-only** runs against dedicated sandbox accounts. No mocks. Use the E2E JSONL schema in `docs/testing/e2e_log_schema.md` and validate with `fcp-e2e --validate-log`.

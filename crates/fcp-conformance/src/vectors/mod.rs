@@ -3,7 +3,10 @@
 //! This module provides byte-exact test cases for protocol structures.
 //! These vectors are normative: implementations must produce these exact bytes.
 
+pub mod capability;
 pub mod core;
 pub mod fcpc;
 pub mod fcps;
+pub mod holder_proof;
 pub mod session;
+pub mod signing;

@@ -48,6 +48,34 @@ This matrix labels items as **MVP** or **Full**. Many are shared.
 
 ---
 
+## ASUPERSYNC Program Baseline (Migration Contract)
+
+The ASUPERSYNC migration program has an additional normative architecture contract:
+
+- **ADR**: `docs/ADR_ASUPERSYNC_Runtime_Baseline.md`
+- **Capability Matrix**: `docs/ASUPERSYNC_Capability_Matrix.md`
+- **Feature Parity Baseline**: `docs/ASUPERSYNC_Feature_Parity_Baseline.md`
+- **Transport/Runtime Replacement Plan**: `docs/ASUPERSYNC_Transport_Runtime_Replacement_Plan.md`
+- **Performance/Reliability Framework**: `docs/ASUPERSYNC_Performance_Reliability_Framework.md`
+- **Tokio Guardrail Ledger**: `.config/asupersync/tokio_exception_ledger.json`
+- **Owner Beads**: `flywheel_connectors-235t.1`, `flywheel_connectors-235t.2`, `flywheel_connectors-235t.5`, `flywheel_connectors-235t.28`, `flywheel_connectors-235t.30`, `flywheel_connectors-235t.31`
+- **Program Epic**: `flywheel_connectors-235t`
+
+All beads under `flywheel_connectors-235t.*` MUST treat that ADR as the runtime and policy baseline, including:
+- Tokio prohibition policy
+- Exception-window policy
+- Shared runtime substrate requirement (`fcp-async-core`)
+- Tokio-to-ASUPERSYNC migration mapping
+- CI enforcement hook requirements
+- Tokio guardrail command + exception-ledger expiry enforcement requirements
+- Primitive row mapping and gap/risk register ownership from `flywheel_connectors-235t.2`
+- Dependency surgery and guardrail ownership from `flywheel_connectors-235t.5`
+- Performance/reliability execution framework ownership from `flywheel_connectors-235t.28`
+- Golden behavior contract and no-regression baseline ownership from `flywheel_connectors-235t.30`
+- Transport/runtime replacement ownership and adapter debt register from `flywheel_connectors-235t.31`
+
+---
+
 ## Pricing / Cost Tracking Clarification
 
 - Connectors MUST emit **usage metrics**.

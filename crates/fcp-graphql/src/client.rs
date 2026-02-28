@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use fcp_async_core::{sync::Mutex, time};
 use futures_util::future::{BoxFuture, FutureExt, Shared};
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, RETRY_AFTER};
 use serde::Serialize;
@@ -73,13 +74,13 @@ pub struct GraphqlClientMetricsSnapshot {
 
 #[derive(Debug, Clone)]
 struct DedupState {
-    inner: Arc<tokio::sync::Mutex<HashMap<u64, SharedRequestFuture>>>,
+    inner: Arc<Mutex<HashMap<u64, SharedRequestFuture>>>,
 }
 
 impl DedupState {
     fn new() -> Self {
         Self {
-            inner: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            inner: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -471,7 +472,7 @@ impl GraphqlClient {
                                 .requests_retried
                                 .fetch_add(1, Ordering::Relaxed);
                             debug!("retrying GraphQL request after {:?}", delay);
-                            tokio::time::sleep(delay).await;
+                            time::sleep(delay).await;
                             attempt += 1;
                         }
                         RetryDecision::DoNotRetry => return Err(err),

@@ -9,6 +9,7 @@ repository.workspace = true
 description = "Typed GraphQL client infrastructure for FCP connectors"
 
 [dependencies]
+fcp-async-core = { workspace = true }
 fcp-core = { workspace = true }
 fcp-streaming = { workspace = true }
 futures-util = { workspace = true }
@@ -18,7 +19,6 @@ reqwest = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tracing = { workspace = true }
 
@@ -26,5 +26,6 @@ tracing = { workspace = true }
 chrono = { workspace = true }
 fcp-testkit = { workspace = true }
 pretty_assertions = { workspace = true }
+tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 wiremock = { workspace = true }

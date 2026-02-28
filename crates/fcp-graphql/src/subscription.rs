@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use fcp_async_core::{channel::mpsc, task, time};
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use fcp_streaming::{StreamError, WsClient, WsConfig, WsMessage};
@@ -117,7 +117,7 @@ impl GraphqlSubscriptionClient {
             })?;
 
         let ack_timeout = self.config.ack_timeout;
-        let ack = tokio::time::timeout(ack_timeout, connection.recv()).await;
+        let ack = time::timeout(ack_timeout, connection.recv()).await;
         match ack {
             Ok(Ok(Some(message))) => {
                 let ack_msg = decode_ws_message(message)?;
@@ -163,7 +163,7 @@ impl GraphqlSubscriptionClient {
 
         let (tx, rx) = mpsc::channel(16);
 
-        tokio::spawn(async move {
+        task::spawn(async move {
             let mut conn = connection;
             while let Ok(Some(message)) = conn.recv().await {
                 match message {

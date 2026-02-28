@@ -1134,7 +1134,7 @@ mod tests {
         CapabilityToken { raw: cose }
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_handshake() {
         let mut connector = OpenAIConnector::new();
         let result = connector
@@ -1152,7 +1152,7 @@ mod tests {
         assert_eq!(result["status"], "accepted");
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_configure_requires_auth() {
         let mut connector = OpenAIConnector::new();
         let result = connector.handle_configure(json!({})).await;
@@ -1160,7 +1160,7 @@ mod tests {
         assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_configure_rejects_both_auth() {
         let mut connector = OpenAIConnector::new();
         let result = connector
@@ -1173,7 +1173,7 @@ mod tests {
         assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_configure_with_credential_id_profile() {
         let mut connector = OpenAIConnector::new();
         let result = connector
@@ -1208,7 +1208,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_health_not_configured() {
         let connector = OpenAIConnector::new();
         let result = connector.handle_health().await.unwrap();
@@ -1216,7 +1216,7 @@ mod tests {
         assert_eq!(result["status"], "not_configured");
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_doctor_not_configured() -> Result<(), String> {
         let mut log = TestLog::new("openai_doctor_not_configured");
         let connector = OpenAIConnector::new();
@@ -1237,7 +1237,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_doctor_configured_api_key() -> Result<(), String> {
         let mut log = TestLog::new("openai_doctor_configured_api_key");
         let mut connector = OpenAIConnector::new();
@@ -1257,7 +1257,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_doctor_configured_credential_id() -> Result<(), String> {
         let mut log = TestLog::new("openai_doctor_configured_credential_id");
         let mut connector = OpenAIConnector::new();
@@ -1288,7 +1288,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_invoke_without_config() {
         let mut connector = OpenAIConnector::new();
 
@@ -1322,7 +1322,7 @@ mod tests {
         assert!(matches!(result.unwrap_err(), FcpError::NotConfigured));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_invoke_missing_message() {
         let mut connector = OpenAIConnector::new();
         // Configure with fake key
@@ -1369,7 +1369,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_get_usage() {
         let mut connector = OpenAIConnector::new();
 

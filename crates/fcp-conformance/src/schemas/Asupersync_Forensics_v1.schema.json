@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flywheel.dev/schemas/asupersync-forensics-v1.schema.json",
+  "title": "ASUPERSYNC Step Forensics Record (v1)",
+  "description": "Canonical step-level forensic record schema for ASUPERSYNC migration evidence bundles.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "run_id",
+    "scenario_id",
+    "trace_id",
+    "correlation_id",
+    "connector",
+    "zone",
+    "operation",
+    "attempt",
+    "timeout_budget_ms",
+    "cancellation_reason",
+    "queue_depth",
+    "decode_budget",
+    "outcome",
+    "elapsed_ms"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "asupersync-forensics/v1"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "scenario_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "trace_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "correlation_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "connector": {
+      "type": "string",
+      "minLength": 1
+    },
+    "zone": {
+      "type": "string",
+      "minLength": 1
+    },
+    "operation": {
+      "type": "string",
+      "minLength": 1
+    },
+    "attempt": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "timeout_budget_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "cancellation_reason": {
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "queue_depth": {
+      "oneOf": [
+        {
+          "type": "number",
+          "minimum": 0
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "decode_budget": {
+      "oneOf": [
+        {
+          "type": "number",
+          "minimum": 0
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "outcome": {
+      "type": "string",
+      "enum": [
+        "pass",
+        "fail",
+        "planned"
+      ]
+    },
+    "elapsed_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "span_id": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{16}$"
+    },
+    "result_code": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "additionalProperties": true
+}

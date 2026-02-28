@@ -2,7 +2,9 @@
 
 use std::time::Duration;
 
+use fcp_async_core::AsyncError;
 use fcp_core::FcpError;
+use fcp_sdk::migration::ConnectorErrorMapping;
 use thiserror::Error;
 
 /// Result type for OpenAI operations.
@@ -84,6 +86,10 @@ impl OpenAIError {
     /// Convert to FCP error.
     #[must_use]
     pub fn to_fcp_error(&self) -> FcpError {
+        ConnectorErrorMapping::to_fcp_error(self)
+    }
+
+    fn fcp_error_impl(&self) -> FcpError {
         match self {
             Self::InvalidApiKey => FcpError::Unauthorized {
                 code: 2001,
@@ -130,6 +136,47 @@ impl OpenAIError {
                 retryable: true,
                 retry_after: Some(Duration::from_millis(*retry_after_ms)),
             },
+        }
+    }
+}
+
+impl ConnectorErrorMapping for OpenAIError {
+    fn from_async_error(error: AsyncError) -> Self {
+        match error {
+            AsyncError::Timeout { timeout_ms } => Self::Api {
+                error_type: "deadline_timeout".into(),
+                message: format!("request context deadline exceeded after {timeout_ms}ms"),
+                status_code: Some(408),
+            },
+            AsyncError::Cancelled => Self::Api {
+                error_type: "request_cancelled".into(),
+                message: "request context cancelled".into(),
+                status_code: None,
+            },
+            other => Self::Api {
+                error_type: "runtime_context".into(),
+                message: other.to_string(),
+                status_code: None,
+            },
+        }
+    }
+
+    fn to_fcp_error(&self) -> FcpError {
+        self.fcp_error_impl()
+    }
+
+    fn is_retryable(&self) -> bool {
+        // Delegate to inherent method
+        matches!(self, Self::RateLimited { .. } | Self::Overloaded { .. })
+    }
+
+    fn retry_after(&self) -> Option<Duration> {
+        // Delegate to inherent method
+        match self {
+            Self::RateLimited { retry_after_ms } | Self::Overloaded { retry_after_ms } => {
+                Some(Duration::from_millis(*retry_after_ms))
+            }
+            _ => None,
         }
     }
 }

@@ -41,7 +41,9 @@ pub use vectors::datagram::{DatagramErrorVector, DatagramGoldenVector, DatagramM
 pub use vectors::fcpc::FcpcGoldenVector;
 pub use vectors::fcps::FcpsGoldenVector;
 pub use vectors::holder_proof::HolderProofGoldenVector;
+pub use vectors::hpke::HpkeSealedBoxGoldenVector;
 pub use vectors::session::SessionGoldenVector;
+pub use vectors::session_messages::{HelloRetryGoldenVector, TransportLimitsGoldenVector};
 pub use vectors::signing::{QuorumSortGoldenVector, SigningBytesGoldenVector};
 
 // Re-export harness types for convenience

@@ -162,6 +162,7 @@ pub use fcp_manifest::{
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub mod formatting;
+pub mod migration;
 pub mod prelude;
 pub mod ratelimit;
 pub mod retry;

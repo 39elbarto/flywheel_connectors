@@ -205,8 +205,13 @@ impl RepairController {
 
         queue.push(request);
 
-        // Sort by priority (highest first)
-        queue.sort_by_key(|r| std::cmp::Reverse(r.priority));
+        // Deterministic ordering: highest priority first, then stable object-id tie-break.
+        queue.sort_by(|left, right| {
+            right
+                .priority
+                .cmp(&left.priority)
+                .then_with(|| left.object_id.cmp(&right.object_id))
+        });
 
         self.stats.write().queue_depth = queue.len();
     }
@@ -777,6 +782,36 @@ mod tests {
 
         let next = controller.next_repair().unwrap();
         assert_eq!(next.priority, 100);
+    }
+
+    #[test]
+    fn queue_tie_breaks_by_object_id() {
+        let controller = RepairController::new(RepairControllerConfig::default());
+
+        let higher_object_id = RepairRequest {
+            object_id: ObjectId::from_bytes([2; 32]),
+            zone_id: "z:test".parse().unwrap(),
+            coverage: test_coverage(5, 10),
+            policy: test_policy(),
+            priority: 100,
+        };
+
+        let lower_object_id = RepairRequest {
+            object_id: ObjectId::from_bytes([1; 32]),
+            zone_id: "z:test".parse().unwrap(),
+            coverage: test_coverage(5, 10),
+            policy: test_policy(),
+            priority: 100,
+        };
+
+        // Insert in reverse object-id order to prove deterministic tie-breaking.
+        controller.queue_repair(higher_object_id);
+        controller.queue_repair(lower_object_id);
+
+        let first = controller.next_repair().expect("first item");
+        let second = controller.next_repair().expect("second item");
+        assert_eq!(first.object_id, ObjectId::from_bytes([1; 32]));
+        assert_eq!(second.object_id, ObjectId::from_bytes([2; 32]));
     }
 
     #[test]

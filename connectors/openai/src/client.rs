@@ -5,12 +5,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
-use fcp_async_core::{AsyncError, ExecutionContext};
 use fcp_core::CredentialId;
+use fcp_sdk::migration::{
+    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
+};
 use futures_util::StreamExt;
 use reqwest::{Client, Response, StatusCode};
 use tokio_stream::Stream;
-use tracing::{debug, instrument, warn};
+use tracing::{debug, instrument};
 
 use crate::{
     error::{OpenAIError, OpenAIResult},
@@ -69,9 +71,8 @@ pub struct OpenAIClient {
     auth: OpenAIAuth,
     base_url: String,
     organization: Option<String>,
-    max_retries: u32,
-    initial_delay_ms: u64,
-    max_delay_ms: u64,
+    runtime: ConnectorRuntime,
+    retry_config: HttpRetryConfig,
     // Usage tracking
     total_prompt_tokens: AtomicU64,
     total_completion_tokens: AtomicU64,
@@ -95,9 +96,8 @@ impl OpenAIClient {
             auth,
             base_url: DEFAULT_BASE_URL.into(),
             organization: None,
-            max_retries: 3,
-            initial_delay_ms: 500,
-            max_delay_ms: 30_000,
+            runtime: ConnectorRuntime::new(ConnectorRuntimeConfig::default()),
+            retry_config: HttpRetryConfig::default(),
             total_prompt_tokens: AtomicU64::new(0),
             total_completion_tokens: AtomicU64::new(0),
         })
@@ -119,15 +119,18 @@ impl OpenAIClient {
 
     /// Set retry configuration.
     #[must_use]
-    pub const fn with_retry_config(
+    pub fn with_retry_config(
         mut self,
         max_retries: u32,
         initial_delay_ms: u64,
         max_delay_ms: u64,
     ) -> Self {
-        self.max_retries = max_retries;
-        self.initial_delay_ms = initial_delay_ms;
-        self.max_delay_ms = max_delay_ms;
+        self.retry_config = HttpRetryConfig {
+            max_retries,
+            initial_delay_ms,
+            max_delay_ms,
+            ..self.retry_config
+        };
         self
     }
 
@@ -290,65 +293,46 @@ impl OpenAIClient {
         Ok(parse_sse_stream(response))
     }
 
-    /// Make a POST request.
+    /// Make a POST request with retry via the migration framework.
     async fn post<T, R>(&self, endpoint: &str, body: &T) -> OpenAIResult<R>
     where
         T: serde::Serialize + Sync,
         R: serde::de::DeserializeOwned + Send,
     {
         let url = format!("{}{endpoint}", self.base_url);
-        let mut delay = Duration::from_millis(self.initial_delay_ms);
-        let mut attempts = 0;
-        let context = ExecutionContext::request_scoped(Duration::from_secs(120));
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
 
-        loop {
-            attempts += 1;
-            debug!(attempt = attempts, endpoint, "Making OpenAI API request");
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let url = &url;
+            async move {
+                debug!(attempt, endpoint, "Making OpenAI API request");
 
-            let request = self
-                .client
-                .post(&url)
-                .header("Content-Type", "application/json");
+                let request = self
+                    .client
+                    .post(url)
+                    .header("Content-Type", "application/json");
 
-            let request = self.apply_auth(request);
+                let request = self.apply_auth(request);
 
-            let result = request.json(body).send().await;
-
-            match result {
-                Ok(response) => match self.handle_response(response).await {
-                    Ok(data) => return Ok(data),
-                    Err(e) if e.is_retryable() && attempts < self.max_retries => {
-                        if let Some(retry_after) = e.retry_after() {
-                            delay = retry_after;
-                        }
-                        warn!(
-                            attempt = attempts,
-                            delay_ms = delay.as_millis(),
-                            error = %e,
-                            "Retrying OpenAI API request"
-                        );
-                        context.sleep(delay).await.map_err(map_context_error)?;
-                        delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                    }
-                    Err(e) => return Err(e),
-                },
-                Err(e) if e.is_timeout() || e.is_connect() => {
-                    if attempts < self.max_retries {
-                        warn!(
-                            attempt = attempts,
-                            delay_ms = delay.as_millis(),
-                            error = %e,
-                            "Retrying after connection error"
-                        );
-                        context.sleep(delay).await.map_err(map_context_error)?;
-                        delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
-                    } else {
-                        return Err(OpenAIError::Http(e));
-                    }
+                match request.json(body).send().await {
+                    Ok(response) => match self.handle_response(response).await {
+                        Ok(data) => AttemptOutcome::Success(data),
+                        Err(e) if e.is_retryable() => AttemptOutcome::Retryable {
+                            retry_after: e.retry_after(),
+                            error: e,
+                        },
+                        Err(e) => AttemptOutcome::Terminal(e),
+                    },
+                    Err(e) if e.is_timeout() || e.is_connect() => AttemptOutcome::Retryable {
+                        error: OpenAIError::Http(e),
+                        retry_after: None,
+                    },
+                    Err(e) => AttemptOutcome::Terminal(OpenAIError::Http(e)),
                 }
-                Err(e) => return Err(OpenAIError::Http(e)),
             }
-        }
+        })
+        .await
     }
 
     /// Make a streaming POST request.
@@ -449,26 +433,6 @@ fn parse_error_response(status: StatusCode, bytes: &Bytes) -> OpenAIError {
     }
 }
 
-fn map_context_error(error: AsyncError) -> OpenAIError {
-    match error {
-        AsyncError::Timeout { timeout_ms } => OpenAIError::Api {
-            error_type: "deadline_timeout".to_string(),
-            message: format!("request context deadline exceeded after {timeout_ms}ms"),
-            status_code: Some(408),
-        },
-        AsyncError::Cancelled => OpenAIError::Api {
-            error_type: "request_cancelled".to_string(),
-            message: "request context cancelled".to_string(),
-            status_code: None,
-        },
-        other => OpenAIError::Api {
-            error_type: "runtime_context".to_string(),
-            message: other.to_string(),
-            status_code: None,
-        },
-    }
-}
-
 /// Parse SSE stream into chunks.
 fn parse_sse_stream(response: Response) -> impl Stream<Item = OpenAIResult<ChatCompletionChunk>> {
     async_stream::stream! {
@@ -534,7 +498,7 @@ mod tests {
         matchers::{header, method, path},
     };
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_chat_success() {
         let mock_server = MockServer::start().await;
 
@@ -577,7 +541,7 @@ mod tests {
         assert_eq!(client.total_completion_tokens(), 8);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_unauthorized() {
         let mock_server = MockServer::start().await;
 
@@ -605,7 +569,7 @@ mod tests {
         assert!(matches!(result.unwrap_err(), OpenAIError::InvalidApiKey));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_rate_limited() {
         let mock_server = MockServer::start().await;
 
@@ -636,7 +600,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_overloaded() {
         let mock_server = MockServer::start().await;
 
@@ -667,7 +631,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_context_length_exceeded() {
         let mock_server = MockServer::start().await;
 
@@ -698,7 +662,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_content_filtered() {
         let mock_server = MockServer::start().await;
 
@@ -729,7 +693,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test(flavor = "current_thread")]
+    #[fcp_async_core::runtime::test]
     async fn test_logs_redact_api_key_and_prompt() {
         let capture = LogCapture::new();
         let _guard = capture.install_json_with_filter("debug");
@@ -796,7 +760,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_model_pricing() {
         assert_eq!(Model::Gpt4o.input_price_per_million(), 2.50);
         assert_eq!(Model::Gpt4o.output_price_per_million(), 10.0);
@@ -806,7 +770,7 @@ mod tests {
         assert_eq!(Model::Gpt35Turbo.output_price_per_million(), 1.50);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn test_usage_cost_calculation() {
         let usage = Usage {
             prompt_tokens: 1000,

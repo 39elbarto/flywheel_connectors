@@ -15,7 +15,7 @@ workspace = true
 fcp-core = { path = "../fcp-core" }
 
 # Async runtime
-tokio = { workspace = true, features = ["sync", "time"] }
+fcp-async-core = { path = "../fcp-async-core" }
 async-trait.workspace = true
 
 # HTTP client
@@ -47,5 +47,4 @@ serde_urlencoded = "0.7"
 parking_lot = "0.12"
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 wiremock.workspace = true

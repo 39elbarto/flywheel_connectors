@@ -18,6 +18,7 @@ fcp-cbor = { path = "../fcp-cbor", optional = true }
 fcp-manifest = { path = "../fcp-manifest" }
 fcp-store = { path = "../fcp-store", optional = true }
 jsonschema.workspace = true
+reqwest = { workspace = true, optional = true }
 semver = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
@@ -26,6 +27,7 @@ tracing.workspace = true
 
 [features]
 cursor-store-object-store = ["dep:fcp-store", "dep:fcp-cbor", "dep:semver"]
+connector-http = ["dep:reqwest"]
 
 [dev-dependencies]
 async-trait = { workspace = true }

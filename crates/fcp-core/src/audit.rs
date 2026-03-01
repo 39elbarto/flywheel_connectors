@@ -1454,4 +1454,180 @@ mod tests {
         assert!(!receipt.reason_code.is_empty());
         assert!(!receipt.evidence.is_empty() || receipt.is_allow());
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Decision trait coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn decision_copy() {
+        let d = Decision::Allow;
+        let copied = d;
+        assert_eq!(d, copied);
+    }
+
+    #[test]
+    fn decision_inequality() {
+        assert_ne!(Decision::Allow, Decision::Deny);
+    }
+
+    #[test]
+    fn decision_serde_allow() {
+        let json = serde_json::to_string(&Decision::Allow).unwrap();
+        assert_eq!(json, "\"allow\"");
+        let back: Decision = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, Decision::Allow);
+    }
+
+    #[test]
+    fn decision_serde_deny() {
+        let json = serde_json::to_string(&Decision::Deny).unwrap();
+        assert_eq!(json, "\"deny\"");
+        let back: Decision = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, Decision::Deny);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // AuditEvent trait coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn audit_event_clone() {
+        let event = create_audit_event(1, None, EVENT_SECRET_ACCESS);
+        let cloned = Clone::clone(&event);
+        assert_eq!(cloned.seq, 1);
+        assert_eq!(cloned.event_type, EVENT_SECRET_ACCESS);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // AuditHead trait coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn audit_head_clone() {
+        let head = create_audit_head(test_object_id("event-1"), 50, 3);
+        let cloned = Clone::clone(&head);
+        assert_eq!(cloned.head_seq, 50);
+        assert!((cloned.coverage - 1.0_f64).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn audit_head_zone_id_accessor() {
+        let head = create_audit_head(test_object_id("event-1"), 50, 3);
+        assert_eq!(head.zone_id().as_str(), "z:work");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ZoneCheckpoint trait coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn zone_checkpoint_clone() {
+        let cp =
+            create_zone_checkpoint(test_object_id("rev"), 10, test_object_id("audit"), 20, 1, 4);
+        let cloned = Clone::clone(&cp);
+        assert_eq!(cloned.rev_seq, 10);
+        assert_eq!(cloned.audit_seq, 20);
+        assert_eq!(cloned.checkpoint_seq, 1);
+    }
+
+    #[test]
+    fn zone_checkpoint_zone_id_accessor() {
+        let cp =
+            create_zone_checkpoint(test_object_id("rev"), 10, test_object_id("audit"), 20, 1, 4);
+        assert_eq!(cp.zone_id().as_str(), "z:work");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // DecisionReceipt trait coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn decision_receipt_clone() {
+        let receipt = create_decision_receipt(
+            test_object_id("request"),
+            Decision::Deny,
+            "FCP-4010",
+            vec![test_object_id("cap")],
+        );
+        let cloned = Clone::clone(&receipt);
+        assert_eq!(cloned.reason_code, "FCP-4010");
+        assert_eq!(cloned.evidence.len(), 1);
+    }
+
+    #[test]
+    fn decision_receipt_zone_id_accessor() {
+        let receipt = create_decision_receipt(
+            test_object_id("request"),
+            Decision::Allow,
+            "FCP-0000",
+            vec![],
+        );
+        assert_eq!(receipt.zone_id().as_str(), "z:work");
+    }
+
+    #[test]
+    fn decision_receipt_is_allow_true() {
+        let receipt = create_decision_receipt(
+            test_object_id("request"),
+            Decision::Allow,
+            "FCP-0000",
+            vec![],
+        );
+        assert!(receipt.is_allow());
+        assert!(!receipt.is_deny());
+    }
+
+    #[test]
+    fn decision_receipt_is_deny_true() {
+        let receipt = create_decision_receipt(
+            test_object_id("request"),
+            Decision::Deny,
+            "FCP-4010",
+            vec![test_object_id("evidence")],
+        );
+        assert!(receipt.is_deny());
+        assert!(!receipt.is_allow());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // TraceContext trait coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn trace_context_clone() {
+        let trace = TraceContext {
+            trace_id: [0xAA; 16],
+            span_id: [0xBB; 8],
+            flags: 0x01,
+        };
+        let cloned = Clone::clone(&trace);
+        assert_eq!(cloned.trace_id, [0xAA; 16]);
+        assert_eq!(cloned.span_id, [0xBB; 8]);
+        assert_eq!(cloned.flags, 0x01);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // AuditEvent follows boundary cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn audit_event_follows_genesis() {
+        // Genesis event (seq=0) cannot follow anything because
+        // follows requires prev_seq + 1 == self.seq
+        let genesis = create_audit_event(0, None, EVENT_SECRET_ACCESS);
+        let prev = create_audit_event(0, None, EVENT_SECRET_ACCESS);
+        let prev_id = test_object_id("prev-0");
+        // seq 0 following seq 0 requires prev.seq.checked_add(1) = Some(1) != 0
+        assert!(!genesis.follows(&prev, &prev_id));
+    }
+
+    #[test]
+    fn audit_head_coverage_boundary() {
+        let head = AuditHead {
+            coverage: 0.0,
+            ..create_audit_head(test_object_id("event"), 1, 0)
+        };
+        assert!(head.coverage.abs() < f64::EPSILON);
+    }
 }

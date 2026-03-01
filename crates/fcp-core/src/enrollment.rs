@@ -1719,4 +1719,261 @@ mod tests {
         assert!(json.contains("\"hostname\": \"test.local\""));
         assert!(json.contains("\"fcp:zone:work\""));
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // DeviceId – additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn device_id_hash_consistency() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(DeviceId::new("device-a"));
+        set.insert(DeviceId::new("device-a"));
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn device_id_hash_different_ids() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(DeviceId::new("device-a"));
+        set.insert(DeviceId::new("device-b"));
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn device_id_clone() {
+        let id = DeviceId::new("clonable");
+        let cloned = Clone::clone(&id);
+        assert_eq!(id, cloned);
+    }
+
+    #[test]
+    fn device_id_empty_string() {
+        let id = DeviceId::new("");
+        assert_eq!(id.as_str(), "");
+        assert_eq!(format!("{id}"), "");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // DeviceMetadata – additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn device_metadata_empty_serializes_minimal() {
+        let meta = DeviceMetadata::default();
+        let json = serde_json::to_value(&meta).unwrap();
+        // All None fields should be omitted, empty tags omitted
+        assert!(json.get("display_name").is_none());
+        assert!(json.get("hostname").is_none());
+        assert!(json.get("os").is_none());
+        assert!(json.get("arch").is_none());
+        assert!(json.get("device_class").is_none());
+        assert!(json.get("requested_tags").is_none());
+    }
+
+    #[test]
+    fn device_metadata_multiple_tags() {
+        let meta = DeviceMetadata::new()
+            .with_tag("tag1")
+            .with_tag("tag2")
+            .with_tag("tag3");
+        assert_eq!(meta.requested_tags.len(), 3);
+        assert_eq!(meta.requested_tags[0], "tag1");
+        assert_eq!(meta.requested_tags[2], "tag3");
+    }
+
+    #[test]
+    fn device_metadata_equality() {
+        let a = DeviceMetadata::new().with_hostname("h").with_os("linux");
+        let b = DeviceMetadata::new().with_hostname("h").with_os("linux");
+        let c = DeviceMetadata::new().with_hostname("h").with_os("macos");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // EnrollmentStatus – additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn enrollment_status_copy() {
+        let s = EnrollmentStatus::Approved;
+        let copied = s;
+        assert_eq!(s, copied);
+    }
+
+    #[test]
+    fn enrollment_status_hash_consistency() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(EnrollmentStatus::Approved);
+        set.insert(EnrollmentStatus::Approved);
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn enrollment_status_all_distinct() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(EnrollmentStatus::Pending);
+        set.insert(EnrollmentStatus::Approved);
+        set.insert(EnrollmentStatus::Rejected);
+        set.insert(EnrollmentStatus::Revoked);
+        set.insert(EnrollmentStatus::Expired);
+        assert_eq!(set.len(), 5);
+    }
+
+    #[test]
+    fn enrollment_status_serde_values() {
+        assert_eq!(
+            serde_json::to_string(&EnrollmentStatus::Pending).unwrap(),
+            "\"pending\""
+        );
+        assert_eq!(
+            serde_json::to_string(&EnrollmentStatus::Approved).unwrap(),
+            "\"approved\""
+        );
+        assert_eq!(
+            serde_json::to_string(&EnrollmentStatus::Rejected).unwrap(),
+            "\"rejected\""
+        );
+        assert_eq!(
+            serde_json::to_string(&EnrollmentStatus::Revoked).unwrap(),
+            "\"revoked\""
+        );
+        assert_eq!(
+            serde_json::to_string(&EnrollmentStatus::Expired).unwrap(),
+            "\"expired\""
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // KeyType – additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn key_type_copy() {
+        let kt = KeyType::Signing;
+        let copied = kt;
+        assert_eq!(kt, copied);
+    }
+
+    #[test]
+    fn key_type_hash_all_distinct() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(KeyType::Signing);
+        set.insert(KeyType::Encryption);
+        set.insert(KeyType::Issuance);
+        assert_eq!(set.len(), 3);
+    }
+
+    #[test]
+    fn key_type_serde_values() {
+        assert_eq!(
+            serde_json::to_string(&KeyType::Signing).unwrap(),
+            "\"signing\""
+        );
+        assert_eq!(
+            serde_json::to_string(&KeyType::Encryption).unwrap(),
+            "\"encryption\""
+        );
+        assert_eq!(
+            serde_json::to_string(&KeyType::Issuance).unwrap(),
+            "\"issuance\""
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // KeyRotationSchedule – additional edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn key_rotation_schedule_zero_rotation() {
+        let schedule = KeyRotationSchedule::new().with_signing_rotation(0);
+        // 0-hour rotation means always needs rotation
+        let recent = Utc::now();
+        assert!(schedule.needs_rotation(KeyType::Signing, recent));
+    }
+
+    #[test]
+    fn key_rotation_schedule_clone() {
+        let schedule = KeyRotationSchedule::new()
+            .with_signing_rotation(12)
+            .without_overlap();
+        let cloned = Clone::clone(&schedule);
+        assert_eq!(schedule, cloned);
+    }
+
+    #[test]
+    fn key_rotation_schedule_debug_format() {
+        let schedule = KeyRotationSchedule::default();
+        let debug = format!("{schedule:?}");
+        assert!(debug.contains("KeyRotationSchedule"));
+        assert!(debug.contains("signing_key_rotation_hours"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NodeKeyAttestation – additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn node_key_attestation_remaining_validity_positive() {
+        let (owner_key, approval) = create_test_approval();
+        let attestation = NodeKeyAttestation::sign(&owner_key, "node-1", &approval, 168).unwrap();
+        assert!(attestation.remaining_validity().num_hours() > 0);
+    }
+
+    #[test]
+    fn node_key_attestation_empty_tags() {
+        let (signing_secret, signing_key, encryption_key, issuance_key) = create_test_keys();
+        let owner_key = Ed25519SigningKey::generate();
+        let request = DeviceEnrollmentRequest::new(
+            "test-device",
+            signing_key,
+            encryption_key,
+            issuance_key,
+            DeviceMetadata::default(),
+            &signing_secret,
+        )
+        .unwrap();
+        let approval = DeviceEnrollmentApproval::sign(
+            &owner_key,
+            &request,
+            ZoneId::work(),
+            vec![], // No tags
+            create_test_manifest(),
+            168,
+        )
+        .unwrap();
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, "node-empty-tags", &approval, 168).unwrap();
+        assert!(attestation.tags.is_empty());
+        assert!(!attestation.has_tag("anything"));
+        assert!(attestation.verify(&owner_key.verifying_key()).is_ok());
+    }
+
+    #[test]
+    fn node_key_attestation_clone() {
+        let (owner_key, approval) = create_test_approval();
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, "node-clone", &approval, 168).unwrap();
+        let cloned = Clone::clone(&attestation);
+        assert_eq!(cloned.node_id, attestation.node_id);
+        assert_eq!(cloned.device_id, attestation.device_id);
+        assert_eq!(cloned.zone_id, attestation.zone_id);
+        assert_eq!(cloned.tags, attestation.tags);
+    }
+
+    #[test]
+    fn node_key_attestation_debug_format() {
+        let (owner_key, approval) = create_test_approval();
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, "node-debug", &approval, 168).unwrap();
+        let debug = format!("{attestation:?}");
+        assert!(debug.contains("NodeKeyAttestation"));
+        assert!(debug.contains("node-debug"));
+    }
 }

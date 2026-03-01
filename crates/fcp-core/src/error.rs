@@ -1580,4 +1580,240 @@ mod tests {
             assert_eq!(err.to_string(), deserialized.to_string());
         }
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ErrorCategory trait coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn error_category_copy() {
+        let cat = ErrorCategory::Protocol;
+        let copied = cat;
+        assert_eq!(cat, copied);
+    }
+
+    #[test]
+    fn error_category_hash_consistency() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let cat = ErrorCategory::Zone;
+        let mut h1 = DefaultHasher::new();
+        let mut h2 = DefaultHasher::new();
+        cat.hash(&mut h1);
+        cat.hash(&mut h2);
+        assert_eq!(h1.finish(), h2.finish());
+    }
+
+    #[test]
+    fn error_category_serde_roundtrip() {
+        let categories = [
+            ErrorCategory::Protocol,
+            ErrorCategory::Auth,
+            ErrorCategory::Capability,
+            ErrorCategory::Zone,
+            ErrorCategory::Connector,
+            ErrorCategory::Resource,
+            ErrorCategory::External,
+            ErrorCategory::Internal,
+        ];
+        for cat in categories {
+            let json = serde_json::to_string(&cat).unwrap();
+            let back: ErrorCategory = serde_json::from_str(&json).unwrap();
+            assert_eq!(cat, back);
+        }
+    }
+
+    #[test]
+    fn error_category_inequality() {
+        assert_ne!(ErrorCategory::Protocol, ErrorCategory::Auth);
+        assert_ne!(ErrorCategory::Zone, ErrorCategory::Internal);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // FcpError trait coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn fcp_error_clone() {
+        let err = FcpError::ZoneViolation {
+            source_zone: "z:a".into(),
+            target_zone: "z:b".into(),
+            message: "denied".into(),
+        };
+        let cloned = err.clone();
+        assert_eq!(err.to_string(), cloned.to_string());
+    }
+
+    #[test]
+    fn fcp_error_std_error_trait() {
+        let err: Box<dyn std::error::Error> = Box::new(FcpError::TokenExpired);
+        assert!(!err.to_string().is_empty());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // FcpError category coverage for all variants
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn category_missing_field_is_protocol() {
+        let err = FcpError::MissingField {
+            field: "name".into(),
+        };
+        assert_eq!(err.category(), ErrorCategory::Protocol);
+    }
+
+    #[test]
+    fn category_budget_exceeded_is_resource() {
+        let err = FcpError::BudgetExceeded {
+            metric: crate::UsageMetricKind::ApiCredits,
+            used: 100,
+            limit: 50,
+            window_seconds: 3600,
+        };
+        assert_eq!(err.category(), ErrorCategory::Resource);
+    }
+
+    #[test]
+    fn category_operation_not_granted_is_capability() {
+        let err = FcpError::OperationNotGranted {
+            operation: "op.test".into(),
+        };
+        assert_eq!(err.category(), ErrorCategory::Capability);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // FcpError numeric_code coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn numeric_code_missing_field() {
+        let err = FcpError::MissingField { field: "x".into() };
+        assert_eq!(err.numeric_code(), 1006);
+    }
+
+    #[test]
+    fn numeric_code_budget_exceeded() {
+        let err = FcpError::BudgetExceeded {
+            metric: crate::UsageMetricKind::ApiCredits,
+            used: 100,
+            limit: 50,
+            window_seconds: 3600,
+        };
+        assert_eq!(err.numeric_code(), 6004);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // FcpError display coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn error_display_missing_field() {
+        let err = FcpError::MissingField {
+            field: "zone_id".into(),
+        };
+        assert_eq!(err.to_string(), "Missing required field: zone_id");
+    }
+
+    #[test]
+    fn error_display_budget_exceeded() {
+        let err = FcpError::BudgetExceeded {
+            metric: crate::UsageMetricKind::ApiCredits,
+            used: 100,
+            limit: 50,
+            window_seconds: 3600,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("100"));
+        assert!(msg.contains("50"));
+        assert!(msg.contains("3600"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // FcpError retryable coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn retryable_budget_exceeded() {
+        let err = FcpError::BudgetExceeded {
+            metric: crate::UsageMetricKind::ApiCredits,
+            used: 100,
+            limit: 50,
+            window_seconds: 3600,
+        };
+        assert!(err.is_retryable());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // FcpErrorResponse trait coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn error_response_clone() {
+        let resp = FcpErrorResponse {
+            code: "FCP-1000".into(),
+            message: "test".into(),
+            retryable: false,
+            retry_after_ms: None,
+            details: None,
+            ai_recovery_hint: None,
+        };
+        let cloned = Clone::clone(&resp);
+        assert_eq!(cloned.code, "FCP-1000");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // FcpError serde edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn fcp_error_serde_external_with_retry_after() {
+        let err = FcpError::External {
+            service: "api".into(),
+            message: "rate limited".into(),
+            status_code: Some(429),
+            retryable: true,
+            retry_after: Some(Duration::from_secs(30)),
+        };
+        let json = serde_json::to_string(&err).unwrap();
+        let back: FcpError = serde_json::from_str(&json).unwrap();
+        assert_eq!(err.to_string(), back.to_string());
+    }
+
+    #[test]
+    fn fcp_error_serde_budget_exceeded() {
+        let err = FcpError::BudgetExceeded {
+            metric: crate::UsageMetricKind::ApiCredits,
+            used: 100,
+            limit: 50,
+            window_seconds: 3600,
+        };
+        let json = serde_json::to_string(&err).unwrap();
+        let back: FcpError = serde_json::from_str(&json).unwrap();
+        assert_eq!(err.to_string(), back.to_string());
+    }
+
+    #[test]
+    fn to_response_missing_field() {
+        let err = FcpError::MissingField {
+            field: "zone_id".into(),
+        };
+        let resp = err.to_response();
+        assert_eq!(resp.code, "FCP-1006");
+        assert!(resp.ai_recovery_hint.is_some());
+        assert!(resp.ai_recovery_hint.unwrap().contains("zone_id"));
+    }
+
+    #[test]
+    fn to_response_budget_exceeded() {
+        let err = FcpError::BudgetExceeded {
+            metric: crate::UsageMetricKind::ApiCredits,
+            used: 100,
+            limit: 50,
+            window_seconds: 3600,
+        };
+        let resp = err.to_response();
+        assert_eq!(resp.code, "FCP-6004");
+        assert!(resp.retryable);
+        assert!(resp.details.is_some());
+    }
 }

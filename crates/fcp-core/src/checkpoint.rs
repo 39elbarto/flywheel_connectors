@@ -1163,6 +1163,554 @@ mod tests {
         );
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // Constants
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn default_checkpoint_interval_is_60() {
+        assert_eq!(DEFAULT_CHECKPOINT_INTERVAL_SECS, 60);
+    }
+
+    #[test]
+    fn default_audit_chain_growth_threshold_is_100() {
+        assert_eq!(DEFAULT_AUDIT_CHAIN_GROWTH_THRESHOLD, 100);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CheckpointTrigger – additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn trigger_clone_preserves_equality() {
+        let trigger = CheckpointTrigger::TimeElapsed {
+            elapsed_secs: 120,
+            threshold_secs: 60,
+        };
+        let cloned = trigger.clone();
+        assert_eq!(trigger, cloned);
+    }
+
+    #[test]
+    fn trigger_manual_none_reason_serde() {
+        let trigger = CheckpointTrigger::Manual { reason: None };
+        let json = serde_json::to_string(&trigger).unwrap();
+        let decoded: CheckpointTrigger = serde_json::from_str(&json).unwrap();
+        assert_eq!(trigger, decoded);
+        if let CheckpointTrigger::Manual { reason } = decoded {
+            assert!(reason.is_none());
+        } else {
+            panic!("wrong variant");
+        }
+    }
+
+    #[test]
+    fn trigger_inequality_across_variants() {
+        let a = CheckpointTrigger::TimeElapsed {
+            elapsed_secs: 120,
+            threshold_secs: 60,
+        };
+        let b = CheckpointTrigger::RevocationChainGrowth { new_events: 1 };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn trigger_audit_growth_boundary_not_met() {
+        // Exactly at threshold - should NOT trigger (must exceed)
+        let trigger = CheckpointTrigger::check_audit_growth(100, 100);
+        assert!(trigger.is_none());
+    }
+
+    #[test]
+    fn trigger_revocation_growth_large_count() {
+        let trigger = CheckpointTrigger::check_revocation_growth(u64::MAX);
+        assert!(trigger.is_some());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ForkEvidence – additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn fork_evidence_clone() {
+        let evidence = ForkEvidence::new(
+            test_zone(),
+            5,
+            test_object_id("a"),
+            test_object_id("b"),
+            1_700_000_000,
+            test_node("det"),
+        );
+        let cloned = evidence.clone();
+        assert_eq!(evidence, cloned);
+    }
+
+    #[test]
+    fn fork_evidence_double_signers_no_overlap() {
+        let evidence = ForkEvidence::new(
+            test_zone(),
+            1,
+            test_object_id("x"),
+            test_object_id("y"),
+            100,
+            test_node("d"),
+        )
+        .with_signers_a(["alice".to_string()])
+        .with_signers_b(["bob".to_string()]);
+        assert!(evidence.double_signers().is_empty());
+    }
+
+    #[test]
+    fn fork_evidence_double_signers_empty_sets() {
+        let evidence = ForkEvidence::new(
+            test_zone(),
+            1,
+            test_object_id("x"),
+            test_object_id("y"),
+            100,
+            test_node("d"),
+        );
+        assert!(evidence.signers_a.is_empty());
+        assert!(evidence.signers_b.is_empty());
+        assert!(evidence.double_signers().is_empty());
+    }
+
+    #[test]
+    fn fork_evidence_serde_roundtrip() {
+        let evidence = ForkEvidence::new(
+            test_zone(),
+            99,
+            test_object_id("cp-a"),
+            test_object_id("cp-b"),
+            1_700_000_000,
+            test_node("detector"),
+        )
+        .with_signers_a(["node1".to_string()])
+        .with_signers_b(["node2".to_string()]);
+        let json = serde_json::to_string(&evidence).unwrap();
+        let decoded: ForkEvidence = serde_json::from_str(&json).unwrap();
+        assert_eq!(evidence, decoded);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ForkDetectionResult – additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn fork_detection_result_no_fork_serde() {
+        let result = ForkDetectionResult::NoFork;
+        let json = serde_json::to_string(&result).unwrap();
+        let decoded: ForkDetectionResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(result, decoded);
+        assert!(!decoded.is_fork());
+    }
+
+    #[test]
+    fn fork_detection_result_fork_detected_serde() {
+        let evidence = ForkEvidence::new(
+            test_zone(),
+            7,
+            test_object_id("a"),
+            test_object_id("b"),
+            100,
+            test_node("d"),
+        );
+        let result = ForkDetectionResult::ForkDetected(evidence);
+        let json = serde_json::to_string(&result).unwrap();
+        let decoded: ForkDetectionResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(result, decoded);
+        assert!(decoded.is_fork());
+    }
+
+    #[test]
+    fn fork_detection_result_clone() {
+        let evidence = ForkEvidence::new(
+            test_zone(),
+            7,
+            test_object_id("a"),
+            test_object_id("b"),
+            100,
+            test_node("d"),
+        );
+        let result = ForkDetectionResult::ForkDetected(evidence);
+        let cloned = result.clone();
+        assert_eq!(result, cloned);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CheckpointAdvanceState – serde all variants
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn advance_state_idle_serde() {
+        let state = CheckpointAdvanceState::idle(5, 1_700_000_000);
+        let json = serde_json::to_string(&state).unwrap();
+        let decoded: CheckpointAdvanceState = serde_json::from_str(&json).unwrap();
+        assert_eq!(state, decoded);
+    }
+
+    #[test]
+    fn advance_state_triggered_serde() {
+        let state = CheckpointAdvanceState::TriggeredAwaitingCoordinator {
+            trigger: CheckpointTrigger::RevocationChainGrowth { new_events: 3 },
+            triggered_at: 1_700_000_050,
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        let decoded: CheckpointAdvanceState = serde_json::from_str(&json).unwrap();
+        assert_eq!(state, decoded);
+        assert!(decoded.can_advance());
+    }
+
+    #[test]
+    fn advance_state_finalized_serde() {
+        let state = CheckpointAdvanceState::Finalized {
+            checkpoint_id: test_object_id("final-chk"),
+            finalized_seq: 42,
+            finalized_at: 1_700_001_000,
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        let decoded: CheckpointAdvanceState = serde_json::from_str(&json).unwrap();
+        assert_eq!(state, decoded);
+        assert!(!decoded.is_halted());
+        assert!(decoded.can_advance());
+        assert!(decoded.fork_evidence().is_none());
+    }
+
+    #[test]
+    fn advance_state_halted_serde() {
+        let evidence = ForkEvidence::new(
+            test_zone(),
+            10,
+            test_object_id("a"),
+            test_object_id("b"),
+            1_700_000_000,
+            test_node("d"),
+        );
+        let state = CheckpointAdvanceState::Halted {
+            fork_evidence: evidence,
+            halted_at: 1_700_000_001,
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        let decoded: CheckpointAdvanceState = serde_json::from_str(&json).unwrap();
+        assert_eq!(state, decoded);
+        assert!(decoded.is_halted());
+    }
+
+    #[test]
+    fn advance_state_clone() {
+        let state = CheckpointAdvanceState::idle(0, 0);
+        let cloned = state.clone();
+        assert_eq!(state, cloned);
+    }
+
+    #[test]
+    fn advance_state_triggered_can_advance() {
+        let state = CheckpointAdvanceState::TriggeredAwaitingCoordinator {
+            trigger: CheckpointTrigger::Manual {
+                reason: Some("test".into()),
+            },
+            triggered_at: 0,
+        };
+        assert!(state.can_advance());
+        assert!(!state.is_halted());
+        assert!(state.fork_evidence().is_none());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CheckpointValidationError – additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn validation_error_invalid_sequence_serde() {
+        let err = CheckpointValidationError::InvalidSequence {
+            expected: 10,
+            got: 12,
+        };
+        let json = serde_json::to_string(&err).unwrap();
+        let decoded: CheckpointValidationError = serde_json::from_str(&json).unwrap();
+        assert_eq!(err, decoded);
+    }
+
+    #[test]
+    fn validation_error_timestamp_skew_serde() {
+        let err = CheckpointValidationError::TimestampSkew {
+            local_time: 100,
+            proposal_time: 200,
+            max_skew: 10,
+        };
+        let json = serde_json::to_string(&err).unwrap();
+        let decoded: CheckpointValidationError = serde_json::from_str(&json).unwrap();
+        assert_eq!(err, decoded);
+    }
+
+    #[test]
+    fn validation_error_not_coordinator_serde() {
+        let err = CheckpointValidationError::NotCoordinator {
+            expected: test_node("a"),
+            got: test_node("b"),
+        };
+        let json = serde_json::to_string(&err).unwrap();
+        let decoded: CheckpointValidationError = serde_json::from_str(&json).unwrap();
+        assert_eq!(err, decoded);
+    }
+
+    #[test]
+    fn validation_error_invalid_coordinator_signature_serde() {
+        let err = CheckpointValidationError::InvalidCoordinatorSignature;
+        let json = serde_json::to_string(&err).unwrap();
+        let decoded: CheckpointValidationError = serde_json::from_str(&json).unwrap();
+        assert_eq!(err, decoded);
+    }
+
+    #[test]
+    fn validation_error_zone_mismatch_serde() {
+        let err = CheckpointValidationError::ZoneMismatch {
+            expected: test_zone(),
+            got: ZoneId::public(),
+        };
+        let json = serde_json::to_string(&err).unwrap();
+        let decoded: CheckpointValidationError = serde_json::from_str(&json).unwrap();
+        assert_eq!(err, decoded);
+    }
+
+    #[test]
+    fn validation_error_epoch_mismatch_serde() {
+        let err = CheckpointValidationError::EpochMismatch {
+            expected: test_epoch(),
+            got: EpochId::new("other"),
+        };
+        let json = serde_json::to_string(&err).unwrap();
+        let decoded: CheckpointValidationError = serde_json::from_str(&json).unwrap();
+        assert_eq!(err, decoded);
+    }
+
+    #[test]
+    fn validation_error_fork_detected_serde() {
+        let err = CheckpointValidationError::ForkDetected(ForkEvidence::new(
+            test_zone(),
+            10,
+            test_object_id("a"),
+            test_object_id("b"),
+            100,
+            test_node("d"),
+        ));
+        let json = serde_json::to_string(&err).unwrap();
+        let decoded: CheckpointValidationError = serde_json::from_str(&json).unwrap();
+        assert_eq!(err, decoded);
+        assert!(decoded.is_fork());
+    }
+
+    #[test]
+    fn validation_error_clone() {
+        let err = CheckpointValidationError::InvalidSequence {
+            expected: 1,
+            got: 2,
+        };
+        let cloned = err.clone();
+        assert_eq!(err, cloned);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // FreshnessResult – additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn freshness_result_copy() {
+        let a = FreshnessResult::Fresh;
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn freshness_result_serde_all_variants() {
+        for variant in [
+            FreshnessResult::Fresh,
+            FreshnessResult::DegradedMode,
+            FreshnessResult::TooStale,
+        ] {
+            let json = serde_json::to_string(&variant).unwrap();
+            let decoded: FreshnessResult = serde_json::from_str(&json).unwrap();
+            assert_eq!(variant, decoded);
+        }
+    }
+
+    #[test]
+    fn freshness_token_boundary_equal_seq_is_fresh() {
+        // token_chk_seq == local_checkpoint_seq → Fresh
+        let result = FreshnessResult::check_token_freshness(10, 10, false);
+        assert_eq!(result, FreshnessResult::Fresh);
+    }
+
+    #[test]
+    fn freshness_revocation_boundary_equal_seq_is_fresh() {
+        // local_rev_head_seq == policy_min_rev_seq → Fresh
+        let result = FreshnessResult::check_revocation_freshness(40, 40, false);
+        assert_eq!(result, FreshnessResult::Fresh);
+    }
+
+    #[test]
+    fn freshness_allows_operation_all_variants() {
+        assert!(FreshnessResult::Fresh.allows_operation());
+        assert!(FreshnessResult::DegradedMode.allows_operation());
+        assert!(!FreshnessResult::TooStale.allows_operation());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CheckpointProposal – additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn proposal_clone() {
+        let proposal = CheckpointProposal {
+            zone_id: test_zone(),
+            proposed_seq: 1,
+            prev_checkpoint_id: None,
+            audit_head_id: test_object_id("audit"),
+            audit_head_seq: 100,
+            revocation_head_id: test_object_id("rev"),
+            revocation_head_seq: 50,
+            zone_definition_head: test_object_id("zone-def"),
+            zone_policy_head: test_object_id("policy"),
+            active_zone_key_manifest: test_object_id("zkm"),
+            epoch_id: test_epoch(),
+            proposed_at: 1_700_000_000,
+            coordinator: test_node("coord"),
+            coordinator_signature: NodeSignature::new(
+                NodeId::new("coord"),
+                [0u8; 64],
+                1_700_000_000,
+            ),
+            triggers: vec![CheckpointTrigger::Manual { reason: None }],
+        };
+        let cloned = proposal.clone();
+        assert_eq!(proposal, cloned);
+    }
+
+    #[test]
+    fn proposal_serde_roundtrip() {
+        let proposal = CheckpointProposal {
+            zone_id: test_zone(),
+            proposed_seq: 5,
+            prev_checkpoint_id: Some(test_object_id("prev")),
+            audit_head_id: test_object_id("audit"),
+            audit_head_seq: 200,
+            revocation_head_id: test_object_id("rev"),
+            revocation_head_seq: 75,
+            zone_definition_head: test_object_id("zone-def"),
+            zone_policy_head: test_object_id("policy"),
+            active_zone_key_manifest: test_object_id("zkm"),
+            epoch_id: test_epoch(),
+            proposed_at: 1_700_000_000,
+            coordinator: test_node("coord"),
+            coordinator_signature: NodeSignature::new(
+                NodeId::new("coord"),
+                [0u8; 64],
+                1_700_000_000,
+            ),
+            triggers: vec![
+                CheckpointTrigger::TimeElapsed {
+                    elapsed_secs: 120,
+                    threshold_secs: 60,
+                },
+                CheckpointTrigger::RevocationChainGrowth { new_events: 3 },
+            ],
+        };
+        let json = serde_json::to_string(&proposal).unwrap();
+        let decoded: CheckpointProposal = serde_json::from_str(&json).unwrap();
+        assert_eq!(proposal, decoded);
+    }
+
+    #[test]
+    fn proposal_seq_follows_genesis() {
+        let proposal = CheckpointProposal {
+            zone_id: test_zone(),
+            proposed_seq: 1,
+            prev_checkpoint_id: None,
+            audit_head_id: test_object_id("audit"),
+            audit_head_seq: 0,
+            revocation_head_id: test_object_id("rev"),
+            revocation_head_seq: 0,
+            zone_definition_head: test_object_id("zone-def"),
+            zone_policy_head: test_object_id("policy"),
+            active_zone_key_manifest: test_object_id("zkm"),
+            epoch_id: test_epoch(),
+            proposed_at: 1_700_000_000,
+            coordinator: test_node("coord"),
+            coordinator_signature: NodeSignature::new(
+                NodeId::new("coord"),
+                [0u8; 64],
+                1_700_000_000,
+            ),
+            triggers: vec![],
+        };
+        // Genesis: prev_seq = 0, proposed_seq = 1
+        assert!(proposal.seq_follows_prev(0));
+    }
+
+    #[test]
+    fn proposal_timestamp_within_skew_zero_skew() {
+        let proposal = CheckpointProposal {
+            zone_id: test_zone(),
+            proposed_seq: 1,
+            prev_checkpoint_id: None,
+            audit_head_id: test_object_id("audit"),
+            audit_head_seq: 0,
+            revocation_head_id: test_object_id("rev"),
+            revocation_head_seq: 0,
+            zone_definition_head: test_object_id("zone-def"),
+            zone_policy_head: test_object_id("policy"),
+            active_zone_key_manifest: test_object_id("zkm"),
+            epoch_id: test_epoch(),
+            proposed_at: 1_700_000_000,
+            coordinator: test_node("coord"),
+            coordinator_signature: NodeSignature::new(
+                NodeId::new("coord"),
+                [0u8; 64],
+                1_700_000_000,
+            ),
+            triggers: vec![],
+        };
+        // Zero skew: only exact match
+        assert!(proposal.timestamp_within_skew(1_700_000_000, 0));
+        assert!(!proposal.timestamp_within_skew(1_700_000_001, 0));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Coordinator ranking – edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn coordinator_ranking_single_node() {
+        let zone = test_zone();
+        let epoch = test_epoch();
+        let nodes = vec![test_node("only-node")];
+        let ranked = rank_checkpoint_coordinators(&zone, &epoch, &nodes);
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].as_str(), "only-node");
+    }
+
+    #[test]
+    fn coordinator_ranking_empty_nodes() {
+        let zone = test_zone();
+        let epoch = test_epoch();
+        let nodes: Vec<TailscaleNodeId> = vec![];
+        let ranked = rank_checkpoint_coordinators(&zone, &epoch, &nodes);
+        assert!(ranked.is_empty());
+    }
+
+    #[test]
+    fn coordinator_selection_single_node() {
+        let zone = test_zone();
+        let epoch = test_epoch();
+        let nodes = vec![test_node("solo")];
+        let coord = select_checkpoint_coordinator(&zone, &epoch, &nodes);
+        assert_eq!(coord.unwrap().as_str(), "solo");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Golden Vector Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
     #[test]
     fn golden_fork_evidence_serialization() {
         let evidence = ForkEvidence {

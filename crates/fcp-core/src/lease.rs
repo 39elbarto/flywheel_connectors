@@ -1245,6 +1245,268 @@ mod tests {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // LeasePurpose – additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn lease_purpose_copy() {
+        let a = LeasePurpose::OperationExecution;
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn lease_purpose_hash_consistency() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(LeasePurpose::Migration);
+        set.insert(LeasePurpose::Migration);
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn lease_purpose_hash_all_distinct() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(LeasePurpose::OperationExecution);
+        set.insert(LeasePurpose::ConnectorStateWrite);
+        set.insert(LeasePurpose::ComputationMigration);
+        set.insert(LeasePurpose::CoordinatorElection);
+        set.insert(LeasePurpose::Migration);
+        set.insert(LeasePurpose::ResourceAccess);
+        assert_eq!(set.len(), 6);
+    }
+
+    #[test]
+    fn lease_purpose_inequality() {
+        assert_ne!(LeasePurpose::OperationExecution, LeasePurpose::Migration);
+        assert_ne!(
+            LeasePurpose::ConnectorStateWrite,
+            LeasePurpose::ResourceAccess
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // LeaseValidationError – additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn lease_validation_error_clone() {
+        let err = LeaseValidationError::Expired {
+            expired_at: 100,
+            now: 200,
+        };
+        let cloned = err.clone();
+        assert_eq!(err, cloned);
+    }
+
+    #[test]
+    fn lease_validation_error_equality() {
+        let a = LeaseValidationError::Superseded {
+            held_seq: 5,
+            current_seq: 10,
+        };
+        let b = LeaseValidationError::Superseded {
+            held_seq: 5,
+            current_seq: 10,
+        };
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn lease_validation_error_inequality() {
+        let a = LeaseValidationError::Expired {
+            expired_at: 100,
+            now: 200,
+        };
+        let b = LeaseValidationError::Superseded {
+            held_seq: 1,
+            current_seq: 2,
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn lease_validation_error_is_error_trait() {
+        let err: &dyn std::error::Error = &LeaseValidationError::Expired {
+            expired_at: 100,
+            now: 200,
+        };
+        assert!(err.to_string().contains("expired"));
+    }
+
+    #[test]
+    fn lease_validation_error_display_all_variants() {
+        let subject_mismatch = LeaseValidationError::SubjectMismatch {
+            expected: test_object_id("a"),
+            got: test_object_id("b"),
+        };
+        assert!(subject_mismatch.to_string().contains("subject mismatch"));
+
+        let zone_mismatch = LeaseValidationError::ZoneMismatch {
+            expected: ZoneId::work(),
+            got: ZoneId::private(),
+        };
+        assert!(zone_mismatch.to_string().contains("zone mismatch"));
+
+        let purpose = LeaseValidationError::PurposeMismatch {
+            expected: LeasePurpose::OperationExecution,
+            got: LeasePurpose::Migration,
+        };
+        assert!(purpose.to_string().contains("purpose mismatch"));
+
+        let coordinator = LeaseValidationError::CoordinatorMismatch {
+            expected: test_node("a"),
+            got: test_node("b"),
+        };
+        assert!(coordinator.to_string().contains("coordinator mismatch"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Lease – additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn lease_clone() {
+        let lease = create_test_lease(42);
+        let cloned = lease.clone();
+        assert_eq!(cloned.lease_seq, lease.lease_seq);
+        assert_eq!(cloned.holder, lease.holder);
+        assert_eq!(cloned.exp, lease.exp);
+        assert_eq!(cloned.purpose, lease.purpose);
+    }
+
+    #[test]
+    fn lease_zone_id_accessor() {
+        let lease = create_test_lease(1);
+        assert_eq!(*lease.zone_id(), ZoneId::work());
+    }
+
+    #[test]
+    fn lease_is_expired_boundary() {
+        let lease = create_test_lease_with_exp(1, 1000);
+        // Just before expiry
+        assert!(!lease.is_expired(999));
+        // Exactly at expiry
+        assert!(lease.is_expired(1000));
+    }
+
+    #[test]
+    fn lease_fencing_token_matches_seq() {
+        let lease = create_test_lease(777);
+        assert_eq!(lease.fencing_token(), 777);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // LeaseRequest – additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn lease_request_clone() {
+        let request = LeaseRequest {
+            subject_object_id: test_object_id("s"),
+            zone_id: test_zone(),
+            requester: test_node("n"),
+            requested_ttl: 60,
+            renew_seq: Some(5),
+        };
+        let cloned = request.clone();
+        assert_eq!(cloned.requested_ttl, request.requested_ttl);
+        assert_eq!(cloned.renew_seq, request.renew_seq);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // LeaseResponse – additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn lease_response_clone() {
+        let response = LeaseResponse::Denied {
+            current_holder: test_node("h"),
+            expires_at: 5000,
+            current_seq: 10,
+        };
+        let cloned = Clone::clone(&response);
+        assert!(matches!(
+            cloned,
+            LeaseResponse::Denied {
+                current_seq: 10,
+                ..
+            }
+        ));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // rank_nodes_by_hrw – additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn rank_nodes_empty() {
+        let zone = test_zone();
+        let subject = test_object_id("s");
+        let ranked = rank_nodes_by_hrw(&zone, &subject, &[]);
+        assert!(ranked.is_empty());
+    }
+
+    #[test]
+    fn rank_nodes_single() {
+        let zone = test_zone();
+        let subject = test_object_id("s");
+        let nodes = vec![test_node("only")];
+        let ranked = rank_nodes_by_hrw(&zone, &subject, &nodes);
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].as_str(), "only");
+    }
+
+    #[test]
+    fn rank_nodes_deterministic() {
+        let zone = test_zone();
+        let subject = test_object_id("s");
+        let nodes = vec![test_node("a"), test_node("b"), test_node("c")];
+        let r1 = rank_nodes_by_hrw(&zone, &subject, &nodes);
+        let r2 = rank_nodes_by_hrw(&zone, &subject, &nodes);
+        assert_eq!(r1, r2);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // current_timestamp – basic sanity
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn current_timestamp_is_reasonable() {
+        let ts = current_timestamp();
+        // Should be after 2020-01-01
+        assert!(ts > 1_577_836_800);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // LeaseParams – clone
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn lease_params_clone() {
+        use crate::Provenance;
+        use fcp_cbor::SchemaId;
+        use semver::Version;
+
+        let zone = test_zone();
+        let params = LeaseParams {
+            schema: SchemaId::new("fcp.lease", "lease", Version::new(1, 0, 0)),
+            zone_id: zone.clone(),
+            holder: test_node("h"),
+            lease_seq: 1,
+            ttl_secs: 60,
+            subject_object_id: test_object_id("s"),
+            provenance: Provenance::new(zone),
+            purpose: LeasePurpose::ResourceAccess,
+            quorum_signatures: SignatureSet::default(),
+        };
+        let cloned = params.clone();
+        assert_eq!(cloned.lease_seq, params.lease_seq);
+        assert_eq!(cloned.purpose, params.purpose);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // Helper Functions
     // ─────────────────────────────────────────────────────────────────────────
 

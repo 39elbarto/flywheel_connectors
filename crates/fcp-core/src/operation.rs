@@ -1660,4 +1660,203 @@ mod tests {
         // Failed with receipt should return cached (to return error consistently)
         assert!(entry.should_return_cached(1500));
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // IntentStatus trait coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn intent_status_copy() {
+        let s = IntentStatus::Pending;
+        let copied = s;
+        assert_eq!(s, copied);
+    }
+
+    #[test]
+    fn intent_status_display_all_variants() {
+        assert_eq!(IntentStatus::Pending.to_string(), "pending");
+        assert_eq!(IntentStatus::InProgress.to_string(), "in_progress");
+        assert_eq!(IntentStatus::Completed.to_string(), "completed");
+        assert_eq!(IntentStatus::Failed.to_string(), "failed");
+        assert_eq!(IntentStatus::Orphaned.to_string(), "orphaned");
+    }
+
+    #[test]
+    fn intent_status_serde_all_variants() {
+        let variants = [
+            IntentStatus::Pending,
+            IntentStatus::InProgress,
+            IntentStatus::Completed,
+            IntentStatus::Failed,
+            IntentStatus::Orphaned,
+        ];
+        for status in variants {
+            let json = serde_json::to_string(&status).unwrap();
+            let back: IntentStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(status, back);
+        }
+    }
+
+    #[test]
+    fn intent_status_inequality() {
+        assert_ne!(IntentStatus::Pending, IntentStatus::Completed);
+        assert_ne!(IntentStatus::Failed, IntentStatus::Orphaned);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // OperationIntent trait coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn operation_intent_clone() {
+        let intent = create_test_intent();
+        let cloned = intent.clone();
+        assert_eq!(cloned.planned_at, intent.planned_at);
+        assert_eq!(cloned.lease_seq, intent.lease_seq);
+        assert_eq!(cloned.idempotency_key, intent.idempotency_key);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // OperationReceipt trait coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn operation_receipt_clone() {
+        let receipt = create_test_receipt();
+        let cloned = receipt.clone();
+        assert_eq!(cloned.executed_at, receipt.executed_at);
+        assert_eq!(cloned.idempotency_key, receipt.idempotency_key);
+    }
+
+    #[test]
+    fn receipt_zone_id() {
+        let receipt = create_test_receipt();
+        assert_eq!(receipt.zone_id(), &test_zone());
+    }
+
+    #[test]
+    fn receipt_is_idempotent() {
+        let mut receipt = create_test_receipt();
+        assert!(receipt.is_idempotent());
+
+        receipt.idempotency_key = None;
+        assert!(!receipt.is_idempotent());
+    }
+
+    #[test]
+    fn receipt_total_objects_produced_empty() {
+        let mut receipt = create_test_receipt();
+        receipt.outcome_object_ids.clear();
+        receipt.resource_object_ids.clear();
+        assert_eq!(receipt.total_objects_produced(), 0);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // IdempotencyEntry trait coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn idempotency_entry_clone() {
+        let entry = IdempotencyEntry {
+            key: "test".to_string(),
+            zone_id: test_zone(),
+            intent_id: test_object_id("intent"),
+            receipt_id: None,
+            status: IntentStatus::Pending,
+            created_at: 1000,
+            expires_at: 2000,
+        };
+        let cloned = Clone::clone(&entry);
+        assert_eq!(cloned.key, "test");
+        assert_eq!(cloned.status, IntentStatus::Pending);
+    }
+
+    #[test]
+    fn idempotency_entry_serde_roundtrip() {
+        let entry = IdempotencyEntry {
+            key: "serde-test".to_string(),
+            zone_id: test_zone(),
+            intent_id: test_object_id("intent"),
+            receipt_id: Some(test_object_id("receipt")),
+            status: IntentStatus::Completed,
+            created_at: 1000,
+            expires_at: 5000,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let back: IdempotencyEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.key, "serde-test");
+        assert_eq!(back.status, IntentStatus::Completed);
+        assert!(back.receipt_id.is_some());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // OperationValidationError trait coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn validation_error_clone() {
+        let err = OperationValidationError::LeaseSeqMismatch {
+            expected: 42,
+            got: 41,
+        };
+        let cloned = err.clone();
+        assert_eq!(err, cloned);
+    }
+
+    #[test]
+    fn validation_error_equality() {
+        let a = OperationValidationError::IntentNotFound {
+            idempotency_key: "k".into(),
+        };
+        let b = OperationValidationError::IntentNotFound {
+            idempotency_key: "k".into(),
+        };
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn validation_error_inequality() {
+        let a = OperationValidationError::IntentNotFound {
+            idempotency_key: "k1".into(),
+        };
+        let b = OperationValidationError::IntentNotFound {
+            idempotency_key: "k2".into(),
+        };
+        assert_ne!(a, b);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // validate_receipt_intent_binding coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn validate_binding_success() {
+        let intent = create_test_intent();
+        let receipt = create_test_receipt();
+        assert!(validate_receipt_intent_binding(&receipt, &intent).is_ok());
+    }
+
+    #[test]
+    fn validate_binding_request_mismatch() {
+        let intent = create_test_intent();
+        let mut receipt = create_test_receipt();
+        receipt.request_object_id = test_object_id("different-request");
+        let err = validate_receipt_intent_binding(&receipt, &intent).unwrap_err();
+        assert!(matches!(
+            err,
+            OperationValidationError::RequestMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_binding_idempotency_key_mismatch() {
+        let intent = create_test_intent();
+        let mut receipt = create_test_receipt();
+        receipt.idempotency_key = Some("different-key".into());
+        let err = validate_receipt_intent_binding(&receipt, &intent).unwrap_err();
+        assert!(matches!(
+            err,
+            OperationValidationError::IntentNotFound { .. }
+        ));
+    }
 }

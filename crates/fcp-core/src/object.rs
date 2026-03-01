@@ -713,18 +713,17 @@ mod tests {
 
     #[test]
     fn object_id_ordering_stable_sort() {
-        let ids: Vec<ObjectId> = (0..5)
+        let mut ids: Vec<ObjectId> = (0..5)
             .map(|i| {
                 let mut bytes = [0_u8; 32];
                 bytes[31] = 4 - i;
                 ObjectId::from_bytes(bytes)
             })
             .collect();
-        let mut sorted = ids.clone();
-        sorted.sort();
+        ids.sort();
         // Lowest byte value first
-        assert_eq!(sorted[0].as_bytes()[31], 0);
-        assert_eq!(sorted[4].as_bytes()[31], 4);
+        assert_eq!(ids[0].as_bytes()[31], 0);
+        assert_eq!(ids[4].as_bytes()[31], 4);
     }
 
     #[test]
@@ -1096,9 +1095,7 @@ mod tests {
                 object_id,
                 header: header.clone(),
                 body: body.clone(),
-                storage: StorageMeta {
-                    retention: retention.clone(),
-                },
+                storage: StorageMeta { retention },
             };
             let json = serde_json::to_string(&stored).unwrap();
             let back: StoredObject = serde_json::from_str(&json).unwrap();

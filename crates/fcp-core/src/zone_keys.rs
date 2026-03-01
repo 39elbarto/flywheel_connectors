@@ -1895,7 +1895,7 @@ mod tests {
         let key_id = ZoneKeyId::from_bytes([0x01; 8]);
         let key = random_zone_key();
         ring.insert_zone_key(key_id, key);
-        ring.set_active_zone_key(key_id);
+        let _ = ring.set_active_zone_key(key_id);
 
         let cloned = ring.clone();
         assert_eq!(cloned.zone_id, ring.zone_id);

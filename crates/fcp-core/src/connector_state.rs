@@ -2005,4 +2005,242 @@ mod tests {
         let decoded: StateForkDetectionResult = serde_json::from_str(&json).unwrap();
         assert!(decoded.is_fork());
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ConnectorStateDelta tests (zero coverage → new)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    fn create_test_delta() -> ConnectorStateDelta {
+        ConnectorStateDelta {
+            header: test_header(),
+            connector_id: test_connector_id(),
+            instance_id: Some(InstanceId::new()),
+            zone_id: ZoneId::work(),
+            crdt_type: CrdtType::LwwMap,
+            delta_cbor: vec![0xA0], // empty CBOR map
+            applied_at: 1_700_000_000,
+            applied_by: TailscaleNodeId::new("node-1"),
+            signature: Signature::zero(),
+        }
+    }
+
+    #[test]
+    fn connector_state_delta_clone() {
+        let delta = create_test_delta();
+        let cloned = Clone::clone(&delta);
+        assert_eq!(cloned.applied_at, 1_700_000_000);
+        assert_eq!(cloned.crdt_type, CrdtType::LwwMap);
+    }
+
+    #[test]
+    fn connector_state_delta_serde_roundtrip() {
+        let delta = create_test_delta();
+        let json = serde_json::to_string(&delta).unwrap();
+        let back: ConnectorStateDelta = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.applied_at, delta.applied_at);
+        assert_eq!(back.crdt_type, delta.crdt_type);
+        assert_eq!(back.delta_cbor, delta.delta_cbor);
+    }
+
+    #[test]
+    fn connector_state_delta_serde_omits_none_instance() {
+        let mut delta = create_test_delta();
+        delta.instance_id = None;
+        let json = serde_json::to_string(&delta).unwrap();
+        assert!(!json.contains("instance_id"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ConnectorStateSnapshot tests (zero coverage → new)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    fn create_test_snapshot() -> ConnectorStateSnapshot {
+        ConnectorStateSnapshot {
+            header: test_header(),
+            connector_id: test_connector_id(),
+            instance_id: None,
+            zone_id: ZoneId::work(),
+            covers_head: test_object_id("head-100"),
+            covers_seq: 100,
+            state_cbor: vec![0xA0],
+            snapshotted_at: 1_700_000_000,
+            signature: Signature::zero(),
+        }
+    }
+
+    #[test]
+    fn connector_state_snapshot_clone() {
+        let snap = create_test_snapshot();
+        let cloned = Clone::clone(&snap);
+        assert_eq!(cloned.covers_seq, 100);
+        assert_eq!(cloned.snapshotted_at, 1_700_000_000);
+    }
+
+    #[test]
+    fn connector_state_snapshot_serde_roundtrip() {
+        let snap = create_test_snapshot();
+        let json = serde_json::to_string(&snap).unwrap();
+        let back: ConnectorStateSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.covers_seq, snap.covers_seq);
+        assert_eq!(back.state_cbor, snap.state_cbor);
+        assert_eq!(back.snapshotted_at, snap.snapshotted_at);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ConnectorStateObject additional tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn connector_state_object_clone() {
+        let obj = ConnectorStateObject {
+            header: test_header(),
+            connector_id: test_connector_id(),
+            instance_id: None,
+            zone_id: ZoneId::work(),
+            prev: None,
+            seq: 0,
+            state_cbor: vec![0xA0],
+            updated_at: 1_700_000_000,
+            lease_seq: 42,
+            lease_object_id: test_object_id("lease-1"),
+            signature: Signature::zero(),
+        };
+        let cloned = Clone::clone(&obj);
+        assert_eq!(cloned.seq, 0);
+        assert!(cloned.is_genesis());
+    }
+
+    #[test]
+    fn connector_state_object_serde_roundtrip() {
+        let obj = ConnectorStateObject {
+            header: test_header(),
+            connector_id: test_connector_id(),
+            instance_id: Some(InstanceId::new()),
+            zone_id: ZoneId::work(),
+            prev: Some(test_object_id("prev")),
+            seq: 5,
+            state_cbor: vec![0xBF, 0xFF],
+            updated_at: 1_700_000_000,
+            lease_seq: 10,
+            lease_object_id: test_object_id("lease-2"),
+            signature: Signature::zero(),
+        };
+        let json = serde_json::to_string(&obj).unwrap();
+        let back: ConnectorStateObject = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.seq, 5);
+        assert!(!back.is_genesis());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // FencingError trait coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn fencing_error_clone() {
+        let err = FencingError::StaleLeaseSeq {
+            held_seq: 42,
+            current_seq: 41,
+        };
+        let cloned = err.clone();
+        assert_eq!(err, cloned);
+    }
+
+    #[test]
+    fn fencing_error_equality() {
+        let a = FencingError::WrongPurpose;
+        let b = FencingError::WrongPurpose;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn fencing_error_inequality() {
+        let a = FencingError::WrongPurpose;
+        let b = FencingError::LeaseNotFound {
+            lease_id: test_object_id("lease-1"),
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn fencing_error_std_error() {
+        let err: Box<dyn std::error::Error> = Box::new(FencingError::WrongPurpose);
+        assert!(!err.to_string().is_empty());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ForkEvent Clone
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn fork_event_clone() {
+        let event = ForkEvent::new(
+            test_object_id("prev"),
+            test_object_id("a"),
+            test_object_id("b"),
+            10,
+            1_700_000_000,
+            ZoneId::work(),
+            test_connector_id(),
+        );
+        let cloned = event.clone();
+        assert_eq!(event, cloned);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ForkResolutionOutcome Clone + serde
+    // ─────────────────────────────────────────────────────────────────────────
+
+    fn create_test_fork_event() -> ForkEvent {
+        ForkEvent::new(
+            test_object_id("prev"),
+            test_object_id("a"),
+            test_object_id("b"),
+            10,
+            1_700_000_000,
+            ZoneId::work(),
+            test_connector_id(),
+        )
+    }
+
+    #[test]
+    fn fork_resolution_outcome_success_clone() {
+        let outcome = ForkResolutionOutcome::success(
+            create_test_fork_event(),
+            ForkResolution::ChooseByLease,
+            test_object_id("winner"),
+            1_700_000_100,
+        );
+        let cloned = Clone::clone(&outcome);
+        assert!(cloned.resolved);
+        assert!(cloned.failure_reason.is_none());
+    }
+
+    #[test]
+    fn fork_resolution_outcome_serde_roundtrip() {
+        let outcome = ForkResolutionOutcome::failure(
+            create_test_fork_event(),
+            ForkResolution::ManualResolution,
+            1_700_000_100,
+            "test failure",
+        );
+        let json = serde_json::to_string(&outcome).unwrap();
+        let back: ForkResolutionOutcome = serde_json::from_str(&json).unwrap();
+        assert!(!back.resolved);
+        assert!(back.failure_reason.is_some());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ConnectorStateRoot Clone
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn connector_state_root_clone() {
+        let root = ConnectorStateRoot::singleton_writer(
+            test_header(),
+            test_connector_id(),
+            ZoneId::work(),
+        );
+        let cloned = Clone::clone(&root);
+        assert_eq!(cloned.model, ConnectorStateModel::SingletonWriter);
+    }
 }

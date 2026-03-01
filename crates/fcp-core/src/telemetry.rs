@@ -408,4 +408,189 @@ mod tests {
         assert!(value.get("outcome").is_some());
         assert!(value.get("occurred_at").is_some());
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CapabilityUsageOutcome – edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn outcome_debug_format() {
+        assert_eq!(format!("{:?}", CapabilityUsageOutcome::Allow), "Allow");
+        assert_eq!(format!("{:?}", CapabilityUsageOutcome::Deny), "Deny");
+        assert_eq!(format!("{:?}", CapabilityUsageOutcome::Error), "Error");
+    }
+
+    #[test]
+    fn outcome_equality() {
+        assert_eq!(CapabilityUsageOutcome::Allow, CapabilityUsageOutcome::Allow);
+        assert_ne!(CapabilityUsageOutcome::Allow, CapabilityUsageOutcome::Deny);
+        assert_ne!(CapabilityUsageOutcome::Deny, CapabilityUsageOutcome::Error);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CapabilityUsageKey – edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn key_debug_format() {
+        let key = test_key();
+        let debug = format!("{key:?}");
+        assert!(debug.contains("CapabilityUsageKey"));
+        assert!(debug.contains("fcp.example"));
+    }
+
+    #[test]
+    fn key_zone_sensitivity() {
+        let a = CapabilityUsageKey::new(
+            ZoneId::work(),
+            ConnectorId::from_static("fcp.a:rr:1"),
+            CapabilityId::from_static("fcp.a.read"),
+        );
+        let b = CapabilityUsageKey::new(
+            ZoneId::private(),
+            ConnectorId::from_static("fcp.a:rr:1"),
+            CapabilityId::from_static("fcp.a.read"),
+        );
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn key_connector_sensitivity() {
+        let a = CapabilityUsageKey::new(
+            ZoneId::work(),
+            ConnectorId::from_static("fcp.a:rr:1"),
+            CapabilityId::from_static("fcp.a.read"),
+        );
+        let b = CapabilityUsageKey::new(
+            ZoneId::work(),
+            ConnectorId::from_static("fcp.b:rr:1"),
+            CapabilityId::from_static("fcp.a.read"),
+        );
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn key_capability_sensitivity() {
+        let a = CapabilityUsageKey::new(
+            ZoneId::work(),
+            ConnectorId::from_static("fcp.a:rr:1"),
+            CapabilityId::from_static("fcp.a.read"),
+        );
+        let b = CapabilityUsageKey::new(
+            ZoneId::work(),
+            ConnectorId::from_static("fcp.a:rr:1"),
+            CapabilityId::from_static("fcp.a.write"),
+        );
+        assert_ne!(a, b);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CapabilityUsageEvent – edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn event_occurred_at_zero() {
+        let event = CapabilityUsageEvent::new(
+            test_key(),
+            PrincipalId::new("user:zero").expect("principal id"),
+            SafetyTier::Safe,
+            OperationId::from_static("op.noop"),
+            CapabilityUsageOutcome::Allow,
+            0,
+        );
+        assert_eq!(event.occurred_at, 0);
+    }
+
+    #[test]
+    fn event_occurred_at_max() {
+        let event = CapabilityUsageEvent::new(
+            test_key(),
+            PrincipalId::new("user:max").expect("principal id"),
+            SafetyTier::Dangerous,
+            OperationId::from_static("op.big"),
+            CapabilityUsageOutcome::Error,
+            u64::MAX,
+        );
+        let json = serde_json::to_string(&event).unwrap();
+        let decoded: CapabilityUsageEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.occurred_at, u64::MAX);
+    }
+
+    #[test]
+    fn event_debug_format() {
+        let event = test_event(CapabilityUsageOutcome::Allow);
+        let debug = format!("{event:?}");
+        assert!(debug.contains("CapabilityUsageEvent"));
+        assert!(debug.contains("fcp-capability-usage"));
+    }
+
+    #[test]
+    fn event_clone_preserves_all_fields() {
+        let event = test_event(CapabilityUsageOutcome::Deny);
+        let cloned = Clone::clone(&event);
+        assert_eq!(cloned.format, event.format);
+        assert_eq!(cloned.schema_version, event.schema_version);
+        assert_eq!(cloned.zone_id, event.zone_id);
+        assert_eq!(cloned.connector_id, event.connector_id);
+        assert_eq!(cloned.capability_id, event.capability_id);
+        assert_eq!(cloned.principal_id, event.principal_id);
+        assert_eq!(cloned.risk_tier, event.risk_tier);
+        assert_eq!(cloned.operation, event.operation);
+        assert_eq!(cloned.outcome, event.outcome);
+        assert_eq!(cloned.occurred_at, event.occurred_at);
+    }
+
+    #[test]
+    fn event_different_principals_produce_different_events() {
+        let e1 = CapabilityUsageEvent::new(
+            test_key(),
+            PrincipalId::new("user:alice").expect("principal id"),
+            SafetyTier::Safe,
+            OperationId::from_static("op.read"),
+            CapabilityUsageOutcome::Allow,
+            1000,
+        );
+        let e2 = CapabilityUsageEvent::new(
+            test_key(),
+            PrincipalId::new("user:bob").expect("principal id"),
+            SafetyTier::Safe,
+            OperationId::from_static("op.read"),
+            CapabilityUsageOutcome::Allow,
+            1000,
+        );
+        // Same key, different principals
+        assert_eq!(e1.key(), e2.key());
+        assert_ne!(e1.principal_id, e2.principal_id);
+    }
+
+    #[test]
+    fn key_clone_is_equal() {
+        let key = test_key();
+        let cloned = Clone::clone(&key);
+        assert_eq!(key, cloned);
+        assert_eq!(key.zone_id, cloned.zone_id);
+        assert_eq!(key.connector_id, cloned.connector_id);
+        assert_eq!(key.capability_id, cloned.capability_id);
+    }
+
+    #[test]
+    fn event_format_is_constant() {
+        let e1 = test_event(CapabilityUsageOutcome::Allow);
+        let e2 = test_event(CapabilityUsageOutcome::Error);
+        assert_eq!(e1.format, e2.format);
+        assert_eq!(e1.schema_version, e2.schema_version);
+    }
+
+    #[test]
+    fn event_key_is_independent_of_outcome_and_principal() {
+        let key = test_key();
+        for outcome in [
+            CapabilityUsageOutcome::Allow,
+            CapabilityUsageOutcome::Deny,
+            CapabilityUsageOutcome::Error,
+        ] {
+            let event = test_event(outcome);
+            assert_eq!(event.key(), key);
+        }
+    }
 }

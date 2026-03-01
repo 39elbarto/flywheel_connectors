@@ -863,13 +863,6 @@ mod tests {
     }
 
     #[test]
-    fn limit_type_clone() {
-        let a = LimitType::Burst;
-        let cloned = a.clone();
-        assert_eq!(a, cloned);
-    }
-
-    #[test]
     fn limit_type_inequality() {
         assert_ne!(LimitType::Rpm, LimitType::Concurrent);
         assert_ne!(LimitType::Burst, LimitType::Quota);
@@ -901,13 +894,6 @@ mod tests {
         let a = BackpressureLevel::Warning;
         let b = a;
         assert_eq!(a, b);
-    }
-
-    #[test]
-    fn backpressure_level_clone() {
-        let a = BackpressureLevel::HardLimit;
-        let cloned = a.clone();
-        assert_eq!(a, cloned);
     }
 
     #[test]
@@ -994,7 +980,7 @@ mod tests {
         let err = RateLimitDeclarationError::EmptyToolPools {
             tool: "t".to_string(),
         };
-        assert!(err.to_string().contains("t"));
+        assert!(err.to_string().contains('t'));
     }
 
     // ─────────────────────────────────────────────────────────────────────────

@@ -1176,4 +1176,257 @@ mod tests {
         let back: PostureRequirement = serde_json::from_str(&json).unwrap();
         assert_eq!(*back.attribute(), PostureAttributeKey::OsVersion);
     }
+
+    // ── PostureAttributeKey trait coverage ────────────────────────────────
+
+    #[test]
+    fn attribute_key_clone() {
+        let key = PostureAttributeKey::DiskEncryption;
+        let cloned = key.clone();
+        assert_eq!(key, cloned);
+    }
+
+    #[test]
+    fn attribute_key_hash_consistency() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let key = PostureAttributeKey::FirewallEnabled;
+        let mut h1 = DefaultHasher::new();
+        let mut h2 = DefaultHasher::new();
+        key.hash(&mut h1);
+        key.hash(&mut h2);
+        assert_eq!(h1.finish(), h2.finish());
+    }
+
+    #[test]
+    fn attribute_key_inequality() {
+        assert_ne!(PostureAttributeKey::OsType, PostureAttributeKey::OsVersion);
+        assert_ne!(
+            PostureAttributeKey::Custom("a".into()),
+            PostureAttributeKey::Custom("b".into())
+        );
+    }
+
+    #[test]
+    fn attribute_key_serde_custom_roundtrip() {
+        let key = PostureAttributeKey::Custom("my_attr".into());
+        let json = serde_json::to_string(&key).unwrap();
+        let back: PostureAttributeKey = serde_json::from_str(&json).unwrap();
+        assert_eq!(key, back);
+    }
+
+    // ── PostureAttributeValue trait coverage ──────────────────────────────
+
+    #[test]
+    fn attribute_value_clone() {
+        let val = PostureAttributeValue::String("test".into());
+        let cloned = val.clone();
+        assert_eq!(val, cloned);
+    }
+
+    #[test]
+    fn attribute_value_bool_accessors() {
+        let val = PostureAttributeValue::Bool(false);
+        assert_eq!(val.as_bool(), Some(false));
+        assert!(val.as_str().is_none());
+        assert!(val.as_number().is_none());
+    }
+
+    #[test]
+    fn attribute_value_number_accessor() {
+        let val = PostureAttributeValue::Number(-42);
+        assert_eq!(val.as_number(), Some(-42));
+    }
+
+    // ── PostureAttestation trait coverage ─────────────────────────────────
+
+    #[test]
+    fn attestation_clone() {
+        let att = create_test_attestation();
+        let cloned = att.clone();
+        assert_eq!(cloned.attestation_id, att.attestation_id);
+        assert_eq!(cloned.schema, att.schema);
+        assert_eq!(cloned.node_id, att.node_id);
+    }
+
+    #[test]
+    fn attestation_schema_constant() {
+        assert_eq!(PostureAttestation::SCHEMA, "fcp.posture.v1");
+    }
+
+    #[test]
+    fn attestation_remaining_validity_positive() {
+        let att = create_test_attestation();
+        let remaining = att.remaining_validity();
+        assert!(remaining.num_seconds() > 0);
+    }
+
+    #[test]
+    fn attestation_remaining_validity_negative_when_expired() {
+        let mut att = create_test_attestation();
+        att.expires_at = Utc::now() - chrono::Duration::hours(1);
+        let remaining = att.remaining_validity();
+        assert!(remaining.num_seconds() < 0);
+    }
+
+    // ── PostureRequirement serde all variants ────────────────────────────
+
+    #[test]
+    fn requirement_serde_require_true() {
+        let req = PostureRequirement::RequireTrue {
+            attribute: PostureAttributeKey::DiskEncryption,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: PostureRequirement = serde_json::from_str(&json).unwrap();
+        assert_eq!(*back.attribute(), PostureAttributeKey::DiskEncryption);
+    }
+
+    #[test]
+    fn requirement_serde_require_false() {
+        let req = PostureRequirement::RequireFalse {
+            attribute: PostureAttributeKey::AntivirusActive,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: PostureRequirement = serde_json::from_str(&json).unwrap();
+        assert_eq!(*back.attribute(), PostureAttributeKey::AntivirusActive);
+    }
+
+    #[test]
+    fn requirement_serde_require_equal() {
+        let req = PostureRequirement::RequireEqual {
+            attribute: PostureAttributeKey::OsType,
+            value: "linux".into(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: PostureRequirement = serde_json::from_str(&json).unwrap();
+        assert_eq!(*back.attribute(), PostureAttributeKey::OsType);
+    }
+
+    #[test]
+    fn requirement_serde_require_one_of() {
+        let req = PostureRequirement::RequireOneOf {
+            attribute: PostureAttributeKey::OsType,
+            values: vec!["macos".into(), "linux".into()],
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: PostureRequirement = serde_json::from_str(&json).unwrap();
+        assert_eq!(*back.attribute(), PostureAttributeKey::OsType);
+    }
+
+    #[test]
+    fn requirement_serde_require_min_value() {
+        let req = PostureRequirement::RequireMinValue {
+            attribute: PostureAttributeKey::ScreenLockTimeout,
+            min_value: 300,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: PostureRequirement = serde_json::from_str(&json).unwrap();
+        assert_eq!(*back.attribute(), PostureAttributeKey::ScreenLockTimeout);
+    }
+
+    #[test]
+    fn requirement_serde_require_max_value() {
+        let req = PostureRequirement::RequireMaxValue {
+            attribute: PostureAttributeKey::ScreenLockTimeout,
+            max_value: 600,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: PostureRequirement = serde_json::from_str(&json).unwrap();
+        assert_eq!(*back.attribute(), PostureAttributeKey::ScreenLockTimeout);
+    }
+
+    #[test]
+    fn requirement_clone() {
+        let req = PostureRequirement::RequireTrue {
+            attribute: PostureAttributeKey::TpmPresent,
+        };
+        let cloned = Clone::clone(&req);
+        assert_eq!(*cloned.attribute(), PostureAttributeKey::TpmPresent);
+    }
+
+    // ── PostureRequirements trait coverage ────────────────────────────────
+
+    #[test]
+    fn requirements_clone() {
+        let reqs = PostureRequirements::builder()
+            .require_disk_encryption(true)
+            .require_firewall(true)
+            .allow_verifier("v1")
+            .build();
+        let cloned = Clone::clone(&reqs);
+        assert_eq!(cloned.requirements.len(), 2);
+        assert_eq!(cloned.allowed_verifiers, vec!["v1"]);
+    }
+
+    #[test]
+    fn requirements_default() {
+        let reqs = PostureRequirements::default();
+        assert!(reqs.requirements.is_empty());
+        // Default derive sets to 0; the 86400 default is only for serde deserialization
+        assert_eq!(reqs.max_attestation_age_secs, 0);
+        assert!(reqs.allowed_verifiers.is_empty());
+    }
+
+    #[test]
+    fn requirements_serde_roundtrip() {
+        let reqs = PostureRequirements::builder()
+            .require_disk_encryption(true)
+            .require_os_min_version("14.0")
+            .max_attestation_age_secs(7200)
+            .allow_verifier("trusted-v")
+            .build();
+        let json = serde_json::to_string(&reqs).unwrap();
+        let back: PostureRequirements = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.requirements.len(), 2);
+        assert_eq!(back.max_attestation_age_secs, 7200);
+        assert_eq!(back.allowed_verifiers, vec!["trusted-v"]);
+    }
+
+    // ── PostureCheckResult trait coverage ─────────────────────────────────
+
+    #[test]
+    fn check_result_clone() {
+        let result = PostureCheckResult::RequirementNotMet {
+            attribute: PostureAttributeKey::TpmPresent,
+        };
+        let cloned = result.clone();
+        assert_eq!(result, cloned);
+    }
+
+    #[test]
+    fn check_result_equality() {
+        assert_eq!(PostureCheckResult::Satisfied, PostureCheckResult::Satisfied);
+        assert_eq!(
+            PostureCheckResult::AttestationExpired,
+            PostureCheckResult::AttestationExpired,
+        );
+        assert_ne!(
+            PostureCheckResult::Satisfied,
+            PostureCheckResult::VerifierNotAllowed,
+        );
+    }
+
+    // ── version_gte additional edge cases ────────────────────────────────
+
+    #[test]
+    fn version_gte_empty_strings() {
+        // Both empty → equal → true
+        assert!(version_gte("", ""));
+    }
+
+    #[test]
+    fn version_gte_non_numeric_parts_filtered() {
+        // Non-numeric parts are filtered out by parse().ok()
+        assert!(version_gte("14.abc.1", "14"));
+    }
+
+    // ── PostureRequirementsBuilder Default ────────────────────────────────
+
+    #[test]
+    fn builder_default_trait() {
+        let builder = PostureRequirementsBuilder::default();
+        let reqs = builder.build();
+        assert!(reqs.is_empty());
+        assert_eq!(reqs.max_attestation_age_secs, 86400);
+    }
 }

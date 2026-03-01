@@ -801,6 +801,200 @@ mod tests {
         assert!(CredentialId::parse("11223344-5566-7788-99aa-bbccddeeff000").is_err()); // too long
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // CredentialId – additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn credential_id_copy() {
+        let a = CredentialId::test_id([0x42; 16]);
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn credential_id_hash_consistency() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        let id = CredentialId::test_id([0xAA; 16]);
+        set.insert(id);
+        set.insert(id);
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn credential_id_ord() {
+        let a = CredentialId::test_id([0x00; 16]);
+        let b = CredentialId::test_id([0xFF; 16]);
+        assert!(a < b);
+        assert!(b > a);
+    }
+
+    #[test]
+    fn credential_id_default_is_unique() {
+        let a = CredentialId::default();
+        let b = CredentialId::default();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn credential_id_from_uuid_as_uuid_roundtrip() {
+        let uuid = Uuid::from_bytes([0x12; 16]);
+        let id = CredentialId::from_uuid(uuid);
+        assert_eq!(*id.as_uuid(), uuid);
+    }
+
+    #[test]
+    fn credential_id_debug_contains_uuid() {
+        let id = CredentialId::test_id([0xAB; 16]);
+        let dbg = format!("{id:?}");
+        assert!(dbg.contains("CredentialId"));
+        assert!(dbg.contains("abababab"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CredentialApplication – additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn credential_application_clone() {
+        let app = CredentialApplication::HttpHeader {
+            name: "X-Token".into(),
+            prefix: Some("Bearer ".into()),
+        };
+        let cloned = app.clone();
+        assert_eq!(app, cloned);
+    }
+
+    #[test]
+    fn credential_application_inequality() {
+        assert_ne!(
+            CredentialApplication::HttpAuthorizationBearer,
+            CredentialApplication::HttpAuthorizationBasic,
+        );
+    }
+
+    #[test]
+    fn credential_application_http_header_no_prefix_serde() {
+        let app = CredentialApplication::HttpHeader {
+            name: "X-Key".into(),
+            prefix: None,
+        };
+        let json = serde_json::to_string(&app).unwrap();
+        assert!(!json.contains("prefix")); // skip_serializing_if = None
+        let decoded: CredentialApplication = serde_json::from_str(&json).unwrap();
+        assert_eq!(app, decoded);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CredentialObject – additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn credential_object_clone() {
+        let cred = test_credential();
+        let cloned = cred.clone();
+        assert_eq!(cloned.credential_id, cred.credential_id);
+        assert_eq!(cloned.label, cred.label);
+        assert_eq!(cloned.tags, cred.tags);
+    }
+
+    #[test]
+    fn credential_object_zone_id() {
+        let cred = test_credential();
+        assert_eq!(*cred.zone_id(), ZoneId::work());
+    }
+
+    #[test]
+    fn credential_object_wildcard_case_insensitive() {
+        let mut cred = test_credential();
+        cred.host_allow = vec!["*.EXAMPLE.COM".into()];
+        assert!(cred.is_host_allowed("api.example.com"));
+        assert!(cred.is_host_allowed("API.EXAMPLE.COM"));
+    }
+
+    #[test]
+    fn credential_object_is_usable_no_expiry_no_host() {
+        let cred = test_credential();
+        // No expiry, no host restrictions → always usable
+        assert!(cred.is_usable(u64::MAX, "any.host"));
+    }
+
+    #[test]
+    fn credential_object_serde_all_fields_present() {
+        let cred = CredentialObject {
+            header: test_header(),
+            credential_id: CredentialId::test_id([0x11; 16]),
+            label: Some("labeled".into()),
+            secret_id: SecretId::test_id([0x22; 16]),
+            application: CredentialApplication::SshKey,
+            host_allow: vec!["host.example.com".into()],
+            expires_at: Some(1_800_000_000),
+            description: Some("desc".into()),
+            tags: vec!["tag1".into()],
+        };
+        let json = serde_json::to_string(&cred).unwrap();
+        assert!(json.contains("label"));
+        assert!(json.contains("host_allow"));
+        assert!(json.contains("expires_at"));
+        assert!(json.contains("description"));
+        assert!(json.contains("tags"));
+        let decoded: CredentialObject = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.credential_id, cred.credential_id);
+        assert_eq!(decoded.tags, cred.tags);
+    }
+
+    #[test]
+    fn credential_object_is_expired_at_exact_boundary() {
+        let mut cred = test_credential();
+        cred.expires_at = Some(1000);
+        assert!(!cred.is_expired(999));
+        assert!(cred.is_expired(1000));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CredentialValidationError – additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn credential_validation_error_clone() {
+        let err = CredentialValidationError::Expired {
+            credential_id: CredentialId::test_id([0x11; 16]),
+        };
+        let cloned = err.clone();
+        assert_eq!(err, cloned);
+    }
+
+    #[test]
+    fn credential_validation_error_equality() {
+        let a = CredentialValidationError::NotInCredentialAllow {
+            credential_id: CredentialId::test_id([0x11; 16]),
+        };
+        let b = CredentialValidationError::NotInCredentialAllow {
+            credential_id: CredentialId::test_id([0x11; 16]),
+        };
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn credential_validation_error_inequality() {
+        let a = CredentialValidationError::Expired {
+            credential_id: CredentialId::test_id([0x11; 16]),
+        };
+        let b = CredentialValidationError::NotInCredentialAllow {
+            credential_id: CredentialId::test_id([0x11; 16]),
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn credential_validation_error_is_error_trait() {
+        let err: &dyn std::error::Error = &CredentialValidationError::Expired {
+            credential_id: CredentialId::test_id([0x11; 16]),
+        };
+        assert!(err.to_string().contains("expired"));
+    }
+
     #[test]
     fn credential_id_parse_accepts_uppercase() {
         // UUID parsing should be case-insensitive

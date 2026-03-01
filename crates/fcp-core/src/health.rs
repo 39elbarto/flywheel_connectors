@@ -852,6 +852,189 @@ mod tests {
         assert!(!health.is_available());
     }
 
+    // ─────────────────────────────────────────────────────────────────────────────
+    // SelfCheckStatus tests
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn self_check_status_copy() {
+        let a = SelfCheckStatus::Ok;
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn self_check_status_serde_all_variants() {
+        for status in [
+            SelfCheckStatus::Ok,
+            SelfCheckStatus::Degraded,
+            SelfCheckStatus::Failed,
+            SelfCheckStatus::Unsupported,
+        ] {
+            let json = serde_json::to_string(&status).unwrap();
+            let decoded: SelfCheckStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(status, decoded);
+        }
+    }
+
+    #[test]
+    fn self_check_status_inequality() {
+        assert_ne!(SelfCheckStatus::Ok, SelfCheckStatus::Failed);
+        assert_ne!(SelfCheckStatus::Degraded, SelfCheckStatus::Unsupported);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // SelfCheckReport tests
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn self_check_report_ok() {
+        let report = SelfCheckReport::ok();
+        assert_eq!(report.status, SelfCheckStatus::Ok);
+        assert!(report.reason_code.is_none());
+        assert!(report.message.is_none());
+        assert!(report.details.is_none());
+    }
+
+    #[test]
+    fn self_check_report_degraded() {
+        let report = SelfCheckReport::degraded("SLOW_UPSTREAM", "upstream latency is high");
+        assert_eq!(report.status, SelfCheckStatus::Degraded);
+        assert_eq!(report.reason_code.as_deref(), Some("SLOW_UPSTREAM"));
+        assert_eq!(report.message.as_deref(), Some("upstream latency is high"));
+    }
+
+    #[test]
+    fn self_check_report_failed() {
+        let report = SelfCheckReport::failed("DB_DOWN", "database unreachable");
+        assert_eq!(report.status, SelfCheckStatus::Failed);
+        assert_eq!(report.reason_code.as_deref(), Some("DB_DOWN"));
+        assert_eq!(report.message.as_deref(), Some("database unreachable"));
+    }
+
+    #[test]
+    fn self_check_report_unsupported() {
+        let report = SelfCheckReport::unsupported();
+        assert_eq!(report.status, SelfCheckStatus::Unsupported);
+        assert!(report.reason_code.is_some());
+        assert!(report.message.is_some());
+    }
+
+    #[test]
+    fn self_check_report_from_error() {
+        let error = FcpError::Unauthorized {
+            code: 2001,
+            message: "bad token".into(),
+        };
+        let report = SelfCheckReport::from_error(&error);
+        assert_eq!(report.status, SelfCheckStatus::Failed);
+        assert!(report.reason_code.is_some());
+        assert!(report.message.is_some());
+        assert!(report.message.unwrap().contains("bad token"));
+    }
+
+    #[test]
+    fn self_check_report_serde_roundtrip_ok() {
+        let report = SelfCheckReport::ok();
+        let json = serde_json::to_string(&report).unwrap();
+        let decoded: SelfCheckReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.status, SelfCheckStatus::Ok);
+    }
+
+    #[test]
+    fn self_check_report_serde_roundtrip_degraded() {
+        let report = SelfCheckReport::degraded("CODE", "msg");
+        let json = serde_json::to_string(&report).unwrap();
+        let decoded: SelfCheckReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.status, SelfCheckStatus::Degraded);
+        assert_eq!(decoded.reason_code.as_deref(), Some("CODE"));
+    }
+
+    #[test]
+    fn self_check_report_serde_omits_none_fields() {
+        let report = SelfCheckReport::ok();
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(!json.contains("reason_code"));
+        assert!(!json.contains("message"));
+        assert!(!json.contains("details"));
+    }
+
+    #[test]
+    fn self_check_report_clone() {
+        let report = SelfCheckReport::degraded("R", "M");
+        let cloned = report.clone();
+        assert_eq!(cloned.status, report.status);
+        assert_eq!(cloned.reason_code, report.reason_code);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Clone tests for types
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn health_state_clone() {
+        let state = HealthState::Degraded {
+            reason: "test".to_string(),
+        };
+        let cloned = Clone::clone(&state);
+        assert_eq!(cloned.as_str(), "degraded");
+    }
+
+    #[test]
+    fn health_snapshot_clone() {
+        let snapshot = HealthSnapshot::ready();
+        let cloned = Clone::clone(&snapshot);
+        assert!(cloned.is_ready());
+    }
+
+    #[test]
+    fn connector_health_clone() {
+        let health = ConnectorHealth::degraded("slow");
+        let cloned = Clone::clone(&health);
+        assert!(cloned.is_available());
+        assert!(!cloned.is_healthy());
+    }
+
+    #[test]
+    fn rate_limit_status_clone() {
+        let status = RateLimitStatus {
+            limit: 100,
+            remaining: 50,
+            reset_at: 1_700_000_000,
+            window_seconds: 60,
+        };
+        let cloned = Clone::clone(&status);
+        assert_eq!(cloned.limit, 100);
+        assert_eq!(cloned.remaining, 50);
+    }
+
+    #[test]
+    fn liveness_response_clone() {
+        let resp = LivenessResponse::default();
+        let cloned = resp.clone();
+        assert_eq!(cloned.alive, resp.alive);
+    }
+
+    #[test]
+    fn readiness_response_clone() {
+        let resp = ReadinessResponse::default();
+        let cloned = resp.clone();
+        assert_eq!(cloned.ready, resp.ready);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // HealthSnapshot with non-default uptime
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn health_snapshot_with_uptime() {
+        let mut snapshot = HealthSnapshot::ready();
+        snapshot.uptime_ms = 86_400_000; // 1 day
+        assert_eq!(snapshot.uptime_ms, 86_400_000);
+        let json = serde_json::to_string(&snapshot).unwrap();
+        assert!(json.contains("86400000"));
+    }
+
     #[test]
     fn health_state_as_str() {
         assert_eq!(HealthState::Starting.as_str(), "starting");

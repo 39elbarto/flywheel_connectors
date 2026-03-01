@@ -668,4 +668,127 @@ mod tests {
         }
         assert_eq!(base.metrics().events_emitted, 1000);
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ConnectorMetrics – boundary values
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn connector_metrics_max_values() {
+        let metrics = ConnectorMetrics {
+            requests_total: u64::MAX,
+            requests_success: u64::MAX,
+            requests_error: u64::MAX,
+            connections_active: u64::MAX,
+            events_emitted: u64::MAX,
+            latency_p50_ms: u64::MAX,
+            latency_p99_ms: u64::MAX,
+            bytes_sent: u64::MAX,
+            bytes_received: u64::MAX,
+        };
+        let json = serde_json::to_string(&metrics).unwrap();
+        let decoded: ConnectorMetrics = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.requests_total, u64::MAX);
+        assert_eq!(decoded.bytes_received, u64::MAX);
+    }
+
+    #[test]
+    fn connector_metrics_deserialize_from_literal() {
+        let raw = r#"{
+            "requests_total": 42,
+            "requests_success": 40,
+            "requests_error": 2,
+            "connections_active": 5,
+            "events_emitted": 100,
+            "latency_p50_ms": 10,
+            "latency_p99_ms": 200,
+            "bytes_sent": 9999,
+            "bytes_received": 8888
+        }"#;
+        let m: ConnectorMetrics = serde_json::from_str(raw).unwrap();
+        assert_eq!(m.requests_total, 42);
+        assert_eq!(m.connections_active, 5);
+        assert_eq!(m.latency_p50_ms, 10);
+        assert_eq!(m.bytes_sent, 9999);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // BaseConnector – edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn base_connector_from_string_id() {
+        let base = BaseConnector::new(ConnectorId::from_static("fcp.slack:streaming:1"));
+        assert_eq!(base.id.as_str(), "fcp.slack:streaming:1");
+    }
+
+    #[test]
+    fn base_connector_check_ready_sequence_matters() {
+        let base = BaseConnector::new(test_connector_id());
+        // Only handshaken, not configured → still not ready
+        base.set_handshaken(true);
+        let err = base.check_ready().unwrap_err();
+        assert!(matches!(err, crate::FcpError::NotConfigured));
+    }
+
+    #[test]
+    fn base_connector_record_only_failures() {
+        let base = BaseConnector::new(test_connector_id());
+        for _ in 0..50 {
+            base.record_request(false);
+        }
+        let m = base.metrics();
+        assert_eq!(m.requests_total, 50);
+        assert_eq!(m.requests_success, 0);
+        assert_eq!(m.requests_error, 50);
+    }
+
+    #[test]
+    fn base_connector_record_only_successes() {
+        let base = BaseConnector::new(test_connector_id());
+        for _ in 0..50 {
+            base.record_request(true);
+        }
+        let m = base.metrics();
+        assert_eq!(m.requests_total, 50);
+        assert_eq!(m.requests_success, 50);
+        assert_eq!(m.requests_error, 0);
+    }
+
+    #[test]
+    fn base_connector_events_independent_of_requests() {
+        let base = BaseConnector::new(test_connector_id());
+        base.record_request(true);
+        base.record_event();
+        base.record_event();
+        let m = base.metrics();
+        assert_eq!(m.requests_total, 1);
+        assert_eq!(m.events_emitted, 2);
+    }
+
+    #[test]
+    fn base_connector_multiple_metrics_snapshots_diverge() {
+        let base = BaseConnector::new(test_connector_id());
+        let snap1 = base.metrics();
+        base.record_request(true);
+        base.record_request(true);
+        base.record_request(true);
+        let snap2 = base.metrics();
+        base.record_event();
+        let snap3 = base.metrics();
+        assert_eq!(snap1.requests_total, 0);
+        assert_eq!(snap2.requests_total, 3);
+        assert_eq!(snap3.requests_total, 3);
+        assert_eq!(snap3.events_emitted, 1);
+        assert_eq!(snap2.events_emitted, 0);
+    }
+
+    #[test]
+    fn connector_id_equality_in_base_connector() {
+        let a = BaseConnector::new(ConnectorId::from_static("fcp.a:rr:1"));
+        let b = BaseConnector::new(ConnectorId::from_static("fcp.a:rr:1"));
+        assert_eq!(a.id, b.id);
+        // But instance IDs differ
+        assert_ne!(a.instance_id.as_str(), b.instance_id.as_str());
+    }
 }

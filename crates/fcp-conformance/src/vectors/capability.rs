@@ -1,4 +1,4 @@
-//! COSE_Sign1 capability token golden vectors.
+//! `COSE_Sign1` capability token golden vectors.
 //!
 //! These vectors lock down the byte-level encoding of FCP2 capability tokens
 //! using deterministic Ed25519 keys and fixed CWT claims. Any implementation
@@ -9,13 +9,13 @@
 //! FCP2 capability tokens are `COSE_Sign1` structures (RFC 9052) containing
 //! CWT claims (RFC 8392) plus FCP2 private claims (negative keys).
 //!
-//! Protected header: { alg: EdDSA, kid: <8-byte key ID> }
+//! Protected header: { alg: `EdDSA`, kid: <8-byte key ID> }
 //! Payload: deterministic CBOR map of CWT + FCP2 claims
-//! Signature: Ed25519 over Sig_structure
+//! Signature: Ed25519 over `Sig_structure`
 
 use serde::{Deserialize, Serialize};
 
-/// Golden vector for a COSE_Sign1 capability token.
+/// Golden vector for a `COSE_Sign1` capability token.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapabilityTokenGoldenVector {
     /// Human-readable description of the test case.
@@ -38,7 +38,7 @@ pub struct CapabilityTokenGoldenVector {
     pub issuer: String,
     /// Issuing node ID claim.
     pub issuing_node: String,
-    /// Holder node ID (optional — triggers holder_proof requirement).
+    /// Holder node ID (optional — triggers `holder_proof` requirement).
     pub holder_node: Option<String>,
     /// Checkpoint ID (hex bytes, optional).
     pub checkpoint_id: Option<String>,
@@ -50,7 +50,7 @@ pub struct CapabilityTokenGoldenVector {
     pub expires: i64,
     /// Expected CWT claims payload (deterministic CBOR, hex).
     pub expected_claims_cbor: String,
-    /// Expected full COSE_Sign1 token (CBOR, hex).
+    /// Expected full `COSE_Sign1` token (CBOR, hex).
     pub expected_token_cbor: String,
 }
 
@@ -68,7 +68,7 @@ impl CapabilityTokenGoldenVector {
     /// Vector 1: Basic capability token with minimal claims.
     ///
     /// Uses sk = [0x01; 32] for deterministic key derivation.
-    /// Single operation, no holder_node, no checkpoint.
+    /// Single operation, no `holder_node`, no checkpoint.
     #[must_use]
     pub fn vector_1_basic_capability() -> Self {
         Self {
@@ -93,9 +93,9 @@ impl CapabilityTokenGoldenVector {
         }
     }
 
-    /// Vector 2: Capability with holder_node binding and checkpoint.
+    /// Vector 2: Capability with `holder_node` binding and checkpoint.
     ///
-    /// Uses sk = [0x02; 32]. Tests that holder_node and chk_id/chk_seq
+    /// Uses sk = [0x02; 32]. Tests that `holder_node` and `chk_id`/`chk_seq`
     /// are correctly encoded in the CWT claims.
     #[must_use]
     pub fn vector_2_with_holder_and_checkpoint() -> Self {
@@ -161,7 +161,7 @@ impl CapabilityTokenGoldenVector {
     /// 2. Verifies the public key matches
     /// 3. Builds CWT claims from the vector fields
     /// 4. Signs the token and verifies claims CBOR matches
-    /// 5. Verifies the full COSE_Sign1 encoding matches
+    /// 5. Verifies the full `COSE_Sign1` encoding matches
     ///
     /// # Errors
     ///
@@ -335,7 +335,7 @@ mod tests {
 
     #[test]
     fn deterministic_encoding() {
-        use fcp_crypto::cose::CwtClaims;
+        use fcp_crypto::cose::{CoseToken, CwtClaims};
         use fcp_crypto::ed25519::Ed25519SigningKey;
 
         let sk_bytes = [0x01u8; 32];
@@ -358,7 +358,6 @@ mod tests {
         assert_eq!(cbor1, cbor2, "Claims encoding must be deterministic");
 
         // Tokens must produce identical COSE_Sign1 bytes
-        use fcp_crypto::cose::CoseToken;
         let token1 = CoseToken::sign(&sk, &claims1).unwrap();
         let token2 = CoseToken::sign(&sk, &claims2).unwrap();
         assert_eq!(

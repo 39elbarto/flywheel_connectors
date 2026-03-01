@@ -749,12 +749,12 @@ mod tests {
             let mut decoder = RaptorQDecoder::new(oti, &config);
             let context = ExecutionContext::request_scoped(Duration::from_secs(5));
 
-            let decoded = controller
+            let decoded_payload = controller
                 .decode_with_context(&context, &mut decoder, symbols)
                 .await
                 .unwrap();
 
-            assert_eq!(decoded, payload);
+            assert_eq!(decoded_payload, payload);
         })
         .expect("runtime available for async decode test");
     }

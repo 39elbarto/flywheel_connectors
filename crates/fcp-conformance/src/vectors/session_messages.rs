@@ -4,12 +4,12 @@
 //! `MeshSessionHelloRetry` (cookie challenge) and `MeshSessionHello` with
 //! `TransportLimits` (datagram size negotiation).
 //!
-//! # HelloRetry Cookie (NORMATIVE)
+//! # `HelloRetry` Cookie (NORMATIVE)
 //!
 //! `MeshSessionHelloRetry` encodes as a CBOR map: `{ from, to, cookie, timestamp }`.
 //! The cookie is a 32-byte opaque value provided by the responder.
 //!
-//! # TransportLimits (NORMATIVE)
+//! # `TransportLimits` (NORMATIVE)
 //!
 //! `TransportLimits` is `#[serde(transparent)]` around `max_datagram_bytes: u16`.
 //! When present in `MeshSessionHello`, it contributes to transcript bytes.
@@ -53,7 +53,7 @@ pub struct TransportLimitsGoldenVector {
     pub timestamp: u64,
     /// Crypto suites (numeric IDs).
     pub suites: Vec<u8>,
-    /// Transport limits: max_datagram_bytes (0 = None).
+    /// Transport limits: `max_datagram_bytes` (0 = None).
     pub max_datagram_bytes: u16,
     /// Expected transcript bytes (hex). Computed via `MeshSessionHello::transcript_bytes()`.
     pub expected_transcript: String,
@@ -62,13 +62,13 @@ pub struct TransportLimitsGoldenVector {
 }
 
 impl HelloRetryGoldenVector {
-    /// Load all HelloRetry golden vectors.
+    /// Load all `HelloRetry` golden vectors.
     #[must_use]
     pub fn load_all() -> Vec<Self> {
         vec![Self::vector_1_basic_retry(), Self::vector_2_max_cookie()]
     }
 
-    /// Vector 1: Basic HelloRetry with simple values.
+    /// Vector 1: Basic `HelloRetry` with simple values.
     #[must_use]
     pub fn vector_1_basic_retry() -> Self {
         Self {
@@ -81,7 +81,7 @@ impl HelloRetryGoldenVector {
         }
     }
 
-    /// Vector 2: HelloRetry with all-zero cookie (edge case).
+    /// Vector 2: `HelloRetry` with all-zero cookie (edge case).
     #[must_use]
     pub fn vector_2_max_cookie() -> Self {
         Self {
@@ -165,7 +165,7 @@ impl HelloRetryGoldenVector {
 }
 
 impl TransportLimitsGoldenVector {
-    /// Load all TransportLimits golden vectors.
+    /// Load all `TransportLimits` golden vectors.
     #[must_use]
     pub fn load_all() -> Vec<Self> {
         vec![
@@ -184,7 +184,7 @@ impl TransportLimitsGoldenVector {
             to: "responder.mesh.ts.net".into(),
             eph_sk: "0101010101010101010101010101010101010101010101010101010101010101".into(),
             nonce: "00000000000000000000000000000001".into(),
-            cookie: "".into(), // None
+            cookie: String::new(), // None
             timestamp: 1_700_000_000,
             suites: vec![1],
             max_datagram_bytes: 1400,
@@ -202,7 +202,7 @@ impl TransportLimitsGoldenVector {
             to: "responder.mesh.ts.net".into(),
             eph_sk: "0101010101010101010101010101010101010101010101010101010101010101".into(),
             nonce: "00000000000000000000000000000001".into(),
-            cookie: "".into(),
+            cookie: String::new(),
             timestamp: 1_700_000_000,
             suites: vec![1],
             max_datagram_bytes: 0, // 0 means None
@@ -211,7 +211,7 @@ impl TransportLimitsGoldenVector {
         }
     }
 
-    /// Vector 3: Hello with TransportLimits = 0 explicitly set.
+    /// Vector 3: Hello with `TransportLimits` = 0 explicitly set.
     ///
     /// When `max_datagram_bytes` is explicitly set to 0, `effective_max()` returns
     /// the default (1200). This tests that the encoding includes the field but
@@ -250,8 +250,8 @@ impl TransportLimitsGoldenVector {
             .map_err(|e| format!("invalid eph_sk hex: {e}"))?
             .try_into()
             .map_err(|_| "eph_sk must be 32 bytes")?;
-        let eph_sk = X25519SecretKey::from_bytes(eph_sk_bytes);
-        let eph_pk = eph_sk.public_key();
+        let eph_secret = X25519SecretKey::from_bytes(eph_sk_bytes);
+        let eph_pubkey = eph_secret.public_key();
 
         // 2. Parse nonce
         let nonce_bytes: [u8; 16] = hex::decode(&self.nonce)
@@ -292,7 +292,7 @@ impl TransportLimitsGoldenVector {
             };
 
         // 6. Verify effective_max
-        let effective = transport_limits.map_or(1200u16, |tl| tl.effective_max());
+        let effective = transport_limits.map_or(1200u16, TransportLimits::effective_max);
         if effective != self.expected_effective_max {
             return Err(format!(
                 "effective_max mismatch: expected {}, got {effective}",
@@ -304,7 +304,7 @@ impl TransportLimitsGoldenVector {
         let hello = MeshSessionHello {
             from: TailscaleNodeId::new(&self.from),
             to: TailscaleNodeId::new(&self.to),
-            eph_pubkey: eph_pk,
+            eph_pubkey,
             nonce: SessionNonce(nonce_bytes),
             cookie,
             timestamp: self.timestamp,

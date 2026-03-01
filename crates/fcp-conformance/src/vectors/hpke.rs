@@ -80,7 +80,7 @@ impl HpkeSealedBoxGoldenVector {
         }
     }
 
-    /// Vector 2: ObjectId key sealing with purpose `FCP2-OBJECTID-KEY`.
+    /// Vector 2: `ObjectId` key sealing with purpose `FCP2-OBJECTID-KEY`.
     ///
     /// Uses recipient sk = `[0x20; 32]`, rng seed = `[0xBB; 32]`.
     /// Seals a 32-byte `ObjectIdKey` to a recipient in a private zone.
@@ -147,8 +147,9 @@ impl HpkeSealedBoxGoldenVector {
             .map_err(|e| format!("invalid recipient_sk hex: {e}"))?
             .try_into()
             .map_err(|_| "recipient_sk must be 32 bytes")?;
-        let recipient_sk = X25519SecretKey::from_bytes(sk_bytes);
-        let recipient_pk = recipient_sk.public_key();
+        #[allow(clippy::similar_names)]
+        let recipient_secret = X25519SecretKey::from_bytes(sk_bytes);
+        let recipient_pk = recipient_secret.public_key();
 
         // 2. Verify public key (if expected is non-empty)
         if !self.expected_recipient_pk.is_empty() {
@@ -224,7 +225,7 @@ impl HpkeSealedBoxGoldenVector {
         }
 
         // 9. Open and verify plaintext round-trip
-        let opened = hpke_open(&recipient_sk, &sealed, &aad)
+        let opened = hpke_open(&recipient_secret, &sealed, &aad)
             .map_err(|e| format!("hpke_open failed: {e}"))?;
 
         if opened != plaintext {

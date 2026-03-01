@@ -52,6 +52,10 @@ impl HolderProofGoldenVector {
     /// Vector 1: Basic holder proof with simple inputs.
     ///
     /// Uses sk = [0x04; 32] to avoid collision with capability vector keys.
+    ///
+    /// # Panics
+    ///
+    /// Panics if hard-coded hex values fail to decode (indicates a bug in the vectors).
     #[must_use]
     pub fn vector_1_basic_holder_proof() -> Self {
         // Domain prefix: "FCP2-HOLDER-PROOF-V1" (20 bytes)
@@ -86,6 +90,10 @@ impl HolderProofGoldenVector {
     /// Vector 2: Holder proof with UUID-style request ID.
     ///
     /// Uses sk = [0x05; 32]. Tests longer request IDs typical of production.
+    ///
+    /// # Panics
+    ///
+    /// Panics if hard-coded hex values fail to decode (indicates a bug in the vectors).
     #[must_use]
     pub fn vector_2_uuid_request_id() -> Self {
         let domain = b"FCP2-HOLDER-PROOF-V1";
@@ -116,6 +124,10 @@ impl HolderProofGoldenVector {
     /// Vector 3: Holder proof with longer JTI (16-byte token ID).
     ///
     /// Uses sk = [0x06; 32]. Tests with a 16-byte JTI as commonly used.
+    ///
+    /// # Panics
+    ///
+    /// Panics if hard-coded hex values fail to decode (indicates a bug in the vectors).
     #[must_use]
     pub fn vector_3_long_jti() -> Self {
         let domain = b"FCP2-HOLDER-PROOF-V1";

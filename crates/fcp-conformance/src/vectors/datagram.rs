@@ -55,7 +55,7 @@ pub struct DatagramMacGoldenVector {
     pub mac_key: String,
     /// Session ID (16 bytes hex).
     pub session_id: String,
-    /// Direction: "InitiatorToResponder" (0x00) or "ResponderToInitiator" (0x01).
+    /// Direction: `InitiatorToResponder` (0x00) or `ResponderToInitiator` (0x01).
     pub direction: String,
     /// Sequence number.
     pub seq: u64,
@@ -74,7 +74,7 @@ pub struct DatagramErrorVector {
     pub input_bytes: String,
     /// Max datagram limit to apply.
     pub max_datagram_bytes: u16,
-    /// Expected error kind: "TooShort" or "TooLarge".
+    /// Expected error kind: `TooShort` or `TooLarge`.
     pub expected_error: String,
 }
 
@@ -166,6 +166,10 @@ impl DatagramGoldenVector {
 
 impl DatagramMacGoldenVector {
     /// Load all datagram MAC golden vectors.
+    ///
+    /// # Panics
+    ///
+    /// Panics if hard-coded hex values fail to decode (indicates a bug in the vectors).
     #[must_use]
     pub fn load_all() -> Vec<Self> {
         use fcp_protocol::{

@@ -1,7 +1,7 @@
 //! Signing-bytes canonicalization golden vectors.
 //!
 //! These vectors lock down the canonical signing-bytes construction used
-//! for all FCP2 signed objects (ZoneCheckpoint, AuditHead, RevocationHead, etc.).
+//! for all FCP2 signed objects (`ZoneCheckpoint`, `AuditHead`, `RevocationHead`, etc.).
 //!
 //! # Signing Bytes Format (NORMATIVE)
 //!
@@ -28,7 +28,7 @@ pub struct SigningBytesGoldenVector {
     pub description: String,
     /// Schema ID string (e.g., "fcp.zone.ZoneCheckpoint/1.0.0").
     pub schema_id: String,
-    /// Expected schema hash (8 bytes hex = BLAKE3(schema_id)[0..8]).
+    /// Expected schema hash (8 bytes hex = `BLAKE3(schema_id)[0..8]`).
     pub expected_schema_hash: String,
     /// Sample unsigned CBOR payload (hex).
     pub unsigned_cbor: String,
@@ -59,7 +59,11 @@ impl SigningBytesGoldenVector {
         ]
     }
 
-    /// Vector 1: ZoneCheckpoint schema hash + signing bytes.
+    /// Vector 1: `ZoneCheckpoint` schema hash + signing bytes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if hard-coded hex values fail to decode (indicates a bug in the vectors).
     #[must_use]
     pub fn vector_1_zone_checkpoint_schema() -> Self {
         let schema_id = "fcp.zone.ZoneCheckpoint/1.0.0";
@@ -80,7 +84,11 @@ impl SigningBytesGoldenVector {
         }
     }
 
-    /// Vector 2: AuditHead schema hash + signing bytes.
+    /// Vector 2: `AuditHead` schema hash + signing bytes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if hard-coded hex values fail to decode (indicates a bug in the vectors).
     #[must_use]
     pub fn vector_2_audit_head_schema() -> Self {
         let schema_id = "fcp.audit.AuditHead/1.0.0";
@@ -101,7 +109,11 @@ impl SigningBytesGoldenVector {
         }
     }
 
-    /// Vector 3: RevocationHead schema hash + signing bytes.
+    /// Vector 3: `RevocationHead` schema hash + signing bytes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if hard-coded hex values fail to decode (indicates a bug in the vectors).
     #[must_use]
     pub fn vector_3_revocation_head_schema() -> Self {
         let schema_id = "fcp.revocation.RevocationHead/1.0.0";
@@ -122,10 +134,14 @@ impl SigningBytesGoldenVector {
         }
     }
 
-    /// Vector 4: CapabilityObject schema hash (cross-check with canonicalize.rs golden).
+    /// Vector 4: `CapabilityObject` schema hash (cross-check with canonicalize.rs golden).
     ///
     /// This vector must produce the same schema hash as the existing test in
     /// `fcp-crypto::canonicalize::tests::schema_hash_golden_vector`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if hard-coded hex values fail to decode (indicates a bug in the vectors).
     #[must_use]
     pub fn vector_4_capability_object_schema() -> Self {
         let schema_id = "fcp.core.CapabilityObject/1.0.0";

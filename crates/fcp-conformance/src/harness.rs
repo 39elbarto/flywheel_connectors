@@ -1036,8 +1036,8 @@ mod tests {
         let to = NodeId::new("node-b");
 
         let msg = NetworkMessage {
-            from: from.clone(),
-            to: to.clone(),
+            from,
+            to,
             payload: b"hello".to_vec(),
         };
 
@@ -1059,8 +1059,8 @@ mod tests {
         network.set_latency(&from, &to, Duration::from_millis(100));
 
         let msg = NetworkMessage {
-            from: from.clone(),
-            to: to.clone(),
+            from,
+            to,
             payload: vec![1],
         };
 
@@ -1079,11 +1079,11 @@ mod tests {
         let b = NodeId::new("b");
 
         // Partition: a is isolated from b
-        network.partition(&[a.clone()]);
+        network.partition(std::slice::from_ref(&a));
 
         let msg = NetworkMessage {
-            from: a.clone(),
-            to: b.clone(),
+            from: a,
+            to: b,
             payload: vec![1],
         };
         // Message from a→b should be dropped
@@ -1099,12 +1099,12 @@ mod tests {
         let c = NodeId::new("c");
 
         // Partition isolates c from a,b
-        network.partition(&[c.clone()]);
+        network.partition(&[c]);
 
         // a→b should work (both outside partition)
         let msg = NetworkMessage {
-            from: a.clone(),
-            to: b.clone(),
+            from: a,
+            to: b,
             payload: vec![1],
         };
         assert!(network.send(0, msg));
@@ -1116,7 +1116,7 @@ mod tests {
         let a = NodeId::new("a");
         let b = NodeId::new("b");
 
-        network.partition(&[a.clone()]);
+        network.partition(std::slice::from_ref(&a));
         let msg1 = NetworkMessage {
             from: a.clone(),
             to: b.clone(),
@@ -1126,8 +1126,8 @@ mod tests {
 
         network.heal_partitions();
         let msg2 = NetworkMessage {
-            from: a.clone(),
-            to: b.clone(),
+            from: a,
+            to: b,
             payload: vec![2],
         };
         assert!(network.send(0, msg2));
@@ -1386,7 +1386,7 @@ mod tests {
     fn harness_start_stop_all() {
         let mut harness = TestHarness::new(3, 42);
         harness.start_all().unwrap();
-        assert!(harness.nodes.iter().all(|n| n.is_running()));
+        assert!(harness.nodes.iter().all(TestMeshNode::is_running));
 
         harness.stop_all().unwrap();
         assert!(harness.nodes.iter().all(|n| !n.is_running()));
@@ -1408,7 +1408,7 @@ mod tests {
         let node0_id = harness.nodes[0].node_id.clone();
         let node1_id = harness.nodes[1].node_id.clone();
 
-        harness.partition(&[node0_id.clone()]);
+        harness.partition(std::slice::from_ref(&node0_id));
 
         // Messages from node0 to node1 should fail
         let msg = NetworkMessage {

@@ -323,9 +323,10 @@ mod tests {
     use crate::{ConnectorArchetype, ConnectorRegistry, ConnectorSummary};
 
     // ── Mock Registry ──
+    type SelfCheckFn = dyn Fn(&ConnectorId) -> Option<SelfCheckReport> + Send + Sync;
 
     struct TestRegistry {
-        self_check_fn: Box<dyn Fn(&ConnectorId) -> Option<SelfCheckReport> + Send + Sync>,
+        self_check_fn: Box<SelfCheckFn>,
     }
 
     impl TestRegistry {
@@ -595,7 +596,7 @@ mod tests {
         let service = DoctorService::new(registry);
 
         let request = DoctorRequest {
-            zone_id: "".to_string(),
+            zone_id: String::new(),
             connectors: vec![],
             self_check: false,
         };
@@ -603,9 +604,8 @@ mod tests {
         let result = service.handle(request).await;
         // Empty zone_id may or may not be rejected depending on ZoneId::parse
         // but we exercise the code path
-        match result {
-            Ok(report) => assert_eq!(report.zone_id, ""),
-            Err(_) => {} // Expected for invalid zone
+        if let Ok(report) = result {
+            assert_eq!(report.zone_id, "");
         }
     }
 

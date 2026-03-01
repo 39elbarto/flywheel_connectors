@@ -18,6 +18,7 @@ MANIFEST_JSON=""
 SCENARIO_PLAN_JSON=""
 REPLAY_SH=""
 SCENARIOS_DIR=""
+FORENSICS_VALIDATOR_REPORT=""
 
 usage() {
   cat <<'EOF'
@@ -40,6 +41,23 @@ require_cmd() {
     echo "Missing required command: $1" >&2
     exit 1
   fi
+}
+
+run_cargo() {
+  if command -v rch >/dev/null 2>&1; then
+    rch exec -- cargo "$@"
+    return $?
+  fi
+  cargo "$@"
+}
+
+validate_log_jsonl() {
+  local log_path="$1"
+  if command -v fcp-e2e >/dev/null 2>&1; then
+    fcp-e2e --validate-log "${log_path}"
+    return $?
+  fi
+  run_cargo run -q -p fcp-e2e --bin fcp-e2e -- --validate-log "${log_path}"
 }
 
 now_ms() {
@@ -233,7 +251,7 @@ run_scenario() {
       if [[ ! -f "${log_jsonl}" ]]; then
         status="fail"
         reason="log_missing"
-      elif ! fcp-e2e --validate-log "${log_jsonl}" >/dev/null 2>&1; then
+      elif ! validate_log_jsonl "${log_jsonl}" >/dev/null 2>&1; then
         status="fail"
         reason="log_invalid"
       fi
@@ -332,10 +350,17 @@ MANIFEST_JSON="${MANIFEST_JSON:-${OUT_ROOT}/manifest.json}"
 SCENARIO_PLAN_JSON="${SCENARIO_PLAN_JSON:-${OUT_ROOT}/scenario_plan.json}"
 REPLAY_SH="${REPLAY_SH:-${OUT_ROOT}/replay.sh}"
 SCENARIOS_DIR="${OUT_ROOT}/scenarios"
+FORENSICS_VALIDATOR_REPORT="${OUT_ROOT}/forensics_validator_report.json"
 
 require_cmd jq
 if [[ "${DRY_RUN}" != "true" ]]; then
-  require_cmd fcp-e2e
+  if ! command -v fcp-e2e >/dev/null 2>&1; then
+    require_cmd cargo
+  fi
+fi
+if [[ ! -x "${SCRIPT_DIR}/validate_asupersync_forensics_bundle.sh" ]]; then
+  echo "Expected executable script not found: ${SCRIPT_DIR}/validate_asupersync_forensics_bundle.sh" >&2
+  exit 1
 fi
 
 mkdir -p "${OUT_ROOT}" "${SCENARIOS_DIR}"
@@ -372,6 +397,12 @@ SCENARIOS=(
   "request_response_user_flow|request_response_user_flow.sh|Request-response user journey e2e|true"
   "polling_user_flow|polling_user_flow.sh|Polling archetype user journey e2e|true"
   "webhook_delivery_flow|webhook_delivery_flow.sh|Webhook delivery user journey e2e|true"
+  "unit_gate|unit_gate_executor.sh|Unit gate coverage enforcement|true"
+  "coverage_gate_publication|coverage_gate_publication.sh|Coverage gate evidence bundle|true"
+  "polling_timeout_backoff_storm|polling_timeout_backoff_storm.sh|Polling timeout backoff bounded recovery|true"
+  "polling_cursor_gap_recovery|polling_cursor_gap_recovery.sh|Polling cursor gap detection recovery|true"
+  "webhook_retry_storm|webhook_retry_storm.sh|Webhook retry storm idempotent delivery|true"
+  "request_timeout_chain|request_timeout_chain.sh|Request timeout chain bounded failure|true"
 )
 
 for entry in "${SCENARIOS[@]}"; do
@@ -432,6 +463,7 @@ jq -s \
   --arg out_root "${OUT_ROOT}" \
   --arg replay_sh "${REPLAY_SH}" \
   --arg scenario_plan "${SCENARIO_PLAN_JSON}" \
+  --arg forensics_validator_report "${FORENSICS_VALIDATOR_REPORT}" \
   --arg git_commit "$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)" \
   --arg only_scenarios "${ONLY_SCENARIOS}" \
   --argjson dry_run "$([[ "${DRY_RUN}" == "true" ]] && echo true || echo false)" \
@@ -449,6 +481,7 @@ jq -s \
     missing_required: $missing_required,
     replay_script: $replay_sh,
     scenario_plan_path: $scenario_plan,
+    forensics_validator_report: $forensics_validator_report,
     only_scenarios: (if ($only_scenarios | length) > 0 then $only_scenarios else null end),
     totals: {
       total: length,
@@ -468,6 +501,7 @@ jq -s \
   --arg replay_sh "${REPLAY_SH}" \
   --arg manifest_path "${MANIFEST_JSON}" \
   --arg scenario_plan_path "${SCENARIO_PLAN_JSON}" \
+  --arg forensics_validator_report "${FORENSICS_VALIDATOR_REPORT}" \
   --argjson dry_run "$([[ "${DRY_RUN}" == "true" ]] && echo true || echo false)" \
   --argjson passed "$([[ "${overall_passed}" == "true" ]] && echo true || echo false)" \
   --argjson missing_required "$([[ "${missing_required}" == "true" ]] && echo true || echo false)" \
@@ -483,6 +517,7 @@ jq -s \
     replay_script: $replay_sh,
     manifest_path: $manifest_path,
     scenario_plan_path: $scenario_plan_path,
+    forensics_validator_report: $forensics_validator_report,
     totals: {
       total: length,
       pass: (map(select(.status == "pass")) | length),
@@ -514,5 +549,11 @@ jq -s \
 } > "${REPLAY_SH}"
 
 chmod +x "${REPLAY_SH}"
+
+bash "${SCRIPT_DIR}/validate_asupersync_forensics_bundle.sh" \
+  --mode "e2e-matrix" \
+  --root "${OUT_ROOT}" \
+  --run-id "${RUN_ID}" \
+  --report "${FORENSICS_VALIDATOR_REPORT}"
 
 echo "E2E scenario matrix complete. Summary: ${SUMMARY_JSON}"

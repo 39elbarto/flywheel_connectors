@@ -1,6 +1,6 @@
 {
   "schema_version": "asupersync-e2e-scenario-registry/v1",
-  "registry_version": 1,
+  "registry_version": 2,
   "program_epic": "flywheel_connectors-235t",
   "owner_bead": "flywheel_connectors-235t.26.6.1",
   "governance_rules": {
@@ -348,6 +348,66 @@
       "archetype": "webhook",
       "failure_class": "webhook_signature_idempotency",
       "user_impact_category": "security"
+    },
+    {
+      "key": "unit_gate",
+      "scenario_id": "asupersync.e2e.unit_gate",
+      "script": "scripts/e2e/unit_gate_executor.sh",
+      "required": true,
+      "contract_id": "contract.unit_gate_coverage_enforcement",
+      "archetype": "cli_process",
+      "failure_class": "unit_coverage_obligation_failure",
+      "user_impact_category": "correctness"
+    },
+    {
+      "key": "coverage_gate_publication",
+      "scenario_id": "asupersync.e2e.coverage_gate_publication",
+      "script": "scripts/e2e/coverage_gate_publication.sh",
+      "required": true,
+      "contract_id": "contract.coverage_gate_evidence_bundle",
+      "archetype": "cli_process",
+      "failure_class": "coverage_publication_incomplete",
+      "user_impact_category": "correctness"
+    },
+    {
+      "key": "polling_timeout_backoff_storm",
+      "scenario_id": "asupersync.e2e.polling_timeout_backoff_storm",
+      "script": "scripts/e2e/polling_timeout_backoff_storm.sh",
+      "required": true,
+      "contract_id": "contract.polling_timeout_backoff_bounded_recovery",
+      "archetype": "polling",
+      "failure_class": "timeout_backoff_storm",
+      "user_impact_category": "availability"
+    },
+    {
+      "key": "polling_cursor_gap_recovery",
+      "scenario_id": "asupersync.e2e.polling_cursor_gap_recovery",
+      "script": "scripts/e2e/polling_cursor_gap_recovery.sh",
+      "required": true,
+      "contract_id": "contract.polling_cursor_gap_detection_recovery",
+      "archetype": "polling",
+      "failure_class": "cursor_gap_data_loss",
+      "user_impact_category": "correctness"
+    },
+    {
+      "key": "webhook_retry_storm",
+      "scenario_id": "asupersync.e2e.webhook_retry_storm",
+      "script": "scripts/e2e/webhook_retry_storm.sh",
+      "required": true,
+      "contract_id": "contract.webhook_retry_storm_idempotent_delivery",
+      "archetype": "webhook",
+      "failure_class": "retry_storm_idempotency",
+      "user_impact_category": "availability"
+    },
+    {
+      "key": "request_timeout_chain",
+      "scenario_id": "asupersync.e2e.request_timeout_chain",
+      "script": "scripts/e2e/request_timeout_chain.sh",
+      "required": true,
+      "contract_id": "contract.request_timeout_chain_bounded_failure",
+      "archetype": "request_response",
+      "failure_class": "timeout_chain_cascade",
+      "user_impact_category": "availability"
     }
   ]
 }

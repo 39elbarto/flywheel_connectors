@@ -494,11 +494,16 @@ DELTA_SUMMARY_JSON="${OUT_ROOT}/delta_summary.json"
 SCENARIO_PLAN_JSON="${OUT_ROOT}/scenario_plan.json"
 REPLAY_SH="${OUT_ROOT}/replay.sh"
 REQUIRED_METRICS_JSON="$(required_metrics_json)"
+FORENSICS_VALIDATOR_REPORT="${OUT_ROOT}/forensics_validator_report.json"
 
 require_cmd jq
 require_cmd rch
 if [[ ! -x "${SCRIPT_DIR}/run_matrix.sh" ]]; then
   echo "Expected executable script not found: ${SCRIPT_DIR}/run_matrix.sh" >&2
+  exit 1
+fi
+if [[ ! -x "${SCRIPT_DIR}/validate_asupersync_forensics_bundle.sh" ]]; then
+  echo "Expected executable script not found: ${SCRIPT_DIR}/validate_asupersync_forensics_bundle.sh" >&2
   exit 1
 fi
 
@@ -639,6 +644,7 @@ jq -n \
   --arg phase "${PHASE}" \
   --arg out_root "${OUT_ROOT}" \
   --arg replay_sh "${REPLAY_SH}" \
+  --arg forensics_validator_report "${FORENSICS_VALIDATOR_REPORT}" \
   --arg metrics_input "${METRICS_INPUT}" \
   --arg baseline_summary "${BASELINE_SUMMARY}" \
   --arg git_commit "$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)" \
@@ -650,7 +656,8 @@ jq -n \
   --arg delta_status "${DELTA_STATUS}" \
   --argjson metric_record_count "${METRIC_RECORD_COUNT}" \
   --argjson missing_required_metrics "${MISSING_REQUIRED_COUNT}" \
-  '{
+  '
+  {
     schema_version: $schema_version,
     generated_at: $generated_at,
     run_id: $run_id,
@@ -662,13 +669,15 @@ jq -n \
     passed: $passed,
     required_failed: $required_failed,
     replay_script: $replay_sh,
-    metrics_input: ($metrics_input | select(length > 0)),
-    baseline_summary: ($baseline_summary | select(length > 0)),
+    forensics_validator_report: $forensics_validator_report,
     normalized_classification: $normalized_classification,
     delta_status: $delta_status,
     metric_record_count: $metric_record_count,
     missing_required_metrics: $missing_required_metrics
-  }' > "${MANIFEST_JSON}"
+  }
+  + (if ($metrics_input | length) > 0 then {metrics_input: $metrics_input} else {} end)
+  + (if ($baseline_summary | length) > 0 then {baseline_summary: $baseline_summary} else {} end)
+  ' > "${MANIFEST_JSON}"
 
 jq -s \
   --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -683,6 +692,7 @@ jq -s \
   --arg normalized_summary_path "${NORMALIZED_SUMMARY_JSON}" \
   --arg delta_summary_path "${DELTA_SUMMARY_JSON}" \
   --arg scenario_plan_path "${SCENARIO_PLAN_JSON}" \
+  --arg forensics_validator_report "${FORENSICS_VALIDATOR_REPORT}" \
   --argjson pre_gate "$([[ "${PRE_GATE}" == "true" ]] && echo true || echo false)" \
   --argjson dry_run "$([[ "${DRY_RUN}" == "true" ]] && echo true || echo false)" \
   --argjson passed "$([[ "${overall_passed}" == "true" ]] && echo true || echo false)" \
@@ -708,11 +718,18 @@ jq -s \
     normalized_summary_path: $normalized_summary_path,
     delta_summary_path: $delta_summary_path,
     scenario_plan_path: $scenario_plan_path,
+    forensics_validator_report: $forensics_validator_report,
     normalized_classification: $normalized_classification,
     delta_status: $delta_status,
     metric_record_count: $metric_record_count,
     missing_required_metrics: $missing_required_metrics,
     steps: .
   }' "${STEPS_JSONL}" > "${SUMMARY_JSON}"
+
+bash "${SCRIPT_DIR}/validate_asupersync_forensics_bundle.sh" \
+  --mode "performance-pack" \
+  --root "${OUT_ROOT}" \
+  --run-id "${RUN_ID}" \
+  --report "${FORENSICS_VALIDATOR_REPORT}"
 
 echo "ASUPERSYNC performance pack complete. Summary: ${SUMMARY_JSON}"

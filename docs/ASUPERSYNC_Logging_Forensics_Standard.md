@@ -112,8 +112,15 @@ Current enforcement is wired into:
 
 - [scripts/e2e/asupersync_validation_pack.sh](/Users/jemanuel/projects/flywheel_connectors/scripts/e2e/asupersync_validation_pack.sh)
 - [scripts/e2e/asupersync_performance_pack.sh](/Users/jemanuel/projects/flywheel_connectors/scripts/e2e/asupersync_performance_pack.sh)
+- [scripts/e2e/run_matrix.sh](/Users/jemanuel/projects/flywheel_connectors/scripts/e2e/run_matrix.sh)
+- [scripts/e2e/unit_gate_executor.sh](/Users/jemanuel/projects/flywheel_connectors/scripts/e2e/unit_gate_executor.sh)
+- [scripts/e2e/integration_gate_executor.sh](/Users/jemanuel/projects/flywheel_connectors/scripts/e2e/integration_gate_executor.sh)
+- [scripts/e2e/validate_asupersync_forensics_bundle.sh](/Users/jemanuel/projects/flywheel_connectors/scripts/e2e/validate_asupersync_forensics_bundle.sh)
 
 These scripts validate `steps.jsonl` records against `asupersync-forensics/v1` before writing final summaries.
+They also emit a deterministic gate report at:
+
+- `forensics_validator_report.json`
 
 Runbook commands:
 

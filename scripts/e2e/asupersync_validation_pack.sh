@@ -230,11 +230,16 @@ fi
 STEPS_JSONL="${OUT_ROOT}/steps.jsonl"
 SUMMARY_JSON="${OUT_ROOT}/summary.json"
 REPLAY_SH="${OUT_ROOT}/replay.sh"
+FORENSICS_VALIDATOR_REPORT="${OUT_ROOT}/forensics_validator_report.json"
 
 require_cmd jq
 require_cmd rch
 if [[ ! -x "${SCRIPT_DIR}/run_matrix.sh" ]]; then
   echo "Expected executable script not found: ${SCRIPT_DIR}/run_matrix.sh" >&2
+  exit 1
+fi
+if [[ ! -x "${SCRIPT_DIR}/validate_asupersync_forensics_bundle.sh" ]]; then
+  echo "Expected executable script not found: ${SCRIPT_DIR}/validate_asupersync_forensics_bundle.sh" >&2
   exit 1
 fi
 
@@ -300,6 +305,7 @@ jq -s \
   --arg run_id "${RUN_ID}" \
   --arg out_root "${OUT_ROOT}" \
   --arg replay_sh "${REPLAY_SH}" \
+  --arg forensics_validator_report "${FORENSICS_VALIDATOR_REPORT}" \
   --argjson dry_run "$([[ "${DRY_RUN}" == "true" ]] && echo true || echo false)" \
   --argjson passed "$([[ "${overall_passed}" == "true" ]] && echo true || echo false)" \
   --argjson required_failed "$([[ "${required_failed}" == "true" ]] && echo true || echo false)" \
@@ -312,7 +318,14 @@ jq -s \
     passed: $passed,
     required_failed: $required_failed,
     replay_script: $replay_sh,
+    forensics_validator_report: $forensics_validator_report,
     steps: .
   }' "${STEPS_JSONL}" > "${SUMMARY_JSON}"
+
+bash "${SCRIPT_DIR}/validate_asupersync_forensics_bundle.sh" \
+  --mode "validation-pack" \
+  --root "${OUT_ROOT}" \
+  --run-id "${RUN_ID}" \
+  --report "${FORENSICS_VALIDATOR_REPORT}"
 
 echo "ASUPERSYNC validation pack complete. Summary: ${SUMMARY_JSON}"

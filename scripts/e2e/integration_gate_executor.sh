@@ -294,9 +294,14 @@ STEPS_JSONL="${OUT_ROOT}/steps.jsonl"
 SUMMARY_JSON="${OUT_ROOT}/gate_summary.json"
 DRIFT_JSON="${OUT_ROOT}/drift_report.json"
 REPLAY_SH="${OUT_ROOT}/replay.sh"
+FORENSICS_VALIDATOR_REPORT="${OUT_ROOT}/forensics_validator_report.json"
 
 require_cmd jq
 require_cmd rch
+if [[ ! -x "${SCRIPT_DIR}/validate_asupersync_forensics_bundle.sh" ]]; then
+  echo "Expected executable script not found: ${SCRIPT_DIR}/validate_asupersync_forensics_bundle.sh" >&2
+  exit 1
+fi
 
 if [[ ! -f "${COVERAGE_MATRIX}" ]]; then
   echo "Coverage matrix not found: ${COVERAGE_MATRIX}" >&2
@@ -681,6 +686,7 @@ jq -s \
   --arg out_root "${OUT_ROOT}" \
   --arg replay_sh "${REPLAY_SH}" \
   --arg drift_json "${DRIFT_JSON}" \
+  --arg forensics_validator_report "${FORENSICS_VALIDATOR_REPORT}" \
   --arg coverage_matrix "${COVERAGE_MATRIX}" \
   --argjson dry_run "$([[ "${DRY_RUN}" == "true" ]] && echo true || echo false)" \
   --argjson passed "$([[ "${overall_passed}" == "true" ]] && echo true || echo false)" \
@@ -707,8 +713,15 @@ jq -s \
     },
     replay_script: $replay_sh,
     drift_report: $drift_json,
+    forensics_validator_report: $forensics_validator_report,
     steps: .
   }' "${STEPS_JSONL}" > "${SUMMARY_JSON}"
+
+bash "${SCRIPT_DIR}/validate_asupersync_forensics_bundle.sh" \
+  --mode "integration-gate" \
+  --root "${OUT_ROOT}" \
+  --run-id "${RUN_ID}" \
+  --report "${FORENSICS_VALIDATOR_REPORT}"
 
 echo ""
 echo "=== Integration Gate Result ==="
@@ -723,6 +736,7 @@ fi
 echo ""
 echo "Summary:   ${SUMMARY_JSON}"
 echo "Drift:     ${DRIFT_JSON}"
+echo "Forensics: ${FORENSICS_VALIDATOR_REPORT}"
 echo "Steps:     ${STEPS_JSONL}"
 echo "Replay:    ${REPLAY_SH}"
 echo "Replay:    RUN_ID=${RUN_ID} bash $0 --out-root \"${OUT_ROOT}\" --run-id \"${RUN_ID}\""

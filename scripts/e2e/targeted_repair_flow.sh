@@ -25,6 +25,14 @@ run_cargo() {
   cargo "$@"
 }
 
+run_fcp_e2e() {
+  if command -v fcp-e2e >/dev/null 2>&1; then
+    fcp-e2e "$@"
+    return $?
+  fi
+  run_cargo run -q -p fcp-e2e --bin fcp-e2e -- "$@"
+}
+
 now_ms() {
   local now
   now=$(date +%s%3N 2>/dev/null || true)
@@ -69,13 +77,37 @@ json_or_null() {
 }
 
 details_json() {
-  if [[ -z "${EXPECTED_FAILURE}" && -z "${ACTUAL_FAILURE}" ]]; then
+  local has_failure=0
+  local has_context=0
+
+  if [[ -n "${EXPECTED_FAILURE}" || -n "${ACTUAL_FAILURE}" ]]; then
+    has_failure=1
+  fi
+  if [[ -n "${STEP_CONTEXT}" && "${STEP_CONTEXT}" != "null" && "${STEP_CONTEXT}" != "{}" ]]; then
+    has_context=1
+  fi
+
+  if [[ ${has_failure} -eq 0 && ${has_context} -eq 0 ]]; then
     printf 'null'
     return 0
   fi
-  printf '{"expected_failure":%s,"actual_failure":%s}' \
-    "$(json_or_null "${EXPECTED_FAILURE}")" \
-    "$(json_or_null "${ACTUAL_FAILURE}")"
+
+  if [[ ${has_failure} -eq 1 && ${has_context} -eq 1 ]]; then
+    printf '{"expected_failure":%s,"actual_failure":%s,"context":%s}' \
+      "$(json_or_null "${EXPECTED_FAILURE}")" \
+      "$(json_or_null "${ACTUAL_FAILURE}")" \
+      "${STEP_CONTEXT}"
+    return 0
+  fi
+
+  if [[ ${has_failure} -eq 1 ]]; then
+    printf '{"expected_failure":%s,"actual_failure":%s}' \
+      "$(json_or_null "${EXPECTED_FAILURE}")" \
+      "$(json_or_null "${ACTUAL_FAILURE}")"
+    return 0
+  fi
+
+  printf '{"context":%s}' "${STEP_CONTEXT}"
 }
 
 log_step() {
@@ -93,8 +125,8 @@ log_step() {
   details="$(details_json)"
 
   mkdir -p "$(dirname "${LOG_JSONL}")"
-  printf '{"timestamp":"%s","script":"%s","step":"%s","step_number":%s,"correlation_id":"%s","duration_ms":%s,"result":"%s","artifacts":%s,"context":%s,"details":%s}\n' \
-    "${timestamp}" "${SCRIPT_NAME}" "${step}" "${step_number}" "${correlation_id}" "${duration_ms}" "${result}" "${artifacts_json}" "${STEP_CONTEXT}" "${details}" >> "${LOG_JSONL}"
+  printf '{"timestamp":"%s","log_version":"v2","script":"%s","step":"%s","step_number":%s,"correlation_id":"%s","duration_ms":%s,"result":"%s","artifacts":%s,"details":%s}\n' \
+    "${timestamp}" "${SCRIPT_NAME}" "${step}" "${step_number}" "${correlation_id}" "${duration_ms}" "${result}" "${artifacts_json}" "${details}" >> "${LOG_JSONL}"
 }
 
 run_step() {
@@ -132,6 +164,7 @@ run_step() {
 
 step_prepare() {
   mkdir -p "${OUT_DIR}"
+  : > "${LOG_JSONL}"
 }
 
 step_run_symbol_request_tests() {
@@ -148,25 +181,29 @@ step_run_store_adversarial_tests() {
 
 require_cmd cargo
 
-run_step "prepare_output" 1 "{}" "" "{}" step_prepare
+run_step "prepare_output" 1 "[]" "" "{}" step_prepare
 run_step \
   "run_symbol_request_tests" \
   2 \
-  '{"crate":"fcp-mesh","target":"mesh_integration","filter":"meshnode_symbol_"}' \
+  '["crate:fcp-mesh","target:mesh_integration","filter:meshnode_symbol_"]' \
   "" \
   '{"category":"symbol_request","purpose":"targeted_repair"}' \
   step_run_symbol_request_tests
 run_step \
   "run_decode_status_tests" \
   3 \
-  '{"crate":"fcp-mesh","target":"mesh_integration","filter":"meshnode_decode_status"}' \
+  '["crate:fcp-mesh","target:mesh_integration","filter:meshnode_decode_status"]' \
   "" \
   '{"category":"decode_status","purpose":"targeted_repair"}' \
   step_run_decode_status_tests
 run_step \
   "run_store_adversarial_tests" \
   4 \
-  '{"crate":"fcp-store","target":"store_repair_integration","filter":"adversarial_"}' \
+  '["crate:fcp-store","target:store_repair_integration","filter:adversarial_"]' \
   "" \
   '{"category":"store_repair","purpose":"adversarial_recovery"}' \
   step_run_store_adversarial_tests
+
+run_fcp_e2e --validate-log "${LOG_JSONL}"
+
+echo "${SCRIPT_NAME} complete. Logs: ${LOG_JSONL}"

@@ -3,8 +3,11 @@ set -euo pipefail
 
 SCRIPT_NAME="e2e_transport_path_matrix"
 SEED="0xC0FFEE"
+RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 OUT_DIR="${OUT_DIR:-./out/${SCRIPT_NAME}}"
 LOG_JSONL="${LOG_JSONL:-${OUT_DIR}/${SCRIPT_NAME}.jsonl}"
+TARGET_DIR_DEFAULT="target_rch_${SCRIPT_NAME}_${RUN_ID}"
+TARGET_DIR="${TARGET_DIR:-${TARGET_DIR_DEFAULT}}"
 
 EXPECTED_FAILURE=""
 ACTUAL_FAILURE=""
@@ -127,16 +130,19 @@ step_prepare() {
 }
 
 step_run_transport_tests() {
-  cargo test -p fcp-mesh --test mesh_integration transport_ -- --nocapture
+  CARGO_TARGET_DIR="${TARGET_DIR}" \
+    rch exec -- cargo test -p fcp-mesh --test mesh_integration transport_ -- --nocapture
 }
 
-require_cmd cargo
+require_cmd rch
+
+ARTIFACTS_JSON="$(printf '{"crate":"fcp-mesh","target":"mesh_integration","filter":"transport_","runner":"rch","target_dir":"%s"}' "${TARGET_DIR}")"
 
 run_step "prepare_output" 1 "{}" "" "{}" step_prepare
 run_step \
   "run_transport_integration_tests" \
   2 \
-  '{"crate":"fcp-mesh","target":"mesh_integration","filter":"transport_"}' \
+  "${ARTIFACTS_JSON}" \
   "" \
   '{"category":"transport","purpose":"path_matrix"}' \
   step_run_transport_tests

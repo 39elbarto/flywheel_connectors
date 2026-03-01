@@ -449,6 +449,18 @@ impl PolicyBundle {
             policy.validate()?;
         }
         self.signature.validate()?;
+        let expected_signed_fields: Vec<String> = POLICY_BUNDLE_SIGNED_FIELDS
+            .iter()
+            .map(|field| (*field).to_string())
+            .collect();
+        if self.signature.signed_fields != expected_signed_fields {
+            return Err(PolicyBundleError::InvalidBundle {
+                reason: format!(
+                    "signature.signed_fields must exactly match [{}]",
+                    POLICY_BUNDLE_SIGNED_FIELDS.join(", ")
+                ),
+            });
+        }
         Ok(())
     }
 }
@@ -930,6 +942,11 @@ pub fn diff_policy_bundles(
     let roles = diff_roles(before, after, &mut missing_objects);
     let resources = diff_resources(before, after, &mut missing_objects);
     let capabilities = diff_capabilities(before, after, &mut missing_objects);
+    let missing_objects = missing_objects
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
 
     let risk = compute_policy_risk_summary(
         zone_policy.as_ref(),
@@ -3249,12 +3266,10 @@ mod tests {
         PolicyBundleSignature::new(
             "key-001",
             "sig-data",
-            vec![
-                "bundle_id".to_string(),
-                "zone_id".to_string(),
-                "policy_seq".to_string(),
-                "bundle_hash".to_string(),
-            ],
+            POLICY_BUNDLE_SIGNED_FIELDS
+                .iter()
+                .map(|field| (*field).to_string())
+                .collect(),
         )
     }
 
@@ -3282,6 +3297,60 @@ mod tests {
         bundle.bundle_hash = "sha256:deadbeef".to_string();
         let err = bundle.validate().expect_err("expected invalid bundle");
         assert!(err.to_string().contains("bundle_hash must be in format"));
+    }
+
+    #[test]
+    fn policy_bundle_validate_rejects_missing_signed_field() {
+        let mut signature = test_bundle_signature();
+        signature.signed_fields.pop();
+
+        let err = PolicyBundle::builder("bundle-001", ZoneId::work(), 1)
+            .bundle_hash(test_bundle_hash())
+            .policies(vec![test_policy_ref()])
+            .signature(signature)
+            .build()
+            .expect_err("bundle should fail signed_fields validation");
+
+        assert!(
+            err.to_string()
+                .contains("signature.signed_fields must exactly match")
+        );
+    }
+
+    #[test]
+    fn policy_bundle_validate_rejects_extra_signed_field() {
+        let mut signature = test_bundle_signature();
+        signature.signed_fields.push("unexpected".to_string());
+
+        let err = PolicyBundle::builder("bundle-001", ZoneId::work(), 1)
+            .bundle_hash(test_bundle_hash())
+            .policies(vec![test_policy_ref()])
+            .signature(signature)
+            .build()
+            .expect_err("bundle should fail signed_fields validation");
+
+        assert!(
+            err.to_string()
+                .contains("signature.signed_fields must exactly match")
+        );
+    }
+
+    #[test]
+    fn policy_bundle_validate_rejects_reordered_signed_fields() {
+        let mut signature = test_bundle_signature();
+        signature.signed_fields.swap(0, 1);
+
+        let err = PolicyBundle::builder("bundle-001", ZoneId::work(), 1)
+            .bundle_hash(test_bundle_hash())
+            .policies(vec![test_policy_ref()])
+            .signature(signature)
+            .build()
+            .expect_err("bundle should fail signed_fields validation");
+
+        assert!(
+            err.to_string()
+                .contains("signature.signed_fields must exactly match")
+        );
     }
 
     #[test]
@@ -3477,6 +3546,146 @@ mod tests {
         let codes: BTreeSet<PolicyRiskCode> = diff.risk.flags.iter().map(|f| f.code).collect();
 
         assert!(codes.contains(&PolicyRiskCode::IntegrityLowered));
+    }
+
+    #[test]
+    fn policy_bundle_diff_missing_objects_sorted_and_deduplicated() {
+        let zone = ZoneId::work();
+        let before_bundle = policy_bundle(
+            "bundle-before",
+            zone.clone(),
+            vec![
+                policy_ref("missing-role-b", "fcp.core:RoleObject@1.0"),
+                policy_ref("missing-role-a", "fcp.core:RoleObject@1.0"),
+                policy_ref("missing-cap-a", "fcp.core:CapabilityObject@1.0"),
+                policy_ref("missing-policy", "fcp.core:ZonePolicy@1.0"),
+            ],
+        );
+        let after_bundle = policy_bundle(
+            "bundle-after",
+            zone,
+            vec![
+                policy_ref("missing-resource-a", "fcp.core:ResourceObject@1.0"),
+                policy_ref("missing-cap-a", "fcp.core:CapabilityObject@1.0"),
+                policy_ref("missing-role-a", "fcp.core:RoleObject@1.0"),
+            ],
+        );
+
+        let before_resolved = PolicyBundleResolved::new(before_bundle, BTreeMap::new());
+        let after_resolved = PolicyBundleResolved::new(after_bundle, BTreeMap::new());
+
+        let diff = diff_policy_bundles(&before_resolved, &after_resolved).expect("bundle diff");
+
+        assert_eq!(
+            diff.missing_objects,
+            vec![
+                "missing-cap-a".to_string(),
+                "missing-policy".to_string(),
+                "missing-resource-a".to_string(),
+                "missing-role-a".to_string(),
+                "missing-role-b".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn policy_bundle_diff_matches_golden_snapshot() {
+        let zone = ZoneId::work();
+        let before_policy = test_zone_policy(zone.clone());
+        let mut after_policy = test_zone_policy(zone.clone());
+        after_policy.connector_allow.push(PolicyPattern {
+            pattern: "fcp.test:*".to_string(),
+        });
+        after_policy.transport_policy.allow_derp = true;
+
+        let before_bundle = policy_bundle(
+            "bundle-before",
+            zone.clone(),
+            vec![policy_ref("policy-1", "fcp.core:ZonePolicy@1.0")],
+        );
+        let after_bundle = policy_bundle(
+            "bundle-after",
+            zone,
+            vec![policy_ref("policy-1", "fcp.core:ZonePolicy@1.0")],
+        );
+
+        let mut before_objects = BTreeMap::new();
+        before_objects.insert(
+            "policy-1".to_string(),
+            PolicyBundleObject::ZonePolicy(before_policy),
+        );
+        let mut after_objects = BTreeMap::new();
+        after_objects.insert(
+            "policy-1".to_string(),
+            PolicyBundleObject::ZonePolicy(after_policy),
+        );
+
+        let before_resolved = PolicyBundleResolved::new(before_bundle, before_objects);
+        let after_resolved = PolicyBundleResolved::new(after_bundle, after_objects);
+        let diff = diff_policy_bundles(&before_resolved, &after_resolved).expect("bundle diff");
+
+        let actual = serde_json::to_value(&diff).expect("serialize diff");
+        let expected = serde_json::json!({
+            "zone_id": "z:work",
+            "before_bundle_id": "bundle-before",
+            "after_bundle_id": "bundle-after",
+            "added": [],
+            "removed": [],
+            "changed": [],
+            "zone_policy": {
+                "added": {
+                    "principal_allow": [],
+                    "principal_deny": [],
+                    "connector_allow": ["fcp.test:*"],
+                    "connector_deny": [],
+                    "capability_allow": [],
+                    "capability_deny": [],
+                    "capability_ceiling": []
+                },
+                "removed": {
+                    "principal_allow": [],
+                    "principal_deny": [],
+                    "connector_allow": [],
+                    "connector_deny": [],
+                    "capability_allow": [],
+                    "capability_deny": [],
+                    "capability_ceiling": []
+                },
+                "changed": {
+                    "transport_policy": {
+                        "before": {
+                            "allow_lan": true,
+                            "allow_derp": false,
+                            "allow_funnel": false
+                        },
+                        "after": {
+                            "allow_lan": true,
+                            "allow_derp": true,
+                            "allow_funnel": false
+                        }
+                    }
+                }
+            },
+            "zone_definition": null,
+            "roles": [],
+            "resources": [],
+            "capabilities": [],
+            "missing_objects": [],
+            "risk": {
+                "flags": [
+                    {
+                        "code": "connector_allow_expanded",
+                        "severity": "medium"
+                    },
+                    {
+                        "code": "transport_derp_enabled",
+                        "severity": "high"
+                    }
+                ]
+            }
+        });
+
+        assert_eq!(actual, expected);
     }
 
     #[test]

@@ -68,10 +68,16 @@ fn base_bundle(bundle_id: &str) -> Value {
             "key_id": "key-001",
             "signature": "sig-data",
             "signed_fields": [
+                "format",
+                "schema_version",
                 "bundle_id",
                 "zone_id",
                 "policy_seq",
-                "bundle_hash"
+                "created_at",
+                "previous_bundle",
+                "hash_algo",
+                "bundle_hash",
+                "policies"
             ]
         }
     })
@@ -121,6 +127,47 @@ fn policy_bundle_schema_rejects_bad_hash() {
         test_name,
         &correlation_id,
         "bundle-bad-hash",
+        "pass",
+        elapsed_ms(&start),
+        Some(json!({"error": result.err().unwrap().to_string()})),
+    );
+
+    capture
+        .validate_jsonl()
+        .expect("log schema validation failed");
+}
+
+#[test]
+fn policy_bundle_schema_rejects_incomplete_signed_fields() {
+    let capture = LogCapture::new();
+    let correlation_id = Uuid::new_v4().to_string();
+    let test_name = "policy_bundle_schema_rejects_incomplete_signed_fields";
+    let start = Instant::now();
+
+    let mut bundle = base_bundle("bundle-missing-signed-field");
+    bundle["signature"]["signed_fields"] = json!([
+        "format",
+        "schema_version",
+        "bundle_id",
+        "zone_id",
+        "policy_seq",
+        "created_at",
+        "previous_bundle",
+        "hash_algo",
+        "bundle_hash"
+    ]);
+
+    let result = validate_policy_bundle(&bundle);
+    assert!(
+        result.is_err(),
+        "expected invalid policy bundle signed_fields set"
+    );
+
+    emit_log(
+        &capture,
+        test_name,
+        &correlation_id,
+        "bundle-missing-signed-field",
         "pass",
         elapsed_ms(&start),
         Some(json!({"error": result.err().unwrap().to_string()})),

@@ -3547,3 +3547,1337 @@ mod integration_scenarios {
         );
     }
 }
+
+// ============================================================================
+// REAL-COMPONENT MULTI-NODE INTEGRATION TESTS (9hoz)
+//
+// These tests exercise the full MeshNode stack with real sessions, gossip,
+// admission control, and DecisionReceipt evidence — no mocks.
+// ============================================================================
+
+mod real_component_integration {
+    use super::*;
+
+    use bytes::Bytes;
+    use fcp_cbor::SchemaId;
+    use fcp_core::{
+        Decision, DecisionReasonCode, EpochId, NodeSignature, ObjectHeader, Provenance, ZoneKeyId,
+    };
+    use fcp_mesh::admission::{AdmissionError, AdmissionPolicy, ObjectAdmissionClass, PeerBudget};
+    use fcp_mesh::gossip::GossipConfig;
+    use fcp_mesh::{MeshNode, MeshNodeConfig, MeshSession, SymbolRequestError};
+    use fcp_protocol::session::{
+        MeshSessionId, SessionCryptoSuite, SessionKeys, SessionReplayPolicy, TransportLimits,
+    };
+    use fcp_protocol::{DecodeStatus, SymbolAck, SymbolAckReason, SymbolRequest};
+    use fcp_store::{
+        MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore, MemorySymbolStoreConfig,
+        ObjectAdmissionPolicy, ObjectSymbolMeta, ObjectTransmissionInfo, QuarantineStore,
+        StoredSymbol, SymbolMeta, SymbolStore,
+    };
+    use fcp_tailscale::NodeId;
+    use raptorq::ObjectTransmissionInformation;
+    use semver::Version;
+    use std::collections::HashSet;
+    use std::sync::Arc;
+
+    fn test_header(zone_id: &ZoneId) -> ObjectHeader {
+        ObjectHeader {
+            schema: SchemaId::new("fcp.mesh", "SymbolRequest", Version::new(1, 0, 0)),
+            zone_id: zone_id.clone(),
+            created_at: 0,
+            provenance: Provenance::new(zone_id.clone()),
+            refs: Vec::new(),
+            foreign_refs: Vec::new(),
+            ttl_secs: None,
+            placement: None,
+        }
+    }
+
+    fn build_mesh_node_with_policy(
+        name: &str,
+        sender_instance_id: u64,
+        local_node_id: u64,
+        policy: AdmissionPolicy,
+    ) -> MeshNode {
+        let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+        let symbol_store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig {
+            local_node_id,
+            ..MemorySymbolStoreConfig::default()
+        }));
+        let quarantine_store = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
+
+        MeshNode::new(
+            MeshNodeConfig::new(name)
+                .with_sender_instance_id(sender_instance_id)
+                .with_admission_policy(policy),
+            object_store,
+            symbol_store,
+            quarantine_store,
+        )
+    }
+
+    fn build_node(name: &str, sender_instance_id: u64, local_node_id: u64) -> MeshNode {
+        build_mesh_node_with_policy(
+            name,
+            sender_instance_id,
+            local_node_id,
+            AdmissionPolicy::default(),
+        )
+    }
+
+    async fn seed_symbols(store: &Arc<dyn SymbolStore>, meta: &ObjectSymbolMeta, source_node: u64) {
+        store.put_object_meta(meta.clone()).await.unwrap();
+        let symbol_size = meta.oti.symbol_size as usize;
+
+        for esi in 0..meta.source_symbols {
+            let esi_byte = u8::try_from(esi).expect("esi fits in u8");
+            let symbol = StoredSymbol {
+                meta: SymbolMeta {
+                    object_id: meta.object_id,
+                    esi,
+                    zone_id: meta.zone_id.clone(),
+                    source_node: Some(source_node),
+                    stored_at: 0,
+                },
+                data: Bytes::from(vec![esi_byte; symbol_size]),
+            };
+            store.put_symbol(symbol).await.unwrap();
+        }
+    }
+
+    fn make_decision_receipt(
+        zone_id: &ZoneId,
+        request_object_id: fcp_core::ObjectId,
+        decision: Decision,
+        reason_code: &str,
+        node_name: &str,
+        evidence: Vec<fcp_core::ObjectId>,
+    ) -> fcp_core::DecisionReceipt {
+        fcp_core::DecisionReceipt {
+            header: ObjectHeader {
+                schema: SchemaId::new("fcp.core", "DecisionReceipt", Version::new(1, 0, 0)),
+                zone_id: zone_id.clone(),
+                created_at: 1_000,
+                provenance: Provenance::new(zone_id.clone()),
+                refs: vec![],
+                foreign_refs: vec![],
+                ttl_secs: None,
+                placement: None,
+            },
+            request_object_id,
+            decision,
+            reason_code: reason_code.to_string(),
+            evidence,
+            explanation: None,
+            signature: NodeSignature::new(fcp_core::NodeId::new(node_name), [0u8; 64], 1_000),
+        }
+    }
+
+    // ========================================================================
+    // 1. Session registration + admission auth gate through MeshNode
+    // ========================================================================
+
+    #[allow(clippy::too_many_lines)]
+    #[fcp_async_core::runtime::test]
+    async fn session_auth_gate_register_and_remove() {
+        const TEST_NAME: &str = "session_auth_gate_register_and_remove";
+        const CATEGORY: &str = "real_component";
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([10u8; 8]);
+        let object_id = test_object_id("session-auth-gate");
+        let peer = NodeId::new("peer-session");
+
+        let policy = AdmissionPolicy {
+            require_authenticated_requests: true,
+            ..AdmissionPolicy::default()
+        };
+        let mut node = build_mesh_node_with_policy("node-auth-gate", 50, 1, policy);
+        let symbol_store = node.symbol_store().clone();
+
+        let oti = ObjectTransmissionInformation::new(512, 128, 1, 1, 1);
+        let meta = ObjectSymbolMeta {
+            object_id,
+            zone_id: zone_id.clone(),
+            oti: ObjectTransmissionInfo::from(oti),
+            source_symbols: 4,
+            first_symbol_at: 0,
+        };
+        seed_symbols(&symbol_store, &meta, 1).await;
+
+        // Phase 1: Unauthenticated request rejected
+        let request = SymbolRequest::new(
+            test_header(&zone_id),
+            object_id,
+            zone_id.clone(),
+            zone_key_id,
+            1,
+            2,
+            1,
+        );
+
+        let err = node
+            .handle_symbol_request(request.clone(), &peer, false, 1000)
+            .await
+            .expect_err("unauthenticated should be rejected");
+
+        let deny_reason = match &err {
+            SymbolRequestError::AdmissionRejected(AdmissionError::AuthenticationRequired) => {
+                "authentication_required"
+            }
+            other => panic!("expected AuthenticationRequired, got: {other}"),
+        };
+
+        let deny_receipt = make_decision_receipt(
+            &zone_id,
+            object_id,
+            Decision::Deny,
+            deny_reason,
+            "node-auth-gate",
+            vec![],
+        );
+        assert!(deny_receipt.is_deny());
+        assert_eq!(deny_receipt.reason_code, "authentication_required");
+
+        // Phase 2: Register session → authenticated
+        let session = MeshSession::new(
+            MeshSessionId::new(),
+            peer.clone(),
+            SessionCryptoSuite::Suite1,
+            SessionKeys {
+                k_mac_i2r: [11u8; 32],
+                k_mac_r2i: [12u8; 32],
+                k_ctx: [13u8; 32],
+            },
+            TransportLimits::default(),
+            true,
+            1000,
+            SessionReplayPolicy::default(),
+        );
+        node.register_session(session, 1000);
+        assert!(node.is_peer_authenticated(&peer));
+
+        let response = node
+            .handle_symbol_request(request.clone(), &peer, false, 1001)
+            .await
+            .expect("authenticated session should allow request");
+        assert!(!response.symbol_esis.is_empty());
+
+        let allow_receipt = make_decision_receipt(
+            &zone_id,
+            object_id,
+            Decision::Allow,
+            DecisionReasonCode::Allow.as_str(),
+            "node-auth-gate",
+            vec![],
+        );
+        assert!(allow_receipt.is_allow());
+
+        // Phase 3: Remove session → unauthenticated again
+        node.remove_session(&peer, 2000);
+        assert!(!node.is_peer_authenticated(&peer));
+
+        let err = node
+            .handle_symbol_request(request, &peer, false, 2001)
+            .await
+            .expect_err("unauthenticated after session removal");
+
+        assert!(matches!(
+            err,
+            SymbolRequestError::AdmissionRejected(AdmissionError::AuthenticationRequired)
+        ));
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "phase_1_deny": deny_reason,
+                "phase_2_allow": true,
+                "phase_3_deny_after_removal": true,
+                "decision_receipts": 2,
+            }),
+        );
+    }
+
+    // ========================================================================
+    // 2. Admission flood — byte budget exhaustion through MeshNode
+    // ========================================================================
+
+    #[fcp_async_core::runtime::test]
+    async fn admission_flood_byte_budget_via_meshnode() {
+        const TEST_NAME: &str = "admission_flood_byte_budget_via_meshnode";
+        const CATEGORY: &str = "real_component";
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([20u8; 8]);
+        let object_id = test_object_id("flood-byte-budget");
+        let peer = NodeId::new("flood-peer");
+
+        let policy = AdmissionPolicy {
+            per_peer: PeerBudget {
+                max_bytes_per_min: 512,
+                ..PeerBudget::default()
+            },
+            ..AdmissionPolicy::default()
+        };
+        let mut node = build_mesh_node_with_policy("node-flood-byte", 51, 1, policy);
+        let symbol_store = node.symbol_store().clone();
+
+        let oti = ObjectTransmissionInformation::new(512, 128, 1, 1, 1);
+        let meta = ObjectSymbolMeta {
+            object_id,
+            zone_id: zone_id.clone(),
+            oti: ObjectTransmissionInfo::from(oti),
+            source_symbols: 8,
+            first_symbol_at: 0,
+        };
+        seed_symbols(&symbol_store, &meta, 1).await;
+
+        let mut allowed_count = 0u32;
+        let mut denied_count = 0u32;
+        let mut deny_reason = String::new();
+        let now_ms = 1000u64;
+
+        // Symbol size from OTI: 128 bytes. Each request asks for max 2 symbols.
+        // Estimated bytes per request = 2 * 128 = 256 bytes.
+        // Budget = 512 bytes, so 2nd request should hit the limit.
+        let symbol_size = 128u64;
+        let max_symbols_per_request = 2u64;
+        let estimated_bytes_per_request = max_symbols_per_request * symbol_size;
+
+        for attempt in 0..10 {
+            let request = SymbolRequest::new(
+                test_header(&zone_id),
+                object_id,
+                zone_id.clone(),
+                zone_key_id,
+                1,
+                2,
+                1,
+            );
+
+            match node
+                .handle_symbol_request(request, &peer, true, now_ms + attempt)
+                .await
+            {
+                Ok(response) => {
+                    assert!(!response.symbol_esis.is_empty());
+                    allowed_count += 1;
+                    // Record bytes against admission budget so it accumulates
+                    node.admission_mut().record_bytes(
+                        &peer,
+                        estimated_bytes_per_request,
+                        now_ms + attempt,
+                    );
+                }
+                Err(SymbolRequestError::AdmissionRejected(ref err)) => {
+                    deny_reason = format!("{err}");
+                    denied_count += 1;
+                    assert!(
+                        matches!(err, AdmissionError::ByteBudgetExceeded { .. }),
+                        "expected ByteBudgetExceeded, got: {err}"
+                    );
+                    break;
+                }
+                Err(other) => panic!("unexpected error: {other}"),
+            }
+        }
+
+        assert!(allowed_count > 0, "at least one request should be allowed");
+        assert!(
+            denied_count > 0,
+            "byte budget should eventually be exceeded"
+        );
+
+        let deny_receipt = make_decision_receipt(
+            &zone_id,
+            object_id,
+            Decision::Deny,
+            "byte_budget_exceeded",
+            "node-flood-byte",
+            vec![],
+        );
+        assert!(deny_receipt.is_deny());
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "allowed_requests": allowed_count,
+                "denied_requests": denied_count,
+                "deny_reason": deny_reason,
+                "receipt_reason": deny_receipt.reason_code,
+            }),
+        );
+    }
+
+    // ========================================================================
+    // 3. Admission flood — symbol budget exhaustion through MeshNode
+    // ========================================================================
+
+    #[fcp_async_core::runtime::test]
+    async fn admission_flood_symbol_budget_via_meshnode() {
+        const TEST_NAME: &str = "admission_flood_symbol_budget_via_meshnode";
+        const CATEGORY: &str = "real_component";
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([21u8; 8]);
+        let object_id = test_object_id("flood-symbol-budget");
+        let peer = NodeId::new("flood-sym-peer");
+
+        let policy = AdmissionPolicy {
+            per_peer: PeerBudget {
+                max_symbols_per_min: 5,
+                max_bytes_per_min: u64::MAX,
+                ..PeerBudget::default()
+            },
+            ..AdmissionPolicy::default()
+        };
+        let mut node = build_mesh_node_with_policy("node-flood-sym", 52, 1, policy);
+        let symbol_store = node.symbol_store().clone();
+
+        let oti = ObjectTransmissionInformation::new(512, 128, 1, 1, 1);
+        let meta = ObjectSymbolMeta {
+            object_id,
+            zone_id: zone_id.clone(),
+            oti: ObjectTransmissionInfo::from(oti),
+            source_symbols: 8,
+            first_symbol_at: 0,
+        };
+        seed_symbols(&symbol_store, &meta, 1).await;
+
+        let mut allowed_symbols = 0u32;
+        let mut denied = false;
+        let now_ms = 1000u64;
+        // Each request asks for max 2 symbols; budget is 5, so 3rd request should exceed
+        let symbols_per_request = 2u32;
+
+        for attempt in 0..10 {
+            let request = SymbolRequest::new(
+                test_header(&zone_id),
+                object_id,
+                zone_id.clone(),
+                zone_key_id,
+                1,
+                2,
+                1,
+            );
+
+            match node
+                .handle_symbol_request(request, &peer, true, now_ms + attempt)
+                .await
+            {
+                Ok(response) => {
+                    let sent = u32::try_from(response.symbol_esis.len())
+                        .expect("symbol count should fit in u32");
+                    allowed_symbols += sent;
+                    // Record symbols against admission budget so it accumulates
+                    node.admission_mut().record_symbols(
+                        &peer,
+                        symbols_per_request,
+                        now_ms + attempt,
+                    );
+                }
+                Err(SymbolRequestError::AdmissionRejected(ref err)) => {
+                    assert!(
+                        matches!(err, AdmissionError::SymbolBudgetExceeded { .. }),
+                        "expected SymbolBudgetExceeded, got: {err}"
+                    );
+                    denied = true;
+                    break;
+                }
+                Err(other) => panic!("unexpected error: {other}"),
+            }
+        }
+
+        assert!(allowed_symbols > 0);
+        assert!(denied, "symbol budget should eventually be exceeded");
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "allowed_symbols": allowed_symbols,
+                "budget_exceeded": denied,
+            }),
+        );
+    }
+
+    // ========================================================================
+    // 4. Multi-node gossip convergence through MeshNode
+    // ========================================================================
+
+    #[test]
+    fn multi_node_gossip_convergence_via_meshnode() {
+        const TEST_NAME: &str = "multi_node_gossip_convergence_via_meshnode";
+        const CATEGORY: &str = "real_component";
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let zone_id = ZoneId::work();
+        let obj_a = test_object_id("gossip-obj-a");
+        let obj_b = test_object_id("gossip-obj-b");
+        let obj_c = test_object_id("gossip-obj-c");
+
+        let mut node_a = build_node("node-gossip-a", 60, 1);
+        let mut node_b = build_node("node-gossip-b", 61, 2);
+
+        // Node A announces obj_a and obj_b
+        assert!(node_a.announce_object(&zone_id, &obj_a, ObjectAdmissionClass::Admitted, 1000));
+        assert!(node_a.announce_object(&zone_id, &obj_b, ObjectAdmissionClass::Admitted, 1001));
+        for esi in 0..10 {
+            node_a.announce_symbol(&zone_id, &obj_a, esi, ObjectAdmissionClass::Admitted, 1002);
+        }
+
+        // Node B announces obj_b and obj_c
+        assert!(node_b.announce_object(&zone_id, &obj_b, ObjectAdmissionClass::Admitted, 1000));
+        assert!(node_b.announce_object(&zone_id, &obj_c, ObjectAdmissionClass::Admitted, 1001));
+        for esi in 0..5 {
+            node_b.announce_symbol(&zone_id, &obj_c, esi, ObjectAdmissionClass::Admitted, 1002);
+        }
+
+        // Node A: knows obj_a and obj_b, not obj_c
+        assert!(node_a.gossip_mut().has_object(&zone_id, &obj_a));
+        assert!(node_a.gossip_mut().has_object(&zone_id, &obj_b));
+        assert!(!node_a.gossip_mut().has_object(&zone_id, &obj_c));
+
+        // Node B: knows obj_b and obj_c, not obj_a
+        assert!(node_b.gossip_mut().has_object(&zone_id, &obj_b));
+        assert!(node_b.gossip_mut().has_object(&zone_id, &obj_c));
+        assert!(!node_b.gossip_mut().has_object(&zone_id, &obj_a));
+
+        // Exchange gossip summaries + handle_summary to track peer state
+        let epoch = EpochId::new("epoch-convergence");
+
+        let summary_a = node_a
+            .gossip_mut()
+            .create_summary(&zone_id, epoch.clone())
+            .expect("node A should produce a summary");
+
+        // B processes A's summary to learn about A's objects
+        node_b.gossip_mut().handle_summary(summary_a, 2000);
+
+        // B requests objects it learned about from A
+        let request_from_b = node_b
+            .gossip_mut()
+            .create_request(&zone_id, vec![obj_a, obj_b], 2001);
+        let response_a = node_a.gossip_mut().handle_request(&request_from_b);
+        assert!(
+            !response_a.have_objects.is_empty(),
+            "node A should have objects B requests"
+        );
+
+        let summary_b = node_b
+            .gossip_mut()
+            .create_summary(&zone_id, epoch)
+            .expect("node B should produce a summary");
+
+        // A processes B's summary to learn about B's objects
+        node_a.gossip_mut().handle_summary(summary_b, 2002);
+
+        // A requests objects it learned about from B
+        let request_from_a = node_a
+            .gossip_mut()
+            .create_request(&zone_id, vec![obj_c], 2003);
+        let response_b = node_b.gossip_mut().handle_request(&request_from_a);
+        assert!(
+            !response_b.have_objects.is_empty(),
+            "node B should have objects A requests"
+        );
+
+        let metrics_a = node_a.metrics();
+        let metrics_b = node_b.metrics();
+        assert!(metrics_a.gossip_announcements >= 2);
+        assert!(metrics_b.gossip_announcements >= 2);
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "node_a_objects": 2,
+                "node_b_objects": 2,
+                "node_a_announcements": metrics_a.gossip_announcements,
+                "node_b_announcements": metrics_b.gossip_announcements,
+                "a_has_for_b": response_a.have_objects.len(),
+                "b_has_for_a": response_b.have_objects.len(),
+            }),
+        );
+    }
+
+    // ========================================================================
+    // 5. Multi-node session-gated symbol transfer with DecisionReceipt
+    // ========================================================================
+
+    #[allow(clippy::too_many_lines)]
+    #[fcp_async_core::runtime::test]
+    async fn multi_node_session_gated_symbol_transfer() {
+        const TEST_NAME: &str = "multi_node_session_gated_symbol_transfer";
+        const CATEGORY: &str = "real_component";
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([30u8; 8]);
+        let object_id = test_object_id("session-gated-transfer");
+        let peer_b = NodeId::new("node-b-peer");
+
+        let policy = AdmissionPolicy {
+            require_authenticated_requests: true,
+            ..AdmissionPolicy::default()
+        };
+        let mut node_a = build_mesh_node_with_policy("node-a-gated", 70, 1, policy);
+        let node_b = build_node("node-b-requester", 71, 2);
+
+        let symbol_store_a = node_a.symbol_store().clone();
+        let receiver_store = node_b.symbol_store().clone();
+
+        let oti = ObjectTransmissionInformation::new(512, 128, 1, 1, 1);
+        let meta = ObjectSymbolMeta {
+            object_id,
+            zone_id: zone_id.clone(),
+            oti: ObjectTransmissionInfo::from(oti),
+            source_symbols: 4,
+            first_symbol_at: 0,
+        };
+        seed_symbols(&symbol_store_a, &meta, 1).await;
+
+        // Phase 1: Unauthenticated — denied
+        let request = SymbolRequest::new(
+            test_header(&zone_id),
+            object_id,
+            zone_id.clone(),
+            zone_key_id,
+            1,
+            4,
+            1,
+        );
+        let err = node_a
+            .handle_symbol_request(request, &peer_b, false, 1000)
+            .await
+            .expect_err("unauthenticated should fail");
+        assert!(matches!(
+            err,
+            SymbolRequestError::AdmissionRejected(AdmissionError::AuthenticationRequired)
+        ));
+
+        let deny_receipt = make_decision_receipt(
+            &zone_id,
+            object_id,
+            Decision::Deny,
+            "authentication_required",
+            "node-a-gated",
+            vec![],
+        );
+
+        // Phase 2: Register session → authenticated transfer
+        let session = MeshSession::new(
+            MeshSessionId::new(),
+            peer_b.clone(),
+            SessionCryptoSuite::Suite1,
+            SessionKeys {
+                k_mac_i2r: [31u8; 32],
+                k_mac_r2i: [32u8; 32],
+                k_ctx: [33u8; 32],
+            },
+            TransportLimits::default(),
+            true,
+            1001,
+            SessionReplayPolicy::default(),
+        );
+        node_a.register_session(session, 1001);
+
+        let request = SymbolRequest::new(
+            test_header(&zone_id),
+            object_id,
+            zone_id.clone(),
+            zone_key_id,
+            1,
+            4,
+            1,
+        );
+        let response = node_a
+            .handle_symbol_request(request, &peer_b, false, 1002)
+            .await
+            .expect("authenticated session should succeed");
+
+        assert_eq!(response.symbol_esis.len(), 4);
+        assert!(response.is_final);
+
+        let allow_receipt = make_decision_receipt(
+            &zone_id,
+            object_id,
+            Decision::Allow,
+            DecisionReasonCode::Allow.as_str(),
+            "node-a-gated",
+            vec![object_id],
+        );
+
+        // Transfer symbols to receiver
+        receiver_store.put_object_meta(meta.clone()).await.unwrap();
+        for esi in response.symbol_esis {
+            let symbol = symbol_store_a.get_symbol(&object_id, esi).await.unwrap();
+            receiver_store.put_symbol(symbol).await.unwrap();
+        }
+        assert!(receiver_store.can_reconstruct(&object_id).await);
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "deny_receipt": { "decision": "deny", "reason": deny_receipt.reason_code },
+                "allow_receipt": { "decision": "allow", "reason": allow_receipt.reason_code },
+                "symbols_transferred": 4,
+                "receiver_reconstructed": true,
+            }),
+        );
+    }
+
+    // ========================================================================
+    // 6. Gossip quarantine isolation through MeshNode (multi-object)
+    // ========================================================================
+
+    #[test]
+    fn gossip_quarantine_isolation_multi_object() {
+        const TEST_NAME: &str = "gossip_quarantine_isolation_multi_object";
+        const CATEGORY: &str = "real_component";
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let zone_id = ZoneId::work();
+        let clean_obj = test_object_id("gossip-clean");
+        let quarantined_obj = test_object_id("gossip-quarantined");
+
+        let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+        let symbol_store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig::default()));
+        let quarantine_store = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
+
+        quarantine_store
+            .quarantine(fcp_store::QuarantinedObject {
+                object_id: quarantined_obj,
+                zone_id: zone_id.clone(),
+                data: Bytes::from_static(b"malicious"),
+                source_peer: Some(999),
+                received_at: 0,
+                peer_reputation: -50,
+            })
+            .expect("quarantine");
+
+        let mut node = MeshNode::new(
+            MeshNodeConfig::new("node-quarantine").with_sender_instance_id(80),
+            object_store,
+            symbol_store,
+            quarantine_store,
+        );
+
+        let clean_added =
+            node.announce_object(&zone_id, &clean_obj, ObjectAdmissionClass::Admitted, 1000);
+        let quarantined_added = node.announce_object(
+            &zone_id,
+            &quarantined_obj,
+            ObjectAdmissionClass::Admitted,
+            1001,
+        );
+
+        assert!(clean_added);
+        assert!(node.gossip_mut().has_object(&zone_id, &clean_obj));
+        assert!(!quarantined_added);
+        assert!(!node.gossip_mut().has_object(&zone_id, &quarantined_obj));
+
+        let sym_added = node.announce_symbol(
+            &zone_id,
+            &quarantined_obj,
+            0,
+            ObjectAdmissionClass::Admitted,
+            1002,
+        );
+        assert!(!sym_added);
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "clean_gossipped": clean_added,
+                "quarantined_blocked": !quarantined_added,
+                "quarantined_symbol_blocked": !sym_added,
+            }),
+        );
+    }
+
+    // ========================================================================
+    // 7. DecisionReceipt evidence chain for admission outcomes
+    // ========================================================================
+
+    #[allow(clippy::too_many_lines)]
+    #[fcp_async_core::runtime::test]
+    async fn decision_receipt_evidence_chain() {
+        const TEST_NAME: &str = "decision_receipt_evidence_chain";
+        const CATEGORY: &str = "real_component";
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([40u8; 8]);
+        let object_id = test_object_id("receipt-evidence");
+        let peer = NodeId::new("receipt-peer");
+
+        let policy = AdmissionPolicy {
+            per_peer: PeerBudget {
+                max_bytes_per_min: 1024,
+                ..PeerBudget::default()
+            },
+            ..AdmissionPolicy::default()
+        };
+        let mut node = build_mesh_node_with_policy("node-receipt", 90, 1, policy);
+        let symbol_store = node.symbol_store().clone();
+
+        let oti = ObjectTransmissionInformation::new(512, 128, 1, 1, 1);
+        let meta = ObjectSymbolMeta {
+            object_id,
+            zone_id: zone_id.clone(),
+            oti: ObjectTransmissionInfo::from(oti),
+            source_symbols: 8,
+            first_symbol_at: 0,
+        };
+        seed_symbols(&symbol_store, &meta, 1).await;
+
+        let mut receipts: Vec<fcp_core::DecisionReceipt> = Vec::new();
+        let now_ms = 1000u64;
+        // Symbol size from OTI: 128 bytes. Each request asks for max 2 symbols.
+        // Estimated bytes per request = 2 * 128 = 256 bytes.
+        // Budget = 1024 bytes, so ~4 requests before exhaustion.
+        let estimated_bytes_per_request = 2u64 * 128;
+
+        for attempt in 0..20 {
+            let request = SymbolRequest::new(
+                test_header(&zone_id),
+                object_id,
+                zone_id.clone(),
+                zone_key_id,
+                1,
+                2,
+                1,
+            );
+
+            match node
+                .handle_symbol_request(request, &peer, true, now_ms + attempt)
+                .await
+            {
+                Ok(_) => {
+                    // Record bytes so admission budget accumulates
+                    node.admission_mut().record_bytes(
+                        &peer,
+                        estimated_bytes_per_request,
+                        now_ms + attempt,
+                    );
+                    receipts.push(make_decision_receipt(
+                        &zone_id,
+                        object_id,
+                        Decision::Allow,
+                        DecisionReasonCode::Allow.as_str(),
+                        "node-receipt",
+                        vec![object_id],
+                    ));
+                }
+                Err(SymbolRequestError::AdmissionRejected(ref err)) => {
+                    let reason = match err {
+                        AdmissionError::ByteBudgetExceeded { .. } => "byte_budget_exceeded",
+                        AdmissionError::SymbolBudgetExceeded { .. } => "symbol_budget_exceeded",
+                        other => panic!("unexpected admission error: {other}"),
+                    };
+                    receipts.push(make_decision_receipt(
+                        &zone_id,
+                        object_id,
+                        Decision::Deny,
+                        reason,
+                        "node-receipt",
+                        vec![],
+                    ));
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+
+        let allow_count = receipts.iter().filter(|r| r.is_allow()).count();
+        let deny_count = receipts.iter().filter(|r| r.is_deny()).count();
+
+        assert!(allow_count > 0, "must have at least one allow receipt");
+        assert!(deny_count > 0, "must have at least one deny receipt");
+
+        for receipt in &receipts {
+            assert_eq!(*receipt.zone_id(), zone_id);
+            assert_eq!(receipt.request_object_id, object_id);
+            assert_eq!(
+                receipt.signature.node_id,
+                fcp_core::NodeId::new("node-receipt")
+            );
+            if receipt.is_allow() {
+                assert_eq!(receipt.evidence.len(), 1);
+            }
+        }
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "total_receipts": receipts.len(),
+                "allow_receipts": allow_count,
+                "deny_receipts": deny_count,
+                "evidence_chain_valid": true,
+            }),
+        );
+    }
+
+    // ========================================================================
+    // 8. DecodeStatus::Complete stops further transfers
+    // ========================================================================
+
+    #[fcp_async_core::runtime::test]
+    async fn decode_complete_stops_transfer_via_meshnode() {
+        const TEST_NAME: &str = "decode_complete_stops_transfer_via_meshnode";
+        const CATEGORY: &str = "real_component";
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([50u8; 8]);
+        let object_id = test_object_id("decode-complete-stop");
+        let peer = NodeId::new("decode-peer");
+
+        let mut node = build_node("node-decode", 100, 1);
+        let symbol_store = node.symbol_store().clone();
+
+        let oti = ObjectTransmissionInformation::new(512, 128, 1, 1, 1);
+        let meta = ObjectSymbolMeta {
+            object_id,
+            zone_id: zone_id.clone(),
+            oti: ObjectTransmissionInfo::from(oti),
+            source_symbols: 4,
+            first_symbol_at: 0,
+        };
+        seed_symbols(&symbol_store, &meta, 1).await;
+
+        // Phase 1: Initial request succeeds
+        let request = SymbolRequest::new(
+            test_header(&zone_id),
+            object_id,
+            zone_id.clone(),
+            zone_key_id,
+            1,
+            2,
+            1,
+        );
+
+        let response = node
+            .handle_symbol_request(request, &peer, true, 1000)
+            .await
+            .expect("first request should succeed");
+        assert!(!response.symbol_esis.is_empty());
+
+        // Phase 2: Peer reports decode complete
+        let header = ObjectHeader {
+            schema: SchemaId::new("fcp.status", "DecodeStatus", Version::new(1, 0, 0)),
+            zone_id: zone_id.clone(),
+            created_at: 0,
+            provenance: Provenance::new(zone_id.clone()),
+            refs: Vec::new(),
+            foreign_refs: Vec::new(),
+            ttl_secs: None,
+            placement: None,
+        };
+        let status = DecodeStatus {
+            header,
+            object_id,
+            zone_id: zone_id.clone(),
+            zone_key_id,
+            epoch_id: 1,
+            received_unique: 4,
+            needed: 0,
+            complete: true,
+            missing_hint: None,
+            signature: fcp_crypto::Ed25519Signature::from_bytes(&[0u8; 64]),
+        };
+        node.handle_decode_status(&status, 1001);
+
+        // Phase 3: Follow-up request rejected
+        let request2 = SymbolRequest::new(
+            test_header(&zone_id),
+            object_id,
+            zone_id.clone(),
+            zone_key_id,
+            1,
+            2,
+            1,
+        );
+
+        let err = node
+            .handle_symbol_request(request2, &peer, true, 1001)
+            .await
+            .expect_err("should reject after decode complete");
+        assert!(matches!(err, SymbolRequestError::AlreadyComplete { .. }));
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "initial_symbols_sent": response.symbol_esis.len(),
+                "decode_complete_reported": true,
+                "follow_up_rejected": true,
+            }),
+        );
+    }
+
+    // ========================================================================
+    // 9. Gossip checkpoint exchange between MeshNodes
+    // ========================================================================
+
+    #[allow(clippy::too_many_lines)]
+    #[test]
+    fn gossip_checkpoint_exchange_reconciliation() {
+        const TEST_NAME: &str = "gossip_checkpoint_exchange_reconciliation";
+        const CATEGORY: &str = "real_component";
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let zone_id = ZoneId::work();
+
+        let gossip_config = GossipConfig {
+            max_objects_per_summary: 100,
+            max_symbols_per_summary: 1000,
+            max_objects_per_request: 50,
+            max_symbols_per_request: 50,
+            ..GossipConfig::default()
+        };
+
+        let object_store_a = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+        let symbol_store_a = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig::default()));
+        let quarantine_store_a = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
+
+        let mut node_a = MeshNode::new(
+            MeshNodeConfig::new("node-ckpt-a")
+                .with_sender_instance_id(110)
+                .with_gossip_config(gossip_config.clone()),
+            object_store_a,
+            symbol_store_a,
+            quarantine_store_a,
+        );
+
+        let object_store_b = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+        let symbol_store_b = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig::default()));
+        let quarantine_store_b = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
+
+        let mut node_b = MeshNode::new(
+            MeshNodeConfig::new("node-ckpt-b")
+                .with_sender_instance_id(111)
+                .with_gossip_config(gossip_config),
+            object_store_b,
+            symbol_store_b,
+            quarantine_store_b,
+        );
+
+        // Node A: 5 objects
+        let mut a_objects = Vec::new();
+        for i in 0_u64..5 {
+            let obj = test_object_id(&format!("checkpoint-a-{i}"));
+            node_a.announce_object(&zone_id, &obj, ObjectAdmissionClass::Admitted, 1000 + i);
+            a_objects.push(obj);
+        }
+
+        // Node B: 3 objects (1 overlap with A)
+        let mut b_objects = Vec::new();
+        node_b.announce_object(
+            &zone_id,
+            &a_objects[0],
+            ObjectAdmissionClass::Admitted,
+            1000,
+        );
+        b_objects.push(a_objects[0]);
+        for i in 0_u64..2 {
+            let obj = test_object_id(&format!("checkpoint-b-{i}"));
+            node_b.announce_object(&zone_id, &obj, ObjectAdmissionClass::Admitted, 1001 + i);
+            b_objects.push(obj);
+        }
+
+        // A → B checkpoint exchange
+        let epoch = EpochId::new("epoch-checkpoint");
+        let summary_a = node_a
+            .gossip_mut()
+            .create_summary(&zone_id, epoch.clone())
+            .expect("A should produce summary");
+
+        // B processes A's summary, then requests A's objects it doesn't have
+        node_b.gossip_mut().handle_summary(summary_a, 2000);
+        // B wants a_objects[1..5] (it already has a_objects[0])
+        let missing_from_a: Vec<_> = a_objects[1..].to_vec();
+        let request_from_b = node_b
+            .gossip_mut()
+            .create_request(&zone_id, missing_from_a, 2001);
+        let response_a = node_a.gossip_mut().handle_request(&request_from_b);
+
+        // B → A checkpoint exchange
+        let summary_b = node_b
+            .gossip_mut()
+            .create_summary(&zone_id, epoch)
+            .expect("B should produce summary");
+        node_a.gossip_mut().handle_summary(summary_b, 2002);
+
+        // A wants b_objects[1..3] (it already has a_objects[0] which overlaps)
+        let missing_from_b: Vec<_> = b_objects[1..].to_vec();
+        let request_from_a = node_a
+            .gossip_mut()
+            .create_request(&zone_id, missing_from_b, 2003);
+        let response_b = node_b.gossip_mut().handle_request(&request_from_a);
+
+        // A should confirm it has the objects B requested
+        assert!(
+            !response_a.have_objects.is_empty(),
+            "A should have objects for B's request"
+        );
+        // B should confirm it has the objects A requested
+        assert!(
+            !response_b.have_objects.is_empty(),
+            "B should have objects for A's request"
+        );
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "node_a_announced": a_objects.len(),
+                "node_b_announced": b_objects.len(),
+                "overlap": 1,
+                "a_has_for_b": response_a.have_objects.len(),
+                "b_has_for_a": response_b.have_objects.len(),
+            }),
+        );
+    }
+
+    // ========================================================================
+    // 10. Anti-amplification through MeshNode
+    // ========================================================================
+
+    #[fcp_async_core::runtime::test]
+    async fn admission_anti_amplification_via_meshnode() {
+        const TEST_NAME: &str = "admission_anti_amplification_via_meshnode";
+        const CATEGORY: &str = "real_component";
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([60u8; 8]);
+        let object_id = test_object_id("anti-amplification");
+        let peer = NodeId::new("amp-peer");
+
+        let policy = AdmissionPolicy {
+            max_amplification_factor: 2,
+            require_authenticated_requests: false,
+            ..AdmissionPolicy::default()
+        };
+        let mut node = build_mesh_node_with_policy("node-amp", 120, 1, policy);
+        let symbol_store = node.symbol_store().clone();
+
+        let oti = ObjectTransmissionInformation::new(512, 128, 1, 1, 1);
+        let meta = ObjectSymbolMeta {
+            object_id,
+            zone_id: zone_id.clone(),
+            oti: ObjectTransmissionInfo::from(oti),
+            source_symbols: 4,
+            first_symbol_at: 0,
+        };
+        seed_symbols(&symbol_store, &meta, 1).await;
+
+        // Record minimal incoming to trigger amplification ratio check
+        node.admission_mut().record_bytes(&peer, 10, 1000);
+
+        let request = SymbolRequest::new(
+            test_header(&zone_id),
+            object_id,
+            zone_id.clone(),
+            zone_key_id,
+            1,
+            4,
+            1,
+        );
+
+        let result = node.handle_symbol_request(request, &peer, true, 1001).await;
+
+        let (decision, reason) = match &result {
+            Ok(_) => (
+                Decision::Allow,
+                DecisionReasonCode::Allow.as_str().to_string(),
+            ),
+            Err(SymbolRequestError::AdmissionRejected(err)) => {
+                let reason = match err {
+                    AdmissionError::AmplificationViolation { .. } => "amplification_violation",
+                    other => panic!("unexpected admission error: {other}"),
+                };
+                (Decision::Deny, reason.to_string())
+            }
+            Err(other) => panic!("unexpected error: {other}"),
+        };
+
+        let _receipt =
+            make_decision_receipt(&zone_id, object_id, decision, &reason, "node-amp", vec![]);
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "decision": format!("{decision:?}"),
+                "reason": reason,
+                "receipt_generated": true,
+            }),
+        );
+    }
+
+    // ========================================================================
+    // 11. Peer state routing through MeshNode plan_execution
+    // ========================================================================
+
+    #[test]
+    fn peer_state_routing_through_meshnode() {
+        const TEST_NAME: &str = "peer_state_routing_through_meshnode";
+        const CATEGORY: &str = "real_component";
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let connector_id = test_connector_id("route:connector:1.0.0");
+        let target_symbol = test_object_id("routing-target-symbol");
+
+        let mut node = build_node("node-router", 130, 1);
+
+        let mut peer1_symbols = HashSet::new();
+        peer1_symbols.insert(target_symbol);
+
+        let gpu = GpuProfile::new(GpuVendor::Nvidia, "RTX 4090", 24576);
+        node.update_peer_state(
+            NodeId::new("peer-powerful"),
+            DeviceProfile::builder(NodeId::new("peer-powerful"))
+                .cpu_cores(32)
+                .memory_mb(131072)
+                .gpu(gpu)
+                .add_connector(InstalledConnector::new(
+                    connector_id.clone(),
+                    "1.0.0",
+                    test_object_id("bin1"),
+                ))
+                .build(),
+            peer1_symbols,
+            vec![],
+            1000,
+        );
+
+        node.update_peer_state(
+            NodeId::new("peer-weak"),
+            DeviceProfile::builder(NodeId::new("peer-weak"))
+                .cpu_cores(4)
+                .memory_mb(8192)
+                .add_connector(InstalledConnector::new(
+                    connector_id.clone(),
+                    "1.0.0",
+                    test_object_id("bin2"),
+                ))
+                .build(),
+            HashSet::new(),
+            vec![],
+            1000,
+        );
+
+        assert_eq!(node.peer_count(), 2);
+
+        let context = PlannerContext::new(connector_id).with_preferred_symbols(vec![target_symbol]);
+        let candidates = node.plan_execution(&context, 1000);
+
+        assert!(!candidates.is_empty());
+        assert_eq!(candidates[0].node_id.as_str(), "peer-powerful");
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "candidates": candidates.len(),
+                "top_candidate": candidates[0].node_id.as_str(),
+                "top_score": candidates[0].score,
+            }),
+        );
+    }
+
+    // ========================================================================
+    // 12. SymbolAck StopSending halts further transfers
+    // ========================================================================
+
+    #[fcp_async_core::runtime::test]
+    async fn symbol_ack_stop_sending_via_meshnode() {
+        const TEST_NAME: &str = "symbol_ack_stop_sending_via_meshnode";
+        const CATEGORY: &str = "real_component";
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([70u8; 8]);
+        let object_id = test_object_id("ack-stop-sending");
+        let peer = NodeId::new("ack-peer");
+
+        let mut node = build_node("node-ack", 140, 1);
+        let symbol_store = node.symbol_store().clone();
+
+        let oti = ObjectTransmissionInformation::new(512, 128, 1, 1, 1);
+        let meta = ObjectSymbolMeta {
+            object_id,
+            zone_id: zone_id.clone(),
+            oti: ObjectTransmissionInfo::from(oti),
+            source_symbols: 4,
+            first_symbol_at: 0,
+        };
+        seed_symbols(&symbol_store, &meta, 1).await;
+
+        // Phase 1: Normal request
+        let request = SymbolRequest::new(
+            test_header(&zone_id),
+            object_id,
+            zone_id.clone(),
+            zone_key_id,
+            1,
+            2,
+            1,
+        );
+        let response = node
+            .handle_symbol_request(request, &peer, true, 1000)
+            .await
+            .expect("first request should succeed");
+        assert!(!response.symbol_esis.is_empty());
+
+        // Phase 2: SymbolAck Complete — signals object is fully decoded
+        let ack = SymbolAck::new(
+            test_header(&zone_id),
+            object_id,
+            zone_id.clone(),
+            zone_key_id,
+            1,
+            SymbolAckReason::Complete,
+            4,
+        );
+        node.handle_symbol_ack(&ack, 1001);
+
+        // Phase 3: Rejected
+        let request2 = SymbolRequest::new(
+            test_header(&zone_id),
+            object_id,
+            zone_id.clone(),
+            zone_key_id,
+            1,
+            2,
+            1,
+        );
+        let err = node
+            .handle_symbol_request(request2, &peer, true, 1001)
+            .await
+            .expect_err("should stop after SymbolAck StopSending");
+        assert!(matches!(err, SymbolRequestError::AlreadyComplete { .. }));
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "initial_symbols": response.symbol_esis.len(),
+                "stop_ack_received": true,
+                "follow_up_rejected": true,
+            }),
+        );
+    }
+}

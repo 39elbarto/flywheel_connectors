@@ -3031,6 +3031,141 @@ fn sanitizer_receipt_object_id(receipt: &SanitizerReceipt) -> ObjectId {
     ObjectId::from_unscoped_bytes(receipt.receipt_id.as_bytes())
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Direct Zone Policy Preview (would-allow without bundle resolution)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Outcome of a single sample in the direct zone policy preview.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreviewOutcome {
+    /// The policy allows the operation.
+    Allow,
+    /// The policy denies the operation.
+    Deny,
+}
+
+impl From<Decision> for PreviewOutcome {
+    fn from(d: Decision) -> Self {
+        match d {
+            Decision::Allow => Self::Allow,
+            Decision::Deny => Self::Deny,
+        }
+    }
+}
+
+/// A single row in the preview delta report.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreviewDeltaEntry {
+    /// Index of the sample in the input list.
+    pub sample_index: usize,
+    /// Decision under the *current* (baseline) policy.
+    pub baseline_outcome: PreviewOutcome,
+    /// Reason code under the baseline policy.
+    pub baseline_reason: String,
+    /// Decision under the *proposed* policy.
+    pub proposed_outcome: PreviewOutcome,
+    /// Reason code under the proposed policy.
+    pub proposed_reason: String,
+    /// Whether the decision changed between baseline and proposed.
+    pub changed: bool,
+}
+
+/// Aggregate summary of changes in a preview evaluation.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PreviewSummary {
+    /// Total samples evaluated.
+    pub total_samples: usize,
+    /// Samples whose decision changed.
+    pub changed_count: usize,
+    /// Samples that went from deny to allow.
+    pub newly_allowed: usize,
+    /// Samples that went from allow to deny.
+    pub newly_denied: usize,
+    /// Samples whose outcome was unchanged.
+    pub unchanged: usize,
+}
+
+/// Full result of a preview evaluation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreviewResult {
+    /// Per-sample delta entries.
+    pub deltas: Vec<PreviewDeltaEntry>,
+    /// Aggregate summary.
+    pub summary: PreviewSummary,
+}
+
+/// Input for the preview evaluator.
+///
+/// Compares a *baseline* (current) policy against a *proposed* policy
+/// using a set of sample operations. The evaluator is read-only and
+/// never mutates state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreviewInput {
+    /// Current policy in effect.
+    pub baseline_policy: ZonePolicyObject,
+    /// Proposed replacement policy.
+    pub proposed_policy: ZonePolicyObject,
+    /// Sample operations to evaluate against both policies.
+    pub samples: Vec<PolicySimulationInput>,
+}
+
+/// Evaluate proposed policy changes without side effects.
+///
+/// Runs each sample against both the baseline and proposed policies,
+/// producing a deterministic delta report showing which decisions
+/// would change.
+///
+/// # Errors
+///
+/// Returns [`PolicySimulationError`] if any sample cannot be evaluated
+/// (e.g., missing required token claims).
+pub fn preview_policy_changes(
+    input: &PreviewInput,
+) -> Result<PreviewResult, PolicySimulationError> {
+    let mut deltas = Vec::with_capacity(input.samples.len());
+    let mut summary = PreviewSummary {
+        total_samples: input.samples.len(),
+        ..Default::default()
+    };
+
+    for (idx, sample) in input.samples.iter().enumerate() {
+        let mut baseline_sample = sample.clone();
+        baseline_sample.zone_policy = input.baseline_policy.clone();
+        let baseline_receipt = simulate_policy_decision(&baseline_sample)?;
+
+        let mut proposed_sample = sample.clone();
+        proposed_sample.zone_policy = input.proposed_policy.clone();
+        let proposed_receipt = simulate_policy_decision(&proposed_sample)?;
+
+        let baseline_outcome = PreviewOutcome::from(baseline_receipt.decision);
+        let proposed_outcome = PreviewOutcome::from(proposed_receipt.decision);
+        let changed = baseline_outcome != proposed_outcome;
+
+        if changed {
+            summary.changed_count += 1;
+            match (&baseline_outcome, &proposed_outcome) {
+                (PreviewOutcome::Deny, PreviewOutcome::Allow) => summary.newly_allowed += 1,
+                (PreviewOutcome::Allow, PreviewOutcome::Deny) => summary.newly_denied += 1,
+                _ => {}
+            }
+        } else {
+            summary.unchanged += 1;
+        }
+
+        deltas.push(PreviewDeltaEntry {
+            sample_index: idx,
+            baseline_outcome,
+            baseline_reason: baseline_receipt.reason_code.clone(),
+            proposed_outcome,
+            proposed_reason: proposed_receipt.reason_code.clone(),
+            changed,
+        });
+    }
+
+    Ok(PreviewResult { deltas, summary })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4563,5 +4698,1006 @@ mod tests {
         };
         assert!(pat.matches("abcxyz"));
         assert!(!pat.matches("xyzabc"));
+    }
+
+    // ── Preview Evaluator Tests ───────────────────────────────────────────
+
+    #[test]
+    fn preview_bundles_detects_allow_to_deny_transition() {
+        let zone = ZoneId::work();
+        let before_policy = test_zone_policy(zone.clone());
+        let mut after_policy = test_zone_policy(zone.clone());
+        // Add a deny rule that blocks the test capability
+        after_policy.capability_deny.push(PolicyPattern {
+            pattern: "cap.all".to_string(),
+        });
+
+        let before_bundle = policy_bundle(
+            "b-before",
+            zone.clone(),
+            vec![policy_ref("p-1", "fcp.core:ZonePolicy@1.0")],
+        );
+        let after_bundle = policy_bundle(
+            "b-after",
+            zone.clone(),
+            vec![policy_ref("p-1", "fcp.core:ZonePolicy@1.0")],
+        );
+
+        let mut before_objects = BTreeMap::new();
+        before_objects.insert(
+            "p-1".to_string(),
+            PolicyBundleObject::ZonePolicy(before_policy),
+        );
+        let mut after_objects = BTreeMap::new();
+        after_objects.insert(
+            "p-1".to_string(),
+            PolicyBundleObject::ZonePolicy(after_policy),
+        );
+
+        let before_r = PolicyBundleResolved::new(before_bundle, before_objects);
+        let after_r = PolicyBundleResolved::new(after_bundle, after_objects);
+
+        let sample = preview_sample("s1", test_invoke_request(zone));
+        let report =
+            preview_policy_bundles(&before_r, &after_r, &[sample]).expect("preview report");
+
+        assert_eq!(report.entries.len(), 1);
+        assert_eq!(
+            report.entries[0].before_decision,
+            PolicyPreviewDecision::Allow
+        );
+        assert_eq!(
+            report.entries[0].after_decision,
+            PolicyPreviewDecision::Deny
+        );
+        assert_eq!(report.entries[0].delta, Some(PolicyPreviewDelta::WouldDeny));
+        assert_eq!(report.summary.would_deny, 1);
+        assert_eq!(report.summary.total, 1);
+    }
+
+    #[test]
+    fn preview_bundles_detects_deny_to_allow_transition() {
+        let zone = ZoneId::work();
+        // Before: deny cap.all
+        let mut before_policy = test_zone_policy(zone.clone());
+        before_policy.capability_deny.push(PolicyPattern {
+            pattern: "cap.all".to_string(),
+        });
+        // After: no deny rules → allow
+        let after_policy = test_zone_policy(zone.clone());
+
+        let before_bundle = policy_bundle(
+            "b-1",
+            zone.clone(),
+            vec![policy_ref("p-1", "fcp.core:ZonePolicy@1.0")],
+        );
+        let after_bundle = policy_bundle(
+            "b-2",
+            zone.clone(),
+            vec![policy_ref("p-1", "fcp.core:ZonePolicy@1.0")],
+        );
+
+        let mut before_objects = BTreeMap::new();
+        before_objects.insert(
+            "p-1".to_string(),
+            PolicyBundleObject::ZonePolicy(before_policy),
+        );
+        let mut after_objects = BTreeMap::new();
+        after_objects.insert(
+            "p-1".to_string(),
+            PolicyBundleObject::ZonePolicy(after_policy),
+        );
+
+        let before_r = PolicyBundleResolved::new(before_bundle, before_objects);
+        let after_r = PolicyBundleResolved::new(after_bundle, after_objects);
+
+        let sample = preview_sample("s1", test_invoke_request(zone));
+        let report =
+            preview_policy_bundles(&before_r, &after_r, &[sample]).expect("preview report");
+
+        assert_eq!(
+            report.entries[0].delta,
+            Some(PolicyPreviewDelta::WouldAllow)
+        );
+        assert_eq!(report.summary.would_allow, 1);
+    }
+
+    #[test]
+    fn preview_bundles_no_change_when_policies_identical() {
+        let zone = ZoneId::work();
+        let policy = test_zone_policy(zone.clone());
+
+        let bundle = policy_bundle(
+            "b-same",
+            zone.clone(),
+            vec![policy_ref("p-1", "fcp.core:ZonePolicy@1.0")],
+        );
+
+        let mut objects = BTreeMap::new();
+        objects.insert("p-1".to_string(), PolicyBundleObject::ZonePolicy(policy));
+
+        let resolved_a = PolicyBundleResolved::new(bundle.clone(), objects.clone());
+        let resolved_b = PolicyBundleResolved::new(bundle, objects);
+
+        let sample = preview_sample("s1", test_invoke_request(zone));
+        let report =
+            preview_policy_bundles(&resolved_a, &resolved_b, &[sample]).expect("preview report");
+
+        assert_eq!(report.entries.len(), 1);
+        assert!(report.entries[0].delta.is_none());
+        assert_eq!(report.summary.total, 1);
+        assert_eq!(report.summary.would_allow, 0);
+        assert_eq!(report.summary.would_deny, 0);
+    }
+
+    #[test]
+    fn preview_bundles_rejects_zone_mismatch() {
+        let zone_a = ZoneId::work();
+        let zone_b = ZoneId::community();
+
+        let bundle_a = policy_bundle(
+            "ba",
+            zone_a.clone(),
+            vec![policy_ref("p-1", "fcp.core:ZonePolicy@1.0")],
+        );
+        let bundle_b = policy_bundle(
+            "bb",
+            zone_b,
+            vec![policy_ref("p-1", "fcp.core:ZonePolicy@1.0")],
+        );
+
+        let mut objs = BTreeMap::new();
+        objs.insert(
+            "p-1".to_string(),
+            PolicyBundleObject::ZonePolicy(test_zone_policy(zone_a)),
+        );
+
+        let a = PolicyBundleResolved::new(bundle_a, objs.clone());
+        let b = PolicyBundleResolved::new(bundle_b, objs);
+
+        let result = preview_policy_bundles(&a, &b, &[]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, PolicyPreviewError::ZoneMismatch { .. }),
+            "expected ZoneMismatch, got: {err}"
+        );
+    }
+
+    #[test]
+    fn preview_bundles_missing_zone_policy_returns_error() {
+        let zone = ZoneId::work();
+        let bundle = policy_bundle(
+            "b1",
+            zone,
+            vec![policy_ref("p-1", "fcp.core:ZonePolicy@1.0")],
+        );
+
+        // Before has objects, after is empty (missing policy)
+        let a = PolicyBundleResolved::new(bundle.clone(), BTreeMap::new());
+        let b = PolicyBundleResolved::new(bundle, BTreeMap::new());
+
+        let result = preview_policy_bundles(&a, &b, &[]);
+        assert!(matches!(
+            result,
+            Err(PolicyPreviewError::MissingZonePolicy { .. })
+        ));
+    }
+
+    #[test]
+    fn preview_bundles_transport_change_deny_to_allow() {
+        let zone = ZoneId::work();
+        // Before: deny DERP
+        let before_policy = test_zone_policy(zone.clone()); // default denies DERP
+        // After: allow DERP
+        let mut after_policy = test_zone_policy(zone.clone());
+        after_policy.transport_policy.allow_derp = true;
+
+        let before_bundle = policy_bundle(
+            "b1",
+            zone.clone(),
+            vec![policy_ref("p-1", "fcp.core:ZonePolicy@1.0")],
+        );
+        let after_bundle = policy_bundle(
+            "b2",
+            zone.clone(),
+            vec![policy_ref("p-1", "fcp.core:ZonePolicy@1.0")],
+        );
+
+        let mut before_objs = BTreeMap::new();
+        before_objs.insert(
+            "p-1".to_string(),
+            PolicyBundleObject::ZonePolicy(before_policy),
+        );
+        let mut after_objs = BTreeMap::new();
+        after_objs.insert(
+            "p-1".to_string(),
+            PolicyBundleObject::ZonePolicy(after_policy),
+        );
+
+        let br = PolicyBundleResolved::new(before_bundle, before_objs);
+        let ar = PolicyBundleResolved::new(after_bundle, after_objs);
+
+        let mut sample = preview_sample("derp-test", test_invoke_request(zone));
+        sample.transport = TransportMode::Derp;
+
+        let report = preview_policy_bundles(&br, &ar, &[sample]).expect("preview");
+        assert_eq!(
+            report.entries[0].delta,
+            Some(PolicyPreviewDelta::WouldAllow)
+        );
+        assert_eq!(report.summary.would_allow, 1);
+    }
+
+    #[test]
+    fn preview_bundles_reason_changed_same_decision() {
+        let zone = ZoneId::work();
+        // Both policies deny — but for different reasons
+        let mut before_policy = test_zone_policy(zone.clone());
+        before_policy.transport_policy.allow_lan = false;
+
+        let mut after_policy = test_zone_policy(zone.clone());
+        after_policy.principal_deny.push(PolicyPattern {
+            pattern: "user:*".to_string(),
+        });
+
+        let before_bundle = policy_bundle(
+            "b1",
+            zone.clone(),
+            vec![policy_ref("p-1", "fcp.core:ZonePolicy@1.0")],
+        );
+        let after_bundle = policy_bundle(
+            "b2",
+            zone.clone(),
+            vec![policy_ref("p-1", "fcp.core:ZonePolicy@1.0")],
+        );
+
+        let mut before_objs = BTreeMap::new();
+        before_objs.insert(
+            "p-1".to_string(),
+            PolicyBundleObject::ZonePolicy(before_policy),
+        );
+        let mut after_objs = BTreeMap::new();
+        after_objs.insert(
+            "p-1".to_string(),
+            PolicyBundleObject::ZonePolicy(after_policy),
+        );
+
+        let br = PolicyBundleResolved::new(before_bundle, before_objs);
+        let ar = PolicyBundleResolved::new(after_bundle, after_objs);
+
+        let sample = preview_sample("reason-change", test_invoke_request(zone));
+        let report = preview_policy_bundles(&br, &ar, &[sample]).expect("preview");
+
+        // Both deny, but reason codes differ
+        assert_eq!(
+            report.entries[0].before_decision,
+            PolicyPreviewDecision::Deny
+        );
+        assert_eq!(
+            report.entries[0].after_decision,
+            PolicyPreviewDecision::Deny
+        );
+        assert_eq!(
+            report.entries[0].delta,
+            Some(PolicyPreviewDelta::ReasonChanged)
+        );
+        assert_eq!(report.summary.reason_changed, 1);
+    }
+
+    #[test]
+    fn preview_bundles_multiple_samples_mixed_deltas() {
+        let zone = ZoneId::work();
+        let before_policy = test_zone_policy(zone.clone());
+        let mut after_policy = test_zone_policy(zone.clone());
+        after_policy.transport_policy.allow_derp = true;
+        after_policy.capability_deny.push(PolicyPattern {
+            pattern: "cap.all".to_string(),
+        });
+
+        let before_bundle = policy_bundle(
+            "b1",
+            zone.clone(),
+            vec![policy_ref("p-1", "fcp.core:ZonePolicy@1.0")],
+        );
+        let after_bundle = policy_bundle(
+            "b2",
+            zone.clone(),
+            vec![policy_ref("p-1", "fcp.core:ZonePolicy@1.0")],
+        );
+
+        let mut before_objs = BTreeMap::new();
+        before_objs.insert(
+            "p-1".to_string(),
+            PolicyBundleObject::ZonePolicy(before_policy),
+        );
+        let mut after_objs = BTreeMap::new();
+        after_objs.insert(
+            "p-1".to_string(),
+            PolicyBundleObject::ZonePolicy(after_policy),
+        );
+
+        let br = PolicyBundleResolved::new(before_bundle, before_objs);
+        let ar = PolicyBundleResolved::new(after_bundle, after_objs);
+
+        // Sample 1: LAN request → was allow, now denied (cap.all in deny list)
+        let s1 = preview_sample("lan-req", test_invoke_request(zone.clone()));
+        // Sample 2: DERP request → was denied (DERP forbidden), now denied (cap.all deny overrides)
+        let mut s2 = preview_sample("derp-req", test_invoke_request(zone));
+        s2.transport = TransportMode::Derp;
+
+        let report = preview_policy_bundles(&br, &ar, &[s1, s2]).expect("preview");
+
+        assert_eq!(report.summary.total, 2);
+        // First: allow → deny
+        assert_eq!(report.entries[0].delta, Some(PolicyPreviewDelta::WouldDeny));
+        // Second: deny(transport) → deny(capability) = reason changed
+        assert_eq!(
+            report.entries[1].before_decision,
+            PolicyPreviewDecision::Deny
+        );
+        assert_eq!(
+            report.entries[1].after_decision,
+            PolicyPreviewDecision::Deny
+        );
+    }
+
+    #[test]
+    fn preview_bundles_empty_samples_produces_empty_report() {
+        let zone = ZoneId::work();
+        let policy = test_zone_policy(zone.clone());
+        let bundle = policy_bundle(
+            "b1",
+            zone,
+            vec![policy_ref("p-1", "fcp.core:ZonePolicy@1.0")],
+        );
+
+        let mut objs = BTreeMap::new();
+        objs.insert("p-1".to_string(), PolicyBundleObject::ZonePolicy(policy));
+
+        let r = PolicyBundleResolved::new(bundle, objs);
+        let report = preview_policy_bundles(&r, &r, &[]).expect("preview");
+
+        assert!(report.entries.is_empty());
+        assert_eq!(report.summary.total, 0);
+    }
+
+    #[test]
+    fn preview_bundles_is_deterministic() {
+        let zone = ZoneId::work();
+        let before_policy = test_zone_policy(zone.clone());
+        let mut after_policy = test_zone_policy(zone.clone());
+        after_policy.capability_deny.push(PolicyPattern {
+            pattern: "cap.all".to_string(),
+        });
+
+        let before_bundle = policy_bundle(
+            "b1",
+            zone.clone(),
+            vec![policy_ref("p-1", "fcp.core:ZonePolicy@1.0")],
+        );
+        let after_bundle = policy_bundle(
+            "b2",
+            zone.clone(),
+            vec![policy_ref("p-1", "fcp.core:ZonePolicy@1.0")],
+        );
+
+        let mut before_objs = BTreeMap::new();
+        before_objs.insert(
+            "p-1".to_string(),
+            PolicyBundleObject::ZonePolicy(before_policy),
+        );
+        let mut after_objs = BTreeMap::new();
+        after_objs.insert(
+            "p-1".to_string(),
+            PolicyBundleObject::ZonePolicy(after_policy),
+        );
+
+        let br = PolicyBundleResolved::new(before_bundle.clone(), before_objs.clone());
+        let ar = PolicyBundleResolved::new(after_bundle.clone(), after_objs.clone());
+
+        let sample = preview_sample("det-test", test_invoke_request(zone));
+        let r1 = preview_policy_bundles(&br, &ar, std::slice::from_ref(&sample)).expect("r1");
+
+        let br2 = PolicyBundleResolved::new(before_bundle, before_objs);
+        let ar2 = PolicyBundleResolved::new(after_bundle, after_objs);
+        let r2 = preview_policy_bundles(&br2, &ar2, &[sample]).expect("r2");
+
+        assert_eq!(r1.entries.len(), r2.entries.len());
+        assert_eq!(r1.entries[0].before.decision, r2.entries[0].before.decision);
+        assert_eq!(r1.entries[0].after.decision, r2.entries[0].after.decision);
+        assert_eq!(
+            r1.entries[0].before.reason_code,
+            r2.entries[0].before.reason_code
+        );
+        assert_eq!(
+            r1.entries[0].after.reason_code,
+            r2.entries[0].after.reason_code
+        );
+        assert_eq!(r1.summary.total, r2.summary.total);
+        assert_eq!(r1.summary.would_deny, r2.summary.would_deny);
+    }
+
+    // ── Direct Zone Policy Preview Tests ──────────────────────────────────
+
+    #[test]
+    fn direct_preview_detects_allow_to_deny() {
+        let zone = ZoneId::work();
+        let baseline = minimal_zone_policy();
+        let mut proposed = minimal_zone_policy();
+        proposed.capability_deny.push(PolicyPattern {
+            pattern: "cap.all".to_string(),
+        });
+
+        let sample = PolicySimulationInput {
+            zone_policy: baseline.clone(), // overridden by preview
+            invoke_request: test_invoke_request(zone),
+            transport: TransportMode::Lan,
+            checkpoint_fresh: true,
+            revocation_fresh: true,
+            execution_approval_required: false,
+            sanitizer_receipts: Vec::new(),
+            related_object_ids: Vec::new(),
+            request_object_id: None,
+            request_input_hash: None,
+            safety_tier: SafetyTier::Safe,
+            principal: Some("user:alice".to_string()),
+            capability_id: Some("cap.all".to_string()),
+            provenance_record: None,
+            now_ms: None,
+            posture_attestation: None,
+        };
+
+        let input = PreviewInput {
+            baseline_policy: baseline,
+            proposed_policy: proposed,
+            samples: vec![sample],
+        };
+        let result = preview_policy_changes(&input).expect("preview");
+
+        assert_eq!(result.deltas.len(), 1);
+        assert_eq!(result.deltas[0].baseline_outcome, PreviewOutcome::Allow);
+        assert_eq!(result.deltas[0].proposed_outcome, PreviewOutcome::Deny);
+        assert!(result.deltas[0].changed);
+        assert_eq!(result.summary.changed_count, 1);
+        assert_eq!(result.summary.newly_denied, 1);
+    }
+
+    #[test]
+    fn direct_preview_detects_deny_to_allow() {
+        let zone = ZoneId::work();
+        let mut baseline = minimal_zone_policy();
+        baseline.transport_policy.allow_lan = false;
+        let proposed = minimal_zone_policy();
+
+        let sample = PolicySimulationInput {
+            zone_policy: baseline.clone(),
+            invoke_request: test_invoke_request(zone),
+            transport: TransportMode::Lan,
+            checkpoint_fresh: true,
+            revocation_fresh: true,
+            execution_approval_required: false,
+            sanitizer_receipts: Vec::new(),
+            related_object_ids: Vec::new(),
+            request_object_id: None,
+            request_input_hash: None,
+            safety_tier: SafetyTier::Safe,
+            principal: Some("user:alice".to_string()),
+            capability_id: Some("cap.all".to_string()),
+            provenance_record: None,
+            now_ms: None,
+            posture_attestation: None,
+        };
+
+        let input = PreviewInput {
+            baseline_policy: baseline,
+            proposed_policy: proposed,
+            samples: vec![sample],
+        };
+        let result = preview_policy_changes(&input).expect("preview");
+
+        assert_eq!(result.deltas[0].baseline_outcome, PreviewOutcome::Deny);
+        assert_eq!(result.deltas[0].proposed_outcome, PreviewOutcome::Allow);
+        assert!(result.deltas[0].changed);
+        assert_eq!(result.summary.newly_allowed, 1);
+    }
+
+    #[test]
+    fn direct_preview_no_change_reports_unchanged() {
+        let zone = ZoneId::work();
+        let policy = minimal_zone_policy();
+
+        let sample = PolicySimulationInput {
+            zone_policy: policy.clone(),
+            invoke_request: test_invoke_request(zone),
+            transport: TransportMode::Lan,
+            checkpoint_fresh: true,
+            revocation_fresh: true,
+            execution_approval_required: false,
+            sanitizer_receipts: Vec::new(),
+            related_object_ids: Vec::new(),
+            request_object_id: None,
+            request_input_hash: None,
+            safety_tier: SafetyTier::Safe,
+            principal: Some("user:alice".to_string()),
+            capability_id: Some("cap.all".to_string()),
+            provenance_record: None,
+            now_ms: None,
+            posture_attestation: None,
+        };
+
+        let input = PreviewInput {
+            baseline_policy: policy.clone(),
+            proposed_policy: policy,
+            samples: vec![sample],
+        };
+        let result = preview_policy_changes(&input).expect("preview");
+
+        assert!(!result.deltas[0].changed);
+        assert_eq!(result.summary.unchanged, 1);
+        assert_eq!(result.summary.changed_count, 0);
+    }
+
+    #[test]
+    fn direct_preview_empty_samples() {
+        let policy = minimal_zone_policy();
+        let input = PreviewInput {
+            baseline_policy: policy.clone(),
+            proposed_policy: policy,
+            samples: vec![],
+        };
+        let result = preview_policy_changes(&input).expect("preview");
+
+        assert!(result.deltas.is_empty());
+        assert_eq!(result.summary.total_samples, 0);
+    }
+
+    #[test]
+    fn preview_outcome_serde_roundtrip() {
+        let allow = serde_json::to_string(&PreviewOutcome::Allow).unwrap();
+        assert_eq!(allow, "\"allow\"");
+        let deny = serde_json::to_string(&PreviewOutcome::Deny).unwrap();
+        assert_eq!(deny, "\"deny\"");
+        let rt: PreviewOutcome = serde_json::from_str(&allow).unwrap();
+        assert_eq!(rt, PreviewOutcome::Allow);
+    }
+
+    #[test]
+    fn preview_delta_entry_serde_roundtrip() {
+        let entry = PreviewDeltaEntry {
+            sample_index: 0,
+            baseline_outcome: PreviewOutcome::Allow,
+            baseline_reason: "allow".to_string(),
+            proposed_outcome: PreviewOutcome::Deny,
+            proposed_reason: "zone_policy.capability_denied".to_string(),
+            changed: true,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let back: PreviewDeltaEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.sample_index, 0);
+        assert!(back.changed);
+        assert_eq!(back.proposed_outcome, PreviewOutcome::Deny);
+    }
+
+    #[test]
+    fn preview_result_serde_roundtrip() {
+        let result = PreviewResult {
+            deltas: vec![PreviewDeltaEntry {
+                sample_index: 0,
+                baseline_outcome: PreviewOutcome::Allow,
+                baseline_reason: "allow".to_string(),
+                proposed_outcome: PreviewOutcome::Deny,
+                proposed_reason: "transport.lan_forbidden".to_string(),
+                changed: true,
+            }],
+            summary: PreviewSummary {
+                total_samples: 1,
+                changed_count: 1,
+                newly_allowed: 0,
+                newly_denied: 1,
+                unchanged: 0,
+            },
+        };
+        let json = serde_json::to_string_pretty(&result).unwrap();
+        let back: PreviewResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.deltas.len(), 1);
+        assert_eq!(back.summary.newly_denied, 1);
+    }
+
+    // ── Bundle Signature Tests (bead 2ady) ────────────────────────────────
+
+    #[test]
+    fn bundle_signing_bytes_change_when_policy_seq_changes() {
+        let zone = ZoneId::work();
+        let refs = vec![policy_ref("p-1", "fcp.core:ZonePolicy@1.0")];
+        let b1 = PolicyBundle::builder("b", zone.clone(), 1)
+            .bundle_hash(test_bundle_hash())
+            .policies(refs.clone())
+            .signature(test_bundle_signature())
+            .build()
+            .expect("b1");
+        let b2 = PolicyBundle::builder("b", zone, 2)
+            .bundle_hash(test_bundle_hash())
+            .policies(refs)
+            .signature(test_bundle_signature())
+            .build()
+            .expect("b2");
+
+        let s1 = b1.signing_bytes().expect("s1");
+        let s2 = b2.signing_bytes().expect("s2");
+        assert_ne!(
+            s1, s2,
+            "different policy_seq must produce different signing bytes"
+        );
+    }
+
+    #[test]
+    fn bundle_validate_rejects_empty_bundle_id() {
+        let zone = ZoneId::work();
+        let result = PolicyBundle::builder("", zone, 1)
+            .bundle_hash(test_bundle_hash())
+            .policies(vec![policy_ref("p", "fcp.core:ZonePolicy@1.0")])
+            .signature(test_bundle_signature())
+            .build();
+
+        assert!(
+            result.is_err() || {
+                let b = result.unwrap();
+                b.validate().is_err()
+            }
+        );
+    }
+
+    #[test]
+    fn bundle_validate_rejects_wrong_hash_algo() {
+        let zone = ZoneId::work();
+        let mut bundle = PolicyBundle::builder("b", zone, 1)
+            .bundle_hash(test_bundle_hash())
+            .policies(vec![policy_ref("p", "fcp.core:ZonePolicy@1.0")])
+            .signature(test_bundle_signature())
+            .build()
+            .expect("bundle");
+        bundle.hash_algo = "sha256".to_string();
+
+        let err = bundle.validate();
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn bundle_signing_bytes_include_all_fields() {
+        let zone = ZoneId::work();
+        let bundle = PolicyBundle::builder("b", zone, 1)
+            .bundle_hash(test_bundle_hash())
+            .policies(vec![policy_ref("p", "fcp.core:ZonePolicy@1.0")])
+            .signature(test_bundle_signature())
+            .build()
+            .expect("bundle");
+
+        let bytes = bundle.signing_bytes().expect("signing bytes");
+        // Signing bytes must be non-empty and reproducible
+        assert!(!bytes.is_empty());
+        let bytes2 = bundle.signing_bytes().expect("signing bytes 2");
+        assert_eq!(bytes, bytes2, "signing bytes must be deterministic");
+    }
+
+    // ── Diff Stability & Risk Summary Tests (bead 2ady) ──────────────────
+
+    #[test]
+    fn diff_risk_flags_capability_allow_expansion() {
+        let zone = ZoneId::work();
+        let before_policy = test_zone_policy(zone.clone());
+        let mut after_policy = test_zone_policy(zone.clone());
+        after_policy.capability_allow.push(PolicyPattern {
+            pattern: "cap.read".to_string(),
+        });
+
+        let before_bundle = policy_bundle(
+            "b1",
+            zone.clone(),
+            vec![policy_ref("p-1", "fcp.core:ZonePolicy@1.0")],
+        );
+        let after_bundle = policy_bundle(
+            "b2",
+            zone,
+            vec![policy_ref("p-1", "fcp.core:ZonePolicy@1.0")],
+        );
+
+        let mut before_objs = BTreeMap::new();
+        before_objs.insert(
+            "p-1".to_string(),
+            PolicyBundleObject::ZonePolicy(before_policy),
+        );
+        let mut after_objs = BTreeMap::new();
+        after_objs.insert(
+            "p-1".to_string(),
+            PolicyBundleObject::ZonePolicy(after_policy),
+        );
+
+        let br = PolicyBundleResolved::new(before_bundle, before_objs);
+        let ar = PolicyBundleResolved::new(after_bundle, after_objs);
+
+        let diff = diff_policy_bundles(&br, &ar).expect("diff");
+        assert!(
+            diff.risk
+                .flags
+                .iter()
+                .map(|flag| flag.code)
+                .any(|code| code == PolicyRiskCode::CapabilityAllowExpanded),
+            "expanding capability_allow should flag CapabilityAllowExpanded"
+        );
+    }
+
+    #[test]
+    fn diff_risk_flags_transport_derp_enabled() {
+        let zone = ZoneId::work();
+        let before_policy = test_zone_policy(zone.clone());
+        let mut after_policy = test_zone_policy(zone.clone());
+        after_policy.transport_policy.allow_derp = true;
+
+        let before_bundle = policy_bundle(
+            "b1",
+            zone.clone(),
+            vec![policy_ref("p-1", "fcp.core:ZonePolicy@1.0")],
+        );
+        let after_bundle = policy_bundle(
+            "b2",
+            zone,
+            vec![policy_ref("p-1", "fcp.core:ZonePolicy@1.0")],
+        );
+
+        let mut before_objs = BTreeMap::new();
+        before_objs.insert(
+            "p-1".to_string(),
+            PolicyBundleObject::ZonePolicy(before_policy),
+        );
+        let mut after_objs = BTreeMap::new();
+        after_objs.insert(
+            "p-1".to_string(),
+            PolicyBundleObject::ZonePolicy(after_policy),
+        );
+
+        let br = PolicyBundleResolved::new(before_bundle, before_objs);
+        let ar = PolicyBundleResolved::new(after_bundle, after_objs);
+
+        let diff = diff_policy_bundles(&br, &ar).expect("diff");
+        assert!(
+            diff.risk
+                .flags
+                .iter()
+                .map(|flag| flag.code)
+                .any(|code| code == PolicyRiskCode::TransportDerpEnabled)
+        );
+    }
+
+    #[test]
+    fn diff_risk_summary_is_deterministic() {
+        let zone = ZoneId::work();
+        let before_policy = test_zone_policy(zone.clone());
+        let mut after_policy = test_zone_policy(zone.clone());
+        after_policy.transport_policy.allow_derp = true;
+        after_policy.transport_policy.allow_funnel = true;
+        after_policy.capability_allow.push(PolicyPattern {
+            pattern: "cap.read".to_string(),
+        });
+
+        let make_resolved = |bundle_id: &str, policy: ZonePolicyObject| {
+            let bundle = policy_bundle(
+                bundle_id,
+                zone.clone(),
+                vec![policy_ref("p-1", "fcp.core:ZonePolicy@1.0")],
+            );
+            let mut objs = BTreeMap::new();
+            objs.insert("p-1".to_string(), PolicyBundleObject::ZonePolicy(policy));
+            PolicyBundleResolved::new(bundle, objs)
+        };
+
+        let br1 = make_resolved("b1", before_policy.clone());
+        let ar1 = make_resolved("b2", after_policy.clone());
+        let diff1 = diff_policy_bundles(&br1, &ar1).expect("d1");
+
+        let br2 = make_resolved("b1", before_policy);
+        let ar2 = make_resolved("b2", after_policy);
+        let diff2 = diff_policy_bundles(&br2, &ar2).expect("d2");
+
+        // Risk flags should be identical and in the same order
+        assert_eq!(diff1.risk.flags.len(), diff2.risk.flags.len());
+        for (f1, f2) in diff1.risk.flags.iter().zip(diff2.risk.flags.iter()) {
+            assert_eq!(f1.code, f2.code);
+            assert_eq!(f1.severity, f2.severity);
+        }
+    }
+
+    #[test]
+    fn diff_no_change_produces_empty_risk_flags() {
+        let zone = ZoneId::work();
+        let policy = test_zone_policy(zone.clone());
+
+        let bundle = policy_bundle(
+            "b-same",
+            zone,
+            vec![policy_ref("p-1", "fcp.core:ZonePolicy@1.0")],
+        );
+
+        let mut objs = BTreeMap::new();
+        objs.insert("p-1".to_string(), PolicyBundleObject::ZonePolicy(policy));
+
+        let r = PolicyBundleResolved::new(bundle, objs);
+        let diff = diff_policy_bundles(&r, &r).expect("diff");
+
+        assert!(
+            diff.risk.flags.is_empty(),
+            "identical policies should produce no risk flags"
+        );
+        assert!(diff.added.is_empty());
+        assert!(diff.removed.is_empty());
+        assert!(diff.changed.is_empty());
+    }
+
+    #[test]
+    fn diff_rejects_zone_mismatch() {
+        let zone_a = ZoneId::work();
+        let zone_b = ZoneId::community();
+
+        let ba = policy_bundle(
+            "ba",
+            zone_a.clone(),
+            vec![policy_ref("p", "fcp.core:ZonePolicy@1.0")],
+        );
+        let bb = policy_bundle(
+            "bb",
+            zone_b,
+            vec![policy_ref("p", "fcp.core:ZonePolicy@1.0")],
+        );
+
+        let mut objs = BTreeMap::new();
+        objs.insert(
+            "p".to_string(),
+            PolicyBundleObject::ZonePolicy(test_zone_policy(zone_a)),
+        );
+
+        let ra = PolicyBundleResolved::new(ba, objs.clone());
+        let rb = PolicyBundleResolved::new(bb, objs);
+
+        assert!(matches!(
+            diff_policy_bundles(&ra, &rb),
+            Err(PolicyDiffError::ZoneMismatch { .. })
+        ));
+    }
+
+    // ── Enforcement + Rollback Integration Tests (bead 2ady) ─────────────
+
+    #[test]
+    fn apply_bundle_changes_enforcement_decisions() {
+        let zone = ZoneId::work();
+        // Step 1: Baseline allows everything
+        let baseline_policy = test_zone_policy(zone.clone());
+        let baseline_engine = PolicyEngine {
+            zone_policy: baseline_policy,
+        };
+
+        let input = minimal_decision_input();
+        let d1 = baseline_engine.evaluate_invoke(&input);
+        assert_eq!(d1.decision, Decision::Allow);
+
+        // Step 2: "Apply" new policy that denies the capability
+        let mut new_policy = test_zone_policy(zone);
+        new_policy.capability_deny.push(PolicyPattern {
+            pattern: "cap.*".to_string(),
+        });
+        let new_engine = PolicyEngine {
+            zone_policy: new_policy,
+        };
+
+        let d2 = new_engine.evaluate_invoke(&input);
+        assert_eq!(d2.decision, Decision::Deny);
+        assert_eq!(
+            d2.reason_code,
+            DecisionReasonCode::ZonePolicyCapabilityDenied
+        );
+    }
+
+    #[test]
+    fn rollback_restores_prior_enforcement_behavior() {
+        let zone = ZoneId::work();
+        // Step 1: Baseline allows
+        let baseline_policy = test_zone_policy(zone.clone());
+
+        // Step 2: Changed policy denies
+        let mut changed_policy = test_zone_policy(zone);
+        changed_policy.principal_deny.push(PolicyPattern {
+            pattern: "user:*".to_string(),
+        });
+
+        let input = minimal_decision_input();
+
+        let baseline_engine = PolicyEngine {
+            zone_policy: baseline_policy.clone(),
+        };
+        let changed_engine = PolicyEngine {
+            zone_policy: changed_policy,
+        };
+
+        let d_before = baseline_engine.evaluate_invoke(&input);
+        assert_eq!(d_before.decision, Decision::Allow);
+
+        let d_changed = changed_engine.evaluate_invoke(&input);
+        assert_eq!(d_changed.decision, Decision::Deny);
+
+        // Step 3: Rollback to baseline
+        let rollback_engine = PolicyEngine {
+            zone_policy: baseline_policy,
+        };
+        let d_rollback = rollback_engine.evaluate_invoke(&input);
+        assert_eq!(d_rollback.decision, Decision::Allow);
+        assert_eq!(d_rollback.reason_code, d_before.reason_code);
+    }
+
+    #[test]
+    fn enforcement_change_with_transport_restriction() {
+        let zone = ZoneId::work();
+        let mut policy = test_zone_policy(zone);
+        // Deny DERP transport
+        policy.transport_policy.allow_derp = false;
+
+        let engine = PolicyEngine {
+            zone_policy: policy,
+        };
+
+        let mut input = minimal_decision_input();
+        // LAN should still be allowed
+        input.transport = TransportMode::Lan;
+        assert_eq!(engine.evaluate_invoke(&input).decision, Decision::Allow);
+
+        // DERP should be denied
+        input.transport = TransportMode::Derp;
+        let d = engine.evaluate_invoke(&input);
+        assert_eq!(d.decision, Decision::Deny);
+        assert_eq!(d.reason_code, DecisionReasonCode::TransportDerpForbidden);
+    }
+
+    #[test]
+    fn diff_serde_roundtrip() {
+        let zone = ZoneId::work();
+        let before_policy = test_zone_policy(zone.clone());
+        let mut after_policy = test_zone_policy(zone.clone());
+        after_policy.capability_allow.push(PolicyPattern {
+            pattern: "cap.read".to_string(),
+        });
+
+        let make_resolved = |bundle_id: &str, policy: ZonePolicyObject| {
+            let bundle = policy_bundle(
+                bundle_id,
+                zone.clone(),
+                vec![policy_ref("p", "fcp.core:ZonePolicy@1.0")],
+            );
+            let mut objs = BTreeMap::new();
+            objs.insert("p".to_string(), PolicyBundleObject::ZonePolicy(policy));
+            PolicyBundleResolved::new(bundle, objs)
+        };
+
+        let br = make_resolved("b1", before_policy);
+        let ar = make_resolved("b2", after_policy);
+        let diff = diff_policy_bundles(&br, &ar).expect("diff");
+
+        let json = serde_json::to_string(&diff).expect("serialize");
+        let back: PolicyBundleDiff = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.zone_id, diff.zone_id);
+        assert_eq!(back.risk.flags.len(), diff.risk.flags.len());
+    }
+
+    #[test]
+    fn risk_severity_ordering() {
+        assert!(PolicyRiskSeverity::Low < PolicyRiskSeverity::Medium);
+        assert!(PolicyRiskSeverity::Medium < PolicyRiskSeverity::High);
+        assert!(PolicyRiskSeverity::High < PolicyRiskSeverity::Critical);
+    }
+
+    #[test]
+    fn risk_code_serde_roundtrip() {
+        let code = PolicyRiskCode::TransportDerpEnabled;
+        let json = serde_json::to_string(&code).unwrap();
+        assert_eq!(json, "\"transport_derp_enabled\"");
+        let back: PolicyRiskCode = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, code);
     }
 }

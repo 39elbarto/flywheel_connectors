@@ -1127,4 +1127,466 @@ mod tests {
         assert_eq!(deserialized.sealed_data, vec![0xDE, 0xAD, 0xBE, 0xEF]);
         assert_eq!(deserialized.recipient_key_id, "node-123-x25519");
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // SecretId – Additional Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn secret_id_hash_consistency() {
+        use std::collections::HashSet;
+        let id = SecretId::test_id([0x42; 16]);
+        let mut set = HashSet::new();
+        set.insert(id);
+        set.insert(id);
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn secret_id_ordering() {
+        let a = SecretId::test_id([0x00; 16]);
+        let b = SecretId::test_id([0xFF; 16]);
+        assert!(a < b || b < a); // Deterministic ordering exists
+        assert_eq!(a.cmp(&a), std::cmp::Ordering::Equal);
+    }
+
+    #[test]
+    fn secret_id_clone() {
+        let id = SecretId::new();
+        #[allow(clippy::clone_on_copy)]
+        let cloned = id.clone();
+        assert_eq!(id, cloned);
+    }
+
+    #[test]
+    fn secret_id_copy() {
+        let a = SecretId::test_id([0x11; 16]);
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn secret_id_default_is_unique() {
+        let a = SecretId::default();
+        let b = SecretId::default();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn secret_id_as_uuid() {
+        let uuid = Uuid::from_bytes([0xAA; 16]);
+        let id = SecretId::from_uuid(uuid);
+        assert_eq!(*id.as_uuid(), uuid);
+    }
+
+    #[test]
+    fn secret_id_parse_invalid() {
+        let result = SecretId::parse("not-a-uuid");
+        assert!(result.is_err());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // SecretType – Additional Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn secret_type_serializes_remaining_variants() {
+        assert_eq!(
+            serde_json::to_string(&SecretType::SshKey).unwrap(),
+            "\"ssh_key\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SecretType::Generic).unwrap(),
+            "\"generic\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SecretType::HmacKey).unwrap(),
+            "\"hmac_key\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SecretType::EncryptionKey).unwrap(),
+            "\"encryption_key\""
+        );
+    }
+
+    #[test]
+    fn secret_type_serde_roundtrip_all_variants() {
+        let variants = [
+            SecretType::ApiKey,
+            SecretType::OAuthToken,
+            SecretType::WebhookSecret,
+            SecretType::DatabasePassword,
+            SecretType::ClientCertificate,
+            SecretType::SshKey,
+            SecretType::Generic,
+            SecretType::HmacKey,
+            SecretType::EncryptionKey,
+        ];
+        for variant in &variants {
+            let json = serde_json::to_string(variant).unwrap();
+            let decoded: SecretType = serde_json::from_str(&json).unwrap();
+            assert_eq!(*variant, decoded, "roundtrip failed for {variant:?}");
+        }
+    }
+
+    #[test]
+    fn secret_type_copy() {
+        let a = SecretType::SshKey;
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn secret_type_equality() {
+        assert_eq!(SecretType::ApiKey, SecretType::ApiKey);
+        assert_ne!(SecretType::ApiKey, SecretType::SshKey);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // SecretFormat – Additional Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn secret_format_raw_serde() {
+        let format = SecretFormat::Raw;
+        let json = serde_json::to_string(&format).unwrap();
+        assert_eq!(json, "\"raw\"");
+        let decoded: SecretFormat = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, SecretFormat::Raw);
+    }
+
+    #[test]
+    fn secret_format_wrapped_key_serde() {
+        let format = SecretFormat::WrappedKey;
+        let json = serde_json::to_string(&format).unwrap();
+        assert_eq!(json, "\"wrapped_key\"");
+        let decoded: SecretFormat = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, SecretFormat::WrappedKey);
+    }
+
+    #[test]
+    fn secret_format_threshold_share_serde_roundtrip() {
+        let format = SecretFormat::ThresholdShare {
+            index: 2,
+            threshold: 3,
+            total: 5,
+        };
+        let json = serde_json::to_string(&format).unwrap();
+        let decoded: SecretFormat = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, format);
+    }
+
+    #[test]
+    fn secret_format_copy() {
+        let a = SecretFormat::Raw;
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // SecretObject – Additional Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    fn test_secret_object() -> SecretObject {
+        SecretObject {
+            header: test_header(),
+            secret_id: SecretId::test_id([0x42; 16]),
+            secret_type: SecretType::ApiKey,
+            format: SecretFormat::Raw,
+            label: Some("test-secret".into()),
+            encrypted_payload: vec![0xDE, 0xAD],
+            key_derivation_info: None,
+            expires_at: Some(1_700_000_100),
+            max_access_count: Some(10),
+            access_count: 0,
+            revoked_by: None,
+        }
+    }
+
+    #[test]
+    fn secret_object_zone_id() {
+        let secret = test_secret_object();
+        assert_eq!(*secret.zone_id(), ZoneId::work());
+    }
+
+    #[test]
+    fn secret_object_not_usable_when_revoked() {
+        let mut secret = test_secret_object();
+        secret.revoked_by = Some(ObjectId::from_bytes([0xFF; 32]));
+        assert!(!secret.is_usable(1_700_000_000));
+    }
+
+    #[test]
+    fn secret_object_not_usable_when_exhausted() {
+        let mut secret = test_secret_object();
+        secret.access_count = 10;
+        assert!(!secret.is_usable(1_700_000_000));
+    }
+
+    #[test]
+    fn secret_object_clone() {
+        let secret = test_secret_object();
+        let cloned = secret.clone();
+        assert_eq!(cloned.secret_id, secret.secret_id);
+        assert_eq!(cloned.secret_type, secret.secret_type);
+        assert_eq!(cloned.format, secret.format);
+        assert_eq!(cloned.label, secret.label);
+        assert_eq!(cloned.encrypted_payload, secret.encrypted_payload);
+    }
+
+    #[test]
+    fn secret_object_serde_omits_none_fields() {
+        let mut secret = test_secret_object();
+        secret.label = None;
+        secret.key_derivation_info = None;
+        secret.expires_at = None;
+        secret.max_access_count = None;
+        secret.revoked_by = None;
+        let json = serde_json::to_string(&secret).unwrap();
+        assert!(!json.contains("label"));
+        assert!(!json.contains("key_derivation_info"));
+        assert!(!json.contains("expires_at"));
+        assert!(!json.contains("max_access_count"));
+        assert!(!json.contains("revoked_by"));
+    }
+
+    #[test]
+    fn secret_object_no_max_access_never_exhausted() {
+        let mut secret = test_secret_object();
+        secret.max_access_count = None;
+        secret.access_count = u32::MAX;
+        assert!(!secret.is_access_exhausted());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // SecretAccessToken – Additional Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    fn test_token() -> SecretAccessToken {
+        SecretAccessToken::new(
+            SecretId::test_id([0x42; 16]),
+            ZoneId::work(),
+            test_principal(),
+            "test-purpose".into(),
+            1_700_000_000,
+            1_700_000_300,
+            5,
+            vec![0xCA, 0xFE],
+        )
+    }
+
+    #[test]
+    fn secret_access_token_authorization_accessor() {
+        let token = test_token();
+        assert_eq!(token.authorization(), &[0xCA, 0xFE]);
+    }
+
+    #[test]
+    fn secret_access_token_remaining_uses_saturating() {
+        let mut token = test_token();
+        token.use_count = 100; // Way over max_uses of 5
+        assert_eq!(token.remaining_uses(), 0);
+    }
+
+    #[test]
+    fn secret_access_token_is_valid_combines_checks() {
+        let mut token = test_token();
+        // Valid: not expired, not exhausted
+        assert!(token.is_valid(1_700_000_100));
+        // Expired
+        assert!(!token.is_valid(1_700_000_300));
+        // Exhausted but not expired
+        token.use_count = 5;
+        assert!(!token.is_valid(1_700_000_100));
+    }
+
+    #[test]
+    fn secret_access_token_serde_roundtrip() {
+        let token = test_token();
+        let json = serde_json::to_string(&token).unwrap();
+        let decoded: SecretAccessToken = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.secret_id, token.secret_id);
+        assert_eq!(decoded.zone_id, token.zone_id);
+        assert_eq!(decoded.purpose, token.purpose);
+        assert_eq!(decoded.issued_at, token.issued_at);
+        assert_eq!(decoded.expires_at, token.expires_at);
+        assert_eq!(decoded.max_uses, token.max_uses);
+        assert_eq!(decoded.use_count, token.use_count);
+    }
+
+    #[test]
+    fn secret_access_token_record_use_until_exhaustion() {
+        let mut token = SecretAccessToken::new(
+            SecretId::new(),
+            ZoneId::work(),
+            test_principal(),
+            "single-use".into(),
+            1_700_000_000,
+            1_700_000_300,
+            1,
+            vec![],
+        );
+        assert_eq!(token.remaining_uses(), 1);
+        assert!(token.record_use());
+        assert_eq!(token.remaining_uses(), 0);
+        assert!(token.is_exhausted());
+        assert!(!token.record_use());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // KeyDerivationInfo – Additional Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn key_derivation_info_serde_roundtrip() {
+        let kdi = KeyDerivationInfo {
+            algorithm: "HKDF-SHA256".into(),
+            salt: vec![0x01, 0x02, 0x03],
+            info: Some("context-string".into()),
+        };
+        let json = serde_json::to_string(&kdi).unwrap();
+        let decoded: KeyDerivationInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.algorithm, "HKDF-SHA256");
+        assert_eq!(decoded.salt, vec![0x01, 0x02, 0x03]);
+        assert_eq!(decoded.info.as_deref(), Some("context-string"));
+    }
+
+    #[test]
+    fn key_derivation_info_serde_omits_empty_fields() {
+        let kdi = KeyDerivationInfo {
+            algorithm: "HKDF-SHA256".into(),
+            salt: vec![],
+            info: None,
+        };
+        let json = serde_json::to_string(&kdi).unwrap();
+        assert!(!json.contains("salt"));
+        assert!(!json.contains("info"));
+    }
+
+    #[test]
+    fn key_derivation_info_clone() {
+        let kdi = KeyDerivationInfo {
+            algorithm: "HKDF-SHA256".into(),
+            salt: vec![0xFF],
+            info: Some("test".into()),
+        };
+        let cloned = kdi.clone();
+        assert_eq!(cloned.algorithm, kdi.algorithm);
+        assert_eq!(cloned.salt, kdi.salt);
+        assert_eq!(cloned.info, kdi.info);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // SecretSharingScheme – Additional Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn secret_sharing_scheme_copy() {
+        let a = SecretSharingScheme::ShamirGf256;
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // SecretRotationPolicy – Additional Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn rotation_policy_default_matches_default_policy() {
+        let from_default = SecretRotationPolicy::default();
+        let from_fn = SecretRotationPolicy::default_policy();
+        assert_eq!(from_default.rotate_after_secs, from_fn.rotate_after_secs);
+        assert_eq!(from_default.overlap_secs, from_fn.overlap_secs);
+    }
+
+    #[test]
+    fn rotation_policy_clone() {
+        let policy = SecretRotationPolicy::new(86400, 3600);
+        let cloned = policy.clone();
+        assert_eq!(cloned.rotate_after_secs, policy.rotate_after_secs);
+        assert_eq!(cloned.overlap_secs, policy.overlap_secs);
+    }
+
+    #[test]
+    fn rotation_policy_equality() {
+        let a = SecretRotationPolicy::new(100, 10);
+        let b = SecretRotationPolicy::new(100, 10);
+        let c = SecretRotationPolicy::new(200, 10);
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ThresholdSecretObject – Additional Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    fn test_threshold_secret() -> ThresholdSecretObject {
+        ThresholdSecretObject {
+            header: test_header(),
+            secret_id: SecretId::test_id([0x55; 16]),
+            zone_id: ZoneId::work(),
+            k: 3,
+            n: 5,
+            scheme: SecretSharingScheme::ShamirGf256,
+            wrapped_shares: std::collections::HashMap::new(),
+            rotation: SecretRotationPolicy::new(3600, 300),
+            secret_type: SecretType::EncryptionKey,
+            label: Some("threshold-test".into()),
+            created_at: 1_700_000_000,
+            expires_at: Some(1_700_100_000),
+            generation: 1,
+        }
+    }
+
+    #[test]
+    fn threshold_secret_zone_id() {
+        let secret = test_threshold_secret();
+        assert_eq!(*secret.zone_id(), ZoneId::work());
+    }
+
+    #[test]
+    fn threshold_secret_clone() {
+        let secret = test_threshold_secret();
+        let cloned = secret.clone();
+        assert_eq!(cloned.secret_id, secret.secret_id);
+        assert_eq!(cloned.k, secret.k);
+        assert_eq!(cloned.n, secret.n);
+        assert_eq!(cloned.generation, secret.generation);
+        assert_eq!(cloned.label, secret.label);
+    }
+
+    #[test]
+    fn threshold_secret_serde_roundtrip() {
+        let secret = test_threshold_secret();
+        let json = serde_json::to_string(&secret).unwrap();
+        let decoded: ThresholdSecretObject = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.secret_id, secret.secret_id);
+        assert_eq!(decoded.k, 3);
+        assert_eq!(decoded.n, 5);
+        assert_eq!(decoded.generation, 1);
+        assert_eq!(decoded.created_at, 1_700_000_000);
+    }
+
+    #[test]
+    fn threshold_secret_needs_rotation_at_boundary() {
+        let secret = test_threshold_secret();
+        // rotation.rotate_after_secs = 3600
+        // created_at = 1_700_000_000
+        // rotation due at created_at + 3600 = 1_700_003_600
+        assert!(!secret.needs_rotation(1_700_003_599));
+        assert!(secret.needs_rotation(1_700_003_600));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // SecretMaterial – Additional Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn secret_material_large() {
+        let material = SecretMaterial::new(vec![0xFF; 1024]);
+        assert_eq!(material.len(), 1024);
+        assert!(!material.is_empty());
+        assert_eq!(material.as_bytes()[0], 0xFF);
+        assert_eq!(material.as_bytes()[1023], 0xFF);
+    }
 }

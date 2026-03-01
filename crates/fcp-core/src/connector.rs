@@ -498,4 +498,174 @@ mod tests {
         assert_eq!(base.metrics().requests_error, 1);
         assert_eq!(base.metrics().events_emitted, 2);
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Additional ConnectorMetrics tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn connector_metrics_serde_roundtrip() {
+        let metrics = ConnectorMetrics {
+            requests_total: 1000,
+            requests_success: 950,
+            requests_error: 50,
+            connections_active: 12,
+            events_emitted: 500,
+            latency_p50_ms: 45,
+            latency_p99_ms: 250,
+            bytes_sent: 1_000_000,
+            bytes_received: 2_000_000,
+        };
+        let json = serde_json::to_string(&metrics).unwrap();
+        let decoded: ConnectorMetrics = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded.requests_total, 1000);
+        assert_eq!(decoded.requests_success, 950);
+        assert_eq!(decoded.requests_error, 50);
+        assert_eq!(decoded.connections_active, 12);
+        assert_eq!(decoded.events_emitted, 500);
+        assert_eq!(decoded.latency_p50_ms, 45);
+        assert_eq!(decoded.latency_p99_ms, 250);
+        assert_eq!(decoded.bytes_sent, 1_000_000);
+        assert_eq!(decoded.bytes_received, 2_000_000);
+    }
+
+    #[test]
+    fn connector_metrics_partial_init() {
+        let metrics = ConnectorMetrics {
+            requests_total: 42,
+            latency_p99_ms: 100,
+            ..Default::default()
+        };
+        assert_eq!(metrics.requests_total, 42);
+        assert_eq!(metrics.latency_p99_ms, 100);
+        assert_eq!(metrics.requests_success, 0);
+        assert_eq!(metrics.bytes_sent, 0);
+    }
+
+    #[test]
+    fn connector_metrics_json_fields() {
+        let metrics = ConnectorMetrics::default();
+        let value = serde_json::to_value(&metrics).unwrap();
+        for field in [
+            "requests_total",
+            "requests_success",
+            "requests_error",
+            "connections_active",
+            "events_emitted",
+            "latency_p50_ms",
+            "latency_p99_ms",
+            "bytes_sent",
+            "bytes_received",
+        ] {
+            assert!(value.get(field).is_some(), "missing field: {field}");
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Additional BaseConnector tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn base_connector_instance_id_unique() {
+        let a = BaseConnector::new(test_connector_id());
+        let b = BaseConnector::new(test_connector_id());
+        // Instance IDs should be unique for each BaseConnector
+        assert_ne!(
+            a.instance_id.as_str(),
+            b.instance_id.as_str(),
+            "instance IDs should be unique"
+        );
+    }
+
+    #[test]
+    fn base_connector_metrics_initially_zero() {
+        let base = BaseConnector::new(test_connector_id());
+        let m = base.metrics();
+        assert_eq!(m.requests_total, 0);
+        assert_eq!(m.requests_success, 0);
+        assert_eq!(m.requests_error, 0);
+        assert_eq!(m.connections_active, 0);
+        assert_eq!(m.events_emitted, 0);
+        assert_eq!(m.latency_p50_ms, 0);
+        assert_eq!(m.latency_p99_ms, 0);
+        assert_eq!(m.bytes_sent, 0);
+        assert_eq!(m.bytes_received, 0);
+    }
+
+    #[test]
+    fn base_connector_set_configured_toggle() {
+        let base = BaseConnector::new(test_connector_id());
+        assert!(!base.configured.load(Ordering::Relaxed));
+
+        base.set_configured(true);
+        assert!(base.configured.load(Ordering::Relaxed));
+
+        base.set_configured(false);
+        assert!(!base.configured.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn base_connector_set_handshaken_toggle() {
+        let base = BaseConnector::new(test_connector_id());
+        assert!(!base.handshaken.load(Ordering::Relaxed));
+
+        base.set_handshaken(true);
+        assert!(base.handshaken.load(Ordering::Relaxed));
+
+        base.set_handshaken(false);
+        assert!(!base.handshaken.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn base_connector_metrics_snapshot_independent() {
+        let base = BaseConnector::new(test_connector_id());
+        base.record_request(true);
+
+        let snapshot1 = base.metrics();
+        base.record_request(true);
+        let snapshot2 = base.metrics();
+
+        // Snapshot values are independent
+        assert_eq!(snapshot1.requests_total, 1);
+        assert_eq!(snapshot2.requests_total, 2);
+    }
+
+    #[test]
+    fn base_connector_check_ready_reconfigure() {
+        let base = BaseConnector::new(test_connector_id());
+        base.set_configured(true);
+        base.set_handshaken(true);
+        assert!(base.check_ready().is_ok());
+
+        // Deconfigure -> no longer ready
+        base.set_configured(false);
+        assert!(base.check_ready().is_err());
+
+        // Reconfigure -> ready again
+        base.set_configured(true);
+        assert!(base.check_ready().is_ok());
+    }
+
+    #[test]
+    fn base_connector_mixed_success_failure() {
+        let base = BaseConnector::new(test_connector_id());
+        for i in 0..100 {
+            base.record_request(i % 3 != 0);
+        }
+        let m = base.metrics();
+        assert_eq!(m.requests_total, 100);
+        // i=0,3,6,...,99 => failures = 34 (0..100 step 3)
+        assert_eq!(m.requests_error, 34);
+        assert_eq!(m.requests_success, 66);
+    }
+
+    #[test]
+    fn base_connector_many_events() {
+        let base = BaseConnector::new(test_connector_id());
+        for _ in 0..1000 {
+            base.record_event();
+        }
+        assert_eq!(base.metrics().events_emitted, 1000);
+    }
 }

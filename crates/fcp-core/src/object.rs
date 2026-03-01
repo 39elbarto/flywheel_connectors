@@ -667,4 +667,497 @@ mod tests {
             SerializationError::PayloadTooLarge { .. }
         ));
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ObjectId serde roundtrip
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn object_id_json_serde_roundtrip() {
+        let bytes = [0xab_u8; 32];
+        let id = ObjectId::from_bytes(bytes);
+        let json = serde_json::to_string(&id).unwrap();
+        let back: ObjectId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn object_id_json_serde_zero_bytes() {
+        let id = ObjectId::from_bytes([0_u8; 32]);
+        let json = serde_json::to_string(&id).unwrap();
+        let back: ObjectId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+        assert!(json.contains(&"00".repeat(32)));
+    }
+
+    #[test]
+    fn object_id_json_serde_max_bytes() {
+        let id = ObjectId::from_bytes([0xff_u8; 32]);
+        let json = serde_json::to_string(&id).unwrap();
+        let back: ObjectId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ObjectId ordering
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn object_id_ordering_lexicographic() {
+        let a = ObjectId::from_bytes([0_u8; 32]);
+        let mut b_bytes = [0_u8; 32];
+        b_bytes[0] = 1;
+        let b = ObjectId::from_bytes(b_bytes);
+        assert!(a < b);
+    }
+
+    #[test]
+    fn object_id_ordering_stable_sort() {
+        let ids: Vec<ObjectId> = (0..5)
+            .map(|i| {
+                let mut bytes = [0_u8; 32];
+                bytes[31] = 4 - i;
+                ObjectId::from_bytes(bytes)
+            })
+            .collect();
+        let mut sorted = ids.clone();
+        sorted.sort();
+        // Lowest byte value first
+        assert_eq!(sorted[0].as_bytes()[31], 0);
+        assert_eq!(sorted[4].as_bytes()[31], 4);
+    }
+
+    #[test]
+    fn object_id_btreemap_key() {
+        use std::collections::BTreeMap;
+        let mut map = BTreeMap::new();
+        let id1 = ObjectId::from_bytes([1_u8; 32]);
+        let id2 = ObjectId::from_bytes([2_u8; 32]);
+        map.insert(id1, "first");
+        map.insert(id2, "second");
+        assert_eq!(map.len(), 2);
+        assert_eq!(map[&id1], "first");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ObjectId domain separation
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn object_id_keyed_vs_unscoped_differ() {
+        let key = ObjectIdKey::from_bytes([0_u8; 32]);
+        let zone: ZoneId = "z:work".parse().unwrap();
+        let schema = SchemaId::new("fcp.test", "Test", Version::new(1, 0, 0));
+        let content = b"same content";
+
+        let keyed = ObjectId::new(content, &zone, &schema, &key);
+        let unscoped = ObjectId::from_unscoped_bytes(content);
+
+        assert_ne!(keyed, unscoped);
+    }
+
+    #[test]
+    fn object_id_test_id_deterministic() {
+        let id1 = ObjectId::test_id("my-test");
+        let id2 = ObjectId::test_id("my-test");
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn object_id_test_id_differs_by_name() {
+        let id1 = ObjectId::test_id("test-a");
+        let id2 = ObjectId::test_id("test-b");
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn object_id_empty_content_is_valid() {
+        let id = ObjectId::from_unscoped_bytes(b"");
+        // Should produce a valid hash (not all zeros)
+        assert_ne!(id, ObjectId::from_bytes([0_u8; 32]));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ObjectIdKey additional tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn object_id_key_different_keys_not_equal() {
+        let key1 = ObjectIdKey::from_bytes([0_u8; 32]);
+        let key2 = ObjectIdKey::from_bytes([1_u8; 32]);
+        assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn object_id_key_debug_never_leaks_bytes() {
+        let key = ObjectIdKey::from_bytes([0x41_u8; 32]); // 'A' repeated
+        let debug = format!("{key:?}");
+        // Must NOT contain hex of 0x41 = "41" or "AAAA"
+        assert!(debug.contains("redacted"));
+        assert!(!debug.contains("4141"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // DeviceSelector additional tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn device_selector_serde_roundtrip_all_variants() {
+        let variants = vec![
+            DeviceSelector::Tag("gpu".into()),
+            DeviceSelector::Class("high-mem".into()),
+            DeviceSelector::NodeId(42),
+            DeviceSelector::Zone(ZoneId::private()),
+            DeviceSelector::HasCapability("compute.v2".into()),
+        ];
+        for variant in &variants {
+            let json = serde_json::to_string(variant).unwrap();
+            let back: DeviceSelector = serde_json::from_str(&json).unwrap();
+            let json2 = serde_json::to_string(&back).unwrap();
+            assert_eq!(json, json2);
+        }
+    }
+
+    #[test]
+    fn device_selector_node_id_zero() {
+        let sel = DeviceSelector::NodeId(0);
+        let json = serde_json::to_string(&sel).unwrap();
+        let back: DeviceSelector = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, DeviceSelector::NodeId(0)));
+    }
+
+    #[test]
+    fn device_selector_node_id_max() {
+        let sel = DeviceSelector::NodeId(u64::MAX);
+        let json = serde_json::to_string(&sel).unwrap();
+        let back: DeviceSelector = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, DeviceSelector::NodeId(v) if v == u64::MAX));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ObjectPlacementPolicy edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn placement_policy_defaults_on_deserialize() {
+        let json = r#"{
+            "min_nodes": 1,
+            "max_node_fraction_bps": 10000,
+            "target_coverage_bps": 10000
+        }"#;
+        let policy: ObjectPlacementPolicy = serde_json::from_str(json).unwrap();
+        assert!(policy.preferred_devices.is_empty());
+        assert!(policy.excluded_devices.is_empty());
+        assert_eq!(policy.min_source_diversity, 0);
+    }
+
+    #[test]
+    fn placement_policy_with_all_fields() {
+        let policy = ObjectPlacementPolicy {
+            min_nodes: 5,
+            max_node_fraction_bps: 2000,
+            preferred_devices: vec![
+                DeviceSelector::Tag("ssd".into()),
+                DeviceSelector::Class("high-mem".into()),
+            ],
+            excluded_devices: vec![DeviceSelector::NodeId(999)],
+            target_coverage_bps: 8000,
+            min_source_diversity: 3,
+        };
+        let json = serde_json::to_string(&policy).unwrap();
+        let back: ObjectPlacementPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.min_nodes, 5);
+        assert_eq!(back.max_node_fraction_bps, 2000);
+        assert_eq!(back.preferred_devices.len(), 2);
+        assert_eq!(back.excluded_devices.len(), 1);
+        assert_eq!(back.target_coverage_bps, 8000);
+        assert_eq!(back.min_source_diversity, 3);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ObjectHeader additional tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn object_header_with_multiple_refs() {
+        let header = ObjectHeader {
+            schema: SchemaId::new("fcp.test", "Multi", Version::new(1, 0, 0)),
+            zone_id: ZoneId::work(),
+            created_at: 1_700_000_000,
+            provenance: Provenance::new(ZoneId::work()),
+            refs: vec![
+                ObjectId::from_bytes([1_u8; 32]),
+                ObjectId::from_bytes([2_u8; 32]),
+                ObjectId::from_bytes([3_u8; 32]),
+            ],
+            foreign_refs: vec![ObjectId::from_bytes([10_u8; 32])],
+            ttl_secs: None,
+            placement: None,
+        };
+        let json = serde_json::to_string(&header).unwrap();
+        let back: ObjectHeader = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.refs.len(), 3);
+        assert_eq!(back.foreign_refs.len(), 1);
+    }
+
+    #[test]
+    fn object_header_with_placement_policy() {
+        let header = ObjectHeader {
+            schema: SchemaId::new("fcp.test", "Placed", Version::new(1, 0, 0)),
+            zone_id: ZoneId::community(),
+            created_at: 2_000_000_000,
+            provenance: Provenance::new(ZoneId::community()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: Some(86400),
+            placement: Some(ObjectPlacementPolicy {
+                min_nodes: 3,
+                max_node_fraction_bps: 5000,
+                preferred_devices: vec![],
+                excluded_devices: vec![],
+                target_coverage_bps: 10000,
+                min_source_diversity: 2,
+            }),
+        };
+        let json = serde_json::to_string(&header).unwrap();
+        let back: ObjectHeader = serde_json::from_str(&json).unwrap();
+        assert!(back.placement.is_some());
+        assert_eq!(back.placement.unwrap().min_nodes, 3);
+    }
+
+    #[test]
+    fn object_header_default_refs_on_deserialize() {
+        let json = r#"{
+            "schema": {"namespace":"fcp.test","name":"T","version":"1.0.0"},
+            "zone_id": "z:work",
+            "created_at": 0,
+            "provenance": {"origin_zone":"z:work"}
+        }"#;
+        let header: ObjectHeader = serde_json::from_str(json).unwrap();
+        assert!(header.refs.is_empty());
+        assert!(header.foreign_refs.is_empty());
+        assert!(header.ttl_secs.is_none());
+        assert!(header.placement.is_none());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // RetentionClass additional tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn retention_class_equality() {
+        assert_eq!(RetentionClass::Pinned, RetentionClass::Pinned);
+        assert_eq!(RetentionClass::Ephemeral, RetentionClass::Ephemeral);
+        assert_eq!(
+            RetentionClass::Lease { expires_at: 100 },
+            RetentionClass::Lease { expires_at: 100 }
+        );
+        assert_ne!(
+            RetentionClass::Lease { expires_at: 100 },
+            RetentionClass::Lease { expires_at: 200 }
+        );
+        assert_ne!(RetentionClass::Pinned, RetentionClass::Ephemeral);
+    }
+
+    #[test]
+    fn retention_class_lease_zero_expiry() {
+        let r = RetentionClass::Lease { expires_at: 0 };
+        let json = serde_json::to_string(&r).unwrap();
+        let back: RetentionClass = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, RetentionClass::Lease { expires_at: 0 }));
+    }
+
+    #[test]
+    fn retention_class_lease_max_expiry() {
+        let r = RetentionClass::Lease {
+            expires_at: u64::MAX,
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        let back: RetentionClass = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            RetentionClass::Lease { expires_at } if expires_at == u64::MAX
+        ));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // StoredObject additional tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn stored_object_canonical_bytes_deterministic() {
+        let header = ObjectHeader {
+            schema: SchemaId::new("fcp.test", "Det", Version::new(1, 0, 0)),
+            zone_id: ZoneId::work(),
+            created_at: 999,
+            provenance: Provenance::new(ZoneId::work()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        };
+        let body = b"deterministic body";
+        let bytes1 = StoredObject::canonical_bytes(&header, body).unwrap();
+        let bytes2 = StoredObject::canonical_bytes(&header, body).unwrap();
+        assert_eq!(bytes1, bytes2);
+    }
+
+    #[test]
+    fn stored_object_canonical_bytes_differ_by_header() {
+        let header1 = ObjectHeader {
+            schema: SchemaId::new("fcp.test", "A", Version::new(1, 0, 0)),
+            zone_id: ZoneId::work(),
+            created_at: 100,
+            provenance: Provenance::new(ZoneId::work()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        };
+        let header2 = ObjectHeader {
+            schema: SchemaId::new("fcp.test", "B", Version::new(1, 0, 0)),
+            zone_id: ZoneId::work(),
+            created_at: 100,
+            provenance: Provenance::new(ZoneId::work()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        };
+        let body = b"same body";
+        let bytes1 = StoredObject::canonical_bytes(&header1, body).unwrap();
+        let bytes2 = StoredObject::canonical_bytes(&header2, body).unwrap();
+        assert_ne!(bytes1, bytes2);
+    }
+
+    #[test]
+    fn stored_object_canonical_bytes_empty_body() {
+        let header = ObjectHeader {
+            schema: SchemaId::new("fcp.test", "Empty", Version::new(1, 0, 0)),
+            zone_id: ZoneId::work(),
+            created_at: 0,
+            provenance: Provenance::new(ZoneId::work()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        };
+        let result = StoredObject::canonical_bytes(&header, b"");
+        assert!(result.is_ok());
+        let bytes = result.unwrap();
+        assert!(bytes.starts_with(b"FCP2-OBJECT-V1"));
+    }
+
+    #[test]
+    fn stored_object_derive_id_differs_by_key() {
+        let header = ObjectHeader {
+            schema: SchemaId::new("fcp.test", "Key", Version::new(1, 0, 0)),
+            zone_id: ZoneId::work(),
+            created_at: 0,
+            provenance: Provenance::new(ZoneId::work()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        };
+        let body = b"same body";
+        let key1 = ObjectIdKey::from_bytes([1_u8; 32]);
+        let key2 = ObjectIdKey::from_bytes([2_u8; 32]);
+
+        let id1 = StoredObject::derive_id(&header, body, &key1).unwrap();
+        let id2 = StoredObject::derive_id(&header, body, &key2).unwrap();
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn stored_object_with_all_retention_classes() {
+        let header = ObjectHeader {
+            schema: SchemaId::new("fcp.test", "Ret", Version::new(1, 0, 0)),
+            zone_id: ZoneId::work(),
+            created_at: 0,
+            provenance: Provenance::new(ZoneId::work()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        };
+        let body = b"body".to_vec();
+        let key = ObjectIdKey::from_bytes([0_u8; 32]);
+        let object_id = StoredObject::derive_id(&header, &body, &key).unwrap();
+
+        for retention in [
+            RetentionClass::Pinned,
+            RetentionClass::Ephemeral,
+            RetentionClass::Lease {
+                expires_at: 1_000_000,
+            },
+        ] {
+            let stored = StoredObject {
+                object_id,
+                header: header.clone(),
+                body: body.clone(),
+                storage: StorageMeta {
+                    retention: retention.clone(),
+                },
+            };
+            let json = serde_json::to_string(&stored).unwrap();
+            let back: StoredObject = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.storage.retention, retention);
+        }
+    }
+
+    #[test]
+    fn stored_object_serde_preserves_refs() {
+        let key = ObjectIdKey::from_bytes([0_u8; 32]);
+        let ref1 = ObjectId::from_bytes([1_u8; 32]);
+        let ref2 = ObjectId::from_bytes([2_u8; 32]);
+        let foreign = ObjectId::from_bytes([10_u8; 32]);
+
+        let header = ObjectHeader {
+            schema: SchemaId::new("fcp.test", "Refs", Version::new(1, 0, 0)),
+            zone_id: ZoneId::work(),
+            created_at: 500,
+            provenance: Provenance::new(ZoneId::work()),
+            refs: vec![ref1, ref2],
+            foreign_refs: vec![foreign],
+            ttl_secs: Some(7200),
+            placement: None,
+        };
+        let body = b"ref-body".to_vec();
+        let object_id = StoredObject::derive_id(&header, &body, &key).unwrap();
+
+        let stored = StoredObject {
+            object_id,
+            header,
+            body,
+            storage: StorageMeta {
+                retention: RetentionClass::Pinned,
+            },
+        };
+        let json = serde_json::to_string(&stored).unwrap();
+        let back: StoredObject = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(back.header.refs.len(), 2);
+        assert_eq!(back.header.foreign_refs.len(), 1);
+        assert_eq!(back.header.ttl_secs, Some(7200));
+        assert_eq!(back.header.refs[0], ref1);
+        assert_eq!(back.header.foreign_refs[0], foreign);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // StorageMeta tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn storage_meta_serde_roundtrip() {
+        let meta = StorageMeta {
+            retention: RetentionClass::Lease { expires_at: 42_000 },
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        let back: StorageMeta = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back.retention,
+            RetentionClass::Lease { expires_at: 42_000 }
+        ));
+    }
 }

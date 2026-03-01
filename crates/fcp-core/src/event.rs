@@ -714,4 +714,240 @@ mod tests {
 
         assert_eq!(&bytes[..fcp_cbor::SCHEMA_HASH_LEN], schema_hash.as_bytes());
     }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // ThreadKind serde tests
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn thread_kind_serde_all_variants() {
+        for (kind, expected) in [
+            (ThreadKind::Thread, "\"thread\""),
+            (ThreadKind::ForumTopic, "\"forum_topic\""),
+            (ThreadKind::Channel, "\"channel\""),
+            (ThreadKind::Reply, "\"reply\""),
+        ] {
+            let json = serde_json::to_string(&kind).unwrap();
+            assert_eq!(json, expected);
+            let back: ThreadKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(kind, back);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // ThreadInfo tests
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn thread_info_new_no_parent() {
+        let info = ThreadInfo::new("tid-1", ThreadKind::Thread);
+        assert_eq!(info.thread_id, "tid-1");
+        assert!(info.parent_id.is_none());
+        assert_eq!(info.kind, ThreadKind::Thread);
+    }
+
+    #[test]
+    fn thread_info_with_parent_id() {
+        let info = ThreadInfo::new("tid-2", ThreadKind::ForumTopic).with_parent_id("parent-99");
+        assert_eq!(info.parent_id, Some("parent-99".to_string()));
+    }
+
+    #[test]
+    fn thread_info_serde_roundtrip_with_parent() {
+        let info =
+            ThreadInfo::new("thread-abc", ThreadKind::Channel).with_parent_id("channel-main");
+        let json = serde_json::to_string(&info).unwrap();
+        let back: ThreadInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(info, back);
+    }
+
+    #[test]
+    fn thread_info_serde_roundtrip_without_parent() {
+        let info = ThreadInfo::new("thread-solo", ThreadKind::Reply);
+        let json = serde_json::to_string(&info).unwrap();
+        // parent_id should be omitted
+        assert!(!json.contains("parent_id"));
+        let back: ThreadInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(info, back);
+    }
+
+    #[test]
+    fn thread_info_equality() {
+        let a = ThreadInfo::new("t1", ThreadKind::Thread);
+        let b = ThreadInfo::new("t1", ThreadKind::Thread);
+        let c = ThreadInfo::new("t2", ThreadKind::Thread);
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn thread_info_equality_kind_differs() {
+        let a = ThreadInfo::new("t1", ThreadKind::Thread);
+        let b = ThreadInfo::new("t1", ThreadKind::Reply);
+        assert_ne!(a, b);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // EventEnvelope additional tests
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn event_envelope_with_cursor_seq_sets_string() {
+        let data = sample_event_data();
+        let envelope = EventEnvelope::new("events.cursor-seq", data).with_cursor_seq(123);
+        assert_eq!(envelope.cursor, "123");
+    }
+
+    #[test]
+    fn event_envelope_with_cursor_seq_zero() {
+        let data = sample_event_data();
+        let envelope = EventEnvelope::new("events.zero", data).with_cursor_seq(0);
+        assert_eq!(envelope.cursor, "0");
+    }
+
+    #[test]
+    fn event_envelope_schema_is_stable() {
+        let schema1 = EventEnvelope::schema();
+        let schema2 = EventEnvelope::schema();
+        assert_eq!(schema1.hash(), schema2.hash());
+    }
+
+    #[test]
+    fn event_envelope_canonical_bytes_same_envelope_is_deterministic() {
+        let data = sample_event_data();
+        let envelope = EventEnvelope::new("events.det", data)
+            .with_seq(1)
+            .with_cursor("c");
+
+        // Same envelope produces same canonical bytes on repeated calls
+        let bytes1 = envelope.canonical_bytes().unwrap();
+        let bytes2 = envelope.canonical_bytes().unwrap();
+        assert_eq!(bytes1, bytes2);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // EventAck additional tests
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn event_ack_schema_is_stable() {
+        let schema1 = EventAck::schema();
+        let schema2 = EventAck::schema();
+        assert_eq!(schema1.hash(), schema2.hash());
+    }
+
+    #[test]
+    fn event_ack_canonical_bytes_deterministic() {
+        let ack1 = EventAck::new("events.ack-det", vec![10, 20]);
+        let ack2 = EventAck::new("events.ack-det", vec![10, 20]);
+        let bytes1 = ack1.canonical_bytes().unwrap();
+        let bytes2 = ack2.canonical_bytes().unwrap();
+        assert_eq!(bytes1, bytes2);
+    }
+
+    #[test]
+    fn event_ack_type_field_is_ack() {
+        let ack = EventAck::new("t", vec![]);
+        let json = serde_json::to_string(&ack).unwrap();
+        assert!(json.contains("\"type\":\"ack\""));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // EventNack additional tests
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn event_nack_schema_is_stable() {
+        let schema1 = EventNack::schema();
+        let schema2 = EventNack::schema();
+        assert_eq!(schema1.hash(), schema2.hash());
+    }
+
+    #[test]
+    fn event_nack_canonical_bytes_deterministic() {
+        let nack1 = EventNack::new("events.nack-det", vec![5], "err").with_delay(100);
+        let nack2 = EventNack::new("events.nack-det", vec![5], "err").with_delay(100);
+        let bytes1 = nack1.canonical_bytes().unwrap();
+        let bytes2 = nack2.canonical_bytes().unwrap();
+        assert_eq!(bytes1, bytes2);
+    }
+
+    #[test]
+    fn event_nack_type_field_is_nack() {
+        let nack = EventNack::new("t", vec![], "reason");
+        let json = serde_json::to_string(&nack).unwrap();
+        assert!(json.contains("\"type\":\"nack\""));
+    }
+
+    #[test]
+    fn event_nack_delay_zero_is_valid() {
+        let nack = EventNack::new("t", vec![1], "fast retry").with_delay(0);
+        assert_eq!(nack.delay_ms, Some(0));
+        let json = serde_json::to_string(&nack).unwrap();
+        assert!(json.contains("\"delay_ms\":0"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // EventData additional tests
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn event_data_optional_fields_omitted_in_json() {
+        let data = sample_event_data();
+        let json = serde_json::to_string(&data).unwrap();
+        // correlation_id and thread_info should be omitted when None
+        assert!(!json.contains("correlation_id"));
+        assert!(!json.contains("thread_info"));
+    }
+
+    #[test]
+    fn event_data_all_fields_populated_roundtrip() {
+        let corr_id = CorrelationId::new();
+        let thread = ThreadInfo::new("tid-full", ThreadKind::ForumTopic).with_parent_id("parent");
+        let data = sample_event_data()
+            .with_correlation_id(corr_id.clone())
+            .with_resource_uris(vec!["uri:a".into(), "uri:b".into()])
+            .with_thread_info(thread.clone());
+
+        let json = serde_json::to_string(&data).unwrap();
+        let back: EventData = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.correlation_id.unwrap(), corr_id);
+        assert_eq!(back.resource_uris, vec!["uri:a", "uri:b"]);
+        assert_eq!(back.thread_info, Some(thread));
+    }
+
+    #[test]
+    fn event_data_complex_payload() {
+        let data = EventData::new(
+            sample_connector_id(),
+            InstanceId::new(),
+            ZoneId::work(),
+            sample_principal(),
+            json!({
+                "nested": {"key": "value"},
+                "array": [1, 2, 3],
+                "null_val": null,
+                "bool_val": true
+            }),
+        );
+        let json = serde_json::to_string(&data).unwrap();
+        let back: EventData = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.payload["nested"]["key"], "value");
+        assert_eq!(back.payload["array"][1], 2);
+        assert!(back.payload["null_val"].is_null());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Schema hash distinctness
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn event_schemas_are_distinct() {
+        let envelope_hash = EventEnvelope::schema().hash();
+        let ack_hash = EventAck::schema().hash();
+        let nack_hash = EventNack::schema().hash();
+        assert_ne!(envelope_hash, ack_hash);
+        assert_ne!(envelope_hash, nack_hash);
+        assert_ne!(ack_hash, nack_hash);
+    }
 }

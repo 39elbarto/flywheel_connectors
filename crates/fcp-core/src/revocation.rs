@@ -1208,4 +1208,941 @@ mod tests {
         let deserialized: EpochId = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.as_str(), "epoch-123");
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // RevocationScope – Additional Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn revocation_scope_serde_roundtrip_all_variants() {
+        let variants = [
+            RevocationScope::Capability,
+            RevocationScope::IssuerKey,
+            RevocationScope::NodeAttestation,
+            RevocationScope::ZoneKey,
+            RevocationScope::ConnectorBinary,
+        ];
+        for scope in &variants {
+            let json = serde_json::to_string(scope).unwrap();
+            let decoded: RevocationScope = serde_json::from_str(&json).unwrap();
+            assert_eq!(*scope, decoded, "roundtrip mismatch for {scope:?}");
+        }
+    }
+
+    #[test]
+    fn revocation_scope_as_str_all_variants() {
+        assert_eq!(RevocationScope::Capability.as_str(), "capability");
+        assert_eq!(RevocationScope::IssuerKey.as_str(), "issuer_key");
+        assert_eq!(
+            RevocationScope::NodeAttestation.as_str(),
+            "node_attestation"
+        );
+        assert_eq!(RevocationScope::ZoneKey.as_str(), "zone_key");
+        assert_eq!(
+            RevocationScope::ConnectorBinary.as_str(),
+            "connector_binary"
+        );
+    }
+
+    #[test]
+    fn revocation_scope_copy() {
+        let a = RevocationScope::ZoneKey;
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn revocation_scope_clone() {
+        let a = RevocationScope::ConnectorBinary;
+        #[allow(clippy::clone_on_copy)]
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn revocation_scope_hash_consistency() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(RevocationScope::Capability);
+        set.insert(RevocationScope::Capability);
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn revocation_scope_hash_different_variants() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(RevocationScope::Capability);
+        set.insert(RevocationScope::IssuerKey);
+        set.insert(RevocationScope::NodeAttestation);
+        set.insert(RevocationScope::ZoneKey);
+        set.insert(RevocationScope::ConnectorBinary);
+        assert_eq!(set.len(), 5);
+    }
+
+    #[test]
+    fn revocation_scope_inequality() {
+        assert_ne!(RevocationScope::Capability, RevocationScope::IssuerKey);
+        assert_ne!(RevocationScope::ZoneKey, RevocationScope::ConnectorBinary);
+    }
+
+    #[test]
+    fn revocation_scope_critical_vs_non_critical_partition() {
+        let non_critical = [RevocationScope::Capability, RevocationScope::IssuerKey];
+        let critical = [
+            RevocationScope::NodeAttestation,
+            RevocationScope::ZoneKey,
+            RevocationScope::ConnectorBinary,
+        ];
+        for scope in &non_critical {
+            assert!(!scope.is_critical(), "{scope:?} should not be critical");
+        }
+        for scope in &critical {
+            assert!(scope.is_critical(), "{scope:?} should be critical");
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // RevocationObject – Additional Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn revocation_object_zone_id() {
+        let revocation = test_revocation();
+        assert_eq!(*revocation.zone_id(), ZoneId::work());
+    }
+
+    #[test]
+    fn revocation_object_revokes_multiple_ids() {
+        let mut revocation = test_revocation();
+        let id1 = ObjectId::from_bytes([1u8; 32]);
+        let id2 = ObjectId::from_bytes([2u8; 32]);
+        let id3 = ObjectId::from_bytes([3u8; 32]);
+        revocation.revoked = vec![id1, id2];
+
+        assert!(revocation.revokes(&id1));
+        assert!(revocation.revokes(&id2));
+        assert!(!revocation.revokes(&id3));
+    }
+
+    #[test]
+    fn revocation_object_revokes_empty_list() {
+        let mut revocation = test_revocation();
+        revocation.revoked = vec![];
+        let id = ObjectId::from_bytes([1u8; 32]);
+        assert!(!revocation.revokes(&id));
+    }
+
+    #[test]
+    fn revocation_object_is_active_exact_effective_at() {
+        let revocation = test_revocation();
+        // At exactly effective_at: should be active
+        assert!(revocation.is_active(revocation.effective_at));
+        // One tick before: not active
+        assert!(!revocation.is_active(revocation.effective_at - 1));
+    }
+
+    #[test]
+    fn revocation_object_is_active_exact_expires_at() {
+        let mut revocation = test_revocation();
+        revocation.expires_at = Some(1_800_000_000);
+        // At exactly expires_at: NOT active (now < exp is false when now == exp)
+        assert!(!revocation.is_active(1_800_000_000));
+        // One tick before expiry: active
+        assert!(revocation.is_active(1_799_999_999));
+    }
+
+    #[test]
+    fn revocation_object_clone() {
+        let revocation = test_revocation();
+        let cloned = revocation.clone();
+        assert_eq!(cloned.scope, revocation.scope);
+        assert_eq!(cloned.reason, revocation.reason);
+        assert_eq!(cloned.effective_at, revocation.effective_at);
+        assert_eq!(cloned.expires_at, revocation.expires_at);
+        assert_eq!(cloned.revoked.len(), revocation.revoked.len());
+    }
+
+    #[test]
+    fn revocation_object_serde_roundtrip() {
+        let revocation = test_revocation();
+        let json = serde_json::to_string(&revocation).unwrap();
+        let decoded: RevocationObject = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.scope, revocation.scope);
+        assert_eq!(decoded.reason, revocation.reason);
+        assert_eq!(decoded.effective_at, revocation.effective_at);
+        assert_eq!(decoded.expires_at, revocation.expires_at);
+        assert_eq!(decoded.revoked, revocation.revoked);
+    }
+
+    #[test]
+    fn revocation_object_serde_with_expiry() {
+        let mut revocation = test_revocation();
+        revocation.expires_at = Some(1_900_000_000);
+        let json = serde_json::to_string(&revocation).unwrap();
+        assert!(json.contains("expires_at"));
+        let decoded: RevocationObject = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.expires_at, Some(1_900_000_000));
+    }
+
+    #[test]
+    fn revocation_object_serde_without_expiry_omits_field() {
+        let revocation = test_revocation();
+        assert!(revocation.expires_at.is_none());
+        let json = serde_json::to_string(&revocation).unwrap();
+        assert!(!json.contains("expires_at"));
+    }
+
+    #[test]
+    fn revocation_object_all_scopes() {
+        let scopes = [
+            RevocationScope::Capability,
+            RevocationScope::IssuerKey,
+            RevocationScope::NodeAttestation,
+            RevocationScope::ZoneKey,
+            RevocationScope::ConnectorBinary,
+        ];
+        for scope in scopes {
+            let mut rev = test_revocation();
+            rev.scope = scope;
+            let json = serde_json::to_string(&rev).unwrap();
+            let decoded: RevocationObject = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded.scope, scope);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // RevocationEvent – Additional Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    fn test_event(seq: u64, prev: Option<ObjectId>) -> RevocationEvent {
+        RevocationEvent {
+            header: test_header(),
+            revocation_object_id: ObjectId::from_bytes([1u8; 32]),
+            prev,
+            seq,
+            occurred_at: 1_700_000_000 + seq,
+            signature: [0u8; 64],
+        }
+    }
+
+    #[test]
+    fn revocation_event_zone_id() {
+        let event = test_event(1, None);
+        assert_eq!(*event.zone_id(), ZoneId::work());
+    }
+
+    #[test]
+    fn revocation_event_genesis_has_no_prev() {
+        let genesis = test_event(0, None);
+        assert!(genesis.prev.is_none());
+        assert_eq!(genesis.seq, 0);
+    }
+
+    #[test]
+    fn revocation_event_follows_requires_exact_seq_increment() {
+        let event1_id = ObjectId::from_bytes([10u8; 32]);
+        let event1 = test_event(5, None);
+        // Gap: seq 5 → seq 7 (should fail, needs seq 6)
+        let event_gap = RevocationEvent {
+            prev: Some(event1_id),
+            seq: 7,
+            ..test_event(7, Some(event1_id))
+        };
+        assert!(!event_gap.follows(&event1, &event1_id));
+    }
+
+    #[test]
+    fn revocation_event_follows_correct_seq() {
+        let event1_id = ObjectId::from_bytes([10u8; 32]);
+        let event1 = test_event(5, None);
+        let event2 = test_event(6, Some(event1_id));
+        assert!(event2.follows(&event1, &event1_id));
+    }
+
+    #[test]
+    fn revocation_event_clone() {
+        let event = test_event(42, None);
+        let cloned = event.clone();
+        assert_eq!(cloned.seq, event.seq);
+        assert_eq!(cloned.occurred_at, event.occurred_at);
+        assert_eq!(cloned.prev, event.prev);
+        assert_eq!(cloned.revocation_object_id, event.revocation_object_id);
+    }
+
+    #[test]
+    fn revocation_event_serde_roundtrip() {
+        let event = test_event(10, Some(ObjectId::from_bytes([5u8; 32])));
+        let json = serde_json::to_string(&event).unwrap();
+        let decoded: RevocationEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.seq, 10);
+        assert_eq!(decoded.prev, Some(ObjectId::from_bytes([5u8; 32])));
+    }
+
+    #[test]
+    fn revocation_event_serde_genesis_omits_prev() {
+        let genesis = test_event(0, None);
+        let json = serde_json::to_string(&genesis).unwrap();
+        assert!(!json.contains("\"prev\""));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // EpochId – Additional Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn epoch_id_equality() {
+        let a = EpochId::new("epoch-1");
+        let b = EpochId::new("epoch-1");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn epoch_id_inequality() {
+        let a = EpochId::new("epoch-1");
+        let b = EpochId::new("epoch-2");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn epoch_id_hash_consistency() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(EpochId::new("epoch-1"));
+        set.insert(EpochId::new("epoch-1"));
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn epoch_id_hash_different() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(EpochId::new("epoch-1"));
+        set.insert(EpochId::new("epoch-2"));
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn epoch_id_clone() {
+        let a = EpochId::new("epoch-1");
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn epoch_id_from_string() {
+        let s = String::from("epoch-owned");
+        let epoch = EpochId::new(s);
+        assert_eq!(epoch.as_str(), "epoch-owned");
+    }
+
+    #[test]
+    fn epoch_id_empty() {
+        let epoch = EpochId::new("");
+        assert_eq!(epoch.as_str(), "");
+        assert_eq!(epoch.to_string(), "");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // RevocationHead – Additional Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    fn test_head(seq: u64) -> RevocationHead {
+        RevocationHead {
+            header: test_header(),
+            zone_id: ZoneId::work(),
+            head_event: ObjectId::from_bytes([1u8; 32]),
+            head_seq: seq,
+            epoch_id: EpochId::new(format!("epoch-{seq}")),
+            quorum_signatures: SignatureSet::new(),
+        }
+    }
+
+    #[test]
+    fn revocation_head_age_saturating() {
+        let mut head = test_head(1);
+        head.header.created_at = 1_700_000_000;
+        // now < created_at → saturating_sub returns 0
+        assert_eq!(head.age_secs(1_699_999_000), 0);
+    }
+
+    #[test]
+    fn revocation_head_age_zero() {
+        let mut head = test_head(1);
+        head.header.created_at = 1_700_000_000;
+        assert_eq!(head.age_secs(1_700_000_000), 0);
+    }
+
+    #[test]
+    fn revocation_head_is_fresher_equal_seqs() {
+        let h1 = test_head(10);
+        let h2 = test_head(10);
+        // Equal seqs: neither is fresher
+        assert!(!h1.is_fresher_than(&h2));
+        assert!(!h2.is_fresher_than(&h1));
+    }
+
+    #[test]
+    fn revocation_head_clone() {
+        let head = test_head(42);
+        let cloned = head.clone();
+        assert_eq!(head.head_seq, 42);
+        assert_eq!(head.zone_id, ZoneId::work());
+        assert_eq!(head.epoch_id.as_str(), "epoch-42");
+        assert_eq!(cloned.head_seq, 42);
+        assert_eq!(cloned.zone_id, ZoneId::work());
+        assert_eq!(cloned.epoch_id.as_str(), "epoch-42");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // FreshnessPolicy – Additional Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn freshness_policy_default_is_strict() {
+        let policy = FreshnessPolicy::default();
+        assert_eq!(policy, FreshnessPolicy::Strict);
+    }
+
+    #[test]
+    fn freshness_policy_serde_roundtrip_all_variants() {
+        let variants = [
+            FreshnessPolicy::Strict,
+            FreshnessPolicy::Warn,
+            FreshnessPolicy::BestEffort,
+        ];
+        for policy in &variants {
+            let json = serde_json::to_string(policy).unwrap();
+            let decoded: FreshnessPolicy = serde_json::from_str(&json).unwrap();
+            assert_eq!(*policy, decoded, "roundtrip mismatch for {policy:?}");
+        }
+    }
+
+    #[test]
+    fn freshness_policy_as_str_all_variants() {
+        assert_eq!(FreshnessPolicy::Strict.as_str(), "strict");
+        assert_eq!(FreshnessPolicy::Warn.as_str(), "warn");
+        assert_eq!(FreshnessPolicy::BestEffort.as_str(), "best_effort");
+    }
+
+    #[test]
+    fn freshness_policy_copy() {
+        let a = FreshnessPolicy::Warn;
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn freshness_policy_hash_consistency() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(FreshnessPolicy::Strict);
+        set.insert(FreshnessPolicy::Strict);
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn freshness_policy_hash_all_variants_distinct() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(FreshnessPolicy::Strict);
+        set.insert(FreshnessPolicy::Warn);
+        set.insert(FreshnessPolicy::BestEffort);
+        assert_eq!(set.len(), 3);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // FreshnessFailureReason – Additional Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn freshness_failure_reason_as_str_all() {
+        assert_eq!(FreshnessFailureReason::StaleData.as_str(), "stale_data");
+        assert_eq!(
+            FreshnessFailureReason::StaleButWithinMaxAge.as_str(),
+            "stale_but_within_max_age"
+        );
+        assert_eq!(
+            FreshnessFailureReason::StaleButAllowed.as_str(),
+            "stale_but_allowed"
+        );
+    }
+
+    #[test]
+    fn freshness_failure_reason_display_all() {
+        assert_eq!(FreshnessFailureReason::StaleData.to_string(), "stale_data");
+        assert_eq!(
+            FreshnessFailureReason::StaleButWithinMaxAge.to_string(),
+            "stale_but_within_max_age"
+        );
+        assert_eq!(
+            FreshnessFailureReason::StaleButAllowed.to_string(),
+            "stale_but_allowed"
+        );
+    }
+
+    #[test]
+    fn freshness_failure_reason_serde_roundtrip_all() {
+        let variants = [
+            FreshnessFailureReason::StaleData,
+            FreshnessFailureReason::StaleButWithinMaxAge,
+            FreshnessFailureReason::StaleButAllowed,
+        ];
+        for reason in &variants {
+            let json = serde_json::to_string(reason).unwrap();
+            let decoded: FreshnessFailureReason = serde_json::from_str(&json).unwrap();
+            assert_eq!(*reason, decoded, "roundtrip mismatch for {reason:?}");
+        }
+    }
+
+    #[test]
+    fn freshness_failure_reason_equality() {
+        assert_eq!(
+            FreshnessFailureReason::StaleData,
+            FreshnessFailureReason::StaleData
+        );
+        assert_ne!(
+            FreshnessFailureReason::StaleData,
+            FreshnessFailureReason::StaleButAllowed
+        );
+    }
+
+    #[test]
+    fn freshness_failure_reason_copy() {
+        let a = FreshnessFailureReason::StaleButWithinMaxAge;
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn freshness_failure_reason_hash_consistency() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(FreshnessFailureReason::StaleData);
+        set.insert(FreshnessFailureReason::StaleData);
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn freshness_failure_reason_hash_all_distinct() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(FreshnessFailureReason::StaleData);
+        set.insert(FreshnessFailureReason::StaleButWithinMaxAge);
+        set.insert(FreshnessFailureReason::StaleButAllowed);
+        assert_eq!(set.len(), 3);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // FreshnessCheckResult – Additional Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn freshness_check_result_serde_with_reason() {
+        let result = FreshnessCheckResult {
+            allowed: false,
+            stale: true,
+            age_secs: 300,
+            reason: Some(FreshnessFailureReason::StaleData),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let decoded: FreshnessCheckResult = serde_json::from_str(&json).unwrap();
+        assert!(!decoded.allowed);
+        assert!(decoded.stale);
+        assert_eq!(decoded.age_secs, 300);
+        assert_eq!(decoded.reason, Some(FreshnessFailureReason::StaleData));
+    }
+
+    #[test]
+    fn freshness_check_result_serde_without_reason() {
+        let result = FreshnessCheckResult {
+            allowed: true,
+            stale: false,
+            age_secs: 0,
+            reason: None,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(!json.contains("reason"));
+        let decoded: FreshnessCheckResult = serde_json::from_str(&json).unwrap();
+        assert!(decoded.allowed);
+        assert!(!decoded.stale);
+        assert!(decoded.reason.is_none());
+    }
+
+    #[test]
+    fn freshness_check_result_clone() {
+        let result = FreshnessCheckResult {
+            allowed: true,
+            stale: true,
+            age_secs: 42,
+            reason: Some(FreshnessFailureReason::StaleButAllowed),
+        };
+        let cloned = result.clone();
+        assert_eq!(cloned.allowed, result.allowed);
+        assert_eq!(cloned.stale, result.stale);
+        assert_eq!(cloned.age_secs, result.age_secs);
+        assert_eq!(cloned.reason, result.reason);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // RevocationCheckResult – Additional Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn revocation_check_result_serde_revoked() {
+        let result = RevocationCheckResult {
+            is_revoked: true,
+            revocation: Some(ObjectId::from_bytes([1u8; 32])),
+            scope: Some(RevocationScope::Capability),
+            stale_data: false,
+            head_age_secs: 10,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let decoded: RevocationCheckResult = serde_json::from_str(&json).unwrap();
+        assert!(decoded.is_revoked);
+        assert!(decoded.revocation.is_some());
+        assert_eq!(decoded.scope, Some(RevocationScope::Capability));
+        assert_eq!(decoded.head_age_secs, 10);
+    }
+
+    #[test]
+    fn revocation_check_result_serde_not_revoked() {
+        let result = RevocationCheckResult {
+            is_revoked: false,
+            revocation: None,
+            scope: None,
+            stale_data: false,
+            head_age_secs: 5,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(!json.contains("revocation"));
+        assert!(!json.contains("scope"));
+        let decoded: RevocationCheckResult = serde_json::from_str(&json).unwrap();
+        assert!(!decoded.is_revoked);
+        assert!(decoded.revocation.is_none());
+        assert!(decoded.scope.is_none());
+    }
+
+    #[test]
+    fn revocation_check_result_clone() {
+        let result = RevocationCheckResult {
+            is_revoked: true,
+            revocation: Some(ObjectId::from_bytes([3u8; 32])),
+            scope: Some(RevocationScope::ZoneKey),
+            stale_data: true,
+            head_age_secs: 999,
+        };
+        let cloned = result.clone();
+        assert_eq!(cloned.is_revoked, result.is_revoked);
+        assert_eq!(cloned.revocation, result.revocation);
+        assert_eq!(cloned.scope, result.scope);
+        assert_eq!(cloned.stale_data, result.stale_data);
+        assert_eq!(cloned.head_age_secs, result.head_age_secs);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // BloomFilter – Additional Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn bloom_filter_default() {
+        let bf = BloomFilter::default();
+        assert!(!bf.might_contain(b"anything"));
+    }
+
+    #[test]
+    fn bloom_filter_insert_same_item_twice() {
+        let mut bf = BloomFilter::new(100, 0.01);
+        bf.insert(b"hello");
+        bf.insert(b"hello");
+        assert!(bf.might_contain(b"hello"));
+    }
+
+    #[test]
+    fn bloom_filter_many_items_no_false_negatives() {
+        let mut bf = BloomFilter::new(10_000, 0.01);
+        for i in 0..1000u32 {
+            bf.insert(&i.to_le_bytes());
+        }
+        for i in 0..1000u32 {
+            assert!(
+                bf.might_contain(&i.to_le_bytes()),
+                "false negative for item {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn bloom_filter_different_sizes() {
+        // Very small
+        let mut bf_small = BloomFilter::new(1, 0.5);
+        bf_small.insert(b"x");
+        assert!(bf_small.might_contain(b"x"));
+
+        // Medium
+        let mut bf_medium = BloomFilter::new(1000, 0.001);
+        bf_medium.insert(b"y");
+        assert!(bf_medium.might_contain(b"y"));
+    }
+
+    #[test]
+    fn bloom_filter_empty_item() {
+        let mut bf = BloomFilter::new(100, 0.01);
+        bf.insert(b"");
+        assert!(bf.might_contain(b""));
+    }
+
+    #[test]
+    fn bloom_filter_clear_then_reuse() {
+        let mut bf = BloomFilter::new(100, 0.01);
+        bf.insert(b"first");
+        bf.clear();
+        assert!(!bf.might_contain(b"first"));
+        bf.insert(b"second");
+        assert!(bf.might_contain(b"second"));
+        assert!(!bf.might_contain(b"first"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // RevocationRegistry – Additional Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn registry_with_capacity() {
+        let registry = RevocationRegistry::with_capacity(1000);
+        assert!(registry.is_empty());
+        assert_eq!(registry.len(), 0);
+        assert!(registry.head.is_none());
+        assert_eq!(registry.head_seq, 0);
+        assert_eq!(registry.last_updated, 0);
+    }
+
+    #[test]
+    fn registry_add_multiple_revocations() {
+        let mut registry = RevocationRegistry::new();
+
+        let mut rev1 = test_revocation();
+        rev1.revoked = vec![ObjectId::from_bytes([1u8; 32])];
+        rev1.scope = RevocationScope::Capability;
+
+        let mut rev2 = test_revocation();
+        rev2.revoked = vec![ObjectId::from_bytes([2u8; 32])];
+        rev2.scope = RevocationScope::IssuerKey;
+
+        let mut rev3 = test_revocation();
+        rev3.revoked = vec![ObjectId::from_bytes([3u8; 32])];
+        rev3.scope = RevocationScope::ZoneKey;
+
+        registry.add_revocation(&rev1);
+        registry.add_revocation(&rev2);
+        registry.add_revocation(&rev3);
+
+        assert_eq!(registry.len(), 3);
+        assert!(registry.is_revoked(&ObjectId::from_bytes([1u8; 32])));
+        assert!(registry.is_revoked(&ObjectId::from_bytes([2u8; 32])));
+        assert!(registry.is_revoked(&ObjectId::from_bytes([3u8; 32])));
+        assert!(!registry.is_revoked(&ObjectId::from_bytes([4u8; 32])));
+    }
+
+    #[test]
+    fn registry_add_revocation_with_multiple_ids() {
+        let mut registry = RevocationRegistry::new();
+        let mut revocation = test_revocation();
+        let id1 = ObjectId::from_bytes([10u8; 32]);
+        let id2 = ObjectId::from_bytes([20u8; 32]);
+        let id3 = ObjectId::from_bytes([30u8; 32]);
+        revocation.revoked = vec![id1, id2, id3];
+
+        registry.add_revocation(&revocation);
+        // Each revoked ID gets its own entry in the map
+        assert_eq!(registry.len(), 3);
+        assert!(registry.is_revoked(&id1));
+        assert!(registry.is_revoked(&id2));
+        assert!(registry.is_revoked(&id3));
+    }
+
+    #[test]
+    fn registry_len_tracking() {
+        let mut registry = RevocationRegistry::new();
+        assert_eq!(registry.len(), 0);
+
+        let mut rev = test_revocation();
+        rev.revoked = vec![ObjectId::from_bytes([1u8; 32])];
+        registry.add_revocation(&rev);
+        assert_eq!(registry.len(), 1);
+
+        let mut rev2 = test_revocation();
+        rev2.revoked = vec![ObjectId::from_bytes([2u8; 32])];
+        registry.add_revocation(&rev2);
+        assert_eq!(registry.len(), 2);
+
+        registry.clear();
+        assert_eq!(registry.len(), 0);
+    }
+
+    #[test]
+    fn registry_is_empty_transitions() {
+        let mut registry = RevocationRegistry::new();
+        assert!(registry.is_empty());
+
+        registry.add_revocation(&test_revocation());
+        assert!(!registry.is_empty());
+
+        registry.clear();
+        assert!(registry.is_empty());
+    }
+
+    #[test]
+    fn registry_is_fresh_zero_seq() {
+        let registry = RevocationRegistry::new();
+        assert!(registry.is_fresh(0)); // 0 >= 0
+        assert!(!registry.is_fresh(1)); // 0 < 1
+    }
+
+    #[test]
+    fn registry_check_freshness_all_policies_when_fresh() {
+        let mut registry = RevocationRegistry::new();
+        registry.head_seq = 100;
+        registry.last_updated = 1_700_000_000;
+        let now = 1_700_000_050;
+
+        // When fresh, all policies should allow and not be stale
+        for policy in [
+            FreshnessPolicy::Strict,
+            FreshnessPolicy::Warn,
+            FreshnessPolicy::BestEffort,
+        ] {
+            let result = registry.check_freshness(100, policy, 300, now);
+            assert!(result.allowed, "policy {policy:?} should allow when fresh");
+            assert!(
+                !result.stale,
+                "policy {policy:?} should not be stale when fresh"
+            );
+            assert!(
+                result.reason.is_none(),
+                "policy {policy:?} should have no reason when fresh"
+            );
+            assert_eq!(result.age_secs, 50);
+        }
+    }
+
+    #[test]
+    fn registry_check_freshness_warn_fresh_data() {
+        let mut registry = RevocationRegistry::new();
+        registry.head_seq = 100;
+        registry.last_updated = 1_700_000_000;
+        let now = 1_700_000_050;
+
+        let result = registry.check_freshness(100, FreshnessPolicy::Warn, 300, now);
+        assert!(result.allowed);
+        assert!(!result.stale);
+        assert!(result.reason.is_none());
+    }
+
+    #[test]
+    fn registry_check_freshness_strict_stale_reason() {
+        let mut registry = RevocationRegistry::new();
+        registry.head_seq = 50;
+        registry.last_updated = 1_700_000_000;
+
+        let result = registry.check_freshness(100, FreshnessPolicy::Strict, 300, 1_700_000_100);
+        assert!(!result.allowed);
+        assert!(result.stale);
+        assert_eq!(result.reason, Some(FreshnessFailureReason::StaleData));
+    }
+
+    #[test]
+    fn registry_check_freshness_warn_stale_beyond_max_age_reason() {
+        let mut registry = RevocationRegistry::new();
+        registry.head_seq = 50;
+        registry.last_updated = 1_700_000_000;
+
+        // now - last_updated = 500, max_age = 100 → beyond max age
+        let result = registry.check_freshness(100, FreshnessPolicy::Warn, 100, 1_700_000_500);
+        assert!(!result.allowed);
+        assert!(result.stale);
+        assert_eq!(result.reason, Some(FreshnessFailureReason::StaleData));
+    }
+
+    #[test]
+    fn registry_check_freshness_best_effort_always_allowed() {
+        let mut registry = RevocationRegistry::new();
+        registry.head_seq = 0;
+        registry.last_updated = 0;
+
+        // Extremely stale, max_age 0, but BestEffort always allows
+        let result = registry.check_freshness(u64::MAX, FreshnessPolicy::BestEffort, 0, u64::MAX);
+        assert!(result.allowed);
+        assert!(result.stale);
+    }
+
+    #[test]
+    fn registry_revocations_by_scope_all_scopes() {
+        let mut registry = RevocationRegistry::new();
+        let scopes = [
+            RevocationScope::Capability,
+            RevocationScope::IssuerKey,
+            RevocationScope::NodeAttestation,
+            RevocationScope::ZoneKey,
+            RevocationScope::ConnectorBinary,
+        ];
+        for (i, scope) in scopes.iter().enumerate() {
+            let mut rev = test_revocation();
+            rev.scope = *scope;
+            let revoked_byte = u8::try_from(i).expect("scope index fits u8") + 10;
+            rev.revoked = vec![ObjectId::from_bytes([revoked_byte; 32])];
+            registry.add_revocation(&rev);
+        }
+
+        for scope in scopes {
+            let found = registry.revocations_by_scope(scope);
+            assert_eq!(found.len(), 1, "expected 1 revocation for scope {scope:?}");
+            assert_eq!(found[0].scope, scope);
+        }
+    }
+
+    #[test]
+    fn registry_get_revocation_absent() {
+        let registry = RevocationRegistry::new();
+        let id = ObjectId::from_bytes([99u8; 32]);
+        assert!(registry.get_revocation(&id).is_none());
+    }
+
+    #[test]
+    fn registry_update_head_overwrites() {
+        let mut registry = RevocationRegistry::new();
+        let head1 = ObjectId::from_bytes([1u8; 32]);
+        let head2 = ObjectId::from_bytes([2u8; 32]);
+
+        registry.update_head(head1, 10, 100);
+        assert_eq!(registry.head_seq, 10);
+
+        registry.update_head(head2, 20, 200);
+        assert_eq!(registry.head, Some(head2));
+        assert_eq!(registry.head_seq, 20);
+        assert_eq!(registry.last_updated, 200);
+    }
+
+    #[test]
+    fn registry_clone() {
+        let mut registry = RevocationRegistry::new();
+        registry.add_revocation(&test_revocation());
+        registry.update_head(ObjectId::from_bytes([42u8; 32]), 5, 999);
+
+        let cloned = registry.clone();
+        assert_eq!(cloned.len(), registry.len());
+        assert_eq!(cloned.head_seq, registry.head_seq);
+        assert_eq!(cloned.last_updated, registry.last_updated);
+        assert_eq!(cloned.head, registry.head);
+    }
+
+    #[test]
+    fn registry_default_matches_new() {
+        let from_new = RevocationRegistry::new();
+        let from_default = RevocationRegistry::default();
+        assert!(from_new.is_empty());
+        assert!(from_default.is_empty());
+        assert_eq!(from_new.head_seq, from_default.head_seq);
+        assert_eq!(from_new.last_updated, from_default.last_updated);
+    }
 }

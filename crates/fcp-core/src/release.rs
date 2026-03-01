@@ -1139,4 +1139,688 @@ mod tests {
             .build();
         assert!(matches!(result, Err(ReleaseError::InvalidManifest { .. })));
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Additional ReleaseManifest tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn release_manifest_validation_schema_version() {
+        let mut manifest = ReleaseManifest::builder(test_connector_id(), "1.0.0")
+            .digest(test_digest())
+            .min_host_version("0.1.0")
+            .signed_by("test")
+            .signature(test_signature())
+            .build()
+            .unwrap();
+
+        manifest.schema_version = "2.0".to_string();
+        let err = manifest.validate().unwrap_err();
+        assert!(err.to_string().contains("schema_version"));
+    }
+
+    #[test]
+    fn release_manifest_digest_wrong_prefix() {
+        let result = ReleaseManifest::builder(test_connector_id(), "1.0.0")
+            .digest(format!("sha256:{}", "a".repeat(64)))
+            .min_host_version("0.1.0")
+            .signed_by("test")
+            .signature(test_signature())
+            .build();
+        assert!(matches!(result, Err(ReleaseError::InvalidManifest { .. })));
+    }
+
+    #[test]
+    fn release_manifest_digest_too_short() {
+        let result = ReleaseManifest::builder(test_connector_id(), "1.0.0")
+            .digest(format!("blake3-256:{}", "a".repeat(32)))
+            .min_host_version("0.1.0")
+            .signed_by("test")
+            .signature(test_signature())
+            .build();
+        assert!(matches!(result, Err(ReleaseError::InvalidManifest { .. })));
+    }
+
+    #[test]
+    fn release_manifest_digest_too_long() {
+        let result = ReleaseManifest::builder(test_connector_id(), "1.0.0")
+            .digest(format!("blake3-256:{}", "a".repeat(128)))
+            .min_host_version("0.1.0")
+            .signed_by("test")
+            .signature(test_signature())
+            .build();
+        assert!(matches!(result, Err(ReleaseError::InvalidManifest { .. })));
+    }
+
+    #[test]
+    fn release_manifest_digest_empty() {
+        let result = ReleaseManifest::builder(test_connector_id(), "1.0.0")
+            .digest("")
+            .min_host_version("0.1.0")
+            .signed_by("test")
+            .signature(test_signature())
+            .build();
+        assert!(matches!(result, Err(ReleaseError::InvalidManifest { .. })));
+    }
+
+    #[test]
+    fn release_manifest_digest_hex_no_prefix() {
+        let mut manifest = ReleaseManifest::builder(test_connector_id(), "1.0.0")
+            .digest(test_digest())
+            .min_host_version("0.1.0")
+            .signed_by("test")
+            .signature(test_signature())
+            .build()
+            .unwrap();
+
+        manifest.digest = "no-prefix-here".to_string();
+        assert!(manifest.digest_hex().is_none());
+    }
+
+    #[test]
+    fn release_manifest_builder_default_channel() {
+        // Builder defaults to "stable" channel
+        let manifest = ReleaseManifest::builder(test_connector_id(), "1.0.0")
+            .digest(test_digest())
+            .min_host_version("0.1.0")
+            .signed_by("test")
+            .signature(test_signature())
+            .build()
+            .unwrap();
+        assert_eq!(manifest.channel, "stable");
+    }
+
+    #[test]
+    fn release_manifest_builder_required_caps_batch() {
+        let manifest = ReleaseManifest::builder(test_connector_id(), "1.0.0")
+            .digest(test_digest())
+            .min_host_version("0.1.0")
+            .signed_by("test")
+            .required_caps(vec![
+                "net:http".to_string(),
+                "fs:read".to_string(),
+                "secret:read".to_string(),
+            ])
+            .signature(test_signature())
+            .build()
+            .unwrap();
+        assert_eq!(manifest.required_caps.len(), 3);
+        assert_eq!(manifest.required_caps[2], "secret:read");
+    }
+
+    #[test]
+    fn release_manifest_builder_add_required_cap_chaining() {
+        let manifest = ReleaseManifest::builder(test_connector_id(), "1.0.0")
+            .digest(test_digest())
+            .min_host_version("0.1.0")
+            .signed_by("test")
+            .add_required_cap("net:http")
+            .add_required_cap("fs:write")
+            .signature(test_signature())
+            .build()
+            .unwrap();
+        assert_eq!(manifest.required_caps, vec!["net:http", "fs:write"]);
+    }
+
+    #[test]
+    fn release_manifest_builder_created_at() {
+        let ts = chrono::Utc::now();
+        let manifest = ReleaseManifest::builder(test_connector_id(), "1.0.0")
+            .digest(test_digest())
+            .min_host_version("0.1.0")
+            .signed_by("test")
+            .created_at(ts)
+            .signature(test_signature())
+            .build()
+            .unwrap();
+        assert_eq!(manifest.created_at, Some(ts));
+    }
+
+    #[test]
+    fn release_manifest_created_at_none_by_default() {
+        let manifest = ReleaseManifest::builder(test_connector_id(), "1.0.0")
+            .digest(test_digest())
+            .min_host_version("0.1.0")
+            .signed_by("test")
+            .signature(test_signature())
+            .build()
+            .unwrap();
+        assert!(manifest.created_at.is_none());
+    }
+
+    #[test]
+    fn release_manifest_created_at_omitted_in_json() {
+        let manifest = ReleaseManifest::builder(test_connector_id(), "1.0.0")
+            .digest(test_digest())
+            .min_host_version("0.1.0")
+            .signed_by("test")
+            .signature(test_signature())
+            .build()
+            .unwrap();
+        let value = serde_json::to_value(&manifest).unwrap();
+        assert!(value.get("created_at").is_none());
+    }
+
+    #[test]
+    fn release_manifest_created_at_present_in_json() {
+        let manifest = ReleaseManifest::builder(test_connector_id(), "1.0.0")
+            .digest(test_digest())
+            .min_host_version("0.1.0")
+            .signed_by("test")
+            .created_at(chrono::Utc::now())
+            .signature(test_signature())
+            .build()
+            .unwrap();
+        let value = serde_json::to_value(&manifest).unwrap();
+        assert!(value.get("created_at").is_some());
+    }
+
+    #[test]
+    fn release_manifest_serde_roundtrip_with_caps_and_timestamp() {
+        let manifest = ReleaseManifest::builder(test_connector_id(), "2.5.0")
+            .digest(test_digest())
+            .channel("beta")
+            .min_host_version("1.0.0")
+            .signed_by("publisher@example.com")
+            .required_caps(vec!["net:http".to_string(), "gpu:infer".to_string()])
+            .created_at(chrono::Utc::now())
+            .signature(test_signature())
+            .build()
+            .unwrap();
+
+        let json = serde_json::to_string(&manifest).unwrap();
+        let decoded: ReleaseManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(manifest, decoded);
+    }
+
+    #[test]
+    fn release_manifest_clone() {
+        let manifest = ReleaseManifest::builder(test_connector_id(), "1.0.0")
+            .digest(test_digest())
+            .min_host_version("0.1.0")
+            .signed_by("test")
+            .signature(test_signature())
+            .build()
+            .unwrap();
+        let cloned = manifest.clone();
+        assert_eq!(manifest, cloned);
+    }
+
+    #[test]
+    fn release_manifest_format_constant() {
+        assert_eq!(RELEASE_MANIFEST_FORMAT, "fcp-release-manifest");
+        assert_eq!(RELEASE_MANIFEST_SCHEMA_VERSION, "1.0");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Additional ReleaseSignature tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn release_signature_validates_ok() {
+        let sig = test_signature();
+        assert!(sig.validate().is_ok());
+    }
+
+    #[test]
+    fn release_signature_empty_signature_data() {
+        let sig = ReleaseSignature::new("key-001", "", vec!["field1".to_string()]);
+        let err = sig.validate().unwrap_err();
+        assert!(err.to_string().contains("signature"));
+    }
+
+    #[test]
+    fn release_signature_serde_roundtrip() {
+        let sig = test_signature();
+        let json = serde_json::to_string(&sig).unwrap();
+        let decoded: ReleaseSignature = serde_json::from_str(&json).unwrap();
+        assert_eq!(sig, decoded);
+    }
+
+    #[test]
+    fn release_signature_algorithm_always_ed25519() {
+        let sig = ReleaseSignature::new("k", "s", vec!["f".to_string()]);
+        assert_eq!(sig.algorithm, "ed25519");
+    }
+
+    #[test]
+    fn release_signature_clone() {
+        let sig = test_signature();
+        let cloned = sig.clone();
+        assert_eq!(sig, cloned);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Additional RolloutPolicy tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn rollout_policy_new_equals_default() {
+        let a = RolloutPolicy::new();
+        let b = RolloutPolicy::default();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn rollout_policy_validation_schema_version() {
+        let policy = RolloutPolicy {
+            schema_version: "2.0".to_string(),
+            ..Default::default()
+        };
+        let err = policy.validate().unwrap_err();
+        assert!(err.to_string().contains("schema_version"));
+    }
+
+    #[test]
+    fn rollout_policy_canary_percent_boundary_0() {
+        let policy = RolloutPolicy {
+            canary_percent: 0,
+            ..Default::default()
+        };
+        assert!(policy.validate().is_ok());
+    }
+
+    #[test]
+    fn rollout_policy_canary_percent_boundary_100() {
+        let policy = RolloutPolicy {
+            canary_percent: 100,
+            ..Default::default()
+        };
+        assert!(policy.validate().is_ok());
+    }
+
+    #[test]
+    fn rollout_policy_canary_percent_boundary_101() {
+        let policy = RolloutPolicy {
+            canary_percent: 101,
+            ..Default::default()
+        };
+        assert!(policy.validate().is_err());
+    }
+
+    #[test]
+    fn rollout_policy_builder_defaults() {
+        let policy = RolloutPolicy::builder().build();
+        assert_eq!(policy.canary_percent, 10);
+        assert_eq!(policy.min_canary_duration_secs, 300);
+    }
+
+    #[test]
+    fn rollout_policy_builder_created_at() {
+        let ts = chrono::Utc::now();
+        let policy = RolloutPolicy::builder().created_at(ts).build();
+        assert_eq!(policy.created_at, Some(ts));
+    }
+
+    #[test]
+    fn rollout_policy_created_at_none_by_default() {
+        let policy = RolloutPolicy::default();
+        assert!(policy.created_at.is_none());
+    }
+
+    #[test]
+    fn rollout_policy_created_at_omitted_in_json() {
+        let policy = RolloutPolicy::default();
+        let value = serde_json::to_value(&policy).unwrap();
+        assert!(value.get("created_at").is_none());
+    }
+
+    #[test]
+    fn rollout_policy_threshold_consistency_equal_ok() {
+        // Equal promotion error and rollback error is valid
+        let policy = RolloutPolicy::builder()
+            .success_thresholds(SuccessThresholds::new(9500, 500, 50, 120))
+            .rollback_rules(RollbackRules::new(500, 3, 5, 30, true))
+            .build();
+        assert!(policy.validate().is_ok());
+    }
+
+    #[test]
+    fn rollout_policy_threshold_consistency_promotion_lower_ok() {
+        // Promotion error tolerance < rollback threshold is valid
+        let policy = RolloutPolicy::builder()
+            .success_thresholds(SuccessThresholds::new(9700, 300, 50, 120))
+            .rollback_rules(RollbackRules::new(500, 3, 5, 30, true))
+            .build();
+        assert!(policy.validate().is_ok());
+    }
+
+    #[test]
+    fn rollout_policy_format_constant() {
+        assert_eq!(ROLLOUT_POLICY_FORMAT, "fcp-rollout-policy");
+        assert_eq!(ROLLOUT_POLICY_SCHEMA_VERSION, "1.0");
+    }
+
+    #[test]
+    fn max_bps_constant() {
+        assert_eq!(MAX_BPS, 10_000);
+    }
+
+    #[test]
+    fn rollout_policy_clone() {
+        let policy = RolloutPolicy::default();
+        let cloned = policy.clone();
+        assert_eq!(policy, cloned);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Additional SuccessThresholds tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn success_thresholds_max_bps_boundary() {
+        let thresholds = SuccessThresholds::new(MAX_BPS, MAX_BPS, 1, 1);
+        assert!(thresholds.validate().is_ok());
+    }
+
+    #[test]
+    fn success_thresholds_max_bps_plus_one() {
+        let thresholds = SuccessThresholds::new(MAX_BPS + 1, 500, 100, 300);
+        assert!(thresholds.validate().is_err());
+    }
+
+    #[test]
+    fn success_thresholds_error_rate_overflow() {
+        let thresholds = SuccessThresholds {
+            max_error_rate_bps: MAX_BPS + 1,
+            ..Default::default()
+        };
+        assert!(thresholds.validate().is_err());
+    }
+
+    #[test]
+    fn success_thresholds_zero_bps() {
+        let thresholds = SuccessThresholds::new(0, 0, 1, 1);
+        assert!(thresholds.validate().is_ok());
+    }
+
+    #[test]
+    fn success_thresholds_rate_percent_zero() {
+        let thresholds = SuccessThresholds::new(0, 0, 1, 1);
+        assert!((thresholds.success_rate_percent()).abs() < f64::EPSILON);
+        assert!((thresholds.error_rate_percent()).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn success_thresholds_rate_percent_100() {
+        let thresholds = SuccessThresholds::new(MAX_BPS, MAX_BPS, 1, 1);
+        assert!((thresholds.success_rate_percent() - 100.0).abs() < f64::EPSILON);
+        assert!((thresholds.error_rate_percent() - 100.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn success_thresholds_serde_roundtrip() {
+        let thresholds = SuccessThresholds::new(9800, 200, 50, 120);
+        let json = serde_json::to_string(&thresholds).unwrap();
+        let decoded: SuccessThresholds = serde_json::from_str(&json).unwrap();
+        assert_eq!(thresholds, decoded);
+    }
+
+    #[test]
+    fn success_thresholds_clone() {
+        let a = SuccessThresholds::default();
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Additional RollbackRules tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn rollback_rules_max_bps_boundary() {
+        let rules = RollbackRules::new(MAX_BPS, 1, 1, 1, true);
+        assert!(rules.validate().is_ok());
+    }
+
+    #[test]
+    fn rollback_rules_max_bps_plus_one() {
+        let rules = RollbackRules::new(MAX_BPS + 1, 1, 1, 1, true);
+        assert!(rules.validate().is_err());
+    }
+
+    #[test]
+    fn rollback_rules_consecutive_failures_one_ok() {
+        let rules = RollbackRules::new(2000, 1, 10, 60, true);
+        assert!(rules.validate().is_ok());
+    }
+
+    #[test]
+    fn rollback_rules_auto_rollback_false() {
+        let rules = RollbackRules::new(2000, 5, 10, 60, false);
+        assert!(!rules.auto_rollback);
+        assert!(rules.validate().is_ok());
+    }
+
+    #[test]
+    fn rollback_rules_error_rate_percent_zero() {
+        let rules = RollbackRules::new(0, 1, 1, 1, true);
+        assert!((rules.error_rate_percent()).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn rollback_rules_error_rate_percent_100() {
+        let rules = RollbackRules::new(MAX_BPS, 1, 1, 1, true);
+        assert!((rules.error_rate_percent() - 100.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn rollback_rules_serde_roundtrip() {
+        let rules = RollbackRules::new(1500, 3, 10, 60, true);
+        let json = serde_json::to_string(&rules).unwrap();
+        let decoded: RollbackRules = serde_json::from_str(&json).unwrap();
+        assert_eq!(rules, decoded);
+    }
+
+    #[test]
+    fn rollback_rules_clone() {
+        let a = RollbackRules::default();
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Additional ReleaseError tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn release_error_invalid_manifest_display_prefix() {
+        let err = ReleaseError::InvalidManifest {
+            reason: "test".to_string(),
+        };
+        assert!(err.to_string().starts_with("invalid release manifest:"));
+    }
+
+    #[test]
+    fn release_error_invalid_policy_display_prefix() {
+        let err = ReleaseError::InvalidPolicy {
+            reason: "test".to_string(),
+        };
+        assert!(err.to_string().starts_with("invalid rollout policy:"));
+    }
+
+    #[test]
+    fn release_error_signature_failed_display_prefix() {
+        let err = ReleaseError::SignatureVerificationFailed {
+            reason: "test".to_string(),
+        };
+        assert!(
+            err.to_string()
+                .starts_with("signature verification failed:")
+        );
+    }
+
+    #[test]
+    fn release_error_not_found_display() {
+        let err = ReleaseError::NotFound {
+            connector_id: test_connector_id(),
+            version: "3.0.0".to_string(),
+        };
+        let s = err.to_string();
+        assert!(s.contains("test:release:v1"));
+        assert!(s.contains("3.0.0"));
+    }
+
+    #[test]
+    fn release_error_is_std_error() {
+        let err: Box<dyn std::error::Error> = Box::new(ReleaseError::InvalidManifest {
+            reason: "test".to_string(),
+        });
+        assert!(err.to_string().contains("test"));
+    }
+
+    #[test]
+    fn release_error_equality() {
+        let a = ReleaseError::InvalidManifest {
+            reason: "same".to_string(),
+        };
+        let b = ReleaseError::InvalidManifest {
+            reason: "same".to_string(),
+        };
+        let c = ReleaseError::InvalidManifest {
+            reason: "different".to_string(),
+        };
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn release_error_clone() {
+        let err = ReleaseError::InvalidPolicy {
+            reason: "test".to_string(),
+        };
+        let cloned = err.clone();
+        assert_eq!(err, cloned);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Builder edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn builder_required_caps_override() {
+        let manifest = ReleaseManifest::builder(test_connector_id(), "1.0.0")
+            .digest(test_digest())
+            .min_host_version("0.1.0")
+            .signed_by("test")
+            .add_required_cap("cap1")
+            .required_caps(vec!["cap2".to_string(), "cap3".to_string()])
+            .signature(test_signature())
+            .build()
+            .unwrap();
+        // required_caps() replaces the list, so cap1 is gone
+        assert_eq!(manifest.required_caps, vec!["cap2", "cap3"]);
+    }
+
+    #[test]
+    fn builder_channel_override() {
+        let manifest = ReleaseManifest::builder(test_connector_id(), "1.0.0")
+            .digest(test_digest())
+            .min_host_version("0.1.0")
+            .signed_by("test")
+            .channel("canary")
+            .channel("beta")
+            .signature(test_signature())
+            .build()
+            .unwrap();
+        assert_eq!(manifest.channel, "beta");
+    }
+
+    #[test]
+    fn builder_empty_required_caps_valid() {
+        let manifest = ReleaseManifest::builder(test_connector_id(), "1.0.0")
+            .digest(test_digest())
+            .min_host_version("0.1.0")
+            .signed_by("test")
+            .signature(test_signature())
+            .build()
+            .unwrap();
+        assert!(manifest.required_caps.is_empty());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // RolloutPolicyBuilder edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn rollout_policy_builder_all_fields() {
+        let ts = chrono::Utc::now();
+        let policy = RolloutPolicy::builder()
+            .canary_percent(25)
+            .min_canary_duration_secs(900)
+            .success_thresholds(SuccessThresholds::new(9800, 200, 200, 600))
+            .rollback_rules(RollbackRules::new(500, 10, 50, 120, false))
+            .created_at(ts)
+            .build();
+
+        assert_eq!(policy.canary_percent, 25);
+        assert_eq!(policy.min_canary_duration_secs, 900);
+        assert_eq!(policy.success_thresholds.min_success_rate_bps, 9800);
+        assert_eq!(policy.rollback_rules.max_consecutive_failures, 10);
+        assert!(!policy.rollback_rules.auto_rollback);
+        assert_eq!(policy.created_at, Some(ts));
+    }
+
+    #[test]
+    fn rollout_policy_builder_partial_overrides() {
+        let policy = RolloutPolicy::builder().canary_percent(50).build();
+        assert_eq!(policy.canary_percent, 50);
+        // Others should be defaults
+        assert_eq!(policy.min_canary_duration_secs, 300);
+        assert_eq!(
+            policy.success_thresholds.min_success_rate_bps,
+            SuccessThresholds::default().min_success_rate_bps
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Cross-type validation
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn manifest_with_all_channels() {
+        for channel in ["stable", "canary", "beta", "nightly", "dev"] {
+            let manifest = ReleaseManifest::builder(test_connector_id(), "1.0.0")
+                .digest(test_digest())
+                .channel(channel)
+                .min_host_version("0.1.0")
+                .signed_by("test")
+                .signature(test_signature())
+                .build()
+                .unwrap();
+            assert_eq!(manifest.channel, channel);
+        }
+    }
+
+    #[test]
+    fn manifest_signature_propagation() {
+        // Signature with invalid algorithm should bubble up through manifest validation
+        let mut sig = test_signature();
+        sig.algorithm = "hmac".to_string();
+        let mut manifest = ReleaseManifest::builder(test_connector_id(), "1.0.0")
+            .digest(test_digest())
+            .min_host_version("0.1.0")
+            .signed_by("test")
+            .signature(test_signature())
+            .build()
+            .unwrap();
+        manifest.signature = sig;
+        let err = manifest.validate().unwrap_err();
+        assert!(err.to_string().contains("algorithm"));
+    }
+
+    #[test]
+    fn policy_full_serde_roundtrip_with_timestamp() {
+        let policy = RolloutPolicy::builder()
+            .canary_percent(20)
+            .min_canary_duration_secs(600)
+            .success_thresholds(SuccessThresholds::new(9800, 200, 50, 120))
+            .rollback_rules(RollbackRules::new(500, 3, 10, 60, true))
+            .created_at(chrono::Utc::now())
+            .build();
+
+        let json = serde_json::to_string(&policy).unwrap();
+        let decoded: RolloutPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(policy, decoded);
+    }
 }

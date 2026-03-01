@@ -1701,4 +1701,279 @@ mod tests {
         assert!(manifest.wrapped_object_id_key_for(&node_1_id).is_some());
         assert!(manifest.wrapped_object_id_key_for(&node_2_id).is_none());
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ZoneKeyId – Additional Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn zone_key_id_hash_consistency() {
+        use std::collections::HashSet;
+        let id = ZoneKeyId::from_bytes([0x42; 8]);
+        let mut set = HashSet::new();
+        set.insert(id);
+        set.insert(id);
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn zone_key_id_equality() {
+        let a = ZoneKeyId::from_bytes([1; 8]);
+        let b = ZoneKeyId::from_bytes([1; 8]);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn zone_key_id_inequality() {
+        let a = ZoneKeyId::from_bytes([1; 8]);
+        let b = ZoneKeyId::from_bytes([2; 8]);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn zone_key_id_clone() {
+        let a = ZoneKeyId::from_bytes([0xAB; 8]);
+        #[allow(clippy::clone_on_copy)]
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn zone_key_id_copy() {
+        let a = ZoneKeyId::from_bytes([0xCD; 8]);
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn zone_key_id_as_bytes() {
+        let bytes = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+        let id = ZoneKeyId::from_bytes(bytes);
+        assert_eq!(*id.as_bytes(), bytes);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ObjectIdKeyId – Additional Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn object_id_key_id_hash_consistency() {
+        use std::collections::HashSet;
+        let id = ObjectIdKeyId::from_bytes([0x42; 8]);
+        let mut set = HashSet::new();
+        set.insert(id);
+        set.insert(id);
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn object_id_key_id_equality() {
+        let a = ObjectIdKeyId::from_bytes([3; 8]);
+        let b = ObjectIdKeyId::from_bytes([3; 8]);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn object_id_key_id_inequality() {
+        let a = ObjectIdKeyId::from_bytes([3; 8]);
+        let b = ObjectIdKeyId::from_bytes([4; 8]);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn object_id_key_id_clone() {
+        let a = ObjectIdKeyId::from_bytes([0xDE; 8]);
+        #[allow(clippy::clone_on_copy)]
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn object_id_key_id_as_bytes() {
+        let bytes = [0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80];
+        let id = ObjectIdKeyId::from_bytes(bytes);
+        assert_eq!(*id.as_bytes(), bytes);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ZoneKey – Additional Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn zone_key_equality() {
+        let a = ZoneKey::from_bytes([0x01; ZONE_KEY_LEN]);
+        let b = ZoneKey::from_bytes([0x01; ZONE_KEY_LEN]);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn zone_key_inequality() {
+        let a = ZoneKey::from_bytes([0x01; ZONE_KEY_LEN]);
+        let b = ZoneKey::from_bytes([0x02; ZONE_KEY_LEN]);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn zone_key_hash_consistency() {
+        use std::collections::HashSet;
+        let key = ZoneKey::from_bytes([0x42; ZONE_KEY_LEN]);
+        let mut set = HashSet::new();
+        set.insert(key);
+        set.insert(key);
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn zone_key_copy() {
+        let a = ZoneKey::from_bytes([0x99; ZONE_KEY_LEN]);
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn zone_key_clone() {
+        let a = ZoneKey::from_bytes([0xAA; ZONE_KEY_LEN]);
+        #[allow(clippy::clone_on_copy)]
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ZoneKeyAlgorithm – Additional Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn zone_key_algorithm_equality() {
+        assert_eq!(
+            ZoneKeyAlgorithm::ChaCha20Poly1305,
+            ZoneKeyAlgorithm::ChaCha20Poly1305
+        );
+        assert_ne!(
+            ZoneKeyAlgorithm::ChaCha20Poly1305,
+            ZoneKeyAlgorithm::XChaCha20Poly1305
+        );
+    }
+
+    #[test]
+    fn zone_key_algorithm_copy() {
+        let a = ZoneKeyAlgorithm::XChaCha20Poly1305;
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ZoneKeyError – Additional Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn zone_key_error_is_std_error() {
+        let err: Box<dyn std::error::Error> = Box::new(ZoneKeyError::InvalidKeyLength {
+            expected: 32,
+            found: 16,
+        });
+        assert!(err.to_string().contains("32"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ZoneKeyRing – Additional Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn zone_key_ring_insert_and_retrieve_object_id_key() {
+        let mut ring = ZoneKeyRing::new(ZoneId::work());
+        let key_id = ObjectIdKeyId::from_bytes([0x42; 8]);
+        let key = random_object_id_key();
+        ring.insert_object_id_key(key_id, key);
+        assert_eq!(ring.object_id_key(&key_id), Some(&key));
+        assert!(ring.set_active_object_id_key(key_id));
+        assert_eq!(ring.active_object_id_key(), Some(&key));
+    }
+
+    #[test]
+    fn zone_key_ring_clone() {
+        let mut ring = ZoneKeyRing::new(ZoneId::work());
+        let key_id = ZoneKeyId::from_bytes([0x01; 8]);
+        let key = random_zone_key();
+        ring.insert_zone_key(key_id, key);
+        ring.set_active_zone_key(key_id);
+
+        let cloned = ring.clone();
+        assert_eq!(cloned.zone_id, ring.zone_id);
+        assert_eq!(cloned.active_zone_key_id, ring.active_zone_key_id);
+        assert_eq!(cloned.zone_key(&key_id), Some(&key));
+    }
+
+    #[test]
+    fn zone_key_ring_multiple_keys() {
+        let mut ring = ZoneKeyRing::new(ZoneId::work());
+        let id1 = ZoneKeyId::from_bytes([1; 8]);
+        let id2 = ZoneKeyId::from_bytes([2; 8]);
+        let key1 = ZoneKey::from_bytes([0x11; ZONE_KEY_LEN]);
+        let key2 = ZoneKey::from_bytes([0x22; ZONE_KEY_LEN]);
+
+        ring.insert_zone_key(id1, key1);
+        ring.insert_zone_key(id2, key2);
+
+        assert_eq!(ring.zone_key(&id1), Some(&key1));
+        assert_eq!(ring.zone_key(&id2), Some(&key2));
+
+        // Switch active between them
+        assert!(ring.set_active_zone_key(id1));
+        assert_eq!(ring.active_zone_key(), Some(&key1));
+        assert!(ring.set_active_zone_key(id2));
+        assert_eq!(ring.active_zone_key(), Some(&key2));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // RekeyPolicy – Additional Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn rekey_policy_clone() {
+        let rp = RekeyPolicy {
+            epoch_ratchet: true,
+            overlap_window_secs: Some(300),
+            retain_epochs: Some(3),
+            rewrap_on_membership_change: true,
+            rotate_object_id_key_on_membership_change: true,
+        };
+        let cloned = rp.clone();
+        assert_eq!(cloned.epoch_ratchet, rp.epoch_ratchet);
+        assert_eq!(cloned.overlap_window_secs, rp.overlap_window_secs);
+        assert_eq!(cloned.retain_epochs, rp.retain_epochs);
+        assert_eq!(
+            cloned.rewrap_on_membership_change,
+            rp.rewrap_on_membership_change
+        );
+        assert_eq!(
+            cloned.rotate_object_id_key_on_membership_change,
+            rp.rotate_object_id_key_on_membership_change
+        );
+    }
+
+    #[test]
+    fn rekey_policy_all_fields_set() {
+        let rp = RekeyPolicy {
+            epoch_ratchet: true,
+            overlap_window_secs: Some(600),
+            retain_epochs: Some(10),
+            rewrap_on_membership_change: true,
+            rotate_object_id_key_on_membership_change: true,
+        };
+        let json = serde_json::to_string(&rp).unwrap();
+        assert!(json.contains("epoch_ratchet"));
+        assert!(json.contains("overlap_window_secs"));
+        assert!(json.contains("retain_epochs"));
+        assert!(json.contains("rewrap_on_membership_change"));
+        assert!(json.contains("rotate_object_id_key_on_membership_change"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ZONE_KEY_LEN constant
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn zone_key_len_is_32() {
+        assert_eq!(ZONE_KEY_LEN, 32);
+    }
 }

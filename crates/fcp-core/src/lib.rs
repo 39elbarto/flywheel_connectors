@@ -34,6 +34,7 @@ mod ratelimit;
 mod release;
 mod revocation;
 mod secret;
+mod supply_chain;
 mod telemetry;
 pub mod util;
 mod zone_keys;
@@ -63,6 +64,7 @@ pub use ratelimit::*;
 pub use release::*;
 pub use revocation::*;
 pub use secret::*;
+pub use supply_chain::*;
 pub use telemetry::*;
 pub use zone_keys::*;
 

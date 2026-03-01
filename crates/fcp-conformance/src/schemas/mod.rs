@@ -50,6 +50,11 @@ pub const ROLLOUT_POLICY_V1_SCHEMA: &str = include_str!("RolloutPolicy_v1.schema
 pub const TRACE_V1_SCHEMA: &str = include_str!("Trace_v1.schema.json");
 /// The `CapabilityUsage` JSON schema (v1).
 pub const CAPABILITY_USAGE_V1_SCHEMA: &str = include_str!("CapabilityUsage_v1.schema.json");
+/// The `SupplyChainAttestation` JSON schema (v1).
+pub const SUPPLY_CHAIN_ATTESTATION_V1_SCHEMA: &str =
+    include_str!("SupplyChainAttestation_v1.schema.json");
+/// The `SBOM` JSON schema (v1).
+pub const SBOM_V1_SCHEMA: &str = include_str!("Sbom_v1.schema.json");
 /// The ASUPERSYNC step-level forensics JSON schema (v1).
 pub const ASUPERSYNC_FORENSICS_V1_SCHEMA: &str =
     include_str!("Asupersync_Forensics_v1.schema.json");
@@ -647,6 +652,30 @@ pub fn validate_trace(value: &Value) -> Result<(), SchemaValidationError> {
 /// Returns `SchemaValidationError` if validation fails.
 pub fn validate_capability_usage(value: &Value) -> Result<(), SchemaValidationError> {
     let validator = compile_schema(CAPABILITY_USAGE_V1_SCHEMA)?;
+    validator
+        .validate(value)
+        .map_err(|err| SchemaValidationError::new(err.to_string()))
+}
+
+/// Validate a `SupplyChainAttestation` JSON document against the v1 schema.
+///
+/// # Errors
+///
+/// Returns `SchemaValidationError` if validation fails.
+pub fn validate_supply_chain_attestation(value: &Value) -> Result<(), SchemaValidationError> {
+    let validator = compile_schema(SUPPLY_CHAIN_ATTESTATION_V1_SCHEMA)?;
+    validator
+        .validate(value)
+        .map_err(|err| SchemaValidationError::new(err.to_string()))
+}
+
+/// Validate an `SBOM` JSON document against the v1 schema.
+///
+/// # Errors
+///
+/// Returns `SchemaValidationError` if validation fails.
+pub fn validate_sbom(value: &Value) -> Result<(), SchemaValidationError> {
+    let validator = compile_schema(SBOM_V1_SCHEMA)?;
     validator
         .validate(value)
         .map_err(|err| SchemaValidationError::new(err.to_string()))

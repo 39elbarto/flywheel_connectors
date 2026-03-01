@@ -8,7 +8,7 @@
 use super::{
     ASUPERSYNC_FORENSICS_V1_SCHEMA, CAPABILITY_USAGE_V1_SCHEMA, E2E_LOG_V1_SCHEMA,
     E2E_LOG_V2_SCHEMA, FZPF_V01_SCHEMA, RELEASE_MANIFEST_V1_SCHEMA, ROLLOUT_POLICY_V1_SCHEMA,
-    TRACE_V1_SCHEMA,
+    SBOM_V1_SCHEMA, SUPPLY_CHAIN_ATTESTATION_V1_SCHEMA, TRACE_V1_SCHEMA,
 };
 use fcp_cbor::to_canonical_cbor;
 use fcp_core::ObjectId;
@@ -264,6 +264,18 @@ fn load_capability_usage_schema() -> Validator {
     Validator::new(&schema).expect("CapabilityUsage schema should be a valid JSON Schema")
 }
 
+fn load_supply_chain_attestation_schema() -> Validator {
+    let schema: Value = serde_json::from_str(SUPPLY_CHAIN_ATTESTATION_V1_SCHEMA)
+        .expect("SupplyChainAttestation schema should be valid JSON");
+    Validator::new(&schema).expect("SupplyChainAttestation schema should be a valid JSON Schema")
+}
+
+fn load_sbom_schema() -> Validator {
+    let schema: Value =
+        serde_json::from_str(SBOM_V1_SCHEMA).expect("SBOM schema should be valid JSON");
+    Validator::new(&schema).expect("SBOM schema should be a valid JSON Schema")
+}
+
 fn sample_release_manifest() -> Value {
     serde_json::from_str(examples::RELEASE_MANIFEST).expect("sample release manifest should parse")
 }
@@ -323,6 +335,118 @@ fn sample_capability_usage() -> Value {
         }"#,
     )
     .expect("sample capability usage should parse")
+}
+
+fn sample_supply_chain_attestation() -> Value {
+    serde_json::from_str(
+        r#"{
+            "format": "fcp-supply-chain-attestation",
+            "schema_version": "1.0",
+            "subject_digest": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "predicate_type": "https://slsa.dev/provenance/v1",
+            "builder_id": "builder://github/actions",
+            "build_type": "https://slsa.dev/container-based-build/v1",
+            "materials": [
+                {
+                    "uri": "git+https://github.com/flywheel/connectors@refs/heads/main",
+                    "digest": "blake3-256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                }
+            ],
+            "metadata": {
+                "build_started_at": "2026-02-01T12:00:00Z",
+                "build_finished_at": "2026-02-01T12:05:00Z",
+                "invocation_id": "gh-run-42"
+            },
+            "slsa_level": 3,
+            "provenance_hash": "blake3-256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "trust_root": {
+                "root_type": "sigstore",
+                "root_id": "sigstore-public-good"
+            },
+            "builder_allowlist": ["builder://github/actions"],
+            "signature": {
+                "algorithm": "ed25519",
+                "key_id": "owner-key-1",
+                "signature": "deadbeef",
+                "signed_fields": [
+                    "format",
+                    "schema_version",
+                    "subject_digest",
+                    "predicate_type",
+                    "builder_id",
+                    "build_type",
+                    "materials",
+                    "metadata",
+                    "slsa_level",
+                    "provenance_hash",
+                    "trust_root",
+                    "builder_allowlist"
+                ]
+            }
+        }"#,
+    )
+    .expect("sample supply-chain attestation should parse")
+}
+
+fn sample_sbom() -> Value {
+    serde_json::from_str(
+        r#"{
+            "format": "fcp-sbom",
+            "schema_version": "1.0",
+            "bom_format": "cyclonedx",
+            "bom_version": "1.6",
+            "tool_chain": ["cargo 1.86.0-nightly", "fcp-cli package"],
+            "components": [
+                {
+                    "component_id": "connector-root",
+                    "name": "fcp-connector-openai",
+                    "version": "1.2.3",
+                    "hashes": [
+                        "blake3-256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                        "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+                    ],
+                    "licenses": ["Apache-2.0"]
+                },
+                {
+                    "component_id": "dep-serde",
+                    "name": "serde",
+                    "version": "1.0.210",
+                    "hashes": ["sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"],
+                    "licenses": ["MIT", "Apache-2.0"]
+                }
+            ],
+            "dependencies": [
+                {
+                    "component_id": "connector-root",
+                    "depends_on": ["dep-serde"]
+                },
+                {
+                    "component_id": "dep-serde",
+                    "depends_on": []
+                }
+            ],
+            "trust_root": {
+                "root_type": "sigstore",
+                "root_id": "sigstore-public-good"
+            },
+            "signature": {
+                "algorithm": "ed25519",
+                "key_id": "owner-key-1",
+                "signature": "cafebabe",
+                "signed_fields": [
+                    "format",
+                    "schema_version",
+                    "bom_format",
+                    "bom_version",
+                    "tool_chain",
+                    "components",
+                    "dependencies",
+                    "trust_root"
+                ]
+            }
+        }"#,
+    )
+    .expect("sample sbom should parse")
 }
 
 const TRACE_CBOR_HEX: &str = "a766666f726d6174696663702d747261636567656e747269657381aa62747374323032362d30322d30315431323a30303a30315a646b696e6470726f7574696e675f6465636973696f6e677061796c6f6164687265646163746564677a6f6e655f6964667a3a776f726b686465636973696f6e65616c6c6f7769636f6d706f6e656e746b6d6573682e726f7574657269646972656374696f6e68696e7465726e616c69726564616374696f6ea2666669656c647381677061796c6f6164676170706c696564f56b726561736f6e5f636f64656c726f7574652e6469726563746c7061796c6f61645f68617368784b626c616b65332d3235363a61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161676e6f64655f6964666e6f64652d316874726163655f6964782034626639326633353737623334646136613363653932396430653065343733366b63617074757265645f617474323032362d30322d30315431323a30303a30305a6e736368656d615f76657273696f6e63312e3070726564616374696f6e5f706f6c696379a3666669656c647381677061796c6f6164676170706c696564f56e706f6c6963795f76657273696f6e63312e30";
@@ -1591,4 +1715,75 @@ fn reject_rollout_policy_out_of_range_canary() {
         validator.validate(&doc).is_err(),
         "canary percent above 100 should be rejected"
     );
+}
+
+// ============================================================================
+// Supply-Chain Attestation Schema Validation
+// ============================================================================
+
+#[test]
+fn valid_supply_chain_attestation_document() {
+    let validator = load_supply_chain_attestation_schema();
+    let doc = sample_supply_chain_attestation();
+    assert!(
+        validator.validate(&doc).is_ok(),
+        "supply-chain attestation should validate"
+    );
+}
+
+#[test]
+fn reject_supply_chain_attestation_with_unknown_predicate() {
+    let validator = load_supply_chain_attestation_schema();
+    let mut doc = sample_supply_chain_attestation();
+    doc["predicate_type"] = serde_json::json!("https://example.invalid/predicate");
+    assert!(
+        validator.validate(&doc).is_err(),
+        "unknown predicate type should be rejected"
+    );
+}
+
+#[test]
+fn supply_chain_attestation_cbor_is_deterministic() {
+    let doc = sample_supply_chain_attestation();
+    let bytes1 = to_canonical_cbor(&doc).expect("canonical CBOR should serialize");
+    let bytes2 = to_canonical_cbor(&doc).expect("canonical CBOR should serialize");
+    assert_eq!(bytes1, bytes2, "canonical CBOR must be deterministic");
+
+    let hash1 = ObjectId::from_unscoped_bytes(&bytes1);
+    let hash2 = ObjectId::from_unscoped_bytes(&bytes2);
+    assert_eq!(hash1, hash2, "hashes must match for identical CBOR");
+}
+
+// ============================================================================
+// SBOM Schema Validation
+// ============================================================================
+
+#[test]
+fn valid_sbom_document() {
+    let validator = load_sbom_schema();
+    let doc = sample_sbom();
+    assert!(validator.validate(&doc).is_ok(), "sbom should validate");
+}
+
+#[test]
+fn reject_sbom_component_with_invalid_hash_prefix() {
+    let validator = load_sbom_schema();
+    let mut doc = sample_sbom();
+    doc["components"][0]["hashes"][0] = serde_json::json!("sha1:deadbeef");
+    assert!(
+        validator.validate(&doc).is_err(),
+        "unsupported hash prefix should be rejected"
+    );
+}
+
+#[test]
+fn sbom_cbor_is_deterministic() {
+    let doc = sample_sbom();
+    let bytes1 = to_canonical_cbor(&doc).expect("canonical CBOR should serialize");
+    let bytes2 = to_canonical_cbor(&doc).expect("canonical CBOR should serialize");
+    assert_eq!(bytes1, bytes2, "canonical CBOR must be deterministic");
+
+    let hash1 = ObjectId::from_unscoped_bytes(&bytes1);
+    let hash2 = ObjectId::from_unscoped_bytes(&bytes2);
+    assert_eq!(hash1, hash2, "hashes must match for identical CBOR");
 }

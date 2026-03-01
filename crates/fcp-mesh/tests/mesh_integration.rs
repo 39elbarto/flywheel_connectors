@@ -12,6 +12,9 @@
 // Test code - allow some clippy lints for clarity over micro-optimization
 #![allow(clippy::redundant_clone)]
 #![allow(clippy::unreadable_literal)]
+#![allow(clippy::too_many_lines)]
+#![allow(clippy::cast_sign_loss)]
+#![allow(clippy::cast_possible_truncation)]
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};

@@ -390,7 +390,9 @@ fn test_canary_connector_permissive_profile() {
 #[cfg(target_os = "linux")]
 mod linux_apply_integration {
     use super::*;
+    use std::net::Shutdown;
     use std::os::unix::process::ExitStatusExt;
+    use std::process::Command;
 
     const CHILD_ENV: &str = "FCP_SANDBOX_CHILD";
 

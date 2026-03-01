@@ -29,4 +29,5 @@ fcp-tailscale = { path = "../fcp-tailscale" }
 chrono.workspace = true
 fcp-testkit = { path = "../fcp-testkit" }
 rand.workspace = true
+rand_chacha = "0.3"
 serde_json.workspace = true

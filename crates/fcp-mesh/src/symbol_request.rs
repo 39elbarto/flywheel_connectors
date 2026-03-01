@@ -735,6 +735,7 @@ mod tests {
     use fcp_cbor::SchemaId;
     use fcp_core::{ObjectHeader, Provenance};
     use fcp_protocol::SymbolAckReason;
+    use proptest::prelude::*;
     use semver::Version;
 
     fn test_zone_id() -> ZoneId {
@@ -1247,6 +1248,102 @@ mod tests {
         let validated = result.unwrap();
         // Should be bounded to the request's max, not the policy's max
         assert_eq!(validated.max_response_symbols, 50);
+    }
+
+    proptest! {
+        #[test]
+        fn unauthenticated_requests_enforce_normative_cap(
+            requested in 1u32..(DEFAULT_MAX_SYMBOLS_UNAUTHENTICATED + 129)
+        ) {
+            let handler = SymbolRequestHandler::with_default_policy();
+            let mut policy = crate::admission::AdmissionPolicy::default();
+            policy.require_authenticated_requests = false;
+            let mut admission = AdmissionController::new(policy);
+            let peer = NodeId::new("peer-prop-unauth");
+            let request = test_symbol_request(requested, None);
+
+            let result = handler.validate_request(&request, false, &mut admission, &peer, 0, 64);
+
+            if requested > DEFAULT_MAX_SYMBOLS_UNAUTHENTICATED {
+                match result {
+                    Err(SymbolRequestError::BoundsExceeded { .. }) => {}
+                    other => prop_assert!(
+                        false,
+                        "expected bounds rejection for unauthenticated request, got: {:?}",
+                        other
+                    ),
+                }
+            } else {
+                prop_assert!(result.is_ok());
+                let validated = result.expect("validated request");
+                prop_assert_eq!(validated.max_response_symbols, requested);
+            }
+        }
+
+        #[test]
+        fn response_builder_never_exceeds_effective_limit(
+            available_len in 0u32..256,
+            request_max in 1u32..128,
+            builder_max in 1u32..128,
+            already_sent_len in 0usize..64
+        ) {
+            let mut engine = TargetedRepairEngine::new();
+            let object_id = ObjectId::from_bytes([0x33; 32]);
+            let zone_id = test_zone_id();
+            engine.register_available(object_id.clone(), 0..available_len);
+
+            let request = ValidatedRequest {
+                request: test_symbol_request(request_max, None),
+                is_authenticated: true,
+                max_response_symbols: request_max,
+                has_proof_of_need: false,
+            };
+
+            let already_sent_max = u32::try_from(already_sent_len).expect("already_sent_len fits u32");
+            let already_sent: HashSet<u32> = (0..already_sent_max).collect();
+
+            let response = SymbolResponseBuilder::new(
+                object_id,
+                zone_id,
+                ZoneKeyId::from_bytes([0x44; 8]),
+                builder_max,
+            )
+            .add_from_repair_engine(&engine, &request, &already_sent)
+            .build(available_len, already_sent.len());
+
+            let effective_limit = builder_max.min(request_max.saturating_add(1));
+            prop_assert!(response.symbol_count() <= effective_limit);
+        }
+
+        #[test]
+        fn targeted_repair_never_resends_already_sent_symbols(
+            hinted in proptest::collection::vec(0u32..512, 0..128),
+            already_sent in proptest::collection::vec(0u32..512, 0..128),
+            request_max in 1u32..128
+        ) {
+            let mut engine = TargetedRepairEngine::new();
+            let object_id = ObjectId::from_bytes([0x55; 32]);
+            engine.register_available(object_id.clone(), 0..512);
+
+            let bounded_hint: Vec<u32> = hinted
+                .into_iter()
+                .take(request_max as usize)
+                .collect();
+            let request = ValidatedRequest {
+                request: test_symbol_request(request_max, Some(bounded_hint)),
+                is_authenticated: true,
+                max_response_symbols: request_max,
+                has_proof_of_need: true,
+            };
+            let already_sent_set: HashSet<u32> = already_sent.into_iter().collect();
+
+            let selected = engine.select_symbols(&request, &already_sent_set);
+
+            prop_assert!(selected
+                .iter()
+                .all(|esi| !already_sent_set.contains(esi)));
+            prop_assert!(selected.len() <= request_max as usize + 1);
+        }
     }
 
     #[test]

@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use tracing::Span;
 use uuid::Uuid;
 
-fcp_async_core::task_local! {
+tokio::task_local! {
     static CONTEXT: Arc<TelemetryContext>;
 }
 

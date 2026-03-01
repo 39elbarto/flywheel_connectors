@@ -1,6 +1,6 @@
 {
   "schema_version": "asupersync-e2e-scenario-registry/v1",
-  "registry_version": 2,
+  "registry_version": 14,
   "program_epic": "flywheel_connectors-235t",
   "owner_bead": "flywheel_connectors-235t.26.6.1",
   "governance_rules": {
@@ -407,6 +407,206 @@
       "contract_id": "contract.request_timeout_chain_bounded_failure",
       "archetype": "request_response",
       "failure_class": "timeout_chain_cascade",
+      "user_impact_category": "availability"
+    },
+    {
+      "key": "raptorq_partial_symbol_recovery",
+      "scenario_id": "asupersync.e2e.raptorq_partial_symbol_recovery",
+      "script": "scripts/e2e/raptorq_partial_symbol_recovery.sh",
+      "required": true,
+      "contract_id": "contract.raptorq_partial_loss_repair_convergence",
+      "archetype": "queue_pubsub",
+      "failure_class": "symbol_loss_repair_convergence",
+      "user_impact_category": "availability"
+    },
+    {
+      "key": "raptorq_adversarial_decode_stress",
+      "scenario_id": "asupersync.e2e.raptorq_adversarial_decode_stress",
+      "script": "scripts/e2e/raptorq_adversarial_decode_stress.sh",
+      "required": true,
+      "contract_id": "contract.raptorq_adversarial_decode_budget_bounds",
+      "archetype": "queue_pubsub",
+      "failure_class": "adversarial_decode_budget_exhaustion",
+      "user_impact_category": "security"
+    },
+    {
+      "key": "raptorq_multinode_repair_convergence",
+      "scenario_id": "asupersync.e2e.raptorq_multinode_repair_convergence",
+      "script": "scripts/e2e/raptorq_multinode_repair_convergence.sh",
+      "required": true,
+      "contract_id": "contract.raptorq_multinode_placement_repair",
+      "archetype": "queue_pubsub",
+      "failure_class": "multinode_repair_divergence",
+      "user_impact_category": "availability"
+    },
+    {
+      "key": "raptorq_degraded_network_recovery",
+      "scenario_id": "asupersync.e2e.raptorq_degraded_network_recovery",
+      "script": "scripts/e2e/raptorq_degraded_network_recovery.sh",
+      "required": true,
+      "contract_id": "contract.raptorq_degraded_network_graceful_recovery",
+      "archetype": "queue_pubsub",
+      "failure_class": "degraded_network_symbol_recovery",
+      "user_impact_category": "availability"
+    },
+    {
+      "key": "database_connection_pool_exhaustion",
+      "scenario_id": "asupersync.e2e.database_connection_pool_exhaustion",
+      "script": "scripts/e2e/database_connection_pool_exhaustion.sh",
+      "required": true,
+      "contract_id": "contract.database_connection_pool_bounded_recovery",
+      "archetype": "database",
+      "failure_class": "connection_pool_exhaustion",
+      "user_impact_category": "availability"
+    },
+    {
+      "key": "file_blob_partial_upload_recovery",
+      "scenario_id": "asupersync.e2e.file_blob_partial_upload_recovery",
+      "script": "scripts/e2e/file_blob_partial_upload_recovery.sh",
+      "required": true,
+      "contract_id": "contract.file_blob_partial_upload_bounded_recovery",
+      "archetype": "file_blob",
+      "failure_class": "partial_upload_data_corruption",
+      "user_impact_category": "correctness"
+    },
+    {
+      "key": "browser_session_crash_recovery",
+      "scenario_id": "asupersync.e2e.browser_session_crash_recovery",
+      "script": "scripts/e2e/browser_session_crash_recovery.sh",
+      "required": true,
+      "contract_id": "contract.browser_session_crash_bounded_recovery",
+      "archetype": "browser",
+      "failure_class": "session_crash_resource_leak",
+      "user_impact_category": "availability"
+    },
+    {
+      "key": "cross_component_revalidation",
+      "scenario_id": "asupersync.e2e.cross_component_revalidation",
+      "script": "scripts/e2e/e2e_cross_component_revalidation.sh",
+      "required": true,
+      "contract_id": "contract.cross_component_behavioral_parity",
+      "archetype": "cli_process",
+      "failure_class": "cross_component_regression",
+      "user_impact_category": "correctness"
+    },
+    {
+      "key": "fuzz_adversarial_revalidation",
+      "scenario_id": "asupersync.e2e.fuzz_adversarial_revalidation",
+      "script": "scripts/e2e/e2e_fuzz_adversarial_revalidation.sh",
+      "required": true,
+      "contract_id": "contract.fuzz_adversarial_boundary_robustness",
+      "archetype": "cli_process",
+      "failure_class": "fuzz_adversarial_regression",
+      "user_impact_category": "security"
+    },
+    {
+      "key": "unified_validation_report",
+      "scenario_id": "asupersync.e2e.unified_validation_report",
+      "script": "scripts/e2e/e2e_unified_validation_report.sh",
+      "required": true,
+      "contract_id": "contract.unified_release_gate_artifact",
+      "archetype": "cli_process",
+      "failure_class": "release_gate_validation_failure",
+      "user_impact_category": "correctness"
+    },
+    {
+      "key": "recovery_guidance_validation",
+      "scenario_id": "asupersync.e2e.recovery_guidance_validation",
+      "script": "scripts/e2e/e2e_recovery_guidance_validation.sh",
+      "required": true,
+      "contract_id": "contract.recovery_guidance_user_journey",
+      "archetype": "cli_process",
+      "failure_class": "recovery_guidance_regression",
+      "user_impact_category": "correctness"
+    },
+    {
+      "key": "failure_journey_forensic_bundle",
+      "scenario_id": "asupersync.e2e.failure_journey_forensic_bundle",
+      "script": "scripts/e2e/e2e_failure_journey_forensic_bundle.sh",
+      "required": true,
+      "contract_id": "contract.failure_journey_forensic_evidence_bundle",
+      "archetype": "cli_process",
+      "failure_class": "failure_journey_semantics_drift",
+      "user_impact_category": "correctness"
+    },
+    {
+      "key": "reliability_soak_adversarial_load",
+      "scenario_id": "asupersync.e2e.reliability_soak_adversarial_load",
+      "script": "scripts/e2e/e2e_reliability_soak_adversarial_load.sh",
+      "required": true,
+      "contract_id": "contract.reliability_soak_adversarial_load_stability",
+      "archetype": "cli_process",
+      "failure_class": "reliability_soak_regression",
+      "user_impact_category": "performance"
+    },
+    {
+      "key": "runtime_tuning_calibration",
+      "scenario_id": "asupersync.e2e.runtime_tuning_calibration",
+      "script": "scripts/e2e/e2e_runtime_tuning_calibration.sh",
+      "required": true,
+      "contract_id": "contract.runtime_tuning_risk_bounded_calibration",
+      "archetype": "cli_process",
+      "failure_class": "tuning_regression_tail_risk",
+      "user_impact_category": "performance"
+    },
+    {
+      "key": "performance_reliability_gate",
+      "scenario_id": "asupersync.e2e.performance_reliability_gate",
+      "script": "scripts/e2e/e2e_performance_reliability_gate.sh",
+      "required": true,
+      "contract_id": "contract.performance_reliability_gate_config_freeze",
+      "archetype": "cli_process",
+      "failure_class": "gate_verdict_regression",
+      "user_impact_category": "performance"
+    },
+    {
+      "key": "canary_scenario_matrix",
+      "scenario_id": "asupersync.e2e.canary_scenario_matrix",
+      "script": "scripts/e2e/e2e_canary_scenario_matrix.sh",
+      "required": true,
+      "contract_id": "contract.canary_scenario_matrix_abort_thresholds",
+      "archetype": "cli_process",
+      "failure_class": "canary_abort_threshold_regression",
+      "user_impact_category": "availability"
+    },
+    {
+      "key": "rollback_drill_consistency",
+      "scenario_id": "asupersync.e2e.rollback_drill_consistency",
+      "script": "scripts/e2e/e2e_rollback_drill_consistency.sh",
+      "required": true,
+      "contract_id": "contract.rollback_drill_state_consistency",
+      "archetype": "cli_process",
+      "failure_class": "rollback_state_invariant_violation",
+      "user_impact_category": "availability"
+    },
+    {
+      "key": "rehearsal_automation",
+      "scenario_id": "asupersync.e2e.rehearsal_automation",
+      "script": "scripts/e2e/e2e_rehearsal_automation.sh",
+      "required": true,
+      "contract_id": "contract.rehearsal_automation_artifact_log_enforcement",
+      "archetype": "cli_process",
+      "failure_class": "rehearsal_artifact_enforcement_failure",
+      "user_impact_category": "availability"
+    },
+    {
+      "key": "go_nogo_decision_gate",
+      "scenario_id": "asupersync.e2e.go_nogo_decision_gate",
+      "script": "scripts/e2e/e2e_go_nogo_decision_gate.sh",
+      "required": true,
+      "contract_id": "contract.go_nogo_decision_gate_operator_runbook",
+      "archetype": "cli_process",
+      "failure_class": "go_nogo_decision_blocker",
+      "user_impact_category": "availability"
+    },
+    {
+      "key": "final_cutover_gate",
+      "scenario_id": "asupersync.e2e.final_cutover_gate",
+      "script": "scripts/e2e/e2e_final_cutover_gate.sh",
+      "required": true,
+      "contract_id": "contract.final_cutover_tokio_removal_policy_lock",
+      "archetype": "cli_process",
+      "failure_class": "cutover_compliance_blocker",
       "user_impact_category": "availability"
     }
   ]

@@ -22,7 +22,8 @@ replay-manifest integrity, and actionable failure taxonomy diagnostics.
 
 Options:
   --mode <mode>         Bundle mode:
-                        validation-pack | performance-pack | e2e-matrix | unit-gate | integration-gate
+                        validation-pack | performance-pack | e2e-matrix | unit-gate |
+                        integration-gate | coverage-gate | quality-gate | suite
   --root <path>         Bundle root directory to validate
   --run-id <id>         Expected run identifier (optional; auto-discovered from summary/manifest)
   --report <path>       Output report JSON path (default: <root>/forensics_validator_report.json)
@@ -301,6 +302,39 @@ validate_steps_jsonl() {
   done < "${abs}"
 }
 
+validate_suite_steps_jsonl() {
+  local rel="$1"
+  local abs="${ROOT}/${rel}"
+  local line_no=0
+  local line
+
+  if ! require_file "${rel}" "forensics.suite_steps.file"; then
+    return 1
+  fi
+
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    line_no=$((line_no + 1))
+    if [[ -z "${line//[[:space:]]/}" ]]; then
+      continue
+    fi
+    if ! jq -e . >/dev/null 2>&1 <<< "${line}"; then
+      add_issue "forensics.suite_steps.json" "error" "invalid JSON line in suite steps file" "${rel}" "${line_no}"
+      continue
+    fi
+    # Suite-level steps: must have schema_version, run_id, phase, status
+    if ! jq -e '
+      type == "object"
+      and (.schema_version | type == "string" and length > 0)
+      and (.run_id | type == "string" and length > 0)
+      and (.phase | type == "string" and length > 0)
+      and (.status | type == "string" and length > 0)
+    ' <<< "${line}" >/dev/null 2>&1; then
+      # Fall back to forensics/v1 check
+      validate_forensics_step_line "${line}" "${rel}" "${line_no}"
+    fi
+  done < "${abs}"
+}
+
 validate_results_jsonl() {
   local rel="$1"
   local abs="${ROOT}/${rel}"
@@ -492,6 +526,97 @@ validate_integration_drift() {
   fi
 }
 
+validate_performance_normalized_summary() {
+  local rel="$1"
+  local abs="${ROOT}/${rel}"
+  if ! validate_json_file "${rel}" "forensics.performance.normalized_summary"; then
+    return 1
+  fi
+  if ! jq -e '
+    type == "object"
+    and (.run_id | type == "string" and length > 0)
+    and (.phase | type == "string")
+    and (.record_count | type == "number" and . >= 0)
+    and (.metric_names | type == "array")
+    and (.missing_required_metrics | type == "array")
+    and (.metrics | type == "array")
+    and (.classification | IN("accept", "requires_followup"))
+    and (.classification_reason_codes | type == "array")
+  ' "${abs}" >/dev/null 2>&1; then
+    add_issue "forensics.performance.normalized_summary.schema" "error" "normalized summary is missing required fields or has invalid classification values" "${rel}"
+  fi
+}
+
+validate_performance_delta_summary() {
+  local rel="$1"
+  local abs="${ROOT}/${rel}"
+  if ! validate_json_file "${rel}" "forensics.performance.delta_summary"; then
+    return 1
+  fi
+  if ! jq -e '
+    type == "object"
+    and (.phase | type == "string")
+    and (.status | type == "string")
+    and (.thresholds_pct | type == "object")
+    and (.classification | IN("accept", "reject", "requires_followup"))
+    and (.classification_reasons | type == "array")
+    and (.metrics | type == "array")
+  ' "${abs}" >/dev/null 2>&1; then
+    add_issue "forensics.performance.delta_summary.schema" "error" "delta summary is missing required fields or has invalid classification values" "${rel}"
+  fi
+}
+
+validate_performance_manifest_contract() {
+  local rel="$1"
+  local abs="${ROOT}/${rel}"
+  if ! validate_json_file "${rel}" "forensics.performance.manifest.contract"; then
+    return 1
+  fi
+  if ! jq -e '
+    type == "object"
+    and (.run_id | type == "string" and length > 0)
+    and (.phase | type == "string")
+    and (.run_classification | IN("accept", "reject", "requires_followup"))
+    and (.decision | type == "object")
+    and (.decision.classification | IN("accept", "reject", "requires_followup"))
+    and (.decision.reasons | type == "array")
+    and (.command_set | type == "array")
+    and (.scenario_ids | type == "array")
+    and (.environment_fingerprint | type == "object")
+    and (.environment_fingerprint.rustc | type == "string")
+    and (.environment_fingerprint.cargo | type == "string")
+    and (.environment_fingerprint.rch | type == "string")
+    and (.environment_fingerprint.jq | type == "string")
+    and (.environment_fingerprint.os | type == "string")
+    and (.decision_thresholds_pct | type == "object")
+  ' "${abs}" >/dev/null 2>&1; then
+    add_issue "forensics.performance.manifest.contract" "error" "manifest missing decision/command/environment contract fields" "${rel}"
+  fi
+}
+
+validate_performance_summary_contract() {
+  local rel="$1"
+  local abs="${ROOT}/${rel}"
+  if ! validate_json_file "${rel}" "forensics.performance.summary.contract"; then
+    return 1
+  fi
+  if ! jq -e '
+    type == "object"
+    and (.run_id | type == "string" and length > 0)
+    and (.phase | type == "string")
+    and (.run_classification | IN("accept", "reject", "requires_followup"))
+    and (.decision | type == "object")
+    and (.decision.classification | IN("accept", "reject", "requires_followup"))
+    and (.command_set | type == "array")
+    and (.scenario_ids | type == "array")
+    and (.environment_fingerprint | type == "object")
+    and (.decision_thresholds_pct | type == "object")
+    and (.steps | type == "array")
+  ' "${abs}" >/dev/null 2>&1; then
+    add_issue "forensics.performance.summary.contract" "error" "summary missing decision/contract envelope fields" "${rel}"
+  fi
+}
+
 validate_mode_contract() {
   case "${MODE}" in
     validation-pack)
@@ -518,6 +643,10 @@ validate_mode_contract() {
       validate_run_id_field "normalized_summary.json" "forensics.performance.normalized_summary" || true
       validate_run_id_field "scenario_plan.json" "forensics.performance.scenario_plan" || true
       validate_json_file "delta_summary.json" "forensics.performance.delta_summary" || true
+      validate_performance_summary_contract "summary.json" || true
+      validate_performance_manifest_contract "manifest.json" || true
+      validate_performance_normalized_summary "normalized_summary.json" || true
+      validate_performance_delta_summary "delta_summary.json" || true
       require_file "metrics.jsonl" "forensics.performance.metrics_jsonl" || true
       if [[ -f "${ROOT}/metrics.jsonl" ]]; then
         add_checked_file "metrics.jsonl"
@@ -551,6 +680,70 @@ validate_mode_contract() {
       validate_run_id_field "gate_summary.json" "forensics.integration.summary" || true
       validate_replay_script "replay.sh" "forensics.integration.replay" || true
       validate_integration_drift "drift_report.json" || true
+      ;;
+    coverage-gate)
+      validate_steps_jsonl "steps.jsonl" || true
+      validate_run_id_field "gate_summary.json" "forensics.coverage.summary" || true
+      validate_replay_script "replay.sh" "forensics.coverage.replay" || true
+      validate_json_file "replay_manifest.json" "forensics.coverage.replay_manifest" || true
+      ;;
+    quality-gate)
+      validate_suite_steps_jsonl "steps.jsonl" || true
+      validate_run_id_field "quality_gate_report.json" "forensics.quality.report" || true
+      validate_replay_script "replay.sh" "forensics.quality.replay" || true
+      validate_json_file "scenario_verdicts.json" "forensics.quality.verdicts" || true
+      validate_json_file "assertion_policy.json" "forensics.quality.policy" || true
+      if [[ -f "${ROOT}/quality_gate_report.json" ]]; then
+        add_checked_file "quality_gate_report.json"
+        if ! jq -e '
+          type == "object"
+          and (.schema_version | type == "string" and length > 0)
+          and (.run_id | type == "string" and length > 0)
+          and (.overall_status | IN("pass", "fail"))
+          and (.phases | type == "object")
+          and (.violations | type == "array")
+          and (.evidence | type == "array")
+          and (.triage_guide | type == "object")
+        ' "${ROOT}/quality_gate_report.json" >/dev/null 2>&1; then
+          add_issue "forensics.quality.report.schema" "error" "quality gate report missing required fields" "quality_gate_report.json"
+        fi
+      fi
+      ;;
+    suite)
+      validate_suite_steps_jsonl "steps.jsonl" || true
+      validate_run_id_field "suite_report.json" "forensics.suite.report" || true
+      validate_replay_script "replay.sh" "forensics.suite.replay" || true
+      validate_json_file "scenario_catalog.json" "forensics.suite.catalog" || true
+      validate_json_file "BUNDLE_MANIFEST.json" "forensics.suite.manifest" || true
+      # Validate nested bundles
+      if [[ -d "${ROOT}/e2e" && -f "${ROOT}/e2e/summary.json" ]]; then
+        bash "${SCRIPT_DIR}/validate_asupersync_forensics_bundle.sh" \
+          --mode e2e-matrix --root "${ROOT}/e2e" --run-id "${RUN_ID}" \
+          --report "${ROOT}/e2e/forensics_validator_report.json" >/dev/null || \
+          add_issue "forensics.suite.nested_e2e" "error" "nested e2e-matrix bundle failed validation" "e2e"
+        add_checked_file "e2e/forensics_validator_report.json"
+      fi
+      if [[ -d "${ROOT}/unit-gate" && -f "${ROOT}/unit-gate/gate_summary.json" ]]; then
+        bash "${SCRIPT_DIR}/validate_asupersync_forensics_bundle.sh" \
+          --mode unit-gate --root "${ROOT}/unit-gate" --run-id "${RUN_ID}" \
+          --report "${ROOT}/unit-gate/forensics_validator_report.json" >/dev/null || \
+          add_issue "forensics.suite.nested_unit" "error" "nested unit-gate bundle failed validation" "unit-gate"
+        add_checked_file "unit-gate/forensics_validator_report.json"
+      fi
+      if [[ -d "${ROOT}/integration-gate" && -f "${ROOT}/integration-gate/gate_summary.json" ]]; then
+        bash "${SCRIPT_DIR}/validate_asupersync_forensics_bundle.sh" \
+          --mode integration-gate --root "${ROOT}/integration-gate" --run-id "${RUN_ID}" \
+          --report "${ROOT}/integration-gate/forensics_validator_report.json" >/dev/null || \
+          add_issue "forensics.suite.nested_integ" "error" "nested integration-gate bundle failed validation" "integration-gate"
+        add_checked_file "integration-gate/forensics_validator_report.json"
+      fi
+      if [[ -d "${ROOT}/coverage-gate" && -f "${ROOT}/coverage-gate/gate_summary.json" ]]; then
+        bash "${SCRIPT_DIR}/validate_asupersync_forensics_bundle.sh" \
+          --mode coverage-gate --root "${ROOT}/coverage-gate" --run-id "${RUN_ID}" \
+          --report "${ROOT}/coverage-gate/forensics_validator_report.json" >/dev/null || \
+          add_issue "forensics.suite.nested_coverage" "error" "nested coverage-gate bundle failed validation" "coverage-gate"
+        add_checked_file "coverage-gate/forensics_validator_report.json"
+      fi
       ;;
     *)
       add_issue "forensics.mode" "error" "unsupported mode" "${MODE}"

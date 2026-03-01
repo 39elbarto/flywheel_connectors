@@ -16,6 +16,11 @@ PHASE="baseline"
 METRICS_INPUT=""
 BASELINE_SUMMARY=""
 FORENSICS_SCHEMA_VERSION="asupersync-forensics/v1"
+LATENCY_REGRESSION_THRESHOLD_PCT="5"
+THROUGHPUT_DROP_THRESHOLD_PCT="5"
+MEMORY_REGRESSION_THRESHOLD_PCT="10"
+QUEUE_REGRESSION_THRESHOLD_PCT="10"
+RELIABILITY_REGRESSION_THRESHOLD_PCT="5"
 
 REQUIRED_METRICS=(
   "latency_p50_ms"
@@ -44,6 +49,16 @@ Options:
   --metrics-input <path> Optional JSONL metric input file to normalize
   --baseline-summary <path>
                          Baseline normalized summary JSON (required for --phase delta)
+  --latency-regression-threshold-pct <n>
+                         Reject when latency p50/p95/p99 or cancel recovery regress by > n%% (default: 5)
+  --throughput-drop-threshold-pct <n>
+                         Reject when throughput/reconnect regress by > n%% (default: 5)
+  --memory-regression-threshold-pct <n>
+                         Reject when rss_mb regresses by > n%% (default: 10)
+  --queue-regression-threshold-pct <n>
+                         Reject when queue_depth_p95 regresses by > n%% (default: 10)
+  --reliability-regression-threshold-pct <n>
+                         Reject when error_budget_burn_rate regresses by > n%% (default: 5)
   --skip-guardrail       Skip tokio guardrail snapshot step
   --skip-baseline        Skip workspace baseline compile/check step
   --skip-bench           Skip benchmark-oriented crate checks
@@ -73,6 +88,35 @@ validate_phase() {
       exit 2
       ;;
   esac
+}
+
+validate_non_negative_number() {
+  local value="$1"
+  local flag_name="$2"
+  if ! [[ "${value}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    echo "${flag_name} must be a non-negative number, got: ${value}" >&2
+    exit 2
+  fi
+}
+
+decision_thresholds_json() {
+  jq -n \
+    --arg latency "${LATENCY_REGRESSION_THRESHOLD_PCT}" \
+    --arg throughput "${THROUGHPUT_DROP_THRESHOLD_PCT}" \
+    --arg memory "${MEMORY_REGRESSION_THRESHOLD_PCT}" \
+    --arg queue "${QUEUE_REGRESSION_THRESHOLD_PCT}" \
+    --arg reliability "${RELIABILITY_REGRESSION_THRESHOLD_PCT}" \
+    '{
+      latency_p50_ms: {direction: "lower_is_better", reject_pct: ($latency | tonumber)},
+      latency_p95_ms: {direction: "lower_is_better", reject_pct: ($latency | tonumber)},
+      latency_p99_ms: {direction: "lower_is_better", reject_pct: ($latency | tonumber)},
+      throughput_ops_s: {direction: "higher_is_better", reject_pct: ($throughput | tonumber)},
+      rss_mb: {direction: "lower_is_better", reject_pct: ($memory | tonumber)},
+      queue_depth_p95: {direction: "lower_is_better", reject_pct: ($queue | tonumber)},
+      reconnect_success_rate: {direction: "higher_is_better", reject_pct: ($throughput | tonumber)},
+      cancel_storm_recovery_ms: {direction: "lower_is_better", reject_pct: ($latency | tonumber)},
+      error_budget_burn_rate: {direction: "lower_is_better", reject_pct: ($reliability | tonumber)}
+    }'
 }
 
 validate_metric_record() {
@@ -177,11 +221,20 @@ build_normalized_summary() {
         ),
         classification: (
           if length == 0 then
-            "inconclusive"
+            "requires_followup"
           elif (($required_metrics - ([.[].metric_name] | unique)) | length) > 0 then
-            "inconclusive"
+            "requires_followup"
           else
             "accept"
+          end
+        ),
+        classification_reason_codes: (
+          if length == 0 then
+            ["no_metrics_ingested"]
+          elif (($required_metrics - ([.[].metric_name] | unique)) | length) > 0 then
+            ["missing_required_metrics"]
+          else
+            []
           end
         )
       }
@@ -193,19 +246,38 @@ build_delta_summary() {
   local baseline_summary_path="$2"
   local normalized_summary_path="$3"
   local output_path="$4"
+  local thresholds_json="$5"
 
   if [[ "${phase}" != "delta" ]]; then
     jq -n \
       --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
       --arg phase "${phase}" \
-      '{generated_at: $generated_at, phase: $phase, status: "not_applicable", metrics: []}' > "${output_path}"
+      --argjson thresholds "${thresholds_json}" \
+      '{
+        generated_at: $generated_at,
+        phase: $phase,
+        status: "not_applicable",
+        thresholds_pct: $thresholds,
+        classification: "requires_followup",
+        classification_reasons: [{reason_code: "delta_not_requested", detail: "phase is not delta"}],
+        metrics: []
+      }' > "${output_path}"
     return 0
   fi
 
   if [[ -z "${baseline_summary_path}" ]]; then
     jq -n \
       --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-      '{generated_at: $generated_at, phase: "delta", status: "missing_baseline_summary", metrics: []}' > "${output_path}"
+      --argjson thresholds "${thresholds_json}" \
+      '{
+        generated_at: $generated_at,
+        phase: "delta",
+        status: "missing_baseline_summary",
+        thresholds_pct: $thresholds,
+        classification: "requires_followup",
+        classification_reasons: [{reason_code: "missing_baseline_summary", detail: "delta phase requires --baseline-summary"}],
+        metrics: []
+      }' > "${output_path}"
     return 0
   fi
 
@@ -218,17 +290,86 @@ build_delta_summary() {
     --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --slurpfile baseline "${baseline_summary_path}" \
     --slurpfile current "${normalized_summary_path}" \
+    --argjson thresholds "${thresholds_json}" \
     '
       def metric_means(doc): ((doc[0].metrics // []) | map({key: .metric_name, value: .mean}) | from_entries);
       def metric_units(doc): ((doc[0].metrics // []) | map({key: .metric_name, value: (.unit // "")}) | from_entries);
+      def regression_pct($baseline; $current; $direction):
+        if ($baseline == null or $current == null) then
+          null
+        elif $baseline == 0 then
+          if $current == 0 then 0 else null end
+        elif $direction == "higher_is_better" then
+          if $current < $baseline then ((($baseline - $current) / $baseline) * 100) else 0 end
+        else
+          if $current > $baseline then ((($current - $baseline) / $baseline) * 100) else 0 end
+        end;
 
       (metric_means($baseline)) as $baseline_means
       | (metric_means($current)) as $current_means
       | (metric_units($current)) as $current_units
+      | $thresholds as $thresholds
       | ((($baseline_means | keys) + ($current_means | keys)) | unique | sort) as $metric_names
+      | (
+          $metric_names
+          | map({
+              metric_name: .,
+              unit: ($current_units[.] // ""),
+              baseline_mean: ($baseline_means[.] // null),
+              current_mean: ($current_means[.] // null),
+              direction: ($thresholds[.].direction // "lower_is_better"),
+              reject_threshold_pct: ($thresholds[.].reject_pct // 5)
+            })
+          | map(
+              . + {
+                delta_abs: (
+                  if (.baseline_mean != null and .current_mean != null) then
+                    (.current_mean - .baseline_mean)
+                  else
+                    null
+                  end
+                ),
+                delta_pct: (
+                  if (.baseline_mean != null and .current_mean != null and .baseline_mean != 0) then
+                    (((.current_mean - .baseline_mean) / .baseline_mean) * 100)
+                  else
+                    null
+                  end
+                ),
+                regression_pct: regression_pct(.baseline_mean; .current_mean; .direction)
+              }
+            )
+          | map(
+              . + {
+                verdict: (
+                  if (.baseline_mean == null or .current_mean == null) then
+                    "requires_followup"
+                  elif (.regression_pct == null) then
+                    "requires_followup"
+                  elif (.regression_pct > .reject_threshold_pct) then
+                    "reject"
+                  else
+                    "accept"
+                  end
+                ),
+                reason_code: (
+                  if (.baseline_mean == null or .current_mean == null) then
+                    "missing_metric_data"
+                  elif (.regression_pct == null) then
+                    "indeterminate_regression"
+                  elif (.regression_pct > .reject_threshold_pct) then
+                    "regression_threshold_exceeded"
+                  else
+                    "within_threshold"
+                  end
+                )
+              }
+            )
+        ) as $metric_results
       | {
           generated_at: $generated_at,
           phase: "delta",
+          thresholds_pct: $thresholds,
           status: (
             if ($baseline_means | length) == 0 then
               "missing_baseline_metrics"
@@ -240,28 +381,36 @@ build_delta_summary() {
           ),
           baseline_run_id: ($baseline[0].run_id // null),
           current_run_id: ($current[0].run_id // null),
-          metrics: (
-            $metric_names
-            | map({
-                metric_name: .,
-                unit: ($current_units[.] // ""),
-                baseline_mean: ($baseline_means[.] // null),
-                current_mean: ($current_means[.] // null),
-                delta_abs: (
-                  if ($baseline_means[.] != null and $current_means[.] != null) then
-                    ($current_means[.] - $baseline_means[.])
-                  else
-                    null
-                  end
-                ),
-                delta_pct: (
-                  if ($baseline_means[.] != null and $current_means[.] != null and $baseline_means[.] != 0) then
-                    ((($current_means[.] - $baseline_means[.]) / $baseline_means[.]) * 100)
-                  else
-                    null
-                  end
-                )
-              })
+          metrics: $metric_results,
+          classification: (
+            if ($baseline_means | length) == 0 then
+              "requires_followup"
+            elif ($current_means | length) == 0 then
+              "requires_followup"
+            elif any($metric_results[]; .verdict == "reject") then
+              "reject"
+            elif any($metric_results[]; .verdict == "requires_followup") then
+              "requires_followup"
+            else
+              "accept"
+            end
+          ),
+          classification_reasons: (
+            if ($baseline_means | length) == 0 then
+              [{reason_code: "missing_baseline_metrics", detail: "baseline normalized summary has no metric means"}]
+            elif ($current_means | length) == 0 then
+              [{reason_code: "missing_current_metrics", detail: "current normalized summary has no metric means"}]
+            else
+              (
+                $metric_results
+                | map(select(.verdict != "accept") | {
+                    reason_code: .reason_code,
+                    metric_name: .metric_name,
+                    regression_pct: .regression_pct,
+                    reject_threshold_pct: .reject_threshold_pct
+                  })
+              )
+            end
           )
         }
     ' > "${output_path}"
@@ -445,6 +594,26 @@ while [[ $# -gt 0 ]]; do
       BASELINE_SUMMARY="${2:-}"
       shift 2
       ;;
+    --latency-regression-threshold-pct)
+      LATENCY_REGRESSION_THRESHOLD_PCT="${2:-}"
+      shift 2
+      ;;
+    --throughput-drop-threshold-pct)
+      THROUGHPUT_DROP_THRESHOLD_PCT="${2:-}"
+      shift 2
+      ;;
+    --memory-regression-threshold-pct)
+      MEMORY_REGRESSION_THRESHOLD_PCT="${2:-}"
+      shift 2
+      ;;
+    --queue-regression-threshold-pct)
+      QUEUE_REGRESSION_THRESHOLD_PCT="${2:-}"
+      shift 2
+      ;;
+    --reliability-regression-threshold-pct)
+      RELIABILITY_REGRESSION_THRESHOLD_PCT="${2:-}"
+      shift 2
+      ;;
     --skip-guardrail)
       SKIP_GUARDRAIL=true
       shift
@@ -483,6 +652,11 @@ if [[ -z "${OUT_ROOT}" ]]; then
 fi
 
 validate_phase "${PHASE}"
+validate_non_negative_number "${LATENCY_REGRESSION_THRESHOLD_PCT}" "--latency-regression-threshold-pct"
+validate_non_negative_number "${THROUGHPUT_DROP_THRESHOLD_PCT}" "--throughput-drop-threshold-pct"
+validate_non_negative_number "${MEMORY_REGRESSION_THRESHOLD_PCT}" "--memory-regression-threshold-pct"
+validate_non_negative_number "${QUEUE_REGRESSION_THRESHOLD_PCT}" "--queue-regression-threshold-pct"
+validate_non_negative_number "${RELIABILITY_REGRESSION_THRESHOLD_PCT}" "--reliability-regression-threshold-pct"
 
 STEPS_JSONL="${OUT_ROOT}/steps.jsonl"
 SUMMARY_JSON="${OUT_ROOT}/summary.json"
@@ -495,6 +669,7 @@ SCENARIO_PLAN_JSON="${OUT_ROOT}/scenario_plan.json"
 REPLAY_SH="${OUT_ROOT}/replay.sh"
 REQUIRED_METRICS_JSON="$(required_metrics_json)"
 FORENSICS_VALIDATOR_REPORT="${OUT_ROOT}/forensics_validator_report.json"
+DECISION_THRESHOLDS_JSON="$(decision_thresholds_json)"
 
 require_cmd jq
 require_cmd rch
@@ -589,12 +764,81 @@ done < "${STEPS_JSONL}"
 
 ingest_metrics "${METRICS_INPUT}" "${METRICS_JSONL}" "${PHASE}" "${RUN_ID}"
 build_normalized_summary "${METRICS_JSONL}" "${NORMALIZED_SUMMARY_JSON}" "${REQUIRED_METRICS_JSON}" "${RUN_ID}" "${PHASE}"
-build_delta_summary "${PHASE}" "${BASELINE_SUMMARY}" "${NORMALIZED_SUMMARY_JSON}" "${DELTA_SUMMARY_JSON}"
+build_delta_summary "${PHASE}" "${BASELINE_SUMMARY}" "${NORMALIZED_SUMMARY_JSON}" "${DELTA_SUMMARY_JSON}" "${DECISION_THRESHOLDS_JSON}"
 
-NORMALIZED_CLASSIFICATION="$(jq -r '.classification // "inconclusive"' "${NORMALIZED_SUMMARY_JSON}")"
+NORMALIZED_CLASSIFICATION="$(jq -r '.classification // "requires_followup"' "${NORMALIZED_SUMMARY_JSON}")"
+NORMALIZED_REASON_CODES_JSON="$(jq -c '.classification_reason_codes // []' "${NORMALIZED_SUMMARY_JSON}")"
 MISSING_REQUIRED_COUNT="$(jq -r '.missing_required_metrics | length' "${NORMALIZED_SUMMARY_JSON}")"
 METRIC_RECORD_COUNT="$(jq -r '.record_count // 0' "${NORMALIZED_SUMMARY_JSON}")"
 DELTA_STATUS="$(jq -r '.status // "not_applicable"' "${DELTA_SUMMARY_JSON}")"
+DELTA_CLASSIFICATION="$(jq -r '.classification // "requires_followup"' "${DELTA_SUMMARY_JSON}")"
+DELTA_REASONS_JSON="$(jq -c '.classification_reasons // []' "${DELTA_SUMMARY_JSON}")"
+
+RUN_DECISION_JSON="$(
+  jq -n \
+    --arg phase "${PHASE}" \
+    --arg normalized_classification "${NORMALIZED_CLASSIFICATION}" \
+    --arg delta_classification "${DELTA_CLASSIFICATION}" \
+    --argjson required_failed "$([[ "${required_failed}" == "true" ]] && echo true || echo false)" \
+    --argjson normalized_reasons "${NORMALIZED_REASON_CODES_JSON}" \
+    --argjson delta_reasons "${DELTA_REASONS_JSON}" \
+    '
+      if $required_failed then
+        {
+          classification: "reject",
+          reason_source: "steps",
+          reasons: [{reason_code: "required_step_failed"}]
+        }
+      elif $normalized_classification != "accept" then
+        {
+          classification: "requires_followup",
+          reason_source: "normalized_summary",
+          reasons: (
+            if ($normalized_reasons | length) > 0 then
+              ($normalized_reasons | map({reason_code: .}))
+            else
+              [{reason_code: "normalized_summary_requires_followup"}]
+            end
+          )
+        }
+      elif $phase == "delta" and ($delta_classification == "reject" or $delta_classification == "requires_followup") then
+        {
+          classification: $delta_classification,
+          reason_source: "delta_summary",
+          reasons: (
+            if ($delta_reasons | length) > 0 then
+              $delta_reasons
+            else
+              [{reason_code: "delta_summary_requires_followup"}]
+            end
+          )
+        }
+      else
+        {
+          classification: "accept",
+          reason_source: "run",
+          reasons: []
+        }
+      end
+    '
+)"
+RUN_CLASSIFICATION="$(jq -r '.classification' <<< "${RUN_DECISION_JSON}")"
+COMMAND_SET_JSON="$(jq -s 'map(.command) | unique | sort' "${STEPS_JSONL}")"
+
+RUSTC_VERSION="$(rustc --version 2>/dev/null || echo unknown)"
+CARGO_VERSION="$(cargo --version 2>/dev/null || echo unknown)"
+RCH_VERSION="$(rch --version 2>/dev/null | head -n 1 || echo unknown)"
+JQ_VERSION="$(jq --version 2>/dev/null || echo unknown)"
+OS_FINGERPRINT="$(uname -srm 2>/dev/null || echo unknown)"
+ENV_FINGERPRINT_JSON="$(
+  jq -n \
+    --arg rustc "${RUSTC_VERSION}" \
+    --arg cargo "${CARGO_VERSION}" \
+    --arg rch "${RCH_VERSION}" \
+    --arg jq "${JQ_VERSION}" \
+    --arg os "${OS_FINGERPRINT}" \
+    '{rustc: $rustc, cargo: $cargo, rch: $rch, jq: $jq, os: $os}'
+)"
 
 jq -n \
   --arg run_id "${RUN_ID}" \
@@ -636,6 +880,7 @@ jq -n \
       {id: "tuning-scheduler-workers", phase: "tuning", category: "scheduler"}
     ]
   }' > "${SCENARIO_PLAN_JSON}"
+SCENARIO_IDS_JSON="$(jq -c '[.scenarios[].id]' "${SCENARIO_PLAN_JSON}")"
 
 jq -n \
   --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -647,15 +892,22 @@ jq -n \
   --arg forensics_validator_report "${FORENSICS_VALIDATOR_REPORT}" \
   --arg metrics_input "${METRICS_INPUT}" \
   --arg baseline_summary "${BASELINE_SUMMARY}" \
+  --arg run_classification "${RUN_CLASSIFICATION}" \
   --arg git_commit "$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)" \
   --argjson pre_gate "$([[ "${PRE_GATE}" == "true" ]] && echo true || echo false)" \
   --argjson dry_run "$([[ "${DRY_RUN}" == "true" ]] && echo true || echo false)" \
   --argjson passed "$([[ "${overall_passed}" == "true" ]] && echo true || echo false)" \
   --argjson required_failed "$([[ "${required_failed}" == "true" ]] && echo true || echo false)" \
   --arg normalized_classification "${NORMALIZED_CLASSIFICATION}" \
+  --arg delta_classification "${DELTA_CLASSIFICATION}" \
   --arg delta_status "${DELTA_STATUS}" \
   --argjson metric_record_count "${METRIC_RECORD_COUNT}" \
   --argjson missing_required_metrics "${MISSING_REQUIRED_COUNT}" \
+  --argjson run_decision "${RUN_DECISION_JSON}" \
+  --argjson command_set "${COMMAND_SET_JSON}" \
+  --argjson scenario_ids "${SCENARIO_IDS_JSON}" \
+  --argjson environment_fingerprint "${ENV_FINGERPRINT_JSON}" \
+  --argjson decision_thresholds "${DECISION_THRESHOLDS_JSON}" \
   '
   {
     schema_version: $schema_version,
@@ -668,9 +920,16 @@ jq -n \
     dry_run: $dry_run,
     passed: $passed,
     required_failed: $required_failed,
+    run_classification: $run_classification,
+    decision: $run_decision,
     replay_script: $replay_sh,
+    command_set: $command_set,
+    scenario_ids: $scenario_ids,
+    environment_fingerprint: $environment_fingerprint,
+    decision_thresholds_pct: $decision_thresholds,
     forensics_validator_report: $forensics_validator_report,
     normalized_classification: $normalized_classification,
+    delta_classification: $delta_classification,
     delta_status: $delta_status,
     metric_record_count: $metric_record_count,
     missing_required_metrics: $missing_required_metrics
@@ -697,10 +956,17 @@ jq -s \
   --argjson dry_run "$([[ "${DRY_RUN}" == "true" ]] && echo true || echo false)" \
   --argjson passed "$([[ "${overall_passed}" == "true" ]] && echo true || echo false)" \
   --argjson required_failed "$([[ "${required_failed}" == "true" ]] && echo true || echo false)" \
+  --arg run_classification "${RUN_CLASSIFICATION}" \
   --arg normalized_classification "${NORMALIZED_CLASSIFICATION}" \
+  --arg delta_classification "${DELTA_CLASSIFICATION}" \
   --arg delta_status "${DELTA_STATUS}" \
   --argjson metric_record_count "${METRIC_RECORD_COUNT}" \
   --argjson missing_required_metrics "${MISSING_REQUIRED_COUNT}" \
+  --argjson run_decision "${RUN_DECISION_JSON}" \
+  --argjson command_set "${COMMAND_SET_JSON}" \
+  --argjson scenario_ids "${SCENARIO_IDS_JSON}" \
+  --argjson environment_fingerprint "${ENV_FINGERPRINT_JSON}" \
+  --argjson decision_thresholds "${DECISION_THRESHOLDS_JSON}" \
   '{
     schema_version: $schema_version,
     generated_at: $generated_at,
@@ -711,8 +977,14 @@ jq -s \
     dry_run: $dry_run,
     passed: $passed,
     required_failed: $required_failed,
+    run_classification: $run_classification,
+    decision: $run_decision,
     replay_script: $replay_sh,
     manifest_path: $manifest_path,
+    command_set: $command_set,
+    scenario_ids: $scenario_ids,
+    environment_fingerprint: $environment_fingerprint,
+    decision_thresholds_pct: $decision_thresholds,
     metrics_path: $metrics_path,
     metrics_template_path: $metrics_template_path,
     normalized_summary_path: $normalized_summary_path,
@@ -720,6 +992,7 @@ jq -s \
     scenario_plan_path: $scenario_plan_path,
     forensics_validator_report: $forensics_validator_report,
     normalized_classification: $normalized_classification,
+    delta_classification: $delta_classification,
     delta_status: $delta_status,
     metric_record_count: $metric_record_count,
     missing_required_metrics: $missing_required_metrics,

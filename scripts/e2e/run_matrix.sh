@@ -10,6 +10,10 @@ RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 ROOT_SEED=""
 OUT_ROOT="${OUT_ROOT:-}"
 ONLY_SCENARIOS=""
+ONLY_SCENARIO_IDS=""
+ONLY_ARCHETYPES=""
+ONLY_CONNECTORS=""
+ONLY_TRACKS=""
 DRY_RUN=false
 
 SUMMARY_JSONL=""
@@ -17,8 +21,11 @@ SUMMARY_JSON=""
 MANIFEST_JSON=""
 SCENARIO_PLAN_JSON=""
 REPLAY_SH=""
+FAILURE_INDEX_JSON=""
+RERUN_FAILED_SH=""
 SCENARIOS_DIR=""
 FORENSICS_VALIDATOR_REPORT=""
+REGISTRY_PATH=""
 
 usage() {
   cat <<'EOF'
@@ -31,6 +38,10 @@ Options:
   --seed <seed>            Root deterministic seed (default: derived from run-id)
   --out-root <path>        Artifact root (default: artifacts/asupersync/e2e/<run-id>)
   --only-scenarios <csv>   Run subset of scenario keys (comma-separated)
+  --only-scenario-ids <csv> Run subset by scenario_id values (comma-separated)
+  --only-archetypes <csv>  Run subset by archetype values (comma-separated)
+  --only-connectors <csv>  Run subset by connector identifiers (comma-separated)
+  --track <csv>            Run subset by execution tracks (comma-separated)
   --dry-run                Emit artifact plan without executing scenarios
   -h, --help               Show this help
 EOF
@@ -91,6 +102,83 @@ normalized_hash() {
   printf '%s' "${input}" | hash256 | tr -cd '0-9a-fA-F' | head -c 64
 }
 
+csv_contains() {
+  local csv="$1"
+  local needle="$2"
+  local candidate
+  local cleaned
+  local -a entries=()
+
+  if [[ -z "${csv}" ]]; then
+    return 0
+  fi
+
+  IFS=',' read -r -a entries <<< "${csv}"
+  for candidate in "${entries[@]}"; do
+    cleaned="${candidate//[[:space:]]/}"
+    if [[ -n "${cleaned}" && "${cleaned}" == "${needle}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+detect_connector() {
+  local script_path="$1"
+  local line connector
+
+  line="$(rg -m1 '^CONNECTOR=' "${script_path}" 2>/dev/null || true)"
+  if [[ -z "${line}" ]]; then
+    printf '%s' "unknown"
+    return 0
+  fi
+
+  connector="$(sed -E \
+    -e 's/^CONNECTOR="\$\{CONNECTOR:-([^}]+)\}"$/\1/' \
+    -e 's/^CONNECTOR="([^"]+)".*$/\1/' \
+    <<< "${line}")"
+
+  if [[ -z "${connector}" ]]; then
+    printf '%s' "unknown"
+  else
+    printf '%s' "${connector}"
+  fi
+}
+
+track_for_scenario() {
+  local scenario="$1"
+  local archetype="$2"
+  local failure_class="$3"
+
+  case "${scenario}" in
+    raptorq_*|targeted_repair_flow|offline_repair)
+      printf '%s' "raptorq_repair"
+      ;;
+    request_response_user_flow|polling_user_flow|webhook_delivery_flow|happy_path|denial_path|revocation_flow|taint_approval)
+      printf '%s' "user_journey"
+      ;;
+    integration_gate|unit_gate|coverage_gate_publication|cross_component_revalidation|fuzz_adversarial_revalidation|unified_validation_report|failure_journey_forensic_bundle|reliability_soak_adversarial_load|runtime_tuning_calibration|performance_reliability_gate|canary_scenario_matrix|rollback_drill_consistency|rehearsal_automation|go_nogo_decision_gate|final_cutover_gate)
+      printf '%s' "quality_gates"
+      ;;
+    streaming_*|sse_reconnect_ordering|bidirectional_cancel_chain|cancellation_flow)
+      printf '%s' "streaming_bidi"
+      ;;
+    polling_*)
+      printf '%s' "polling_resilience"
+      ;;
+    webhook_*)
+      printf '%s' "webhook_resilience"
+      ;;
+    *)
+      if [[ "${failure_class}" == *"budget"* || "${failure_class}" == *"rate_limit"* ]]; then
+        printf '%s' "resource_controls"
+      else
+        printf '%s' "${archetype}"
+      fi
+      ;;
+  esac
+}
+
 seed_for_scenario() {
   local scenario_id="$1"
   local hash
@@ -100,20 +188,28 @@ seed_for_scenario() {
 
 is_selected_scenario() {
   local scenario="$1"
-  local candidate
-  local cleaned
-  local -a selected_entries=()
-  if [[ -z "${ONLY_SCENARIOS}" ]]; then
-    return 0
+  local scenario_id="$2"
+  local archetype="$3"
+  local connector="$4"
+  local track="$5"
+
+  if ! csv_contains "${ONLY_SCENARIOS}" "${scenario}"; then
+    return 1
   fi
-  IFS=',' read -r -a selected_entries <<< "${ONLY_SCENARIOS}"
-  for candidate in "${selected_entries[@]}"; do
-    cleaned="${candidate//[[:space:]]/}"
-    if [[ "${cleaned}" == "${scenario}" ]]; then
-      return 0
-    fi
-  done
-  return 1
+  if ! csv_contains "${ONLY_SCENARIO_IDS}" "${scenario_id}"; then
+    return 1
+  fi
+  if ! csv_contains "${ONLY_ARCHETYPES}" "${archetype}"; then
+    return 1
+  fi
+  if ! csv_contains "${ONLY_CONNECTORS}" "${connector}"; then
+    return 1
+  fi
+  if ! csv_contains "${ONLY_TRACKS}" "${track}"; then
+    return 1
+  fi
+
+  return 0
 }
 
 record_result() {
@@ -121,16 +217,19 @@ record_result() {
   local scenario_id="$2"
   local scenario_seed="$3"
   local script_path="$4"
-  local description="$5"
-  local required="$6"
-  local selected="$7"
-  local status="$8"
-  local duration_ms="$9"
-  local log_path="${10}"
-  local execution_log="${11}"
-  local command_path="${12}"
-  local replay_command="${13}"
-  local reason="${14}"
+  local archetype="$5"
+  local connector="$6"
+  local track="$7"
+  local description="$8"
+  local required="$9"
+  local selected="${10}"
+  local status="${11}"
+  local duration_ms="${12}"
+  local log_path="${13}"
+  local execution_log="${14}"
+  local command_path="${15}"
+  local replay_command="${16}"
+  local reason="${17}"
 
   jq -c -n \
     --arg schema_version "${SCHEMA_VERSION}" \
@@ -139,6 +238,9 @@ record_result() {
     --arg scenario_id "${scenario_id}" \
     --arg scenario_seed "${scenario_seed}" \
     --arg script "${script_path}" \
+    --arg archetype "${archetype}" \
+    --arg connector "${connector}" \
+    --arg track "${track}" \
     --arg description "${description}" \
     --arg status "${status}" \
     --arg log "${log_path}" \
@@ -156,6 +258,9 @@ record_result() {
       scenario_id: $scenario_id,
       scenario_seed: $scenario_seed,
       script: $script,
+      archetype: $archetype,
+      connector: $connector,
+      track: $track,
       description: $description,
       required: $required,
       selected: $selected,
@@ -175,8 +280,14 @@ run_scenario() {
   local description="$3"
   local required="$4"
   local resolved_script_path
+  local registry_entry
+  local registry_script
+  local scenario_id
+  local archetype
+  local failure_class
+  local connector
+  local track
   local selected="false"
-  local scenario_id="asupersync.e2e.${scenario}"
   local scenario_seed
   local scenario_dir
   local payload_dir
@@ -188,11 +299,29 @@ run_scenario() {
   local start_ms end_ms duration_ms rc status reason
   local command
 
+  registry_entry="$(jq -c --arg key "${scenario}" '.scenarios[] | select(.key == $key)' "${REGISTRY_PATH}")"
+  if [[ -z "${registry_entry}" ]]; then
+    registry_entry='{}'
+  fi
+
+  scenario_id="$(jq -r '.scenario_id // empty' <<< "${registry_entry}")"
+  if [[ -z "${scenario_id}" ]]; then
+    scenario_id="asupersync.e2e.${scenario}"
+  fi
+  archetype="$(jq -r '.archetype // "unknown"' <<< "${registry_entry}")"
+  failure_class="$(jq -r '.failure_class // "unknown"' <<< "${registry_entry}")"
+  registry_script="$(jq -r '.script // empty' <<< "${registry_entry}")"
+
   if [[ "${script_path}" = /* ]]; then
     resolved_script_path="${script_path}"
+  elif [[ -n "${registry_script}" ]]; then
+    resolved_script_path="${REPO_ROOT}/${registry_script}"
   else
     resolved_script_path="${SCRIPT_DIR}/${script_path}"
   fi
+
+  connector="$(detect_connector "${resolved_script_path}")"
+  track="$(track_for_scenario "${scenario}" "${archetype}" "${failure_class}")"
 
   scenario_seed="$(seed_for_scenario "${scenario_id}")"
   scenario_dir="${SCENARIOS_DIR}/${scenario}"
@@ -208,7 +337,7 @@ run_scenario() {
   mkdir -p "${scenario_dir}" "${payload_dir}"
   printf '%s\n' "${command}" > "${command_path}"
 
-  if is_selected_scenario "${scenario}"; then
+  if is_selected_scenario "${scenario}" "${scenario_id}" "${archetype}" "${connector}" "${track}"; then
     selected="true"
   fi
 
@@ -217,7 +346,8 @@ run_scenario() {
     reason="filtered"
     duration_ms=0
     record_result \
-      "${scenario}" "${scenario_id}" "${scenario_seed}" "${resolved_script_path}" "${description}" \
+      "${scenario}" "${scenario_id}" "${scenario_seed}" "${resolved_script_path}" \
+      "${archetype}" "${connector}" "${track}" "${description}" \
       "${required}" "${selected}" "${status}" "${duration_ms}" "${log_jsonl}" "${execution_log}" \
       "${command_path}" "${replay_command}" "${reason}"
   elif [[ ! -x "${resolved_script_path}" ]]; then
@@ -225,7 +355,8 @@ run_scenario() {
     reason="script_missing"
     duration_ms=0
     record_result \
-      "${scenario}" "${scenario_id}" "${scenario_seed}" "${resolved_script_path}" "${description}" \
+      "${scenario}" "${scenario_id}" "${scenario_seed}" "${resolved_script_path}" \
+      "${archetype}" "${connector}" "${track}" "${description}" \
       "${required}" "${selected}" "${status}" "${duration_ms}" "${log_jsonl}" "${execution_log}" \
       "${command_path}" "${replay_command}" "${reason}"
   elif [[ "${DRY_RUN}" == "true" ]]; then
@@ -233,7 +364,8 @@ run_scenario() {
     reason="dry_run"
     duration_ms=0
     record_result \
-      "${scenario}" "${scenario_id}" "${scenario_seed}" "${resolved_script_path}" "${description}" \
+      "${scenario}" "${scenario_id}" "${scenario_seed}" "${resolved_script_path}" \
+      "${archetype}" "${connector}" "${track}" "${description}" \
       "${required}" "${selected}" "${status}" "${duration_ms}" "${log_jsonl}" "${execution_log}" \
       "${command_path}" "${replay_command}" "${reason}"
   else
@@ -261,7 +393,8 @@ run_scenario() {
     fi
 
     record_result \
-      "${scenario}" "${scenario_id}" "${scenario_seed}" "${resolved_script_path}" "${description}" \
+      "${scenario}" "${scenario_id}" "${scenario_seed}" "${resolved_script_path}" \
+      "${archetype}" "${connector}" "${track}" "${description}" \
       "${required}" "${selected}" "${status}" "${duration_ms}" "${log_jsonl}" "${execution_log}" \
       "${command_path}" "${replay_command}" "${reason}"
   fi
@@ -272,6 +405,9 @@ run_scenario() {
     --arg scenario "${scenario}" \
     --arg scenario_id "${scenario_id}" \
     --arg script "${resolved_script_path}" \
+    --arg archetype "${archetype}" \
+    --arg connector "${connector}" \
+    --arg track "${track}" \
     --arg description "${description}" \
     --arg scenario_seed "${scenario_seed}" \
     --arg out_dir "${payload_dir}" \
@@ -288,6 +424,9 @@ run_scenario() {
       required: $required,
       selected: $selected,
       script: $script,
+      archetype: $archetype,
+      connector: $connector,
+      track: $track,
       description: $description,
       scenario_seed: $scenario_seed,
       out_dir: $out_dir,
@@ -313,6 +452,22 @@ while [[ $# -gt 0 ]]; do
       ;;
     --only-scenarios)
       ONLY_SCENARIOS="${2:-}"
+      shift 2
+      ;;
+    --only-scenario-ids)
+      ONLY_SCENARIO_IDS="${2:-}"
+      shift 2
+      ;;
+    --only-archetypes)
+      ONLY_ARCHETYPES="${2:-}"
+      shift 2
+      ;;
+    --only-connectors)
+      ONLY_CONNECTORS="${2:-}"
+      shift 2
+      ;;
+    --track)
+      ONLY_TRACKS="${2:-}"
       shift 2
       ;;
     --dry-run)
@@ -351,8 +506,15 @@ SCENARIO_PLAN_JSON="${SCENARIO_PLAN_JSON:-${OUT_ROOT}/scenario_plan.json}"
 REPLAY_SH="${REPLAY_SH:-${OUT_ROOT}/replay.sh}"
 SCENARIOS_DIR="${OUT_ROOT}/scenarios"
 FORENSICS_VALIDATOR_REPORT="${OUT_ROOT}/forensics_validator_report.json"
+FAILURE_INDEX_JSON="${OUT_ROOT}/failure_index.json"
+RERUN_FAILED_SH="${OUT_ROOT}/rerun_failed.sh"
+REGISTRY_PATH="${SCRIPT_DIR}/scenario_registry.json"
 
 require_cmd jq
+[[ -f "${REGISTRY_PATH}" ]] || {
+  echo "Registry file not found: ${REGISTRY_PATH}" >&2
+  exit 1
+}
 if [[ "${DRY_RUN}" != "true" ]]; then
   if ! command -v fcp-e2e >/dev/null 2>&1; then
     require_cmd cargo
@@ -403,6 +565,23 @@ SCENARIOS=(
   "polling_cursor_gap_recovery|polling_cursor_gap_recovery.sh|Polling cursor gap detection recovery|true"
   "webhook_retry_storm|webhook_retry_storm.sh|Webhook retry storm idempotent delivery|true"
   "request_timeout_chain|request_timeout_chain.sh|Request timeout chain bounded failure|true"
+  "raptorq_partial_symbol_recovery|raptorq_partial_symbol_recovery.sh|RaptorQ partial symbol loss repair convergence|true"
+  "raptorq_adversarial_decode_stress|raptorq_adversarial_decode_stress.sh|RaptorQ adversarial decode budget bounds|true"
+  "raptorq_multinode_repair_convergence|raptorq_multinode_repair_convergence.sh|RaptorQ multi-node placement repair convergence|true"
+  "raptorq_degraded_network_recovery|raptorq_degraded_network_recovery.sh|RaptorQ degraded network graceful recovery|true"
+  "cross_component_revalidation|e2e_cross_component_revalidation.sh|Cross-component E2E data path revalidation|true"
+  "fuzz_adversarial_revalidation|e2e_fuzz_adversarial_revalidation.sh|Fuzz adversarial boundary revalidation|true"
+  "unified_validation_report|e2e_unified_validation_report.sh|Unified validation report release gate|true"
+  "recovery_guidance_validation|e2e_recovery_guidance_validation.sh|Recovery guidance user journey validation|true"
+  "failure_journey_forensic_bundle|e2e_failure_journey_forensic_bundle.sh|Failure-journey E2E forensic evidence bundle|true"
+  "reliability_soak_adversarial_load|e2e_reliability_soak_adversarial_load.sh|Reliability soak adversarial load stability|true"
+  "runtime_tuning_calibration|e2e_runtime_tuning_calibration.sh|Runtime tuning risk-bounded calibration|true"
+  "performance_reliability_gate|e2e_performance_reliability_gate.sh|Performance reliability gate config freeze|true"
+  "canary_scenario_matrix|e2e_canary_scenario_matrix.sh|Canary scenario matrix abort thresholds|true"
+  "rollback_drill_consistency|e2e_rollback_drill_consistency.sh|Rollback drill state consistency recovery|true"
+  "rehearsal_automation|e2e_rehearsal_automation.sh|Rehearsal automation artifact log enforcement|true"
+  "go_nogo_decision_gate|e2e_go_nogo_decision_gate.sh|Go no-go decision gate operator runbook|true"
+  "final_cutover_gate|e2e_final_cutover_gate.sh|Final cutover tokio removal policy lock|true"
 )
 
 for entry in "${SCENARIOS[@]}"; do
@@ -448,6 +627,9 @@ jq -s \
         required: .required,
         selected: .selected,
         script: .script,
+        archetype: .archetype,
+        connector: .connector,
+        track: .track,
         description: .description,
         scenario_seed: .scenario_seed,
         replay_command: .replay_command
@@ -464,8 +646,14 @@ jq -s \
   --arg replay_sh "${REPLAY_SH}" \
   --arg scenario_plan "${SCENARIO_PLAN_JSON}" \
   --arg forensics_validator_report "${FORENSICS_VALIDATOR_REPORT}" \
+  --arg failure_index_path "${FAILURE_INDEX_JSON}" \
+  --arg rerun_failed_path "${RERUN_FAILED_SH}" \
   --arg git_commit "$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)" \
   --arg only_scenarios "${ONLY_SCENARIOS}" \
+  --arg only_scenario_ids "${ONLY_SCENARIO_IDS}" \
+  --arg only_archetypes "${ONLY_ARCHETYPES}" \
+  --arg only_connectors "${ONLY_CONNECTORS}" \
+  --arg only_tracks "${ONLY_TRACKS}" \
   --argjson dry_run "$([[ "${DRY_RUN}" == "true" ]] && echo true || echo false)" \
   --argjson passed "$([[ "${overall_passed}" == "true" ]] && echo true || echo false)" \
   --argjson missing_required "$([[ "${missing_required}" == "true" ]] && echo true || echo false)" \
@@ -482,7 +670,13 @@ jq -s \
     replay_script: $replay_sh,
     scenario_plan_path: $scenario_plan,
     forensics_validator_report: $forensics_validator_report,
+    failure_index_path: $failure_index_path,
+    rerun_failed_path: $rerun_failed_path,
     only_scenarios: (if ($only_scenarios | length) > 0 then $only_scenarios else null end),
+    only_scenario_ids: (if ($only_scenario_ids | length) > 0 then $only_scenario_ids else null end),
+    only_archetypes: (if ($only_archetypes | length) > 0 then $only_archetypes else null end),
+    only_connectors: (if ($only_connectors | length) > 0 then $only_connectors else null end),
+    only_tracks: (if ($only_tracks | length) > 0 then $only_tracks else null end),
     totals: {
       total: length,
       pass: (map(select(.status == "pass")) | length),
@@ -502,6 +696,8 @@ jq -s \
   --arg manifest_path "${MANIFEST_JSON}" \
   --arg scenario_plan_path "${SCENARIO_PLAN_JSON}" \
   --arg forensics_validator_report "${FORENSICS_VALIDATOR_REPORT}" \
+  --arg failure_index_path "${FAILURE_INDEX_JSON}" \
+  --arg rerun_failed_path "${RERUN_FAILED_SH}" \
   --argjson dry_run "$([[ "${DRY_RUN}" == "true" ]] && echo true || echo false)" \
   --argjson passed "$([[ "${overall_passed}" == "true" ]] && echo true || echo false)" \
   --argjson missing_required "$([[ "${missing_required}" == "true" ]] && echo true || echo false)" \
@@ -518,6 +714,8 @@ jq -s \
     manifest_path: $manifest_path,
     scenario_plan_path: $scenario_plan_path,
     forensics_validator_report: $forensics_validator_report,
+    failure_index_path: $failure_index_path,
+    rerun_failed_path: $rerun_failed_path,
     totals: {
       total: length,
       pass: (map(select(.status == "pass")) | length),
@@ -528,13 +726,78 @@ jq -s \
     results: .
   }' "${SUMMARY_JSONL}" > "${SUMMARY_JSON}"
 
+jq -s \
+  --arg schema_version "asupersync-e2e-failure-index/v1" \
+  --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+  --arg run_id "${RUN_ID}" \
+  --arg root_seed "${ROOT_SEED}" \
+  '{
+    schema_version: $schema_version,
+    generated_at: $generated_at,
+    run_id: $run_id,
+    root_seed: $root_seed,
+    fail_count: (map(select(.status == "fail")) | length),
+    failures: (
+      map(select(.status == "fail"))
+      | sort_by(.scenario)
+      | map({
+          scenario,
+          scenario_id,
+          archetype,
+          connector,
+          track,
+          reason,
+          replay_command,
+          execution_log,
+          log,
+          command_path
+        })
+    )
+  }' "${SUMMARY_JSONL}" > "${FAILURE_INDEX_JSON}"
+
 {
   echo "#!/usr/bin/env bash"
   echo "set -euo pipefail"
   echo "cd \"${REPO_ROOT}\""
   echo
+  echo "FAIL_COUNT=\$(jq -r '.fail_count' \"${FAILURE_INDEX_JSON}\")"
+  echo 'if [[ "${FAIL_COUNT}" == "0" ]]; then'
+  echo '  echo "No failed scenarios to rerun."'
+  echo "  exit 0"
+  echo "fi"
+  echo
+  echo 'echo "Replaying ${FAIL_COUNT} failed scenarios..."'
+  while IFS= read -r cmd || [[ -n "${cmd}" ]]; do
+    if [[ -n "${cmd}" ]]; then
+      echo "${cmd}"
+    fi
+  done < <(jq -r '.failures[].replay_command' "${FAILURE_INDEX_JSON}")
+} > "${RERUN_FAILED_SH}"
+chmod +x "${RERUN_FAILED_SH}"
+
+{
+  echo "#!/usr/bin/env bash"
+  echo "set -euo pipefail"
+  echo "cd \"${REPO_ROOT}\""
+  echo
+  full_replay_cmd="bash \"${SCRIPT_DIR}/run_matrix.sh\" --run-id \"${RUN_ID}\" --seed \"${ROOT_SEED}\" --out-root \"${OUT_ROOT}\""
+  if [[ -n "${ONLY_SCENARIOS}" ]]; then
+    full_replay_cmd="${full_replay_cmd} --only-scenarios \"${ONLY_SCENARIOS}\""
+  fi
+  if [[ -n "${ONLY_SCENARIO_IDS}" ]]; then
+    full_replay_cmd="${full_replay_cmd} --only-scenario-ids \"${ONLY_SCENARIO_IDS}\""
+  fi
+  if [[ -n "${ONLY_ARCHETYPES}" ]]; then
+    full_replay_cmd="${full_replay_cmd} --only-archetypes \"${ONLY_ARCHETYPES}\""
+  fi
+  if [[ -n "${ONLY_CONNECTORS}" ]]; then
+    full_replay_cmd="${full_replay_cmd} --only-connectors \"${ONLY_CONNECTORS}\""
+  fi
+  if [[ -n "${ONLY_TRACKS}" ]]; then
+    full_replay_cmd="${full_replay_cmd} --track \"${ONLY_TRACKS}\""
+  fi
   echo "# Full matrix replay"
-  echo "bash \"${SCRIPT_DIR}/run_matrix.sh\" --run-id \"${RUN_ID}\" --seed \"${ROOT_SEED}\" --out-root \"${OUT_ROOT}\""
+  echo "${full_replay_cmd}"
   echo
   echo "# Scenario-specific replay commands"
   while IFS= read -r line || [[ -n "${line}" ]]; do
@@ -557,3 +820,4 @@ bash "${SCRIPT_DIR}/validate_asupersync_forensics_bundle.sh" \
   --report "${FORENSICS_VALIDATOR_REPORT}"
 
 echo "E2E scenario matrix complete. Summary: ${SUMMARY_JSON}"
+echo "Failure index: ${FAILURE_INDEX_JSON}"

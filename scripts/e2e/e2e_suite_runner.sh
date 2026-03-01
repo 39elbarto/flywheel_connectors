@@ -33,6 +33,12 @@
 #   --skip-coverage-gate    Skip coverage gate publication
 #   --skip-validation       Skip forensics bundle validation
 #   --only-scenarios <csv>  Filter E2E scenarios (passed to run_matrix.sh)
+#   --only-scenario-ids <csv> Filter E2E scenarios by scenario_id
+#   --only-archetypes <csv> Filter E2E scenarios by archetype
+#   --only-connectors <csv> Filter E2E scenarios by connector identifier
+#   --track <csv>           Filter E2E scenarios by execution track
+#   --bundle                Package artifacts into a tar.gz bundle
+#   --ci                    CI mode (auto-detected from CI env var)
 #   -h, --help              Show this help
 # =============================================================================
 set -euo pipefail
@@ -45,12 +51,18 @@ RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 ROOT_SEED=""
 OUT_ROOT=""
 DRY_RUN=false
+BUNDLE=false
+CI_MODE="${CI:-false}"
 SKIP_E2E=false
 SKIP_UNIT_GATE=false
 SKIP_INTEGRATION_GATE=false
 SKIP_COVERAGE_GATE=false
 SKIP_VALIDATION=false
 ONLY_SCENARIOS=""
+ONLY_SCENARIO_IDS=""
+ONLY_ARCHETYPES=""
+ONLY_CONNECTORS=""
+ONLY_TRACKS=""
 
 # Gate statuses
 E2E_STATUS="skipped"
@@ -77,6 +89,12 @@ Options:
   --skip-coverage-gate      Skip coverage gate publication
   --skip-validation         Skip forensics bundle validation
   --only-scenarios <csv>    Filter E2E scenarios (comma-separated keys)
+  --only-scenario-ids <csv> Filter E2E scenarios by scenario_id
+  --only-archetypes <csv>   Filter E2E scenarios by archetype
+  --only-connectors <csv>   Filter E2E scenarios by connector identifier
+  --track <csv>             Filter E2E scenarios by execution track
+  --bundle                  Package all artifacts into a tar.gz bundle
+  --ci                      CI mode: compact output, absolute paths, bundle auto-enabled
   -h, --help                Show this help
 EOF
 }
@@ -120,6 +138,12 @@ while [[ $# -gt 0 ]]; do
     --skip-coverage-gate) SKIP_COVERAGE_GATE=true; shift;;
     --skip-validation) SKIP_VALIDATION=true; shift;;
     --only-scenarios) ONLY_SCENARIOS="$2"; shift 2;;
+    --only-scenario-ids) ONLY_SCENARIO_IDS="$2"; shift 2;;
+    --only-archetypes) ONLY_ARCHETYPES="$2"; shift 2;;
+    --only-connectors) ONLY_CONNECTORS="$2"; shift 2;;
+    --track) ONLY_TRACKS="$2"; shift 2;;
+    --bundle) BUNDLE=true; shift;;
+    --ci) CI_MODE=true; BUNDLE=true; shift;;
     -h|--help)      usage; exit 0;;
     *)              echo "Unknown option: $1" >&2; usage; exit 1;;
   esac
@@ -214,6 +238,18 @@ if [[ "${SKIP_E2E}" == "false" ]]; then
   )
   if [[ -n "${ONLY_SCENARIOS}" ]]; then
     E2E_ARGS+=(--only-scenarios "${ONLY_SCENARIOS}")
+  fi
+  if [[ -n "${ONLY_SCENARIO_IDS}" ]]; then
+    E2E_ARGS+=(--only-scenario-ids "${ONLY_SCENARIO_IDS}")
+  fi
+  if [[ -n "${ONLY_ARCHETYPES}" ]]; then
+    E2E_ARGS+=(--only-archetypes "${ONLY_ARCHETYPES}")
+  fi
+  if [[ -n "${ONLY_CONNECTORS}" ]]; then
+    E2E_ARGS+=(--only-connectors "${ONLY_CONNECTORS}")
+  fi
+  if [[ -n "${ONLY_TRACKS}" ]]; then
+    E2E_ARGS+=(--track "${ONLY_TRACKS}")
   fi
   if [[ "${DRY_RUN}" == "true" ]]; then
     E2E_ARGS+=(--dry-run)
@@ -450,6 +486,11 @@ jq -n \
   --arg integration_gate_status "${INTEGRATION_GATE_STATUS}" \
   --arg coverage_gate_status "${COVERAGE_GATE_STATUS}" \
   --arg validation_status "${VALIDATION_STATUS}" \
+  --arg only_scenarios "${ONLY_SCENARIOS}" \
+  --arg only_scenario_ids "${ONLY_SCENARIO_IDS}" \
+  --arg only_archetypes "${ONLY_ARCHETYPES}" \
+  --arg only_connectors "${ONLY_CONNECTORS}" \
+  --arg only_tracks "${ONLY_TRACKS}" \
   --argjson total_scenarios "${TOTAL_SCENARIOS}" \
   --argjson required_scenarios "${REQUIRED_SCENARIOS}" \
   '{
@@ -470,11 +511,20 @@ jq -n \
       total: $total_scenarios,
       required: $required_scenarios
     },
+    filters: {
+      only_scenarios: (if ($only_scenarios | length) > 0 then $only_scenarios else null end),
+      only_scenario_ids: (if ($only_scenario_ids | length) > 0 then $only_scenario_ids else null end),
+      only_archetypes: (if ($only_archetypes | length) > 0 then $only_archetypes else null end),
+      only_connectors: (if ($only_connectors | length) > 0 then $only_connectors else null end),
+      only_tracks: (if ($only_tracks | length) > 0 then $only_tracks else null end)
+    },
     artifacts: {
       suite_report: "suite_report.json",
       scenario_catalog: "scenario_catalog.json",
       steps: "steps.jsonl",
       replay: "replay.sh",
+      failure_index: "e2e/failure_index.json",
+      rerun_failed: "e2e/rerun_failed.sh",
       e2e: "e2e/",
       unit_gate: "unit-gate/",
       integration_gate: "integration-gate/",
@@ -499,7 +549,15 @@ echo ""
 # Full suite replay:
 bash scripts/e2e/e2e_suite_runner.sh \\
   --run-id "${RUN_ID}" \\
-  --seed "${ROOT_SEED}"
+  --seed "${ROOT_SEED}" \\
+  --out-root "${OUT_ROOT}"
+
+# Optional filter replay examples:
+#   --only-scenarios "${ONLY_SCENARIOS}"
+#   --only-scenario-ids "${ONLY_SCENARIO_IDS}"
+#   --only-archetypes "${ONLY_ARCHETYPES}"
+#   --only-connectors "${ONLY_CONNECTORS}"
+#   --track "${ONLY_TRACKS}"
 
 # Individual gate replays:
 # E2E scenarios only:
@@ -510,6 +568,74 @@ bash scripts/e2e/e2e_suite_runner.sh \\
 #   bash scripts/e2e/e2e_suite_runner.sh --run-id "${RUN_ID}" --seed "${ROOT_SEED}" --skip-e2e --skip-unit-gate --skip-coverage-gate
 REPLAY_EOF
 chmod +x "${SUITE_REPLAY}"
+
+# ── Phase 9: Bundle Manifest ────────────────────────────────────────────────
+log_step "MANIFEST" "Generating artifact bundle manifest"
+
+BUNDLE_MANIFEST="${OUT_ROOT}/BUNDLE_MANIFEST.json"
+jq -n \
+  --arg schema_version "asupersync-bundle-manifest/v1" \
+  --arg run_id "${RUN_ID}" \
+  --arg seed "${ROOT_SEED}" \
+  --arg generated_at "$(now_iso)" \
+  --arg overall_status "${OVERALL_STATUS}" \
+  --argjson ci_mode "${CI_MODE}" \
+  '{
+    schema_version: $schema_version,
+    run_id: $run_id,
+    seed: $seed,
+    generated_at: $generated_at,
+    overall_status: $overall_status,
+    ci_mode: $ci_mode,
+    layout: {
+      "suite_report.json": "Aggregated gate pass/fail with scenario counts and filter metadata",
+      "scenario_catalog.json": "Full scenario inventory derived from scenario_registry.json",
+      "steps.jsonl": "Per-phase execution log (one JSON line per gate phase)",
+      "replay.sh": "Deterministic full-suite replay script (seed + run-id locked)",
+      "BUNDLE_MANIFEST.json": "This file — describes artifact bundle contents and layout",
+      "e2e/": "E2E scenario matrix results",
+      "e2e/summary.json": "Matrix-level pass/fail/skip counts",
+      "e2e/summary.jsonl": "Per-scenario structured execution records",
+      "e2e/manifest.json": "Matrix run manifest with paths and replay commands",
+      "e2e/scenario_plan.json": "Pre-execution scenario plan (filter-resolved)",
+      "e2e/failure_index.json": "Failed scenario index with replay commands for triage",
+      "e2e/rerun_failed.sh": "Executable script to replay only failed scenarios",
+      "e2e/replay.sh": "Full matrix replay with per-scenario commands",
+      "e2e/scenarios/": "Per-scenario artifact directories (logs, metrics, traces)",
+      "unit-gate/": "Unit gate executor results",
+      "integration-gate/": "Integration gate executor results",
+      "coverage-gate/": "Coverage gate publication results"
+    },
+    triage_guide: {
+      "quick_status": "Check suite_report.json overall_status field",
+      "find_failures": "Read e2e/failure_index.json for failed scenario list and replay commands",
+      "rerun_failures": "Execute e2e/rerun_failed.sh to replay only failed scenarios",
+      "full_replay": "Execute replay.sh for deterministic full-suite replay",
+      "deep_dive": "Look in e2e/scenarios/<scenario-key>/ for per-scenario logs and metrics"
+    }
+  }' > "${BUNDLE_MANIFEST}"
+
+# ── Phase 10: Artifact Bundle Packaging ──────────────────────────────────────
+BUNDLE_PATH=""
+if [[ "${BUNDLE}" == "true" ]]; then
+  log_step "BUNDLE" "Packaging artifact bundle"
+  BUNDLE_NAME="asupersync-e2e-${RUN_ID}.tar.gz"
+  BUNDLE_PATH="$(dirname "${OUT_ROOT}")/${BUNDLE_NAME}"
+  tar -czf "${BUNDLE_PATH}" -C "$(dirname "${OUT_ROOT}")" "$(basename "${OUT_ROOT}")"
+  BUNDLE_SIZE=$(wc -c < "${BUNDLE_PATH}" | tr -d ' ')
+  log_step "BUNDLE" "Bundle: ${BUNDLE_PATH} (${BUNDLE_SIZE} bytes)"
+
+  jq -c -n \
+    --arg schema_version "${SCHEMA_VERSION}" \
+    --arg run_id "${RUN_ID}" \
+    --arg phase "bundle" \
+    --arg status "pass" \
+    --arg bundle_path "${BUNDLE_PATH}" \
+    --argjson bundle_size "${BUNDLE_SIZE}" \
+    --arg timestamp "$(now_iso)" \
+    '{schema_version: $schema_version, run_id: $run_id, phase: $phase, status: $status, bundle_path: $bundle_path, bundle_size: $bundle_size, timestamp: $timestamp}' \
+    >> "${SUITE_STEPS}"
+fi
 
 # ── Summary Output ───────────────────────────────────────────────────────────
 echo ""
@@ -528,13 +654,26 @@ echo "    Coverage Gate:    ${COVERAGE_GATE_STATUS}"
 echo "    Forensics Valid:  ${VALIDATION_STATUS}"
 echo ""
 echo "  Scenarios:          ${TOTAL_SCENARIOS} total (${REQUIRED_SCENARIOS} required)"
+if [[ -n "${ONLY_SCENARIOS}${ONLY_SCENARIO_IDS}${ONLY_ARCHETYPES}${ONLY_CONNECTORS}${ONLY_TRACKS}" ]]; then
+  echo "  Filters:            key=${ONLY_SCENARIOS:-<none>} id=${ONLY_SCENARIO_IDS:-<none>} archetype=${ONLY_ARCHETYPES:-<none>} connector=${ONLY_CONNECTORS:-<none>} track=${ONLY_TRACKS:-<none>}"
+fi
 echo ""
 echo "  Artifacts:          ${OUT_ROOT}/"
 echo "    suite_report.json   — aggregated pass/fail"
 echo "    scenario_catalog.json — scenario inventory"
 echo "    steps.jsonl         — per-phase execution log"
 echo "    replay.sh           — deterministic replay"
+echo "    e2e/failure_index.json — failed scenario index"
+echo "    e2e/rerun_failed.sh — failed scenario replay commands"
+echo "    BUNDLE_MANIFEST.json — artifact layout documentation"
+if [[ -n "${BUNDLE_PATH}" ]]; then
+  echo ""
+  echo "  Bundle:             ${BUNDLE_PATH}"
+fi
 echo ""
+if [[ "${CI_MODE}" == "true" ]]; then
+  echo "  Mode:               CI (auto-bundle enabled)"
+fi
 echo "════════════════════════════════════════════════════════════════════"
 
 if [[ "${OVERALL_STATUS}" == "fail" ]]; then

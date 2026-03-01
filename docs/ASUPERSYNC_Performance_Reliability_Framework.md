@@ -118,6 +118,15 @@ artifacts/asupersync/perf/<run-id>/
 - scenario list
 - pass/fail summary
 - metric normalization classification and missing-required-metric count
+- run-level decision envelope (`run_classification` + machine-readable `decision.reasons`)
+- decision thresholds used for delta evaluation (`decision_thresholds_pct`)
+
+Environment fingerprint must minimally include:
+- `rustc`
+- `cargo`
+- `rch`
+- `jq`
+- `os`
 
 `replay.sh` must be executable and reproduce the measurement run from the same repo state.
 
@@ -141,6 +150,12 @@ Each candidate run must be labeled:
 
 with machine-readable rationale.
 
+Implementation contract for `scripts/e2e/asupersync_performance_pack.sh`:
+- `normalized_summary.json.classification` is `accept` or `requires_followup` (data completeness gate).
+- `delta_summary.json.classification` is `accept|reject|requires_followup` (threshold-based regression gate).
+- `manifest.json.run_classification` and `summary.json.run_classification` carry final run decision.
+- `manifest.json.decision` and `summary.json.decision` provide deterministic reason records.
+
 ---
 
 ## 7. RCH Command Pack (for heavy workloads)
@@ -154,7 +169,12 @@ bash scripts/e2e/asupersync_performance_pack.sh --phase baseline --pre-gate --me
 # Orchestrated delta run (compare against baseline normalized summary)
 bash scripts/e2e/asupersync_performance_pack.sh --phase delta --pre-gate \
   --metrics-input artifacts/asupersync/perf/input/metrics_delta.jsonl \
-  --baseline-summary artifacts/asupersync/perf/<baseline-run-id>/normalized_summary.json
+  --baseline-summary artifacts/asupersync/perf/<baseline-run-id>/normalized_summary.json \
+  --latency-regression-threshold-pct 5 \
+  --throughput-drop-threshold-pct 5 \
+  --memory-regression-threshold-pct 10 \
+  --queue-regression-threshold-pct 10 \
+  --reliability-regression-threshold-pct 5
 
 # Baseline checks
 rch exec -- cargo check --workspace --all-targets

@@ -165,6 +165,26 @@ impl S3Client {
         self
     }
 
+    /// Apply authentication to a request builder.
+    fn apply_auth(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.auth {
+            S3Auth::Keys {
+                access_key_id, ..
+            } => builder.bearer_auth(access_key_id),
+            S3Auth::CredentialId(id) => builder.header("X-FCP-Credential-ID", id.to_string()),
+        }
+    }
+
+    /// Perform a lightweight health check (list buckets).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the API call fails.
+    pub async fn health_check(&self) -> S3Result<()> {
+        let _ = self.list_buckets().await?;
+        Ok(())
+    }
+
     /// Set retry configuration.
     #[must_use]
     pub const fn with_retry_config(
@@ -372,6 +392,15 @@ impl S3Client {
         // Construct a presigned-style URL. In production, this would use
         // AWS SigV4 query string signing. For now, we construct a URL that
         // indicates the presigned nature with expiry metadata.
+        let (access_key, region) = match &self.auth {
+            S3Auth::Keys {
+                access_key_id,
+                region,
+                ..
+            } => (access_key_id.as_str(), region.as_str()),
+            S3Auth::CredentialId(_) => ("CREDENTIAL_ID_MODE", "proxy"),
+        };
+
         let encoded_key =
             percent_encoding::utf8_percent_encode(key, percent_encoding::NON_ALPHANUMERIC);
 
@@ -382,8 +411,6 @@ impl S3Client {
              &X-Amz-SignedHeaders=host\
              &X-Amz-Signature=PLACEHOLDER_SIGNATURE",
             base = self.base_url,
-            access_key = self.access_key_id,
-            region = self.region,
         );
 
         PresignedUrlResponse { url }
@@ -407,9 +434,7 @@ impl S3Client {
             debug!(attempt = attempts, url, "S3 GET request");
 
             let result = self
-                .client
-                .get(url)
-                .bearer_auth(&self.access_key_id)
+                .apply_auth(self.client.get(url))
                 .header("x-amz-content-sha256", "UNSIGNED-PAYLOAD")
                 .send()
                 .await;
@@ -483,9 +508,7 @@ impl S3Client {
             debug!(attempt = attempts, url, "S3 PUT request");
 
             let result = self
-                .client
-                .put(url)
-                .bearer_auth(&self.access_key_id)
+                .apply_auth(self.client.put(url))
                 .header("content-type", "application/octet-stream")
                 .header("x-amz-content-sha256", "UNSIGNED-PAYLOAD")
                 .body(body.to_string())
@@ -538,9 +561,7 @@ impl S3Client {
             debug!(attempt = attempts, url, copy_source, "S3 COPY request");
 
             let result = self
-                .client
-                .put(url)
-                .bearer_auth(&self.access_key_id)
+                .apply_auth(self.client.put(url))
                 .header("x-amz-copy-source", copy_source)
                 .header("x-amz-content-sha256", "UNSIGNED-PAYLOAD")
                 .send()
@@ -588,9 +609,7 @@ impl S3Client {
             debug!(attempt = attempts, url, "S3 DELETE request");
 
             let result = self
-                .client
-                .delete(url)
-                .bearer_auth(&self.access_key_id)
+                .apply_auth(self.client.delete(url))
                 .header("x-amz-content-sha256", "UNSIGNED-PAYLOAD")
                 .send()
                 .await;
@@ -644,9 +663,7 @@ impl S3Client {
             debug!(attempt = attempts, url, "S3 HEAD request");
 
             let result = self
-                .client
-                .head(url)
-                .bearer_auth(&self.access_key_id)
+                .apply_auth(self.client.head(url))
                 .header("x-amz-content-sha256", "UNSIGNED-PAYLOAD")
                 .send()
                 .await;

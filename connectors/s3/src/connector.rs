@@ -4,18 +4,127 @@ use std::sync::Arc;
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
-    ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier, SessionId,
-    SimulateRequest, SimulateResponse,
+    ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
+    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
 
-use crate::{client::S3Client, error::S3Error};
+use crate::{
+    client::{DEFAULT_BASE_URL, S3Auth, S3Client},
+    error::S3Error,
+};
+
+/// Validated configuration for the S3 connector.
+struct S3Config {
+    auth: S3Auth,
+    base_url: String,
+}
+
+impl S3Config {
+    /// Parse and validate configuration from FCP params.
+    ///
+    /// Strict auth: exactly one of (`access_key_id` + `secret_access_key`) or `credential_id`.
+    fn from_params(params: &serde_json::Value) -> FcpResult<Self> {
+        let access_key_id = params
+            .get("access_key_id")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let secret_access_key = params
+            .get("secret_access_key")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let region = params
+            .get("region")
+            .and_then(|v| v.as_str())
+            .unwrap_or("us-east-1")
+            .to_string();
+        let credential_id = match params.get("credential_id") {
+            Some(value) => {
+                let raw = value.as_str().ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "credential_id must be a string".into(),
+                })?;
+                Some(
+                    CredentialId::parse(raw).map_err(|_| FcpError::InvalidRequest {
+                        code: 1003,
+                        message: "credential_id must be a valid UUID".into(),
+                    })?,
+                )
+            }
+            None => None,
+        };
+
+        let has_keys = access_key_id.is_some() || secret_access_key.is_some();
+        let auth = match (has_keys, credential_id) {
+            (true, None) => {
+                let aki = access_key_id.ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing access_key_id (required with secret_access_key)".into(),
+                })?;
+                let sak = secret_access_key.ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing secret_access_key (required with access_key_id)".into(),
+                })?;
+                S3Auth::Keys {
+                    access_key_id: aki,
+                    secret_access_key: sak,
+                    region,
+                }
+            }
+            (false, Some(cid)) => S3Auth::CredentialId(cid),
+            (true, Some(_)) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Supply exactly one of (`access_key_id` + `secret_access_key`) or `credential_id`, not both".into(),
+                });
+            }
+            (false, None) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing authentication: supply (`access_key_id` + `secret_access_key`) or `credential_id`".into(),
+                });
+            }
+        };
+
+        let base_url = params
+            .get("base_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or(DEFAULT_BASE_URL)
+            .to_string();
+
+        Ok(Self { auth, base_url })
+    }
+}
+
+/// Structured readiness diagnostic for the doctor command.
+#[derive(Debug, Serialize, Deserialize)]
+struct DoctorResult {
+    status: DoctorStatus,
+    checks: Vec<DoctorCheck>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DoctorCheck {
+    name: String,
+    status: DoctorStatus,
+    message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum DoctorStatus {
+    Healthy,
+    Degraded,
+    Unhealthy,
+}
 
 /// FCP S3 Connector.
 pub struct S3Connector {
     base: Arc<BaseConnector>,
+    config: Option<S3Config>,
     pub(crate) client: Option<S3Client>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
@@ -27,6 +136,7 @@ impl S3Connector {
     pub fn new() -> Self {
         Self {
             base: Arc::new(BaseConnector::new(ConnectorId::from_static("s3"))),
+            config: None,
             client: None,
             verifier: None,
             session_id: None,
@@ -39,41 +149,19 @@ impl S3Connector {
         &mut self,
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
-        let access_key_id = params.get("access_key_id").and_then(|v| v.as_str()).ok_or(
-            FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing access_key_id in configuration".into(),
-            },
-        )?;
+        let config = S3Config::from_params(&params)?;
 
-        let secret_access_key = params
-            .get("secret_access_key")
-            .and_then(|v| v.as_str())
-            .ok_or(FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing secret_access_key in configuration".into(),
-            })?;
-
-        let region = params
-            .get("region")
-            .and_then(|v| v.as_str())
-            .unwrap_or("us-east-1");
-
-        let base_url = params.get("base_url").and_then(|v| v.as_str());
-
-        let mut client = S3Client::new(access_key_id, secret_access_key, region).map_err(|e| {
+        let client = S3Client::new_with_auth(config.auth.clone()).map_err(|e| {
             FcpError::Internal {
                 message: format!("Failed to create HTTP client: {e}"),
             }
-        })?;
+        })?.with_base_url(&config.base_url);
 
-        if let Some(url) = base_url {
-            client = client.with_base_url(url);
-        }
+        info!(auth = %config.auth.redacted_label(), "S3 connector configured");
 
+        self.config = Some(config);
         self.client = Some(client);
         self.base.set_configured(true);
-        info!("S3 connector configured");
 
         Ok(json!({ "status": "configured" }))
     }
@@ -133,13 +221,176 @@ impl S3Connector {
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
         let configured = self.client.is_some();
         let metrics = self.base.metrics();
-        Ok(json!({
+        let mut health = json!({
             "status": if configured { "healthy" } else { "not_configured" },
             "metrics": {
                 "requests_total": metrics.requests_total,
                 "requests_error": metrics.requests_error,
             }
-        }))
+        });
+        if let Some(config) = &self.config {
+            health["auth_mode"] = json!(config.auth.redacted_label());
+            health["base_url"] = json!(config.base_url);
+        }
+        Ok(health)
+    }
+
+    /// Handle doctor readiness check.
+    pub async fn handle_doctor(&self) -> FcpResult<serde_json::Value> {
+        let mut checks = Vec::new();
+
+        // 1. Configuration
+        checks.push(if self.config.is_some() {
+            DoctorCheck {
+                name: "configuration".into(),
+                status: DoctorStatus::Healthy,
+                message: "Connector is configured".into(),
+            }
+        } else {
+            DoctorCheck {
+                name: "configuration".into(),
+                status: DoctorStatus::Unhealthy,
+                message: "Connector is not configured – call `configure` first".into(),
+            }
+        });
+
+        // 2. Client initialized
+        checks.push(if self.client.is_some() {
+            DoctorCheck {
+                name: "client_initialized".into(),
+                status: DoctorStatus::Healthy,
+                message: "HTTP client is ready".into(),
+            }
+        } else {
+            DoctorCheck {
+                name: "client_initialized".into(),
+                status: DoctorStatus::Unhealthy,
+                message: "HTTP client is not initialized".into(),
+            }
+        });
+
+        // 3. Base URL
+        if let Some(config) = &self.config {
+            checks.push(DoctorCheck {
+                name: "base_url".into(),
+                status: DoctorStatus::Healthy,
+                message: format!("Base URL: {}", config.base_url),
+            });
+        } else {
+            checks.push(DoctorCheck {
+                name: "base_url".into(),
+                status: DoctorStatus::Unhealthy,
+                message: "Base URL not set (not configured)".into(),
+            });
+        }
+
+        // 4. Auth mode
+        if let Some(config) = &self.config {
+            checks.push(DoctorCheck {
+                name: "auth_mode".into(),
+                status: DoctorStatus::Healthy,
+                message: format!("Auth: {}", config.auth.redacted_label()),
+            });
+        } else {
+            checks.push(DoctorCheck {
+                name: "auth_mode".into(),
+                status: DoctorStatus::Unhealthy,
+                message: "Auth mode not set (not configured)".into(),
+            });
+        }
+
+        // 5. Network constraints
+        let egress_target = self.config.as_ref().map_or("s3.amazonaws.com", |c| {
+            c.base_url
+                .strip_prefix("https://")
+                .or_else(|| c.base_url.strip_prefix("http://"))
+                .and_then(|s| s.split('/').next())
+                .unwrap_or("s3.amazonaws.com")
+        });
+        checks.push(DoctorCheck {
+            name: "network_constraints".into(),
+            status: DoctorStatus::Healthy,
+            message: format!("Egress target: {egress_target}"),
+        });
+
+        // 6. Credential injection
+        if let Some(config) = &self.config {
+            if config.auth.is_secretless() {
+                checks.push(DoctorCheck {
+                    name: "credential_injection".into(),
+                    status: DoctorStatus::Healthy,
+                    message: "Secretless mode – egress proxy will inject credentials".into(),
+                });
+            } else {
+                checks.push(DoctorCheck {
+                    name: "credential_injection".into(),
+                    status: DoctorStatus::Healthy,
+                    message: "Direct keys mode – no proxy injection needed".into(),
+                });
+            }
+        } else {
+            checks.push(DoctorCheck {
+                name: "credential_injection".into(),
+                status: DoctorStatus::Unhealthy,
+                message: "Cannot assess – not configured".into(),
+            });
+        }
+
+        let overall = if checks.iter().any(|c| c.status == DoctorStatus::Unhealthy) {
+            DoctorStatus::Unhealthy
+        } else if checks.iter().any(|c| c.status == DoctorStatus::Degraded) {
+            DoctorStatus::Degraded
+        } else {
+            DoctorStatus::Healthy
+        };
+
+        let result = DoctorResult {
+            status: overall,
+            checks,
+        };
+
+        serde_json::to_value(result).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize doctor result: {e}"),
+        })
+    }
+
+    /// Handle self-check connectivity probe.
+    pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
+        let Some(client) = &self.client else {
+            let report =
+                SelfCheckReport::failed("not_configured", "Connector is not configured yet");
+            return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize self-check report: {e}"),
+            });
+        };
+
+        // In credential_id mode, we can't verify connectivity without the egress proxy
+        if let Some(config) = &self.config {
+            if config.auth.is_secretless() {
+                let report = SelfCheckReport::degraded(
+                    "credential_injection_required",
+                    "Configured with credential_id; egress proxy injection required for checks",
+                );
+                return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                    message: format!("Failed to serialize self-check report: {e}"),
+                });
+            }
+        }
+
+        let report = match client.health_check().await {
+            Ok(()) => SelfCheckReport::ok(),
+            Err(err) => {
+                if err.is_retryable() {
+                    SelfCheckReport::degraded("self_check_retryable", err.to_string())
+                } else {
+                    SelfCheckReport::failed("self_check_failed", err.to_string())
+                }
+            }
+        };
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {e}"),
+        })
     }
 
     /// Handle introspect method.
@@ -677,11 +928,15 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn test_invoke_missing_field() {
         let mut connector = S3Connector::new();
-        connector.client = Some(
-            S3Client::new("test_key", "test_secret", "us-east-1")
-                .unwrap()
-                .with_base_url("http://localhost:9999"),
-        );
+        connector
+            .handle_configure(json!({
+                "access_key_id": "test_key",
+                "secret_access_key": "test_secret",
+                "region": "us-east-1",
+                "base_url": "http://localhost:9999"
+            }))
+            .await
+            .unwrap();
 
         let signing_key = Ed25519SigningKey::generate();
         let verifying_key = signing_key.verifying_key();

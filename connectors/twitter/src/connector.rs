@@ -892,6 +892,7 @@ impl TwitterConnector {
 
             // Tweet operations
             "twitter.tweet.get" => self.op_tweet_get(args).await,
+            "twitter.tweet.get_many" => self.op_tweet_get_many(args).await,
             "twitter.tweet.search" => self.op_tweet_search(args).await,
             "twitter.tweet.create" => self.op_tweet_create(args).await,
             "twitter.tweet.reply" => self.op_tweet_reply(args).await,
@@ -999,6 +1000,47 @@ impl TwitterConnector {
         Ok(json!({
             "tweet": response.data,
             "includes": response.includes
+        }))
+    }
+
+    async fn op_tweet_get_many(&self, args: Value) -> Result<Value, FcpError> {
+        let client = self.require_client()?;
+
+        let ids_value = args.get("tweet_ids").ok_or_else(|| FcpError::InvalidRequest {
+            code: 1006,
+            message: "Missing 'tweet_ids' argument".into(),
+        })?;
+
+        let ids: Vec<String> =
+            serde_json::from_value(ids_value.clone()).map_err(|e| FcpError::InvalidRequest {
+                code: 1007,
+                message: format!("Invalid tweet_ids format: {e}"),
+            })?;
+
+        if ids.is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1007,
+                message: "tweet_ids must not be empty".into(),
+            });
+        }
+
+        if ids.len() > 100 {
+            return Err(FcpError::InvalidRequest {
+                code: 1007,
+                message: "tweet_ids exceeds maximum of 100".into(),
+            });
+        }
+
+        let ids_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let response = client
+            .get_tweets(&ids_refs)
+            .await
+            .map_err(|e| e.to_fcp_error())?;
+
+        Ok(json!({
+            "tweets": response.data,
+            "includes": response.includes,
+            "meta": response.meta
         }))
     }
 
@@ -1314,6 +1356,34 @@ impl TwitterConnector {
 impl Default for TwitterConnector {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Construct a typed `OperationInfo` for the Twitter introspect catalog.
+#[allow(clippy::too_many_arguments)]
+fn tw_op(
+    id: &'static str,
+    summary: &str,
+    input_schema: Value,
+    output_schema: Value,
+    capability: &'static str,
+    risk_level: RiskLevel,
+    safety_tier: SafetyTier,
+    ai_hints: AgentHint,
+) -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static(id),
+        summary: summary.into(),
+        description: None,
+        input_schema,
+        output_schema,
+        capability: CapabilityId::from_static(capability),
+        risk_level,
+        safety_tier,
+        idempotency: IdempotencyClass::None,
+        ai_hints,
+        rate_limit: None,
+        requires_approval: None,
     }
 }
 

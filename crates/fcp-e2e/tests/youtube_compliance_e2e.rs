@@ -445,7 +445,9 @@ fn youtube_manifest_network_guard_allows_and_denies() {
     let operations = [
         "youtube.search",
         "youtube.get_video",
+        "youtube.list_videos",
         "youtube.get_channel",
+        "youtube.list_playlists",
         "youtube.list_playlist_items",
         "youtube.list_comments",
         "youtube.post_comment",

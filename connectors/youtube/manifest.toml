@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:d343b8d194599a0ac796312daf8a9f202f62fdad211c3e06aea455a0166a7e66"
+interface_hash = "blake3-256:fcp.interface.v2:1ca09b685051049224eddfe1d65e6d28f11de2f61810018ff137ddad08a44367"
 
 [connector]
 id = "fcp.youtube"
@@ -125,6 +125,53 @@ related = ["youtube.search", "youtube.list_comments"]
 
 # ────────────────────────────────────────────────────────────────
 
+[provides.operations."youtube.list_videos"]
+description = "Get details for multiple videos by ID"
+capability = "youtube.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."youtube.list_videos".input_schema]
+required = ["video_ids"]
+type = "object"
+[provides.operations."youtube.list_videos".input_schema.properties.video_ids]
+type = "array"
+items = { type = "string" }
+minItems = 1
+
+[provides.operations."youtube.list_videos".output_schema]
+required = ["videos", "total_results"]
+type = "object"
+[provides.operations."youtube.list_videos".output_schema.properties.videos]
+type = "array"
+[provides.operations."youtube.list_videos".output_schema.properties.total_results]
+type = "integer"
+
+[provides.operations."youtube.list_videos".network_constraints]
+host_allow = ["www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."youtube.list_videos".ai_hints]
+when_to_use = "Get metadata for multiple videos in one request."
+common_mistakes = ["Passing an empty video_ids list"]
+examples = ['{"video_ids": ["dQw4w9WgXcQ", "9bZkp7q19f0"]}']
+related = ["youtube.get_video", "youtube.search"]
+
+# ────────────────────────────────────────────────────────────────
+
 [provides.operations."youtube.get_channel"]
 description = "Get channel details"
 capability = "youtube.read"
@@ -165,6 +212,55 @@ when_to_use = "Get details about a YouTube channel."
 common_mistakes = []
 examples = ['{"channel_id": "UCxxxxxxxx"}']
 related = ["youtube.search"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."youtube.list_playlists"]
+description = "List playlists for a channel"
+capability = "youtube.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."youtube.list_playlists".input_schema]
+required = ["channel_id"]
+type = "object"
+[provides.operations."youtube.list_playlists".input_schema.properties.channel_id]
+type = "string"
+[provides.operations."youtube.list_playlists".input_schema.properties.max_results]
+type = "integer"
+[provides.operations."youtube.list_playlists".input_schema.properties.page_token]
+type = "string"
+
+[provides.operations."youtube.list_playlists".output_schema]
+required = ["playlists"]
+type = "object"
+[provides.operations."youtube.list_playlists".output_schema.properties.playlists]
+type = "array"
+[provides.operations."youtube.list_playlists".output_schema.properties.next_page_token]
+type = "string"
+
+[provides.operations."youtube.list_playlists".network_constraints]
+host_allow = ["www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 5242880
+
+[provides.operations."youtube.list_playlists".ai_hints]
+when_to_use = "List playlists owned by a channel."
+common_mistakes = ["Not handling pagination via next_page_token"]
+examples = ['{"channel_id": "UCxxxxxxxx", "max_results": 10}']
+related = ["youtube.list_playlist_items"]
 
 # ────────────────────────────────────────────────────────────────
 
@@ -371,7 +467,9 @@ scope = "instance"
 [rate_limits.operation_pools]
 "youtube.search" = ["youtube.read"]
 "youtube.get_video" = ["youtube.read"]
+"youtube.list_videos" = ["youtube.read"]
 "youtube.get_channel" = ["youtube.read"]
+"youtube.list_playlists" = ["youtube.read"]
 "youtube.list_playlist_items" = ["youtube.read"]
 "youtube.list_comments" = ["youtube.read"]
 "youtube.post_comment" = ["youtube.write"]

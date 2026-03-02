@@ -2519,7 +2519,9 @@ fn youtube_full_manifest_parses_with_all_operations() {
     let expected_ops = [
         "youtube.search",
         "youtube.get_video",
+        "youtube.list_videos",
         "youtube.get_channel",
+        "youtube.list_playlists",
         "youtube.list_playlist_items",
         "youtube.list_comments",
         "youtube.post_comment",

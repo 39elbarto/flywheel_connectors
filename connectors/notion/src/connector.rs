@@ -4,18 +4,103 @@ use std::sync::Arc;
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
-    ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier, SessionId,
-    SimulateRequest, SimulateResponse,
+    ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
+    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
 
-use crate::{client::NotionClient, error::NotionError};
+use crate::{
+    client::{DEFAULT_API_URL, NotionAuth, NotionClient},
+    error::NotionError,
+};
+
+/// Validated configuration for the Notion connector.
+struct NotionConfig {
+    auth: NotionAuth,
+    api_url: String,
+}
+
+impl NotionConfig {
+    /// Parse and validate configuration from FCP params.
+    ///
+    /// Strict auth: exactly one of `token` or `credential_id` must be supplied.
+    fn from_params(params: &serde_json::Value) -> FcpResult<Self> {
+        let token = params
+            .get("token")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let credential_id = match params.get("credential_id") {
+            Some(value) => {
+                let raw = value.as_str().ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "credential_id must be a string".into(),
+                })?;
+                Some(
+                    CredentialId::parse(raw).map_err(|_| FcpError::InvalidRequest {
+                        code: 1003,
+                        message: "credential_id must be a valid UUID".into(),
+                    })?,
+                )
+            }
+            None => None,
+        };
+
+        let auth = match (token, credential_id) {
+            (Some(t), None) => NotionAuth::Token(t),
+            (None, Some(cid)) => NotionAuth::CredentialId(cid),
+            (Some(_), Some(_)) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Supply exactly one of `token` or `credential_id`, not both".into(),
+                });
+            }
+            (None, None) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing authentication: supply `token` or `credential_id`".into(),
+                });
+            }
+        };
+
+        let api_url = params
+            .get("api_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or(DEFAULT_API_URL)
+            .to_string();
+
+        Ok(Self { auth, api_url })
+    }
+}
+
+/// Structured readiness diagnostic for the doctor command.
+#[derive(Debug, Serialize, Deserialize)]
+struct DoctorResult {
+    status: DoctorStatus,
+    checks: Vec<DoctorCheck>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DoctorCheck {
+    name: String,
+    status: DoctorStatus,
+    message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum DoctorStatus {
+    Healthy,
+    Degraded,
+    Unhealthy,
+}
 
 /// FCP Notion Connector.
 pub struct NotionConnector {
     base: Arc<BaseConnector>,
+    config: Option<NotionConfig>,
     client: Option<NotionClient>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
@@ -27,6 +112,7 @@ impl NotionConnector {
     pub fn new() -> Self {
         Self {
             base: Arc::new(BaseConnector::new(ConnectorId::from_static("notion"))),
+            config: None,
             client: None,
             verifier: None,
             session_id: None,
@@ -39,28 +125,19 @@ impl NotionConnector {
         &mut self,
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
-        let token =
-            params
-                .get("token")
-                .and_then(|v| v.as_str())
-                .ok_or(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing token in configuration".into(),
-                })?;
+        let config = NotionConfig::from_params(&params)?;
 
-        let api_url = params.get("api_url").and_then(|v| v.as_str());
+        let client = NotionClient::new_with_auth(config.auth.clone())
+            .map_err(|e| FcpError::Internal {
+                message: format!("Failed to create HTTP client: {e}"),
+            })?
+            .with_api_url(&config.api_url);
 
-        let mut client = NotionClient::new(token).map_err(|e| FcpError::Internal {
-            message: format!("Failed to create HTTP client: {e}"),
-        })?;
+        info!(auth = %config.auth.redacted_label(), "Notion connector configured");
 
-        if let Some(url) = api_url {
-            client = client.with_api_url(url);
-        }
-
+        self.config = Some(config);
         self.client = Some(client);
         self.base.set_configured(true);
-        info!("Notion connector configured");
 
         Ok(json!({ "status": "configured" }))
     }
@@ -120,13 +197,176 @@ impl NotionConnector {
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
         let configured = self.client.is_some();
         let metrics = self.base.metrics();
-        Ok(json!({
+        let mut health = json!({
             "status": if configured { "healthy" } else { "not_configured" },
             "metrics": {
                 "requests_total": metrics.requests_total,
                 "requests_error": metrics.requests_error,
             }
-        }))
+        });
+        if let Some(config) = &self.config {
+            health["auth_mode"] = json!(config.auth.redacted_label());
+            health["api_url"] = json!(config.api_url);
+        }
+        Ok(health)
+    }
+
+    /// Handle doctor readiness check.
+    pub async fn handle_doctor(&self) -> FcpResult<serde_json::Value> {
+        let mut checks = Vec::new();
+
+        // 1. Configuration
+        checks.push(if self.config.is_some() {
+            DoctorCheck {
+                name: "configuration".into(),
+                status: DoctorStatus::Healthy,
+                message: "Connector is configured".into(),
+            }
+        } else {
+            DoctorCheck {
+                name: "configuration".into(),
+                status: DoctorStatus::Unhealthy,
+                message: "Connector is not configured – call `configure` first".into(),
+            }
+        });
+
+        // 2. Client initialized
+        checks.push(if self.client.is_some() {
+            DoctorCheck {
+                name: "client_initialized".into(),
+                status: DoctorStatus::Healthy,
+                message: "HTTP client is ready".into(),
+            }
+        } else {
+            DoctorCheck {
+                name: "client_initialized".into(),
+                status: DoctorStatus::Unhealthy,
+                message: "HTTP client is not initialized".into(),
+            }
+        });
+
+        // 3. API URL
+        if let Some(config) = &self.config {
+            checks.push(DoctorCheck {
+                name: "base_url".into(),
+                status: DoctorStatus::Healthy,
+                message: format!("API URL: {}", config.api_url),
+            });
+        } else {
+            checks.push(DoctorCheck {
+                name: "base_url".into(),
+                status: DoctorStatus::Unhealthy,
+                message: "API URL not set (not configured)".into(),
+            });
+        }
+
+        // 4. Auth mode
+        if let Some(config) = &self.config {
+            checks.push(DoctorCheck {
+                name: "auth_mode".into(),
+                status: DoctorStatus::Healthy,
+                message: format!("Auth: {}", config.auth.redacted_label()),
+            });
+        } else {
+            checks.push(DoctorCheck {
+                name: "auth_mode".into(),
+                status: DoctorStatus::Unhealthy,
+                message: "Auth mode not set (not configured)".into(),
+            });
+        }
+
+        // 5. Network constraints
+        let egress_target = self.config.as_ref().map_or("api.notion.com", |c| {
+            c.api_url
+                .strip_prefix("https://")
+                .or_else(|| c.api_url.strip_prefix("http://"))
+                .and_then(|s| s.split('/').next())
+                .unwrap_or("api.notion.com")
+        });
+        checks.push(DoctorCheck {
+            name: "network_constraints".into(),
+            status: DoctorStatus::Healthy,
+            message: format!("Egress target: {egress_target}"),
+        });
+
+        // 6. Credential injection
+        if let Some(config) = &self.config {
+            if config.auth.is_secretless() {
+                checks.push(DoctorCheck {
+                    name: "credential_injection".into(),
+                    status: DoctorStatus::Healthy,
+                    message: "Secretless mode – egress proxy will inject credentials".into(),
+                });
+            } else {
+                checks.push(DoctorCheck {
+                    name: "credential_injection".into(),
+                    status: DoctorStatus::Healthy,
+                    message: "Direct token mode – no proxy injection needed".into(),
+                });
+            }
+        } else {
+            checks.push(DoctorCheck {
+                name: "credential_injection".into(),
+                status: DoctorStatus::Unhealthy,
+                message: "Cannot assess – not configured".into(),
+            });
+        }
+
+        let overall = if checks.iter().any(|c| c.status == DoctorStatus::Unhealthy) {
+            DoctorStatus::Unhealthy
+        } else if checks.iter().any(|c| c.status == DoctorStatus::Degraded) {
+            DoctorStatus::Degraded
+        } else {
+            DoctorStatus::Healthy
+        };
+
+        let result = DoctorResult {
+            status: overall,
+            checks,
+        };
+
+        serde_json::to_value(result).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize doctor result: {e}"),
+        })
+    }
+
+    /// Handle self-check connectivity probe.
+    pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
+        let Some(client) = &self.client else {
+            let report =
+                SelfCheckReport::failed("not_configured", "Connector is not configured yet");
+            return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize self-check report: {e}"),
+            });
+        };
+
+        // In credential_id mode, we can't verify connectivity without the egress proxy
+        if let Some(config) = &self.config {
+            if config.auth.is_secretless() {
+                let report = SelfCheckReport::degraded(
+                    "credential_injection_required",
+                    "Configured with credential_id; egress proxy injection required for checks",
+                );
+                return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                    message: format!("Failed to serialize self-check report: {e}"),
+                });
+            }
+        }
+
+        let report = match client.health_check().await {
+            Ok(()) => SelfCheckReport::ok(),
+            Err(err) => {
+                if err.is_retryable() {
+                    SelfCheckReport::degraded("self_check_retryable", err.to_string())
+                } else {
+                    SelfCheckReport::failed("self_check_failed", err.to_string())
+                }
+            }
+        };
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {e}"),
+        })
     }
 
     /// Handle introspect method.
@@ -809,11 +1049,13 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn test_invoke_missing_field() {
         let mut connector = NotionConnector::new();
-        connector.client = Some(
-            NotionClient::new("fake_key")
-                .unwrap()
-                .with_api_url("http://localhost:9999/v1"),
-        );
+        connector
+            .handle_configure(json!({
+                "token": "ntn_test123",
+                "api_url": "http://localhost:9999/v1"
+            }))
+            .await
+            .unwrap();
 
         let signing_key = Ed25519SigningKey::generate();
         let verifying_key = signing_key.verifying_key();
@@ -867,6 +1109,164 @@ mod tests {
         assert!(op_ids.contains(&"notion.add_comment"));
         assert!(op_ids.contains(&"notion.list_comments"));
         assert_eq!(ops.len(), 10);
+    }
+
+    // ── Provisioning automation tests ─────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_with_token() {
+        let mut connector = NotionConnector::new();
+        let result = connector
+            .handle_configure(json!({ "token": "ntn_test123" }))
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "configured");
+        assert!(connector.client.is_some());
+        assert!(connector.config.is_some());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_with_credential_id() {
+        let mut connector = NotionConnector::new();
+        let cid = uuid::Uuid::new_v4().to_string();
+        let result = connector
+            .handle_configure(json!({ "credential_id": cid }))
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "configured");
+        assert!(connector.config.as_ref().unwrap().auth.is_secretless());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_both_auth_modes() {
+        let mut connector = NotionConnector::new();
+        let cid = uuid::Uuid::new_v4().to_string();
+        let result = connector
+            .handle_configure(json!({
+                "token": "ntn_test123",
+                "credential_id": cid
+            }))
+            .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("exactly one"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_no_auth() {
+        let mut connector = NotionConnector::new();
+        let result = connector.handle_configure(json!({})).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("Missing authentication"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_with_custom_api_url() {
+        let mut connector = NotionConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "token": "ntn_test123",
+                "api_url": "https://custom-notion.example.com/v1"
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "configured");
+        let config = connector.config.as_ref().unwrap();
+        assert_eq!(config.api_url, "https://custom-notion.example.com/v1");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_health_includes_auth_info() {
+        let mut connector = NotionConnector::new();
+        connector
+            .handle_configure(json!({ "token": "ntn_test123" }))
+            .await
+            .unwrap();
+        let health = connector.handle_health().await.unwrap();
+        assert_eq!(health["status"], "healthy");
+        assert!(health["auth_mode"].as_str().unwrap().contains("token"));
+        assert!(health["api_url"].as_str().is_some());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_not_configured() {
+        let connector = NotionConnector::new();
+        let result = connector.handle_doctor().await.unwrap();
+        assert_eq!(result["status"], "unhealthy");
+        let checks = result["checks"].as_array().unwrap();
+        assert_eq!(checks.len(), 6);
+        assert_eq!(checks[0]["name"], "configuration");
+        assert_eq!(checks[0]["status"], "unhealthy");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_configured_healthy() {
+        let mut connector = NotionConnector::new();
+        connector
+            .handle_configure(json!({ "token": "ntn_test123" }))
+            .await
+            .unwrap();
+        let result = connector.handle_doctor().await.unwrap();
+        assert_eq!(result["status"], "healthy");
+        let checks = result["checks"].as_array().unwrap();
+        assert_eq!(checks.len(), 6);
+        for check in checks {
+            assert_eq!(check["status"], "healthy");
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_credential_id_mode() {
+        let mut connector = NotionConnector::new();
+        let cid = uuid::Uuid::new_v4().to_string();
+        connector
+            .handle_configure(json!({ "credential_id": cid }))
+            .await
+            .unwrap();
+        let result = connector.handle_doctor().await.unwrap();
+        assert_eq!(result["status"], "healthy");
+        let checks = result["checks"].as_array().unwrap();
+        let cred_check = checks
+            .iter()
+            .find(|c| c["name"] == "credential_injection")
+            .unwrap();
+        assert_eq!(cred_check["status"], "healthy");
+        assert!(
+            cred_check["message"]
+                .as_str()
+                .unwrap()
+                .contains("Secretless")
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_not_configured() {
+        let connector = NotionConnector::new();
+        let result = connector.handle_self_check().await.unwrap();
+        assert_eq!(result["status"], "failed");
+        assert_eq!(result["reason_code"], "not_configured");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_credential_id_degraded() {
+        let mut connector = NotionConnector::new();
+        let cid = uuid::Uuid::new_v4().to_string();
+        connector
+            .handle_configure(json!({ "credential_id": cid }))
+            .await
+            .unwrap();
+        let result = connector.handle_self_check().await.unwrap();
+        assert_eq!(result["status"], "degraded");
+        assert_eq!(result["reason_code"], "credential_injection_required");
     }
 
     #[test]

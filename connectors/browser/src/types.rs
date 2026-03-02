@@ -78,6 +78,23 @@ pub struct Cookie {
     pub same_site: Option<String>,
 }
 
+/// Proxy configuration for browser network routing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProxyConfig {
+    pub server: String,
+    pub bypass_list: Option<Vec<String>>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+}
+
+/// Result of proxy configuration operations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProxyResult {
+    pub enabled: bool,
+    pub mode: String,
+    pub server: Option<String>,
+}
+
 /// Result of a wait-for-selector operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WaitResult {

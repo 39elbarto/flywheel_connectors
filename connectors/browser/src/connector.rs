@@ -2,20 +2,109 @@
 
 use std::sync::Arc;
 
+use fcp_core::ApprovalScope::Execution;
 use fcp_core::{
-    AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
-    ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier, SessionId,
-    SimulateRequest, SimulateResponse,
+    AgentHint, ApprovalMode, ApprovalToken, BaseConnector, CapabilityGrant, CapabilityId,
+    CapabilityToken, CapabilityVerifier, ConnectorId, CredentialId, EventCaps, FcpError, FcpResult,
+    HandshakeRequest, HandshakeResponse, IdempotencyClass, Introspection, OperationId,
+    OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId, SimulateRequest,
+    SimulateResponse,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
 
-use crate::{client::BrowserClient, error::BrowserError, types::Cookie};
+use crate::{
+    client::{BrowserAuth, BrowserClient, DEFAULT_BROWSER_URL},
+    error::BrowserError,
+    types::{Cookie, ProxyConfig},
+};
+
+#[derive(Debug, Clone)]
+struct ExecutionApprovalContext {
+    token_id: String,
+}
+
+/// Validated configuration for the Browser connector.
+struct BrowserConfig {
+    auth: BrowserAuth,
+    browser_url: String,
+}
+
+impl BrowserConfig {
+    /// Parse and validate configuration from FCP params.
+    ///
+    /// Browser auth is optional: no auth, `api_key`, or `credential_id`.
+    /// Cannot supply both `api_key` and `credential_id`.
+    fn from_params(params: &serde_json::Value) -> FcpResult<Self> {
+        let api_key = params
+            .get("api_key")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let credential_id = match params.get("credential_id") {
+            Some(value) => {
+                let raw = value.as_str().ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "credential_id must be a string".into(),
+                })?;
+                Some(
+                    CredentialId::parse(raw).map_err(|_| FcpError::InvalidRequest {
+                        code: 1003,
+                        message: "credential_id must be a valid UUID".into(),
+                    })?,
+                )
+            }
+            None => None,
+        };
+
+        let auth = match (api_key, credential_id) {
+            (Some(key), None) => BrowserAuth::ApiKey(key),
+            (None, Some(cid)) => BrowserAuth::CredentialId(cid),
+            (Some(_), Some(_)) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Supply at most one of `api_key` or `credential_id`, not both".into(),
+                });
+            }
+            (None, None) => BrowserAuth::None,
+        };
+
+        let browser_url = params
+            .get("browser_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or(DEFAULT_BROWSER_URL)
+            .to_string();
+
+        Ok(Self { auth, browser_url })
+    }
+}
+
+/// Structured readiness diagnostic for the doctor command.
+#[derive(Debug, Serialize, Deserialize)]
+struct DoctorResult {
+    status: DoctorStatus,
+    checks: Vec<DoctorCheck>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DoctorCheck {
+    name: String,
+    status: DoctorStatus,
+    message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum DoctorStatus {
+    Healthy,
+    Degraded,
+    Unhealthy,
+}
 
 /// FCP Browser Connector.
 pub struct BrowserConnector {
     base: Arc<BaseConnector>,
+    config: Option<BrowserConfig>,
     client: Option<BrowserClient>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
@@ -27,6 +116,7 @@ impl BrowserConnector {
     pub fn new() -> Self {
         Self {
             base: Arc::new(BaseConnector::new(ConnectorId::from_static("fcp.browser"))),
+            config: None,
             client: None,
             verifier: None,
             session_id: None,
@@ -39,20 +129,19 @@ impl BrowserConnector {
         &mut self,
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
-        let api_key = params.get("api_key").and_then(|v| v.as_str());
-        let browser_url = params.get("browser_url").and_then(|v| v.as_str());
+        let config = BrowserConfig::from_params(&params)?;
 
-        let mut client = BrowserClient::new(api_key).map_err(|e| FcpError::Internal {
-            message: format!("Failed to create HTTP client: {e}"),
-        })?;
+        let client = BrowserClient::new_with_auth(config.auth.clone())
+            .map_err(|e| FcpError::Internal {
+                message: format!("Failed to create HTTP client: {e}"),
+            })?
+            .with_browser_url(&config.browser_url);
 
-        if let Some(url) = browser_url {
-            client = client.with_browser_url(url);
-        }
+        info!(auth = %config.auth.redacted_label(), "Browser connector configured");
 
+        self.config = Some(config);
         self.client = Some(client);
         self.base.set_configured(true);
-        info!("Browser connector configured");
 
         Ok(json!({ "status": "configured" }))
     }
@@ -112,13 +201,176 @@ impl BrowserConnector {
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
         let configured = self.client.is_some();
         let metrics = self.base.metrics();
-        Ok(json!({
+        let mut health = json!({
             "status": if configured { "healthy" } else { "not_configured" },
             "metrics": {
                 "requests_total": metrics.requests_total,
                 "requests_error": metrics.requests_error,
             }
-        }))
+        });
+        if let Some(config) = &self.config {
+            health["auth_mode"] = json!(config.auth.redacted_label());
+            health["browser_url"] = json!(config.browser_url);
+        }
+        Ok(health)
+    }
+
+    /// Handle doctor readiness check.
+    pub async fn handle_doctor(&self) -> FcpResult<serde_json::Value> {
+        let mut checks = Vec::new();
+
+        // 1. Configuration
+        checks.push(if self.config.is_some() {
+            DoctorCheck {
+                name: "configuration".into(),
+                status: DoctorStatus::Healthy,
+                message: "Connector is configured".into(),
+            }
+        } else {
+            DoctorCheck {
+                name: "configuration".into(),
+                status: DoctorStatus::Unhealthy,
+                message: "Connector is not configured – call `configure` first".into(),
+            }
+        });
+
+        // 2. Client initialized
+        checks.push(if self.client.is_some() {
+            DoctorCheck {
+                name: "client_initialized".into(),
+                status: DoctorStatus::Healthy,
+                message: "HTTP client is ready".into(),
+            }
+        } else {
+            DoctorCheck {
+                name: "client_initialized".into(),
+                status: DoctorStatus::Unhealthy,
+                message: "HTTP client is not initialized".into(),
+            }
+        });
+
+        // 3. Browser URL
+        if let Some(config) = &self.config {
+            checks.push(DoctorCheck {
+                name: "base_url".into(),
+                status: DoctorStatus::Healthy,
+                message: format!("Browser URL: {}", config.browser_url),
+            });
+        } else {
+            checks.push(DoctorCheck {
+                name: "base_url".into(),
+                status: DoctorStatus::Unhealthy,
+                message: "Browser URL not set (not configured)".into(),
+            });
+        }
+
+        // 4. Auth mode
+        if let Some(config) = &self.config {
+            checks.push(DoctorCheck {
+                name: "auth_mode".into(),
+                status: DoctorStatus::Healthy,
+                message: format!("Auth: {}", config.auth.redacted_label()),
+            });
+        } else {
+            checks.push(DoctorCheck {
+                name: "auth_mode".into(),
+                status: DoctorStatus::Unhealthy,
+                message: "Auth mode not set (not configured)".into(),
+            });
+        }
+
+        // 5. Network constraints
+        let egress_target = self.config.as_ref().map_or("localhost:9222", |c| {
+            c.browser_url
+                .strip_prefix("https://")
+                .or_else(|| c.browser_url.strip_prefix("http://"))
+                .and_then(|s| s.split('/').next())
+                .unwrap_or("localhost:9222")
+        });
+        checks.push(DoctorCheck {
+            name: "network_constraints".into(),
+            status: DoctorStatus::Healthy,
+            message: format!("Egress target: {egress_target}"),
+        });
+
+        // 6. Credential injection
+        if let Some(config) = &self.config {
+            if config.auth.is_secretless() {
+                checks.push(DoctorCheck {
+                    name: "credential_injection".into(),
+                    status: DoctorStatus::Healthy,
+                    message: "Secretless mode – egress proxy will inject credentials".into(),
+                });
+            } else {
+                checks.push(DoctorCheck {
+                    name: "credential_injection".into(),
+                    status: DoctorStatus::Healthy,
+                    message: "Direct auth mode – no proxy injection needed".into(),
+                });
+            }
+        } else {
+            checks.push(DoctorCheck {
+                name: "credential_injection".into(),
+                status: DoctorStatus::Unhealthy,
+                message: "Cannot assess – not configured".into(),
+            });
+        }
+
+        let overall = if checks.iter().any(|c| c.status == DoctorStatus::Unhealthy) {
+            DoctorStatus::Unhealthy
+        } else if checks.iter().any(|c| c.status == DoctorStatus::Degraded) {
+            DoctorStatus::Degraded
+        } else {
+            DoctorStatus::Healthy
+        };
+
+        let result = DoctorResult {
+            status: overall,
+            checks,
+        };
+
+        serde_json::to_value(result).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize doctor result: {e}"),
+        })
+    }
+
+    /// Handle self-check connectivity probe.
+    pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
+        let Some(client) = &self.client else {
+            let report =
+                SelfCheckReport::failed("not_configured", "Connector is not configured yet");
+            return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize self-check report: {e}"),
+            });
+        };
+
+        // In credential_id mode, we can't verify connectivity without the egress proxy
+        if let Some(config) = &self.config {
+            if config.auth.is_secretless() {
+                let report = SelfCheckReport::degraded(
+                    "credential_injection_required",
+                    "Configured with credential_id; egress proxy injection required for checks",
+                );
+                return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                    message: format!("Failed to serialize self-check report: {e}"),
+                });
+            }
+        }
+
+        let report = match client.health_check().await {
+            Ok(()) => SelfCheckReport::ok(),
+            Err(err) => {
+                if err.is_retryable() {
+                    SelfCheckReport::degraded("self_check_retryable", err.to_string())
+                } else {
+                    SelfCheckReport::failed("self_check_failed", err.to_string())
+                }
+            }
+        };
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {e}"),
+        })
     }
 
     /// Handle introspect method.
@@ -485,6 +737,73 @@ impl BrowserConnector {
                         related: vec![CapabilityId::from_static("browser.get_cookies")],
                     },
                 ),
+                op_info(
+                    "browser.set_proxy",
+                    "Configure an outbound proxy for browser traffic",
+                    json!({
+                        "type": "object",
+                        "required": ["server"],
+                        "properties": {
+                            "server": { "type": "string" },
+                            "bypass_list": { "type": "array", "items": { "type": "string" } },
+                            "username": { "type": "string" },
+                            "password": { "type": "string" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": ["enabled", "mode"],
+                        "properties": {
+                            "enabled": { "type": "boolean" },
+                            "mode": { "type": "string" },
+                            "server": { "type": "string" },
+                            "audit": { "type": "object" }
+                        }
+                    }),
+                    "browser.proxy",
+                    RiskLevel::High,
+                    SafetyTier::Dangerous,
+                    IdempotencyClass::BestEffort,
+                    AgentHint {
+                        when_to_use: "Route browser requests through a controlled proxy. Dangerous because it changes outbound trust boundaries.".into(),
+                        common_mistakes: vec![
+                            "Sending credentials to untrusted proxy endpoints.".into(),
+                            "Forgetting bypass rules for local callback URLs.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"server": "http://proxy.example.com:8080", "bypass_list": ["localhost"]}"#.into(),
+                        ],
+                        related: vec![CapabilityId::from_static("browser.clear_proxy")],
+                    },
+                ),
+                op_info(
+                    "browser.clear_proxy",
+                    "Clear outbound proxy configuration",
+                    json!({
+                        "type": "object",
+                        "properties": {}
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": ["enabled", "mode"],
+                        "properties": {
+                            "enabled": { "type": "boolean" },
+                            "mode": { "type": "string" },
+                            "server": { "type": "string" },
+                            "audit": { "type": "object" }
+                        }
+                    }),
+                    "browser.proxy",
+                    RiskLevel::High,
+                    SafetyTier::Dangerous,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Revert browser networking to direct mode after proxy-based workflows.".into(),
+                        common_mistakes: vec!["Assuming proxy state is reset between sessions.".into()],
+                        examples: vec![r"{}".into()],
+                        related: vec![CapabilityId::from_static("browser.set_proxy")],
+                    },
+                ),
             ],
             events: vec![],
             resource_types: vec![],
@@ -561,6 +880,8 @@ impl BrowserConnector {
             return Err(FcpError::NotConfigured);
         }
 
+        let execution_approval = Self::require_execution_approval(operation, &input, &params)?;
+
         match operation {
             "browser.navigate" => self.invoke_navigate(input).await,
             "browser.screenshot" => self.invoke_screenshot(input).await,
@@ -569,14 +890,113 @@ impl BrowserConnector {
             "browser.extract_links" => self.invoke_extract_links(input).await,
             "browser.wait_for_selector" => self.invoke_wait_for_selector(input).await,
             "browser.click" => self.invoke_click(input).await,
-            "browser.fill_form" => self.invoke_fill_form(input).await,
-            "browser.evaluate_js" => self.invoke_evaluate_js(input).await,
-            "browser.get_cookies" => self.invoke_get_cookies(input).await,
-            "browser.set_cookies" => self.invoke_set_cookies(input).await,
+            "browser.fill_form" => {
+                self.invoke_fill_form(input, execution_approval.as_ref())
+                    .await
+            }
+            "browser.evaluate_js" => {
+                self.invoke_evaluate_js(input, execution_approval.as_ref())
+                    .await
+            }
+            "browser.get_cookies" => {
+                self.invoke_get_cookies(input, execution_approval.as_ref())
+                    .await
+            }
+            "browser.set_cookies" => {
+                self.invoke_set_cookies(input, execution_approval.as_ref())
+                    .await
+            }
+            "browser.set_proxy" => {
+                self.invoke_set_proxy(input, execution_approval.as_ref())
+                    .await
+            }
+            "browser.clear_proxy" => {
+                self.invoke_clear_proxy(input, execution_approval.as_ref())
+                    .await
+            }
             _ => Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
             }),
         }
+    }
+
+    fn require_execution_approval(
+        operation: &str,
+        input: &serde_json::Value,
+        params: &serde_json::Value,
+    ) -> FcpResult<Option<ExecutionApprovalContext>> {
+        if !requires_execution_approval(operation) {
+            return Ok(None);
+        }
+
+        let approval_value = params
+            .get("approval_token")
+            .ok_or(FcpError::CapabilityDenied {
+                capability: operation.to_string(),
+                reason: format!(
+                    "Operation '{operation}' requires an ApprovalToken with execution scope"
+                ),
+            })?;
+
+        let approval: ApprovalToken =
+            serde_json::from_value(approval_value.clone()).map_err(|e| {
+                FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Invalid approval_token format: {e}"),
+                }
+            })?;
+
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        if !approval.is_valid(now_ms) {
+            return Err(FcpError::CapabilityDenied {
+                capability: operation.to_string(),
+                reason: "approval_token is expired or not yet valid".into(),
+            });
+        }
+
+        let Execution(scope) = &approval.scope else {
+            return Err(FcpError::CapabilityDenied {
+                capability: operation.to_string(),
+                reason: "approval_token must use execution scope".into(),
+            });
+        };
+
+        if scope.connector_id != "fcp.browser" {
+            return Err(FcpError::CapabilityDenied {
+                capability: operation.to_string(),
+                reason: "approval_token connector_id does not match fcp.browser".into(),
+            });
+        }
+
+        if !operation_pattern_matches(&scope.method_pattern, operation) {
+            return Err(FcpError::CapabilityDenied {
+                capability: operation.to_string(),
+                reason: "approval_token execution scope does not allow this operation".into(),
+            });
+        }
+
+        if scope.request_object_id.is_some() || scope.input_hash.is_some() {
+            return Err(FcpError::CapabilityDenied {
+                capability: operation.to_string(),
+                reason: "approval_token binds request_object_id/input_hash, unsupported in direct connector invocation".into(),
+            });
+        }
+
+        if !scope.input_constraints.is_empty()
+            && !scope
+                .input_constraints
+                .iter()
+                .all(|constraint| input.pointer(&constraint.pointer) == Some(&constraint.expected))
+        {
+            return Err(FcpError::CapabilityDenied {
+                capability: operation.to_string(),
+                reason: "approval_token input constraints do not match this invocation".into(),
+            });
+        }
+
+        Ok(Some(ExecutionApprovalContext {
+            token_id: approval.token_id,
+        }))
     }
 
     // -- Operation implementations --
@@ -671,7 +1091,11 @@ impl BrowserConnector {
         Ok(json!({ "clicked": result.clicked, "navigation_url": result.navigation_url }))
     }
 
-    async fn invoke_fill_form(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+    async fn invoke_fill_form(
+        &self,
+        input: serde_json::Value,
+        execution_approval: Option<&ExecutionApprovalContext>,
+    ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let fields = input.get("fields").ok_or(FcpError::InvalidRequest {
             code: 1003,
@@ -682,30 +1106,52 @@ impl BrowserConnector {
             .fill_form(fields, submit_selector)
             .await
             .map_err(|e: BrowserError| e.to_fcp_error())?;
-        Ok(json!({ "filled_count": result.filled_count, "submitted": result.submitted }))
+        Ok(json!({
+            "filled_count": result.filled_count,
+            "submitted": result.submitted,
+            "audit": dangerous_operation_audit("browser.fill_form", true, execution_approval),
+        }))
     }
 
-    async fn invoke_evaluate_js(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+    async fn invoke_evaluate_js(
+        &self,
+        input: serde_json::Value,
+        execution_approval: Option<&ExecutionApprovalContext>,
+    ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let expression = require_str(&input, "expression")?;
         let result = client
             .evaluate_js(expression)
             .await
             .map_err(|e: BrowserError| e.to_fcp_error())?;
-        Ok(json!({ "result": result.result }))
+        Ok(json!({
+            "result": result.result,
+            "audit": dangerous_operation_audit("browser.evaluate_js", true, execution_approval),
+        }))
     }
 
-    async fn invoke_get_cookies(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+    async fn invoke_get_cookies(
+        &self,
+        input: serde_json::Value,
+        execution_approval: Option<&ExecutionApprovalContext>,
+    ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let domain = input.get("domain").and_then(|v| v.as_str());
         let cookies = client
             .get_cookies(domain)
             .await
             .map_err(|e: BrowserError| e.to_fcp_error())?;
-        Ok(json!({ "cookies": cookies }))
+        Ok(json!({
+            "cookies": cookies,
+            "audit": dangerous_operation_audit("browser.get_cookies", false, execution_approval),
+        }))
     }
 
-    async fn invoke_set_cookies(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+    async fn invoke_set_cookies(
+        &self,
+        input: serde_json::Value,
+        execution_approval: Option<&ExecutionApprovalContext>,
+    ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let cookies_value = input.get("cookies").ok_or(FcpError::InvalidRequest {
             code: 1003,
@@ -721,7 +1167,78 @@ impl BrowserConnector {
             .set_cookies(&cookies)
             .await
             .map_err(|e: BrowserError| e.to_fcp_error())?;
-        Ok(json!({ "set_count": count }))
+        Ok(json!({
+            "set_count": count,
+            "audit": dangerous_operation_audit("browser.set_cookies", true, execution_approval),
+        }))
+    }
+
+    async fn invoke_set_proxy(
+        &self,
+        input: serde_json::Value,
+        execution_approval: Option<&ExecutionApprovalContext>,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let server = require_str(&input, "server")?;
+        let bypass_list = input
+            .get("bypass_list")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .map(|v| {
+                        v.as_str().ok_or(FcpError::InvalidRequest {
+                            code: 1003,
+                            message: "bypass_list values must be strings".into(),
+                        })
+                    })
+                    .collect::<FcpResult<Vec<_>>>()
+                    .map(|entries| entries.into_iter().map(str::to_string).collect::<Vec<_>>())
+            })
+            .transpose()?;
+        let username = input
+            .get("username")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let password = input
+            .get("password")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+
+        let proxy = ProxyConfig {
+            server: server.to_string(),
+            bypass_list,
+            username,
+            password,
+        };
+
+        let result = client
+            .set_proxy(&proxy)
+            .await
+            .map_err(|e: BrowserError| e.to_fcp_error())?;
+        Ok(json!({
+            "enabled": result.enabled,
+            "mode": result.mode,
+            "server": result.server,
+            "audit": dangerous_operation_audit("browser.set_proxy", true, execution_approval),
+        }))
+    }
+
+    async fn invoke_clear_proxy(
+        &self,
+        _input: serde_json::Value,
+        execution_approval: Option<&ExecutionApprovalContext>,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let result = client
+            .clear_proxy()
+            .await
+            .map_err(|e: BrowserError| e.to_fcp_error())?;
+        Ok(json!({
+            "enabled": result.enabled,
+            "mode": result.mode,
+            "server": result.server,
+            "audit": dangerous_operation_audit("browser.clear_proxy", true, execution_approval),
+        }))
     }
 
     /// Handle shutdown.
@@ -750,6 +1267,40 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a s
         })
 }
 
+fn requires_execution_approval(operation: &str) -> bool {
+    matches!(
+        operation,
+        "browser.evaluate_js"
+            | "browser.fill_form"
+            | "browser.get_cookies"
+            | "browser.set_cookies"
+            | "browser.set_proxy"
+            | "browser.clear_proxy"
+    )
+}
+
+fn operation_pattern_matches(pattern: &str, operation: &str) -> bool {
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        operation.starts_with(prefix)
+    } else {
+        pattern == operation
+    }
+}
+
+fn dangerous_operation_audit(
+    operation: &str,
+    side_effect: bool,
+    execution_approval: Option<&ExecutionApprovalContext>,
+) -> serde_json::Value {
+    json!({
+        "operation": operation,
+        "dangerous": true,
+        "side_effect": side_effect,
+        "approval_token_id": execution_approval.map(|ctx| ctx.token_id.clone()),
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    })
+}
+
 #[allow(clippy::fn_params_excessive_bools)]
 fn op_info(
     id: &'static str,
@@ -762,6 +1313,14 @@ fn op_info(
     idempotency: IdempotencyClass,
     ai_hints: AgentHint,
 ) -> OperationInfo {
+    let requires_approval = match safety_tier {
+        SafetyTier::Risky => Some(ApprovalMode::Policy),
+        SafetyTier::Dangerous | SafetyTier::Critical | SafetyTier::Forbidden => {
+            Some(ApprovalMode::ElevationToken)
+        }
+        SafetyTier::Safe => None,
+    };
+
     OperationInfo {
         id: OperationId::from_static(id),
         summary: summary.into(),
@@ -771,7 +1330,7 @@ fn op_info(
         risk_level,
         description: None,
         rate_limit: None,
-        requires_approval: None,
+        requires_approval,
         safety_tier,
         idempotency,
         ai_hints,
@@ -856,11 +1415,12 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn test_invoke_missing_field() {
         let mut connector = BrowserConnector::new();
-        connector.client = Some(
-            BrowserClient::new(None)
-                .unwrap()
-                .with_browser_url("http://localhost:9999"),
-        );
+        connector
+            .handle_configure(json!({
+                "browser_url": "http://localhost:9999"
+            }))
+            .await
+            .unwrap();
 
         let signing_key = Ed25519SigningKey::generate();
         let verifying_key = signing_key.verifying_key();
@@ -909,7 +1469,157 @@ mod tests {
         assert!(op_ids.contains(&"browser.evaluate_js"));
         assert!(op_ids.contains(&"browser.get_cookies"));
         assert!(op_ids.contains(&"browser.set_cookies"));
-        assert_eq!(ops.len(), 11);
+        assert!(op_ids.contains(&"browser.set_proxy"));
+        assert!(op_ids.contains(&"browser.clear_proxy"));
+        assert_eq!(ops.len(), 13);
+    }
+
+    // ── Provisioning automation tests ─────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_no_auth() {
+        let mut connector = BrowserConnector::new();
+        let result = connector.handle_configure(json!({})).await.unwrap();
+        assert_eq!(result["status"], "configured");
+        assert!(connector.client.is_some());
+        assert!(connector.config.is_some());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_with_api_key() {
+        let mut connector = BrowserConnector::new();
+        let result = connector
+            .handle_configure(json!({ "api_key": "browser-secret" }))
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "configured");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_with_credential_id() {
+        let mut connector = BrowserConnector::new();
+        let cid = uuid::Uuid::new_v4().to_string();
+        let result = connector
+            .handle_configure(json!({ "credential_id": cid }))
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "configured");
+        assert!(connector.config.as_ref().unwrap().auth.is_secretless());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_both_auth_modes() {
+        let mut connector = BrowserConnector::new();
+        let cid = uuid::Uuid::new_v4().to_string();
+        let result = connector
+            .handle_configure(json!({
+                "api_key": "browser-secret",
+                "credential_id": cid
+            }))
+            .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("not both"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_with_custom_browser_url() {
+        let mut connector = BrowserConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "browser_url": "http://remote-browser:9222"
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "configured");
+        let config = connector.config.as_ref().unwrap();
+        assert_eq!(config.browser_url, "http://remote-browser:9222");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_health_includes_auth_info() {
+        let mut connector = BrowserConnector::new();
+        connector
+            .handle_configure(json!({ "api_key": "test-key" }))
+            .await
+            .unwrap();
+        let health = connector.handle_health().await.unwrap();
+        assert_eq!(health["status"], "healthy");
+        assert!(health["auth_mode"].as_str().unwrap().contains("api_key"));
+        assert!(health["browser_url"].as_str().is_some());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_not_configured() {
+        let connector = BrowserConnector::new();
+        let result = connector.handle_doctor().await.unwrap();
+        assert_eq!(result["status"], "unhealthy");
+        let checks = result["checks"].as_array().unwrap();
+        assert_eq!(checks.len(), 6);
+        assert_eq!(checks[0]["name"], "configuration");
+        assert_eq!(checks[0]["status"], "unhealthy");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_configured_healthy() {
+        let mut connector = BrowserConnector::new();
+        connector.handle_configure(json!({})).await.unwrap();
+        let result = connector.handle_doctor().await.unwrap();
+        assert_eq!(result["status"], "healthy");
+        let checks = result["checks"].as_array().unwrap();
+        assert_eq!(checks.len(), 6);
+        for check in checks {
+            assert_eq!(check["status"], "healthy");
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_credential_id_mode() {
+        let mut connector = BrowserConnector::new();
+        let cid = uuid::Uuid::new_v4().to_string();
+        connector
+            .handle_configure(json!({ "credential_id": cid }))
+            .await
+            .unwrap();
+        let result = connector.handle_doctor().await.unwrap();
+        assert_eq!(result["status"], "healthy");
+        let checks = result["checks"].as_array().unwrap();
+        let cred_check = checks
+            .iter()
+            .find(|c| c["name"] == "credential_injection")
+            .unwrap();
+        assert_eq!(cred_check["status"], "healthy");
+        assert!(
+            cred_check["message"]
+                .as_str()
+                .unwrap()
+                .contains("Secretless")
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_not_configured() {
+        let connector = BrowserConnector::new();
+        let result = connector.handle_self_check().await.unwrap();
+        assert_eq!(result["status"], "failed");
+        assert_eq!(result["reason_code"], "not_configured");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_credential_id_degraded() {
+        let mut connector = BrowserConnector::new();
+        let cid = uuid::Uuid::new_v4().to_string();
+        connector
+            .handle_configure(json!({ "credential_id": cid }))
+            .await
+            .unwrap();
+        let result = connector.handle_self_check().await.unwrap();
+        assert_eq!(result["status"], "degraded");
+        assert_eq!(result["reason_code"], "credential_injection_required");
     }
 
     #[test]

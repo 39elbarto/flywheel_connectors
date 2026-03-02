@@ -11,7 +11,7 @@ interface_hash = "blake3-256:fcp.interface.v2:9d598f8320f1d425528d303083f34a08a9
 id = "fcp.browser"
 name = "Browser Connector"
 version = "0.1.0"
-description = "FCP connector for headless browser automation — navigation, screenshots, extraction, form interaction, JS evaluation"
+description = "FCP connector for headless browser automation — navigation, screenshots, extraction, form interaction, JS evaluation, and proxy controls"
 archetypes = ["operational"]
 format = "wasi"
 
@@ -716,6 +716,139 @@ common_mistakes = ["Setting cookies on wrong domain — they won't be sent."]
 examples = ['{"cookies": [{"name": "session", "value": "abc123", "domain": "example.com", "path": "/"}]}']
 related = ["browser.get_cookies"]
 
+[provides.operations."browser.set_proxy"]
+description = "Configure outbound proxy settings for browser traffic"
+capability = "browser.proxy"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "best_effort"
+
+[provides.operations."browser.set_proxy".input_schema]
+required = ["server"]
+type = "object"
+
+[provides.operations."browser.set_proxy".input_schema.properties.server]
+description = "Proxy server URL (e.g. http://proxy.example.com:8080)"
+type = "string"
+
+[provides.operations."browser.set_proxy".input_schema.properties.bypass_list]
+description = "Optional host patterns to bypass proxy"
+type = "array"
+
+[provides.operations."browser.set_proxy".input_schema.properties.username]
+description = "Optional proxy username"
+type = "string"
+
+[provides.operations."browser.set_proxy".input_schema.properties.password]
+description = "Optional proxy password"
+type = "string"
+
+[provides.operations."browser.set_proxy".output_schema]
+required = ["enabled", "mode"]
+type = "object"
+
+[provides.operations."browser.set_proxy".output_schema.properties.enabled]
+type = "boolean"
+
+[provides.operations."browser.set_proxy".output_schema.properties.mode]
+type = "string"
+
+[provides.operations."browser.set_proxy".output_schema.properties.server]
+type = "string"
+
+[provides.operations."browser.set_proxy".network_constraints]
+host_allow = [
+    "*.github.com",
+    "*.google.com",
+    "*.wikipedia.org",
+    "*.amazonaws.com",
+]
+port_allow = [
+    80,
+    443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 15000
+max_response_bytes = 1048576
+
+[provides.operations."browser.set_proxy".ai_hints]
+when_to_use = "Route browser traffic through an approved proxy for controlled egress."
+common_mistakes = [
+    "Pointing at untrusted proxy infrastructure.",
+    "Forgetting bypass rules for local callback domains.",
+]
+examples = ['{"server": "http://proxy.example.com:8080", "bypass_list": ["localhost"]}']
+related = ["browser.clear_proxy"]
+
+[provides.operations."browser.clear_proxy"]
+description = "Clear outbound proxy settings and return to direct mode"
+capability = "browser.proxy"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."browser.clear_proxy".input_schema]
+required = []
+type = "object"
+
+[provides.operations."browser.clear_proxy".output_schema]
+required = ["enabled", "mode"]
+type = "object"
+
+[provides.operations."browser.clear_proxy".output_schema.properties.enabled]
+type = "boolean"
+
+[provides.operations."browser.clear_proxy".output_schema.properties.mode]
+type = "string"
+
+[provides.operations."browser.clear_proxy".output_schema.properties.server]
+type = "string"
+
+[provides.operations."browser.clear_proxy".network_constraints]
+host_allow = [
+    "*.github.com",
+    "*.google.com",
+    "*.wikipedia.org",
+    "*.amazonaws.com",
+]
+port_allow = [
+    80,
+    443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 15000
+max_response_bytes = 1048576
+
+[provides.operations."browser.clear_proxy".ai_hints]
+when_to_use = "Remove proxy settings after constrained-network workflows complete."
+common_mistakes = ["Assuming sessions always start in direct mode."]
+examples = ["{}"]
+related = ["browser.set_proxy"]
+
 [provides.operations."browser.wait_for_selector"]
 description = "Wait for an element matching a CSS selector to appear"
 capability = "browser.extract"
@@ -837,6 +970,13 @@ window_ms = 60000
 burst = 10
 scope = "instance"
 
+[[rate_limits.pools]]
+id = "browser.proxy"
+requests = 30
+window_ms = 60000
+burst = 5
+scope = "instance"
+
 [rate_limits.operation_pools]
 "browser.navigate" = ["browser.navigate"]
 "browser.click" = ["browser.interact"]
@@ -849,3 +989,5 @@ scope = "instance"
 "browser.extract_text" = ["browser.extract"]
 "browser.get_cookies" = ["browser.cookies"]
 "browser.fill_form" = ["browser.interact"]
+"browser.set_proxy" = ["browser.proxy"]
+"browser.clear_proxy" = ["browser.proxy"]

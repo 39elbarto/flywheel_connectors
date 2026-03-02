@@ -4,6 +4,9 @@
 //! - Control plane (`https://api.pinecone.io`) for index management
 //! - Data plane (`https://{index-host}`) for vector operations
 
+use std::fmt;
+
+use fcp_core::CredentialId;
 use reqwest::{Client, StatusCode, header};
 use tracing::{debug, warn};
 
@@ -15,26 +18,100 @@ use crate::{
     },
 };
 
-const DEFAULT_CONTROL_PLANE_URL: &str = "https://api.pinecone.io";
+/// Default Pinecone control plane URL.
+pub const DEFAULT_CONTROL_PLANE_URL: &str = "https://api.pinecone.io";
+
+/// Authentication mode for Pinecone.
+#[derive(Clone)]
+pub enum PineconeAuth {
+    /// Direct API key.
+    ApiKey(String),
+    /// Secretless credential reference (egress proxy injection).
+    CredentialId(CredentialId),
+}
+
+impl PineconeAuth {
+    /// Render a redacted label suitable for logs/diagnostics.
+    #[must_use]
+    pub fn redacted_label(&self) -> String {
+        match self {
+            Self::ApiKey(key) => {
+                let prefix = if key.len() > 8 {
+                    &key[..8]
+                } else {
+                    key.as_str()
+                };
+                format!("api_key:{prefix}***")
+            }
+            Self::CredentialId(id) => format!("credential_id:{id}"),
+        }
+    }
+
+    /// Whether this auth mode requires egress proxy credential injection.
+    #[must_use]
+    pub const fn is_secretless(&self) -> bool {
+        matches!(self, Self::CredentialId(_))
+    }
+}
+
+impl fmt::Debug for PineconeAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ApiKey(_) => f
+                .debug_struct("ApiKey")
+                .field("key", &"<redacted>")
+                .finish(),
+            Self::CredentialId(id) => f.debug_tuple("CredentialId").field(id).finish(),
+        }
+    }
+}
 
 /// Pinecone REST API client.
 pub struct PineconeClient {
     http: Client,
+    auth: PineconeAuth,
     control_plane_url: String,
     data_plane_url: Option<String>,
     max_retries: u32,
 }
 
+impl fmt::Debug for PineconeClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PineconeClient")
+            .field("auth", &self.auth)
+            .field("control_plane_url", &self.control_plane_url)
+            .field("data_plane_url", &self.data_plane_url)
+            .finish_non_exhaustive()
+    }
+}
+
 impl PineconeClient {
     /// Create a new Pinecone client with an API key.
     pub fn new(api_key: &str) -> PineconeResult<Self> {
+        Self::new_with_auth(PineconeAuth::ApiKey(api_key.to_string()))
+    }
+
+    /// Create a new Pinecone client with explicit auth mode.
+    pub fn new_with_auth(auth: PineconeAuth) -> PineconeResult<Self> {
         let mut headers = header::HeaderMap::new();
-        headers.insert(
-            "Api-Key",
-            api_key
-                .parse()
-                .map_err(|_| PineconeError::InvalidConfig("Invalid API key format".into()))?,
-        );
+        match &auth {
+            PineconeAuth::ApiKey(key) => {
+                headers.insert(
+                    "Api-Key",
+                    key.parse().map_err(|_| {
+                        PineconeError::InvalidConfig("Invalid API key format".into())
+                    })?,
+                );
+            }
+            PineconeAuth::CredentialId(id) => {
+                headers.insert(
+                    "X-FCP-Credential-ID",
+                    id.to_string().parse().map_err(|_| {
+                        PineconeError::InvalidConfig("Invalid credential ID format".into())
+                    })?,
+                );
+            }
+        }
 
         let http = Client::builder()
             .default_headers(headers)
@@ -44,10 +121,21 @@ impl PineconeClient {
 
         Ok(Self {
             http,
+            auth,
             control_plane_url: DEFAULT_CONTROL_PLANE_URL.to_string(),
             data_plane_url: None,
             max_retries: 2,
         })
+    }
+
+    /// Perform a lightweight health check (list indexes).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the API call fails.
+    pub async fn health_check(&self) -> PineconeResult<()> {
+        let _ = self.list_indexes().await?;
+        Ok(())
     }
 
     /// Set a custom control plane URL (for testing).

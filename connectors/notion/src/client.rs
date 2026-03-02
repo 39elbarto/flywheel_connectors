@@ -1,5 +1,6 @@
 //! Notion REST API client.
 
+use fcp_core::CredentialId;
 use reqwest::{Client, StatusCode, header};
 use tracing::{debug, warn};
 
@@ -8,26 +9,90 @@ use crate::{
     types::{ApiErrorResponse, Page, PaginatedResponse},
 };
 
-const DEFAULT_API_URL: &str = "https://api.notion.com/v1";
+/// Default Notion API base URL.
+pub const DEFAULT_API_URL: &str = "https://api.notion.com/v1";
 const NOTION_VERSION: &str = "2022-06-28";
+
+/// Authentication mode for the Notion connector.
+#[derive(Clone)]
+pub enum NotionAuth {
+    /// Direct integration/OAuth token (Bearer auth).
+    Token(String),
+    /// Secretless mode – egress proxy injects credentials at runtime.
+    CredentialId(CredentialId),
+}
+
+impl std::fmt::Debug for NotionAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NotionAuth").finish_non_exhaustive()
+    }
+}
+
+impl NotionAuth {
+    /// Human-readable label with secrets redacted.
+    #[must_use]
+    pub fn redacted_label(&self) -> &'static str {
+        match self {
+            Self::Token(_) => "token:****",
+            Self::CredentialId(_) => "credential_id",
+        }
+    }
+
+    /// Whether this auth mode is secretless (egress proxy).
+    #[must_use]
+    pub const fn is_secretless(&self) -> bool {
+        matches!(self, Self::CredentialId(_))
+    }
+}
 
 /// Notion REST API client.
 pub struct NotionClient {
     http: Client,
     api_url: String,
     max_retries: u32,
+    auth: NotionAuth,
+}
+
+impl std::fmt::Debug for NotionClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NotionClient").finish_non_exhaustive()
+    }
 }
 
 impl NotionClient {
-    /// Create a new Notion client with an integration token.
+    /// Create a new Notion client with a direct integration token.
     pub fn new(token: &str) -> NotionResult<Self> {
+        Self::new_with_auth(NotionAuth::Token(token.to_string()))
+    }
+
+    /// Create a new Notion client with the specified auth mode.
+    pub fn new_with_auth(auth: NotionAuth) -> NotionResult<Self> {
         let mut headers = header::HeaderMap::new();
         headers.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
-        headers.insert(
-            header::AUTHORIZATION,
-            format!("Bearer {token}").parse().unwrap(),
-        );
         headers.insert("Notion-Version", NOTION_VERSION.parse().unwrap());
+
+        match &auth {
+            NotionAuth::Token(token) => {
+                headers.insert(
+                    header::AUTHORIZATION,
+                    format!("Bearer {token}")
+                        .parse()
+                        .map_err(|_| NotionError::Api {
+                            message: "Invalid token value for header".into(),
+                            status_code: None,
+                        })?,
+                );
+            }
+            NotionAuth::CredentialId(id) => {
+                headers.insert(
+                    "X-FCP-Credential-ID",
+                    id.to_string().parse().map_err(|_| NotionError::Api {
+                        message: "Invalid credential_id value for header".into(),
+                        status_code: None,
+                    })?,
+                );
+            }
+        }
 
         let http = Client::builder()
             .default_headers(headers)
@@ -39,7 +104,16 @@ impl NotionClient {
             http,
             api_url: DEFAULT_API_URL.to_string(),
             max_retries: 2,
+            auth,
         })
+    }
+
+    /// Lightweight connectivity probe – search with no query.
+    pub async fn health_check(&self) -> NotionResult<()> {
+        let url = format!("{}/search", self.api_url);
+        let body = serde_json::json!({ "page_size": 1 });
+        self.post(&url, Some(body)).await?;
+        Ok(())
     }
 
     /// Set a custom API URL (for testing).

@@ -2,7 +2,7 @@
 //!
 //! Deterministic integration tests using wiremock to mock the browser API.
 //! No real browser connections. Covers:
-//! - Happy-path operations (navigate, screenshot, extract, interact, cookies)
+//! - Happy-path operations (navigate, screenshot, extract, interact, cookies, proxy)
 //! - Error taxonomy (429/500/400)
 //! - FCP2 default-deny + capability verification
 //! - Lifecycle (health, introspect, shutdown)
@@ -39,6 +39,29 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> fcp_core:
         .sign(signing_key)
         .unwrap();
     fcp_core::CapabilityToken { raw: cose }
+}
+
+/// Generate a valid execution-scope approval token for dangerous operations.
+fn generate_execution_approval(
+    operation: &str,
+    _input: &serde_json::Value,
+) -> fcp_core::ApprovalToken {
+    let now_ms = Utc::now().timestamp_millis() as u64;
+    fcp_core::ApprovalToken {
+        token_id: format!("approval-{operation}-{now_ms}"),
+        issued_at_ms: now_ms.saturating_sub(1_000),
+        expires_at_ms: now_ms + 300_000,
+        issuer: "owner:test".into(),
+        scope: fcp_core::ApprovalScope::Execution(fcp_core::ExecutionScope {
+            connector_id: "fcp.browser".into(),
+            method_pattern: operation.into(),
+            request_object_id: None,
+            input_hash: None,
+            input_constraints: vec![],
+        }),
+        zone_id: fcp_core::ZoneId::work(),
+        signature: None,
+    }
 }
 
 /// Perform handshake on a connector, returning the signing key for token generation.
@@ -323,24 +346,29 @@ async fn test_fill_form() {
     setup_configure(&mut connector, &mock_server.uri()).await;
 
     let token = generate_valid_token(&key, "browser.fill_form");
+    let input = json!({
+        "fields": {
+            "#name": "Alice",
+            "#email": "alice@example.com",
+            "#message": "Hello!"
+        },
+        "submit_selector": "button[type=submit]"
+    });
+    let approval = generate_execution_approval("browser.fill_form", &input);
     let result = connector
         .handle_invoke(json!({
             "operation": "browser.fill_form",
-            "input": {
-                "fields": {
-                    "#name": "Alice",
-                    "#email": "alice@example.com",
-                    "#message": "Hello!"
-                },
-                "submit_selector": "button[type=submit]"
-            },
-            "capability_token": token
+            "input": input,
+            "capability_token": token,
+            "approval_token": approval
         }))
         .await
         .unwrap();
 
     assert_eq!(result["filled_count"], 3);
     assert_eq!(result["submitted"], true);
+    assert_eq!(result["audit"]["operation"], "browser.fill_form");
+    assert_eq!(result["audit"]["dangerous"], true);
 }
 
 #[fcp_async_core::runtime::test]
@@ -361,16 +389,21 @@ async fn test_evaluate_js() {
     setup_configure(&mut connector, &mock_server.uri()).await;
 
     let token = generate_valid_token(&key, "browser.evaluate_js");
+    let input = json!({ "expression": "document.title" });
+    let approval = generate_execution_approval("browser.evaluate_js", &input);
     let result = connector
         .handle_invoke(json!({
             "operation": "browser.evaluate_js",
-            "input": { "expression": "document.title" },
-            "capability_token": token
+            "input": input,
+            "capability_token": token,
+            "approval_token": approval
         }))
         .await
         .unwrap();
 
     assert_eq!(result["result"], "Example Domain");
+    assert_eq!(result["audit"]["operation"], "browser.evaluate_js");
+    assert_eq!(result["audit"]["dangerous"], true);
 }
 
 #[fcp_async_core::runtime::test]
@@ -394,11 +427,14 @@ async fn test_get_cookies() {
     setup_configure(&mut connector, &mock_server.uri()).await;
 
     let token = generate_valid_token(&key, "browser.get_cookies");
+    let input = json!({ "domain": "example.com" });
+    let approval = generate_execution_approval("browser.get_cookies", &input);
     let result = connector
         .handle_invoke(json!({
             "operation": "browser.get_cookies",
-            "input": { "domain": "example.com" },
-            "capability_token": token
+            "input": input,
+            "capability_token": token,
+            "approval_token": approval
         }))
         .await
         .unwrap();
@@ -407,6 +443,9 @@ async fn test_get_cookies() {
     assert_eq!(cookies.len(), 2);
     assert_eq!(cookies[0]["name"], "session");
     assert_eq!(cookies[1]["name"], "pref");
+    assert_eq!(result["audit"]["operation"], "browser.get_cookies");
+    assert_eq!(result["audit"]["dangerous"], true);
+    assert_eq!(result["audit"]["side_effect"], false);
 }
 
 #[fcp_async_core::runtime::test]
@@ -427,21 +466,106 @@ async fn test_set_cookies() {
     setup_configure(&mut connector, &mock_server.uri()).await;
 
     let token = generate_valid_token(&key, "browser.set_cookies");
+    let input = json!({
+        "cookies": [
+            { "name": "session", "value": "abc123", "domain": "example.com", "path": "/" },
+            { "name": "pref", "value": "dark", "domain": "example.com", "path": "/" }
+        ]
+    });
+    let approval = generate_execution_approval("browser.set_cookies", &input);
     let result = connector
         .handle_invoke(json!({
             "operation": "browser.set_cookies",
-            "input": {
-                "cookies": [
-                    { "name": "session", "value": "abc123", "domain": "example.com", "path": "/" },
-                    { "name": "pref", "value": "dark", "domain": "example.com", "path": "/" }
-                ]
-            },
-            "capability_token": token
+            "input": input,
+            "capability_token": token,
+            "approval_token": approval
         }))
         .await
         .unwrap();
 
     assert_eq!(result["set_count"], 2);
+    assert_eq!(result["audit"]["operation"], "browser.set_cookies");
+    assert_eq!(result["audit"]["dangerous"], true);
+    assert_eq!(result["audit"]["side_effect"], true);
+}
+
+#[fcp_async_core::runtime::test]
+async fn test_set_proxy() {
+    let _ctx = AsyncTestContext::for_scenario("browser-set-proxy");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/proxy/set"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "enabled": true,
+            "mode": "fixed_servers",
+            "server": "http://proxy.example.com:8080"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = BrowserConnector::new();
+    let key = setup_handshake(&mut connector, &["browser.set_proxy"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "browser.set_proxy");
+    let input = json!({
+        "server": "http://proxy.example.com:8080",
+        "bypass_list": ["localhost"]
+    });
+    let approval = generate_execution_approval("browser.set_proxy", &input);
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "browser.set_proxy",
+            "input": input,
+            "capability_token": token,
+            "approval_token": approval
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["enabled"], true);
+    assert_eq!(result["mode"], "fixed_servers");
+    assert_eq!(result["server"], "http://proxy.example.com:8080");
+    assert_eq!(result["audit"]["operation"], "browser.set_proxy");
+}
+
+#[fcp_async_core::runtime::test]
+async fn test_clear_proxy() {
+    let _ctx = AsyncTestContext::for_scenario("browser-clear-proxy");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/proxy/clear"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "enabled": false,
+            "mode": "direct",
+            "server": null
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = BrowserConnector::new();
+    let key = setup_handshake(&mut connector, &["browser.clear_proxy"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "browser.clear_proxy");
+    let input = json!({});
+    let approval = generate_execution_approval("browser.clear_proxy", &input);
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "browser.clear_proxy",
+            "input": input,
+            "capability_token": token,
+            "approval_token": approval
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["enabled"], false);
+    assert_eq!(result["mode"], "direct");
+    assert_eq!(result["server"], serde_json::Value::Null);
+    assert_eq!(result["audit"]["operation"], "browser.clear_proxy");
 }
 
 // ============================================================================
@@ -605,6 +729,64 @@ async fn test_invoke_wrong_capability() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn test_dangerous_operation_requires_approval_token() {
+    let _ctx = AsyncTestContext::for_scenario("browser-requires-execution-approval");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = BrowserConnector::new();
+    let key = setup_handshake(&mut connector, &["browser.evaluate_js"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "browser.evaluate_js");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "browser.evaluate_js",
+            "input": { "expression": "document.title" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::CapabilityDenied { capability, reason } => {
+            assert_eq!(capability, "browser.evaluate_js");
+            assert!(reason.contains("ApprovalToken"));
+        }
+        e => panic!("Expected CapabilityDenied, got: {e:?}"),
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn test_dangerous_operation_approval_scope_mismatch() {
+    let _ctx = AsyncTestContext::for_scenario("browser-approval-scope-mismatch");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = BrowserConnector::new();
+    let key = setup_handshake(&mut connector, &["browser.evaluate_js"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "browser.evaluate_js");
+    let approval = generate_execution_approval("browser.set_proxy", &json!({}));
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "browser.evaluate_js",
+            "input": { "expression": "document.title" },
+            "capability_token": token,
+            "approval_token": approval
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::CapabilityDenied { capability, reason } => {
+            assert_eq!(capability, "browser.evaluate_js");
+            assert!(reason.contains("does not allow"));
+        }
+        e => panic!("Expected CapabilityDenied, got: {e:?}"),
+    }
+}
+
+#[fcp_async_core::runtime::test]
 async fn test_invoke_unknown_operation() {
     let _ctx = AsyncTestContext::for_scenario("browser-unknown-operation");
     let mock_server = MockServer::start().await;
@@ -660,7 +842,7 @@ async fn test_introspect_operations() {
     let result = connector.handle_introspect().await.unwrap();
 
     let ops = result["operations"].as_array().unwrap();
-    assert_eq!(ops.len(), 11);
+    assert_eq!(ops.len(), 13);
 
     let op_ids: Vec<&str> = ops.iter().map(|o| o["id"].as_str().unwrap()).collect();
     assert!(op_ids.contains(&"browser.navigate"));
@@ -674,6 +856,8 @@ async fn test_introspect_operations() {
     assert!(op_ids.contains(&"browser.evaluate_js"));
     assert!(op_ids.contains(&"browser.get_cookies"));
     assert!(op_ids.contains(&"browser.set_cookies"));
+    assert!(op_ids.contains(&"browser.set_proxy"));
+    assert!(op_ids.contains(&"browser.clear_proxy"));
 }
 
 #[fcp_async_core::runtime::test]
@@ -752,11 +936,13 @@ async fn test_evaluate_js_missing_expression() {
     setup_configure(&mut connector, &mock_server.uri()).await;
 
     let token = generate_valid_token(&key, "browser.evaluate_js");
+    let approval = generate_execution_approval("browser.evaluate_js", &json!({}));
     let result = connector
         .handle_invoke(json!({
             "operation": "browser.evaluate_js",
             "input": {},
-            "capability_token": token
+            "capability_token": token,
+            "approval_token": approval
         }))
         .await;
 
@@ -779,11 +965,13 @@ async fn test_fill_form_missing_fields() {
     setup_configure(&mut connector, &mock_server.uri()).await;
 
     let token = generate_valid_token(&key, "browser.fill_form");
+    let approval = generate_execution_approval("browser.fill_form", &json!({}));
     let result = connector
         .handle_invoke(json!({
             "operation": "browser.fill_form",
             "input": {},
-            "capability_token": token
+            "capability_token": token,
+            "approval_token": approval
         }))
         .await;
 
@@ -806,11 +994,13 @@ async fn test_set_cookies_missing_cookies() {
     setup_configure(&mut connector, &mock_server.uri()).await;
 
     let token = generate_valid_token(&key, "browser.set_cookies");
+    let approval = generate_execution_approval("browser.set_cookies", &json!({}));
     let result = connector
         .handle_invoke(json!({
             "operation": "browser.set_cookies",
             "input": {},
-            "capability_token": token
+            "capability_token": token,
+            "approval_token": approval
         }))
         .await;
 

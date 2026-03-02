@@ -4,7 +4,8 @@ use std::fmt::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use reqwest::{Client, Response, StatusCode};
+use fcp_core::CredentialId;
+use reqwest::{Client, RequestBuilder, Response, StatusCode};
 use tracing::{instrument, warn};
 
 use crate::{
@@ -17,13 +18,47 @@ use crate::{
 };
 
 /// Default Figma API base URL.
-const DEFAULT_BASE_URL: &str = "https://api.figma.com/v1";
+pub const DEFAULT_BASE_URL: &str = "https://api.figma.com/v1";
+
+/// Authentication mode for the Figma client.
+#[derive(Clone)]
+pub enum FigmaAuth {
+    /// Direct personal access token.
+    Token(String),
+    /// Secretless credential injection via egress proxy.
+    CredentialId(CredentialId),
+}
+
+impl std::fmt::Debug for FigmaAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Token(_) => f.debug_tuple("Token").field(&"[REDACTED]").finish(),
+            Self::CredentialId(id) => f.debug_tuple("CredentialId").field(id).finish(),
+        }
+    }
+}
+
+impl FigmaAuth {
+    /// Human-readable label with secrets redacted.
+    #[must_use]
+    pub const fn redacted_label(&self) -> &'static str {
+        match self {
+            Self::Token(_) => "token",
+            Self::CredentialId(_) => "credential_id",
+        }
+    }
+
+    /// Whether this auth mode is secretless (no raw credentials held).
+    #[must_use]
+    pub const fn is_secretless(&self) -> bool {
+        matches!(self, Self::CredentialId(_))
+    }
+}
 
 /// Figma REST API client with retry logic and rate limit awareness.
-#[derive(Debug)]
 pub struct FigmaClient {
     client: Client,
-    token: String,
+    auth: FigmaAuth,
     base_url: String,
     max_retries: u32,
     initial_delay_ms: u64,
@@ -31,9 +66,24 @@ pub struct FigmaClient {
     total_requests: AtomicU64,
 }
 
+impl std::fmt::Debug for FigmaClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FigmaClient")
+            .field("auth", &self.auth)
+            .field("base_url", &self.base_url)
+            .field("max_retries", &self.max_retries)
+            .finish_non_exhaustive()
+    }
+}
+
 impl FigmaClient {
     /// Create a new Figma client with a personal access token.
     pub fn new(token: impl Into<String>) -> FigmaResult<Self> {
+        Self::new_with_auth(FigmaAuth::Token(token.into()))
+    }
+
+    /// Create a new Figma client with the specified auth mode.
+    pub fn new_with_auth(auth: FigmaAuth) -> FigmaResult<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(60))
             .user_agent("fcp-figma/0.1.0")
@@ -42,13 +92,43 @@ impl FigmaClient {
 
         Ok(Self {
             client,
-            token: token.into(),
+            auth,
             base_url: DEFAULT_BASE_URL.into(),
             max_retries: 3,
             initial_delay_ms: 1000,
             max_delay_ms: 60_000,
             total_requests: AtomicU64::new(0),
         })
+    }
+
+    /// Apply authentication to a request builder.
+    fn apply_auth(&self, builder: RequestBuilder) -> RequestBuilder {
+        match &self.auth {
+            FigmaAuth::Token(token) => builder.header("X-FIGMA-TOKEN", token),
+            FigmaAuth::CredentialId(id) => builder.header("X-FCP-Credential-ID", id.to_string()),
+        }
+    }
+
+    /// Lightweight connectivity probe for self-check.
+    pub async fn health_check(&self) -> FigmaResult<()> {
+        let url = format!("{}/me", self.base_url);
+        let response = self
+            .apply_auth(self.client.get(&url))
+            .send()
+            .await
+            .map_err(FigmaError::Http)?;
+        let status = response.status();
+        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            return Err(FigmaError::Unauthorized);
+        }
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(FigmaError::Api {
+                status: status.as_u16(),
+                message: body,
+            });
+        }
+        Ok(())
     }
 
     /// Set the base URL (for testing).
@@ -290,12 +370,7 @@ impl FigmaClient {
 
         loop {
             attempt += 1;
-            let response = self
-                .client
-                .get(&url)
-                .header("X-FIGMA-TOKEN", &self.token)
-                .send()
-                .await;
+            let response = self.apply_auth(self.client.get(&url)).send().await;
 
             match response {
                 Ok(resp) => {
@@ -355,9 +430,7 @@ impl FigmaClient {
         loop {
             attempt += 1;
             let response = self
-                .client
-                .post(&url)
-                .header("X-FIGMA-TOKEN", &self.token)
+                .apply_auth(self.client.post(&url))
                 .json(body)
                 .send()
                 .await;
@@ -409,12 +482,7 @@ impl FigmaClient {
 
         loop {
             attempt += 1;
-            let response = self
-                .client
-                .delete(&url)
-                .header("X-FIGMA-TOKEN", &self.token)
-                .send()
-                .await;
+            let response = self.apply_auth(self.client.delete(&url)).send().await;
 
             match response {
                 Ok(resp) => {

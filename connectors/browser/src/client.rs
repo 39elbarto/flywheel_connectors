@@ -2,6 +2,7 @@
 //!
 //! Sends JSON POST commands to a Chrome DevTools Protocol HTTP endpoint.
 
+use fcp_core::CredentialId;
 use reqwest::{Client, StatusCode, header};
 use tracing::{debug, warn};
 
@@ -9,28 +10,97 @@ use crate::{
     error::{BrowserError, BrowserResult},
     types::{
         ApiErrorResponse, ClickResult, Cookie, FormResult, JsResult, LinksResult, NavigateResult,
-        PdfResult, ScreenshotResult, TextResult, WaitResult,
+        PdfResult, ProxyConfig, ProxyResult, ScreenshotResult, TextResult, WaitResult,
     },
 };
 
-const DEFAULT_BROWSER_URL: &str = "http://localhost:9222";
+/// Default browser CDP endpoint.
+pub const DEFAULT_BROWSER_URL: &str = "http://localhost:9222";
+
+/// Authentication mode for the Browser connector.
+#[derive(Clone)]
+pub enum BrowserAuth {
+    /// No authentication (local browser, no API key required).
+    None,
+    /// Bearer API key for authenticated browser endpoints.
+    ApiKey(String),
+    /// Secretless mode – egress proxy injects credentials at runtime.
+    CredentialId(CredentialId),
+}
+
+impl std::fmt::Debug for BrowserAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BrowserAuth").finish_non_exhaustive()
+    }
+}
+
+impl BrowserAuth {
+    /// Human-readable label with secrets redacted.
+    #[must_use]
+    pub fn redacted_label(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::ApiKey(_) => "api_key:****",
+            Self::CredentialId(_) => "credential_id",
+        }
+    }
+
+    /// Whether this auth mode is secretless (egress proxy).
+    #[must_use]
+    pub const fn is_secretless(&self) -> bool {
+        matches!(self, Self::CredentialId(_))
+    }
+}
 
 /// Browser automation HTTP client.
 pub struct BrowserClient {
     http: Client,
     browser_url: String,
     max_retries: u32,
+    auth: BrowserAuth,
+}
+
+impl std::fmt::Debug for BrowserClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BrowserClient").finish_non_exhaustive()
+    }
 }
 
 impl BrowserClient {
     /// Create a new browser client with an optional API key.
     pub fn new(api_key: Option<&str>) -> BrowserResult<Self> {
+        let auth = match api_key {
+            Some(key) => BrowserAuth::ApiKey(key.to_string()),
+            None => BrowserAuth::None,
+        };
+        Self::new_with_auth(auth)
+    }
+
+    /// Create a new browser client with the specified auth mode.
+    pub fn new_with_auth(auth: BrowserAuth) -> BrowserResult<Self> {
         let mut headers = header::HeaderMap::new();
-        if let Some(key) = api_key {
-            headers.insert(
-                header::AUTHORIZATION,
-                format!("Bearer {key}").parse().unwrap(),
-            );
+        match &auth {
+            BrowserAuth::None => {}
+            BrowserAuth::ApiKey(key) => {
+                headers.insert(
+                    header::AUTHORIZATION,
+                    format!("Bearer {key}")
+                        .parse()
+                        .map_err(|_| BrowserError::Api {
+                            message: "Invalid API key value for header".into(),
+                            status_code: None,
+                        })?,
+                );
+            }
+            BrowserAuth::CredentialId(id) => {
+                headers.insert(
+                    "X-FCP-Credential-ID",
+                    id.to_string().parse().map_err(|_| BrowserError::Api {
+                        message: "Invalid credential_id value for header".into(),
+                        status_code: None,
+                    })?,
+                );
+            }
         }
 
         let http = Client::builder()
@@ -43,7 +113,15 @@ impl BrowserClient {
             http,
             browser_url: DEFAULT_BROWSER_URL.to_string(),
             max_retries: 2,
+            auth,
         })
+    }
+
+    /// Lightweight connectivity probe – check if the browser endpoint is reachable.
+    pub async fn health_check(&self) -> BrowserResult<()> {
+        let url = format!("{}/json/version", self.browser_url);
+        self.execute(|| self.http.get(&url)).await?;
+        Ok(())
     }
 
     /// Set a custom browser URL.
@@ -256,6 +334,23 @@ impl BrowserClient {
         let data = self.post_json(&endpoint, &body).await?;
         let count = data.get("set_count").and_then(|v| v.as_u64()).unwrap_or(0);
         Ok(count as u32)
+    }
+
+    // -- Proxy --
+
+    /// Configure outbound proxy for browser traffic.
+    pub async fn set_proxy(&self, proxy: &ProxyConfig) -> BrowserResult<ProxyResult> {
+        let endpoint = format!("{}/proxy/set", self.browser_url);
+        let body = serde_json::to_value(proxy)?;
+        let data = self.post_json(&endpoint, &body).await?;
+        Ok(serde_json::from_value(data)?)
+    }
+
+    /// Clear outbound proxy configuration.
+    pub async fn clear_proxy(&self) -> BrowserResult<ProxyResult> {
+        let endpoint = format!("{}/proxy/clear", self.browser_url);
+        let data = self.post_json(&endpoint, &serde_json::json!({})).await?;
+        Ok(serde_json::from_value(data)?)
     }
 
     // -- HTTP helpers --
@@ -549,6 +644,63 @@ mod tests {
         }];
         let count = client.set_cookies(&cookies).await.unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_set_proxy() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/proxy/set"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "enabled": true,
+                "mode": "fixed_servers",
+                "server": "http://proxy.example.com:8080"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = BrowserClient::new(None)
+            .unwrap()
+            .with_browser_url(&mock_server.uri());
+
+        let proxy = ProxyConfig {
+            server: "http://proxy.example.com:8080".into(),
+            bypass_list: Some(vec!["localhost".into()]),
+            username: None,
+            password: None,
+        };
+        let result = client.set_proxy(&proxy).await.unwrap();
+        assert!(result.enabled);
+        assert_eq!(result.mode, "fixed_servers");
+        assert_eq!(
+            result.server.as_deref(),
+            Some("http://proxy.example.com:8080")
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_clear_proxy() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/proxy/clear"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "enabled": false,
+                "mode": "direct",
+                "server": null
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = BrowserClient::new(None)
+            .unwrap()
+            .with_browser_url(&mock_server.uri());
+
+        let result = client.clear_proxy().await.unwrap();
+        assert!(!result.enabled);
+        assert_eq!(result.mode, "direct");
+        assert!(result.server.is_none());
     }
 
     #[fcp_async_core::runtime::test]

@@ -9,6 +9,23 @@ repository.workspace = true
 [features]
 default = []
 openai = []
+anthropic = []
+slack = []
+discord = []
+google_ai = []
+qdrant = []
+telegram = []
+pinecone = []
+plaid = []
+github = []
+gmail = []
+linear = []
+stripe = []
+notion = []
+youtube = []
+twitter = []
+google_calendar = []
+s3 = []
 
 [dependencies]
 fcp-core = { workspace = true }
@@ -24,9 +41,27 @@ tokio = { workspace = true, features = ["io-util", "macros", "process", "rt", "t
 [dev-dependencies]
 fcp-async-core = { workspace = true }
 fcp-crypto = { workspace = true }
+fcp-anthropic = { path = "../../connectors/anthropic" }
 fcp-openai = { path = "../../connectors/openai" }
+fcp-slack = { path = "../../connectors/slack" }
+fcp-discord = { path = "../../connectors/discord" }
+fcp-google-ai = { path = "../../connectors/google-ai" }
+fcp-qdrant = { path = "../../connectors/qdrant" }
+fcp-telegram = { path = "../../connectors/telegram" }
+fcp-pinecone = { path = "../../connectors/pinecone" }
+fcp-plaid = { path = "../../connectors/plaid" }
+fcp-github = { path = "../../connectors/github" }
+fcp-gmail = { path = "../../connectors/gmail" }
+fcp-linear = { path = "../../connectors/linear" }
+fcp-stripe = { path = "../../connectors/stripe" }
+fcp-notion = { path = "../../connectors/notion" }
+fcp-youtube = { path = "../../connectors/youtube" }
+fcp-twitter = { path = "../../connectors/twitter" }
+fcp-google-calendar = { path = "../../connectors/google-calendar" }
+fcp-s3 = { path = "../../connectors/s3" }
 pretty_assertions = { workspace = true }
 reqwest = { workspace = true }
 fcp-manifest = { workspace = true }
 futures-util = { workspace = true }
 wiremock = { workspace = true }
+toml = { workspace = true }

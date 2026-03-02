@@ -36,11 +36,7 @@ use std::io::{BufRead, Write};
 use anyhow::Result;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
-mod client;
-mod connector;
-mod types;
-
-use connector::TelegramConnector;
+use fcp_telegram::connector::TelegramConnector;
 
 fn main() -> Result<()> {
     // Initialize tracing

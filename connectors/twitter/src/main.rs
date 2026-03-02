@@ -26,15 +26,7 @@ use std::io::{BufRead, Write};
 use anyhow::Result;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
-mod client;
-mod config;
-mod connector;
-mod error;
-mod oauth;
-mod stream;
-mod types;
-
-use connector::TwitterConnector;
+use fcp_twitter::TwitterConnector;
 
 fn main() -> Result<()> {
     // Initialize tracing

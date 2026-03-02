@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[lib]
+name = "fcp_twitter"
+path = "src/lib.rs"
+
 [[bin]]
 name = "fcp-twitter"
 path = "src/main.rs"
@@ -39,6 +43,7 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+fcp-crypto = { path = "../../crates/fcp-crypto" }
 fcp-manifest = { path = "../../crates/fcp-manifest" }
 fcp-testkit = { path = "../../crates/fcp-testkit" }
 fcp-async-core = { path = "../../crates/fcp-async-core" }

@@ -239,6 +239,106 @@ impl TelegramClient {
         )
     }
 
+    /// Send a photo to a chat.
+    #[instrument(skip_all)]
+    pub async fn send_photo(
+        &self,
+        chat_id: impl Into<String>,
+        photo: impl Into<String>,
+        options: SendMediaOptions,
+    ) -> Result<Message, TelegramError> {
+        let request = SendMediaRequest {
+            chat_id: normalize_chat_id(&chat_id.into())?,
+            media_field: "photo".into(),
+            media_value: photo.into(),
+            caption: options.caption,
+            parse_mode: options.parse_mode,
+            reply_to_message_id: options.reply_to_message_id,
+        };
+        self.request("POST", "sendPhoto", Some(&request), None)
+            .await
+    }
+
+    /// Send a document to a chat.
+    #[instrument(skip_all)]
+    pub async fn send_document(
+        &self,
+        chat_id: impl Into<String>,
+        document: impl Into<String>,
+        options: SendMediaOptions,
+    ) -> Result<Message, TelegramError> {
+        let request = SendMediaRequest {
+            chat_id: normalize_chat_id(&chat_id.into())?,
+            media_field: "document".into(),
+            media_value: document.into(),
+            caption: options.caption,
+            parse_mode: options.parse_mode,
+            reply_to_message_id: options.reply_to_message_id,
+        };
+        self.request("POST", "sendDocument", Some(&request), None)
+            .await
+    }
+
+    /// Send an audio file to a chat.
+    #[instrument(skip_all)]
+    pub async fn send_audio(
+        &self,
+        chat_id: impl Into<String>,
+        audio: impl Into<String>,
+        options: SendMediaOptions,
+    ) -> Result<Message, TelegramError> {
+        let request = SendMediaRequest {
+            chat_id: normalize_chat_id(&chat_id.into())?,
+            media_field: "audio".into(),
+            media_value: audio.into(),
+            caption: options.caption,
+            parse_mode: options.parse_mode,
+            reply_to_message_id: options.reply_to_message_id,
+        };
+        self.request("POST", "sendAudio", Some(&request), None)
+            .await
+    }
+
+    /// Send a video to a chat.
+    #[instrument(skip_all)]
+    pub async fn send_video(
+        &self,
+        chat_id: impl Into<String>,
+        video: impl Into<String>,
+        options: SendMediaOptions,
+    ) -> Result<Message, TelegramError> {
+        let request = SendMediaRequest {
+            chat_id: normalize_chat_id(&chat_id.into())?,
+            media_field: "video".into(),
+            media_value: video.into(),
+            caption: options.caption,
+            parse_mode: options.parse_mode,
+            reply_to_message_id: options.reply_to_message_id,
+        };
+        self.request("POST", "sendVideo", Some(&request), None)
+            .await
+    }
+
+    /// Send a voice message to a chat.
+    #[instrument(skip_all)]
+    pub async fn send_voice(
+        &self,
+        chat_id: impl Into<String>,
+        voice: impl Into<String>,
+        options: SendMediaOptions,
+    ) -> Result<Message, TelegramError> {
+        let request = SendMediaRequest {
+            chat_id: normalize_chat_id(&chat_id.into())?,
+            media_field: "voice".into(),
+            media_value: voice.into(),
+            caption: options.caption,
+            parse_mode: options.parse_mode,
+            reply_to_message_id: options.reply_to_message_id,
+        };
+        self.request("POST", "sendVoice", Some(&request), None)
+            .await
+    }
+
     /// Answer a callback query (acknowledge button press).
     #[instrument(skip_all)]
     pub async fn answer_callback_query(
@@ -293,6 +393,60 @@ impl SendMessageOptions {
     pub fn reply_to_message_id(mut self, id: i64) -> Self {
         self.reply_to_message_id = Some(id);
         self
+    }
+}
+
+/// Options for sending media.
+#[derive(Debug, Default, Clone)]
+pub struct SendMediaOptions {
+    pub caption: Option<String>,
+    pub parse_mode: Option<String>,
+    pub reply_to_message_id: Option<i64>,
+}
+
+/// Request body for send media methods.
+///
+/// Telegram expects the media field name to vary by type (photo, document, etc.).
+/// We use a custom serializer to emit the correct field name.
+#[derive(Debug)]
+struct SendMediaRequest {
+    chat_id: String,
+    media_field: String,
+    media_value: String,
+    caption: Option<String>,
+    parse_mode: Option<String>,
+    reply_to_message_id: Option<i64>,
+}
+
+impl Serialize for SendMediaRequest {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap;
+        let mut count = 2; // chat_id + media field
+        if self.caption.is_some() {
+            count += 1;
+        }
+        if self.parse_mode.is_some() {
+            count += 1;
+        }
+        if self.reply_to_message_id.is_some() {
+            count += 1;
+        }
+        let mut map = serializer.serialize_map(Some(count))?;
+        map.serialize_entry("chat_id", &self.chat_id)?;
+        map.serialize_entry(&self.media_field, &self.media_value)?;
+        if let Some(ref caption) = self.caption {
+            map.serialize_entry("caption", caption)?;
+        }
+        if let Some(ref parse_mode) = self.parse_mode {
+            map.serialize_entry("parse_mode", parse_mode)?;
+        }
+        if let Some(reply_to) = self.reply_to_message_id {
+            map.serialize_entry("reply_to_message_id", &reply_to)?;
+        }
+        map.end()
     }
 }
 
@@ -743,5 +897,84 @@ mod tests {
         // Invalid chat ID should not be retryable
         let invalid_chat = TelegramError::InvalidChatId("bad".into());
         assert!(!invalid_chat.is_retryable());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_send_photo_success() {
+        let (mock_server, client) = setup_mock_client().await;
+
+        Mock::given(method("POST"))
+            .and(path("/bottest_token_12345/sendPhoto"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": {
+                    "message_id": 50,
+                    "chat": {
+                        "id": 123456,
+                        "type": "private",
+                        "first_name": "Test"
+                    },
+                    "date": 1234567890,
+                    "photo": [{
+                        "file_id": "AgACAgIAAxk",
+                        "file_unique_id": "AQADAgAT",
+                        "width": 320,
+                        "height": 240,
+                        "file_size": 12345
+                    }]
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let options = SendMediaOptions {
+            caption: Some("Test photo".into()),
+            ..Default::default()
+        };
+        let message = client
+            .send_photo("123456", "AgACAgIAAxk", options)
+            .await
+            .unwrap();
+
+        assert_eq!(message.message_id, 50);
+        assert_eq!(message.chat.id, 123456);
+        assert!(message.photo.is_some());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_send_document_success() {
+        let (mock_server, client) = setup_mock_client().await;
+
+        Mock::given(method("POST"))
+            .and(path("/bottest_token_12345/sendDocument"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": {
+                    "message_id": 51,
+                    "chat": {
+                        "id": 123456,
+                        "type": "private",
+                        "first_name": "Test"
+                    },
+                    "date": 1234567890,
+                    "document": {
+                        "file_id": "BQACAgIAAxk",
+                        "file_unique_id": "AgADAgAT",
+                        "file_name": "report.pdf",
+                        "mime_type": "application/pdf",
+                        "file_size": 98765
+                    }
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let message = client
+            .send_document("123456", "BQACAgIAAxk", SendMediaOptions::default())
+            .await
+            .unwrap();
+
+        assert_eq!(message.message_id, 51);
+        assert!(message.document.is_some());
     }
 }

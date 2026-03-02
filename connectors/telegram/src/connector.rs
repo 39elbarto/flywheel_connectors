@@ -9,17 +9,17 @@ use std::time::Instant;
 use fcp_async_core::channel::{broadcast, watch};
 use fcp_async_core::sync::RwLock;
 use fcp_core::*;
-use reqwest::Url;
-use serde::{Deserialize, Serialize};
 use fcp_sdk::{
     ErrorClass, FormatMode, Formatter, Limits, classify_error_message,
     runtime::{PollResult, PollingCursor, PollingSupervisor, SupervisorConfig},
     validate_input_with_limits, validate_output_with_limits,
 };
+use reqwest::Url;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, warn};
 
-use crate::client::{SendMessageOptions, TelegramClient, TelegramError};
+use crate::client::{SendMediaOptions, SendMessageOptions, TelegramClient, TelegramError};
 use crate::types::{GetUpdatesRequest, Message, Update, UpdateKind};
 
 const DEFAULT_TELEGRAM_BASE_URL: &str = "https://api.telegram.org";
@@ -380,16 +380,17 @@ impl TelegramConnector {
                     })?;
                 client = client.with_base_url(&normalized_base_url);
 
-                let bot_info = client
-                    .get_me()
-                    .await
-                    .map_err(|e: TelegramError| FcpError::External {
-                        service: "telegram".into(),
-                        message: format!("Credential validation failed: {e}"),
-                        status_code: None,
-                        retryable: e.is_retryable(),
-                        retry_after: None,
-                    })?;
+                let bot_info =
+                    client
+                        .get_me()
+                        .await
+                        .map_err(|e: TelegramError| FcpError::External {
+                            service: "telegram".into(),
+                            message: format!("Credential validation failed: {e}"),
+                            status_code: None,
+                            retryable: e.is_retryable(),
+                            retry_after: None,
+                        })?;
 
                 details = json!({
                     "bot_id": bot_info.id,
@@ -500,7 +501,7 @@ impl TelegramConnector {
             event_caps: Some(EventCaps {
                 streaming: true,
                 replay: false,
-                min_buffer_events: 0,
+                min_buffer_events: 1000,
                 requires_ack: false,
             }),
             auth_caps: None,
@@ -601,7 +602,10 @@ impl TelegramConnector {
             message: Some(if config.allowed_updates.is_empty() {
                 "allowed_updates not set (Telegram defaults will apply)".into()
             } else {
-                format!("allowed_updates configured: {}", config.allowed_updates.join(", "))
+                format!(
+                    "allowed_updates configured: {}",
+                    config.allowed_updates.join(", ")
+                )
             }),
             critical: false,
         });
@@ -749,6 +753,31 @@ impl TelegramConnector {
         })
     }
 
+    fn send_media_input_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "chat_id": { "type": ["string", "integer"], "description": "Chat ID or @username" },
+                "media_type": { "type": "string", "enum": ["photo", "document", "audio", "video", "voice"], "description": "Type of media to send" },
+                "media": { "type": "string", "description": "File ID (from a previous message) or HTTPS URL" },
+                "caption": { "type": "string", "description": "Media caption (up to 1024 characters)" },
+                "parse_mode": { "type": "string", "enum": ["HTML", "MarkdownV2"] },
+                "reply_to_message_id": { "type": "integer" }
+            },
+            "required": ["chat_id", "media_type", "media"]
+        })
+    }
+
+    fn send_media_output_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "message_id": { "type": "integer" },
+                "chat_id": { "type": "integer" }
+            }
+        })
+    }
+
     fn get_file_input_schema() -> serde_json::Value {
         json!({
             "type": "object",
@@ -802,9 +831,22 @@ impl TelegramConnector {
         })
     }
 
+    fn callback_query_event_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string" },
+                "from": { "type": "object" },
+                "data": { "type": "string" },
+                "chat_instance": { "type": "string" }
+            }
+        })
+    }
+
     fn input_schema_for(operation: &str) -> Option<serde_json::Value> {
         match operation {
             "telegram.send_message" => Some(Self::send_message_input_schema()),
+            "telegram.send_media" => Some(Self::send_media_input_schema()),
             "telegram.get_file" => Some(Self::get_file_input_schema()),
             "telegram.answer_callback_query" => Some(Self::answer_callback_query_input_schema()),
             _ => None,
@@ -814,6 +856,7 @@ impl TelegramConnector {
     fn output_schema_for(operation: &str) -> Option<serde_json::Value> {
         match operation {
             "telegram.send_message" => Some(Self::send_message_output_schema()),
+            "telegram.send_media" => Some(Self::send_media_output_schema()),
             "telegram.get_file" => Some(Self::get_file_output_schema()),
             "telegram.answer_callback_query" => Some(Self::answer_callback_query_output_schema()),
             _ => None,
@@ -843,6 +886,30 @@ impl TelegramConnector {
                         examples: vec![
                             r#"{"chat_id": "@username", "text": "Hello!"}"#.into(),
                             r#"{"chat_id": "-100123456789", "text": "Group message"}"#.into(),
+                        ],
+                        related: vec![],
+                    },
+                    rate_limit: None,
+                    requires_approval: None,
+                },
+                OperationInfo {
+                    id: OperationId::from_static("telegram.send_media"),
+                    summary: "Send a media file (photo, document, audio, video, voice) to a Telegram chat".into(),
+                    description: Some("Sends media by file_id or HTTPS URL to a specified Telegram chat.".into()),
+                    input_schema: Self::send_media_input_schema(),
+                    output_schema: Self::send_media_output_schema(),
+                    capability: CapabilityId::from_static("telegram.send"),
+                    risk_level: RiskLevel::Medium,
+                    safety_tier: SafetyTier::Risky,
+                    idempotency: IdempotencyClass::None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Send a photo, document, audio, video, or voice message to a Telegram chat.".into(),
+                        common_mistakes: vec![
+                            "Providing a local file path instead of a file_id or HTTPS URL".into(),
+                        ],
+                        examples: vec![
+                            r#"{"chat_id": "@username", "media_type": "photo", "media": "AgACAgIAAxk..."}"#.into(),
+                            r#"{"chat_id": "123456", "media_type": "document", "media": "https://example.com/file.pdf", "caption": "Report"}"#.into(),
                         ],
                         related: vec![],
                     },
@@ -892,17 +959,39 @@ impl TelegramConnector {
                     requires_approval: None,
                 },
             ],
-            events: vec![EventInfo {
-                topic: "telegram.message".into(),
-                schema: Self::message_event_schema(),
-                requires_ack: false,
-            }],
+            events: vec![
+                EventInfo {
+                    topic: "telegram.message.new".into(),
+                    schema: Self::message_event_schema(),
+                    requires_ack: false,
+                },
+                EventInfo {
+                    topic: "telegram.message.edited".into(),
+                    schema: Self::message_event_schema(),
+                    requires_ack: false,
+                },
+                EventInfo {
+                    topic: "telegram.channel_post.new".into(),
+                    schema: Self::message_event_schema(),
+                    requires_ack: false,
+                },
+                EventInfo {
+                    topic: "telegram.channel_post.edited".into(),
+                    schema: Self::message_event_schema(),
+                    requires_ack: false,
+                },
+                EventInfo {
+                    topic: "telegram.callback_query".into(),
+                    schema: Self::callback_query_event_schema(),
+                    requires_ack: false,
+                },
+            ],
             resource_types: vec![],
             auth_caps: None,
             event_caps: Some(EventCaps {
                 streaming: true,
                 replay: false,
-                min_buffer_events: 0,
+                min_buffer_events: 1000,
                 requires_ack: false,
             }),
         };
@@ -953,6 +1042,20 @@ impl TelegramConnector {
                             message: format!(
                                 "Message text exceeds {MAX_TEXT_LENGTH} character limit (got {} characters)",
                                 text.chars().count()
+                            ),
+                        });
+                    }
+                }
+            }
+            "telegram.send_media" => {
+                const MAX_CAPTION_LENGTH: usize = 1024;
+                if let Some(caption) = input.get("caption").and_then(|v| v.as_str()) {
+                    if caption.chars().count() > MAX_CAPTION_LENGTH {
+                        return Err(FcpError::InvalidRequest {
+                            code: 1004,
+                            message: format!(
+                                "Caption exceeds {MAX_CAPTION_LENGTH} character limit (got {} characters)",
+                                caption.chars().count()
                             ),
                         });
                     }
@@ -1032,6 +1135,7 @@ impl TelegramConnector {
 
         match operation {
             "telegram.send_message" => self.invoke_send_message(input).await,
+            "telegram.send_media" => self.invoke_send_media(input).await,
             "telegram.get_file" => self.invoke_get_file(input).await,
             "telegram.answer_callback_query" => self.invoke_answer_callback_query(input).await,
             _ => Err(FcpError::OperationNotGranted {
@@ -1150,6 +1254,115 @@ impl TelegramConnector {
         });
 
         if let Some(schema) = Self::output_schema_for("telegram.send_message") {
+            validate_output_with_limits(&schema, &response, &Limits::default())?;
+        }
+
+        Ok(response)
+    }
+
+    async fn invoke_send_media(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+
+        let chat_id = match input.get("chat_id") {
+            Some(serde_json::Value::String(value)) => value.clone(),
+            Some(serde_json::Value::Number(value)) => value
+                .as_i64()
+                .map(|value| value.to_string())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "chat_id must be an integer or string".into(),
+                })?,
+            Some(_) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "chat_id must be an integer or string".into(),
+                });
+            }
+            None => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing chat_id".into(),
+                });
+            }
+        };
+
+        let media_type =
+            input
+                .get("media_type")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing media_type".into(),
+                })?;
+
+        let media =
+            input
+                .get("media")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing media (file_id or URL)".into(),
+                })?;
+
+        let mut options = SendMediaOptions::default();
+        if let Some(caption) = input.get("caption").and_then(|v| v.as_str()) {
+            options.caption = Some(caption.to_string());
+        }
+        if let Some(parse_mode) = input.get("parse_mode").and_then(|v| v.as_str()) {
+            options.parse_mode = Some(parse_mode.to_string());
+        }
+        if let Some(reply_to) = input.get("reply_to_message_id").and_then(|v| v.as_i64()) {
+            options.reply_to_message_id = Some(reply_to);
+        }
+
+        let map_external = |e: TelegramError| FcpError::External {
+            service: "telegram".into(),
+            message: e.to_string(),
+            status_code: match &e {
+                TelegramError::Api { code, .. } => u16::try_from(*code).ok(),
+                _ => None,
+            },
+            retryable: e.is_retryable(),
+            retry_after: None,
+        };
+
+        let message: Message = match media_type {
+            "photo" => client
+                .send_photo(chat_id, media, options)
+                .await
+                .map_err(map_external)?,
+            "document" => client
+                .send_document(chat_id, media, options)
+                .await
+                .map_err(map_external)?,
+            "audio" => client
+                .send_audio(chat_id, media, options)
+                .await
+                .map_err(map_external)?,
+            "video" => client
+                .send_video(chat_id, media, options)
+                .await
+                .map_err(map_external)?,
+            "voice" => client
+                .send_voice(chat_id, media, options)
+                .await
+                .map_err(map_external)?,
+            _ => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!(
+                        "Unsupported media_type: {media_type}. Must be one of: photo, document, audio, video, voice"
+                    ),
+                });
+            }
+        };
+
+        let response = json!({
+            "message_id": message.message_id,
+            "chat_id": message.chat.id
+        });
+
+        if let Some(schema) = Self::output_schema_for("telegram.send_media") {
             validate_output_with_limits(&schema, &response, &Limits::default())?;
         }
 
@@ -1371,11 +1584,11 @@ fn update_to_event(
     instance_id: &InstanceId,
 ) -> Option<EventEnvelope> {
     let (topic, payload) = match &update.kind {
-        UpdateKind::Message(msg) | UpdateKind::EditedMessage(msg) => {
-            ("telegram.message", message_to_json(msg))
-        }
-        UpdateKind::ChannelPost(msg) | UpdateKind::EditedChannelPost(msg) => {
-            ("telegram.channel_post", message_to_json(msg))
+        UpdateKind::Message(msg) => ("telegram.message.new", message_to_json(msg)),
+        UpdateKind::EditedMessage(msg) => ("telegram.message.edited", message_to_json(msg)),
+        UpdateKind::ChannelPost(msg) => ("telegram.channel_post.new", message_to_json(msg)),
+        UpdateKind::EditedChannelPost(msg) => {
+            ("telegram.channel_post.edited", message_to_json(msg))
         }
         UpdateKind::CallbackQuery(cb) => (
             "telegram.callback_query",
@@ -1448,6 +1661,8 @@ impl Default for TelegramConnector {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration as StdDuration;
+
     use super::*;
     use crate::types::{Chat, User};
     use serde_json::json;
@@ -1695,7 +1910,7 @@ mod tests {
         )
         .expect("event");
 
-        assert_eq!(event.topic, "telegram.message");
+        assert_eq!(event.topic, "telegram.message.new");
         assert_eq!(event.seq, 42);
         assert_eq!(event.data.zone_id, ZoneId::community());
         assert_eq!(event.data.principal.kind, "telegram_user");
@@ -1705,6 +1920,188 @@ mod tests {
             event.data.payload.get("text").and_then(|v| v.as_str()),
             Some("hello")
         );
+    }
+
+    #[test]
+    fn test_update_to_event_maps_topics_by_update_variant() {
+        let msg = Message {
+            message_id: 1,
+            from: Some(User {
+                id: 7,
+                is_bot: false,
+                first_name: "Test".into(),
+                last_name: None,
+                username: Some("tester".into()),
+                language_code: None,
+            }),
+            chat: Chat {
+                id: 99,
+                chat_type: "private".into(),
+                title: None,
+                username: Some("tester".into()),
+                first_name: Some("Test".into()),
+                last_name: None,
+            },
+            date: 1234567890,
+            text: Some("hello".into()),
+            caption: None,
+            photo: None,
+            document: None,
+            audio: None,
+            video: None,
+            voice: None,
+            reply_to_message: None,
+            message_thread_id: None,
+        };
+
+        let connector_id = ConnectorId::from_static("telegram");
+        let instance_id = InstanceId::new();
+
+        let edited = Update {
+            update_id: 43,
+            kind: UpdateKind::EditedMessage(msg.clone()),
+        };
+        let channel_post = Update {
+            update_id: 44,
+            kind: UpdateKind::ChannelPost(msg.clone()),
+        };
+        let edited_channel_post = Update {
+            update_id: 45,
+            kind: UpdateKind::EditedChannelPost(msg),
+        };
+        let callback = Update {
+            update_id: 46,
+            kind: UpdateKind::CallbackQuery(crate::types::CallbackQuery {
+                id: "cb-1".into(),
+                from: User {
+                    id: 8,
+                    is_bot: false,
+                    first_name: "Button".into(),
+                    last_name: None,
+                    username: Some("button_user".into()),
+                    language_code: None,
+                },
+                message: None,
+                chat_instance: "chat-instance".into(),
+                data: Some("tap".into()),
+            }),
+        };
+
+        assert_eq!(
+            update_to_event(&edited, &connector_id, &instance_id)
+                .expect("edited event")
+                .topic,
+            "telegram.message.edited"
+        );
+        assert_eq!(
+            update_to_event(&channel_post, &connector_id, &instance_id)
+                .expect("channel post event")
+                .topic,
+            "telegram.channel_post.new"
+        );
+        assert_eq!(
+            update_to_event(&edited_channel_post, &connector_id, &instance_id)
+                .expect("edited channel post event")
+                .topic,
+            "telegram.channel_post.edited"
+        );
+        assert_eq!(
+            update_to_event(&callback, &connector_id, &instance_id)
+                .expect("callback event")
+                .topic,
+            "telegram.callback_query"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_polling_emits_event_envelope_from_get_updates() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path(token_path("getMe")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": {
+                    "id": 123456789,
+                    "is_bot": true,
+                    "first_name": "Test Bot",
+                    "username": "test_bot"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path(token_path("getUpdates")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": [{
+                    "update_id": 1000,
+                    "message": {
+                        "message_id": 55,
+                        "from": {
+                            "id": 7,
+                            "is_bot": false,
+                            "first_name": "Test",
+                            "username": "tester"
+                        },
+                        "chat": {
+                            "id": 99,
+                            "type": "private",
+                            "first_name": "Test",
+                            "username": "tester"
+                        },
+                        "date": 1700000000,
+                        "text": "hello poll"
+                    }
+                }]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let mut connector = TelegramConnector::new();
+        let mut event_rx = connector.event_tx.subscribe();
+
+        connector
+            .handle_configure(json!({
+                "credential": TEST_BOT_TOKEN,
+                "base_url": mock_server.uri(),
+                "poll_timeout": 1
+            }))
+            .await
+            .expect("configure should succeed");
+
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        connector
+            .handle_handshake(serde_json::json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["telegram.read"]
+            }))
+            .await
+            .expect("handshake should succeed");
+
+        let event = fcp_async_core::time::timeout(StdDuration::from_secs(3), event_rx.recv())
+            .await
+            .expect("timed out waiting for polling event")
+            .expect("broadcast receive should succeed")
+            .expect("event payload should be ok");
+
+        assert_eq!(event.topic, "telegram.message.new");
+        assert_eq!(event.seq, 1000);
+        assert_eq!(event.data.principal.trust, TrustLevel::Untrusted);
+        assert_eq!(
+            event.data.payload.get("text").and_then(|v| v.as_str()),
+            Some("hello poll")
+        );
+
+        connector
+            .handle_shutdown(json!({}))
+            .await
+            .expect("shutdown should succeed");
     }
 
     #[fcp_async_core::runtime::test]
@@ -2001,5 +2398,62 @@ mod tests {
     fn test_telegram_message_length_constant() {
         // Verify our constant matches Telegram's documented limit
         assert_eq!(4096, 4096); // MAX_TEXT_LENGTH
+    }
+
+    #[test]
+    fn test_send_media_caption_too_long() {
+        let caption = "x".repeat(1025);
+        let input = json!({
+            "chat_id": "123",
+            "media_type": "photo",
+            "media": "AgACAgIAAxk",
+            "caption": caption
+        });
+        let result = TelegramConnector::validate_input_early("telegram.send_media", &input);
+        assert!(result.is_err());
+        if let Err(FcpError::InvalidRequest { message, .. }) = result {
+            assert!(message.contains("1024"));
+        }
+    }
+
+    #[test]
+    fn test_send_media_caption_at_limit() {
+        let caption = "x".repeat(1024);
+        let input = json!({
+            "chat_id": "123",
+            "media_type": "photo",
+            "media": "AgACAgIAAxk",
+            "caption": caption
+        });
+        let result = TelegramConnector::validate_input_early("telegram.send_media", &input);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_send_media_invalid_type_rejected() {
+        let input = json!({
+            "chat_id": "123",
+            "media_type": "gif",
+            "media": "AgACAgIAAxk"
+        });
+        // The input_schema validation should reject "gif" since it's not in the enum
+        let result = TelegramConnector::validate_input_early("telegram.send_media", &input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_introspect_has_four_operations() {
+        let rt = fcp_async_core::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let connector = TelegramConnector::new();
+            let result = connector.handle_introspect().await.unwrap();
+            let ops = result["operations"].as_array().unwrap();
+            assert_eq!(ops.len(), 4, "expected 4 operations, got {}", ops.len());
+            let op_ids: Vec<&str> = ops.iter().filter_map(|o| o["id"].as_str()).collect();
+            assert!(op_ids.contains(&"telegram.send_message"));
+            assert!(op_ids.contains(&"telegram.send_media"));
+            assert!(op_ids.contains(&"telegram.get_file"));
+            assert!(op_ids.contains(&"telegram.answer_callback_query"));
+        });
     }
 }

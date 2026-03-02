@@ -671,7 +671,10 @@ impl AnthropicConnector {
         })?;
 
         let mut resource_uris = Vec::new();
-        if operation == "anthropic.message" || operation == "anthropic.chat" {
+        if operation == "anthropic.message"
+            || operation == "anthropic.message.stream"
+            || operation == "anthropic.chat"
+        {
             let model = input
                 .get("model")
                 .and_then(|v| v.as_str())
@@ -687,6 +690,7 @@ impl AnthropicConnector {
 
         match operation {
             "anthropic.message" => self.invoke_message(input).await,
+            "anthropic.message.stream" => self.invoke_message_stream(input).await,
             "anthropic.chat" => self.invoke_chat(input).await,
             "anthropic.get_usage" => self.invoke_get_usage().await,
             _ => Err(FcpError::OperationNotGranted {
@@ -786,7 +790,21 @@ impl AnthropicConnector {
         let cost = response.usage.calculate_cost(model);
         self.track_cost(&response.usage, model);
 
-        // Extract text content
+        // Build structured content blocks preserving tool_use
+        let content_blocks: Vec<serde_json::Value> = response
+            .content
+            .iter()
+            .map(|b| match b {
+                crate::types::ResponseContentBlock::Text { text } => {
+                    json!({"type": "text", "text": text})
+                }
+                crate::types::ResponseContentBlock::ToolUse { id, name, input } => {
+                    json!({"type": "tool_use", "id": id, "name": name, "input": input})
+                }
+            })
+            .collect();
+
+        // Extract text for convenience field
         let text_content: String = response
             .content
             .iter()
@@ -797,6 +815,7 @@ impl AnthropicConnector {
         Ok(json!({
             "id": response.id,
             "content": text_content,
+            "content_blocks": content_blocks,
             "model": response.model,
             "stop_reason": response.stop_reason,
             "usage": {
@@ -804,6 +823,218 @@ impl AnthropicConnector {
                 "output_tokens": response.usage.output_tokens
             },
             "cost_usd": cost
+        }))
+    }
+
+    async fn invoke_message_stream(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        use futures_util::StreamExt;
+
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+
+        let model_str = input
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or("claude-sonnet-4-20250514");
+
+        let model = match model_str {
+            "claude-opus-4-5-20251101" => Model::ClaudeOpus4_5,
+            "claude-sonnet-4-20250514" => Model::ClaudeSonnet4,
+            "claude-3-5-haiku-20241022" => Model::Claude3_5Haiku,
+            "claude-3-5-sonnet-20241022" => Model::Claude3_5Sonnet,
+            _ => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Unknown model: {model_str}"),
+                });
+            }
+        };
+
+        let messages_json = input.get("messages").ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "Missing messages".into(),
+        })?;
+
+        let messages: Vec<Message> =
+            serde_json::from_value(messages_json.clone()).map_err(|e| {
+                FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Invalid messages format: {e}"),
+                }
+            })?;
+
+        if messages.is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Messages array cannot be empty".into(),
+            });
+        }
+
+        let system = input.get("system").and_then(|v| v.as_str());
+        let max_tokens = match input.get("max_tokens").and_then(|v| v.as_u64()) {
+            Some(v) if v > u64::from(u32::MAX) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("max_tokens value {} exceeds maximum {}", v, u32::MAX),
+                });
+            }
+            Some(v) => v as u32,
+            None => 4096,
+        };
+        let temperature = input.get("temperature").and_then(|v| v.as_f64());
+
+        let tools: Option<Vec<Tool>> = input
+            .get("tools")
+            .map(|v| serde_json::from_value(v.clone()))
+            .transpose()
+            .map_err(|e| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid tools format: {e}"),
+            })?;
+
+        let tool_choice: Option<ToolChoice> = input
+            .get("tool_choice")
+            .map(|v| serde_json::from_value(v.clone()))
+            .transpose()
+            .map_err(|e| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid tool_choice format: {e}"),
+            })?;
+
+        // Use the streaming API and assemble the final response
+        let mut stream = client
+            .message_stream(
+                model,
+                messages,
+                max_tokens,
+                system,
+                temperature,
+                tools,
+                tool_choice,
+            )
+            .await
+            .map_err(|e: AnthropicError| e.to_fcp_error())?;
+
+        let mut message_id = String::new();
+        let mut response_model = String::new();
+        let mut stop_reason: Option<String> = None;
+        let mut usage = Usage {
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+        };
+
+        // Accumulate content blocks from the stream
+        struct BlockAccumulator {
+            block_type: String,
+            text: String,
+            tool_id: String,
+            tool_name: String,
+            tool_input_json: String,
+        }
+        let mut blocks: Vec<BlockAccumulator> = Vec::new();
+
+        while let Some(event_result) = stream.next().await {
+            let event = event_result.map_err(|e: AnthropicError| e.to_fcp_error())?;
+
+            match event {
+                crate::types::StreamEvent::MessageStart { message: msg } => {
+                    message_id = msg.id;
+                    response_model = msg.model;
+                    usage = msg.usage;
+                }
+                crate::types::StreamEvent::ContentBlockStart {
+                    content_block,
+                    ..
+                } => match content_block {
+                    crate::types::ContentBlockStartData::Text { text } => {
+                        blocks.push(BlockAccumulator {
+                            block_type: "text".into(),
+                            text,
+                            tool_id: String::new(),
+                            tool_name: String::new(),
+                            tool_input_json: String::new(),
+                        });
+                    }
+                    crate::types::ContentBlockStartData::ToolUse { id, name, .. } => {
+                        blocks.push(BlockAccumulator {
+                            block_type: "tool_use".into(),
+                            text: String::new(),
+                            tool_id: id,
+                            tool_name: name,
+                            tool_input_json: String::new(),
+                        });
+                    }
+                },
+                crate::types::StreamEvent::ContentBlockDelta { delta, .. } => {
+                    if let Some(block) = blocks.last_mut() {
+                        match delta {
+                            crate::types::ContentDelta::TextDelta { text } => {
+                                block.text.push_str(&text);
+                            }
+                            crate::types::ContentDelta::InputJsonDelta { partial_json } => {
+                                block.tool_input_json.push_str(&partial_json);
+                            }
+                        }
+                    }
+                }
+                crate::types::StreamEvent::MessageDelta {
+                    delta,
+                    usage: delta_usage,
+                } => {
+                    if let Some(sr) = delta.stop_reason {
+                        stop_reason = Some(format!("{sr:?}").to_lowercase());
+                    }
+                    usage.output_tokens = delta_usage.output_tokens;
+                }
+                crate::types::StreamEvent::ContentBlockStop { .. }
+                | crate::types::StreamEvent::MessageStop
+                | crate::types::StreamEvent::Ping => {}
+                crate::types::StreamEvent::Error { error } => {
+                    return Err(FcpError::ExternalService {
+                        service: "anthropic".into(),
+                        message: error.message,
+                    });
+                }
+            }
+        }
+
+        let cost = usage.calculate_cost(model);
+        self.track_cost(&usage, model);
+
+        // Build content blocks
+        let content_blocks: Vec<serde_json::Value> = blocks
+            .iter()
+            .map(|b| {
+                if b.block_type == "tool_use" {
+                    let parsed_input: serde_json::Value =
+                        serde_json::from_str(&b.tool_input_json).unwrap_or(json!({}));
+                    json!({"type": "tool_use", "id": b.tool_id, "name": b.tool_name, "input": parsed_input})
+                } else {
+                    json!({"type": "text", "text": b.text})
+                }
+            })
+            .collect();
+
+        let text_content: String = blocks
+            .iter()
+            .filter(|b| b.block_type == "text")
+            .map(|b| b.text.as_str())
+            .collect::<Vec<_>>()
+            .join("");
+
+        Ok(json!({
+            "id": message_id,
+            "content": text_content,
+            "content_blocks": content_blocks,
+            "model": response_model,
+            "stop_reason": stop_reason,
+            "usage": {
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens
+            },
+            "cost_usd": cost,
+            "streamed": true
         }))
     }
 

@@ -1622,6 +1622,7 @@ dependencies = [
  "fcp-async-core",
  "fcp-core",
  "fcp-crypto",
+ "fcp-manifest",
  "fcp-testkit",
  "futures-util",
  "reqwest 0.13.2",

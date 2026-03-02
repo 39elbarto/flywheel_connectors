@@ -5,13 +5,17 @@
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::time::Duration;
 
+    use chrono::Utc;
+    use fcp_cbor::{CanonicalSerializer, SchemaId};
     use raptorq::{Decoder, EncodingPacket, PayloadId};
+    use serde::{Deserialize, Serialize};
 
     use crate::{
-        ChunkedObjectManifest, DecodeAdmissionController, EncodingDecision, RaptorQConfig,
-        RaptorQDecoder, RaptorQEncoder,
+        ChunkError, ChunkedObjectManifest, DecodeAdmissionController, EncodingDecision,
+        RaptorQConfig, RaptorQDecoder, RaptorQEncoder,
     };
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -53,6 +57,38 @@ mod tests {
     fn blake3_hex(data: &[u8]) -> String {
         let hash = blake3::hash(data);
         hash.to_hex().to_string()
+    }
+
+    struct EpochReplayLog<'a> {
+        test_name: &'a str,
+        epoch_id: u64,
+        object_hash: &'a str,
+        symbols_needed: u32,
+        symbols_available: usize,
+        repair_attempts: u32,
+        bytes_written: u64,
+        verify_result: &'a str,
+        result: &'a str,
+        fcp_error_code: Option<&'a str>,
+    }
+
+    fn emit_epoch_replay_log(log: &EpochReplayLog<'_>) {
+        let entry = serde_json::json!({
+            "timestamp": Utc::now().to_rfc3339(),
+            "test_name": log.test_name,
+            "trace_id": format!("trace-{}", log.test_name),
+            "zone_id": "z:work",
+            "epoch_id": log.epoch_id,
+            "object_id": log.object_hash,
+            "symbols_needed": log.symbols_needed,
+            "symbols_available": log.symbols_available,
+            "repair_attempts": log.repair_attempts,
+            "bytes_written": log.bytes_written,
+            "verify_result": log.verify_result,
+            "result": log.result,
+            "fcp_error_code": log.fcp_error_code
+        });
+        println!("{entry}");
     }
 
     /// High-repair config for erasure and adversarial tests.
@@ -530,6 +566,390 @@ mod tests {
         let mut corrupted_chunks = chunks;
         corrupted_chunks[0].bytes[0] = 255;
         assert!(manifest.reconstruct(&corrupted_chunks).is_err());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Epoch Replay + Binary Resume Tests (1n78.37.1)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    struct EpochReplayMetadata {
+        epoch_id: u64,
+        zone_id: String,
+        object_hash: [u8; 32],
+        symbols_needed: u32,
+        symbols_available: u32,
+        producer_nodes: Vec<String>,
+        stats: HashMap<String, u64>,
+    }
+
+    #[test]
+    fn epoch_metadata_canonical_cbor_is_deterministic() {
+        let object_hash = *blake3::hash(b"epoch-object-42").as_bytes();
+
+        let mut stats_a = HashMap::new();
+        stats_a.insert("symbols_needed".to_string(), 22);
+        stats_a.insert("symbols_available".to_string(), 31);
+        stats_a.insert("repair_attempts".to_string(), 2);
+
+        let mut stats_b = HashMap::new();
+        // Deliberately insert in a different order to prove canonicalization.
+        stats_b.insert("repair_attempts".to_string(), 2);
+        stats_b.insert("symbols_available".to_string(), 31);
+        stats_b.insert("symbols_needed".to_string(), 22);
+
+        let metadata_a = EpochReplayMetadata {
+            epoch_id: 42,
+            zone_id: "z:work".to_string(),
+            object_hash,
+            symbols_needed: 22,
+            symbols_available: 31,
+            producer_nodes: vec!["node-a".to_string(), "node-b".to_string()],
+            stats: stats_a,
+        };
+        let metadata_b = EpochReplayMetadata {
+            stats: stats_b,
+            ..metadata_a.clone()
+        };
+
+        let schema = SchemaId::new(
+            "fcp.raptorq",
+            "EpochReplayMetadata",
+            "1.0.0".parse().expect("schema version parses"),
+        );
+
+        let bytes_a = CanonicalSerializer::serialize(&metadata_a, &schema)
+            .expect("metadata A serializes canonically");
+        let bytes_b = CanonicalSerializer::serialize(&metadata_b, &schema)
+            .expect("metadata B serializes canonically");
+        assert_eq!(
+            bytes_a, bytes_b,
+            "canonical bytes should be identical for semantically equal metadata"
+        );
+
+        let parsed: EpochReplayMetadata = CanonicalSerializer::deserialize(&bytes_a, &schema)
+            .expect("canonical metadata deserializes");
+        assert_eq!(parsed, metadata_a);
+    }
+
+    #[test]
+    fn epoch_replay_reconstructs_identically_from_multiple_symbol_subsets() {
+        let config = RaptorQConfig {
+            symbol_size: 1024,
+            repair_ratio_bps: 10000, // 100% repair overhead for robust subset decoding
+            max_object_size: 64 * 1024 * 1024,
+            decode_timeout: Duration::from_secs(30),
+            max_chunk_threshold: 256 * 1024,
+            chunk_size: 64 * 1024,
+        };
+
+        let payload = seeded_payload(0xE00C_0042, 20 * 1024);
+        let payload_hash = blake3_hex(&payload);
+        let encoder = RaptorQEncoder::new(&payload, &config).expect("encoder");
+        let symbols = encoder.encode_all();
+        let needed = encoder.source_symbols();
+        assert!(
+            symbols.len() > usize::try_from(needed).expect("needed fits usize"),
+            "test requires repair symbols to be present"
+        );
+
+        // Subset A: all even ESIs + first five odd ESIs.
+        let mut subset_a: Vec<(u32, Vec<u8>)> = symbols
+            .iter()
+            .filter(|(esi, _)| esi % 2 == 0)
+            .cloned()
+            .collect();
+        subset_a.extend(
+            symbols
+                .iter()
+                .filter(|(esi, _)| esi % 2 == 1)
+                .take(5)
+                .cloned(),
+        );
+
+        // Subset B: skip the first 8 symbols (simulates initial gap).
+        let subset_b: Vec<(u32, Vec<u8>)> = symbols.iter().skip(8).cloned().collect();
+
+        // Subset C: drop every 3rd symbol (interleaved loss).
+        let subset_c: Vec<(u32, Vec<u8>)> = symbols
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| idx % 3 != 0)
+            .map(|(_, symbol)| symbol.clone())
+            .collect();
+
+        for (label, mut subset) in [
+            ("subset-a", subset_a),
+            ("subset-b", subset_b),
+            ("subset-c", subset_c),
+        ] {
+            // Reverse to ensure replay order does not depend on arrival order.
+            subset.reverse();
+
+            let mut raptor_decoder = Decoder::new(encoder.transmission_info());
+            let mut reconstructed_payload = None;
+            for (esi, data) in subset.iter().cloned() {
+                let packet = EncodingPacket::new(PayloadId::new(0, esi), data);
+                if let Some(payload_bytes) = raptor_decoder.decode(packet) {
+                    reconstructed_payload = Some(payload_bytes);
+                    break;
+                }
+            }
+
+            let reconstructed_payload = reconstructed_payload.unwrap_or_else(|| {
+                panic!(
+                    "failed to decode payload from {label} (subset_size={})",
+                    subset.len()
+                )
+            });
+            assert_eq!(
+                reconstructed_payload, payload,
+                "{label} produced different payload bytes"
+            );
+            assert_eq!(
+                blake3_hex(&reconstructed_payload),
+                payload_hash,
+                "{label} hash mismatch"
+            );
+
+            emit_epoch_replay_log(&EpochReplayLog {
+                test_name: "epoch_replay_reconstructs_identically_from_multiple_symbol_subsets",
+                epoch_id: 42,
+                object_hash: &payload_hash,
+                symbols_needed: needed,
+                symbols_available: subset.len(),
+                repair_attempts: 0,
+                bytes_written: u64::try_from(reconstructed_payload.len())
+                    .expect("decoded length fits u64"),
+                verify_result: "pass",
+                result: "pass",
+                fcp_error_code: None,
+            });
+        }
+    }
+
+    #[test]
+    fn epoch_replay_reconstructs_from_seeded_randomized_subsets() {
+        use rand::SeedableRng;
+        use rand::seq::SliceRandom;
+        use rand_chacha::ChaCha20Rng;
+
+        let config = RaptorQConfig {
+            symbol_size: 1024,
+            repair_ratio_bps: 10000, // 100% repair overhead for robust subset decoding
+            max_object_size: 64 * 1024 * 1024,
+            decode_timeout: Duration::from_secs(30),
+            max_chunk_threshold: 256 * 1024,
+            chunk_size: 64 * 1024,
+        };
+
+        let payload = seeded_payload(0xE00C_7742, 32 * 1024);
+        let payload_hash = blake3_hex(&payload);
+        let encoder = RaptorQEncoder::new(&payload, &config).expect("encoder");
+        let symbols = encoder.encode_all();
+        let needed = encoder.source_symbols();
+        let keep_count = usize::try_from(needed)
+            .expect("needed fits usize")
+            .saturating_add(12)
+            .min(symbols.len());
+        assert!(
+            keep_count >= usize::try_from(needed).expect("needed fits usize"),
+            "seeded subset must include at least K symbols"
+        );
+
+        for seed in [0xA501_u64, 0xA502, 0xA503, 0xA504, 0xA505] {
+            let mut subset = symbols.clone();
+            let mut rng = ChaCha20Rng::seed_from_u64(seed);
+            subset.shuffle(&mut rng);
+            subset.truncate(keep_count);
+
+            let mut raptor_decoder = Decoder::new(encoder.transmission_info());
+            let mut reconstructed_payload = None;
+            for (esi, data) in subset.iter().cloned() {
+                let packet = EncodingPacket::new(PayloadId::new(0, esi), data);
+                if let Some(payload_bytes) = raptor_decoder.decode(packet) {
+                    reconstructed_payload = Some(payload_bytes);
+                    break;
+                }
+            }
+
+            let reconstructed_payload = reconstructed_payload.unwrap_or_else(|| {
+                panic!(
+                    "seeded randomized subset failed to decode (seed={seed}, subset_size={keep_count})"
+                )
+            });
+            assert_eq!(reconstructed_payload, payload);
+            assert_eq!(blake3_hex(&reconstructed_payload), payload_hash);
+
+            emit_epoch_replay_log(&EpochReplayLog {
+                test_name: "epoch_replay_reconstructs_from_seeded_randomized_subsets",
+                epoch_id: 47,
+                object_hash: &payload_hash,
+                symbols_needed: needed,
+                symbols_available: keep_count,
+                repair_attempts: 0,
+                bytes_written: u64::try_from(reconstructed_payload.len())
+                    .expect("decoded length fits u64"),
+                verify_result: "pass",
+                result: "pass",
+                fcp_error_code: None,
+            });
+        }
+    }
+
+    #[test]
+    fn binary_distribution_resume_after_missing_chunk_gap() {
+        let config = golden_config();
+        let payload = seeded_payload(0xB104_0042, 400 * 1024);
+        let payload_hash = blake3_hex(&payload);
+        let (manifest, chunks) = ChunkedObjectManifest::from_payload(&payload, config.chunk_size);
+
+        assert!(
+            manifest.chunk_count() >= 2,
+            "test expects multi-chunk payload for resume simulation"
+        );
+
+        // Simulate interrupted download: missing the final chunk.
+        let resume_index = chunks.len() - 1;
+        let partial_chunks = chunks[..resume_index].to_vec();
+        let err = manifest
+            .reconstruct(&partial_chunks)
+            .expect_err("partial chunk set should fail reconstruction");
+        assert!(matches!(
+            err,
+            ChunkError::MissingChunks { expected, got }
+            if expected == chunks.len() && got == partial_chunks.len()
+        ));
+
+        // Resume transfer by appending only the missing chunk.
+        let mut resumed_chunks = partial_chunks;
+        resumed_chunks.push(chunks[resume_index].clone());
+        let reconstructed = manifest
+            .reconstruct(&resumed_chunks)
+            .expect("reconstruction should succeed after resume");
+        assert_eq!(reconstructed, payload);
+
+        emit_epoch_replay_log(&EpochReplayLog {
+            test_name: "binary_distribution_resume_after_missing_chunk_gap",
+            epoch_id: 43,
+            object_hash: &payload_hash,
+            symbols_needed: u32::try_from(manifest.chunk_count()).expect("chunk count fits u32"),
+            symbols_available: resumed_chunks.len(),
+            repair_attempts: 1,
+            bytes_written: u64::try_from(reconstructed.len())
+                .expect("reconstructed length fits u64"),
+            verify_result: "pass",
+            result: "pass",
+            fcp_error_code: None,
+        });
+    }
+
+    #[test]
+    fn binary_distribution_verification_fails_closed_until_verified() {
+        let config = golden_config();
+        let payload = seeded_payload(0x51A1_0042, 320 * 1024);
+        let payload_hash = blake3_hex(&payload);
+        let (manifest, mut chunks) =
+            ChunkedObjectManifest::from_payload(&payload, config.chunk_size);
+
+        let staged_verified = manifest
+            .reconstruct_unchecked(&chunks)
+            .expect("unchecked reconstruction should stage payload");
+        assert!(manifest.verify_hash(&staged_verified));
+
+        // Simulate quarantine gate: bytes are staged but not installable until verify passes.
+        let mut quarantined = Some(staged_verified);
+        let installed_payload =
+            if manifest.verify_hash(quarantined.as_ref().expect("payload staged in quarantine")) {
+                quarantined.take()
+            } else {
+                None
+            };
+
+        let installed_payload = installed_payload.expect("verified staged payload should install");
+        assert_eq!(installed_payload, payload);
+        emit_epoch_replay_log(&EpochReplayLog {
+            test_name: "binary_distribution_verification_fails_closed_until_verified",
+            epoch_id: 44,
+            object_hash: &payload_hash,
+            symbols_needed: u32::try_from(manifest.chunk_count()).expect("chunk count fits u32"),
+            symbols_available: chunks.len(),
+            repair_attempts: 0,
+            bytes_written: u64::try_from(installed_payload.len())
+                .expect("installed length fits u64"),
+            verify_result: "pass",
+            result: "pass",
+            fcp_error_code: None,
+        });
+
+        // Corrupt one staged chunk and ensure verification blocks install.
+        chunks[0].bytes[0] ^= 0x01;
+        let staged_corrupt = manifest
+            .reconstruct_unchecked(&chunks)
+            .expect("unchecked reconstruction should still stage bytes");
+        assert!(
+            !manifest.verify_hash(&staged_corrupt),
+            "hash verification must fail for corrupt staged bytes"
+        );
+
+        let mut quarantined_corrupt = Some(staged_corrupt);
+        let installed_corrupt = if manifest.verify_hash(
+            quarantined_corrupt
+                .as_ref()
+                .expect("corrupt bytes are staged in quarantine"),
+        ) {
+            quarantined_corrupt.take()
+        } else {
+            None
+        };
+        assert!(
+            installed_corrupt.is_none(),
+            "install must fail closed if verification does not pass"
+        );
+        emit_epoch_replay_log(&EpochReplayLog {
+            test_name: "binary_distribution_verification_fails_closed_until_verified",
+            epoch_id: 45,
+            object_hash: &payload_hash,
+            symbols_needed: u32::try_from(manifest.chunk_count()).expect("chunk count fits u32"),
+            symbols_available: chunks.len(),
+            repair_attempts: 0,
+            bytes_written: 0,
+            verify_result: "fail",
+            result: "fail",
+            fcp_error_code: Some("FCP_SUPPLY_CHAIN_VERIFY_FAILED"),
+        });
+    }
+
+    #[test]
+    fn malformed_epoch_metadata_is_rejected_with_bounded_error() {
+        let schema = SchemaId::new(
+            "fcp.raptorq",
+            "EpochReplayMetadata",
+            "1.0.0".parse().expect("schema version parses"),
+        );
+
+        // Invalid CBOR shape for EpochReplayMetadata (array instead of expected struct map).
+        let malformed = vec![0x9f, 0x01, 0x02, 0xff];
+        let start = std::time::Instant::now();
+        let parse = CanonicalSerializer::deserialize::<EpochReplayMetadata>(&malformed, &schema);
+        assert!(parse.is_err(), "malformed metadata must be rejected");
+        assert!(
+            start.elapsed() <= Duration::from_secs(1),
+            "malformed metadata decode should fail in bounded time"
+        );
+
+        emit_epoch_replay_log(&EpochReplayLog {
+            test_name: "malformed_epoch_metadata_is_rejected_with_bounded_error",
+            epoch_id: 46,
+            object_hash: "invalid-metadata",
+            symbols_needed: 0,
+            symbols_available: 0,
+            repair_attempts: 0,
+            bytes_written: 0,
+            verify_result: "fail",
+            result: "fail",
+            fcp_error_code: Some("FCP_EPOCH_METADATA_INVALID"),
+        });
     }
 
     // ═════════════════════════════════════════════════════════════════════════

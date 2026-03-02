@@ -1899,6 +1899,100 @@ mod tests {
         assert_eq!(result["reason_code"], "credential_injection_required");
     }
 
+    // ── Redaction unit tests (u56.4) ──────────────────────────────────
+
+    #[test]
+    fn redact_search_result_strips_person_emails() {
+        let mut item = json!({
+            "object": "page",
+            "id": "pg-1",
+            "properties": {
+                "Assignee": {
+                    "type": "people",
+                    "people": [{
+                        "object": "user",
+                        "id": "u1",
+                        "name": "Alice",
+                        "person": { "email": "alice@example.com" }
+                    }]
+                }
+            }
+        });
+
+        item = super::redact_search_result(item);
+
+        assert_eq!(
+            item["properties"]["Assignee"]["people"][0]["person"]["email"],
+            "[redacted]"
+        );
+        assert_eq!(
+            item["properties"]["Assignee"]["people"][0]["name"],
+            "Alice"
+        );
+    }
+
+    #[test]
+    fn redact_search_result_strips_created_by_email() {
+        let mut item = json!({
+            "object": "page",
+            "id": "pg-2",
+            "created_by": {
+                "object": "user",
+                "id": "u1",
+                "person": { "email": "alice@acme.com" }
+            },
+            "last_edited_by": {
+                "object": "user",
+                "id": "u2",
+                "person": { "email": "bob@acme.com" }
+            }
+        });
+
+        item = super::redact_search_result(item);
+
+        assert_eq!(item["created_by"]["person"]["email"], "[redacted]");
+        assert_eq!(item["last_edited_by"]["person"]["email"], "[redacted]");
+    }
+
+    #[test]
+    fn redact_search_result_preserves_non_pii_fields() {
+        let item = json!({
+            "object": "page",
+            "id": "pg-3",
+            "properties": {
+                "Title": {
+                    "type": "title",
+                    "title": [{ "text": { "content": "Important" } }]
+                }
+            },
+            "url": "https://notion.so/Important"
+        });
+
+        let redacted = super::redact_search_result(item.clone());
+
+        assert_eq!(redacted["id"], "pg-3");
+        assert_eq!(redacted["url"], "https://notion.so/Important");
+        assert_eq!(
+            redacted["properties"]["Title"]["title"][0]["text"]["content"],
+            "Important"
+        );
+    }
+
+    #[test]
+    fn redact_search_result_handles_no_person_data() {
+        let item = json!({
+            "object": "database",
+            "id": "db-1",
+            "properties": {
+                "Name": { "type": "title", "title": {} }
+            }
+        });
+
+        // Should not panic or modify anything
+        let redacted = super::redact_search_result(item.clone());
+        assert_eq!(redacted["id"], "db-1");
+    }
+
     #[test]
     fn manifest_interface_hash_is_deterministic() {
         let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("manifest.toml");

@@ -1,0 +1,1048 @@
+//! FCP GitHub Connector implementation.
+
+use std::sync::Arc;
+
+use fcp_core::{
+    AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
+    ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
+    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier, SessionId,
+    SimulateRequest, SimulateResponse,
+};
+use serde_json::json;
+use tracing::{info, instrument};
+
+use crate::{
+    client::GitHubClient,
+    error::GitHubError,
+    types::{CreateIssueRequest, CreatePullRequestRequest, MergePullRequestRequest},
+};
+
+/// FCP GitHub Connector.
+pub struct GitHubConnector {
+    base: Arc<BaseConnector>,
+    client: Option<GitHubClient>,
+    verifier: Option<CapabilityVerifier>,
+    session_id: Option<SessionId>,
+}
+
+impl GitHubConnector {
+    /// Create a new GitHub connector.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            base: Arc::new(BaseConnector::new(ConnectorId::from_static("github"))),
+            client: None,
+            verifier: None,
+            session_id: None,
+        }
+    }
+
+    /// Handle configure method.
+    ///
+    /// # Errors
+    /// Returns [`FcpError`] if the configuration is invalid or client creation fails.
+    #[instrument(skip(self, params))]
+    pub async fn handle_configure(
+        &mut self,
+        params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let token =
+            params
+                .get("token")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing token in configuration".into(),
+                })?;
+
+        let base_url = params.get("base_url").and_then(|v| v.as_str());
+
+        let mut client = GitHubClient::new(token).map_err(|e| FcpError::Internal {
+            message: format!("Failed to create HTTP client: {e}"),
+        })?;
+
+        if let Some(url) = base_url {
+            client = client.with_base_url(url);
+        }
+
+        self.client = Some(client);
+        self.base.set_configured(true);
+        info!("GitHub connector configured");
+
+        Ok(json!({ "status": "configured" }))
+    }
+
+    /// Handle handshake method.
+    ///
+    /// # Errors
+    /// Returns [`FcpError`] if the request is invalid or serialization fails.
+    pub async fn handle_handshake(
+        &mut self,
+        params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let req: HandshakeRequest =
+            serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid handshake request: {e}"),
+            })?;
+
+        self.verifier = Some(CapabilityVerifier::new(
+            req.host_public_key,
+            req.zone.clone(),
+            self.base.instance_id.clone(),
+        ));
+
+        let session_id = SessionId::new();
+        self.session_id = Some(session_id.clone());
+        self.base.set_handshaken(true);
+
+        let capabilities_granted: Vec<CapabilityGrant> = req
+            .capabilities_requested
+            .into_iter()
+            .map(|cap| CapabilityGrant {
+                capability: cap,
+                operation: None,
+            })
+            .collect();
+
+        let response = HandshakeResponse {
+            status: "accepted".into(),
+            capabilities_granted,
+            session_id,
+            manifest_hash: "sha256:github-connector-v1".into(),
+            nonce: req.nonce,
+            event_caps: Some(EventCaps {
+                streaming: true,
+                replay: false,
+                min_buffer_events: 100,
+                requires_ack: false,
+            }),
+            auth_caps: None,
+            op_catalog_hash: None,
+        };
+
+        serde_json::to_value(response).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize response: {e}"),
+        })
+    }
+
+    /// Handle health check.
+    ///
+    /// # Errors
+    /// Returns [`FcpError`] if the health status cannot be determined.
+    pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
+        let configured = self.client.is_some();
+        let metrics = self.base.metrics();
+        Ok(json!({
+            "status": if configured { "healthy" } else { "not_configured" },
+            "metrics": {
+                "requests_total": metrics.requests_total,
+                "requests_error": metrics.requests_error,
+            }
+        }))
+    }
+
+    /// Handle introspect method.
+    ///
+    /// # Errors
+    /// Returns [`FcpError`] if serialization of the introspection data fails.
+    pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
+        let introspection = Introspection {
+            operations: vec![
+                op_info(
+                    "github.create_issue",
+                    "Create an issue in a repository",
+                    json!({
+                        "type": "object",
+                        "required": ["owner", "repo", "title"],
+                        "properties": {
+                            "owner": { "type": "string" },
+                            "repo": { "type": "string" },
+                            "title": { "type": "string" },
+                            "body": { "type": "string" },
+                            "assignees": { "type": "array", "items": { "type": "string" } },
+                            "labels": { "type": "array", "items": { "type": "string" } }
+                        }
+                    }),
+                    json!({ "type": "object", "properties": { "issue": { "type": "object" } } }),
+                    "github.write",
+                    RiskLevel::Medium,
+                    SafetyTier::Risky,
+                    IdempotencyClass::None,
+                    AgentHint {
+                        when_to_use: "Create a new issue in a GitHub repository.".into(),
+                        common_mistakes: vec!["Forgetting to specify both owner and repo".into()],
+                        examples: vec![
+                            r#"{"owner": "octocat", "repo": "hello-world", "title": "Bug report"}"#.into(),
+                        ],
+                        related: vec![CapabilityId::from_static("github.get_issue"), CapabilityId::from_static("github.search_issues")],
+                    },
+                ),
+                op_info(
+                    "github.get_issue",
+                    "Get a single issue by number",
+                    json!({
+                        "type": "object",
+                        "required": ["owner", "repo", "issue_number"],
+                        "properties": {
+                            "owner": { "type": "string" },
+                            "repo": { "type": "string" },
+                            "issue_number": { "type": "integer" }
+                        }
+                    }),
+                    json!({ "type": "object", "properties": { "issue": { "type": "object" } } }),
+                    "github.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Retrieve details about a specific issue.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![
+                            r#"{"owner": "octocat", "repo": "hello-world", "issue_number": 42}"#.into(),
+                        ],
+                        related: vec![CapabilityId::from_static("github.create_issue"), CapabilityId::from_static("github.search_issues")],
+                    },
+                ),
+                op_info(
+                    "github.search_issues",
+                    "Search issues and pull requests",
+                    json!({
+                        "type": "object",
+                        "required": ["query"],
+                        "properties": { "query": { "type": "string" } }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "items": { "type": "array" },
+                            "total_count": { "type": "integer" }
+                        }
+                    }),
+                    "github.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Search for issues or PRs matching a query.".into(),
+                        common_mistakes: vec!["Using non-GitHub search syntax".into()],
+                        examples: vec![
+                            r#"{"query": "is:open is:issue repo:octocat/hello-world"}"#.into(),
+                        ],
+                        related: vec![CapabilityId::from_static("github.get_issue")],
+                    },
+                ),
+                op_info(
+                    "github.create_pull_request",
+                    "Create a pull request",
+                    json!({
+                        "type": "object",
+                        "required": ["owner", "repo", "title", "head", "base"],
+                        "properties": {
+                            "owner": { "type": "string" },
+                            "repo": { "type": "string" },
+                            "title": { "type": "string" },
+                            "head": { "type": "string" },
+                            "base": { "type": "string" },
+                            "body": { "type": "string" },
+                            "draft": { "type": "boolean" }
+                        }
+                    }),
+                    json!({ "type": "object", "properties": { "pull_request": { "type": "object" } } }),
+                    "github.write",
+                    RiskLevel::Medium,
+                    SafetyTier::Risky,
+                    IdempotencyClass::None,
+                    AgentHint {
+                        when_to_use: "Open a new pull request.".into(),
+                        common_mistakes: vec!["Mixing up head (source) and base (target) branches".into()],
+                        examples: vec![
+                            r#"{"owner": "octocat", "repo": "hello-world", "title": "Fix typo", "head": "fix-typo", "base": "main"}"#.into(),
+                        ],
+                        related: vec![CapabilityId::from_static("github.get_pull_request"), CapabilityId::from_static("github.merge_pull_request")],
+                    },
+                ),
+                op_info(
+                    "github.get_pull_request",
+                    "Get a single pull request by number",
+                    json!({
+                        "type": "object",
+                        "required": ["owner", "repo", "pull_number"],
+                        "properties": {
+                            "owner": { "type": "string" },
+                            "repo": { "type": "string" },
+                            "pull_number": { "type": "integer" }
+                        }
+                    }),
+                    json!({ "type": "object", "properties": { "pull_request": { "type": "object" } } }),
+                    "github.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Retrieve details about a specific pull request.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![
+                            r#"{"owner": "octocat", "repo": "hello-world", "pull_number": 1}"#.into(),
+                        ],
+                        related: vec![CapabilityId::from_static("github.create_pull_request")],
+                    },
+                ),
+                op_info(
+                    "github.merge_pull_request",
+                    "Merge a pull request",
+                    json!({
+                        "type": "object",
+                        "required": ["owner", "repo", "pull_number"],
+                        "properties": {
+                            "owner": { "type": "string" },
+                            "repo": { "type": "string" },
+                            "pull_number": { "type": "integer" },
+                            "merge_method": { "type": "string", "enum": ["merge", "squash", "rebase"] }
+                        }
+                    }),
+                    json!({ "type": "object", "properties": { "merged": { "type": "boolean" } } }),
+                    "github.admin",
+                    RiskLevel::High,
+                    SafetyTier::Risky,
+                    IdempotencyClass::None,
+                    AgentHint {
+                        when_to_use: "Merge an approved pull request into the base branch.".into(),
+                        common_mistakes: vec!["Merging without checking CI status or reviews".into()],
+                        examples: vec![
+                            r#"{"owner": "octocat", "repo": "hello-world", "pull_number": 1, "merge_method": "squash"}"#.into(),
+                        ],
+                        related: vec![CapabilityId::from_static("github.get_pull_request")],
+                    },
+                ),
+                op_info(
+                    "github.get_repo",
+                    "Get repository metadata",
+                    json!({
+                        "type": "object",
+                        "required": ["owner", "repo"],
+                        "properties": {
+                            "owner": { "type": "string" },
+                            "repo": { "type": "string" }
+                        }
+                    }),
+                    json!({ "type": "object", "properties": { "repository": { "type": "object" } } }),
+                    "github.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Retrieve metadata about a repository.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![r#"{"owner": "octocat", "repo": "hello-world"}"#.into()],
+                        related: vec![CapabilityId::from_static("github.search_repos")],
+                    },
+                ),
+                op_info(
+                    "github.search_repos",
+                    "Search repositories",
+                    json!({
+                        "type": "object",
+                        "required": ["query"],
+                        "properties": { "query": { "type": "string" } }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "items": { "type": "array" },
+                            "total_count": { "type": "integer" }
+                        }
+                    }),
+                    "github.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Search for repositories matching a query.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![r#"{"query": "language:rust stars:>1000"}"#.into()],
+                        related: vec![CapabilityId::from_static("github.get_repo")],
+                    },
+                ),
+                op_info(
+                    "github.list_workflows",
+                    "List GitHub Actions workflows",
+                    json!({
+                        "type": "object",
+                        "required": ["owner", "repo"],
+                        "properties": {
+                            "owner": { "type": "string" },
+                            "repo": { "type": "string" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "workflows": { "type": "array" },
+                            "total_count": { "type": "integer" }
+                        }
+                    }),
+                    "github.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "List CI/CD workflows in a repository.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![r#"{"owner": "octocat", "repo": "hello-world"}"#.into()],
+                        related: vec![CapabilityId::from_static("github.trigger_workflow")],
+                    },
+                ),
+                op_info(
+                    "github.trigger_workflow",
+                    "Trigger a GitHub Actions workflow dispatch",
+                    json!({
+                        "type": "object",
+                        "required": ["owner", "repo", "workflow_id", "ref"],
+                        "properties": {
+                            "owner": { "type": "string" },
+                            "repo": { "type": "string" },
+                            "workflow_id": { "type": "string" },
+                            "ref": { "type": "string" }
+                        }
+                    }),
+                    json!({ "type": "object", "properties": { "triggered": { "type": "boolean" } } }),
+                    "github.admin",
+                    RiskLevel::High,
+                    SafetyTier::Risky,
+                    IdempotencyClass::None,
+                    AgentHint {
+                        when_to_use: "Manually trigger a GitHub Actions workflow.".into(),
+                        common_mistakes: vec!["Using workflow file name instead of ID".into()],
+                        examples: vec![
+                            r#"{"owner": "octocat", "repo": "hello-world", "workflow_id": "ci.yml", "ref": "main"}"#.into(),
+                        ],
+                        related: vec![CapabilityId::from_static("github.list_workflows")],
+                    },
+                ),
+                op_info(
+                    "github.get_file_content",
+                    "Get file or directory content",
+                    json!({
+                        "type": "object",
+                        "required": ["owner", "repo", "path"],
+                        "properties": {
+                            "owner": { "type": "string" },
+                            "repo": { "type": "string" },
+                            "path": { "type": "string" }
+                        }
+                    }),
+                    json!({ "type": "object", "properties": { "content": { "type": "object" } } }),
+                    "github.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Read file content from a repository.".into(),
+                        common_mistakes: vec!["Not specifying a ref for a specific branch".into()],
+                        examples: vec![
+                            r#"{"owner": "octocat", "repo": "hello-world", "path": "README.md"}"#.into(),
+                        ],
+                        related: vec![CapabilityId::from_static("github.search_code")],
+                    },
+                ),
+                op_info(
+                    "github.search_code",
+                    "Search code across repositories",
+                    json!({
+                        "type": "object",
+                        "required": ["query"],
+                        "properties": { "query": { "type": "string" } }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "items": { "type": "array" },
+                            "total_count": { "type": "integer" }
+                        }
+                    }),
+                    "github.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Search for code matching a query across GitHub.".into(),
+                        common_mistakes: vec!["Not scoping to a repo or org".into()],
+                        examples: vec![
+                            r#"{"query": "addClass repo:octocat/hello-world"}"#.into(),
+                        ],
+                        related: vec![CapabilityId::from_static("github.get_file_content")],
+                    },
+                ),
+            ],
+            events: vec![],
+            resource_types: vec![],
+            auth_caps: None,
+            event_caps: None,
+        };
+
+        serde_json::to_value(introspection).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize introspection: {e}"),
+        })
+    }
+
+    /// Handle simulate method.
+    ///
+    /// # Errors
+    /// Returns [`FcpError`] if the request is invalid or serialization fails.
+    pub async fn handle_simulate(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let req: SimulateRequest =
+            serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid simulate request: {e}"),
+            })?;
+
+        let response = SimulateResponse::allowed(req.id);
+        serde_json::to_value(response).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize response: {e}"),
+        })
+    }
+
+    /// Handle invoke method.
+    ///
+    /// # Errors
+    /// Returns [`FcpError`] if the operation fails or capability verification fails.
+    pub async fn handle_invoke(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let result = self.handle_invoke_internal(params).await;
+        self.base.record_request(result.is_ok());
+        result
+    }
+
+    async fn handle_invoke_internal(
+        &self,
+        params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let operation =
+            params
+                .get("operation")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing operation".into(),
+                })?;
+
+        let input = params.get("input").cloned().unwrap_or(json!({}));
+
+        // Extract and verify capability token
+        let token_value = params
+            .get("capability_token")
+            .ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing capability_token".into(),
+            })?;
+
+        let token: CapabilityToken =
+            serde_json::from_value(token_value.clone()).map_err(|e| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid capability_token format: {e}"),
+            })?;
+
+        let op_id: OperationId = operation.parse().map_err(|_| FcpError::InvalidRequest {
+            code: 1003,
+            message: "Invalid operation ID format".into(),
+        })?;
+        let cap_id: CapabilityId = operation.parse().map_err(|_| FcpError::InvalidRequest {
+            code: 1003,
+            message: "Invalid capability ID format".into(),
+        })?;
+
+        if let Some(verifier) = &self.verifier {
+            verifier.verify(&token, &cap_id, &op_id, &[])?;
+        } else {
+            return Err(FcpError::NotConfigured);
+        }
+
+        match operation {
+            "github.create_issue" => self.invoke_create_issue(input).await,
+            "github.get_issue" => self.invoke_get_issue(input).await,
+            "github.search_issues" => self.invoke_search_issues(input).await,
+            "github.create_pull_request" => self.invoke_create_pull_request(input).await,
+            "github.get_pull_request" => self.invoke_get_pull_request(input).await,
+            "github.merge_pull_request" => self.invoke_merge_pull_request(input).await,
+            "github.get_repo" => self.invoke_get_repo(input).await,
+            "github.search_repos" => self.invoke_search_repos(input).await,
+            "github.list_workflows" => self.invoke_list_workflows(input).await,
+            "github.trigger_workflow" => self.invoke_trigger_workflow(input).await,
+            "github.get_file_content" => self.invoke_get_file_content(input).await,
+            "github.search_code" => self.invoke_search_code(input).await,
+            _ => Err(FcpError::OperationNotGranted {
+                operation: operation.into(),
+            }),
+        }
+    }
+
+    // ── Operation implementations ─────────────────────────────────
+
+    async fn invoke_create_issue(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let owner = require_str(&input, "owner")?;
+        let repo = require_str(&input, "repo")?;
+        let title = require_str(&input, "title")?;
+
+        let req = CreateIssueRequest {
+            title: title.into(),
+            body: input.get("body").and_then(|v| v.as_str()).map(Into::into),
+            assignees: input
+                .get("assignees")
+                .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok()),
+            labels: input
+                .get("labels")
+                .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok()),
+            milestone: input
+                .get("milestone")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32),
+        };
+
+        let issue = client
+            .create_issue(owner, repo, &req)
+            .await
+            .map_err(|e: GitHubError| e.to_fcp_error())?;
+
+        Ok(json!({ "issue": issue }))
+    }
+
+    async fn invoke_get_issue(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let owner = require_str(&input, "owner")?;
+        let repo = require_str(&input, "repo")?;
+        let issue_number = require_u32(&input, "issue_number")?;
+
+        let issue = client
+            .get_issue(owner, repo, issue_number)
+            .await
+            .map_err(|e: GitHubError| e.to_fcp_error())?;
+
+        Ok(json!({ "issue": issue }))
+    }
+
+    async fn invoke_search_issues(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let query = require_str(&input, "query")?;
+
+        let results = client
+            .search_issues(query)
+            .await
+            .map_err(|e: GitHubError| e.to_fcp_error())?;
+
+        Ok(json!({
+            "items": results.items,
+            "total_count": results.total_count
+        }))
+    }
+
+    async fn invoke_create_pull_request(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let owner = require_str(&input, "owner")?;
+        let repo = require_str(&input, "repo")?;
+        let title = require_str(&input, "title")?;
+        let head = require_str(&input, "head")?;
+        let base = require_str(&input, "base")?;
+
+        let req = CreatePullRequestRequest {
+            title: title.into(),
+            head: head.into(),
+            base: base.into(),
+            body: input.get("body").and_then(|v| v.as_str()).map(Into::into),
+            draft: input.get("draft").and_then(|v| v.as_bool()),
+        };
+
+        let pr = client
+            .create_pull_request(owner, repo, &req)
+            .await
+            .map_err(|e: GitHubError| e.to_fcp_error())?;
+
+        Ok(json!({ "pull_request": pr }))
+    }
+
+    async fn invoke_get_pull_request(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let owner = require_str(&input, "owner")?;
+        let repo = require_str(&input, "repo")?;
+        let pull_number = require_u32(&input, "pull_number")?;
+
+        let pr = client
+            .get_pull_request(owner, repo, pull_number)
+            .await
+            .map_err(|e: GitHubError| e.to_fcp_error())?;
+
+        Ok(json!({ "pull_request": pr }))
+    }
+
+    async fn invoke_merge_pull_request(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let owner = require_str(&input, "owner")?;
+        let repo = require_str(&input, "repo")?;
+        let pull_number = require_u32(&input, "pull_number")?;
+
+        let req = MergePullRequestRequest {
+            commit_title: input
+                .get("commit_title")
+                .and_then(|v| v.as_str())
+                .map(Into::into),
+            commit_message: input
+                .get("commit_message")
+                .and_then(|v| v.as_str())
+                .map(Into::into),
+            merge_method: input
+                .get("merge_method")
+                .and_then(|v| v.as_str())
+                .map(Into::into),
+            sha: input.get("sha").and_then(|v| v.as_str()).map(Into::into),
+        };
+
+        let result = client
+            .merge_pull_request(owner, repo, pull_number, &req)
+            .await
+            .map_err(|e: GitHubError| e.to_fcp_error())?;
+
+        Ok(json!({ "merged": result.merged, "sha": result.sha, "message": result.message }))
+    }
+
+    async fn invoke_get_repo(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let owner = require_str(&input, "owner")?;
+        let repo = require_str(&input, "repo")?;
+
+        let repository = client
+            .get_repo(owner, repo)
+            .await
+            .map_err(|e: GitHubError| e.to_fcp_error())?;
+
+        Ok(json!({ "repository": repository }))
+    }
+
+    async fn invoke_search_repos(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let query = require_str(&input, "query")?;
+
+        let results = client
+            .search_repos(query)
+            .await
+            .map_err(|e: GitHubError| e.to_fcp_error())?;
+
+        Ok(json!({
+            "items": results.items,
+            "total_count": results.total_count
+        }))
+    }
+
+    async fn invoke_list_workflows(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let owner = require_str(&input, "owner")?;
+        let repo = require_str(&input, "repo")?;
+
+        let result = client
+            .list_workflows(owner, repo)
+            .await
+            .map_err(|e: GitHubError| e.to_fcp_error())?;
+
+        Ok(json!({
+            "workflows": result.workflows,
+            "total_count": result.total_count
+        }))
+    }
+
+    async fn invoke_trigger_workflow(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let owner = require_str(&input, "owner")?;
+        let repo = require_str(&input, "repo")?;
+        let workflow_id = require_str(&input, "workflow_id")?;
+        let git_ref = require_str(&input, "ref")?;
+
+        client
+            .trigger_workflow(owner, repo, workflow_id, git_ref)
+            .await
+            .map_err(|e: GitHubError| e.to_fcp_error())?;
+
+        Ok(json!({ "triggered": true }))
+    }
+
+    async fn invoke_get_file_content(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let owner = require_str(&input, "owner")?;
+        let repo = require_str(&input, "repo")?;
+        let path = require_str(&input, "path")?;
+
+        let content = client
+            .get_file_content(owner, repo, path)
+            .await
+            .map_err(|e: GitHubError| e.to_fcp_error())?;
+
+        Ok(json!({ "content": content }))
+    }
+
+    async fn invoke_search_code(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let query = require_str(&input, "query")?;
+
+        let results = client
+            .search_code(query)
+            .await
+            .map_err(|e: GitHubError| e.to_fcp_error())?;
+
+        Ok(json!({
+            "items": results.items,
+            "total_count": results.total_count
+        }))
+    }
+
+    /// Handle shutdown.
+    ///
+    /// # Errors
+    /// Returns [`FcpError`] if the shutdown process fails.
+    pub async fn handle_shutdown(
+        &self,
+        _params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        info!("GitHub connector shutting down");
+        Ok(json!({ "status": "shutdown" }))
+    }
+}
+
+impl Default for GitHubConnector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ── Helper functions ──────────────────────────────────────────────
+
+fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a str> {
+    input
+        .get(field)
+        .and_then(|v| v.as_str())
+        .ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("Missing required field: {field}"),
+        })
+}
+
+fn require_u32(input: &serde_json::Value, field: &str) -> FcpResult<u32> {
+    input
+        .get(field)
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32)
+        .ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("Missing required field: {field}"),
+        })
+}
+
+#[allow(clippy::fn_params_excessive_bools)]
+fn op_info(
+    id: &'static str,
+    summary: &str,
+    input_schema: serde_json::Value,
+    output_schema: serde_json::Value,
+    capability: &'static str,
+    risk_level: RiskLevel,
+    safety_tier: SafetyTier,
+    idempotency: IdempotencyClass,
+    ai_hints: AgentHint,
+) -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static(id),
+        summary: summary.into(),
+        input_schema,
+        output_schema,
+        capability: CapabilityId::from_static(capability),
+        risk_level,
+        description: None,
+        rate_limit: None,
+        requires_approval: None,
+        safety_tier,
+        idempotency,
+        ai_hints,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Duration, Utc};
+    use fcp_crypto::cose::CapabilityTokenBuilder;
+    use fcp_crypto::ed25519::Ed25519SigningKey;
+    use fcp_manifest::ConnectorManifest;
+    use std::path::PathBuf;
+
+    fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> CapabilityToken {
+        let now = Utc::now();
+        let cose = CapabilityTokenBuilder::new()
+            .capability_id(cap)
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(&[cap])
+            .issuer("node:test")
+            .validity(now, now + Duration::hours(1))
+            .sign(signing_key)
+            .unwrap();
+        CapabilityToken { raw: cose }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_handshake() {
+        let mut connector = GitHubConnector::new();
+        let result = connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": vec![0u8; 32],
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["github.read"]
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(result["status"], "accepted");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_health_not_configured() {
+        let connector = GitHubConnector::new();
+        let result = connector.handle_health().await.unwrap();
+        assert_eq!(result["status"], "not_configured");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_without_config() {
+        let mut connector = GitHubConnector::new();
+
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["github.get_repo"]
+            }))
+            .await
+            .unwrap();
+
+        let token = generate_valid_token(&signing_key, "github.get_repo");
+
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "github.get_repo",
+                "input": { "owner": "octocat", "repo": "hello-world" },
+                "capability_token": token
+            }))
+            .await;
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), FcpError::NotConfigured));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_missing_field() {
+        let mut connector = GitHubConnector::new();
+        connector.client = Some(
+            GitHubClient::new("fake_key")
+                .unwrap()
+                .with_base_url("http://localhost:9999"),
+        );
+
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["github.get_issue"]
+            }))
+            .await
+            .unwrap();
+
+        let token = generate_valid_token(&signing_key, "github.get_issue");
+
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "github.get_issue",
+                "input": { "owner": "octocat" },
+                "capability_token": token
+            }))
+            .await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("repo") || message.contains("issue_number"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_has_all_operations() {
+        let connector = GitHubConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+
+        let ops = result["operations"].as_array().unwrap();
+        let op_ids: Vec<&str> = ops.iter().map(|o| o["id"].as_str().unwrap()).collect();
+
+        assert!(op_ids.contains(&"github.create_issue"));
+        assert!(op_ids.contains(&"github.get_issue"));
+        assert!(op_ids.contains(&"github.search_issues"));
+        assert!(op_ids.contains(&"github.create_pull_request"));
+        assert!(op_ids.contains(&"github.get_pull_request"));
+        assert!(op_ids.contains(&"github.merge_pull_request"));
+        assert!(op_ids.contains(&"github.get_repo"));
+        assert!(op_ids.contains(&"github.search_repos"));
+        assert!(op_ids.contains(&"github.list_workflows"));
+        assert!(op_ids.contains(&"github.trigger_workflow"));
+        assert!(op_ids.contains(&"github.get_file_content"));
+        assert!(op_ids.contains(&"github.search_code"));
+        assert_eq!(ops.len(), 12);
+    }
+
+    #[test]
+    fn manifest_interface_hash_is_deterministic() {
+        let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("manifest.toml");
+        if !manifest_path.exists() {
+            eprintln!("manifest.toml missing; skipping interface_hash check");
+            return;
+        }
+
+        let raw = std::fs::read_to_string(&manifest_path).expect("read manifest");
+        let manifest = ConnectorManifest::parse_str(&raw).expect("manifest should validate");
+        let computed = manifest
+            .compute_interface_hash()
+            .expect("compute interface hash");
+        assert_eq!(manifest.manifest.interface_hash, computed);
+
+        let manifest2 = ConnectorManifest::parse_str_unchecked(&raw).expect("parse unchecked");
+        let computed2 = manifest2
+            .compute_interface_hash()
+            .expect("compute interface hash");
+        assert_eq!(computed, computed2);
+    }
+}

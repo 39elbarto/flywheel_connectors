@@ -1,0 +1,45 @@
+[package]
+name = "fcp-github"
+description = "GitHub API connector for the Flywheel Connector Protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "fcp_github"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fcp-github"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+fcp-core = { path = "../../crates/fcp-core" }
+fcp-async-core = { path = "../../crates/fcp-async-core" }
+
+anyhow.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+reqwest = { workspace = true, features = ["stream"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+wiremock.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+futures-util.workspace = true
+fcp-crypto = { path = "../../crates/fcp-crypto" }
+fcp-manifest = { path = "../../crates/fcp-manifest" }
+fcp-testkit = { path = "../../crates/fcp-testkit" }

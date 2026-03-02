@@ -46,15 +46,20 @@ fn generate_execution_approval(
     operation: &str,
     _input: &serde_json::Value,
 ) -> fcp_core::ApprovalToken {
+    generate_execution_approval_with_pattern(operation)
+}
+
+/// Generate a valid execution-scope approval token for a method pattern.
+fn generate_execution_approval_with_pattern(method_pattern: &str) -> fcp_core::ApprovalToken {
     let now_ms = u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0);
     fcp_core::ApprovalToken {
-        token_id: format!("approval-{operation}-{now_ms}"),
+        token_id: format!("approval-{method_pattern}-{now_ms}"),
         issued_at_ms: now_ms.saturating_sub(1_000),
         expires_at_ms: now_ms + 300_000,
         issuer: "owner:test".into(),
         scope: fcp_core::ApprovalScope::Execution(fcp_core::ExecutionScope {
             connector_id: "fcp.browser".into(),
-            method_pattern: operation.into(),
+            method_pattern: method_pattern.into(),
             request_object_id: None,
             input_hash: None,
             input_constraints: vec![],
@@ -490,6 +495,207 @@ async fn test_set_cookies() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn test_session_save() {
+    let _ctx = AsyncTestContext::for_scenario("browser-session-save");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/cookies"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "cookies": [
+                { "name": "session", "value": "abc123", "domain": "example.com", "path": "/" },
+                { "name": "pref", "value": "dark", "domain": "example.com", "path": "/" }
+            ]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = BrowserConnector::new();
+    let key = setup_handshake(&mut connector, &["browser.session.save"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "browser.session.save");
+    let input = json!({
+        "domain": "example.com",
+        "lease_seq": 10,
+        "lease_object_id": "lease-obj-10"
+    });
+    let approval = generate_execution_approval("browser.session.save", &input);
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "browser.session.save",
+            "input": input,
+            "capability_token": token,
+            "approval_token": approval
+        }))
+        .await
+        .unwrap();
+
+    assert!(result["state_object_id"].as_str().is_some());
+    assert_eq!(result["seq"], 0);
+    assert_eq!(result["lease_seq"], 10);
+    assert_eq!(result["cookie_count"], 2);
+    assert!(result["payload_cbor_size"].as_u64().unwrap() > 0);
+    assert_eq!(result["audit"]["operation"], "browser.session.save");
+}
+
+#[fcp_async_core::runtime::test]
+async fn test_session_restore_and_describe() {
+    let _ctx = AsyncTestContext::for_scenario("browser-session-restore-describe");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/cookies"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "cookies": [
+                { "name": "session", "value": "abc123", "domain": "example.com", "path": "/" }
+            ]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/set_cookies"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "set_count": 1
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = BrowserConnector::new();
+    let key = setup_handshake(
+        &mut connector,
+        &[
+            "browser.session.save",
+            "browser.session.restore",
+            "browser.session.describe",
+        ],
+    )
+    .await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let save_token = generate_valid_token(&key, "browser.session.save");
+    let save_input = json!({
+        "domain": "example.com",
+        "lease_seq": 10,
+        "lease_object_id": "lease-obj-10"
+    });
+    let save_approval = generate_execution_approval("browser.session.save", &save_input);
+    let saved = connector
+        .handle_invoke(json!({
+            "operation": "browser.session.save",
+            "input": save_input,
+            "capability_token": save_token,
+            "approval_token": save_approval
+        }))
+        .await
+        .unwrap();
+    let state_object_id = saved["state_object_id"].as_str().unwrap().to_string();
+
+    let restore_token = generate_valid_token(&key, "browser.session.restore");
+    let restore_input = json!({
+        "state_object_id": state_object_id,
+        "lease_seq": 11,
+        "lease_object_id": "lease-obj-11"
+    });
+    let restore_approval = generate_execution_approval("browser.session.restore", &restore_input);
+    let restored = connector
+        .handle_invoke(json!({
+            "operation": "browser.session.restore",
+            "input": restore_input,
+            "capability_token": restore_token,
+            "approval_token": restore_approval
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(restored["restored_count"], 1);
+    assert_eq!(restored["cookie_count"], 1);
+    assert_eq!(restored["lease_seq"], 11);
+    assert_eq!(restored["audit"]["operation"], "browser.session.restore");
+
+    let describe_token = generate_valid_token(&key, "browser.session.describe");
+    let described = connector
+        .handle_invoke(json!({
+            "operation": "browser.session.describe",
+            "input": { "state_object_id": state_object_id },
+            "capability_token": describe_token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(described["cookie_count"], 1);
+    assert_eq!(described["seq"], 0);
+    assert_eq!(described["lease_seq"], 10);
+    assert_eq!(described["is_head"], true);
+    assert!(described["payload_cbor_size"].as_u64().unwrap() > 0);
+}
+
+#[fcp_async_core::runtime::test]
+async fn test_session_restore_rejects_stale_lease_seq() {
+    let _ctx = AsyncTestContext::for_scenario("browser-session-restore-stale-lease");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/cookies"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "cookies": [
+                { "name": "session", "value": "abc123", "domain": "example.com", "path": "/" }
+            ]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = BrowserConnector::new();
+    let key = setup_handshake(
+        &mut connector,
+        &["browser.session.save", "browser.session.restore"],
+    )
+    .await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let save_token = generate_valid_token(&key, "browser.session.save");
+    let save_input = json!({
+        "lease_seq": 5,
+        "lease_object_id": "lease-obj-5"
+    });
+    let save_approval = generate_execution_approval("browser.session.save", &save_input);
+    let saved = connector
+        .handle_invoke(json!({
+            "operation": "browser.session.save",
+            "input": save_input,
+            "capability_token": save_token,
+            "approval_token": save_approval
+        }))
+        .await
+        .unwrap();
+
+    let restore_token = generate_valid_token(&key, "browser.session.restore");
+    let restore_input = json!({
+        "state_object_id": saved["state_object_id"],
+        "lease_seq": 4,
+        "lease_object_id": "lease-obj-4"
+    });
+    let restore_approval = generate_execution_approval("browser.session.restore", &restore_input);
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "browser.session.restore",
+            "input": restore_input,
+            "capability_token": restore_token,
+            "approval_token": restore_approval
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::Conflict { message } => {
+            assert!(message.contains("stale lease_seq"));
+        }
+        e => panic!("Expected Conflict, got: {e:?}"),
+    }
+}
+
+#[fcp_async_core::runtime::test]
 async fn test_set_proxy() {
     let _ctx = AsyncTestContext::for_scenario("browser-set-proxy");
     let mock_server = MockServer::start().await;
@@ -757,6 +963,118 @@ async fn test_dangerous_operation_requires_approval_token() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn test_all_execution_scoped_ops_require_approval_token() {
+    let _ctx = AsyncTestContext::for_scenario("browser-all-execution-ops-require-approval");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = BrowserConnector::new();
+    let guarded_ops = [
+        "browser.evaluate_js",
+        "browser.fill_form",
+        "browser.get_cookies",
+        "browser.set_cookies",
+        "browser.session.save",
+        "browser.session.restore",
+        "browser.set_proxy",
+        "browser.clear_proxy",
+    ];
+    let key = setup_handshake(&mut connector, &guarded_ops).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let cases = [
+        (
+            "browser.evaluate_js",
+            json!({ "expression": "document.title" }),
+        ),
+        (
+            "browser.fill_form",
+            json!({ "fields": { "#email": "test@example.com" } }),
+        ),
+        ("browser.get_cookies", json!({ "domain": "example.com" })),
+        (
+            "browser.set_cookies",
+            json!({
+                "cookies": [{ "name": "session", "value": "abc123", "domain": "example.com", "path": "/" }]
+            }),
+        ),
+        (
+            "browser.set_proxy",
+            json!({ "server": "http://proxy.example.com:8080" }),
+        ),
+        (
+            "browser.session.save",
+            json!({ "lease_seq": 10, "lease_object_id": "lease-obj-10" }),
+        ),
+        (
+            "browser.session.restore",
+            json!({ "lease_seq": 10, "lease_object_id": "lease-obj-10" }),
+        ),
+        ("browser.clear_proxy", json!({})),
+    ];
+
+    for (operation, input) in cases {
+        let token = generate_valid_token(&key, operation);
+        let result = connector
+            .handle_invoke(json!({
+                "operation": operation,
+                "input": input,
+                "capability_token": token
+            }))
+            .await;
+
+        assert!(
+            result.is_err(),
+            "operation should require approval: {operation}"
+        );
+        match result.unwrap_err() {
+            fcp_core::FcpError::CapabilityDenied { capability, reason } => {
+                assert_eq!(capability, operation);
+                assert!(
+                    reason.contains("ApprovalToken"),
+                    "operation should mention ApprovalToken requirement: {operation}"
+                );
+            }
+            e => panic!("Expected CapabilityDenied for {operation}, got: {e:?}"),
+        }
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn test_dangerous_operation_allows_wildcard_execution_scope() {
+    let _ctx = AsyncTestContext::for_scenario("browser-approval-wildcard-pattern");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/evaluate"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "result": "Example Domain"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = BrowserConnector::new();
+    let key = setup_handshake(&mut connector, &["browser.evaluate_js"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "browser.evaluate_js");
+    let input = json!({ "expression": "document.title" });
+    let approval = generate_execution_approval_with_pattern("browser.*");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "browser.evaluate_js",
+            "input": input,
+            "capability_token": token,
+            "approval_token": approval
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["result"], "Example Domain");
+    assert_eq!(result["audit"]["operation"], "browser.evaluate_js");
+    assert_eq!(result["audit"]["dangerous"], true);
+}
+
+#[fcp_async_core::runtime::test]
 async fn test_dangerous_operation_approval_scope_mismatch() {
     let _ctx = AsyncTestContext::for_scenario("browser-approval-scope-mismatch");
     let mock_server = MockServer::start().await;
@@ -842,7 +1160,7 @@ async fn test_introspect_operations() {
     let result = connector.handle_introspect().await.unwrap();
 
     let ops = result["operations"].as_array().unwrap();
-    assert_eq!(ops.len(), 13);
+    assert_eq!(ops.len(), 16);
 
     let op_ids: Vec<&str> = ops.iter().map(|o| o["id"].as_str().unwrap()).collect();
     assert!(op_ids.contains(&"browser.navigate"));
@@ -856,6 +1174,9 @@ async fn test_introspect_operations() {
     assert!(op_ids.contains(&"browser.evaluate_js"));
     assert!(op_ids.contains(&"browser.get_cookies"));
     assert!(op_ids.contains(&"browser.set_cookies"));
+    assert!(op_ids.contains(&"browser.session.save"));
+    assert!(op_ids.contains(&"browser.session.restore"));
+    assert!(op_ids.contains(&"browser.session.describe"));
     assert!(op_ids.contains(&"browser.set_proxy"));
     assert!(op_ids.contains(&"browser.clear_proxy"));
 }
@@ -1010,6 +1331,35 @@ async fn test_set_cookies_missing_cookies() {
             assert!(message.contains("cookies"));
         }
         e => panic!("Expected InvalidRequest about 'cookies', got: {e:?}"),
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn test_session_save_missing_lease_fields() {
+    let _ctx = AsyncTestContext::for_scenario("browser-session-save-missing-lease");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = BrowserConnector::new();
+    let key = setup_handshake(&mut connector, &["browser.session.save"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "browser.session.save");
+    let approval = generate_execution_approval("browser.session.save", &json!({}));
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "browser.session.save",
+            "input": {},
+            "capability_token": token,
+            "approval_token": approval
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("lease_seq"));
+        }
+        e => panic!("Expected InvalidRequest about 'lease_seq', got: {e:?}"),
     }
 }
 

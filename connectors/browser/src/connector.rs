@@ -1,6 +1,7 @@
 //! FCP Browser Connector implementation.
 
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 use fcp_core::ApprovalScope::Execution;
 use fcp_core::{
@@ -29,6 +30,44 @@ struct ExecutionApprovalContext {
 struct BrowserConfig {
     auth: BrowserAuth,
     browser_url: String,
+}
+
+const BROWSER_CONTROL_HOST_ALLOWLIST: &[&str] = &[
+    "localhost",
+    "127.0.0.1",
+    "::1",
+    "*.browser.mesh.internal",
+    "*.browser.flywheel.internal",
+];
+
+const BROWSER_SANDBOX_PROFILE: &str = "strict";
+const BROWSER_SANDBOX_MEMORY_MB: u32 = 1024;
+const BROWSER_SANDBOX_CPU_PERCENT: u8 = 75;
+const BROWSER_SANDBOX_WALL_CLOCK_TIMEOUT_MS: u64 = 300_000;
+const BROWSER_SANDBOX_DENY_EXEC: bool = true;
+const BROWSER_SANDBOX_DENY_PTRACE: bool = true;
+
+#[derive(Debug, Clone, Serialize)]
+struct BrowserNetworkGuardProfile {
+    allowed_host_patterns: &'static [&'static str],
+    require_https_for_non_loopback: bool,
+    allow_http_for_loopback: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BrowserExecutionPlannerProfile {
+    memory_mb: u32,
+    cpu_percent: u8,
+    wall_clock_timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BrowserPlacementProfile {
+    sandbox_profile: &'static str,
+    sandbox_deny_exec: bool,
+    sandbox_deny_ptrace: bool,
+    network_guard: BrowserNetworkGuardProfile,
+    execution_planner: BrowserExecutionPlannerProfile,
 }
 
 impl BrowserConfig {
@@ -74,9 +113,37 @@ impl BrowserConfig {
             .and_then(|v| v.as_str())
             .unwrap_or(DEFAULT_BROWSER_URL)
             .to_string();
+        validate_browser_control_plane_url(&browser_url)?;
 
         Ok(Self { auth, browser_url })
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BrowserSessionStatePayload {
+    schema_version: u32,
+    captured_at: u64,
+    domain: Option<String>,
+    cookies: Vec<Cookie>,
+}
+
+#[derive(Debug, Clone)]
+struct BrowserSessionStateObjectRecord {
+    state_object_id: String,
+    prev_state_object_id: Option<String>,
+    seq: u64,
+    lease_seq: u64,
+    lease_object_id: String,
+    payload_cbor: Vec<u8>,
+    payload: BrowserSessionStatePayload,
+}
+
+#[derive(Debug, Default)]
+struct BrowserSessionMeshStore {
+    head_state_object_id: Option<String>,
+    objects: BTreeMap<String, BrowserSessionStateObjectRecord>,
+    last_seq: u64,
+    last_lease_seq: u64,
 }
 
 /// Structured readiness diagnostic for the doctor command.
@@ -108,6 +175,7 @@ pub struct BrowserConnector {
     client: Option<BrowserClient>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
+    session_store: Mutex<BrowserSessionMeshStore>,
 }
 
 impl BrowserConnector {
@@ -120,6 +188,7 @@ impl BrowserConnector {
             client: None,
             verifier: None,
             session_id: None,
+            session_store: Mutex::new(BrowserSessionMeshStore::default()),
         }
     }
 
@@ -201,16 +270,32 @@ impl BrowserConnector {
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
         let configured = self.client.is_some();
         let metrics = self.base.metrics();
+        let placement_profile =
+            serde_json::to_value(browser_placement_profile()).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize browser placement profile: {e}"),
+            })?;
         let mut health = json!({
             "status": if configured { "healthy" } else { "not_configured" },
             "metrics": {
                 "requests_total": metrics.requests_total,
                 "requests_error": metrics.requests_error,
-            }
+            },
+            "placement_profile": placement_profile,
         });
         if let Some(config) = &self.config {
+            let (allowlisted, host) = match reqwest::Url::parse(&config.browser_url) {
+                Ok(url) => {
+                    let host = url.host_str().unwrap_or("unknown");
+                    (is_browser_control_host_allowlisted(host), host.to_string())
+                }
+                Err(_) => (false, "invalid".to_string()),
+            };
             health["auth_mode"] = json!(config.auth.redacted_label());
             health["browser_url"] = json!(config.browser_url);
+            health["network_guard"] = json!({
+                "control_plane_host": host,
+                "allowlisted": allowlisted,
+            });
         }
         Ok(health)
     }
@@ -279,21 +364,91 @@ impl BrowserConnector {
             });
         }
 
-        // 5. Network constraints
-        let egress_target = self.config.as_ref().map_or("localhost:9222", |c| {
-            c.browser_url
-                .strip_prefix("https://")
-                .or_else(|| c.browser_url.strip_prefix("http://"))
-                .and_then(|s| s.split('/').next())
-                .unwrap_or("localhost:9222")
-        });
+        // 5. Network guard constraints
+        if let Some(config) = &self.config {
+            let network_guard_check = match reqwest::Url::parse(&config.browser_url) {
+                Ok(url) => match url.host_str() {
+                    Some(host) => {
+                        let allowlisted = is_browser_control_host_allowlisted(host);
+                        let https_or_loopback = url.scheme() == "https" || is_loopback_host(host);
+                        if allowlisted && https_or_loopback {
+                            DoctorCheck {
+                                name: "network_constraints".into(),
+                                status: DoctorStatus::Healthy,
+                                message: format!(
+                                    "Network guard allowlist satisfied for control host '{host}'"
+                                ),
+                            }
+                        } else {
+                            DoctorCheck {
+                                name: "network_constraints".into(),
+                                status: DoctorStatus::Unhealthy,
+                                message: format!(
+                                    "Control host '{host}' violates allowlist or HTTPS policy"
+                                ),
+                            }
+                        }
+                    }
+                    None => DoctorCheck {
+                        name: "network_constraints".into(),
+                        status: DoctorStatus::Unhealthy,
+                        message: "Browser URL is missing a host".into(),
+                    },
+                },
+                Err(err) => DoctorCheck {
+                    name: "network_constraints".into(),
+                    status: DoctorStatus::Unhealthy,
+                    message: format!("Invalid browser URL for network guard checks: {err}"),
+                },
+            };
+            checks.push(network_guard_check);
+        } else {
+            checks.push(DoctorCheck {
+                name: "network_constraints".into(),
+                status: DoctorStatus::Unhealthy,
+                message: "Cannot assess – not configured".into(),
+            });
+        }
+
+        // 6. Sandbox profile
+        let placement_profile = browser_placement_profile();
         checks.push(DoctorCheck {
-            name: "network_constraints".into(),
-            status: DoctorStatus::Healthy,
-            message: format!("Egress target: {egress_target}"),
+            name: "sandbox_profile".into(),
+            status: if placement_profile.sandbox_profile == "strict"
+                && placement_profile.sandbox_deny_exec
+                && placement_profile.sandbox_deny_ptrace
+            {
+                DoctorStatus::Healthy
+            } else {
+                DoctorStatus::Unhealthy
+            },
+            message: format!(
+                "profile={}, deny_exec={}, deny_ptrace={}",
+                placement_profile.sandbox_profile,
+                placement_profile.sandbox_deny_exec,
+                placement_profile.sandbox_deny_ptrace
+            ),
         });
 
-        // 6. Credential injection
+        // 7. Execution planner requirements
+        let planner = placement_profile.execution_planner;
+        checks.push(DoctorCheck {
+            name: "execution_planner_resources".into(),
+            status: if planner.memory_mb > 0
+                && planner.cpu_percent > 0
+                && planner.wall_clock_timeout_ms > 0
+            {
+                DoctorStatus::Healthy
+            } else {
+                DoctorStatus::Unhealthy
+            },
+            message: format!(
+                "memory_mb={}, cpu_percent={}, wall_clock_timeout_ms={}",
+                planner.memory_mb, planner.cpu_percent, planner.wall_clock_timeout_ms
+            ),
+        });
+
+        // 8. Credential injection
         if let Some(config) = &self.config {
             if config.auth.is_secretless() {
                 checks.push(DoctorCheck {
@@ -738,6 +893,139 @@ impl BrowserConnector {
                     },
                 ),
                 op_info(
+                    "browser.session.save",
+                    "Persist current browser cookies into a mesh state object",
+                    json!({
+                        "type": "object",
+                        "required": ["lease_seq", "lease_object_id"],
+                        "properties": {
+                            "domain": { "type": "string" },
+                            "lease_seq": { "type": "integer" },
+                            "lease_object_id": { "type": "string" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": ["state_object_id", "seq", "lease_seq", "cookie_count", "payload_cbor_size", "captured_at"],
+                        "properties": {
+                            "state_object_id": { "type": "string" },
+                            "prev_state_object_id": { "type": "string" },
+                            "seq": { "type": "integer" },
+                            "lease_seq": { "type": "integer" },
+                            "lease_object_id": { "type": "string" },
+                            "cookie_count": { "type": "integer" },
+                            "payload_cbor_size": { "type": "integer" },
+                            "captured_at": { "type": "integer" },
+                            "domain": { "type": "string" },
+                            "audit": { "type": "object" }
+                        }
+                    }),
+                    "browser.sessions",
+                    RiskLevel::High,
+                    SafetyTier::Dangerous,
+                    IdempotencyClass::BestEffort,
+                    AgentHint {
+                        when_to_use: "Persist authenticated browser cookies as mesh state before failover or restart.".into(),
+                        common_mistakes: vec![
+                            "Omitting lease metadata for singleton-writer fencing.".into(),
+                            "Persisting cookies from an unintended domain scope.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"domain":"example.com","lease_seq":12,"lease_object_id":"lease-obj-123"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("browser.session.restore"),
+                            CapabilityId::from_static("browser.session.describe"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "browser.session.restore",
+                    "Restore browser cookies from a saved mesh state object",
+                    json!({
+                        "type": "object",
+                        "required": ["lease_seq", "lease_object_id"],
+                        "properties": {
+                            "state_object_id": { "type": "string" },
+                            "lease_seq": { "type": "integer" },
+                            "lease_object_id": { "type": "string" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": ["state_object_id", "restored_count", "lease_seq", "cookie_count", "captured_at"],
+                        "properties": {
+                            "state_object_id": { "type": "string" },
+                            "restored_count": { "type": "integer" },
+                            "cookie_count": { "type": "integer" },
+                            "seq": { "type": "integer" },
+                            "saved_lease_seq": { "type": "integer" },
+                            "lease_seq": { "type": "integer" },
+                            "lease_object_id": { "type": "string" },
+                            "captured_at": { "type": "integer" },
+                            "domain": { "type": "string" },
+                            "audit": { "type": "object" }
+                        }
+                    }),
+                    "browser.sessions",
+                    RiskLevel::High,
+                    SafetyTier::Dangerous,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Restore a previously captured session on a fresh browser worker.".into(),
+                        common_mistakes: vec![
+                            "Using a stale lease_seq from a pre-failover writer.".into(),
+                            "Assuming state_object_id defaults when no head exists.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"state_object_id":"state-obj-abc","lease_seq":13,"lease_object_id":"lease-obj-124"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("browser.session.save"),
+                            CapabilityId::from_static("browser.get_cookies"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "browser.session.describe",
+                    "Describe metadata for a saved browser session state object",
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "state_object_id": { "type": "string" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": ["state_object_id", "seq", "lease_seq", "cookie_count", "captured_at", "payload_cbor_size", "is_head"],
+                        "properties": {
+                            "state_object_id": { "type": "string" },
+                            "prev_state_object_id": { "type": "string" },
+                            "seq": { "type": "integer" },
+                            "lease_seq": { "type": "integer" },
+                            "lease_object_id": { "type": "string" },
+                            "cookie_count": { "type": "integer" },
+                            "captured_at": { "type": "integer" },
+                            "domain": { "type": "string" },
+                            "payload_cbor_size": { "type": "integer" },
+                            "is_head": { "type": "boolean" }
+                        }
+                    }),
+                    "browser.sessions",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Inspect session metadata without exposing cookie values.".into(),
+                        common_mistakes: vec!["Expecting raw cookie values in this operation output.".into()],
+                        examples: vec![r#"{"state_object_id":"state-obj-abc"}"#.into()],
+                        related: vec![
+                            CapabilityId::from_static("browser.session.save"),
+                            CapabilityId::from_static("browser.session.restore"),
+                        ],
+                    },
+                ),
+                op_info(
                     "browser.set_proxy",
                     "Configure an outbound proxy for browser traffic",
                     json!({
@@ -906,6 +1194,15 @@ impl BrowserConnector {
                 self.invoke_set_cookies(input, execution_approval.as_ref())
                     .await
             }
+            "browser.session.save" => {
+                self.invoke_session_save(input, execution_approval.as_ref())
+                    .await
+            }
+            "browser.session.restore" => {
+                self.invoke_session_restore(input, execution_approval.as_ref())
+                    .await
+            }
+            "browser.session.describe" => self.invoke_session_describe(input).await,
             "browser.set_proxy" => {
                 self.invoke_set_proxy(input, execution_approval.as_ref())
                     .await
@@ -1241,6 +1538,214 @@ impl BrowserConnector {
         }))
     }
 
+    async fn invoke_session_save(
+        &self,
+        input: serde_json::Value,
+        execution_approval: Option<&ExecutionApprovalContext>,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let domain = input
+            .get("domain")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let lease_seq = parse_required_u64_field(&input, "lease_seq")?;
+        let lease_object_id = require_str(&input, "lease_object_id")?.to_string();
+
+        let cookies = client
+            .get_cookies(domain.as_deref())
+            .await
+            .map_err(|e: BrowserError| e.to_fcp_error())?;
+
+        let payload = BrowserSessionStatePayload {
+            schema_version: 1,
+            captured_at: current_unix_timestamp_secs(),
+            domain: domain.clone(),
+            cookies,
+        };
+        let payload_cbor =
+            fcp_cbor::to_canonical_cbor(&payload).map_err(|e| FcpError::Internal {
+                message: format!("Failed to encode browser session payload: {e}"),
+            })?;
+
+        let mut store = self.session_store.lock().map_err(|_| FcpError::Internal {
+            message: "session state store mutex poisoned".into(),
+        })?;
+        if lease_seq < store.last_lease_seq {
+            return Err(FcpError::Conflict {
+                message: format!(
+                    "stale lease_seq for browser session state: current={}, incoming={lease_seq}",
+                    store.last_lease_seq
+                ),
+            });
+        }
+
+        let prev_state_object_id = store.head_state_object_id.clone();
+        let seq = if store.head_state_object_id.is_some() {
+            store.last_seq.saturating_add(1)
+        } else {
+            0
+        };
+        let state_object_id = derive_session_state_object_id(
+            prev_state_object_id.as_deref(),
+            lease_seq,
+            &lease_object_id,
+            &payload_cbor,
+        );
+
+        let record = BrowserSessionStateObjectRecord {
+            state_object_id: state_object_id.clone(),
+            prev_state_object_id: prev_state_object_id.clone(),
+            seq,
+            lease_seq,
+            lease_object_id: lease_object_id.clone(),
+            payload_cbor: payload_cbor.clone(),
+            payload,
+        };
+        let cookie_count = record.payload.cookies.len();
+        let captured_at = record.payload.captured_at;
+
+        store.objects.insert(state_object_id.clone(), record);
+        store.head_state_object_id = Some(state_object_id.clone());
+        store.last_seq = seq;
+        store.last_lease_seq = lease_seq;
+        drop(store);
+
+        Ok(json!({
+            "state_object_id": state_object_id,
+            "prev_state_object_id": prev_state_object_id,
+            "seq": seq,
+            "lease_seq": lease_seq,
+            "lease_object_id": lease_object_id,
+            "cookie_count": cookie_count,
+            "payload_cbor_size": payload_cbor.len(),
+            "captured_at": captured_at,
+            "domain": domain,
+            "audit": dangerous_operation_audit("browser.session.save", true, execution_approval),
+        }))
+    }
+
+    async fn invoke_session_restore(
+        &self,
+        input: serde_json::Value,
+        execution_approval: Option<&ExecutionApprovalContext>,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let requested_state_object_id = input
+            .get("state_object_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let lease_seq = parse_required_u64_field(&input, "lease_seq")?;
+        let lease_object_id = require_str(&input, "lease_object_id")?.to_string();
+
+        let record = {
+            let mut store = self.session_store.lock().map_err(|_| FcpError::Internal {
+                message: "session state store mutex poisoned".into(),
+            })?;
+            if lease_seq < store.last_lease_seq {
+                return Err(FcpError::Conflict {
+                    message: format!(
+                        "stale lease_seq for browser session state: current={}, incoming={lease_seq}",
+                        store.last_lease_seq
+                    ),
+                });
+            }
+
+            let state_object_id = match requested_state_object_id {
+                Some(ref id) => id.clone(),
+                None => store
+                    .head_state_object_id
+                    .clone()
+                    .ok_or(FcpError::InvalidRequest {
+                        code: 1003,
+                        message: "No saved browser session state available".into(),
+                    })?,
+            };
+            let record =
+                store
+                    .objects
+                    .get(&state_object_id)
+                    .cloned()
+                    .ok_or(FcpError::InvalidRequest {
+                        code: 1003,
+                        message: format!(
+                            "Unknown browser session state object_id: {state_object_id}"
+                        ),
+                    })?;
+            store.last_lease_seq = lease_seq;
+            record
+        };
+
+        let restored_count = client
+            .set_cookies(&record.payload.cookies)
+            .await
+            .map_err(|e: BrowserError| e.to_fcp_error())?;
+
+        Ok(json!({
+            "state_object_id": record.state_object_id,
+            "restored_count": restored_count,
+            "cookie_count": record.payload.cookies.len(),
+            "seq": record.seq,
+            "saved_lease_seq": record.lease_seq,
+            "lease_seq": lease_seq,
+            "lease_object_id": lease_object_id,
+            "captured_at": record.payload.captured_at,
+            "domain": record.payload.domain,
+            "audit": dangerous_operation_audit("browser.session.restore", true, execution_approval),
+        }))
+    }
+
+    async fn invoke_session_describe(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let requested_state_object_id = input
+            .get("state_object_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+
+        let (record, is_head) =
+            {
+                let store = self.session_store.lock().map_err(|_| FcpError::Internal {
+                    message: "session state store mutex poisoned".into(),
+                })?;
+                let state_object_id = match requested_state_object_id {
+                    Some(ref id) => id.clone(),
+                    None => store
+                        .head_state_object_id
+                        .clone()
+                        .ok_or(FcpError::InvalidRequest {
+                            code: 1003,
+                            message: "No saved browser session state available".into(),
+                        })?,
+                };
+                let record = store.objects.get(&state_object_id).cloned().ok_or(
+                    FcpError::InvalidRequest {
+                        code: 1003,
+                        message: format!(
+                            "Unknown browser session state object_id: {state_object_id}"
+                        ),
+                    },
+                )?;
+                let is_head =
+                    store.head_state_object_id.as_deref() == Some(state_object_id.as_str());
+                drop(store);
+                (record, is_head)
+            };
+
+        Ok(json!({
+            "state_object_id": record.state_object_id,
+            "prev_state_object_id": record.prev_state_object_id,
+            "seq": record.seq,
+            "lease_seq": record.lease_seq,
+            "lease_object_id": record.lease_object_id,
+            "cookie_count": record.payload.cookies.len(),
+            "captured_at": record.payload.captured_at,
+            "domain": record.payload.domain,
+            "payload_cbor_size": record.payload_cbor.len(),
+            "is_head": is_head,
+        }))
+    }
+
     /// Handle shutdown.
     pub async fn handle_shutdown(
         &self,
@@ -1274,9 +1779,120 @@ fn requires_execution_approval(operation: &str) -> bool {
             | "browser.fill_form"
             | "browser.get_cookies"
             | "browser.set_cookies"
+            | "browser.session.save"
+            | "browser.session.restore"
             | "browser.set_proxy"
             | "browser.clear_proxy"
     )
+}
+
+fn parse_required_u64_field(input: &serde_json::Value, field: &str) -> FcpResult<u64> {
+    input
+        .get(field)
+        .and_then(|v| v.as_u64())
+        .ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("Missing required field: {field}"),
+        })
+}
+
+fn current_unix_timestamp_secs() -> u64 {
+    u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0)
+}
+
+fn browser_placement_profile() -> BrowserPlacementProfile {
+    BrowserPlacementProfile {
+        sandbox_profile: BROWSER_SANDBOX_PROFILE,
+        sandbox_deny_exec: BROWSER_SANDBOX_DENY_EXEC,
+        sandbox_deny_ptrace: BROWSER_SANDBOX_DENY_PTRACE,
+        network_guard: BrowserNetworkGuardProfile {
+            allowed_host_patterns: BROWSER_CONTROL_HOST_ALLOWLIST,
+            require_https_for_non_loopback: true,
+            allow_http_for_loopback: true,
+        },
+        execution_planner: BrowserExecutionPlannerProfile {
+            memory_mb: BROWSER_SANDBOX_MEMORY_MB,
+            cpu_percent: BROWSER_SANDBOX_CPU_PERCENT,
+            wall_clock_timeout_ms: BROWSER_SANDBOX_WALL_CLOCK_TIMEOUT_MS,
+        },
+    }
+}
+
+fn validate_browser_control_plane_url(browser_url: &str) -> FcpResult<()> {
+    let parsed = reqwest::Url::parse(browser_url).map_err(|e| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("browser_url must be an absolute URL: {e}"),
+    })?;
+
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "browser_url scheme must be http or https".into(),
+        });
+    }
+
+    let host = parsed.host_str().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: "browser_url must include a host".into(),
+    })?;
+
+    if !is_browser_control_host_allowlisted(host) {
+        return Err(FcpError::ResourceNotAllowed {
+            resource: format!("browser.control_plane.host:{host}"),
+        });
+    }
+
+    if parsed.scheme() == "http" && !is_loopback_host(host) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "browser_url must use https for non-loopback hosts (got host '{host}')"
+            ),
+        });
+    }
+
+    Ok(())
+}
+
+fn is_browser_control_host_allowlisted(host: &str) -> bool {
+    let normalized = host.to_ascii_lowercase();
+    BROWSER_CONTROL_HOST_ALLOWLIST
+        .iter()
+        .any(|pattern| host_matches_pattern(&normalized, pattern))
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    let normalized = host.to_ascii_lowercase();
+    matches!(normalized.as_str(), "localhost" | "127.0.0.1" | "::1")
+}
+
+fn host_matches_pattern(host: &str, pattern: &str) -> bool {
+    let pattern = pattern.to_ascii_lowercase();
+    if let Some(suffix) = pattern.strip_prefix("*.") {
+        host == suffix
+            || (host.len() > suffix.len()
+                && host.ends_with(suffix)
+                && host.as_bytes()[host.len() - suffix.len() - 1] == b'.')
+    } else {
+        host == pattern
+    }
+}
+
+fn derive_session_state_object_id(
+    prev_state_object_id: Option<&str>,
+    lease_seq: u64,
+    lease_object_id: &str,
+    payload_cbor: &[u8],
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"fcp.browser.session_state.v1");
+    if let Some(prev) = prev_state_object_id {
+        hasher.update(prev.as_bytes());
+    }
+    hasher.update(&lease_seq.to_le_bytes());
+    hasher.update(lease_object_id.as_bytes());
+    hasher.update(payload_cbor);
+    hasher.finalize().to_hex().to_string()
 }
 
 fn operation_pattern_matches(pattern: &str, operation: &str) -> bool {
@@ -1469,9 +2085,12 @@ mod tests {
         assert!(op_ids.contains(&"browser.evaluate_js"));
         assert!(op_ids.contains(&"browser.get_cookies"));
         assert!(op_ids.contains(&"browser.set_cookies"));
+        assert!(op_ids.contains(&"browser.session.save"));
+        assert!(op_ids.contains(&"browser.session.restore"));
+        assert!(op_ids.contains(&"browser.session.describe"));
         assert!(op_ids.contains(&"browser.set_proxy"));
         assert!(op_ids.contains(&"browser.clear_proxy"));
-        assert_eq!(ops.len(), 13);
+        assert_eq!(ops.len(), 16);
     }
 
     // ── Provisioning automation tests ─────────────────────────────
@@ -1531,13 +2150,50 @@ mod tests {
         let mut connector = BrowserConnector::new();
         let result = connector
             .handle_configure(json!({
-                "browser_url": "http://remote-browser:9222"
+                "browser_url": "https://control.browser.flywheel.internal:9222"
             }))
             .await
             .unwrap();
         assert_eq!(result["status"], "configured");
         let config = connector.config.as_ref().unwrap();
-        assert_eq!(config.browser_url, "http://remote-browser:9222");
+        assert_eq!(
+            config.browser_url,
+            "https://control.browser.flywheel.internal:9222"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_disallowed_browser_url_host() {
+        let mut connector = BrowserConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "browser_url": "https://evil.example.net:9222"
+            }))
+            .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::ResourceNotAllowed { resource } => {
+                assert!(resource.contains("browser.control_plane.host"));
+            }
+            e => panic!("Expected ResourceNotAllowed, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_http_on_non_loopback_host() {
+        let mut connector = BrowserConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "browser_url": "http://control.browser.flywheel.internal:9222"
+            }))
+            .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("must use https"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
     }
 
     #[fcp_async_core::runtime::test]
@@ -1551,6 +2207,12 @@ mod tests {
         assert_eq!(health["status"], "healthy");
         assert!(health["auth_mode"].as_str().unwrap().contains("api_key"));
         assert!(health["browser_url"].as_str().is_some());
+        assert_eq!(health["placement_profile"]["sandbox_profile"], "strict");
+        assert_eq!(
+            health["placement_profile"]["execution_planner"]["memory_mb"],
+            1024
+        );
+        assert_eq!(health["network_guard"]["allowlisted"], true);
     }
 
     #[fcp_async_core::runtime::test]
@@ -1559,7 +2221,7 @@ mod tests {
         let result = connector.handle_doctor().await.unwrap();
         assert_eq!(result["status"], "unhealthy");
         let checks = result["checks"].as_array().unwrap();
-        assert_eq!(checks.len(), 6);
+        assert_eq!(checks.len(), 8);
         assert_eq!(checks[0]["name"], "configuration");
         assert_eq!(checks[0]["status"], "unhealthy");
     }
@@ -1571,7 +2233,7 @@ mod tests {
         let result = connector.handle_doctor().await.unwrap();
         assert_eq!(result["status"], "healthy");
         let checks = result["checks"].as_array().unwrap();
-        assert_eq!(checks.len(), 6);
+        assert_eq!(checks.len(), 8);
         for check in checks {
             assert_eq!(check["status"], "healthy");
         }

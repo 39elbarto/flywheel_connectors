@@ -1824,3 +1824,460 @@ mod tests {
         assert_eq!(count, 3);
     }
 }
+
+#[cfg(all(test, feature = "openai"))]
+mod openai_e2e_tests {
+    use std::time::Duration;
+
+    use chrono::{Duration as ChronoDuration, Utc};
+    use fcp_conformance::DynamicSuite;
+    use fcp_core::{
+        AgentHint, CapabilityId, CapabilityToken, ConnectorId, ConnectorMetrics, FcpConnector,
+        FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass,
+        InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId,
+        OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest,
+        SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
+        ZoneId,
+    };
+    use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
+    use fcp_manifest::{ConnectorManifest, NetworkConstraints};
+    use fcp_openai::{
+        client::OpenAIClient,
+        connector::OpenAIConnector,
+        types::{Message, Model},
+    };
+    use fcp_testkit::MockApiServer;
+    use futures_util::{StreamExt, pin_mut};
+    use serde_json::json;
+    use wiremock::{
+        Mock, ResponseTemplate,
+        matchers::{header, method, path},
+    };
+
+    use super::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
+
+    struct OpenAiConnectorAdapter {
+        connector: OpenAIConnector,
+        id: ConnectorId,
+    }
+
+    impl OpenAiConnectorAdapter {
+        fn new() -> Self {
+            Self {
+                connector: OpenAIConnector::new(),
+                id: ConnectorId::from_static("openai"),
+            }
+        }
+    }
+
+    #[fcp_core::async_trait]
+    impl FcpConnector for OpenAiConnectorAdapter {
+        fn id(&self) -> &ConnectorId {
+            &self.id
+        }
+
+        async fn configure(&mut self, config: serde_json::Value) -> fcp_core::FcpResult<()> {
+            self.connector.handle_configure(config).await.map(|_| ())
+        }
+
+        async fn handshake(
+            &mut self,
+            req: HandshakeRequest,
+        ) -> fcp_core::FcpResult<HandshakeResponse> {
+            let request = serde_json::to_value(req).map_err(|err| FcpError::Internal {
+                message: format!("failed to serialize handshake request: {err}"),
+            })?;
+            let response = self.connector.handle_handshake(request).await?;
+            serde_json::from_value(response).map_err(|err| FcpError::Internal {
+                message: format!("failed to deserialize handshake response: {err}"),
+            })
+        }
+
+        async fn health(&self) -> HealthSnapshot {
+            match self.connector.handle_health().await {
+                Ok(payload) => {
+                    let status = payload
+                        .get("status")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("unknown");
+                    match status {
+                        "healthy" => HealthSnapshot::ready(),
+                        "not_configured" => HealthSnapshot::degraded("not_configured"),
+                        other => HealthSnapshot::degraded(format!("openai_status:{other}")),
+                    }
+                }
+                Err(err) => HealthSnapshot::error(err.to_string()),
+            }
+        }
+
+        fn metrics(&self) -> ConnectorMetrics {
+            let requests_total = self.connector.total_requests();
+            let requests_error = self.connector.total_errors();
+            ConnectorMetrics {
+                requests_total,
+                requests_success: requests_total.saturating_sub(requests_error),
+                requests_error,
+                ..ConnectorMetrics::default()
+            }
+        }
+
+        async fn shutdown(&mut self, _req: ShutdownRequest) -> fcp_core::FcpResult<()> {
+            self.connector.handle_shutdown(json!({})).await.map(|_| ())
+        }
+
+        fn introspect(&self) -> Introspection {
+            Introspection {
+                operations: vec![OperationInfo {
+                    id: OperationId::from_static("openai.simple_chat"),
+                    summary: "Simple single-turn chat with GPT models".to_string(),
+                    description: None,
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["message"],
+                        "properties": {
+                            "message": { "type": "string" },
+                            "model": { "type": "string" }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["response"],
+                        "properties": { "response": { "type": "string" } }
+                    }),
+                    capability: CapabilityId::from_static("openai.simple_chat"),
+                    risk_level: RiskLevel::Medium,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Simple single-turn chat".to_string(),
+                        common_mistakes: Vec::new(),
+                        examples: vec![r#"{"message":"hello"}"#.to_string()],
+                        related: Vec::new(),
+                    },
+                    rate_limit: None,
+                    requires_approval: None,
+                }],
+                events: Vec::new(),
+                resource_types: Vec::new(),
+                auth_caps: None,
+                event_caps: None,
+            }
+        }
+
+        async fn invoke(&self, req: InvokeRequest) -> fcp_core::FcpResult<InvokeResponse> {
+            let request_id = req.id;
+            let params = json!({
+                "operation": req.operation.as_str(),
+                "input": req.input,
+                "capability_token": req.capability_token,
+            });
+            let value = self.connector.handle_invoke(params).await?;
+            Ok(InvokeResponse::ok(request_id, value))
+        }
+
+        async fn simulate(&self, req: SimulateRequest) -> fcp_core::FcpResult<SimulateResponse> {
+            let request = serde_json::to_value(req).map_err(|err| FcpError::Internal {
+                message: format!("failed to serialize simulate request: {err}"),
+            })?;
+            let value = self.connector.handle_simulate(request).await?;
+            serde_json::from_value(value).map_err(|err| FcpError::Internal {
+                message: format!("failed to deserialize simulate response: {err}"),
+            })
+        }
+
+        async fn subscribe(
+            &self,
+            _req: SubscribeRequest,
+        ) -> fcp_core::FcpResult<SubscribeResponse> {
+            Err(FcpError::StreamingNotSupported)
+        }
+
+        async fn unsubscribe(&self, _req: UnsubscribeRequest) -> fcp_core::FcpResult<()> {
+            Ok(())
+        }
+    }
+
+    fn openai_manifest_with_hash() -> String {
+        let raw = include_str!("../../../connectors/openai/manifest.toml");
+        let unchecked =
+            ConnectorManifest::parse_str_unchecked(raw).expect("unchecked manifest parse");
+        let computed = unchecked
+            .compute_interface_hash()
+            .expect("compute interface hash");
+        raw.replace(
+            &unchecked.manifest.interface_hash.to_string(),
+            &computed.to_string(),
+        )
+    }
+
+    fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> HandshakeRequest {
+        HandshakeRequest {
+            protocol_version: "2.0".to_string(),
+            zone: ZoneId::work(),
+            zone_dir: None,
+            host_public_key,
+            nonce: [7u8; 32],
+            capabilities_requested: capabilities
+                .iter()
+                .map(|cap| CapabilityId::from_static(cap))
+                .collect(),
+            host: None,
+            transport_caps: None,
+            requested_instance_id: Some(InstanceId::new()),
+        }
+    }
+
+    fn build_token(
+        signing_key: &Ed25519SigningKey,
+        capability: &str,
+        operations: &[&str],
+    ) -> CapabilityToken {
+        let now = Utc::now();
+        let cose = CapabilityTokenBuilder::new()
+            .capability_id(capability)
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(operations)
+            .issuer("node:test")
+            .validity(now, now + ChronoDuration::hours(1))
+            .sign(signing_key)
+            .expect("capability token sign");
+        CapabilityToken { raw: cose }
+    }
+
+    fn invoke_request(
+        operation: &'static str,
+        input: serde_json::Value,
+        token: CapabilityToken,
+    ) -> InvokeRequest {
+        InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::from("openai-e2e"),
+            connector_id: ConnectorId::from_static("openai"),
+            operation: OperationId::from_static(operation),
+            zone_id: ZoneId::work(),
+            input,
+            capability_token: token,
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        }
+    }
+
+    fn host_allowed(host: &str, constraints: &NetworkConstraints) -> bool {
+        constraints.host_allow.iter().any(|pattern| {
+            pattern == host
+                || pattern
+                    .strip_prefix("*.")
+                    .is_some_and(|suffix| host.ends_with(&format!(".{suffix}")))
+        })
+    }
+
+    fn streaming_sse_body() -> String {
+        format!(
+            concat!(
+                "data: {{\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"gpt-4o\",\"choices\":[{{\"index\":0,\"delta\":{{\"role\":\"assistant\",\"content\":\"\"}},\"finish_reason\":null}}]}}\n\n",
+                "data: {{\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"gpt-4o\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"Hello\"}},\"finish_reason\":null}}]}}\n\n",
+                "data: {{\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"gpt-4o\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\" world\"}},\"finish_reason\":null}}]}}\n\n",
+                "data: {{\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"gpt-4o\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\n",
+                "data: [DONE]\n\n"
+            )
+        )
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn openai_default_deny_compliance_suite_passes() {
+        let mut connector = OpenAiConnectorAdapter::new();
+        let signing_key = Ed25519SigningKey::generate();
+        let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["openai.chat"]);
+        let token = build_token(&signing_key, "openai.chat", &["openai.chat"]);
+        let invoke = invoke_request(
+            "openai.simple_chat",
+            json!({ "message": "blocked request" }),
+            token,
+        );
+
+        let dynamic = DynamicSuite {
+            config: json!({ "api_key": "test-openai-key" }),
+            handshake: handshake.clone(),
+            invoke: Some(invoke),
+            expect_invoke_error: true,
+            simulate: None,
+            expect_simulate_would_succeed: None,
+            require_simulate_denial_details: false,
+            require_capability_denial: true,
+            require_decision_receipt: false,
+        };
+        let suite = ComplianceSuite::new(
+            "openai_default_deny",
+            openai_manifest_with_hash(),
+            dynamic,
+        );
+
+        let mut runner = E2eRunner::new("fcp-e2e-openai");
+        let report = runner
+            .run_compliance_suite(&mut connector, suite)
+            .await
+            .expect("compliance suite run");
+
+        assert!(report.passed, "default deny compliance should pass");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn openai_allow_valid_token_connector_suite_passes() {
+        let mock = MockApiServer::start().await;
+        mock.expect_post(
+            "/v1/chat/completions",
+            json!({
+                "id": "chatcmpl-allow-1",
+                "object": "chat.completion",
+                "created": 1700000000,
+                "model": "gpt-4o",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "hello from mock"
+                    },
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 6,
+                    "completion_tokens": 4,
+                    "total_tokens": 10
+                }
+            }),
+        )
+        .await;
+
+        let mut connector = OpenAiConnectorAdapter::new();
+        let signing_key = Ed25519SigningKey::generate();
+        let handshake =
+            handshake_request(signing_key.verifying_key().to_bytes(), &["openai.simple_chat"]);
+        let token = build_token(
+            &signing_key,
+            "openai.simple_chat",
+            &["openai.simple_chat"],
+        );
+        let invoke = invoke_request(
+            "openai.simple_chat",
+            json!({ "message": "hello from e2e" }),
+            token,
+        );
+        let suite = ConnectorSuite {
+            test_name: "openai_allow_valid_token".to_string(),
+            config: json!({
+                "api_key": "test-openai-key",
+                "base_url": mock.base_url(),
+            }),
+            handshake,
+            invoke: Some(invoke),
+            invoke_expectations: InvokeExpectations {
+                expect_error: false,
+                expect_decision_receipt: false,
+                expect_audit_event: false,
+                expect_receipt: false,
+                expected_reason_code: None,
+                rate_limit_pool: None,
+            },
+        };
+
+        let mut runner = E2eRunner::new("fcp-e2e-openai");
+        let report = runner
+            .run_connector_suite(&mut connector, suite)
+            .await
+            .expect("connector suite run");
+
+        assert!(report.passed, "allow suite should pass");
+        let invoke_entry = report
+            .logs
+            .iter()
+            .find(|entry| entry.context.get("operation") == Some(&json!("invoke")))
+            .expect("invoke entry");
+        assert_eq!(invoke_entry.result, "pass");
+        assert_eq!(
+            invoke_entry.context.get("invoke_status"),
+            Some(&json!(format!("{:?}", InvokeStatus::Ok)))
+        );
+        mock.assert_received("/v1/chat/completions").await;
+    }
+
+    #[test]
+    fn openai_manifest_network_guard_allows_openai_and_denies_non_openai_hosts() {
+        let manifest = ConnectorManifest::parse_str(&openai_manifest_with_hash())
+            .expect("manifest should parse");
+
+        for operation_name in ["chat", "simple_chat"] {
+            let operation = manifest
+                .provides
+                .operations
+                .get(operation_name)
+                .expect("operation in manifest");
+            let constraints = operation
+                .network_constraints
+                .as_ref()
+                .expect("network constraints");
+
+            assert_eq!(constraints.host_allow, vec!["api.openai.com".to_string()]);
+            assert!(host_allowed("api.openai.com", constraints));
+            assert!(!host_allowed("example.com", constraints));
+            assert!(!host_allowed("api.anthropic.com", constraints));
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn openai_streaming_backpressure_is_deterministic() {
+        let mock = MockApiServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(header("Authorization", "Bearer stream-test-key"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(streaming_sse_body())
+                    .insert_header("content-type", "text/event-stream"),
+            )
+            .mount(mock.inner())
+            .await;
+
+        let client = OpenAIClient::new("stream-test-key")
+            .expect("client init")
+            .with_base_url(mock.base_url());
+
+        let stream = client
+            .chat_completion_stream(
+                Model::Gpt4o,
+                vec![Message::user("hello")],
+                Some(64),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("stream start");
+        pin_mut!(stream);
+
+        let mut collected = String::new();
+        let mut chunks_seen = 0_u32;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.expect("chunk parse");
+            if let Some(delta) = chunk
+                .choices
+                .first()
+                .and_then(|choice| choice.delta.content.as_deref())
+            {
+                collected.push_str(delta);
+            }
+            chunks_seen += 1;
+            tokio::time::sleep(Duration::from_millis(8)).await;
+        }
+
+        assert_eq!(collected, "Hello world");
+        assert_eq!(chunks_seen, 4);
+        mock.assert_received("/v1/chat/completions").await;
+    }
+}

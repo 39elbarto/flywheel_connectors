@@ -1918,8 +1918,11 @@ dependencies = [
  "fcp-async-core",
  "fcp-conformance",
  "fcp-core",
+ "fcp-crypto",
  "fcp-manifest",
+ "fcp-openai",
  "fcp-testkit",
+ "futures-util",
  "pretty_assertions",
  "reqwest 0.13.2",
  "serde",
@@ -1927,6 +1930,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "wiremock",
 ]
 
 [[package]]

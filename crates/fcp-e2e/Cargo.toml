@@ -6,6 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+openai = []
+
 [dependencies]
 fcp-core = { workspace = true }
 fcp-conformance = { workspace = true }
@@ -19,6 +23,10 @@ tokio = { workspace = true, features = ["io-util", "macros", "process", "rt", "t
 
 [dev-dependencies]
 fcp-async-core = { workspace = true }
+fcp-crypto = { workspace = true }
+fcp-openai = { path = "../../connectors/openai" }
 pretty_assertions = { workspace = true }
 reqwest = { workspace = true }
 fcp-manifest = { workspace = true }
+futures-util = { workspace = true }
+wiremock = { workspace = true }

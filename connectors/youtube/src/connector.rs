@@ -661,6 +661,74 @@ impl YouTubeConnector {
                         related: vec![CapabilityId::from_static("youtube.get_video")],
                     },
                 ),
+                op_info(
+                    "youtube.get_caption_transcript",
+                    "Download transcript content for a caption track",
+                    json!({
+                        "type": "object",
+                        "required": ["caption_id"],
+                        "properties": {
+                            "caption_id": { "type": "string" },
+                            "format": { "type": "string", "enum": ["srt", "vtt", "ttml"] }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "caption_id": { "type": "string" },
+                            "format": { "type": "string" },
+                            "transcript": { "type": "string" },
+                            "provenance": { "type": "object" },
+                            "taint": { "type": "array" }
+                        }
+                    }),
+                    "youtube.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Retrieve transcript text for downstream analysis.".into(),
+                        common_mistakes: vec![
+                            "Assuming transcript data is trusted input".into(),
+                        ],
+                        examples: vec![r#"{"caption_id":"cap1","format":"srt"}"#.into()],
+                        related: vec![CapabilityId::from_static("youtube.get_captions")],
+                    },
+                ),
+                op_info(
+                    "youtube.upload_caption",
+                    "Upload a caption/transcript track for a video",
+                    json!({
+                        "type": "object",
+                        "required": ["video_id", "language", "transcript"],
+                        "properties": {
+                            "video_id": { "type": "string" },
+                            "language": { "type": "string" },
+                            "transcript": { "type": "string" },
+                            "name": { "type": "string" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "caption": { "type": "object" }
+                        }
+                    }),
+                    "youtube.write",
+                    RiskLevel::High,
+                    SafetyTier::Dangerous,
+                    IdempotencyClass::None,
+                    AgentHint {
+                        when_to_use: "Publish or replace caption text for a video.".into(),
+                        common_mistakes: vec![
+                            "Caption upload is a dangerous side-effect and must be approved".into(),
+                        ],
+                        examples: vec![
+                            r#"{"video_id":"dQw4w9WgXcQ","language":"en","transcript":"..."}"#.into(),
+                        ],
+                        related: vec![CapabilityId::from_static("youtube.get_caption_transcript")],
+                    },
+                ),
             ],
             events: vec![],
             resource_types: vec![],
@@ -748,6 +816,8 @@ impl YouTubeConnector {
             "youtube.list_comments" => self.invoke_list_comments(input).await,
             "youtube.post_comment" => self.invoke_post_comment(input).await,
             "youtube.get_captions" => self.invoke_get_captions(input).await,
+            "youtube.get_caption_transcript" => self.invoke_get_caption_transcript(input).await,
+            "youtube.upload_caption" => self.invoke_upload_caption(input).await,
             _ => Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
             }),
@@ -926,6 +996,52 @@ impl YouTubeConnector {
             .map_err(|e: YouTubeError| e.to_fcp_error())?;
 
         Ok(json!({ "items": results.items }))
+    }
+
+    async fn invoke_get_caption_transcript(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let caption_id = require_str(&input, "caption_id")?;
+        let format = input.get("format").and_then(|v| v.as_str());
+
+        let transcript = client
+            .get_caption_transcript(caption_id, format)
+            .await
+            .map_err(|e: YouTubeError| e.to_fcp_error())?;
+
+        Ok(json!({
+            "caption_id": caption_id,
+            "format": format.unwrap_or("srt"),
+            "transcript": transcript,
+            "provenance": {
+                "source": "youtube.captions.download",
+                "derived": true,
+                "resource": format!("caption:{caption_id}")
+            },
+            "taint": ["external_input", "derived_data"]
+        }))
+    }
+
+    async fn invoke_upload_caption(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let video_id = require_str(&input, "video_id")?;
+        let language = require_str(&input, "language")?;
+        let transcript = require_str(&input, "transcript")?;
+        let name = input.get("name").and_then(|v| v.as_str());
+
+        let caption = client
+            .upload_caption(video_id, language, transcript, name)
+            .await
+            .map_err(|e: YouTubeError| e.to_fcp_error())?;
+
+        Ok(json!({
+            "caption": caption
+        }))
     }
 
     /// Handle shutdown.
@@ -1155,7 +1271,9 @@ mod tests {
         assert!(op_ids.contains(&"youtube.list_comments"));
         assert!(op_ids.contains(&"youtube.post_comment"));
         assert!(op_ids.contains(&"youtube.get_captions"));
-        assert_eq!(ops.len(), 9);
+        assert!(op_ids.contains(&"youtube.get_caption_transcript"));
+        assert!(op_ids.contains(&"youtube.upload_caption"));
+        assert_eq!(ops.len(), 11);
     }
 
     // ── Provisioning / doctor / self_check tests ──────────────

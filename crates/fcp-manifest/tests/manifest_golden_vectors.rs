@@ -2526,6 +2526,8 @@ fn youtube_full_manifest_parses_with_all_operations() {
         "youtube.list_comments",
         "youtube.post_comment",
         "youtube.get_captions",
+        "youtube.get_caption_transcript",
+        "youtube.upload_caption",
     ];
     for op_name in &expected_ops {
         assert!(ops.contains_key(*op_name), "missing operation: {op_name}");

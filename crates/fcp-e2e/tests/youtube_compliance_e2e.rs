@@ -452,6 +452,8 @@ fn youtube_manifest_network_guard_allows_and_denies() {
         "youtube.list_comments",
         "youtube.post_comment",
         "youtube.get_captions",
+        "youtube.get_caption_transcript",
+        "youtube.upload_caption",
     ];
 
     let expected_hosts = vec!["www.googleapis.com".to_string()];

@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:1ca09b685051049224eddfe1d65e6d28f11de2f61810018ff137ddad08a44367"
+interface_hash = "blake3-256:fcp.interface.v2:fd052561fb03cdaa6f589dcf32c69c74c2cd9eb5b471d88f1702bb7933e88ecc"
 
 [connector]
 id = "fcp.youtube"
@@ -438,6 +438,111 @@ related = ["youtube.get_video"]
 
 # ── Sandbox ─────────────────────────────────────────────────────
 
+[provides.operations."youtube.get_caption_transcript"]
+description = "Download transcript content for a caption track"
+capability = "youtube.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."youtube.get_caption_transcript".input_schema]
+required = ["caption_id"]
+type = "object"
+[provides.operations."youtube.get_caption_transcript".input_schema.properties.caption_id]
+type = "string"
+[provides.operations."youtube.get_caption_transcript".input_schema.properties.format]
+type = "string"
+enum = ["srt", "vtt", "ttml"]
+
+[provides.operations."youtube.get_caption_transcript".output_schema]
+required = ["caption_id", "format", "transcript", "provenance", "taint"]
+type = "object"
+[provides.operations."youtube.get_caption_transcript".output_schema.properties.caption_id]
+type = "string"
+[provides.operations."youtube.get_caption_transcript".output_schema.properties.format]
+type = "string"
+[provides.operations."youtube.get_caption_transcript".output_schema.properties.transcript]
+type = "string"
+[provides.operations."youtube.get_caption_transcript".output_schema.properties.provenance]
+type = "object"
+[provides.operations."youtube.get_caption_transcript".output_schema.properties.taint]
+type = "array"
+
+[provides.operations."youtube.get_caption_transcript".network_constraints]
+host_allow = ["www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."youtube.get_caption_transcript".ai_hints]
+when_to_use = "Retrieve transcript text for analysis or summarization."
+common_mistakes = ["Treating transcript content as trusted input"]
+examples = ['{"caption_id": "cap1", "format": "srt"}']
+related = ["youtube.get_captions"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."youtube.upload_caption"]
+description = "Upload a caption/transcript track for a video"
+capability = "youtube.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+
+[provides.operations."youtube.upload_caption".input_schema]
+required = ["video_id", "language", "transcript"]
+type = "object"
+[provides.operations."youtube.upload_caption".input_schema.properties.video_id]
+type = "string"
+[provides.operations."youtube.upload_caption".input_schema.properties.language]
+type = "string"
+[provides.operations."youtube.upload_caption".input_schema.properties.transcript]
+type = "string"
+[provides.operations."youtube.upload_caption".input_schema.properties.name]
+type = "string"
+
+[provides.operations."youtube.upload_caption".output_schema]
+required = ["caption"]
+type = "object"
+[provides.operations."youtube.upload_caption".output_schema.properties.caption]
+type = "object"
+
+[provides.operations."youtube.upload_caption".network_constraints]
+host_allow = ["www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 5242880
+
+[provides.operations."youtube.upload_caption".ai_hints]
+when_to_use = "Publish caption text to YouTube for a specific video."
+common_mistakes = ["Caption uploads are dangerous side effects and require approval"]
+examples = ['{"video_id": "dQw4w9WgXcQ", "language": "en", "transcript": "..."}']
+related = ["youtube.get_caption_transcript", "youtube.get_captions"]
+
+# ────────────────────────────────────────────────────────────────
+
+# ── Sandbox ─────────────────────────────────────────────────────
+
 [sandbox]
 profile = "strict"
 memory_mb = 256
@@ -474,3 +579,5 @@ scope = "instance"
 "youtube.list_comments" = ["youtube.read"]
 "youtube.post_comment" = ["youtube.write"]
 "youtube.get_captions" = ["youtube.read"]
+"youtube.get_caption_transcript" = ["youtube.read"]
+"youtube.upload_caption" = ["youtube.write"]

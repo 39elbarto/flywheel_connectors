@@ -10,7 +10,7 @@ use tracing::{debug, warn};
 use crate::{
     error::{YouTubeError, YouTubeResult},
     types::{
-        ApiErrorResponse, CaptionListResponse, ChannelListResponse, Comment,
+        ApiErrorResponse, CaptionListResponse, CaptionTrack, ChannelListResponse, Comment,
         CommentThreadListResponse, PlaylistItemListResponse, PlaylistListResponse,
         SearchListResponse, VideoListResponse,
     },
@@ -298,6 +298,50 @@ impl YouTubeClient {
         self.get_json(&self.url_with_key(&base)).await
     }
 
+    /// Download transcript content for a caption track.
+    pub async fn get_caption_transcript(
+        &self,
+        caption_id: &str,
+        format: Option<&str>,
+    ) -> YouTubeResult<String> {
+        let mut base = format!(
+            "{}/captions/{}",
+            self.base_url,
+            urlencoding::encode(caption_id),
+        );
+
+        if let Some(fmt) = format {
+            let _ = write!(base, "?tfmt={}", urlencoding::encode(fmt));
+        }
+
+        self.get_text(&self.url_with_key(&base)).await
+    }
+
+    /// Upload a caption/transcript track for a video.
+    pub async fn upload_caption(
+        &self,
+        video_id: &str,
+        language: &str,
+        transcript: &str,
+        name: Option<&str>,
+    ) -> YouTubeResult<CaptionTrack> {
+        let base = format!("{}/captions?part=snippet", self.base_url);
+        let url = self.url_with_key(&base);
+
+        let body = serde_json::json!({
+            "snippet": {
+                "videoId": video_id,
+                "language": language,
+                "name": name.unwrap_or("Uploaded transcript"),
+                "trackKind": "standard",
+                "isDraft": false
+            },
+            "transcript": transcript
+        });
+
+        self.post_json(&url, &body).await
+    }
+
     // ── Internal HTTP helpers ────────────────────────────────────
 
     async fn get_json<T: serde::de::DeserializeOwned>(&self, url: &str) -> YouTubeResult<T> {
@@ -323,6 +367,55 @@ impl YouTubeClient {
                         let text = response.text().await.map_err(YouTubeError::Http)?;
                         let parsed: T = serde_json::from_str(&text)?;
                         return Ok(parsed);
+                    }
+
+                    let err =
+                        parse_error_response(status, &response.text().await.unwrap_or_default());
+                    if err.is_retryable() && attempt < self.max_retries {
+                        warn!(attempt, status = %status, "retryable error");
+                        last_err = Some(err);
+                        continue;
+                    }
+                    return Err(err);
+                }
+                Err(e) => {
+                    if attempt < self.max_retries {
+                        warn!(attempt, error = %e, "request failed, will retry");
+                        last_err = Some(YouTubeError::Http(e));
+                        continue;
+                    }
+                    return Err(YouTubeError::Http(e));
+                }
+            }
+        }
+
+        Err(last_err.unwrap_or(YouTubeError::Api {
+            message: "Max retries exceeded".into(),
+            status_code: None,
+        }))
+    }
+
+    async fn get_text(&self, url: &str) -> YouTubeResult<String> {
+        let mut last_err = None;
+
+        for attempt in 0..=self.max_retries {
+            if attempt > 0 {
+                let delay = std::time::Duration::from_millis(500 * u64::from(attempt));
+                debug!(attempt, delay_ms = delay.as_millis(), "retrying request");
+                fcp_async_core::time::sleep(delay).await;
+            }
+
+            let redacted_url = redact_key(url);
+            debug!(url = %redacted_url, "GET text request");
+
+            let builder = self.apply_auth(self.http.get(url));
+            let result = builder.send().await;
+
+            match result {
+                Ok(response) => {
+                    let status = response.status();
+                    if status.is_success() {
+                        return response.text().await.map_err(YouTubeError::Http);
                     }
 
                     let err =
@@ -778,6 +871,66 @@ mod tests {
                 .unwrap()
                 .language
                 .as_deref(),
+            Some("en")
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_get_caption_transcript() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex("/captions/cap1.*"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("1\n00:00:00,000 --> 00:00:01,000\nHello world\n".to_string()),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = YouTubeClient::new("test-key")
+            .unwrap()
+            .with_base_url(&mock_server.uri());
+
+        let transcript = client
+            .get_caption_transcript("cap1", Some("srt"))
+            .await
+            .unwrap();
+        assert!(transcript.contains("Hello world"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_upload_caption() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path_regex("/captions.*"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "kind": "youtube#caption",
+                "etag": "etag-1",
+                "id": "cap-new-1",
+                "snippet": {
+                    "videoId": "dQw4w9WgXcQ",
+                    "language": "en",
+                    "trackKind": "standard",
+                    "name": "English"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = YouTubeClient::new("test-key")
+            .unwrap()
+            .with_base_url(&mock_server.uri());
+
+        let caption = client
+            .upload_caption("dQw4w9WgXcQ", "en", "hello", Some("English"))
+            .await
+            .unwrap();
+
+        assert_eq!(caption.id, "cap-new-1");
+        assert_eq!(
+            caption.snippet.as_ref().unwrap().language.as_deref(),
             Some("en")
         );
     }

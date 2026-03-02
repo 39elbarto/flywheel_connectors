@@ -3,7 +3,7 @@
 //! Deterministic integration tests using wiremock to mock the YouTube Data API v3.
 //! No real API calls. Covers:
 //! - Happy-path operations (search, get_video, list_videos, get_channel, list_playlists, list_playlist_items,
-//!   list_comments, post_comment, get_captions)
+//!   list_comments, post_comment, get_captions, get_caption_transcript, upload_caption)
 //! - Error taxonomy (401/403/404/429 -> FcpError mapping)
 //! - FCP2 default-deny + capability verification
 //! - Lifecycle (health, handshake, introspect, shutdown)
@@ -508,6 +508,87 @@ async fn get_captions_happy_path() {
     assert_eq!(items.len(), 1);
 }
 
+#[fcp_async_core::runtime::test]
+async fn get_caption_transcript_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("youtube.get_caption_transcript.happy_path");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path_regex("/captions/cap1.*"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            "1\n00:00:00,000 --> 00:00:01,000\nHello from transcript\n".to_string(),
+        ))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = YouTubeConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["youtube.get_caption_transcript"]).await;
+    let token = generate_valid_token(&signing_key, "youtube.get_caption_transcript");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "youtube.get_caption_transcript",
+            "input": { "caption_id": "cap1", "format": "srt" },
+            "capability_token": token
+        }))
+        .await
+        .expect("get_caption_transcript invoke should succeed");
+
+    assert_eq!(result["caption_id"], "cap1");
+    assert_eq!(result["format"], "srt");
+    assert!(
+        result["transcript"]
+            .as_str()
+            .expect("transcript str")
+            .contains("Hello from transcript")
+    );
+    assert_eq!(result["taint"].as_array().expect("taint array").len(), 2);
+}
+
+#[fcp_async_core::runtime::test]
+async fn upload_caption_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("youtube.upload_caption.happy_path");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path_regex("/captions.*"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "kind": "youtube#caption",
+            "etag": "etag-1",
+            "id": "cap-new-1",
+            "snippet": {
+                "videoId": "dQw4w9WgXcQ",
+                "language": "en",
+                "trackKind": "standard",
+                "name": "English"
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = YouTubeConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["youtube.upload_caption"]).await;
+    let token = generate_valid_token(&signing_key, "youtube.upload_caption");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "youtube.upload_caption",
+            "input": {
+                "video_id": "dQw4w9WgXcQ",
+                "language": "en",
+                "transcript": "Hello transcript",
+                "name": "English"
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("upload_caption invoke should succeed");
+
+    assert_eq!(result["caption"]["id"], "cap-new-1");
+}
+
 // ============================================================================
 // Error taxonomy tests
 // ============================================================================
@@ -760,7 +841,9 @@ async fn introspect_lists_all_operations() {
     assert!(op_ids.contains(&"youtube.list_comments"));
     assert!(op_ids.contains(&"youtube.post_comment"));
     assert!(op_ids.contains(&"youtube.get_captions"));
-    assert_eq!(ops.len(), 9);
+    assert!(op_ids.contains(&"youtube.get_caption_transcript"));
+    assert!(op_ids.contains(&"youtube.upload_caption"));
+    assert_eq!(ops.len(), 11);
 }
 
 #[fcp_async_core::runtime::test]
@@ -881,6 +964,66 @@ async fn list_playlists_missing_channel_id_fails() {
     match result.unwrap_err() {
         fcp_core::FcpError::InvalidRequest { message, .. } => {
             assert!(message.contains("channel_id"));
+        }
+        e => panic!("Expected InvalidRequest, got: {e:?}"),
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn get_caption_transcript_missing_caption_id_fails() {
+    let _ctx = AsyncTestContext::for_scenario(
+        "youtube.validation.get_caption_transcript_missing_caption_id",
+    );
+    let mock_server = MockServer::start().await;
+
+    let mut connector = YouTubeConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["youtube.get_caption_transcript"]).await;
+    let token = generate_valid_token(&signing_key, "youtube.get_caption_transcript");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "youtube.get_caption_transcript",
+            "input": {},
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("caption_id"));
+        }
+        e => panic!("Expected InvalidRequest, got: {e:?}"),
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn upload_caption_missing_transcript_fails() {
+    let _ctx =
+        AsyncTestContext::for_scenario("youtube.validation.upload_caption_missing_transcript");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = YouTubeConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["youtube.upload_caption"]).await;
+    let token = generate_valid_token(&signing_key, "youtube.upload_caption");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "youtube.upload_caption",
+            "input": {
+                "video_id": "dQw4w9WgXcQ",
+                "language": "en"
+            },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("transcript"));
         }
         e => panic!("Expected InvalidRequest, got: {e:?}"),
     }

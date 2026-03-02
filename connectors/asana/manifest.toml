@@ -1,0 +1,344 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:fe9e06580867ea275c356ff383c75dd8183c80dc3eae7a71dc0b17b8117f216f"
+
+[connector]
+id = "fcp.asana"
+name = "Asana Connector"
+version = "0.1.0"
+description = "FCP connector for Asana project management (workspaces, projects, tasks)"
+archetypes = [
+    "knowledge",
+    "operational",
+]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores personal access token."
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = [
+    "z:public",
+    "z:community",
+]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+]
+optional = []
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "media.upload",
+    "media.download",
+]
+
+[provides.operations."asana.projects.list"]
+description = "List projects in a workspace"
+capability = "asana.projects.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."asana.projects.list".input_schema]
+required = ["workspace"]
+type = "object"
+
+[provides.operations."asana.projects.list".input_schema.properties.workspace]
+description = "Workspace GID"
+type = "string"
+
+[provides.operations."asana.projects.list".output_schema]
+required = ["data"]
+type = "object"
+
+[provides.operations."asana.projects.list".output_schema.properties.data]
+type = "array"
+
+[provides.operations."asana.projects.list".network_constraints]
+host_allow = ["app.asana.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."asana.projects.list".ai_hints]
+when_to_use = "List projects in an Asana workspace."
+common_mistakes = []
+examples = ['{"workspace": "1234567890"}']
+related = [
+    "asana.workspaces.list",
+    "asana.tasks.list",
+]
+
+[provides.operations."asana.tasks.create"]
+description = "Create a task"
+capability = "asana.tasks.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."asana.tasks.create".input_schema]
+required = [
+    "workspace",
+    "name",
+]
+type = "object"
+
+[provides.operations."asana.tasks.create".input_schema.properties.name]
+type = "string"
+
+[provides.operations."asana.tasks.create".input_schema.properties.notes]
+type = "string"
+
+[provides.operations."asana.tasks.create".input_schema.properties.workspace]
+type = "string"
+
+[provides.operations."asana.tasks.create".output_schema]
+required = ["data"]
+type = "object"
+
+[provides.operations."asana.tasks.create".output_schema.properties.data]
+type = "object"
+
+[provides.operations."asana.tasks.create".network_constraints]
+host_allow = ["app.asana.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."asana.tasks.create".ai_hints]
+when_to_use = "Create a new task."
+common_mistakes = []
+examples = ['{"workspace": "1234567890", "name": "Fix login timeout", "notes": "Users report 30s timeouts"}']
+related = [
+    "asana.tasks.list",
+    "asana.tasks.delete",
+]
+
+[provides.operations."asana.tasks.delete"]
+description = "Delete a task"
+capability = "asana.tasks.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."asana.tasks.delete".input_schema]
+required = ["task"]
+type = "object"
+
+[provides.operations."asana.tasks.delete".input_schema.properties.task]
+description = "Task GID"
+type = "string"
+
+[provides.operations."asana.tasks.delete".output_schema]
+type = "object"
+
+[provides.operations."asana.tasks.delete".network_constraints]
+host_allow = ["app.asana.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."asana.tasks.delete".ai_hints]
+when_to_use = "Delete a task. Cannot be undone."
+common_mistakes = []
+examples = ['{"task": "1234567890"}']
+related = ["asana.tasks.list"]
+
+[provides.operations."asana.tasks.list"]
+description = "List tasks in a project"
+capability = "asana.tasks.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."asana.tasks.list".input_schema]
+required = ["project"]
+type = "object"
+
+[provides.operations."asana.tasks.list".input_schema.properties.project]
+description = "Project GID"
+type = "string"
+
+[provides.operations."asana.tasks.list".output_schema]
+required = ["data"]
+type = "object"
+
+[provides.operations."asana.tasks.list".output_schema.properties.data]
+type = "array"
+
+[provides.operations."asana.tasks.list".network_constraints]
+host_allow = ["app.asana.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."asana.tasks.list".ai_hints]
+when_to_use = "List tasks in an Asana project."
+common_mistakes = []
+examples = ['{"project": "1234567890"}']
+related = [
+    "asana.tasks.create",
+    "asana.projects.list",
+]
+
+[provides.operations."asana.workspaces.list"]
+description = "List workspaces"
+capability = "asana.workspaces.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."asana.workspaces.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."asana.workspaces.list".output_schema]
+required = ["data"]
+type = "object"
+
+[provides.operations."asana.workspaces.list".output_schema.properties.data]
+type = "array"
+
+[provides.operations."asana.workspaces.list".network_constraints]
+host_allow = ["app.asana.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."asana.workspaces.list".ai_hints]
+when_to_use = "List Asana workspaces."
+common_mistakes = []
+examples = ["{}"]
+related = ["asana.projects.list"]
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "asana.workspaces.read"
+requests = 100
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "asana.projects.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "asana.tasks.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "asana.tasks.write"
+requests = 50
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[rate_limits.operation_pools]
+"asana.projects.list" = ["asana.projects.read"]
+"asana.tasks.create" = ["asana.tasks.write"]
+"asana.tasks.list" = ["asana.tasks.read"]
+"asana.workspaces.list" = ["asana.workspaces.read"]
+"asana.tasks.delete" = ["asana.tasks.write"]

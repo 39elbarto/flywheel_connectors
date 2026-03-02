@@ -1,0 +1,349 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:fd6a60d1f69d7bf069f86495bcee9a5cedf3d787a80649cf2655d33888350edd"
+
+[connector]
+id = "fcp.n8n"
+name = "n8n Connector"
+version = "0.1.0"
+description = "FCP connector for n8n workflow automation (workflows, executions)"
+archetypes = ["operational"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores n8n API key and instance URL."
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = [
+    "z:public",
+    "z:community",
+]
+
+[capabilities]
+required = [
+    "network.dns",
+    "storage.state",
+]
+optional = ["network.egress"]
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "media.upload",
+    "media.download",
+]
+
+[provides.operations."n8n.executions.get"]
+description = "Get details of a specific execution"
+capability = "n8n.executions.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."n8n.executions.get".input_schema]
+required = ["id"]
+type = "object"
+
+[provides.operations."n8n.executions.get".input_schema.properties.id]
+description = "Execution identifier"
+type = "string"
+
+[provides.operations."n8n.executions.get".output_schema]
+required = [
+    "id",
+    "finished",
+]
+type = "object"
+
+[provides.operations."n8n.executions.get".output_schema.properties.finished]
+type = "boolean"
+
+[provides.operations."n8n.executions.get".output_schema.properties.id]
+type = "string"
+
+[provides.operations."n8n.executions.get".network_constraints]
+host_allow = ["localhost.localdomain"]
+port_allow = [5678]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 15000
+max_response_bytes = 10485760
+
+[provides.operations."n8n.executions.get".ai_hints]
+when_to_use = "Retrieve details of a specific workflow execution by ID."
+common_mistakes = []
+examples = ['{"id": "50001"}']
+related = [
+    "n8n.executions.list",
+    "n8n.workflows.get",
+]
+
+[provides.operations."n8n.executions.list"]
+description = "List recent workflow executions"
+capability = "n8n.executions.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."n8n.executions.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."n8n.executions.list".output_schema]
+required = ["data"]
+type = "object"
+
+[provides.operations."n8n.executions.list".output_schema.properties.data]
+type = "array"
+
+[provides.operations."n8n.executions.list".network_constraints]
+host_allow = ["localhost.localdomain"]
+port_allow = [5678]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 15000
+max_response_bytes = 10485760
+
+[provides.operations."n8n.executions.list".ai_hints]
+when_to_use = "List recent workflow executions in n8n."
+common_mistakes = []
+examples = ["{}"]
+related = [
+    "n8n.executions.get",
+    "n8n.workflows.list",
+]
+
+[provides.operations."n8n.workflows.activate"]
+description = "Activate or deactivate an n8n workflow"
+capability = "n8n.workflows.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."n8n.workflows.activate".input_schema]
+required = [
+    "id",
+    "active",
+]
+type = "object"
+
+[provides.operations."n8n.workflows.activate".input_schema.properties.active]
+description = "Whether to activate (true) or deactivate (false)"
+type = "boolean"
+
+[provides.operations."n8n.workflows.activate".input_schema.properties.id]
+description = "Workflow identifier"
+type = "string"
+
+[provides.operations."n8n.workflows.activate".output_schema]
+required = ["id"]
+type = "object"
+
+[provides.operations."n8n.workflows.activate".output_schema.properties.id]
+type = "string"
+
+[provides.operations."n8n.workflows.activate".network_constraints]
+host_allow = ["localhost.localdomain"]
+port_allow = [5678]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 15000
+max_response_bytes = 1048576
+
+[provides.operations."n8n.workflows.activate".ai_hints]
+when_to_use = "Activate or deactivate an n8n workflow."
+common_mistakes = []
+examples = ['{"id": "1001", "active": true}']
+related = [
+    "n8n.workflows.get",
+    "n8n.workflows.list",
+]
+
+[provides.operations."n8n.workflows.get"]
+description = "Get a specific workflow by ID"
+capability = "n8n.workflows.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."n8n.workflows.get".input_schema]
+required = ["id"]
+type = "object"
+
+[provides.operations."n8n.workflows.get".input_schema.properties.id]
+description = "Workflow identifier"
+type = "string"
+
+[provides.operations."n8n.workflows.get".output_schema]
+required = [
+    "id",
+    "name",
+]
+type = "object"
+
+[provides.operations."n8n.workflows.get".output_schema.properties.id]
+type = "string"
+
+[provides.operations."n8n.workflows.get".output_schema.properties.name]
+type = "string"
+
+[provides.operations."n8n.workflows.get".network_constraints]
+host_allow = ["localhost.localdomain"]
+port_allow = [5678]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 15000
+max_response_bytes = 10485760
+
+[provides.operations."n8n.workflows.get".ai_hints]
+when_to_use = "Retrieve details of a specific n8n workflow by ID."
+common_mistakes = []
+examples = ['{"id": "1001"}']
+related = [
+    "n8n.workflows.list",
+    "n8n.workflows.activate",
+]
+
+[provides.operations."n8n.workflows.list"]
+description = "List all workflows in the n8n instance"
+capability = "n8n.workflows.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."n8n.workflows.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."n8n.workflows.list".output_schema]
+required = ["data"]
+type = "object"
+
+[provides.operations."n8n.workflows.list".output_schema.properties.data]
+type = "array"
+
+[provides.operations."n8n.workflows.list".network_constraints]
+host_allow = ["localhost.localdomain"]
+port_allow = [5678]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 15000
+max_response_bytes = 10485760
+
+[provides.operations."n8n.workflows.list".ai_hints]
+when_to_use = "List all workflows in the n8n instance."
+common_mistakes = []
+examples = ["{}"]
+related = [
+    "n8n.workflows.get",
+    "n8n.workflows.activate",
+]
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "n8n.workflows.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "n8n.workflows.write"
+requests = 50
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "n8n.executions.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[rate_limits.operation_pools]
+"n8n.workflows.activate" = ["n8n.workflows.write"]
+"n8n.workflows.get" = ["n8n.workflows.read"]
+"n8n.workflows.list" = ["n8n.workflows.read"]
+"n8n.executions.get" = ["n8n.executions.read"]
+"n8n.executions.list" = ["n8n.executions.read"]

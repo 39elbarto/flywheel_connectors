@@ -1,0 +1,292 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:f465f2997f05b0ffbbf819c2a7dd702d0c77981fab481a891d6439897e22d58f"
+
+[connector]
+id = "fcp.roam"
+name = "Roam Research Connector"
+version = "0.1.0"
+description = "FCP connector for Roam Research (pages, blocks, graph)"
+archetypes = ["knowledge"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores local API server endpoint and auth token."
+
+[zones]
+home = "z:private"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+]
+allowed_targets = ["z:private"]
+forbidden = [
+    "z:public",
+    "z:community",
+    "z:work",
+]
+
+[capabilities]
+required = [
+    "network.dns",
+    "storage.state",
+]
+optional = ["network.egress"]
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "media.upload",
+    "media.download",
+]
+
+[provides.operations."roam.blocks.create"]
+description = "Create a block on a page"
+capability = "roam.blocks.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."roam.blocks.create".input_schema]
+required = [
+    "page_uid",
+    "content",
+]
+type = "object"
+
+[provides.operations."roam.blocks.create".input_schema.properties.content]
+type = "string"
+
+[provides.operations."roam.blocks.create".input_schema.properties.page_uid]
+description = "Page UID to add block to"
+type = "string"
+
+[provides.operations."roam.blocks.create".output_schema]
+required = ["uid"]
+type = "object"
+
+[provides.operations."roam.blocks.create".output_schema.properties.uid]
+type = "string"
+
+[provides.operations."roam.blocks.create".network_constraints]
+host_allow = ["localhost.localdomain"]
+port_allow = [12345]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 15000
+max_response_bytes = 1048576
+
+[provides.operations."roam.blocks.create".ai_hints]
+when_to_use = "Create a new block on a page."
+common_mistakes = []
+examples = ['{"page_uid": "abc123", "content": "TODO: Review architecture"}']
+related = ["roam.blocks.list"]
+
+[provides.operations."roam.blocks.list"]
+description = "List blocks on a page"
+capability = "roam.blocks.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."roam.blocks.list".input_schema]
+required = ["page_uid"]
+type = "object"
+
+[provides.operations."roam.blocks.list".input_schema.properties.page_uid]
+description = "Page UID"
+type = "string"
+
+[provides.operations."roam.blocks.list".output_schema]
+required = ["blocks"]
+type = "object"
+
+[provides.operations."roam.blocks.list".output_schema.properties.blocks]
+type = "array"
+
+[provides.operations."roam.blocks.list".network_constraints]
+host_allow = ["localhost.localdomain"]
+port_allow = [12345]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 15000
+max_response_bytes = 10485760
+
+[provides.operations."roam.blocks.list".ai_hints]
+when_to_use = "List blocks on a Roam Research page."
+common_mistakes = []
+examples = ['{"page_uid": "abc123"}']
+related = [
+    "roam.pages.get",
+    "roam.blocks.create",
+]
+
+[provides.operations."roam.pages.get"]
+description = "Get a page by title"
+capability = "roam.pages.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."roam.pages.get".input_schema]
+required = ["title"]
+type = "object"
+
+[provides.operations."roam.pages.get".input_schema.properties.title]
+description = "Page title"
+type = "string"
+
+[provides.operations."roam.pages.get".output_schema]
+required = [
+    "title",
+    "uid",
+]
+type = "object"
+
+[provides.operations."roam.pages.get".output_schema.properties.title]
+type = "string"
+
+[provides.operations."roam.pages.get".output_schema.properties.uid]
+type = "string"
+
+[provides.operations."roam.pages.get".network_constraints]
+host_allow = ["localhost.localdomain"]
+port_allow = [12345]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 15000
+max_response_bytes = 1048576
+
+[provides.operations."roam.pages.get".ai_hints]
+when_to_use = "Get a specific page by title."
+common_mistakes = []
+examples = ['{"title": "Daily Notes"}']
+related = [
+    "roam.pages.list",
+    "roam.blocks.list",
+]
+
+[provides.operations."roam.pages.list"]
+description = "List all pages in the graph"
+capability = "roam.pages.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."roam.pages.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."roam.pages.list".output_schema]
+required = ["pages"]
+type = "object"
+
+[provides.operations."roam.pages.list".output_schema.properties.pages]
+type = "array"
+
+[provides.operations."roam.pages.list".network_constraints]
+host_allow = ["localhost.localdomain"]
+port_allow = [12345]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 15000
+max_response_bytes = 10485760
+
+[provides.operations."roam.pages.list".ai_hints]
+when_to_use = "List all pages in the Roam Research graph."
+common_mistakes = []
+examples = ["{}"]
+related = [
+    "roam.pages.get",
+    "roam.blocks.list",
+]
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "roam.pages.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "roam.blocks.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "roam.blocks.write"
+requests = 50
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[rate_limits.operation_pools]
+"roam.pages.get" = ["roam.pages.read"]
+"roam.blocks.create" = ["roam.blocks.write"]
+"roam.blocks.list" = ["roam.blocks.read"]
+"roam.pages.list" = ["roam.pages.read"]

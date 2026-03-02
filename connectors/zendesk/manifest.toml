@@ -1,0 +1,762 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:954d5a806ca6c72cfc552965b905ab78150b5ce89eacbd45c7a2ba0ff7d962e5"
+
+[connector]
+id = "fcp.zendesk"
+name = "Zendesk Connector"
+version = "0.1.0"
+description = "FCP connector for Zendesk Support (tickets, knowledge base, customers, macros)"
+archetypes = [
+    "operational",
+    "streaming",
+    "knowledge",
+]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+]
+optional = ["media.download"]
+forbidden = [
+    "system.exec",
+    "network.listen",
+]
+
+# ---------------------------------------------------------------------------
+# Operations: Ticket CRUD
+# ---------------------------------------------------------------------------
+
+[provides.operations."zendesk.create_ticket"]
+description = "Create a new support ticket"
+capability = "zendesk.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."zendesk.create_ticket".rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations."zendesk.create_ticket".input_schema]
+required = ["subject"]
+type = "object"
+
+[provides.operations."zendesk.create_ticket".input_schema.properties.subject]
+description = "Ticket subject line"
+maxLength = 255
+type = "string"
+
+[provides.operations."zendesk.create_ticket".input_schema.properties.description]
+description = "Ticket description body (first comment)"
+type = "string"
+
+[provides.operations."zendesk.create_ticket".input_schema.properties.priority]
+description = "Ticket priority"
+enum = ["urgent", "high", "normal", "low"]
+type = "string"
+
+[provides.operations."zendesk.create_ticket".input_schema.properties.status]
+description = "Ticket status"
+enum = ["new", "open", "pending", "hold", "solved", "closed"]
+type = "string"
+
+[provides.operations."zendesk.create_ticket".input_schema.properties.type]
+description = "Ticket type"
+enum = ["problem", "incident", "question", "task"]
+type = "string"
+
+[provides.operations."zendesk.create_ticket".input_schema.properties.requester_id]
+description = "Requester user ID"
+type = "integer"
+
+[provides.operations."zendesk.create_ticket".input_schema.properties.assignee_id]
+description = "Assignee agent ID"
+type = "integer"
+
+[provides.operations."zendesk.create_ticket".input_schema.properties.group_id]
+description = "Assigned group ID"
+type = "integer"
+
+[provides.operations."zendesk.create_ticket".input_schema.properties.tags]
+description = "Tags to apply"
+type = "array"
+[provides.operations."zendesk.create_ticket".input_schema.properties.tags.items]
+type = "string"
+
+[provides.operations."zendesk.create_ticket".input_schema.properties.custom_fields]
+description = "Array of {id, value} pairs for custom fields"
+type = "array"
+[provides.operations."zendesk.create_ticket".input_schema.properties.custom_fields.items]
+type = "object"
+
+[provides.operations."zendesk.create_ticket".output_schema]
+required = ["ticket"]
+type = "object"
+[provides.operations."zendesk.create_ticket".output_schema.properties.ticket]
+description = "Created ticket object with id, url, status"
+type = "object"
+
+[provides.operations."zendesk.create_ticket".network_constraints]
+host_allow = ["*.zendesk.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."zendesk.create_ticket".ai_hints]
+when_to_use = "Create a new support ticket. At minimum requires a subject."
+common_mistakes = [
+    "Not providing a description (creates an empty ticket).",
+    "Using group name instead of group_id.",
+]
+examples = ['{"subject": "Login issue", "description": "Cannot log in since update", "priority": "high", "type": "problem"}']
+related = [
+    "zendesk.get_ticket",
+    "zendesk.update_ticket",
+    "zendesk.search_tickets",
+]
+
+[provides.operations."zendesk.get_ticket"]
+description = "Get a single ticket by ID"
+capability = "zendesk.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."zendesk.get_ticket".rate_limit]
+max = 200
+per_ms = 60000
+
+[provides.operations."zendesk.get_ticket".input_schema]
+required = ["ticket_id"]
+type = "object"
+[provides.operations."zendesk.get_ticket".input_schema.properties.ticket_id]
+description = "Ticket ID (numeric)"
+type = "integer"
+
+[provides.operations."zendesk.get_ticket".output_schema]
+required = ["ticket"]
+type = "object"
+[provides.operations."zendesk.get_ticket".output_schema.properties.ticket]
+type = "object"
+
+[provides.operations."zendesk.get_ticket".network_constraints]
+host_allow = ["*.zendesk.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."zendesk.get_ticket".ai_hints]
+when_to_use = "Retrieve a specific ticket by its numeric ID."
+common_mistakes = ["Using ticket subject instead of ticket ID."]
+examples = ['{"ticket_id": 12345}']
+related = ["zendesk.update_ticket", "zendesk.list_ticket_comments"]
+
+[provides.operations."zendesk.update_ticket"]
+description = "Update fields on an existing ticket"
+capability = "zendesk.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."zendesk.update_ticket".rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations."zendesk.update_ticket".input_schema]
+required = ["ticket_id"]
+type = "object"
+[provides.operations."zendesk.update_ticket".input_schema.properties.ticket_id]
+type = "integer"
+[provides.operations."zendesk.update_ticket".input_schema.properties.status]
+enum = ["new", "open", "pending", "hold", "solved", "closed"]
+type = "string"
+[provides.operations."zendesk.update_ticket".input_schema.properties.priority]
+enum = ["urgent", "high", "normal", "low"]
+type = "string"
+[provides.operations."zendesk.update_ticket".input_schema.properties.assignee_id]
+type = "integer"
+[provides.operations."zendesk.update_ticket".input_schema.properties.tags]
+type = "array"
+[provides.operations."zendesk.update_ticket".input_schema.properties.tags.items]
+type = "string"
+[provides.operations."zendesk.update_ticket".input_schema.properties.comment]
+description = "Add a comment with the update"
+type = "object"
+[provides.operations."zendesk.update_ticket".input_schema.properties.custom_fields]
+type = "array"
+[provides.operations."zendesk.update_ticket".input_schema.properties.custom_fields.items]
+type = "object"
+
+[provides.operations."zendesk.update_ticket".output_schema]
+required = ["ticket"]
+type = "object"
+[provides.operations."zendesk.update_ticket".output_schema.properties.ticket]
+type = "object"
+
+[provides.operations."zendesk.update_ticket".network_constraints]
+host_allow = ["*.zendesk.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."zendesk.update_ticket".ai_hints]
+when_to_use = "Modify ticket fields (status, priority, assignee, tags). Can also add a comment in the same call."
+common_mistakes = [
+    "Setting status to 'closed' directly (must go through 'solved' first in most workflows).",
+    "Not including a comment body when adding a public comment.",
+]
+examples = ['{"ticket_id": 12345, "status": "solved", "comment": {"body": "Issue resolved.", "public": true}}']
+related = ["zendesk.get_ticket", "zendesk.list_ticket_comments"]
+
+[provides.operations."zendesk.delete_ticket"]
+description = "Permanently delete a ticket (irreversible)"
+capability = "zendesk.delete"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."zendesk.delete_ticket".rate_limit]
+max = 20
+per_ms = 60000
+
+[provides.operations."zendesk.delete_ticket".input_schema]
+required = ["ticket_id"]
+type = "object"
+[provides.operations."zendesk.delete_ticket".input_schema.properties.ticket_id]
+type = "integer"
+
+[provides.operations."zendesk.delete_ticket".output_schema]
+type = "object"
+
+[provides.operations."zendesk.delete_ticket".network_constraints]
+host_allow = ["*.zendesk.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."zendesk.delete_ticket".ai_hints]
+when_to_use = "Permanently delete a ticket. Cannot be undone."
+common_mistakes = ["Deleting tickets that should be 'closed' instead."]
+examples = ['{"ticket_id": 12345}']
+related = ["zendesk.get_ticket"]
+
+# ---------------------------------------------------------------------------
+# Operations: Search
+# ---------------------------------------------------------------------------
+
+[provides.operations."zendesk.search_tickets"]
+description = "Search tickets using Zendesk search syntax with pagination"
+capability = "zendesk.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."zendesk.search_tickets".rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations."zendesk.search_tickets".input_schema]
+required = ["query"]
+type = "object"
+[provides.operations."zendesk.search_tickets".input_schema.properties.query]
+description = "Zendesk search query (e.g., 'type:ticket status:open priority:urgent')"
+type = "string"
+[provides.operations."zendesk.search_tickets".input_schema.properties.sort_by]
+description = "Sort field"
+enum = ["created_at", "updated_at", "priority", "status", "ticket_type"]
+type = "string"
+[provides.operations."zendesk.search_tickets".input_schema.properties.sort_order]
+enum = ["asc", "desc"]
+type = "string"
+[provides.operations."zendesk.search_tickets".input_schema.properties.page]
+description = "Page number (1-indexed)"
+minimum = 1
+type = "integer"
+[provides.operations."zendesk.search_tickets".input_schema.properties.per_page]
+description = "Results per page (max 100)"
+minimum = 1
+maximum = 100
+type = "integer"
+
+[provides.operations."zendesk.search_tickets".output_schema]
+required = ["results", "count"]
+type = "object"
+[provides.operations."zendesk.search_tickets".output_schema.properties.results]
+type = "array"
+[provides.operations."zendesk.search_tickets".output_schema.properties.results.items]
+type = "object"
+[provides.operations."zendesk.search_tickets".output_schema.properties.count]
+type = "integer"
+[provides.operations."zendesk.search_tickets".output_schema.properties.next_page]
+type = "string"
+
+[provides.operations."zendesk.search_tickets".network_constraints]
+host_allow = ["*.zendesk.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."zendesk.search_tickets".ai_hints]
+when_to_use = "Search tickets using Zendesk query syntax. Supports filtering by status, priority, assignee, tags, and more."
+common_mistakes = [
+    "Using JQL or SQL syntax instead of Zendesk search syntax.",
+    "Not handling pagination for large result sets.",
+    "Search results are eventually consistent — may not include very recent tickets.",
+]
+examples = [
+    '{"query": "type:ticket status:open priority:urgent", "sort_by": "created_at", "sort_order": "desc"}',
+    '{"query": "type:ticket assignee:me tags:billing", "per_page": 25}',
+]
+related = ["zendesk.get_ticket", "zendesk.create_ticket"]
+
+# ---------------------------------------------------------------------------
+# Operations: Comments
+# ---------------------------------------------------------------------------
+
+[provides.operations."zendesk.list_ticket_comments"]
+description = "List comments on a ticket"
+capability = "zendesk.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."zendesk.list_ticket_comments".rate_limit]
+max = 200
+per_ms = 60000
+
+[provides.operations."zendesk.list_ticket_comments".input_schema]
+required = ["ticket_id"]
+type = "object"
+[provides.operations."zendesk.list_ticket_comments".input_schema.properties.ticket_id]
+type = "integer"
+[provides.operations."zendesk.list_ticket_comments".input_schema.properties.sort_order]
+enum = ["asc", "desc"]
+type = "string"
+
+[provides.operations."zendesk.list_ticket_comments".output_schema]
+required = ["comments"]
+type = "object"
+[provides.operations."zendesk.list_ticket_comments".output_schema.properties.comments]
+type = "array"
+[provides.operations."zendesk.list_ticket_comments".output_schema.properties.comments.items]
+type = "object"
+
+[provides.operations."zendesk.list_ticket_comments".network_constraints]
+host_allow = ["*.zendesk.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."zendesk.list_ticket_comments".ai_hints]
+when_to_use = "Retrieve the comment thread on a ticket."
+common_mistakes = []
+examples = ['{"ticket_id": 12345, "sort_order": "asc"}']
+related = ["zendesk.get_ticket", "zendesk.update_ticket"]
+
+# ---------------------------------------------------------------------------
+# Operations: Knowledge Base
+# ---------------------------------------------------------------------------
+
+[provides.operations."zendesk.search_articles"]
+description = "Search Help Center knowledge base articles"
+capability = "zendesk.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."zendesk.search_articles".rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations."zendesk.search_articles".input_schema]
+required = ["query"]
+type = "object"
+[provides.operations."zendesk.search_articles".input_schema.properties.query]
+description = "Search query text"
+type = "string"
+[provides.operations."zendesk.search_articles".input_schema.properties.locale]
+description = "Article locale (e.g., 'en-us')"
+type = "string"
+[provides.operations."zendesk.search_articles".input_schema.properties.category_id]
+description = "Filter by category"
+type = "integer"
+[provides.operations."zendesk.search_articles".input_schema.properties.per_page]
+minimum = 1
+maximum = 100
+type = "integer"
+
+[provides.operations."zendesk.search_articles".output_schema]
+required = ["results", "count"]
+type = "object"
+[provides.operations."zendesk.search_articles".output_schema.properties.results]
+type = "array"
+[provides.operations."zendesk.search_articles".output_schema.properties.results.items]
+type = "object"
+[provides.operations."zendesk.search_articles".output_schema.properties.count]
+type = "integer"
+
+[provides.operations."zendesk.search_articles".network_constraints]
+host_allow = ["*.zendesk.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."zendesk.search_articles".ai_hints]
+when_to_use = "Search the Help Center knowledge base for articles matching a query."
+common_mistakes = ["Not specifying locale for multi-language Help Centers."]
+examples = ['{"query": "password reset", "locale": "en-us"}']
+related = ["zendesk.get_article"]
+
+[provides.operations."zendesk.get_article"]
+description = "Get a single Help Center article by ID"
+capability = "zendesk.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."zendesk.get_article".rate_limit]
+max = 200
+per_ms = 60000
+
+[provides.operations."zendesk.get_article".input_schema]
+required = ["article_id"]
+type = "object"
+[provides.operations."zendesk.get_article".input_schema.properties.article_id]
+type = "integer"
+[provides.operations."zendesk.get_article".input_schema.properties.locale]
+type = "string"
+
+[provides.operations."zendesk.get_article".output_schema]
+required = ["article"]
+type = "object"
+[provides.operations."zendesk.get_article".output_schema.properties.article]
+type = "object"
+
+[provides.operations."zendesk.get_article".network_constraints]
+host_allow = ["*.zendesk.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."zendesk.get_article".ai_hints]
+when_to_use = "Retrieve a specific Help Center article by its ID."
+common_mistakes = []
+examples = ['{"article_id": 360001234567}']
+related = ["zendesk.search_articles"]
+
+# ---------------------------------------------------------------------------
+# Operations: Customer/User Lookup
+# ---------------------------------------------------------------------------
+
+[provides.operations."zendesk.search_users"]
+description = "Search Zendesk users (customers and agents)"
+capability = "zendesk.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."zendesk.search_users".rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations."zendesk.search_users".input_schema]
+required = ["query"]
+type = "object"
+[provides.operations."zendesk.search_users".input_schema.properties.query]
+description = "Search query (name, email, or Zendesk search syntax)"
+type = "string"
+
+[provides.operations."zendesk.search_users".output_schema]
+required = ["users", "count"]
+type = "object"
+[provides.operations."zendesk.search_users".output_schema.properties.users]
+type = "array"
+[provides.operations."zendesk.search_users".output_schema.properties.users.items]
+type = "object"
+[provides.operations."zendesk.search_users".output_schema.properties.count]
+type = "integer"
+
+[provides.operations."zendesk.search_users".network_constraints]
+host_allow = ["*.zendesk.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."zendesk.search_users".ai_hints]
+when_to_use = "Search for customers or agents by name, email, or other criteria."
+common_mistakes = ["Not using quotes for exact email matches."]
+examples = ['{"query": "email:customer@example.com"}']
+related = ["zendesk.create_ticket", "zendesk.get_ticket"]
+
+# ---------------------------------------------------------------------------
+# Operations: Macros
+# ---------------------------------------------------------------------------
+
+[provides.operations."zendesk.apply_macro"]
+description = "Apply a macro to a ticket (predefined set of actions)"
+capability = "zendesk.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."zendesk.apply_macro".rate_limit]
+max = 60
+per_ms = 60000
+
+[provides.operations."zendesk.apply_macro".input_schema]
+required = [
+    "ticket_id",
+    "macro_id",
+]
+type = "object"
+[provides.operations."zendesk.apply_macro".input_schema.properties.ticket_id]
+type = "integer"
+[provides.operations."zendesk.apply_macro".input_schema.properties.macro_id]
+type = "integer"
+
+[provides.operations."zendesk.apply_macro".output_schema]
+required = ["result"]
+type = "object"
+[provides.operations."zendesk.apply_macro".output_schema.properties.result]
+type = "object"
+
+[provides.operations."zendesk.apply_macro".network_constraints]
+host_allow = ["*.zendesk.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."zendesk.apply_macro".ai_hints]
+when_to_use = "Apply a predefined macro to a ticket. Macros can change status, add comments, set fields, etc."
+common_mistakes = ["Using macro name instead of macro_id."]
+examples = ['{"ticket_id": 12345, "macro_id": 67890}']
+related = ["zendesk.update_ticket"]
+
+# ---------------------------------------------------------------------------
+# Streaming / Event Capabilities
+# ---------------------------------------------------------------------------
+
+[event_caps]
+streaming = true
+replay = false
+min_buffer_events = 50
+
+# ---------------------------------------------------------------------------
+# Sandbox
+# ---------------------------------------------------------------------------
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+# ---------------------------------------------------------------------------
+# Rate Limit Pools
+# ---------------------------------------------------------------------------
+
+[[rate_limits.pools]]
+id = "zendesk.read"
+description = "Read operations against Zendesk API"
+requests = 200
+window_ms = 60000
+burst = 40
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "zendesk.write"
+description = "Write/mutation operations"
+requests = 100
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "zendesk.delete"
+description = "Destructive operations"
+requests = 20
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "zendesk.search"
+description = "Search operations (lower rate limit per Zendesk policy)"
+requests = 100
+window_ms = 60000
+burst = 15
+scope = "instance"
+
+[rate_limits.operation_pools]
+"zendesk.create_ticket" = ["zendesk.write"]
+"zendesk.get_ticket" = ["zendesk.read"]
+"zendesk.update_ticket" = ["zendesk.write"]
+"zendesk.delete_ticket" = ["zendesk.delete"]
+"zendesk.search_tickets" = ["zendesk.search"]
+"zendesk.list_ticket_comments" = ["zendesk.read"]
+"zendesk.search_articles" = ["zendesk.search"]
+"zendesk.get_article" = ["zendesk.read"]
+"zendesk.search_users" = ["zendesk.search"]
+"zendesk.apply_macro" = ["zendesk.write"]

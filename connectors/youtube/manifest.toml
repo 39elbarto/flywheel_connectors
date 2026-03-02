@@ -1,0 +1,378 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:d343b8d194599a0ac796312daf8a9f202f62fdad211c3e06aea455a0166a7e66"
+
+[connector]
+id = "fcp.youtube"
+name = "YouTube Connector"
+version = "0.1.0"
+description = "FCP connector for YouTube Data API (videos, channels, playlists, comments, search)"
+archetypes = ["knowledge", "operational"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
+optional = ["media.download"]
+forbidden = ["system.exec", "network.listen"]
+
+# ── Operations ──────────────────────────────────────────────────
+
+[provides.operations."youtube.search"]
+description = "Search for videos, channels, or playlists"
+capability = "youtube.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."youtube.search".input_schema]
+required = ["query"]
+type = "object"
+[provides.operations."youtube.search".input_schema.properties.query]
+type = "string"
+[provides.operations."youtube.search".input_schema.properties.max_results]
+type = "integer"
+[provides.operations."youtube.search".input_schema.properties.type]
+type = "string"
+
+[provides.operations."youtube.search".output_schema]
+required = ["items", "total_results"]
+type = "object"
+[provides.operations."youtube.search".output_schema.properties.items]
+type = "array"
+[provides.operations."youtube.search".output_schema.properties.total_results]
+type = "integer"
+
+[provides.operations."youtube.search".network_constraints]
+host_allow = ["www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."youtube.search".ai_hints]
+when_to_use = "Search YouTube for videos, channels, or playlists."
+common_mistakes = ["Search quota costs 100 units — use sparingly"]
+examples = ['{"query": "rust programming tutorial", "max_results": 10, "type": "video"}']
+related = ["youtube.get_video"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."youtube.get_video"]
+description = "Get video details by ID"
+capability = "youtube.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."youtube.get_video".input_schema]
+required = ["video_id"]
+type = "object"
+[provides.operations."youtube.get_video".input_schema.properties.video_id]
+type = "string"
+
+[provides.operations."youtube.get_video".output_schema]
+required = ["video"]
+type = "object"
+[provides.operations."youtube.get_video".output_schema.properties.video]
+type = "object"
+
+[provides.operations."youtube.get_video".network_constraints]
+host_allow = ["www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."youtube.get_video".ai_hints]
+when_to_use = "Get details about a specific video."
+common_mistakes = []
+examples = ['{"video_id": "dQw4w9WgXcQ"}']
+related = ["youtube.search", "youtube.list_comments"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."youtube.get_channel"]
+description = "Get channel details"
+capability = "youtube.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."youtube.get_channel".input_schema]
+required = ["channel_id"]
+type = "object"
+[provides.operations."youtube.get_channel".input_schema.properties.channel_id]
+type = "string"
+
+[provides.operations."youtube.get_channel".output_schema]
+required = ["channel"]
+type = "object"
+[provides.operations."youtube.get_channel".output_schema.properties.channel]
+type = "object"
+
+[provides.operations."youtube.get_channel".network_constraints]
+host_allow = ["www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."youtube.get_channel".ai_hints]
+when_to_use = "Get details about a YouTube channel."
+common_mistakes = []
+examples = ['{"channel_id": "UCxxxxxxxx"}']
+related = ["youtube.search"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."youtube.list_playlist_items"]
+description = "List videos in a playlist"
+capability = "youtube.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."youtube.list_playlist_items".input_schema]
+required = ["playlist_id"]
+type = "object"
+[provides.operations."youtube.list_playlist_items".input_schema.properties.playlist_id]
+type = "string"
+
+[provides.operations."youtube.list_playlist_items".output_schema]
+required = ["items"]
+type = "object"
+[provides.operations."youtube.list_playlist_items".output_schema.properties.items]
+type = "array"
+
+[provides.operations."youtube.list_playlist_items".network_constraints]
+host_allow = ["www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 5242880
+
+[provides.operations."youtube.list_playlist_items".ai_hints]
+when_to_use = "List videos in a playlist."
+common_mistakes = ["Not handling pagination for large playlists"]
+examples = ['{"playlist_id": "PLxxxxxxxx"}']
+related = ["youtube.get_video"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."youtube.list_comments"]
+description = "List comments on a video"
+capability = "youtube.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."youtube.list_comments".input_schema]
+required = ["video_id"]
+type = "object"
+[provides.operations."youtube.list_comments".input_schema.properties.video_id]
+type = "string"
+
+[provides.operations."youtube.list_comments".output_schema]
+required = ["items"]
+type = "object"
+[provides.operations."youtube.list_comments".output_schema.properties.items]
+type = "array"
+
+[provides.operations."youtube.list_comments".network_constraints]
+host_allow = ["www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 5242880
+
+[provides.operations."youtube.list_comments".ai_hints]
+when_to_use = "Read comments on a video."
+common_mistakes = []
+examples = ['{"video_id": "dQw4w9WgXcQ"}']
+related = ["youtube.get_video", "youtube.post_comment"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."youtube.post_comment"]
+description = "Post a comment on a video"
+capability = "youtube.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+
+[provides.operations."youtube.post_comment".input_schema]
+required = ["video_id", "text"]
+type = "object"
+[provides.operations."youtube.post_comment".input_schema.properties.video_id]
+type = "string"
+[provides.operations."youtube.post_comment".input_schema.properties.text]
+type = "string"
+
+[provides.operations."youtube.post_comment".output_schema]
+required = ["comment"]
+type = "object"
+[provides.operations."youtube.post_comment".output_schema.properties.comment]
+type = "object"
+
+[provides.operations."youtube.post_comment".network_constraints]
+host_allow = ["www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."youtube.post_comment".ai_hints]
+when_to_use = "Post a public comment on a YouTube video."
+common_mistakes = ["Comments are public and permanent"]
+examples = ['{"video_id": "dQw4w9WgXcQ", "text": "Great video!"}']
+related = ["youtube.list_comments"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."youtube.get_captions"]
+description = "Get available captions/subtitles for a video"
+capability = "youtube.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."youtube.get_captions".input_schema]
+required = ["video_id"]
+type = "object"
+[provides.operations."youtube.get_captions".input_schema.properties.video_id]
+type = "string"
+
+[provides.operations."youtube.get_captions".output_schema]
+required = ["items"]
+type = "object"
+[provides.operations."youtube.get_captions".output_schema.properties.items]
+type = "array"
+
+[provides.operations."youtube.get_captions".network_constraints]
+host_allow = ["www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."youtube.get_captions".ai_hints]
+when_to_use = "Get available subtitles/captions for a video."
+common_mistakes = []
+examples = ['{"video_id": "dQw4w9WgXcQ"}']
+related = ["youtube.get_video"]
+
+# ── Sandbox ─────────────────────────────────────────────────────
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+# ── Rate Limits ─────────────────────────────────────────────────
+
+[[rate_limits.pools]]
+id = "youtube.read"
+requests = 100
+window_ms = 1000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "youtube.write"
+requests = 50
+window_ms = 1000
+burst = 5
+scope = "instance"
+
+[rate_limits.operation_pools]
+"youtube.search" = ["youtube.read"]
+"youtube.get_video" = ["youtube.read"]
+"youtube.get_channel" = ["youtube.read"]
+"youtube.list_playlist_items" = ["youtube.read"]
+"youtube.list_comments" = ["youtube.read"]
+"youtube.post_comment" = ["youtube.write"]
+"youtube.get_captions" = ["youtube.read"]

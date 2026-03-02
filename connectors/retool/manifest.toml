@@ -1,0 +1,176 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:c4b5d2c7ddf601777b263839fef45356133c9ba6e3930818d29c9e50a0dfa7f9"
+
+[connector]
+id = "fcp.retool"
+name = "Retool Connector"
+version = "0.1.0"
+description = "FCP connector for Retool (apps, workflows, queries)"
+archetypes = ["operational"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores API token and org subdomain."
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = [
+    "z:public",
+    "z:community",
+]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+]
+optional = []
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "media.upload",
+    "media.download",
+]
+
+[provides.operations."retool.workflows.list"]
+description = "List Retool workflows"
+capability = "retool.workflows.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."retool.workflows.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."retool.workflows.list".output_schema]
+required = ["data"]
+type = "object"
+
+[provides.operations."retool.workflows.list".output_schema.properties.data]
+type = "array"
+
+[provides.operations."retool.workflows.list".network_constraints]
+host_allow = [
+    "api.retool.com",
+    "*.retool.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."retool.workflows.list".ai_hints]
+when_to_use = "List all Retool workflows."
+common_mistakes = []
+examples = ["{}"]
+related = ["retool.workflows.run"]
+
+[provides.operations."retool.workflows.run"]
+description = "Trigger a Retool workflow"
+capability = "retool.workflows.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."retool.workflows.run".input_schema]
+required = ["workflow_id"]
+type = "object"
+
+[provides.operations."retool.workflows.run".input_schema.properties.workflow_id]
+description = "Workflow ID to trigger"
+type = "string"
+
+[provides.operations."retool.workflows.run".output_schema]
+required = ["data"]
+type = "object"
+
+[provides.operations."retool.workflows.run".output_schema.properties.data]
+type = "object"
+
+[provides.operations."retool.workflows.run".network_constraints]
+host_allow = [
+    "api.retool.com",
+    "*.retool.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 1048576
+
+[provides.operations."retool.workflows.run".ai_hints]
+when_to_use = "Trigger a Retool workflow to run."
+common_mistakes = []
+examples = ['{"workflow_id": "wf_abc123"}']
+related = ["retool.workflows.list"]
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "retool.workflows.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "retool.workflows.write"
+requests = 50
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[rate_limits.operation_pools]
+"retool.workflows.run" = ["retool.workflows.write"]
+"retool.workflows.list" = ["retool.workflows.read"]

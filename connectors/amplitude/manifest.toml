@@ -1,0 +1,247 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:8e014ea974087864426bb40736f629ec58ab020acd2006282a8eb264083d3b04"
+
+[connector]
+id = "fcp.amplitude"
+name = "Amplitude Connector"
+version = "0.1.0"
+description = "FCP connector for Amplitude product analytics (events, cohorts, charts)"
+archetypes = ["knowledge"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores API key and secret key."
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = [
+    "z:public",
+    "z:community",
+]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+]
+optional = []
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "media.upload",
+    "media.download",
+]
+
+[provides.operations."amplitude.charts.query"]
+description = "Query a chart by ID"
+capability = "amplitude.charts.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."amplitude.charts.query".input_schema]
+required = ["chart_id"]
+type = "object"
+
+[provides.operations."amplitude.charts.query".input_schema.properties.chart_id]
+description = "Chart ID to query"
+type = "string"
+
+[provides.operations."amplitude.charts.query".output_schema]
+required = ["data"]
+type = "object"
+
+[provides.operations."amplitude.charts.query".output_schema.properties.data]
+type = "object"
+
+[provides.operations."amplitude.charts.query".network_constraints]
+host_allow = [
+    "amplitude.com",
+    "*.amplitude.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 52428800
+
+[provides.operations."amplitude.charts.query".ai_hints]
+when_to_use = "Query chart data from Amplitude by chart ID."
+common_mistakes = []
+examples = ['{"chart_id": "abc123"}']
+related = [
+    "amplitude.events.export",
+    "amplitude.cohorts.list",
+]
+
+[provides.operations."amplitude.cohorts.list"]
+description = "List cohorts"
+capability = "amplitude.cohorts.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."amplitude.cohorts.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."amplitude.cohorts.list".output_schema]
+required = ["cohorts"]
+type = "object"
+
+[provides.operations."amplitude.cohorts.list".output_schema.properties.cohorts]
+type = "array"
+
+[provides.operations."amplitude.cohorts.list".network_constraints]
+host_allow = [
+    "amplitude.com",
+    "*.amplitude.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."amplitude.cohorts.list".ai_hints]
+when_to_use = "List all cohorts in Amplitude."
+common_mistakes = []
+examples = ["{}"]
+related = ["amplitude.events.export"]
+
+[provides.operations."amplitude.events.export"]
+description = "Export events for a date range"
+capability = "amplitude.events.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."amplitude.events.export".input_schema]
+required = [
+    "start",
+    "end",
+]
+type = "object"
+
+[provides.operations."amplitude.events.export".input_schema.properties.end]
+description = "End date (YYYYMMDDTHH)"
+type = "string"
+
+[provides.operations."amplitude.events.export".input_schema.properties.start]
+description = "Start date (YYYYMMDDTHH)"
+type = "string"
+
+[provides.operations."amplitude.events.export".output_schema]
+required = ["data"]
+type = "object"
+
+[provides.operations."amplitude.events.export".output_schema.properties.data]
+type = "array"
+
+[provides.operations."amplitude.events.export".network_constraints]
+host_allow = [
+    "amplitude.com",
+    "*.amplitude.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 52428800
+
+[provides.operations."amplitude.events.export".ai_hints]
+when_to_use = "Export raw events from Amplitude for a date range."
+common_mistakes = ["Date format must be YYYYMMDDTHH"]
+examples = ['{"start": "20250101T00", "end": "20250102T00"}']
+related = [
+    "amplitude.cohorts.list",
+    "amplitude.charts.query",
+]
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "amplitude.events.read"
+requests = 100
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "amplitude.cohorts.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "amplitude.charts.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[rate_limits.operation_pools]
+"amplitude.cohorts.list" = ["amplitude.cohorts.read"]
+"amplitude.events.export" = ["amplitude.events.read"]
+"amplitude.charts.query" = ["amplitude.charts.read"]

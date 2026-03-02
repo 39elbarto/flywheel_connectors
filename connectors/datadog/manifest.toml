@@ -1,0 +1,589 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:0024d3507c4e34caf55ba5bcd24e9f008337912d2a56a484eda4a1919d34bbaa"
+
+[connector]
+id = "fcp.datadog"
+name = "Datadog Connector"
+version = "0.1.0"
+description = "FCP connector for Datadog observability platform (metrics, events, monitors, logs, dashboards)"
+archetypes = [
+    "knowledge",
+    "operational",
+]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores API/app key pair and last-sync cursor for log streaming."
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = [
+    "z:public",
+    "z:community",
+]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+]
+optional = []
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "media.upload",
+    "media.download",
+]
+
+[provides.operations."datadog.events.create"]
+description = "Post an event"
+capability = "datadog.events.write"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."datadog.events.create".input_schema]
+required = [
+    "title",
+    "text",
+]
+type = "object"
+
+[provides.operations."datadog.events.create".input_schema.properties.alert_type]
+type = "string"
+
+[provides.operations."datadog.events.create".input_schema.properties.priority]
+type = "string"
+
+[provides.operations."datadog.events.create".input_schema.properties.tags]
+type = "array"
+
+[provides.operations."datadog.events.create".input_schema.properties.text]
+type = "string"
+
+[provides.operations."datadog.events.create".input_schema.properties.title]
+type = "string"
+
+[provides.operations."datadog.events.create".output_schema]
+required = ["event"]
+type = "object"
+
+[provides.operations."datadog.events.create".output_schema.properties.event]
+type = "object"
+
+[provides.operations."datadog.events.create".network_constraints]
+host_allow = [
+    "*.datadoghq.com",
+    "*.datadoghq.eu",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."datadog.events.create".ai_hints]
+when_to_use = "Post an event to Datadog (deploys, incidents, etc.)."
+common_mistakes = []
+examples = ['{"title": "Deploy v2.1.0", "text": "Deployed to production", "tags": ["env:production"]}']
+related = ["datadog.events.list"]
+
+[provides.operations."datadog.events.list"]
+description = "List events"
+capability = "datadog.events.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."datadog.events.list".input_schema]
+required = [
+    "start",
+    "end",
+]
+type = "object"
+
+[provides.operations."datadog.events.list".input_schema.properties.end]
+type = "integer"
+
+[provides.operations."datadog.events.list".input_schema.properties.priority]
+type = "string"
+
+[provides.operations."datadog.events.list".input_schema.properties.sources]
+type = "string"
+
+[provides.operations."datadog.events.list".input_schema.properties.start]
+type = "integer"
+
+[provides.operations."datadog.events.list".input_schema.properties.tags]
+type = "string"
+
+[provides.operations."datadog.events.list".output_schema]
+required = ["events"]
+type = "object"
+
+[provides.operations."datadog.events.list".output_schema.properties.events]
+type = "array"
+
+[provides.operations."datadog.events.list".network_constraints]
+host_allow = [
+    "*.datadoghq.com",
+    "*.datadoghq.eu",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."datadog.events.list".ai_hints]
+when_to_use = "List events in a time range."
+common_mistakes = []
+examples = ['{"start": 1709251200, "end": 1709337600, "tags": "env:production"}']
+related = ["datadog.events.create"]
+
+[provides.operations."datadog.logs.search"]
+description = "Search logs"
+capability = "datadog.logs.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."datadog.logs.search".input_schema]
+required = ["query"]
+type = "object"
+
+[provides.operations."datadog.logs.search".input_schema.properties.from_ts]
+type = "string"
+
+[provides.operations."datadog.logs.search".input_schema.properties.limit]
+maximum = 1000
+type = "integer"
+
+[provides.operations."datadog.logs.search".input_schema.properties.query]
+type = "string"
+
+[provides.operations."datadog.logs.search".input_schema.properties.to_ts]
+type = "string"
+
+[provides.operations."datadog.logs.search".output_schema]
+required = ["logs"]
+type = "object"
+
+[provides.operations."datadog.logs.search".output_schema.properties.logs]
+type = "array"
+
+[provides.operations."datadog.logs.search".network_constraints]
+host_allow = [
+    "*.datadoghq.com",
+    "*.datadoghq.eu",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 52428800
+
+[provides.operations."datadog.logs.search".ai_hints]
+when_to_use = "Search and retrieve logs from Datadog."
+common_mistakes = ["Not specifying time range — can be very slow on large volumes."]
+examples = ['{"query": "service:api status:error", "from_ts": "now-1h", "to_ts": "now", "limit": 100}']
+related = ["datadog.metrics.query"]
+
+[provides.operations."datadog.metrics.query"]
+description = "Query time-series metrics"
+capability = "datadog.metrics.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."datadog.metrics.query".input_schema]
+required = [
+    "query",
+    "from_ts",
+    "to_ts",
+]
+type = "object"
+
+[provides.operations."datadog.metrics.query".input_schema.properties.from_ts]
+description = "Start epoch seconds"
+type = "integer"
+
+[provides.operations."datadog.metrics.query".input_schema.properties.query]
+description = "Datadog metrics query"
+type = "string"
+
+[provides.operations."datadog.metrics.query".input_schema.properties.to_ts]
+description = "End epoch seconds"
+type = "integer"
+
+[provides.operations."datadog.metrics.query".output_schema]
+required = ["series"]
+type = "object"
+
+[provides.operations."datadog.metrics.query".output_schema.properties.series]
+type = "array"
+
+[provides.operations."datadog.metrics.query".network_constraints]
+host_allow = [
+    "*.datadoghq.com",
+    "*.datadoghq.eu",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 52428800
+
+[provides.operations."datadog.metrics.query".ai_hints]
+when_to_use = "Query time-series metrics from Datadog."
+common_mistakes = ["Querying too wide a time range — Datadog limits points per query."]
+examples = ['{"query": "avg:system.cpu.user{*}", "from_ts": 1709251200, "to_ts": 1709337600}']
+related = ["datadog.metrics.submit"]
+
+[provides.operations."datadog.metrics.submit"]
+description = "Submit custom metrics"
+capability = "datadog.metrics.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."datadog.metrics.submit".input_schema]
+required = ["series"]
+type = "object"
+
+[provides.operations."datadog.metrics.submit".input_schema.properties.series]
+description = "Array of metric series to submit"
+type = "array"
+
+[provides.operations."datadog.metrics.submit".output_schema]
+required = ["status"]
+type = "object"
+
+[provides.operations."datadog.metrics.submit".output_schema.properties.status]
+type = "string"
+
+[provides.operations."datadog.metrics.submit".network_constraints]
+host_allow = [
+    "*.datadoghq.com",
+    "*.datadoghq.eu",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."datadog.metrics.submit".ai_hints]
+when_to_use = "Submit custom metrics to Datadog."
+common_mistakes = ["Submitting metrics with future timestamps — they will be rejected."]
+examples = ['{"series": [{"metric": "custom.latency", "points": [[1709251200, 42.0]], "type": "gauge"}]}']
+related = ["datadog.metrics.query"]
+
+[provides.operations."datadog.monitors.create"]
+description = "Create a monitor"
+capability = "datadog.monitors.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."datadog.monitors.create".input_schema]
+required = [
+    "name",
+    "type",
+    "query",
+]
+type = "object"
+
+[provides.operations."datadog.monitors.create".input_schema.properties.message]
+type = "string"
+
+[provides.operations."datadog.monitors.create".input_schema.properties.name]
+type = "string"
+
+[provides.operations."datadog.monitors.create".input_schema.properties.query]
+type = "string"
+
+[provides.operations."datadog.monitors.create".input_schema.properties.tags]
+type = "array"
+
+[provides.operations."datadog.monitors.create".input_schema.properties.type]
+description = "metric alert, service check, event alert, etc."
+type = "string"
+
+[provides.operations."datadog.monitors.create".output_schema]
+required = ["id"]
+type = "object"
+
+[provides.operations."datadog.monitors.create".output_schema.properties.id]
+type = "integer"
+
+[provides.operations."datadog.monitors.create".network_constraints]
+host_allow = [
+    "*.datadoghq.com",
+    "*.datadoghq.eu",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."datadog.monitors.create".ai_hints]
+when_to_use = "Create a new monitor."
+common_mistakes = ["Not specifying notification channels in the message field."]
+examples = ['{"name": "High CPU", "type": "metric alert", "query": "avg(last_5m):avg:system.cpu.user{*} > 90"}']
+related = [
+    "datadog.monitors.list",
+    "datadog.monitors.delete",
+]
+
+[provides.operations."datadog.monitors.delete"]
+description = "Delete a monitor"
+capability = "datadog.monitors.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."datadog.monitors.delete".input_schema]
+required = ["monitor_id"]
+type = "object"
+
+[provides.operations."datadog.monitors.delete".input_schema.properties.monitor_id]
+type = "integer"
+
+[provides.operations."datadog.monitors.delete".output_schema]
+type = "object"
+
+[provides.operations."datadog.monitors.delete".network_constraints]
+host_allow = [
+    "*.datadoghq.com",
+    "*.datadoghq.eu",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."datadog.monitors.delete".ai_hints]
+when_to_use = "Delete a monitor. Cannot be undone."
+common_mistakes = []
+examples = ['{"monitor_id": 12345}']
+related = ["datadog.monitors.list"]
+
+[provides.operations."datadog.monitors.list"]
+description = "List monitors"
+capability = "datadog.monitors.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."datadog.monitors.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."datadog.monitors.list".input_schema.properties.monitor_tags]
+type = "string"
+
+[provides.operations."datadog.monitors.list".input_schema.properties.tags]
+type = "string"
+
+[provides.operations."datadog.monitors.list".output_schema]
+required = ["monitors"]
+type = "object"
+
+[provides.operations."datadog.monitors.list".output_schema.properties.monitors]
+type = "array"
+
+[provides.operations."datadog.monitors.list".network_constraints]
+host_allow = [
+    "*.datadoghq.com",
+    "*.datadoghq.eu",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."datadog.monitors.list".ai_hints]
+when_to_use = "List monitors and their current status."
+common_mistakes = []
+examples = ['{"tags": "env:production"}']
+related = ["datadog.monitors.create"]
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "datadog.metrics.read"
+requests = 300
+window_ms = 60000
+burst = 30
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "datadog.metrics.write"
+requests = 100
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "datadog.events.read"
+requests = 300
+window_ms = 60000
+burst = 30
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "datadog.events.write"
+requests = 100
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "datadog.monitors.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "datadog.monitors.write"
+requests = 50
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "datadog.logs.read"
+requests = 100
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[rate_limits.operation_pools]
+"datadog.metrics.submit" = ["datadog.metrics.write"]
+"datadog.logs.search" = ["datadog.logs.read"]
+"datadog.monitors.create" = ["datadog.monitors.write"]
+"datadog.metrics.query" = ["datadog.metrics.read"]
+"datadog.events.list" = ["datadog.events.read"]
+"datadog.monitors.list" = ["datadog.monitors.read"]
+"datadog.events.create" = ["datadog.events.write"]
+"datadog.monitors.delete" = ["datadog.monitors.write"]

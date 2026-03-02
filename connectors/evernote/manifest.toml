@@ -1,0 +1,348 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:e50726d2707b9583d0a0a58d09ca701a859230230a7d26ad2b9df18b8db27e9f"
+
+[connector]
+id = "fcp.evernote"
+name = "Evernote Connector"
+version = "0.1.0"
+description = "FCP connector for Evernote (notebooks, notes, tags)"
+archetypes = ["knowledge"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores OAuth access token."
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = [
+    "z:public",
+    "z:community",
+]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+]
+optional = []
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "media.upload",
+    "media.download",
+]
+
+[provides.operations."evernote.notebooks.list"]
+description = "List all notebooks for the authenticated user"
+capability = "evernote.notebooks.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."evernote.notebooks.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."evernote.notebooks.list".output_schema]
+required = ["notebooks"]
+type = "object"
+
+[provides.operations."evernote.notebooks.list".output_schema.properties.notebooks]
+type = "array"
+
+[provides.operations."evernote.notebooks.list".network_constraints]
+host_allow = ["*.evernote.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."evernote.notebooks.list".ai_hints]
+when_to_use = "List all notebooks in the Evernote account."
+common_mistakes = []
+examples = ["{}"]
+related = [
+    "evernote.notes.list",
+    "evernote.notes.get",
+]
+
+[provides.operations."evernote.notes.create"]
+description = "Create a new note in a notebook"
+capability = "evernote.notes.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."evernote.notes.create".input_schema]
+required = [
+    "notebook_id",
+    "title",
+]
+type = "object"
+
+[provides.operations."evernote.notes.create".input_schema.properties.content]
+type = "string"
+
+[provides.operations."evernote.notes.create".input_schema.properties.notebook_id]
+description = "Notebook GUID to create note in"
+type = "string"
+
+[provides.operations."evernote.notes.create".input_schema.properties.title]
+type = "string"
+
+[provides.operations."evernote.notes.create".output_schema]
+required = ["note_id"]
+type = "object"
+
+[provides.operations."evernote.notes.create".output_schema.properties.note_id]
+type = "string"
+
+[provides.operations."evernote.notes.create".network_constraints]
+host_allow = ["*.evernote.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."evernote.notes.create".ai_hints]
+when_to_use = "Create a new note in an Evernote notebook."
+common_mistakes = ["Forgetting to specify notebook_id"]
+examples = ['{"notebook_id": "nb-abc123", "title": "Meeting Notes", "content": "Discussed roadmap items."}']
+related = [
+    "evernote.notes.list",
+    "evernote.notebooks.list",
+]
+
+[provides.operations."evernote.notes.delete"]
+description = "Delete a note"
+capability = "evernote.notes.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."evernote.notes.delete".input_schema]
+required = ["note_id"]
+type = "object"
+
+[provides.operations."evernote.notes.delete".input_schema.properties.note_id]
+description = "Note GUID"
+type = "string"
+
+[provides.operations."evernote.notes.delete".output_schema]
+type = "object"
+
+[provides.operations."evernote.notes.delete".network_constraints]
+host_allow = ["*.evernote.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."evernote.notes.delete".ai_hints]
+when_to_use = "Delete a note from Evernote. Moves to trash."
+common_mistakes = []
+examples = ['{"note_id": "note-abc123"}']
+related = ["evernote.notes.list"]
+
+[provides.operations."evernote.notes.get"]
+description = "Retrieve a note by ID"
+capability = "evernote.notes.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."evernote.notes.get".input_schema]
+required = ["note_id"]
+type = "object"
+
+[provides.operations."evernote.notes.get".input_schema.properties.note_id]
+description = "Note GUID"
+type = "string"
+
+[provides.operations."evernote.notes.get".output_schema]
+required = [
+    "note_id",
+    "title",
+    "content",
+]
+type = "object"
+
+[provides.operations."evernote.notes.get".output_schema.properties.content]
+type = "string"
+
+[provides.operations."evernote.notes.get".output_schema.properties.note_id]
+type = "string"
+
+[provides.operations."evernote.notes.get".output_schema.properties.title]
+type = "string"
+
+[provides.operations."evernote.notes.get".network_constraints]
+host_allow = ["*.evernote.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."evernote.notes.get".ai_hints]
+when_to_use = "Retrieve a specific note by its GUID."
+common_mistakes = []
+examples = ['{"note_id": "note-abc123"}']
+related = [
+    "evernote.notes.list",
+    "evernote.notes.create",
+]
+
+[provides.operations."evernote.notes.list"]
+description = "List notes in a notebook"
+capability = "evernote.notes.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."evernote.notes.list".input_schema]
+required = ["notebook_id"]
+type = "object"
+
+[provides.operations."evernote.notes.list".input_schema.properties.notebook_id]
+description = "Notebook GUID"
+type = "string"
+
+[provides.operations."evernote.notes.list".output_schema]
+required = ["notes"]
+type = "object"
+
+[provides.operations."evernote.notes.list".output_schema.properties.notes]
+type = "array"
+
+[provides.operations."evernote.notes.list".network_constraints]
+host_allow = ["*.evernote.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."evernote.notes.list".ai_hints]
+when_to_use = "List notes in a specific notebook."
+common_mistakes = []
+examples = ['{"notebook_id": "nb-abc123"}']
+related = [
+    "evernote.notebooks.list",
+    "evernote.notes.get",
+]
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "evernote.notebooks.read"
+requests = 100
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "evernote.notes.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "evernote.notes.write"
+requests = 50
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[rate_limits.operation_pools]
+"evernote.notes.delete" = ["evernote.notes.write"]
+"evernote.notes.get" = ["evernote.notes.read"]
+"evernote.notebooks.list" = ["evernote.notebooks.read"]
+"evernote.notes.list" = ["evernote.notes.read"]
+"evernote.notes.create" = ["evernote.notes.write"]

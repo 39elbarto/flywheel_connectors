@@ -1,0 +1,359 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:29c392792b7e20b2aa5181dffb18ece85632782b2ea5dc52facffa90205a8929"
+
+[connector]
+id = "fcp.snowflake"
+name = "Snowflake Connector"
+version = "0.1.0"
+description = "FCP connector for Snowflake data warehouse (SQL queries, warehouses, databases)"
+archetypes = [
+    "knowledge",
+    "storage",
+]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores account identifier, credentials, and warehouse context."
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = [
+    "z:public",
+    "z:community",
+]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+]
+optional = []
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "media.upload",
+    "media.download",
+]
+
+[provides.operations."snowflake.databases.list"]
+description = "List databases"
+capability = "snowflake.databases.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."snowflake.databases.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."snowflake.databases.list".output_schema]
+required = ["databases"]
+type = "object"
+
+[provides.operations."snowflake.databases.list".output_schema.properties.databases]
+type = "array"
+
+[provides.operations."snowflake.databases.list".network_constraints]
+host_allow = ["*.snowflakecomputing.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."snowflake.databases.list".ai_hints]
+when_to_use = "List available Snowflake databases."
+common_mistakes = []
+examples = ["{}"]
+related = [
+    "snowflake.sql.query",
+    "snowflake.warehouses.list",
+]
+
+[provides.operations."snowflake.sql.execute"]
+description = "Execute a SQL statement (DDL/DML)"
+capability = "snowflake.sql.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+
+[provides.operations."snowflake.sql.execute".input_schema]
+required = ["statement"]
+type = "object"
+
+[provides.operations."snowflake.sql.execute".input_schema.properties.database]
+type = "string"
+
+[provides.operations."snowflake.sql.execute".input_schema.properties.statement]
+description = "SQL DDL/DML statement"
+type = "string"
+
+[provides.operations."snowflake.sql.execute".input_schema.properties.warehouse]
+type = "string"
+
+[provides.operations."snowflake.sql.execute".output_schema]
+required = ["status"]
+type = "object"
+
+[provides.operations."snowflake.sql.execute".output_schema.properties.status]
+type = "string"
+
+[provides.operations."snowflake.sql.execute".network_constraints]
+host_allow = ["*.snowflakecomputing.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 300000
+max_response_bytes = 1048576
+
+[provides.operations."snowflake.sql.execute".ai_hints]
+when_to_use = "Execute DDL/DML statements (CREATE, INSERT, UPDATE, DELETE, DROP)."
+common_mistakes = [
+    "Running DROP without confirmation.",
+    "Forgetting to specify the correct database context.",
+]
+examples = ['{"statement": "CREATE TABLE test (id INT, name VARCHAR)", "warehouse": "COMPUTE_WH", "database": "DEV"}']
+related = ["snowflake.sql.query"]
+
+[provides.operations."snowflake.sql.query"]
+description = "Execute a SQL query"
+capability = "snowflake.sql.read"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."snowflake.sql.query".input_schema]
+required = ["statement"]
+type = "object"
+
+[provides.operations."snowflake.sql.query".input_schema.properties.database]
+type = "string"
+
+[provides.operations."snowflake.sql.query".input_schema.properties.schema]
+type = "string"
+
+[provides.operations."snowflake.sql.query".input_schema.properties.statement]
+description = "SQL statement to execute"
+type = "string"
+
+[provides.operations."snowflake.sql.query".input_schema.properties.warehouse]
+type = "string"
+
+[provides.operations."snowflake.sql.query".output_schema]
+required = ["data"]
+type = "object"
+
+[provides.operations."snowflake.sql.query".output_schema.properties.data]
+type = "array"
+
+[provides.operations."snowflake.sql.query".network_constraints]
+host_allow = ["*.snowflakecomputing.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 300000
+max_response_bytes = 52428800
+
+[provides.operations."snowflake.sql.query".ai_hints]
+when_to_use = "Execute a SQL query against Snowflake."
+common_mistakes = [
+    "Running unbounded queries without LIMIT.",
+    "Forgetting to specify warehouse.",
+]
+examples = ['{"statement": "SELECT * FROM orders LIMIT 100", "warehouse": "COMPUTE_WH", "database": "ANALYTICS"}']
+related = [
+    "snowflake.databases.list",
+    "snowflake.warehouses.list",
+]
+
+[provides.operations."snowflake.tables.list"]
+description = "List tables in a database/schema"
+capability = "snowflake.databases.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."snowflake.tables.list".input_schema]
+required = ["database"]
+type = "object"
+
+[provides.operations."snowflake.tables.list".input_schema.properties.database]
+type = "string"
+
+[provides.operations."snowflake.tables.list".input_schema.properties.schema]
+type = "string"
+
+[provides.operations."snowflake.tables.list".output_schema]
+required = ["tables"]
+type = "object"
+
+[provides.operations."snowflake.tables.list".output_schema.properties.tables]
+type = "array"
+
+[provides.operations."snowflake.tables.list".network_constraints]
+host_allow = ["*.snowflakecomputing.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."snowflake.tables.list".ai_hints]
+when_to_use = "List tables in a database, optionally filtered by schema."
+common_mistakes = []
+examples = ['{"database": "ANALYTICS", "schema": "PUBLIC"}']
+related = [
+    "snowflake.databases.list",
+    "snowflake.sql.query",
+]
+
+[provides.operations."snowflake.warehouses.list"]
+description = "List available warehouses"
+capability = "snowflake.warehouses.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."snowflake.warehouses.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."snowflake.warehouses.list".output_schema]
+required = ["warehouses"]
+type = "object"
+
+[provides.operations."snowflake.warehouses.list".output_schema.properties.warehouses]
+type = "array"
+
+[provides.operations."snowflake.warehouses.list".network_constraints]
+host_allow = ["*.snowflakecomputing.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."snowflake.warehouses.list".ai_hints]
+when_to_use = "List available Snowflake warehouses."
+common_mistakes = []
+examples = ["{}"]
+related = ["snowflake.sql.query"]
+
+[sandbox]
+profile = "strict"
+memory_mb = 512
+cpu_percent = 75
+wall_clock_timeout_ms = 600000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "snowflake.sql.read"
+requests = 100
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "snowflake.sql.write"
+requests = 20
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "snowflake.warehouses.read"
+requests = 60
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "snowflake.databases.read"
+requests = 100
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[rate_limits.operation_pools]
+"snowflake.sql.query" = ["snowflake.sql.read"]
+"snowflake.tables.list" = ["snowflake.databases.read"]
+"snowflake.sql.execute" = ["snowflake.sql.write"]
+"snowflake.warehouses.list" = ["snowflake.warehouses.read"]
+"snowflake.databases.list" = ["snowflake.databases.read"]

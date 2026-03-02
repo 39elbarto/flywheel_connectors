@@ -1,0 +1,764 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:bf9cd2662e3662db6246b80e1afa458e65f8e912fc7849acbcd4b8a42f9890c3"
+
+[connector]
+id = "fcp.plaid"
+name = "Plaid Connector"
+version = "0.1.0"
+description = "FCP connector for Plaid financial data — accounts, transactions, balances, identity, auth, investments, liabilities"
+archetypes = [
+    "knowledge",
+    "operational",
+    "streaming",
+]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores transactions_sync cursor, access tokens, and item metadata per linked institution."
+
+[zones]
+home = "z:private"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+]
+allowed_targets = ["z:private"]
+forbidden = [
+    "z:public",
+    "z:community",
+    "z:work",
+]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+]
+optional = []
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "media.upload",
+    "media.download",
+]
+
+[provides.operations."plaid.accounts_balance_get"]
+description = "Get real-time balance for accounts"
+capability = "plaid.accounts.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."plaid.accounts_balance_get".input_schema]
+required = ["access_token"]
+type = "object"
+
+[provides.operations."plaid.accounts_balance_get".input_schema.properties.access_token]
+type = "string"
+
+[provides.operations."plaid.accounts_balance_get".input_schema.properties.options]
+type = "object"
+
+[provides.operations."plaid.accounts_balance_get".output_schema]
+required = ["accounts"]
+type = "object"
+
+[provides.operations."plaid.accounts_balance_get".output_schema.properties.accounts]
+type = "array"
+
+[provides.operations."plaid.accounts_balance_get".network_constraints]
+host_allow = [
+    "production.plaid.com",
+    "sandbox.plaid.com",
+    "development.plaid.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."plaid.accounts_balance_get".ai_hints]
+when_to_use = "Get real-time balances (current, available, limit) — triggers a live connection to the institution."
+common_mistakes = ["Calling too frequently — balance checks are rate-limited and may count against API quotas."]
+examples = ['{"access_token": "access-sandbox-xxxx"}']
+related = ["plaid.accounts_get"]
+
+[provides.operations."plaid.accounts_get"]
+description = "Get all accounts for a linked item"
+capability = "plaid.accounts.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."plaid.accounts_get".input_schema]
+required = ["access_token"]
+type = "object"
+
+[provides.operations."plaid.accounts_get".input_schema.properties.access_token]
+type = "string"
+
+[provides.operations."plaid.accounts_get".input_schema.properties.options]
+description = "Filter by account_ids"
+type = "object"
+
+[provides.operations."plaid.accounts_get".output_schema]
+required = [
+    "accounts",
+    "item",
+]
+type = "object"
+
+[provides.operations."plaid.accounts_get".output_schema.properties.accounts]
+type = "array"
+
+[provides.operations."plaid.accounts_get".output_schema.properties.item]
+type = "object"
+
+[provides.operations."plaid.accounts_get".network_constraints]
+host_allow = [
+    "production.plaid.com",
+    "sandbox.plaid.com",
+    "development.plaid.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."plaid.accounts_get".ai_hints]
+when_to_use = "List all accounts (checking, savings, credit, loan, investment) for a linked institution."
+common_mistakes = []
+examples = ['{"access_token": "access-sandbox-xxxx"}']
+related = [
+    "plaid.accounts_balance_get",
+    "plaid.transactions_sync",
+]
+
+[provides.operations."plaid.auth_get"]
+description = "Get account and routing numbers for ACH"
+capability = "plaid.auth.read"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."plaid.auth_get".input_schema]
+required = ["access_token"]
+type = "object"
+
+[provides.operations."plaid.auth_get".input_schema.properties.access_token]
+type = "string"
+
+[provides.operations."plaid.auth_get".output_schema]
+required = [
+    "accounts",
+    "numbers",
+]
+type = "object"
+
+[provides.operations."plaid.auth_get".output_schema.properties.accounts]
+type = "array"
+
+[provides.operations."plaid.auth_get".output_schema.properties.numbers]
+type = "object"
+
+[provides.operations."plaid.auth_get".network_constraints]
+host_allow = [
+    "production.plaid.com",
+    "sandbox.plaid.com",
+    "development.plaid.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."plaid.auth_get".ai_hints]
+when_to_use = "Get account and routing numbers for ACH transfers. Requires 'auth' product."
+common_mistakes = ["Requesting auth without the 'auth' product enabled in Link."]
+examples = ['{"access_token": "access-sandbox-xxxx"}']
+related = [
+    "plaid.identity_get",
+    "plaid.accounts_get",
+]
+
+[provides.operations."plaid.identity_get"]
+description = "Get account holder identity information (name, address, email, phone)"
+capability = "plaid.identity.read"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."plaid.identity_get".input_schema]
+required = ["access_token"]
+type = "object"
+
+[provides.operations."plaid.identity_get".input_schema.properties.access_token]
+type = "string"
+
+[provides.operations."plaid.identity_get".output_schema]
+required = ["accounts"]
+type = "object"
+
+[provides.operations."plaid.identity_get".output_schema.properties.accounts]
+type = "array"
+
+[provides.operations."plaid.identity_get".network_constraints]
+host_allow = [
+    "production.plaid.com",
+    "sandbox.plaid.com",
+    "development.plaid.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."plaid.identity_get".ai_hints]
+when_to_use = "Get PII (name, address, email, phone) for account holders. Requires 'identity' product."
+common_mistakes = ["Requesting identity without the 'identity' product enabled in Link."]
+examples = ['{"access_token": "access-sandbox-xxxx"}']
+related = ["plaid.auth_get"]
+
+[provides.operations."plaid.investments_holdings_get"]
+description = "Get investment holdings (securities, quantities, values)"
+capability = "plaid.investments.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."plaid.investments_holdings_get".input_schema]
+required = ["access_token"]
+type = "object"
+
+[provides.operations."plaid.investments_holdings_get".input_schema.properties.access_token]
+type = "string"
+
+[provides.operations."plaid.investments_holdings_get".output_schema]
+required = [
+    "accounts",
+    "holdings",
+    "securities",
+]
+type = "object"
+
+[provides.operations."plaid.investments_holdings_get".output_schema.properties.accounts]
+type = "array"
+
+[provides.operations."plaid.investments_holdings_get".output_schema.properties.holdings]
+type = "array"
+
+[provides.operations."plaid.investments_holdings_get".output_schema.properties.securities]
+type = "array"
+
+[provides.operations."plaid.investments_holdings_get".network_constraints]
+host_allow = [
+    "production.plaid.com",
+    "sandbox.plaid.com",
+    "development.plaid.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."plaid.investments_holdings_get".ai_hints]
+when_to_use = "Get investment portfolio holdings. Requires 'investments' product."
+common_mistakes = []
+examples = ['{"access_token": "access-sandbox-xxxx"}']
+related = ["plaid.accounts_get"]
+
+[provides.operations."plaid.liabilities_get"]
+description = "Get liability details (credit cards, student loans, mortgages)"
+capability = "plaid.liabilities.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."plaid.liabilities_get".input_schema]
+required = ["access_token"]
+type = "object"
+
+[provides.operations."plaid.liabilities_get".input_schema.properties.access_token]
+type = "string"
+
+[provides.operations."plaid.liabilities_get".output_schema]
+required = [
+    "accounts",
+    "liabilities",
+]
+type = "object"
+
+[provides.operations."plaid.liabilities_get".output_schema.properties.accounts]
+type = "array"
+
+[provides.operations."plaid.liabilities_get".output_schema.properties.liabilities]
+type = "object"
+
+[provides.operations."plaid.liabilities_get".network_constraints]
+host_allow = [
+    "production.plaid.com",
+    "sandbox.plaid.com",
+    "development.plaid.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."plaid.liabilities_get".ai_hints]
+when_to_use = "Get credit card, student loan, and mortgage liability details. Requires 'liabilities' product."
+common_mistakes = []
+examples = ['{"access_token": "access-sandbox-xxxx"}']
+related = ["plaid.accounts_get"]
+
+[provides.operations."plaid.link_token_create"]
+description = "Create a Link token for Plaid Link initialization"
+capability = "plaid.link"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."plaid.link_token_create".input_schema]
+required = [
+    "client_name",
+    "products",
+    "country_codes",
+    "language",
+]
+type = "object"
+
+[provides.operations."plaid.link_token_create".input_schema.properties.client_name]
+type = "string"
+
+[provides.operations."plaid.link_token_create".input_schema.properties.country_codes]
+type = "array"
+
+[provides.operations."plaid.link_token_create".input_schema.properties.language]
+default = "en"
+type = "string"
+
+[provides.operations."plaid.link_token_create".input_schema.properties.products]
+description = "Products to enable: transactions, auth, identity, investments, liabilities"
+type = "array"
+
+[provides.operations."plaid.link_token_create".input_schema.properties.user]
+description = "User object with client_user_id"
+type = "object"
+
+[provides.operations."plaid.link_token_create".output_schema]
+required = [
+    "link_token",
+    "expiration",
+]
+type = "object"
+
+[provides.operations."plaid.link_token_create".output_schema.properties.expiration]
+type = "string"
+
+[provides.operations."plaid.link_token_create".output_schema.properties.link_token]
+type = "string"
+
+[provides.operations."plaid.link_token_create".network_constraints]
+host_allow = [
+    "production.plaid.com",
+    "sandbox.plaid.com",
+    "development.plaid.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."plaid.link_token_create".ai_hints]
+when_to_use = "Create a Link token to initialize Plaid Link in the client. First step in the Plaid flow."
+common_mistakes = ["Not including required products for the intended use case."]
+examples = ['{"client_name": "MyApp", "products": ["transactions"], "country_codes": ["US"], "language": "en", "user": {"client_user_id": "user-123"}}']
+related = ["plaid.token_exchange"]
+
+[provides.operations."plaid.token_exchange"]
+description = "Exchange a public token from Plaid Link for an access token"
+capability = "plaid.link"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."plaid.token_exchange".input_schema]
+required = ["public_token"]
+type = "object"
+
+[provides.operations."plaid.token_exchange".input_schema.properties.public_token]
+description = "Public token from Plaid Link onSuccess callback"
+type = "string"
+
+[provides.operations."plaid.token_exchange".output_schema]
+required = [
+    "access_token",
+    "item_id",
+]
+type = "object"
+
+[provides.operations."plaid.token_exchange".output_schema.properties.access_token]
+type = "string"
+
+[provides.operations."plaid.token_exchange".output_schema.properties.item_id]
+type = "string"
+
+[provides.operations."plaid.token_exchange".network_constraints]
+host_allow = [
+    "production.plaid.com",
+    "sandbox.plaid.com",
+    "development.plaid.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."plaid.token_exchange".ai_hints]
+when_to_use = "Exchange the public_token from Plaid Link for a persistent access_token. Second step in Plaid flow."
+common_mistakes = ["Calling multiple times with the same public_token (it's single-use)."]
+examples = ['{"public_token": "public-sandbox-xxxx"}']
+related = [
+    "plaid.link_token_create",
+    "plaid.accounts_get",
+]
+
+[provides.operations."plaid.transactions_get"]
+description = "Get transactions for a date range (legacy endpoint)"
+capability = "plaid.transactions.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."plaid.transactions_get".input_schema]
+required = [
+    "access_token",
+    "start_date",
+    "end_date",
+]
+type = "object"
+
+[provides.operations."plaid.transactions_get".input_schema.properties.access_token]
+type = "string"
+
+[provides.operations."plaid.transactions_get".input_schema.properties.end_date]
+type = "string"
+
+[provides.operations."plaid.transactions_get".input_schema.properties.options]
+type = "object"
+
+[provides.operations."plaid.transactions_get".input_schema.properties.start_date]
+description = "YYYY-MM-DD"
+type = "string"
+
+[provides.operations."plaid.transactions_get".output_schema]
+required = [
+    "accounts",
+    "transactions",
+    "total_transactions",
+]
+type = "object"
+
+[provides.operations."plaid.transactions_get".output_schema.properties.accounts]
+type = "array"
+
+[provides.operations."plaid.transactions_get".output_schema.properties.total_transactions]
+type = "integer"
+
+[provides.operations."plaid.transactions_get".output_schema.properties.transactions]
+type = "array"
+
+[provides.operations."plaid.transactions_get".network_constraints]
+host_allow = [
+    "production.plaid.com",
+    "sandbox.plaid.com",
+    "development.plaid.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."plaid.transactions_get".ai_hints]
+when_to_use = "Get transactions for a date range. Prefer transactions_sync for incremental updates."
+common_mistakes = ["Not paginating — default returns only 100 transactions."]
+examples = ['{"access_token": "access-sandbox-xxxx", "start_date": "2026-01-01", "end_date": "2026-01-31"}']
+related = ["plaid.transactions_sync"]
+
+[provides.operations."plaid.transactions_sync"]
+description = "Incrementally sync transactions using a cursor"
+capability = "plaid.transactions.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."plaid.transactions_sync".input_schema]
+required = ["access_token"]
+type = "object"
+
+[provides.operations."plaid.transactions_sync".input_schema.properties.access_token]
+type = "string"
+
+[provides.operations."plaid.transactions_sync".input_schema.properties.count]
+description = "Number of transactions per page (max 500)"
+maximum = 500
+minimum = 1
+type = "integer"
+
+[provides.operations."plaid.transactions_sync".input_schema.properties.cursor]
+description = "Cursor from previous sync response (omit for initial sync)"
+type = "string"
+
+[provides.operations."plaid.transactions_sync".output_schema]
+required = [
+    "added",
+    "modified",
+    "removed",
+    "next_cursor",
+    "has_more",
+]
+type = "object"
+
+[provides.operations."plaid.transactions_sync".output_schema.properties.added]
+type = "array"
+
+[provides.operations."plaid.transactions_sync".output_schema.properties.has_more]
+type = "boolean"
+
+[provides.operations."plaid.transactions_sync".output_schema.properties.modified]
+type = "array"
+
+[provides.operations."plaid.transactions_sync".output_schema.properties.next_cursor]
+type = "string"
+
+[provides.operations."plaid.transactions_sync".output_schema.properties.removed]
+type = "array"
+
+[provides.operations."plaid.transactions_sync".network_constraints]
+host_allow = [
+    "production.plaid.com",
+    "sandbox.plaid.com",
+    "development.plaid.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."plaid.transactions_sync".ai_hints]
+when_to_use = "Incrementally sync transactions — returns added, modified, and removed since last cursor. Preferred over transactions_get."
+common_mistakes = [
+    "Not persisting the cursor between syncs.",
+    "Not looping until has_more is false.",
+]
+examples = ['{"access_token": "access-sandbox-xxxx", "cursor": "", "count": 100}']
+related = ["plaid.transactions_get"]
+
+[event_caps]
+streaming = true
+replay = false
+min_buffer_events = 100
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "plaid.link"
+requests = 30
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "plaid.accounts.read"
+requests = 120
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "plaid.transactions.read"
+requests = 60
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "plaid.identity.read"
+requests = 30
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "plaid.auth.read"
+requests = 30
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "plaid.investments.read"
+requests = 60
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "plaid.liabilities.read"
+requests = 60
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[rate_limits.operation_pools]
+"plaid.link_token_create" = ["plaid.link"]
+"plaid.identity_get" = ["plaid.identity.read"]
+"plaid.accounts_get" = ["plaid.accounts.read"]
+"plaid.auth_get" = ["plaid.auth.read"]
+"plaid.accounts_balance_get" = ["plaid.accounts.read"]
+"plaid.token_exchange" = ["plaid.link"]
+"plaid.investments_holdings_get" = ["plaid.investments.read"]
+"plaid.transactions_get" = ["plaid.transactions.read"]
+"plaid.liabilities_get" = ["plaid.liabilities.read"]
+"plaid.transactions_sync" = ["plaid.transactions.read"]

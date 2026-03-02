@@ -1,0 +1,375 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:28b8503dbae1cfed51876dc24d1daeae578e071f5285e26e2c234dbd5eb5d469"
+
+[connector]
+id = "fcp.box"
+name = "Box Connector"
+version = "0.1.0"
+description = "FCP connector for Box cloud storage (files, folders, sharing)"
+archetypes = [
+    "knowledge",
+    "storage",
+]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores OAuth2 access and refresh tokens."
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = [
+    "z:public",
+    "z:community",
+]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+]
+optional = ["media.download"]
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "media.upload",
+]
+
+[provides.operations."box.files.delete"]
+description = "Delete a file from Box"
+capability = "box.files.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+
+[provides.operations."box.files.delete".input_schema]
+required = ["file_id"]
+type = "object"
+
+[provides.operations."box.files.delete".input_schema.properties.file_id]
+description = "Box file identifier to delete"
+type = "string"
+
+[provides.operations."box.files.delete".output_schema]
+required = []
+type = "object"
+
+[provides.operations."box.files.delete".network_constraints]
+host_allow = [
+    "api.box.com",
+    "upload.box.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."box.files.delete".ai_hints]
+when_to_use = "Permanently delete a file from Box."
+common_mistakes = []
+examples = ['{"file_id": "123456789"}']
+related = [
+    "box.files.get",
+    "box.folders.list",
+]
+
+[provides.operations."box.files.get"]
+description = "Get file metadata from Box"
+capability = "box.files.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."box.files.get".input_schema]
+required = ["file_id"]
+type = "object"
+
+[provides.operations."box.files.get".input_schema.properties.file_id]
+description = "Box file identifier"
+type = "string"
+
+[provides.operations."box.files.get".output_schema]
+required = [
+    "id",
+    "name",
+]
+type = "object"
+
+[provides.operations."box.files.get".output_schema.properties.id]
+type = "string"
+
+[provides.operations."box.files.get".output_schema.properties.name]
+type = "string"
+
+[provides.operations."box.files.get".network_constraints]
+host_allow = [
+    "api.box.com",
+    "upload.box.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."box.files.get".ai_hints]
+when_to_use = "Retrieve metadata for a specific file in Box."
+common_mistakes = []
+examples = ['{"file_id": "123456789"}']
+related = [
+    "box.folders.list",
+    "box.files.upload",
+    "box.files.delete",
+]
+
+[provides.operations."box.files.upload"]
+description = "Upload a file to Box"
+capability = "box.files.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."box.files.upload".input_schema]
+required = [
+    "folder_id",
+    "name",
+]
+type = "object"
+
+[provides.operations."box.files.upload".input_schema.properties.folder_id]
+description = "Target folder ID for the upload"
+type = "string"
+
+[provides.operations."box.files.upload".input_schema.properties.name]
+description = "Name for the uploaded file"
+type = "string"
+
+[provides.operations."box.files.upload".output_schema]
+required = ["id"]
+type = "object"
+
+[provides.operations."box.files.upload".output_schema.properties.id]
+type = "string"
+
+[provides.operations."box.files.upload".network_constraints]
+host_allow = [
+    "api.box.com",
+    "upload.box.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."box.files.upload".ai_hints]
+when_to_use = "Upload a new file to a Box folder."
+common_mistakes = []
+examples = ['{"folder_id": "0", "name": "report.pdf"}']
+related = [
+    "box.folders.list",
+    "box.files.get",
+]
+
+[provides.operations."box.folders.list"]
+description = "List contents of a Box folder"
+capability = "box.folders.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."box.folders.list".input_schema]
+required = ["folder_id"]
+type = "object"
+
+[provides.operations."box.folders.list".input_schema.properties.folder_id]
+description = "Folder ID (0 for root)"
+type = "string"
+
+[provides.operations."box.folders.list".output_schema]
+required = ["entries"]
+type = "object"
+
+[provides.operations."box.folders.list".output_schema.properties.entries]
+type = "array"
+
+[provides.operations."box.folders.list".network_constraints]
+host_allow = [
+    "api.box.com",
+    "upload.box.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."box.folders.list".ai_hints]
+when_to_use = "List contents of a Box folder."
+common_mistakes = []
+examples = ['{"folder_id": "0"}']
+related = [
+    "box.files.get",
+    "box.files.upload",
+]
+
+[provides.operations."box.sharing.list"]
+description = "List sharing collaborations for a Box file"
+capability = "box.sharing.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."box.sharing.list".input_schema]
+required = ["file_id"]
+type = "object"
+
+[provides.operations."box.sharing.list".input_schema.properties.file_id]
+description = "Box file identifier"
+type = "string"
+
+[provides.operations."box.sharing.list".output_schema]
+required = ["entries"]
+type = "object"
+
+[provides.operations."box.sharing.list".output_schema.properties.entries]
+type = "array"
+
+[provides.operations."box.sharing.list".network_constraints]
+host_allow = [
+    "api.box.com",
+    "upload.box.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."box.sharing.list".ai_hints]
+when_to_use = "List sharing collaborations for a Box file."
+common_mistakes = []
+examples = ['{"file_id": "123456789"}']
+related = [
+    "box.files.get",
+    "box.folders.list",
+]
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "box.folders.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "box.files.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "box.files.write"
+requests = 50
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "box.sharing.read"
+requests = 100
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[rate_limits.operation_pools]
+"box.sharing.list" = ["box.sharing.read"]
+"box.files.upload" = ["box.files.write"]
+"box.files.get" = ["box.files.read"]
+"box.files.delete" = ["box.files.write"]
+"box.folders.list" = ["box.folders.read"]

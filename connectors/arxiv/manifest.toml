@@ -1,0 +1,935 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:01863eda5449fb8338e29e5e47aa2d8757646406ed80167c2b998b05a00ef639"
+
+[connector]
+id = "fcp.arxiv"
+name = "arXiv Connector"
+version = "0.1.0"
+description = "FCP connector for arXiv (paper search, metadata, PDF access, citation graph, author info, category classification, new paper monitoring)"
+archetypes = [
+    "knowledge",
+    "operational",
+    "streaming",
+]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores monitor cursors for new-paper polling, bounded metadata cache (max 50 MB), and last-seen paper timestamps per category."
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = [
+    "z:work",
+    "z:private",
+]
+forbidden = [
+    "z:public",
+    "z:community",
+]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+    "media.download",
+]
+optional = []
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "media.upload",
+]
+
+[provides.operations."arxiv.download_pdf"]
+description = "Download a paper's PDF content"
+capability = "arxiv.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."arxiv.download_pdf".input_schema]
+required = ["arxiv_id"]
+type = "object"
+
+[provides.operations."arxiv.download_pdf".input_schema.properties.arxiv_id]
+description = "arXiv paper ID"
+type = "string"
+
+[provides.operations."arxiv.download_pdf".output_schema]
+required = ["content"]
+type = "object"
+
+[provides.operations."arxiv.download_pdf".output_schema.properties.content]
+description = "PDF content (base64-encoded)"
+type = "string"
+
+[provides.operations."arxiv.download_pdf".output_schema.properties.size_bytes]
+type = "integer"
+
+[provides.operations."arxiv.download_pdf".network_constraints]
+host_allow = [
+    "export.arxiv.org",
+    "arxiv.org",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 30000
+total_timeout_ms = 120000
+max_response_bytes = 52428800
+
+[provides.operations."arxiv.download_pdf".ai_hints]
+when_to_use = "Download the full PDF of a paper for text extraction or analysis."
+common_mistakes = [
+    "Downloading many PDFs in rapid succession (respect arXiv rate limits).",
+    "Not checking paper size before download.",
+]
+examples = ['{"arxiv_id": "1706.03762"}']
+related = [
+    "arxiv.get_paper",
+    "arxiv.extract_references",
+]
+
+[provides.operations."arxiv.extract_references"]
+description = "Extract and parse reference entries from a paper's content"
+capability = "arxiv.citations"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."arxiv.extract_references".input_schema]
+required = ["arxiv_id"]
+type = "object"
+
+[provides.operations."arxiv.extract_references".input_schema.properties.arxiv_id]
+type = "string"
+
+[provides.operations."arxiv.extract_references".output_schema]
+required = ["references"]
+type = "object"
+
+[provides.operations."arxiv.extract_references".output_schema.properties.references]
+description = "Parsed reference entries with title, authors, year, DOI where available"
+type = "array"
+
+[provides.operations."arxiv.extract_references".network_constraints]
+host_allow = [
+    "export.arxiv.org",
+    "arxiv.org",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 30000
+total_timeout_ms = 120000
+max_response_bytes = 52428800
+
+[provides.operations."arxiv.extract_references".ai_hints]
+when_to_use = "Parse the reference section of a paper to identify cited works."
+common_mistakes = []
+examples = ['{"arxiv_id": "1706.03762"}']
+related = [
+    "arxiv.get_references",
+    "arxiv.download_pdf",
+]
+
+[provides.operations."arxiv.get_author"]
+description = "Get author information and publication history"
+capability = "arxiv.authors"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."arxiv.get_author".input_schema]
+required = ["author_name"]
+type = "object"
+
+[provides.operations."arxiv.get_author".input_schema.properties.author_name]
+description = "Author name to search for"
+type = "string"
+
+[provides.operations."arxiv.get_author".input_schema.properties.max_papers]
+description = "Max papers to include in publication list"
+maximum = 200
+minimum = 1
+type = "integer"
+
+[provides.operations."arxiv.get_author".output_schema]
+required = [
+    "author",
+    "papers",
+]
+type = "object"
+
+[provides.operations."arxiv.get_author".output_schema.properties.author]
+type = "object"
+
+[provides.operations."arxiv.get_author".output_schema.properties.papers]
+type = "array"
+
+[provides.operations."arxiv.get_author".network_constraints]
+host_allow = [
+    "export.arxiv.org",
+    "arxiv.org",
+    "api.semanticscholar.org",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."arxiv.get_author".ai_hints]
+when_to_use = "Look up an author's profile and publication history."
+common_mistakes = ["Author names are not unique — use additional filters (categories, date ranges) to disambiguate."]
+examples = ['{"author_name": "Ashish Vaswani", "max_papers": 50}']
+related = ["arxiv.search_papers"]
+
+[provides.operations."arxiv.get_citations"]
+description = "Get papers that cite a given paper (cited-by)"
+capability = "arxiv.citations"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."arxiv.get_citations".input_schema]
+required = ["arxiv_id"]
+type = "object"
+
+[provides.operations."arxiv.get_citations".input_schema.properties.arxiv_id]
+description = "arXiv paper ID"
+type = "string"
+
+[provides.operations."arxiv.get_citations".input_schema.properties.max_results]
+description = "Max citing papers to return"
+maximum = 500
+minimum = 1
+type = "integer"
+
+[provides.operations."arxiv.get_citations".output_schema]
+required = [
+    "citations",
+    "total",
+]
+type = "object"
+
+[provides.operations."arxiv.get_citations".output_schema.properties.citations]
+type = "array"
+
+[provides.operations."arxiv.get_citations".output_schema.properties.total]
+type = "integer"
+
+[provides.operations."arxiv.get_citations".network_constraints]
+host_allow = [
+    "export.arxiv.org",
+    "arxiv.org",
+    "api.semanticscholar.org",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."arxiv.get_citations".ai_hints]
+when_to_use = "Find papers that cite a given paper (forward citation graph)."
+common_mistakes = ["Expecting real-time citation counts — there is a delay in indexing."]
+examples = ['{"arxiv_id": "1706.03762", "max_results": 50}']
+related = [
+    "arxiv.get_references",
+    "arxiv.get_paper",
+]
+
+[provides.operations."arxiv.get_full_text"]
+description = "Get extracted plain text from a paper (from TeX source or PDF)"
+capability = "arxiv.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."arxiv.get_full_text".input_schema]
+required = ["arxiv_id"]
+type = "object"
+
+[provides.operations."arxiv.get_full_text".input_schema.properties.arxiv_id]
+description = "arXiv paper ID"
+type = "string"
+
+[provides.operations."arxiv.get_full_text".input_schema.properties.format]
+description = "Preferred format: text, html (default: text)"
+type = "string"
+
+[provides.operations."arxiv.get_full_text".output_schema]
+required = ["text"]
+type = "object"
+
+[provides.operations."arxiv.get_full_text".output_schema.properties.text]
+type = "string"
+
+[provides.operations."arxiv.get_full_text".network_constraints]
+host_allow = [
+    "export.arxiv.org",
+    "arxiv.org",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 30000
+total_timeout_ms = 120000
+max_response_bytes = 52428800
+
+[provides.operations."arxiv.get_full_text".ai_hints]
+when_to_use = "Get the text content of a paper without downloading the raw PDF."
+common_mistakes = ["Expecting perfect formatting — TeX-to-text conversion is lossy."]
+examples = ['{"arxiv_id": "1706.03762"}']
+related = [
+    "arxiv.download_pdf",
+    "arxiv.get_paper",
+]
+
+[provides.operations."arxiv.get_new_papers"]
+description = "Get recently submitted papers in a category"
+capability = "arxiv.categories"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."arxiv.get_new_papers".input_schema]
+required = ["category"]
+type = "object"
+
+[provides.operations."arxiv.get_new_papers".input_schema.properties.category]
+description = "arXiv category (e.g., 'cs.AI', 'math.CO')"
+type = "string"
+
+[provides.operations."arxiv.get_new_papers".input_schema.properties.max_results]
+description = "Max papers to return (default 25)"
+maximum = 100
+minimum = 1
+type = "integer"
+
+[provides.operations."arxiv.get_new_papers".output_schema]
+required = ["papers"]
+type = "object"
+
+[provides.operations."arxiv.get_new_papers".output_schema.properties.papers]
+type = "array"
+
+[provides.operations."arxiv.get_new_papers".network_constraints]
+host_allow = [
+    "export.arxiv.org",
+    "arxiv.org",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."arxiv.get_new_papers".ai_hints]
+when_to_use = "Browse the latest papers in a category — like reading the daily arXiv listings."
+common_mistakes = []
+examples = ['{"category": "cs.AI", "max_results": 25}']
+related = [
+    "arxiv.list_categories",
+    "arxiv.monitor_category",
+]
+
+[provides.operations."arxiv.get_paper"]
+description = "Get detailed metadata for a paper by arXiv ID"
+capability = "arxiv.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."arxiv.get_paper".input_schema]
+required = ["arxiv_id"]
+type = "object"
+
+[provides.operations."arxiv.get_paper".input_schema.properties.arxiv_id]
+description = "arXiv paper ID (e.g., '2301.08745' or '2301.08745v2')"
+type = "string"
+
+[provides.operations."arxiv.get_paper".output_schema]
+required = ["paper"]
+type = "object"
+
+[provides.operations."arxiv.get_paper".output_schema.properties.paper]
+description = "Paper metadata: title, authors, abstract, categories, dates, DOI, comments"
+type = "object"
+
+[provides.operations."arxiv.get_paper".network_constraints]
+host_allow = [
+    "export.arxiv.org",
+    "arxiv.org",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."arxiv.get_paper".ai_hints]
+when_to_use = "Get full metadata for a specific paper by its arXiv ID."
+common_mistakes = ["Using the full URL instead of just the ID (use '2301.08745', not 'https://arxiv.org/abs/2301.08745')."]
+examples = [
+    '{"arxiv_id": "2301.08745"}',
+    '{"arxiv_id": "1706.03762v7"}',
+]
+related = [
+    "arxiv.download_pdf",
+    "arxiv.get_references",
+    "arxiv.get_citations",
+]
+
+[provides.operations."arxiv.get_references"]
+description = "Get papers referenced by a given paper"
+capability = "arxiv.citations"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."arxiv.get_references".input_schema]
+required = ["arxiv_id"]
+type = "object"
+
+[provides.operations."arxiv.get_references".input_schema.properties.arxiv_id]
+description = "arXiv paper ID"
+type = "string"
+
+[provides.operations."arxiv.get_references".output_schema]
+required = ["references"]
+type = "object"
+
+[provides.operations."arxiv.get_references".output_schema.properties.references]
+type = "array"
+
+[provides.operations."arxiv.get_references".network_constraints]
+host_allow = [
+    "export.arxiv.org",
+    "arxiv.org",
+    "api.semanticscholar.org",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."arxiv.get_references".ai_hints]
+when_to_use = "Get the bibliography of a paper (backward citation graph)."
+common_mistakes = []
+examples = ['{"arxiv_id": "1706.03762"}']
+related = [
+    "arxiv.get_citations",
+    "arxiv.get_paper",
+]
+
+[provides.operations."arxiv.list_categories"]
+description = "List arXiv categories and their descriptions"
+capability = "arxiv.categories"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."arxiv.list_categories".input_schema]
+required = []
+type = "object"
+
+[provides.operations."arxiv.list_categories".input_schema.properties.group]
+description = "Filter by group (e.g., 'cs', 'math', 'physics')"
+type = "string"
+
+[provides.operations."arxiv.list_categories".output_schema]
+required = ["categories"]
+type = "object"
+
+[provides.operations."arxiv.list_categories".output_schema.properties.categories]
+type = "array"
+
+[provides.operations."arxiv.list_categories".network_constraints]
+host_allow = [
+    "export.arxiv.org",
+    "arxiv.org",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."arxiv.list_categories".ai_hints]
+when_to_use = "List available arXiv categories to help users refine searches."
+common_mistakes = []
+examples = [
+    "{}",
+    '{"group": "cs"}',
+]
+related = [
+    "arxiv.get_new_papers",
+    "arxiv.search_papers",
+]
+
+[provides.operations."arxiv.monitor_category"]
+description = "Stream new paper notifications for monitored categories (polling-backed)"
+capability = "arxiv.monitor"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."arxiv.monitor_category".input_schema]
+required = ["categories"]
+type = "object"
+
+[provides.operations."arxiv.monitor_category".input_schema.properties.categories]
+description = "List of arXiv categories to monitor"
+type = "array"
+
+[provides.operations."arxiv.monitor_category".input_schema.properties.keyword_filter]
+description = "Optional keyword filter applied to titles and abstracts"
+type = "string"
+
+[provides.operations."arxiv.monitor_category".input_schema.properties.since_ts]
+description = "ISO 8601 timestamp to resume from"
+type = "string"
+
+[provides.operations."arxiv.monitor_category".output_schema]
+required = ["papers"]
+type = "object"
+
+[provides.operations."arxiv.monitor_category".output_schema.properties.cursor_ts]
+description = "Cursor timestamp for next poll"
+type = "string"
+
+[provides.operations."arxiv.monitor_category".output_schema.properties.papers]
+type = "array"
+
+[provides.operations."arxiv.monitor_category".network_constraints]
+host_allow = [
+    "export.arxiv.org",
+    "arxiv.org",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."arxiv.monitor_category".ai_hints]
+when_to_use = "Set up a monitor for new papers in specific categories. Polling-backed, not real-time."
+common_mistakes = [
+    "Monitoring too many categories simultaneously (increases API load).",
+    "Not persisting cursor_ts for resumption after restarts.",
+]
+examples = ['{"categories": ["cs.AI", "cs.CL"], "keyword_filter": "transformer"}']
+related = [
+    "arxiv.get_new_papers",
+    "arxiv.list_categories",
+]
+
+[provides.operations."arxiv.monitor_query"]
+description = "Stream new papers matching a saved search query"
+capability = "arxiv.monitor"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."arxiv.monitor_query".input_schema]
+required = ["query"]
+type = "object"
+
+[provides.operations."arxiv.monitor_query".input_schema.properties.query]
+description = "arXiv search query to monitor"
+type = "string"
+
+[provides.operations."arxiv.monitor_query".input_schema.properties.since_ts]
+description = "ISO 8601 timestamp to resume from"
+type = "string"
+
+[provides.operations."arxiv.monitor_query".output_schema]
+required = ["papers"]
+type = "object"
+
+[provides.operations."arxiv.monitor_query".output_schema.properties.cursor_ts]
+type = "string"
+
+[provides.operations."arxiv.monitor_query".output_schema.properties.papers]
+type = "array"
+
+[provides.operations."arxiv.monitor_query".network_constraints]
+host_allow = [
+    "export.arxiv.org",
+    "arxiv.org",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."arxiv.monitor_query".ai_hints]
+when_to_use = "Monitor for new papers matching a specific search query."
+common_mistakes = []
+examples = ['{"query": "ti:large language model AND cat:cs.CL"}']
+related = [
+    "arxiv.monitor_category",
+    "arxiv.search_papers",
+]
+
+[provides.operations."arxiv.search_papers"]
+description = "Search arXiv for papers by keyword, title, author, or abstract"
+capability = "arxiv.search"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."arxiv.search_papers".input_schema]
+required = ["query"]
+type = "object"
+
+[provides.operations."arxiv.search_papers".input_schema.properties.max_results]
+description = "Maximum results to return (default 10, max 100)"
+maximum = 100
+minimum = 1
+type = "integer"
+
+[provides.operations."arxiv.search_papers".input_schema.properties.query]
+description = "Search query (supports arXiv query syntax: ti:, au:, abs:, cat:, all:)"
+type = "string"
+
+[provides.operations."arxiv.search_papers".input_schema.properties.sort_by]
+description = "Sort order: relevance, lastUpdatedDate, submittedDate"
+type = "string"
+
+[provides.operations."arxiv.search_papers".input_schema.properties.sort_order]
+description = "ascending or descending"
+type = "string"
+
+[provides.operations."arxiv.search_papers".input_schema.properties.start]
+description = "Pagination offset"
+type = "integer"
+
+[provides.operations."arxiv.search_papers".output_schema]
+required = [
+    "papers",
+    "total_results",
+]
+type = "object"
+
+[provides.operations."arxiv.search_papers".output_schema.properties.papers]
+type = "array"
+
+[provides.operations."arxiv.search_papers".output_schema.properties.total_results]
+type = "integer"
+
+[provides.operations."arxiv.search_papers".network_constraints]
+host_allow = [
+    "export.arxiv.org",
+    "arxiv.org",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."arxiv.search_papers".ai_hints]
+when_to_use = "Search for papers on arXiv. Use query syntax for targeted searches (ti: for title, au: for author, cat: for category)."
+common_mistakes = [
+    "Searching with overly broad queries that return too many results.",
+    "Not using arXiv query syntax for structured searches (e.g., au:Einstein AND cat:gr-qc).",
+]
+examples = [
+    '{"query": "ti:attention mechanism transformer", "max_results": 20, "sort_by": "relevance"}',
+    '{"query": "au:Vaswani AND cat:cs.CL", "max_results": 10}',
+]
+related = [
+    "arxiv.get_paper",
+    "arxiv.search_semantic",
+]
+
+[provides.operations."arxiv.search_semantic"]
+description = "Semantic search for papers using natural language queries"
+capability = "arxiv.search"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."arxiv.search_semantic".input_schema]
+required = ["query"]
+type = "object"
+
+[provides.operations."arxiv.search_semantic".input_schema.properties.categories]
+description = "Restrict to arXiv categories (e.g., ['cs.AI', 'cs.CL'])"
+type = "array"
+
+[provides.operations."arxiv.search_semantic".input_schema.properties.max_results]
+description = "Maximum results (default 10)"
+maximum = 50
+minimum = 1
+type = "integer"
+
+[provides.operations."arxiv.search_semantic".input_schema.properties.query]
+description = "Natural language search query"
+type = "string"
+
+[provides.operations."arxiv.search_semantic".output_schema]
+required = ["papers"]
+type = "object"
+
+[provides.operations."arxiv.search_semantic".output_schema.properties.papers]
+type = "array"
+
+[provides.operations."arxiv.search_semantic".network_constraints]
+host_allow = [
+    "export.arxiv.org",
+    "arxiv.org",
+    "api.semanticscholar.org",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."arxiv.search_semantic".ai_hints]
+when_to_use = "Search using natural language descriptions rather than keyword queries."
+common_mistakes = []
+examples = ['{"query": "papers about using graph neural networks for drug discovery", "max_results": 10, "categories": ["cs.LG", "q-bio.QM"]}']
+related = ["arxiv.search_papers"]
+
+[event_caps]
+streaming = true
+replay = false
+min_buffer_events = 200
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "arxiv.search"
+description = "Search operations (arXiv API allows ~1 req/3s)"
+requests = 20
+window_ms = 60000
+burst = 3
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "arxiv.read"
+description = "Paper metadata and content access"
+requests = 20
+window_ms = 60000
+burst = 3
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "arxiv.citations"
+description = "Citation graph operations (may use Semantic Scholar)"
+requests = 100
+window_ms = 300000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "arxiv.authors"
+description = "Author lookup operations"
+requests = 30
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "arxiv.categories"
+description = "Category listing and new paper retrieval"
+requests = 20
+window_ms = 60000
+burst = 3
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "arxiv.monitor"
+description = "Monitor/streaming operations (polling-backed)"
+requests = 10
+window_ms = 60000
+burst = 2
+scope = "instance"
+
+[rate_limits.operation_pools]
+"arxiv.list_categories" = ["arxiv.categories"]
+"arxiv.download_pdf" = ["arxiv.read"]
+"arxiv.get_paper" = ["arxiv.read"]
+"arxiv.get_citations" = ["arxiv.citations"]
+"arxiv.get_references" = ["arxiv.citations"]
+"arxiv.monitor_category" = ["arxiv.monitor"]
+"arxiv.monitor_query" = ["arxiv.monitor"]
+"arxiv.extract_references" = ["arxiv.citations"]
+"arxiv.get_new_papers" = ["arxiv.categories"]
+"arxiv.get_author" = ["arxiv.authors"]
+"arxiv.search_papers" = ["arxiv.search"]
+"arxiv.search_semantic" = ["arxiv.search"]
+"arxiv.get_full_text" = ["arxiv.read"]

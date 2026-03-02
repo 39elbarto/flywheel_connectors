@@ -1,0 +1,518 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:b161c8785ffd21bf97921ca36be3c0b5fdb32d19cac1efd12a27d4fdaf377a0e"
+
+[connector]
+id = "fcp.pinecone"
+name = "Pinecone Connector"
+version = "0.1.0"
+description = "FCP connector for Pinecone vector database — index management, vector CRUD, similarity search"
+archetypes = [
+    "knowledge",
+    "operational",
+]
+format = "wasi"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = [
+    "z:public",
+    "z:community",
+]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+]
+optional = []
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "media.upload",
+    "media.download",
+]
+
+[provides.operations."pinecone.delete"]
+description = "Delete vectors by ID, filter, or delete all in namespace"
+capability = "pinecone.vectors.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."pinecone.delete".input_schema]
+required = ["index_name"]
+type = "object"
+
+[provides.operations."pinecone.delete".input_schema.properties.delete_all]
+default = false
+type = "boolean"
+
+[provides.operations."pinecone.delete".input_schema.properties.filter]
+type = "object"
+
+[provides.operations."pinecone.delete".input_schema.properties.ids]
+type = "array"
+
+[provides.operations."pinecone.delete".input_schema.properties.index_name]
+type = "string"
+
+[provides.operations."pinecone.delete".input_schema.properties.namespace]
+type = "string"
+
+[provides.operations."pinecone.delete".output_schema]
+type = "object"
+
+[provides.operations."pinecone.delete".network_constraints]
+host_allow = ["*.pinecone.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."pinecone.delete".ai_hints]
+when_to_use = "Delete vectors by ID, metadata filter, or clear an entire namespace. Irreversible."
+common_mistakes = ["Setting delete_all=true without specifying namespace — deletes everything."]
+examples = ['{"index_name": "my-index", "ids": ["vec-1", "vec-2"]}']
+related = ["pinecone.upsert"]
+
+[provides.operations."pinecone.describe_index"]
+description = "Get index configuration and statistics"
+capability = "pinecone.indexes.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."pinecone.describe_index".input_schema]
+required = ["index_name"]
+type = "object"
+
+[provides.operations."pinecone.describe_index".input_schema.properties.index_name]
+type = "string"
+
+[provides.operations."pinecone.describe_index".output_schema]
+required = [
+    "name",
+    "dimension",
+    "metric",
+    "status",
+]
+type = "object"
+
+[provides.operations."pinecone.describe_index".output_schema.properties.dimension]
+type = "integer"
+
+[provides.operations."pinecone.describe_index".output_schema.properties.metric]
+type = "string"
+
+[provides.operations."pinecone.describe_index".output_schema.properties.name]
+type = "string"
+
+[provides.operations."pinecone.describe_index".output_schema.properties.status]
+type = "object"
+
+[provides.operations."pinecone.describe_index".network_constraints]
+host_allow = ["*.pinecone.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 15000
+max_response_bytes = 1048576
+
+[provides.operations."pinecone.describe_index".ai_hints]
+when_to_use = "Get details about a specific index: dimension, metric, pod type, replicas."
+common_mistakes = []
+examples = ['{"index_name": "my-index"}']
+related = [
+    "pinecone.list_indexes",
+    "pinecone.describe_index_stats",
+]
+
+[provides.operations."pinecone.describe_index_stats"]
+description = "Get per-namespace vector counts and index fullness"
+capability = "pinecone.indexes.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."pinecone.describe_index_stats".input_schema]
+required = ["index_name"]
+type = "object"
+
+[provides.operations."pinecone.describe_index_stats".input_schema.properties.filter]
+description = "Metadata filter to count matching vectors only"
+type = "object"
+
+[provides.operations."pinecone.describe_index_stats".input_schema.properties.index_name]
+type = "string"
+
+[provides.operations."pinecone.describe_index_stats".output_schema]
+required = [
+    "namespaces",
+    "dimension",
+    "index_fullness",
+    "total_vector_count",
+]
+type = "object"
+
+[provides.operations."pinecone.describe_index_stats".output_schema.properties.dimension]
+type = "integer"
+
+[provides.operations."pinecone.describe_index_stats".output_schema.properties.index_fullness]
+type = "number"
+
+[provides.operations."pinecone.describe_index_stats".output_schema.properties.namespaces]
+type = "object"
+
+[provides.operations."pinecone.describe_index_stats".output_schema.properties.total_vector_count]
+type = "integer"
+
+[provides.operations."pinecone.describe_index_stats".network_constraints]
+host_allow = ["*.pinecone.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 15000
+max_response_bytes = 1048576
+
+[provides.operations."pinecone.describe_index_stats".ai_hints]
+when_to_use = "Get vector counts per namespace and overall index utilization."
+common_mistakes = []
+examples = ['{"index_name": "my-index"}']
+related = ["pinecone.describe_index"]
+
+[provides.operations."pinecone.fetch"]
+description = "Fetch vectors by ID"
+capability = "pinecone.vectors.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."pinecone.fetch".input_schema]
+required = [
+    "index_name",
+    "ids",
+]
+type = "object"
+
+[provides.operations."pinecone.fetch".input_schema.properties.ids]
+type = "array"
+
+[provides.operations."pinecone.fetch".input_schema.properties.index_name]
+type = "string"
+
+[provides.operations."pinecone.fetch".input_schema.properties.namespace]
+type = "string"
+
+[provides.operations."pinecone.fetch".output_schema]
+required = ["vectors"]
+type = "object"
+
+[provides.operations."pinecone.fetch".output_schema.properties.vectors]
+type = "object"
+
+[provides.operations."pinecone.fetch".network_constraints]
+host_allow = ["*.pinecone.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."pinecone.fetch".ai_hints]
+when_to_use = "Retrieve specific vectors by their IDs."
+common_mistakes = ["Fetching too many IDs at once (max 1000 per request)."]
+examples = ['{"index_name": "my-index", "ids": ["vec-1", "vec-2"]}']
+related = ["pinecone.query"]
+
+[provides.operations."pinecone.list_indexes"]
+description = "List all indexes in the project"
+capability = "pinecone.indexes.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."pinecone.list_indexes".input_schema]
+required = []
+type = "object"
+
+[provides.operations."pinecone.list_indexes".output_schema]
+required = ["indexes"]
+type = "object"
+
+[provides.operations."pinecone.list_indexes".output_schema.properties.indexes]
+type = "array"
+
+[provides.operations."pinecone.list_indexes".network_constraints]
+host_allow = ["*.pinecone.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 15000
+max_response_bytes = 1048576
+
+[provides.operations."pinecone.list_indexes".ai_hints]
+when_to_use = "List all Pinecone indexes in the project."
+common_mistakes = []
+examples = ["{}"]
+related = ["pinecone.describe_index"]
+
+[provides.operations."pinecone.query"]
+description = "Query vectors by similarity"
+capability = "pinecone.vectors.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."pinecone.query".input_schema]
+required = [
+    "index_name",
+    "top_k",
+]
+type = "object"
+
+[provides.operations."pinecone.query".input_schema.properties.filter]
+description = "Metadata filter"
+type = "object"
+
+[provides.operations."pinecone.query".input_schema.properties.id]
+description = "Query by vector ID instead of vector values"
+type = "string"
+
+[provides.operations."pinecone.query".input_schema.properties.include_metadata]
+default = true
+type = "boolean"
+
+[provides.operations."pinecone.query".input_schema.properties.include_values]
+default = false
+type = "boolean"
+
+[provides.operations."pinecone.query".input_schema.properties.index_name]
+type = "string"
+
+[provides.operations."pinecone.query".input_schema.properties.namespace]
+type = "string"
+
+[provides.operations."pinecone.query".input_schema.properties.top_k]
+description = "Number of results"
+type = "integer"
+
+[provides.operations."pinecone.query".input_schema.properties.vector]
+description = "Query vector"
+type = "array"
+
+[provides.operations."pinecone.query".output_schema]
+required = ["matches"]
+type = "object"
+
+[provides.operations."pinecone.query".output_schema.properties.matches]
+type = "array"
+
+[provides.operations."pinecone.query".output_schema.properties.namespace]
+type = "string"
+
+[provides.operations."pinecone.query".network_constraints]
+host_allow = ["*.pinecone.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."pinecone.query".ai_hints]
+when_to_use = "Find similar vectors by similarity search. Provide either 'vector' or 'id'."
+common_mistakes = [
+    "Not specifying namespace when index has multiple namespaces.",
+    "Setting include_values=true when only metadata is needed (increases response size).",
+]
+examples = ['{"index_name": "my-index", "vector": [0.1, 0.2, 0.3], "top_k": 10, "include_metadata": true}']
+related = [
+    "pinecone.fetch",
+    "pinecone.upsert",
+]
+
+[provides.operations."pinecone.upsert"]
+description = "Upsert vectors (insert or update)"
+capability = "pinecone.vectors.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."pinecone.upsert".input_schema]
+required = [
+    "index_name",
+    "vectors",
+]
+type = "object"
+
+[provides.operations."pinecone.upsert".input_schema.properties.index_name]
+type = "string"
+
+[provides.operations."pinecone.upsert".input_schema.properties.namespace]
+type = "string"
+
+[provides.operations."pinecone.upsert".input_schema.properties.vectors]
+description = "Array of {id, values, metadata} objects"
+type = "array"
+
+[provides.operations."pinecone.upsert".output_schema]
+required = ["upserted_count"]
+type = "object"
+
+[provides.operations."pinecone.upsert".output_schema.properties.upserted_count]
+type = "integer"
+
+[provides.operations."pinecone.upsert".network_constraints]
+host_allow = ["*.pinecone.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 1048576
+
+[provides.operations."pinecone.upsert".ai_hints]
+when_to_use = "Insert new vectors or update existing ones. Batch up to 100 vectors per request."
+common_mistakes = ["Exceeding max batch size (100 vectors) or max request size (2MB)."]
+examples = ['{"index_name": "my-index", "vectors": [{"id": "vec-1", "values": [0.1, 0.2, 0.3], "metadata": {"text": "hello"}}]}']
+related = [
+    "pinecone.query",
+    "pinecone.delete",
+]
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "pinecone.indexes.read"
+requests = 60
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "pinecone.vectors.read"
+requests = 300
+window_ms = 60000
+burst = 50
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "pinecone.vectors.write"
+requests = 100
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[rate_limits.operation_pools]
+"pinecone.describe_index_stats" = ["pinecone.indexes.read"]
+"pinecone.list_indexes" = ["pinecone.indexes.read"]
+"pinecone.delete" = ["pinecone.vectors.write"]
+"pinecone.query" = ["pinecone.vectors.read"]
+"pinecone.fetch" = ["pinecone.vectors.read"]
+"pinecone.upsert" = ["pinecone.vectors.write"]
+"pinecone.describe_index" = ["pinecone.indexes.read"]

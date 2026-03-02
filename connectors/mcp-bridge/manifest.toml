@@ -1,0 +1,357 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:d5cd871eaaa4e8ca1200fbdf920b252d91c1ba2475911f8c7a489707b481cd9a"
+
+[connector]
+id = "fcp.mcp-bridge"
+name = "MCP Bridge Connector"
+version = "0.1.0"
+description = "FCP connector bridging to Model Context Protocol servers (tools, resources, prompts)"
+archetypes = [
+    "knowledge",
+    "operational",
+]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores MCP server endpoint and transport config."
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = [
+    "z:public",
+    "z:community",
+]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "storage.state",
+]
+optional = ["network.tls.sni"]
+forbidden = [
+    "system.exec",
+    "media.upload",
+    "media.download",
+]
+
+[provides.operations."mcp.prompts.list"]
+description = "List available MCP prompts"
+capability = "mcp.prompts.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."mcp.prompts.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."mcp.prompts.list".output_schema]
+required = ["prompts"]
+type = "object"
+
+[provides.operations."mcp.prompts.list".output_schema.properties.prompts]
+type = "array"
+
+[provides.operations."mcp.prompts.list".network_constraints]
+host_allow = ["localhost.localdomain"]
+port_allow = [
+    3000,
+    8080,
+    8443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 15000
+max_response_bytes = 10485760
+
+[provides.operations."mcp.prompts.list".ai_hints]
+when_to_use = "List prompts exposed by an MCP server."
+common_mistakes = []
+examples = ["{}"]
+related = [
+    "mcp.tools.list",
+    "mcp.resources.list",
+]
+
+[provides.operations."mcp.resources.list"]
+description = "List available MCP resources"
+capability = "mcp.resources.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."mcp.resources.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."mcp.resources.list".output_schema]
+required = ["resources"]
+type = "object"
+
+[provides.operations."mcp.resources.list".output_schema.properties.resources]
+type = "array"
+
+[provides.operations."mcp.resources.list".network_constraints]
+host_allow = ["localhost.localdomain"]
+port_allow = [
+    3000,
+    8080,
+    8443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 15000
+max_response_bytes = 10485760
+
+[provides.operations."mcp.resources.list".ai_hints]
+when_to_use = "List resources exposed by an MCP server."
+common_mistakes = []
+examples = ["{}"]
+related = [
+    "mcp.resources.read",
+    "mcp.tools.list",
+]
+
+[provides.operations."mcp.resources.read"]
+description = "Read an MCP resource"
+capability = "mcp.resources.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."mcp.resources.read".input_schema]
+required = ["uri"]
+type = "object"
+
+[provides.operations."mcp.resources.read".input_schema.properties.uri]
+description = "Resource URI"
+type = "string"
+
+[provides.operations."mcp.resources.read".output_schema]
+required = ["contents"]
+type = "object"
+
+[provides.operations."mcp.resources.read".output_schema.properties.contents]
+type = "array"
+
+[provides.operations."mcp.resources.read".network_constraints]
+host_allow = ["localhost.localdomain"]
+port_allow = [
+    3000,
+    8080,
+    8443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 52428800
+
+[provides.operations."mcp.resources.read".ai_hints]
+when_to_use = "Read content from an MCP resource by URI."
+common_mistakes = []
+examples = ['{"uri": "file:///tmp/data.txt"}']
+related = ["mcp.resources.list"]
+
+[provides.operations."mcp.tools.call"]
+description = "Invoke an MCP tool"
+capability = "mcp.tools.write"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."mcp.tools.call".input_schema]
+required = [
+    "name",
+    "arguments",
+]
+type = "object"
+
+[provides.operations."mcp.tools.call".input_schema.properties.arguments]
+description = "Tool arguments"
+type = "object"
+
+[provides.operations."mcp.tools.call".input_schema.properties.name]
+description = "Tool name"
+type = "string"
+
+[provides.operations."mcp.tools.call".output_schema]
+required = ["content"]
+type = "object"
+
+[provides.operations."mcp.tools.call".output_schema.properties.content]
+type = "array"
+
+[provides.operations."mcp.tools.call".network_constraints]
+host_allow = ["localhost.localdomain"]
+port_allow = [
+    3000,
+    8080,
+    8443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 120000
+max_response_bytes = 52428800
+
+[provides.operations."mcp.tools.call".ai_hints]
+when_to_use = "Invoke an MCP tool by name with arguments."
+common_mistakes = ["Passing arguments as a string instead of an object."]
+examples = ['{"name": "read_file", "arguments": {"path": "/tmp/data.txt"}}']
+related = ["mcp.tools.list"]
+
+[provides.operations."mcp.tools.list"]
+description = "List available MCP tools"
+capability = "mcp.tools.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."mcp.tools.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."mcp.tools.list".output_schema]
+required = ["tools"]
+type = "object"
+
+[provides.operations."mcp.tools.list".output_schema.properties.tools]
+type = "array"
+
+[provides.operations."mcp.tools.list".network_constraints]
+host_allow = ["localhost.localdomain"]
+port_allow = [
+    3000,
+    8080,
+    8443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 15000
+max_response_bytes = 10485760
+
+[provides.operations."mcp.tools.list".ai_hints]
+when_to_use = "List tools exposed by a connected MCP server."
+common_mistakes = []
+examples = ["{}"]
+related = [
+    "mcp.tools.call",
+    "mcp.resources.list",
+]
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "mcp.tools.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "mcp.tools.write"
+requests = 100
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "mcp.resources.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "mcp.prompts.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[rate_limits.operation_pools]
+"mcp.resources.list" = ["mcp.resources.read"]
+"mcp.resources.read" = ["mcp.resources.read"]
+"mcp.tools.list" = ["mcp.tools.read"]
+"mcp.prompts.list" = ["mcp.prompts.read"]
+"mcp.tools.call" = ["mcp.tools.write"]

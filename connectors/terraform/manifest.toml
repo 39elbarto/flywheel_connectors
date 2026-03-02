@@ -1,0 +1,919 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:fa960fd19fa233b84aabd9a5cad509fa8c1e5a5135336f22bc3c8b6559067527"
+
+[connector]
+id = "fcp.terraform"
+name = "Terraform Connector"
+version = "0.1.0"
+description = "FCP connector for Terraform infrastructure-as-code (plan, apply with plan-hash binding, state inspection, drift detection, resource import, module management)"
+archetypes = ["operational"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores plan artifact references with hashes, drift checkpoint timestamps, last-known state serial numbers, and apply approval tokens."
+
+[zones]
+home = "z:infra"
+allowed_sources = [
+    "z:owner",
+    "z:infra",
+]
+allowed_targets = ["z:infra"]
+forbidden = [
+    "z:public",
+    "z:community",
+    "z:work",
+]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+]
+optional = []
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "media.download",
+    "media.upload",
+]
+
+[provides.operations."terraform.apply"]
+description = "Apply a previously generated plan to modify real infrastructure (requires plan_hash binding)"
+capability = "terraform.apply"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "best_effort"
+
+[provides.operations."terraform.apply".input_schema]
+required = [
+    "working_dir",
+    "plan_hash",
+]
+type = "object"
+
+[provides.operations."terraform.apply".input_schema.properties.plan_file]
+description = "Reference to the saved plan file"
+type = "string"
+
+[provides.operations."terraform.apply".input_schema.properties.plan_hash]
+description = "BLAKE3 hash of the plan to apply (must match a previously generated plan)"
+type = "string"
+
+[provides.operations."terraform.apply".input_schema.properties.working_dir]
+description = "Path to Terraform configuration directory"
+type = "string"
+
+[provides.operations."terraform.apply".output_schema]
+required = [
+    "applied",
+    "summary",
+]
+type = "object"
+
+[provides.operations."terraform.apply".output_schema.properties.applied]
+description = "Whether the apply succeeded"
+type = "boolean"
+
+[provides.operations."terraform.apply".output_schema.properties.outputs]
+description = "Terraform outputs after apply"
+type = "object"
+
+[provides.operations."terraform.apply".output_schema.properties.state_serial]
+description = "New state serial number after apply"
+type = "integer"
+
+[provides.operations."terraform.apply".output_schema.properties.summary]
+description = "Summary of applied changes"
+type = "string"
+
+[provides.operations."terraform.apply".network_constraints]
+host_allow = [
+    "registry.terraform.io",
+    "releases.hashicorp.com",
+    "checkpoint-api.hashicorp.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 30000
+total_timeout_ms = 1800000
+max_response_bytes = 52428800
+
+[provides.operations."terraform.apply".ai_hints]
+when_to_use = "Apply a reviewed plan to modify infrastructure. ALWAYS plan first and review changes before calling apply."
+common_mistakes = [
+    "Calling apply without a matching plan_hash (rejected by the connector).",
+    "Applying stale plans — if code or state changed since plan, re-plan first.",
+    "Not checking apply output for partial failures.",
+]
+examples = ['{"working_dir": "/infra/production", "plan_hash": "blake3:abc123...", "plan_file": "tfplan-abc123"}']
+related = [
+    "terraform.plan",
+    "terraform.destroy",
+]
+
+[provides.operations."terraform.destroy"]
+description = "Destroy all resources managed by a Terraform configuration"
+capability = "terraform.apply"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "best_effort"
+
+[provides.operations."terraform.destroy".input_schema]
+required = [
+    "working_dir",
+    "plan_hash",
+]
+type = "object"
+
+[provides.operations."terraform.destroy".input_schema.properties.plan_hash]
+description = "BLAKE3 hash of the destroy plan (must match a plan generated with destroy=true)"
+type = "string"
+
+[provides.operations."terraform.destroy".input_schema.properties.targets]
+description = "Specific resource addresses to destroy (leave empty for all)"
+type = "array"
+
+[provides.operations."terraform.destroy".input_schema.properties.working_dir]
+description = "Path to Terraform configuration directory"
+type = "string"
+
+[provides.operations."terraform.destroy".output_schema]
+required = [
+    "destroyed",
+    "summary",
+]
+type = "object"
+
+[provides.operations."terraform.destroy".output_schema.properties.destroyed]
+type = "boolean"
+
+[provides.operations."terraform.destroy".output_schema.properties.summary]
+type = "string"
+
+[provides.operations."terraform.destroy".network_constraints]
+host_allow = [
+    "registry.terraform.io",
+    "releases.hashicorp.com",
+    "checkpoint-api.hashicorp.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 30000
+total_timeout_ms = 1800000
+max_response_bytes = 52428800
+
+[provides.operations."terraform.destroy".ai_hints]
+when_to_use = "Destroy infrastructure. EXTREMELY DANGEROUS. Requires a destroy plan (plan with destroy=true) and its hash."
+common_mistakes = [
+    "Destroying without confirming the scope with the user.",
+    "Not using -target to limit destruction scope.",
+    "Destroying production resources without verifying the workspace/directory.",
+]
+examples = ['{"working_dir": "/infra/staging", "plan_hash": "blake3:def456...", "targets": ["aws_instance.temp"]}']
+related = [
+    "terraform.plan",
+    "terraform.apply",
+]
+
+[provides.operations."terraform.detect_drift"]
+description = "Detect configuration drift by refreshing state against real infrastructure"
+capability = "terraform.plan"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."terraform.detect_drift".input_schema]
+required = ["working_dir"]
+type = "object"
+
+[provides.operations."terraform.detect_drift".input_schema.properties.working_dir]
+description = "Path to Terraform configuration directory"
+type = "string"
+
+[provides.operations."terraform.detect_drift".output_schema]
+required = [
+    "drifted",
+    "drift_summary",
+]
+type = "object"
+
+[provides.operations."terraform.detect_drift".output_schema.properties.checkpoint_ts]
+description = "ISO 8601 timestamp of this drift check"
+type = "string"
+
+[provides.operations."terraform.detect_drift".output_schema.properties.drift_summary]
+description = "List of drifted resources with change details"
+type = "array"
+
+[provides.operations."terraform.detect_drift".output_schema.properties.drifted]
+description = "Whether drift was detected"
+type = "boolean"
+
+[provides.operations."terraform.detect_drift".network_constraints]
+host_allow = [
+    "registry.terraform.io",
+    "releases.hashicorp.com",
+    "checkpoint-api.hashicorp.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 30000
+total_timeout_ms = 600000
+max_response_bytes = 52428800
+
+[provides.operations."terraform.detect_drift".ai_hints]
+when_to_use = "Check if real infrastructure has drifted from Terraform state without making changes."
+common_mistakes = ["Not running drift detection before planning in long-running environments."]
+examples = ['{"working_dir": "/infra/production"}']
+related = [
+    "terraform.plan",
+    "terraform.state_list",
+]
+
+[provides.operations."terraform.import"]
+description = "Import an existing infrastructure resource into Terraform state"
+capability = "terraform.state_write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."terraform.import".input_schema]
+required = [
+    "working_dir",
+    "address",
+    "id",
+]
+type = "object"
+
+[provides.operations."terraform.import".input_schema.properties.address]
+description = "Terraform resource address to import into (e.g., 'aws_instance.imported')"
+type = "string"
+
+[provides.operations."terraform.import".input_schema.properties.id]
+description = "Cloud provider resource ID to import"
+type = "string"
+
+[provides.operations."terraform.import".input_schema.properties.working_dir]
+description = "Path to Terraform configuration directory"
+type = "string"
+
+[provides.operations."terraform.import".output_schema]
+required = [
+    "imported",
+    "address",
+]
+type = "object"
+
+[provides.operations."terraform.import".output_schema.properties.address]
+type = "string"
+
+[provides.operations."terraform.import".output_schema.properties.imported]
+type = "boolean"
+
+[provides.operations."terraform.import".network_constraints]
+host_allow = [
+    "registry.terraform.io",
+    "releases.hashicorp.com",
+    "checkpoint-api.hashicorp.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 30000
+total_timeout_ms = 300000
+max_response_bytes = 10485760
+
+[provides.operations."terraform.import".ai_hints]
+when_to_use = "Bring an existing cloud resource under Terraform management."
+common_mistakes = [
+    "Importing without a matching resource block in configuration.",
+    "Using wrong provider resource ID format.",
+]
+examples = ['{"working_dir": "/infra/production", "address": "aws_instance.legacy", "id": "i-0abc123def456"}']
+related = [
+    "terraform.state_list",
+    "terraform.plan",
+]
+
+[provides.operations."terraform.init"]
+description = "Initialize a Terraform working directory (download providers and modules)"
+capability = "terraform.plan"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."terraform.init".input_schema]
+required = ["working_dir"]
+type = "object"
+
+[provides.operations."terraform.init".input_schema.properties.reconfigure]
+description = "Reconfigure backend without migrating state"
+type = "boolean"
+
+[provides.operations."terraform.init".input_schema.properties.upgrade]
+description = "Upgrade provider and module versions within constraints"
+type = "boolean"
+
+[provides.operations."terraform.init".input_schema.properties.working_dir]
+description = "Path to Terraform configuration directory"
+type = "string"
+
+[provides.operations."terraform.init".output_schema]
+required = ["initialized"]
+type = "object"
+
+[provides.operations."terraform.init".output_schema.properties.initialized]
+type = "boolean"
+
+[provides.operations."terraform.init".output_schema.properties.providers]
+description = "Installed provider versions"
+type = "array"
+
+[provides.operations."terraform.init".network_constraints]
+host_allow = [
+    "registry.terraform.io",
+    "releases.hashicorp.com",
+    "checkpoint-api.hashicorp.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 30000
+total_timeout_ms = 600000
+max_response_bytes = 104857600
+
+[provides.operations."terraform.init".ai_hints]
+when_to_use = "Initialize providers and modules. Required before plan/apply in a fresh directory."
+common_mistakes = [
+    "Running plan/apply without init in a new directory.",
+    "Using -upgrade without verifying provider compatibility.",
+]
+examples = [
+    '{"working_dir": "/infra/production"}',
+    '{"working_dir": "/infra/production", "upgrade": true}',
+]
+related = [
+    "terraform.plan",
+    "terraform.list_modules",
+]
+
+[provides.operations."terraform.list_modules"]
+description = "List modules used in the configuration and their versions"
+capability = "terraform.plan"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."terraform.list_modules".input_schema]
+required = ["working_dir"]
+type = "object"
+
+[provides.operations."terraform.list_modules".input_schema.properties.working_dir]
+description = "Path to Terraform configuration directory"
+type = "string"
+
+[provides.operations."terraform.list_modules".output_schema]
+required = ["modules"]
+type = "object"
+
+[provides.operations."terraform.list_modules".output_schema.properties.modules]
+type = "array"
+
+[provides.operations."terraform.list_modules".network_constraints]
+host_allow = ["registry.terraform.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."terraform.list_modules".ai_hints]
+when_to_use = "Inspect which Terraform modules are used and their version constraints."
+common_mistakes = []
+examples = ['{"working_dir": "/infra/production"}']
+related = [
+    "terraform.init",
+    "terraform.plan",
+]
+
+[provides.operations."terraform.output"]
+description = "Read Terraform output values"
+capability = "terraform.state"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."terraform.output".input_schema]
+required = ["working_dir"]
+type = "object"
+
+[provides.operations."terraform.output".input_schema.properties.name]
+description = "Specific output name (omit for all outputs)"
+type = "string"
+
+[provides.operations."terraform.output".input_schema.properties.working_dir]
+description = "Path to Terraform configuration directory"
+type = "string"
+
+[provides.operations."terraform.output".output_schema]
+required = ["outputs"]
+type = "object"
+
+[provides.operations."terraform.output".output_schema.properties.outputs]
+type = "object"
+
+[provides.operations."terraform.output".network_constraints]
+host_allow = [
+    "registry.terraform.io",
+    "releases.hashicorp.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."terraform.output".ai_hints]
+when_to_use = "Read output values from a Terraform state (e.g., endpoint URLs, IPs)."
+common_mistakes = []
+examples = [
+    '{"working_dir": "/infra/production"}',
+    '{"working_dir": "/infra/production", "name": "api_endpoint"}',
+]
+related = [
+    "terraform.state_list",
+    "terraform.apply",
+]
+
+[provides.operations."terraform.plan"]
+description = "Generate a Terraform execution plan (read-only, no changes applied)"
+capability = "terraform.plan"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."terraform.plan".input_schema]
+required = ["working_dir"]
+type = "object"
+
+[provides.operations."terraform.plan".input_schema.properties.destroy]
+description = "Generate a destroy plan (preview only, does not execute)"
+type = "boolean"
+
+[provides.operations."terraform.plan".input_schema.properties.refresh_only]
+description = "Only refresh state, do not propose changes"
+type = "boolean"
+
+[provides.operations."terraform.plan".input_schema.properties.targets]
+description = "List of resource addresses to target"
+type = "array"
+
+[provides.operations."terraform.plan".input_schema.properties.var_file]
+description = "Path to a .tfvars file"
+type = "string"
+
+[provides.operations."terraform.plan".input_schema.properties.working_dir]
+description = "Path to Terraform configuration directory"
+type = "string"
+
+[provides.operations."terraform.plan".output_schema]
+required = [
+    "plan_hash",
+    "summary",
+    "resource_changes",
+]
+type = "object"
+
+[provides.operations."terraform.plan".output_schema.properties.plan_file]
+description = "Reference to the persisted binary plan file"
+type = "string"
+
+[provides.operations."terraform.plan".output_schema.properties.plan_hash]
+description = "BLAKE3 hash of the serialized plan artifact (used for apply binding)"
+type = "string"
+
+[provides.operations."terraform.plan".output_schema.properties.resource_changes]
+description = "List of resource change descriptors"
+type = "array"
+
+[provides.operations."terraform.plan".output_schema.properties.summary]
+description = "Human-readable summary of planned changes"
+type = "string"
+
+[provides.operations."terraform.plan".network_constraints]
+host_allow = [
+    "registry.terraform.io",
+    "releases.hashicorp.com",
+    "checkpoint-api.hashicorp.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 30000
+total_timeout_ms = 600000
+max_response_bytes = 52428800
+
+[provides.operations."terraform.plan".ai_hints]
+when_to_use = "Preview what Terraform would change without actually modifying infrastructure. Always plan before apply."
+common_mistakes = [
+    "Running apply without reviewing the plan output first.",
+    "Not using -target for focused changes when working on specific resources.",
+    "Ignoring refresh_only for state-only reconciliation.",
+]
+examples = [
+    '{"working_dir": "/infra/production"}',
+    '{"working_dir": "/infra/staging", "targets": ["aws_instance.web"], "var_file": "staging.tfvars"}',
+]
+related = [
+    "terraform.apply",
+    "terraform.show_plan",
+]
+
+[provides.operations."terraform.show_plan"]
+description = "Display human-readable details of a saved plan file"
+capability = "terraform.plan"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."terraform.show_plan".input_schema]
+required = ["plan_file"]
+type = "object"
+
+[provides.operations."terraform.show_plan".input_schema.properties.json]
+description = "Output in JSON format instead of human-readable"
+type = "boolean"
+
+[provides.operations."terraform.show_plan".input_schema.properties.plan_file]
+description = "Reference to a previously generated plan file"
+type = "string"
+
+[provides.operations."terraform.show_plan".output_schema]
+required = ["plan_detail"]
+type = "object"
+
+[provides.operations."terraform.show_plan".output_schema.properties.plan_detail]
+type = "object"
+
+[provides.operations."terraform.show_plan".network_constraints]
+host_allow = [
+    "registry.terraform.io",
+    "releases.hashicorp.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 52428800
+
+[provides.operations."terraform.show_plan".ai_hints]
+when_to_use = "Inspect a saved plan file before deciding whether to apply it."
+common_mistakes = []
+examples = ['{"plan_file": "tfplan-abc123", "json": true}']
+related = [
+    "terraform.plan",
+    "terraform.apply",
+]
+
+[provides.operations."terraform.state_list"]
+description = "List all resources in the Terraform state"
+capability = "terraform.state"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."terraform.state_list".input_schema]
+required = ["working_dir"]
+type = "object"
+
+[provides.operations."terraform.state_list".input_schema.properties.filter]
+description = "Address filter pattern (e.g., 'module.vpc')"
+type = "string"
+
+[provides.operations."terraform.state_list".input_schema.properties.working_dir]
+description = "Path to Terraform configuration directory"
+type = "string"
+
+[provides.operations."terraform.state_list".output_schema]
+required = ["resources"]
+type = "object"
+
+[provides.operations."terraform.state_list".output_schema.properties.resources]
+type = "array"
+
+[provides.operations."terraform.state_list".network_constraints]
+host_allow = [
+    "registry.terraform.io",
+    "releases.hashicorp.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 52428800
+
+[provides.operations."terraform.state_list".ai_hints]
+when_to_use = "List all tracked resources in the current state file."
+common_mistakes = []
+examples = [
+    '{"working_dir": "/infra/production"}',
+    '{"working_dir": "/infra/production", "filter": "module.vpc"}',
+]
+related = [
+    "terraform.state_show",
+    "terraform.plan",
+]
+
+[provides.operations."terraform.state_show"]
+description = "Show detailed attributes of a single resource in state"
+capability = "terraform.state"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."terraform.state_show".input_schema]
+required = [
+    "working_dir",
+    "address",
+]
+type = "object"
+
+[provides.operations."terraform.state_show".input_schema.properties.address]
+description = "Resource address (e.g., 'aws_instance.web')"
+type = "string"
+
+[provides.operations."terraform.state_show".input_schema.properties.working_dir]
+description = "Path to Terraform configuration directory"
+type = "string"
+
+[provides.operations."terraform.state_show".output_schema]
+required = ["resource"]
+type = "object"
+
+[provides.operations."terraform.state_show".output_schema.properties.resource]
+type = "object"
+
+[provides.operations."terraform.state_show".network_constraints]
+host_allow = [
+    "registry.terraform.io",
+    "releases.hashicorp.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."terraform.state_show".ai_hints]
+when_to_use = "Inspect the attributes of a specific resource in state."
+common_mistakes = ["Not using terraform.state_list first to verify the exact resource address."]
+examples = ['{"working_dir": "/infra/production", "address": "aws_instance.web"}']
+related = ["terraform.state_list"]
+
+[provides.operations."terraform.validate"]
+description = "Validate Terraform configuration syntax and internal consistency"
+capability = "terraform.plan"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."terraform.validate".input_schema]
+required = ["working_dir"]
+type = "object"
+
+[provides.operations."terraform.validate".input_schema.properties.working_dir]
+description = "Path to Terraform configuration directory"
+type = "string"
+
+[provides.operations."terraform.validate".output_schema]
+required = ["valid"]
+type = "object"
+
+[provides.operations."terraform.validate".output_schema.properties.diagnostics]
+description = "Validation errors and warnings"
+type = "array"
+
+[provides.operations."terraform.validate".output_schema.properties.valid]
+type = "boolean"
+
+[provides.operations."terraform.validate".network_constraints]
+host_allow = [
+    "registry.terraform.io",
+    "releases.hashicorp.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."terraform.validate".ai_hints]
+when_to_use = "Check configuration for syntax errors before planning."
+common_mistakes = ["Running validate without init (providers must be installed first)."]
+examples = ['{"working_dir": "/infra/production"}']
+related = [
+    "terraform.init",
+    "terraform.plan",
+]
+
+[sandbox]
+profile = "strict"
+memory_mb = 512
+cpu_percent = 75
+wall_clock_timeout_ms = 1800000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = [
+    "$CONNECTOR_STATE",
+    "$TERRAFORM_WORKDIR",
+]
+deny_exec = false
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "terraform.plan"
+description = "Plan and read-only operations"
+requests = 100
+window_ms = 3600000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "terraform.apply"
+description = "Apply and destroy operations (infrastructure mutations)"
+requests = 20
+window_ms = 3600000
+burst = 3
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "terraform.state"
+description = "State inspection operations"
+requests = 500
+window_ms = 3600000
+burst = 25
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "terraform.state_write"
+description = "State modification operations (import)"
+requests = 50
+window_ms = 3600000
+burst = 5
+scope = "instance"
+
+[rate_limits.operation_pools]
+"terraform.state_list" = ["terraform.state"]
+"terraform.state_show" = ["terraform.state"]
+"terraform.destroy" = ["terraform.apply"]
+"terraform.validate" = ["terraform.plan"]
+"terraform.init" = ["terraform.plan"]
+"terraform.output" = ["terraform.state"]
+"terraform.detect_drift" = ["terraform.plan"]
+"terraform.import" = ["terraform.state_write"]
+"terraform.list_modules" = ["terraform.plan"]
+"terraform.apply" = ["terraform.apply"]
+"terraform.plan" = ["terraform.plan"]
+"terraform.show_plan" = ["terraform.plan"]

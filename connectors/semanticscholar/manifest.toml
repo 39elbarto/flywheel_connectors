@@ -1,0 +1,480 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:41ca4a7335120b027bb854512fe92aa0ff723a1d18f487771afb406300040086"
+
+[connector]
+id = "fcp.semanticscholar"
+name = "Semantic Scholar Connector"
+version = "0.1.0"
+description = "FCP connector for Semantic Scholar academic paper search and citation graph"
+archetypes = ["knowledge"]
+format = "wasi"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = [
+    "z:public",
+    "z:community",
+]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+]
+optional = []
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "media.upload",
+    "media.download",
+]
+
+[provides.operations."semanticscholar.author.get"]
+description = "Get author details"
+capability = "semanticscholar.authors.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."semanticscholar.author.get".input_schema]
+required = ["author_id"]
+type = "object"
+
+[provides.operations."semanticscholar.author.get".input_schema.properties.author_id]
+type = "string"
+
+[provides.operations."semanticscholar.author.get".input_schema.properties.fields]
+type = "string"
+
+[provides.operations."semanticscholar.author.get".output_schema]
+required = [
+    "authorId",
+    "name",
+]
+type = "object"
+
+[provides.operations."semanticscholar.author.get".output_schema.properties.authorId]
+type = "string"
+
+[provides.operations."semanticscholar.author.get".output_schema.properties.name]
+type = "string"
+
+[provides.operations."semanticscholar.author.get".network_constraints]
+host_allow = ["api.semanticscholar.org"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."semanticscholar.author.get".ai_hints]
+when_to_use = "Get details for a specific author."
+common_mistakes = []
+examples = ['{"author_id": "1741101", "fields": "name,hIndex,paperCount,citationCount"}']
+related = ["semanticscholar.author.papers"]
+
+[provides.operations."semanticscholar.author.papers"]
+description = "Get papers by an author"
+capability = "semanticscholar.authors.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."semanticscholar.author.papers".input_schema]
+required = ["author_id"]
+type = "object"
+
+[provides.operations."semanticscholar.author.papers".input_schema.properties.author_id]
+type = "string"
+
+[provides.operations."semanticscholar.author.papers".input_schema.properties.fields]
+type = "string"
+
+[provides.operations."semanticscholar.author.papers".input_schema.properties.limit]
+maximum = 1000
+type = "integer"
+
+[provides.operations."semanticscholar.author.papers".output_schema]
+required = ["data"]
+type = "object"
+
+[provides.operations."semanticscholar.author.papers".output_schema.properties.data]
+type = "array"
+
+[provides.operations."semanticscholar.author.papers".network_constraints]
+host_allow = ["api.semanticscholar.org"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."semanticscholar.author.papers".ai_hints]
+when_to_use = "Get all papers by a specific author."
+common_mistakes = []
+examples = ['{"author_id": "1741101", "limit": 50, "fields": "title,year,citationCount"}']
+related = ["semanticscholar.author.get"]
+
+[provides.operations."semanticscholar.paper.citations"]
+description = "Get citations of a paper"
+capability = "semanticscholar.papers.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."semanticscholar.paper.citations".input_schema]
+required = ["paper_id"]
+type = "object"
+
+[provides.operations."semanticscholar.paper.citations".input_schema.properties.fields]
+type = "string"
+
+[provides.operations."semanticscholar.paper.citations".input_schema.properties.limit]
+maximum = 1000
+type = "integer"
+
+[provides.operations."semanticscholar.paper.citations".input_schema.properties.paper_id]
+type = "string"
+
+[provides.operations."semanticscholar.paper.citations".output_schema]
+required = ["data"]
+type = "object"
+
+[provides.operations."semanticscholar.paper.citations".output_schema.properties.data]
+type = "array"
+
+[provides.operations."semanticscholar.paper.citations".network_constraints]
+host_allow = ["api.semanticscholar.org"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."semanticscholar.paper.citations".ai_hints]
+when_to_use = "Get papers that cite a given paper."
+common_mistakes = []
+examples = ['{"paper_id": "649def34f8be52c8b66281af98ae884c09aef38b", "limit": 50}']
+related = [
+    "semanticscholar.paper.get",
+    "semanticscholar.paper.references",
+]
+
+[provides.operations."semanticscholar.paper.get"]
+description = "Get paper details by ID (S2 paper ID, DOI, ArXiv ID, etc.)"
+capability = "semanticscholar.papers.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."semanticscholar.paper.get".input_schema]
+required = ["paper_id"]
+type = "object"
+
+[provides.operations."semanticscholar.paper.get".input_schema.properties.fields]
+type = "string"
+
+[provides.operations."semanticscholar.paper.get".input_schema.properties.paper_id]
+description = "S2 paper ID, DOI, ArXiv ID, etc."
+type = "string"
+
+[provides.operations."semanticscholar.paper.get".output_schema]
+required = [
+    "paperId",
+    "title",
+]
+type = "object"
+
+[provides.operations."semanticscholar.paper.get".output_schema.properties.paperId]
+type = "string"
+
+[provides.operations."semanticscholar.paper.get".output_schema.properties.title]
+type = "string"
+
+[provides.operations."semanticscholar.paper.get".network_constraints]
+host_allow = ["api.semanticscholar.org"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."semanticscholar.paper.get".ai_hints]
+when_to_use = "Get details for a specific paper by ID."
+common_mistakes = []
+examples = ['{"paper_id": "649def34f8be52c8b66281af98ae884c09aef38b", "fields": "title,abstract,authors,year,citationCount"}']
+related = [
+    "semanticscholar.paper.search",
+    "semanticscholar.paper.citations",
+]
+
+[provides.operations."semanticscholar.paper.recommendations"]
+description = "Get recommended papers based on a seed paper"
+capability = "semanticscholar.papers.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."semanticscholar.paper.recommendations".input_schema]
+required = ["paper_id"]
+type = "object"
+
+[provides.operations."semanticscholar.paper.recommendations".input_schema.properties.fields]
+type = "string"
+
+[provides.operations."semanticscholar.paper.recommendations".input_schema.properties.limit]
+maximum = 500
+type = "integer"
+
+[provides.operations."semanticscholar.paper.recommendations".input_schema.properties.paper_id]
+type = "string"
+
+[provides.operations."semanticscholar.paper.recommendations".output_schema]
+required = ["recommendedPapers"]
+type = "object"
+
+[provides.operations."semanticscholar.paper.recommendations".output_schema.properties.recommendedPapers]
+type = "array"
+
+[provides.operations."semanticscholar.paper.recommendations".network_constraints]
+host_allow = ["api.semanticscholar.org"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."semanticscholar.paper.recommendations".ai_hints]
+when_to_use = "Get recommended similar papers."
+common_mistakes = []
+examples = ['{"paper_id": "649def34f8be52c8b66281af98ae884c09aef38b", "limit": 10}']
+related = ["semanticscholar.paper.search"]
+
+[provides.operations."semanticscholar.paper.references"]
+description = "Get references of a paper"
+capability = "semanticscholar.papers.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."semanticscholar.paper.references".input_schema]
+required = ["paper_id"]
+type = "object"
+
+[provides.operations."semanticscholar.paper.references".input_schema.properties.fields]
+type = "string"
+
+[provides.operations."semanticscholar.paper.references".input_schema.properties.limit]
+maximum = 1000
+type = "integer"
+
+[provides.operations."semanticscholar.paper.references".input_schema.properties.paper_id]
+type = "string"
+
+[provides.operations."semanticscholar.paper.references".output_schema]
+required = ["data"]
+type = "object"
+
+[provides.operations."semanticscholar.paper.references".output_schema.properties.data]
+type = "array"
+
+[provides.operations."semanticscholar.paper.references".network_constraints]
+host_allow = ["api.semanticscholar.org"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."semanticscholar.paper.references".ai_hints]
+when_to_use = "Get papers referenced by a given paper."
+common_mistakes = []
+examples = ['{"paper_id": "649def34f8be52c8b66281af98ae884c09aef38b", "limit": 50}']
+related = [
+    "semanticscholar.paper.get",
+    "semanticscholar.paper.citations",
+]
+
+[provides.operations."semanticscholar.paper.search"]
+description = "Search for papers by keyword"
+capability = "semanticscholar.papers.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."semanticscholar.paper.search".input_schema]
+required = ["query"]
+type = "object"
+
+[provides.operations."semanticscholar.paper.search".input_schema.properties.fields]
+description = "Comma-separated field names"
+type = "string"
+
+[provides.operations."semanticscholar.paper.search".input_schema.properties.limit]
+maximum = 100
+minimum = 1
+type = "integer"
+
+[provides.operations."semanticscholar.paper.search".input_schema.properties.offset]
+type = "integer"
+
+[provides.operations."semanticscholar.paper.search".input_schema.properties.query]
+type = "string"
+
+[provides.operations."semanticscholar.paper.search".output_schema]
+required = ["data"]
+type = "object"
+
+[provides.operations."semanticscholar.paper.search".output_schema.properties.data]
+type = "array"
+
+[provides.operations."semanticscholar.paper.search".output_schema.properties.total]
+type = "integer"
+
+[provides.operations."semanticscholar.paper.search".network_constraints]
+host_allow = ["api.semanticscholar.org"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."semanticscholar.paper.search".ai_hints]
+when_to_use = "Search for academic papers by keyword or topic."
+common_mistakes = ["Not specifying fields — only paperId and title returned by default."]
+examples = ['{"query": "transformer attention mechanism", "limit": 10, "fields": "title,abstract,year,citationCount"}']
+related = [
+    "semanticscholar.paper.get",
+    "semanticscholar.paper.recommendations",
+]
+
+[sandbox]
+profile = "strict"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "semanticscholar.papers.read"
+requests = 100
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "semanticscholar.authors.read"
+requests = 100
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[rate_limits.operation_pools]
+"semanticscholar.author.papers" = ["semanticscholar.authors.read"]
+"semanticscholar.paper.recommendations" = ["semanticscholar.papers.read"]
+"semanticscholar.paper.references" = ["semanticscholar.papers.read"]
+"semanticscholar.author.get" = ["semanticscholar.authors.read"]
+"semanticscholar.paper.get" = ["semanticscholar.papers.read"]
+"semanticscholar.paper.search" = ["semanticscholar.papers.read"]
+"semanticscholar.paper.citations" = ["semanticscholar.papers.read"]

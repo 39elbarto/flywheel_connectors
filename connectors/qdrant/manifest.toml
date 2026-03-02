@@ -1,0 +1,582 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:c76ad62513fddb40abbbb942e2118766fb78154e66fc3478acd43d7a7fad7828"
+
+[connector]
+id = "fcp.qdrant"
+name = "Qdrant Connector"
+version = "0.1.0"
+description = "FCP connector for Qdrant vector database — collection management, point CRUD, similarity search, scroll, filtering"
+archetypes = [
+    "knowledge",
+    "operational",
+]
+format = "wasi"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = [
+    "z:public",
+    "z:community",
+]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+]
+optional = []
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "media.upload",
+    "media.download",
+]
+
+[provides.operations."qdrant.collection_info"]
+description = "Get collection configuration and statistics"
+capability = "qdrant.collections.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."qdrant.collection_info".input_schema]
+required = ["collection_name"]
+type = "object"
+
+[provides.operations."qdrant.collection_info".input_schema.properties.collection_name]
+type = "string"
+
+[provides.operations."qdrant.collection_info".output_schema]
+required = ["result"]
+type = "object"
+
+[provides.operations."qdrant.collection_info".output_schema.properties.result]
+type = "object"
+
+[provides.operations."qdrant.collection_info".network_constraints]
+host_allow = ["*.cloud.qdrant.io"]
+port_allow = [
+    443,
+    6333,
+    6334,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 15000
+max_response_bytes = 1048576
+
+[provides.operations."qdrant.collection_info".ai_hints]
+when_to_use = "Get details about a collection: vector size, distance metric, point count, index status."
+common_mistakes = []
+examples = ['{"collection_name": "my-collection"}']
+related = ["qdrant.list_collections"]
+
+[provides.operations."qdrant.count"]
+description = "Count points in a collection with optional filter"
+capability = "qdrant.points.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."qdrant.count".input_schema]
+required = ["collection_name"]
+type = "object"
+
+[provides.operations."qdrant.count".input_schema.properties.collection_name]
+type = "string"
+
+[provides.operations."qdrant.count".input_schema.properties.exact]
+default = true
+type = "boolean"
+
+[provides.operations."qdrant.count".input_schema.properties.filter]
+type = "object"
+
+[provides.operations."qdrant.count".output_schema]
+required = ["count"]
+type = "object"
+
+[provides.operations."qdrant.count".output_schema.properties.count]
+type = "integer"
+
+[provides.operations."qdrant.count".network_constraints]
+host_allow = ["*.cloud.qdrant.io"]
+port_allow = [
+    443,
+    6333,
+    6334,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 15000
+max_response_bytes = 1048576
+
+[provides.operations."qdrant.count".ai_hints]
+when_to_use = "Count points in a collection, optionally filtered."
+common_mistakes = []
+examples = ['{"collection_name": "docs", "exact": true}']
+related = ["qdrant.scroll"]
+
+[provides.operations."qdrant.delete_points"]
+description = "Delete points by ID or filter"
+capability = "qdrant.points.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."qdrant.delete_points".input_schema]
+required = ["collection_name"]
+type = "object"
+
+[provides.operations."qdrant.delete_points".input_schema.properties.collection_name]
+type = "string"
+
+[provides.operations."qdrant.delete_points".input_schema.properties.filter]
+description = "Delete by payload filter"
+type = "object"
+
+[provides.operations."qdrant.delete_points".input_schema.properties.points]
+description = "Point IDs to delete"
+type = "array"
+
+[provides.operations."qdrant.delete_points".output_schema]
+required = ["status"]
+type = "object"
+
+[provides.operations."qdrant.delete_points".output_schema.properties.status]
+type = "string"
+
+[provides.operations."qdrant.delete_points".network_constraints]
+host_allow = ["*.cloud.qdrant.io"]
+port_allow = [
+    443,
+    6333,
+    6334,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."qdrant.delete_points".ai_hints]
+when_to_use = "Delete points by ID or metadata filter. Irreversible."
+common_mistakes = ["Using a broad filter that deletes more points than intended."]
+examples = ['{"collection_name": "docs", "points": [1, 2, 3]}']
+related = ["qdrant.upsert_points"]
+
+[provides.operations."qdrant.get_points"]
+description = "Retrieve points by ID"
+capability = "qdrant.points.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."qdrant.get_points".input_schema]
+required = [
+    "collection_name",
+    "ids",
+]
+type = "object"
+
+[provides.operations."qdrant.get_points".input_schema.properties.collection_name]
+type = "string"
+
+[provides.operations."qdrant.get_points".input_schema.properties.ids]
+type = "array"
+
+[provides.operations."qdrant.get_points".input_schema.properties.with_payload]
+default = true
+type = "boolean"
+
+[provides.operations."qdrant.get_points".input_schema.properties.with_vectors]
+default = false
+type = "boolean"
+
+[provides.operations."qdrant.get_points".output_schema]
+required = ["result"]
+type = "object"
+
+[provides.operations."qdrant.get_points".output_schema.properties.result]
+type = "array"
+
+[provides.operations."qdrant.get_points".network_constraints]
+host_allow = ["*.cloud.qdrant.io"]
+port_allow = [
+    443,
+    6333,
+    6334,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."qdrant.get_points".ai_hints]
+when_to_use = "Retrieve specific points by their IDs."
+common_mistakes = []
+examples = ['{"collection_name": "docs", "ids": [1, 2, 3]}']
+related = ["qdrant.search"]
+
+[provides.operations."qdrant.list_collections"]
+description = "List all collections"
+capability = "qdrant.collections.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."qdrant.list_collections".input_schema]
+required = []
+type = "object"
+
+[provides.operations."qdrant.list_collections".output_schema]
+required = ["collections"]
+type = "object"
+
+[provides.operations."qdrant.list_collections".output_schema.properties.collections]
+type = "array"
+
+[provides.operations."qdrant.list_collections".network_constraints]
+host_allow = ["*.cloud.qdrant.io"]
+port_allow = [
+    443,
+    6333,
+    6334,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 15000
+max_response_bytes = 1048576
+
+[provides.operations."qdrant.list_collections".ai_hints]
+when_to_use = "List all collections in the Qdrant instance."
+common_mistakes = []
+examples = ["{}"]
+related = ["qdrant.collection_info"]
+
+[provides.operations."qdrant.scroll"]
+description = "Iterate over points with optional filtering"
+capability = "qdrant.points.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."qdrant.scroll".input_schema]
+required = ["collection_name"]
+type = "object"
+
+[provides.operations."qdrant.scroll".input_schema.properties.collection_name]
+type = "string"
+
+[provides.operations."qdrant.scroll".input_schema.properties.filter]
+type = "object"
+
+[provides.operations."qdrant.scroll".input_schema.properties.limit]
+default = 10
+type = "integer"
+
+[provides.operations."qdrant.scroll".input_schema.properties.offset]
+description = "Point ID to start from"
+type = "string"
+
+[provides.operations."qdrant.scroll".input_schema.properties.with_payload]
+default = true
+type = "boolean"
+
+[provides.operations."qdrant.scroll".input_schema.properties.with_vectors]
+default = false
+type = "boolean"
+
+[provides.operations."qdrant.scroll".output_schema]
+required = ["result"]
+type = "object"
+
+[provides.operations."qdrant.scroll".output_schema.properties.result]
+type = "object"
+
+[provides.operations."qdrant.scroll".network_constraints]
+host_allow = ["*.cloud.qdrant.io"]
+port_allow = [
+    443,
+    6333,
+    6334,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."qdrant.scroll".ai_hints]
+when_to_use = "Paginate through all points in a collection, optionally filtered."
+common_mistakes = []
+examples = ['{"collection_name": "docs", "limit": 100, "with_payload": true}']
+related = [
+    "qdrant.search",
+    "qdrant.count",
+]
+
+[provides.operations."qdrant.search"]
+description = "Search for similar points by vector"
+capability = "qdrant.points.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."qdrant.search".input_schema]
+required = [
+    "collection_name",
+    "vector",
+    "limit",
+]
+type = "object"
+
+[provides.operations."qdrant.search".input_schema.properties.collection_name]
+type = "string"
+
+[provides.operations."qdrant.search".input_schema.properties.filter]
+description = "Payload filter conditions"
+type = "object"
+
+[provides.operations."qdrant.search".input_schema.properties.limit]
+type = "integer"
+
+[provides.operations."qdrant.search".input_schema.properties.score_threshold]
+type = "number"
+
+[provides.operations."qdrant.search".input_schema.properties.vector]
+description = "Query vector"
+type = "array"
+
+[provides.operations."qdrant.search".input_schema.properties.with_payload]
+default = true
+type = "boolean"
+
+[provides.operations."qdrant.search".input_schema.properties.with_vectors]
+default = false
+type = "boolean"
+
+[provides.operations."qdrant.search".output_schema]
+required = ["result"]
+type = "object"
+
+[provides.operations."qdrant.search".output_schema.properties.result]
+type = "array"
+
+[provides.operations."qdrant.search".network_constraints]
+host_allow = ["*.cloud.qdrant.io"]
+port_allow = [
+    443,
+    6333,
+    6334,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."qdrant.search".ai_hints]
+when_to_use = "Find similar points by vector similarity with optional payload filtering."
+common_mistakes = ["Not specifying score_threshold — may return low-quality matches."]
+examples = ['{"collection_name": "docs", "vector": [0.1, 0.2, 0.3], "limit": 10, "with_payload": true}']
+related = [
+    "qdrant.get_points",
+    "qdrant.scroll",
+]
+
+[provides.operations."qdrant.upsert_points"]
+description = "Upsert points (insert or update)"
+capability = "qdrant.points.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."qdrant.upsert_points".input_schema]
+required = [
+    "collection_name",
+    "points",
+]
+type = "object"
+
+[provides.operations."qdrant.upsert_points".input_schema.properties.collection_name]
+type = "string"
+
+[provides.operations."qdrant.upsert_points".input_schema.properties.points]
+description = "Array of {id, vector, payload} objects"
+type = "array"
+
+[provides.operations."qdrant.upsert_points".output_schema]
+required = ["status"]
+type = "object"
+
+[provides.operations."qdrant.upsert_points".output_schema.properties.status]
+type = "string"
+
+[provides.operations."qdrant.upsert_points".network_constraints]
+host_allow = ["*.cloud.qdrant.io"]
+port_allow = [
+    443,
+    6333,
+    6334,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 1048576
+
+[provides.operations."qdrant.upsert_points".ai_hints]
+when_to_use = "Insert new points or update existing ones by ID."
+common_mistakes = ["Upserting points with mismatched vector dimensions."]
+examples = ['{"collection_name": "docs", "points": [{"id": 1, "vector": [0.1, 0.2, 0.3], "payload": {"text": "hello"}}]}']
+related = [
+    "qdrant.delete_points",
+    "qdrant.search",
+]
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "qdrant.collections.read"
+requests = 60
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "qdrant.points.read"
+requests = 300
+window_ms = 60000
+burst = 50
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "qdrant.points.write"
+requests = 100
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[rate_limits.operation_pools]
+"qdrant.upsert_points" = ["qdrant.points.write"]
+"qdrant.search" = ["qdrant.points.read"]
+"qdrant.delete_points" = ["qdrant.points.write"]
+"qdrant.collection_info" = ["qdrant.collections.read"]
+"qdrant.list_collections" = ["qdrant.collections.read"]
+"qdrant.scroll" = ["qdrant.points.read"]
+"qdrant.get_points" = ["qdrant.points.read"]
+"qdrant.count" = ["qdrant.points.read"]

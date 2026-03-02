@@ -1,0 +1,337 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:962e4e8aa8eb1ceb5b8de98a98f7ab1f313a8c63a5475e922c561973bb3b2233"
+
+[connector]
+id = "fcp.todoist"
+name = "Todoist Connector"
+version = "0.1.0"
+description = "FCP connector for Todoist task management (projects, tasks, labels)"
+archetypes = [
+    "knowledge",
+    "operational",
+]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores API token."
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = [
+    "z:public",
+    "z:community",
+]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+]
+optional = []
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "media.upload",
+    "media.download",
+]
+
+[provides.operations."todoist.projects.list"]
+description = "List all projects for the authenticated user"
+capability = "todoist.projects.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."todoist.projects.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."todoist.projects.list".output_schema]
+required = ["projects"]
+type = "object"
+
+[provides.operations."todoist.projects.list".output_schema.properties.projects]
+type = "array"
+
+[provides.operations."todoist.projects.list".network_constraints]
+host_allow = ["api.todoist.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."todoist.projects.list".ai_hints]
+when_to_use = "List all Todoist projects."
+common_mistakes = []
+examples = ["{}"]
+related = [
+    "todoist.tasks.list",
+    "todoist.tasks.create",
+]
+
+[provides.operations."todoist.tasks.complete"]
+description = "Mark a task as complete"
+capability = "todoist.tasks.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."todoist.tasks.complete".input_schema]
+required = ["task_id"]
+type = "object"
+
+[provides.operations."todoist.tasks.complete".input_schema.properties.task_id]
+description = "Task ID to complete"
+type = "string"
+
+[provides.operations."todoist.tasks.complete".output_schema]
+type = "object"
+
+[provides.operations."todoist.tasks.complete".network_constraints]
+host_allow = ["api.todoist.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."todoist.tasks.complete".ai_hints]
+when_to_use = "Mark a Todoist task as completed."
+common_mistakes = []
+examples = ['{"task_id": "task_abc123"}']
+related = [
+    "todoist.tasks.list",
+    "todoist.tasks.create",
+]
+
+[provides.operations."todoist.tasks.create"]
+description = "Create a new task"
+capability = "todoist.tasks.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."todoist.tasks.create".input_schema]
+required = ["content"]
+type = "object"
+
+[provides.operations."todoist.tasks.create".input_schema.properties.content]
+description = "Task title/content"
+type = "string"
+
+[provides.operations."todoist.tasks.create".input_schema.properties.due_string]
+description = "Natural language due date"
+type = "string"
+
+[provides.operations."todoist.tasks.create".input_schema.properties.project_id]
+description = "Project to add task to"
+type = "string"
+
+[provides.operations."todoist.tasks.create".output_schema]
+required = ["id"]
+type = "object"
+
+[provides.operations."todoist.tasks.create".output_schema.properties.id]
+type = "string"
+
+[provides.operations."todoist.tasks.create".network_constraints]
+host_allow = ["api.todoist.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."todoist.tasks.create".ai_hints]
+when_to_use = "Create a new task in Todoist."
+common_mistakes = ["Forgetting to set project_id, which defaults to Inbox"]
+examples = ['{"content": "Review PR #42", "project_id": "proj_abc123", "due_string": "tomorrow"}']
+related = [
+    "todoist.tasks.list",
+    "todoist.tasks.complete",
+]
+
+[provides.operations."todoist.tasks.delete"]
+description = "Delete a task"
+capability = "todoist.tasks.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."todoist.tasks.delete".input_schema]
+required = ["task_id"]
+type = "object"
+
+[provides.operations."todoist.tasks.delete".input_schema.properties.task_id]
+description = "Task ID to delete"
+type = "string"
+
+[provides.operations."todoist.tasks.delete".output_schema]
+type = "object"
+
+[provides.operations."todoist.tasks.delete".network_constraints]
+host_allow = ["api.todoist.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."todoist.tasks.delete".ai_hints]
+when_to_use = "Permanently delete a Todoist task. Cannot be undone."
+common_mistakes = []
+examples = ['{"task_id": "task_abc123"}']
+related = ["todoist.tasks.list"]
+
+[provides.operations."todoist.tasks.list"]
+description = "List tasks, optionally filtered by project"
+capability = "todoist.tasks.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."todoist.tasks.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."todoist.tasks.list".input_schema.properties.project_id]
+description = "Filter tasks by project ID"
+type = "string"
+
+[provides.operations."todoist.tasks.list".output_schema]
+required = ["tasks"]
+type = "object"
+
+[provides.operations."todoist.tasks.list".output_schema.properties.tasks]
+type = "array"
+
+[provides.operations."todoist.tasks.list".network_constraints]
+host_allow = ["api.todoist.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."todoist.tasks.list".ai_hints]
+when_to_use = "List tasks, optionally filtered by project."
+common_mistakes = []
+examples = ['{"project_id": "proj_abc123"}']
+related = [
+    "todoist.projects.list",
+    "todoist.tasks.create",
+    "todoist.tasks.complete",
+]
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "todoist.projects.read"
+requests = 100
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "todoist.tasks.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "todoist.tasks.write"
+requests = 50
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[rate_limits.operation_pools]
+"todoist.tasks.create" = ["todoist.tasks.write"]
+"todoist.tasks.complete" = ["todoist.tasks.write"]
+"todoist.projects.list" = ["todoist.projects.read"]
+"todoist.tasks.delete" = ["todoist.tasks.write"]
+"todoist.tasks.list" = ["todoist.tasks.read"]

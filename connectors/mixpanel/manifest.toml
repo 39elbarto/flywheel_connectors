@@ -1,0 +1,251 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:4ff8949a842288ddfcb8beedd7939fe0a7df676f7e27d576b2921115772c9548"
+
+[connector]
+id = "fcp.mixpanel"
+name = "Mixpanel Connector"
+version = "0.1.0"
+description = "FCP connector for Mixpanel product analytics (events, funnels, insights)"
+archetypes = ["knowledge"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores service account credentials and project ID."
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = [
+    "z:public",
+    "z:community",
+]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+]
+optional = []
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "media.upload",
+    "media.download",
+]
+
+[provides.operations."mixpanel.events.query"]
+description = "Query events with JQL or Insights API"
+capability = "mixpanel.events.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."mixpanel.events.query".input_schema]
+required = [
+    "from_date",
+    "to_date",
+]
+type = "object"
+
+[provides.operations."mixpanel.events.query".input_schema.properties.event]
+description = "Event name filter"
+type = "string"
+
+[provides.operations."mixpanel.events.query".input_schema.properties.from_date]
+description = "Start date (YYYY-MM-DD)"
+type = "string"
+
+[provides.operations."mixpanel.events.query".input_schema.properties.to_date]
+description = "End date (YYYY-MM-DD)"
+type = "string"
+
+[provides.operations."mixpanel.events.query".output_schema]
+required = ["data"]
+type = "object"
+
+[provides.operations."mixpanel.events.query".output_schema.properties.data]
+type = "object"
+
+[provides.operations."mixpanel.events.query".network_constraints]
+host_allow = [
+    "mixpanel.com",
+    "*.mixpanel.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 52428800
+
+[provides.operations."mixpanel.events.query".ai_hints]
+when_to_use = "Query Mixpanel events for a date range."
+common_mistakes = []
+examples = ['{"from_date": "2025-01-01", "to_date": "2025-01-31", "event": "signup"}']
+related = [
+    "mixpanel.funnels.list",
+    "mixpanel.insights.query",
+]
+
+[provides.operations."mixpanel.funnels.list"]
+description = "List saved funnels"
+capability = "mixpanel.funnels.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."mixpanel.funnels.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."mixpanel.funnels.list".output_schema]
+required = ["funnels"]
+type = "object"
+
+[provides.operations."mixpanel.funnels.list".output_schema.properties.funnels]
+type = "array"
+
+[provides.operations."mixpanel.funnels.list".network_constraints]
+host_allow = [
+    "mixpanel.com",
+    "*.mixpanel.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."mixpanel.funnels.list".ai_hints]
+when_to_use = "List saved funnels in Mixpanel."
+common_mistakes = []
+examples = ["{}"]
+related = ["mixpanel.events.query"]
+
+[provides.operations."mixpanel.insights.query"]
+description = "Run an Insights query"
+capability = "mixpanel.insights.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."mixpanel.insights.query".input_schema]
+required = ["bookmark_id"]
+type = "object"
+
+[provides.operations."mixpanel.insights.query".input_schema.properties.bookmark_id]
+description = "Saved report bookmark ID"
+type = "string"
+
+[provides.operations."mixpanel.insights.query".output_schema]
+required = ["data"]
+type = "object"
+
+[provides.operations."mixpanel.insights.query".output_schema.properties.data]
+type = "object"
+
+[provides.operations."mixpanel.insights.query".network_constraints]
+host_allow = [
+    "mixpanel.com",
+    "*.mixpanel.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 52428800
+
+[provides.operations."mixpanel.insights.query".ai_hints]
+when_to_use = "Run a saved Insights report in Mixpanel."
+common_mistakes = []
+examples = ['{"bookmark_id": "12345"}']
+related = [
+    "mixpanel.events.query",
+    "mixpanel.funnels.list",
+]
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "mixpanel.events.read"
+requests = 100
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "mixpanel.funnels.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "mixpanel.insights.read"
+requests = 100
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[rate_limits.operation_pools]
+"mixpanel.events.query" = ["mixpanel.events.read"]
+"mixpanel.insights.query" = ["mixpanel.insights.read"]
+"mixpanel.funnels.list" = ["mixpanel.funnels.read"]

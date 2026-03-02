@@ -1,0 +1,376 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:2f776d18e83304b2296d6eeb7b00c591481361327b46a4070f944430920a3196"
+
+[connector]
+id = "fcp.bitbucket"
+name = "Bitbucket Connector"
+version = "0.1.0"
+description = "FCP connector for Bitbucket Cloud (repositories, pull requests, issues, pipelines)"
+archetypes = [
+    "knowledge",
+    "operational",
+]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores OAuth2 access and refresh tokens."
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = [
+    "z:public",
+    "z:community",
+]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+]
+optional = []
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "media.upload",
+    "media.download",
+]
+
+[provides.operations."bitbucket.issues.list"]
+description = "List issues in a repository"
+capability = "bitbucket.issues.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."bitbucket.issues.list".input_schema]
+required = [
+    "workspace",
+    "repo_slug",
+]
+type = "object"
+
+[provides.operations."bitbucket.issues.list".input_schema.properties.repo_slug]
+type = "string"
+
+[provides.operations."bitbucket.issues.list".input_schema.properties.workspace]
+type = "string"
+
+[provides.operations."bitbucket.issues.list".output_schema]
+required = ["values"]
+type = "object"
+
+[provides.operations."bitbucket.issues.list".output_schema.properties.values]
+type = "array"
+
+[provides.operations."bitbucket.issues.list".network_constraints]
+host_allow = ["api.bitbucket.org"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."bitbucket.issues.list".ai_hints]
+when_to_use = "List issues in a Bitbucket repository."
+common_mistakes = []
+examples = ['{"workspace": "myteam", "repo_slug": "backend"}']
+related = ["bitbucket.repos.list"]
+
+[provides.operations."bitbucket.pipelines.list"]
+description = "List pipelines"
+capability = "bitbucket.pipelines.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."bitbucket.pipelines.list".input_schema]
+required = [
+    "workspace",
+    "repo_slug",
+]
+type = "object"
+
+[provides.operations."bitbucket.pipelines.list".input_schema.properties.repo_slug]
+type = "string"
+
+[provides.operations."bitbucket.pipelines.list".input_schema.properties.workspace]
+type = "string"
+
+[provides.operations."bitbucket.pipelines.list".output_schema]
+required = ["values"]
+type = "object"
+
+[provides.operations."bitbucket.pipelines.list".output_schema.properties.values]
+type = "array"
+
+[provides.operations."bitbucket.pipelines.list".network_constraints]
+host_allow = ["api.bitbucket.org"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."bitbucket.pipelines.list".ai_hints]
+when_to_use = "List CI/CD pipelines."
+common_mistakes = []
+examples = ['{"workspace": "myteam", "repo_slug": "backend"}']
+related = ["bitbucket.repos.list"]
+
+[provides.operations."bitbucket.pull_requests.create"]
+description = "Create a pull request"
+capability = "bitbucket.pull_requests.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."bitbucket.pull_requests.create".input_schema]
+required = [
+    "workspace",
+    "repo_slug",
+    "title",
+    "source_branch",
+]
+type = "object"
+
+[provides.operations."bitbucket.pull_requests.create".input_schema.properties.repo_slug]
+type = "string"
+
+[provides.operations."bitbucket.pull_requests.create".input_schema.properties.source_branch]
+type = "string"
+
+[provides.operations."bitbucket.pull_requests.create".input_schema.properties.title]
+type = "string"
+
+[provides.operations."bitbucket.pull_requests.create".input_schema.properties.workspace]
+type = "string"
+
+[provides.operations."bitbucket.pull_requests.create".output_schema]
+required = ["id"]
+type = "object"
+
+[provides.operations."bitbucket.pull_requests.create".output_schema.properties.id]
+type = "integer"
+
+[provides.operations."bitbucket.pull_requests.create".network_constraints]
+host_allow = ["api.bitbucket.org"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."bitbucket.pull_requests.create".ai_hints]
+when_to_use = "Create a new pull request."
+common_mistakes = []
+examples = ['{"workspace": "myteam", "repo_slug": "backend", "title": "Fix login bug", "source_branch": "fix/login"}']
+related = ["bitbucket.pull_requests.list"]
+
+[provides.operations."bitbucket.pull_requests.list"]
+description = "List pull requests"
+capability = "bitbucket.pull_requests.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."bitbucket.pull_requests.list".input_schema]
+required = [
+    "workspace",
+    "repo_slug",
+]
+type = "object"
+
+[provides.operations."bitbucket.pull_requests.list".input_schema.properties.repo_slug]
+type = "string"
+
+[provides.operations."bitbucket.pull_requests.list".input_schema.properties.workspace]
+type = "string"
+
+[provides.operations."bitbucket.pull_requests.list".output_schema]
+required = ["values"]
+type = "object"
+
+[provides.operations."bitbucket.pull_requests.list".output_schema.properties.values]
+type = "array"
+
+[provides.operations."bitbucket.pull_requests.list".network_constraints]
+host_allow = ["api.bitbucket.org"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."bitbucket.pull_requests.list".ai_hints]
+when_to_use = "List pull requests in a repository."
+common_mistakes = []
+examples = ['{"workspace": "myteam", "repo_slug": "backend"}']
+related = [
+    "bitbucket.repos.list",
+    "bitbucket.pull_requests.create",
+]
+
+[provides.operations."bitbucket.repos.list"]
+description = "List repositories"
+capability = "bitbucket.repos.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."bitbucket.repos.list".input_schema]
+required = ["workspace"]
+type = "object"
+
+[provides.operations."bitbucket.repos.list".input_schema.properties.workspace]
+description = "Workspace slug"
+type = "string"
+
+[provides.operations."bitbucket.repos.list".output_schema]
+required = ["values"]
+type = "object"
+
+[provides.operations."bitbucket.repos.list".output_schema.properties.values]
+type = "array"
+
+[provides.operations."bitbucket.repos.list".network_constraints]
+host_allow = ["api.bitbucket.org"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."bitbucket.repos.list".ai_hints]
+when_to_use = "List repositories in a Bitbucket workspace."
+common_mistakes = []
+examples = ['{"workspace": "myteam"}']
+related = [
+    "bitbucket.pull_requests.list",
+    "bitbucket.issues.list",
+]
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "bitbucket.repos.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "bitbucket.pull_requests.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "bitbucket.pull_requests.write"
+requests = 50
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "bitbucket.issues.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "bitbucket.pipelines.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[rate_limits.operation_pools]
+"bitbucket.issues.list" = ["bitbucket.issues.read"]
+"bitbucket.pipelines.list" = ["bitbucket.pipelines.read"]
+"bitbucket.pull_requests.create" = ["bitbucket.pull_requests.write"]
+"bitbucket.repos.list" = ["bitbucket.repos.read"]
+"bitbucket.pull_requests.list" = ["bitbucket.pull_requests.read"]

@@ -1,0 +1,576 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:ad796a27e7d14a1e85304130e84cab97810330a53ad24cafbd9ddef06af03f9c"
+
+[connector]
+id = "fcp.google-ai"
+name = "Google AI Connector"
+version = "0.1.0"
+description = "FCP connector for Google AI (Gemini) generative models — text generation, streaming, tool use, embeddings, token counting"
+archetypes = [
+    "operational",
+    "streaming",
+]
+format = "wasi"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = [
+    "z:public",
+    "z:community",
+]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+]
+optional = []
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "storage.state",
+    "media.upload",
+]
+
+[provides.operations."google-ai.batch_embed_contents"]
+description = "Generate embeddings for multiple content items in a single request"
+capability = "google-ai.embed"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."google-ai.batch_embed_contents".input_schema]
+required = ["requests"]
+type = "object"
+
+[provides.operations."google-ai.batch_embed_contents".input_schema.properties.model]
+default = "text-embedding-004"
+type = "string"
+
+[provides.operations."google-ai.batch_embed_contents".input_schema.properties.requests]
+description = "Array of embed requests"
+type = "array"
+
+[provides.operations."google-ai.batch_embed_contents".output_schema]
+required = ["embeddings"]
+type = "object"
+
+[provides.operations."google-ai.batch_embed_contents".output_schema.properties.embeddings]
+type = "array"
+
+[provides.operations."google-ai.batch_embed_contents".network_constraints]
+host_allow = ["generativelanguage.googleapis.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."google-ai.batch_embed_contents".ai_hints]
+when_to_use = "Embed multiple texts in a single batch request for efficiency."
+common_mistakes = ["Exceeding batch size limits (typically 100 items)."]
+examples = ['{"requests": [{"content": {"parts": [{"text": "doc 1"}]}}, {"content": {"parts": [{"text": "doc 2"}]}}]}']
+related = ["google-ai.embed_content"]
+
+[provides.operations."google-ai.count_tokens"]
+description = "Count tokens for content without generating a response"
+capability = "google-ai.models"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."google-ai.count_tokens".input_schema]
+required = ["contents"]
+type = "object"
+
+[provides.operations."google-ai.count_tokens".input_schema.properties.contents]
+type = "array"
+
+[provides.operations."google-ai.count_tokens".input_schema.properties.model]
+default = "gemini-2.0-flash"
+type = "string"
+
+[provides.operations."google-ai.count_tokens".output_schema]
+required = ["total_tokens"]
+type = "object"
+
+[provides.operations."google-ai.count_tokens".output_schema.properties.total_tokens]
+type = "integer"
+
+[provides.operations."google-ai.count_tokens".network_constraints]
+host_allow = ["generativelanguage.googleapis.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 15000
+max_response_bytes = 1048576
+
+[provides.operations."google-ai.count_tokens".ai_hints]
+when_to_use = "Count tokens before sending a generation request to estimate cost or check context limits."
+common_mistakes = []
+examples = ['{"contents": [{"role": "user", "parts": [{"text": "Hello"}]}]}']
+related = ["google-ai.generate_content"]
+
+[provides.operations."google-ai.embed_content"]
+description = "Generate embeddings for text content"
+capability = "google-ai.embed"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."google-ai.embed_content".input_schema]
+required = ["content"]
+type = "object"
+
+[provides.operations."google-ai.embed_content".input_schema.properties.content]
+description = "Content to embed {parts: [{text}]}"
+type = "object"
+
+[provides.operations."google-ai.embed_content".input_schema.properties.model]
+default = "text-embedding-004"
+description = "Embedding model (e.g. text-embedding-004)"
+type = "string"
+
+[provides.operations."google-ai.embed_content".input_schema.properties.output_dimensionality]
+description = "Desired embedding dimension (truncation)"
+type = "integer"
+
+[provides.operations."google-ai.embed_content".input_schema.properties.task_type]
+description = "Task type: RETRIEVAL_QUERY, RETRIEVAL_DOCUMENT, SEMANTIC_SIMILARITY, CLASSIFICATION, CLUSTERING"
+type = "string"
+
+[provides.operations."google-ai.embed_content".input_schema.properties.title]
+description = "Optional document title (for RETRIEVAL_DOCUMENT)"
+type = "string"
+
+[provides.operations."google-ai.embed_content".output_schema]
+required = ["embedding"]
+type = "object"
+
+[provides.operations."google-ai.embed_content".output_schema.properties.embedding]
+type = "object"
+
+[provides.operations."google-ai.embed_content".network_constraints]
+host_allow = ["generativelanguage.googleapis.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."google-ai.embed_content".ai_hints]
+when_to_use = "Generate text embeddings for semantic search, clustering, or classification."
+common_mistakes = ["Not specifying task_type — affects embedding quality for specific use cases."]
+examples = ['{"content": {"parts": [{"text": "What is machine learning?"}]}, "task_type": "RETRIEVAL_QUERY"}']
+related = ["google-ai.batch_embed_contents"]
+
+[provides.operations."google-ai.generate_content"]
+description = "Generate content from a Gemini model (non-streaming)"
+capability = "google-ai.generate"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."google-ai.generate_content".input_schema]
+required = ["contents"]
+type = "object"
+
+[provides.operations."google-ai.generate_content".input_schema.properties.contents]
+description = "Conversation turns [{role, parts}]"
+minItems = 1
+type = "array"
+
+[provides.operations."google-ai.generate_content".input_schema.properties.generation_config]
+description = "Temperature, topP, topK, maxOutputTokens, etc."
+type = "object"
+
+[provides.operations."google-ai.generate_content".input_schema.properties.model]
+default = "gemini-2.0-flash"
+description = "Model name (e.g. gemini-2.0-flash)"
+type = "string"
+
+[provides.operations."google-ai.generate_content".input_schema.properties.safety_settings]
+description = "Per-category safety thresholds"
+type = "array"
+
+[provides.operations."google-ai.generate_content".input_schema.properties.system_instruction]
+description = "Optional system instruction"
+type = "object"
+
+[provides.operations."google-ai.generate_content".input_schema.properties.tool_config]
+description = "Tool execution configuration (auto, none, required)"
+type = "object"
+
+[provides.operations."google-ai.generate_content".input_schema.properties.tools]
+description = "Tool/function declarations for function calling"
+type = "array"
+
+[provides.operations."google-ai.generate_content".output_schema]
+required = [
+    "candidates",
+    "usage_metadata",
+]
+type = "object"
+
+[provides.operations."google-ai.generate_content".output_schema.properties.candidates]
+type = "array"
+
+[provides.operations."google-ai.generate_content".output_schema.properties.model_version]
+type = "string"
+
+[provides.operations."google-ai.generate_content".output_schema.properties.usage_metadata]
+type = "object"
+
+[provides.operations."google-ai.generate_content".network_constraints]
+host_allow = ["generativelanguage.googleapis.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 10485760
+
+[provides.operations."google-ai.generate_content".ai_hints]
+when_to_use = "Generate text from a Gemini model. Use for single-turn or multi-turn conversations."
+common_mistakes = [
+    "Passing a string instead of contents array [{role, parts}].",
+    "Not specifying maxOutputTokens in generation_config — model defaults may be low.",
+]
+examples = ['{"contents": [{"role": "user", "parts": [{"text": "Explain quantum computing"}]}]}']
+related = [
+    "google-ai.generate_content_stream",
+    "google-ai.count_tokens",
+]
+
+[provides.operations."google-ai.generate_content_stream"]
+description = "Generate content with streaming token delivery"
+capability = "google-ai.generate"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."google-ai.generate_content_stream".input_schema]
+required = ["contents"]
+type = "object"
+
+[provides.operations."google-ai.generate_content_stream".input_schema.properties.contents]
+description = "Conversation turns [{role, parts}]"
+minItems = 1
+type = "array"
+
+[provides.operations."google-ai.generate_content_stream".input_schema.properties.generation_config]
+type = "object"
+
+[provides.operations."google-ai.generate_content_stream".input_schema.properties.model]
+default = "gemini-2.0-flash"
+description = "Model name"
+type = "string"
+
+[provides.operations."google-ai.generate_content_stream".input_schema.properties.safety_settings]
+type = "array"
+
+[provides.operations."google-ai.generate_content_stream".input_schema.properties.system_instruction]
+type = "object"
+
+[provides.operations."google-ai.generate_content_stream".input_schema.properties.tool_config]
+type = "object"
+
+[provides.operations."google-ai.generate_content_stream".input_schema.properties.tools]
+type = "array"
+
+[provides.operations."google-ai.generate_content_stream".output_schema]
+required = ["candidates"]
+type = "object"
+
+[provides.operations."google-ai.generate_content_stream".output_schema.properties.candidates]
+type = "array"
+
+[provides.operations."google-ai.generate_content_stream".output_schema.properties.usage_metadata]
+type = "object"
+
+[provides.operations."google-ai.generate_content_stream".network_constraints]
+host_allow = ["generativelanguage.googleapis.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 300000
+max_response_bytes = 52428800
+
+[provides.operations."google-ai.generate_content_stream".ai_hints]
+when_to_use = "Stream generation tokens incrementally for long outputs or real-time display."
+common_mistakes = ["Not handling partial chunks — each SSE chunk is a partial GenerateContentResponse."]
+examples = ['{"model": "gemini-2.0-flash", "contents": [{"role": "user", "parts": [{"text": "Write a story"}]}]}']
+related = ["google-ai.generate_content"]
+
+[provides.operations."google-ai.get_model"]
+description = "Get detailed information about a specific model"
+capability = "google-ai.models"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."google-ai.get_model".input_schema]
+required = ["model"]
+type = "object"
+
+[provides.operations."google-ai.get_model".input_schema.properties.model]
+description = "Model resource name (e.g. models/gemini-2.0-flash)"
+type = "string"
+
+[provides.operations."google-ai.get_model".output_schema]
+required = [
+    "name",
+    "supported_generation_methods",
+]
+type = "object"
+
+[provides.operations."google-ai.get_model".output_schema.properties.display_name]
+type = "string"
+
+[provides.operations."google-ai.get_model".output_schema.properties.input_token_limit]
+type = "integer"
+
+[provides.operations."google-ai.get_model".output_schema.properties.name]
+type = "string"
+
+[provides.operations."google-ai.get_model".output_schema.properties.output_token_limit]
+type = "integer"
+
+[provides.operations."google-ai.get_model".output_schema.properties.supported_generation_methods]
+type = "array"
+
+[provides.operations."google-ai.get_model".network_constraints]
+host_allow = ["generativelanguage.googleapis.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 15000
+max_response_bytes = 1048576
+
+[provides.operations."google-ai.get_model".ai_hints]
+when_to_use = "Get details for a specific model including token limits and supported methods."
+common_mistakes = ["Using display name instead of resource name (must be 'models/gemini-2.0-flash', not 'Gemini 2.0 Flash')."]
+examples = ['{"model": "models/gemini-2.0-flash"}']
+related = ["google-ai.list_models"]
+
+[provides.operations."google-ai.get_usage"]
+description = "Return local usage and cost totals for the current connector session"
+capability = "google-ai.usage"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."google-ai.get_usage".input_schema]
+type = "object"
+
+[provides.operations."google-ai.get_usage".output_schema]
+required = [
+    "total_input_tokens",
+    "total_output_tokens",
+    "requests_total",
+    "requests_error",
+]
+type = "object"
+
+[provides.operations."google-ai.get_usage".output_schema.properties.requests_error]
+type = "integer"
+
+[provides.operations."google-ai.get_usage".output_schema.properties.requests_total]
+type = "integer"
+
+[provides.operations."google-ai.get_usage".output_schema.properties.total_input_tokens]
+type = "integer"
+
+[provides.operations."google-ai.get_usage".output_schema.properties.total_output_tokens]
+type = "integer"
+
+[provides.operations."google-ai.get_usage".ai_hints]
+when_to_use = "Inspect connector token usage counters for the current session."
+common_mistakes = []
+examples = ["{}"]
+related = ["google-ai.generate_content"]
+
+[provides.operations."google-ai.list_models"]
+description = "List available Gemini models and their capabilities"
+capability = "google-ai.models"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."google-ai.list_models".input_schema]
+required = []
+type = "object"
+
+[provides.operations."google-ai.list_models".input_schema.properties.page_size]
+type = "integer"
+
+[provides.operations."google-ai.list_models".input_schema.properties.page_token]
+type = "string"
+
+[provides.operations."google-ai.list_models".output_schema]
+required = ["models"]
+type = "object"
+
+[provides.operations."google-ai.list_models".output_schema.properties.models]
+type = "array"
+
+[provides.operations."google-ai.list_models".output_schema.properties.next_page_token]
+type = "string"
+
+[provides.operations."google-ai.list_models".network_constraints]
+host_allow = ["generativelanguage.googleapis.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 15000
+max_response_bytes = 1048576
+
+[provides.operations."google-ai.list_models".ai_hints]
+when_to_use = "Discover available models and their capabilities, context sizes, and supported generation methods."
+common_mistakes = []
+examples = ["{}"]
+related = ["google-ai.get_model"]
+
+[event_caps]
+streaming = true
+replay = false
+min_buffer_events = 10
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "google-ai.generate"
+requests = 60
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "google-ai.embed"
+requests = 300
+window_ms = 60000
+burst = 30
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "google-ai.models"
+requests = 60
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[rate_limits.operation_pools]
+"google-ai.list_models" = ["google-ai.models"]
+"google-ai.count_tokens" = ["google-ai.models"]
+"google-ai.get_model" = ["google-ai.models"]
+"google-ai.generate_content_stream" = ["google-ai.generate"]
+"google-ai.embed_content" = ["google-ai.embed"]
+"google-ai.get_usage" = ["google-ai.models"]
+"google-ai.generate_content" = ["google-ai.generate"]
+"google-ai.batch_embed_contents" = ["google-ai.embed"]

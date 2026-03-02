@@ -1,0 +1,445 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:698dd53117767bc20f12a5a9de048e6a09bac794791ec3b5abd45385117ba0f5"
+
+[connector]
+id = "fcp.pulumi"
+name = "Pulumi Connector"
+version = "0.1.0"
+description = "FCP connector for Pulumi infrastructure-as-code (stacks, deployments, previews)"
+archetypes = ["operational"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores Pulumi access token and org/project context."
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = [
+    "z:public",
+    "z:community",
+]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+]
+optional = []
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "media.upload",
+    "media.download",
+]
+
+[provides.operations."pulumi.deployments.list"]
+description = "List recent deployments for a stack"
+capability = "pulumi.deployments.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."pulumi.deployments.list".input_schema]
+required = [
+    "organization",
+    "project",
+    "stack",
+]
+type = "object"
+
+[provides.operations."pulumi.deployments.list".input_schema.properties.organization]
+type = "string"
+
+[provides.operations."pulumi.deployments.list".input_schema.properties.project]
+type = "string"
+
+[provides.operations."pulumi.deployments.list".input_schema.properties.stack]
+type = "string"
+
+[provides.operations."pulumi.deployments.list".output_schema]
+required = ["updates"]
+type = "object"
+
+[provides.operations."pulumi.deployments.list".output_schema.properties.updates]
+type = "array"
+
+[provides.operations."pulumi.deployments.list".network_constraints]
+host_allow = ["api.pulumi.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."pulumi.deployments.list".ai_hints]
+when_to_use = "List recent deployments/updates for a stack."
+common_mistakes = []
+examples = ['{"organization": "myorg", "project": "myproject", "stack": "production"}']
+related = ["pulumi.stacks.get"]
+
+[provides.operations."pulumi.stacks.create"]
+description = "Create a new stack"
+capability = "pulumi.stacks.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."pulumi.stacks.create".input_schema]
+required = [
+    "organization",
+    "project",
+    "stack",
+]
+type = "object"
+
+[provides.operations."pulumi.stacks.create".input_schema.properties.organization]
+type = "string"
+
+[provides.operations."pulumi.stacks.create".input_schema.properties.project]
+type = "string"
+
+[provides.operations."pulumi.stacks.create".input_schema.properties.stack]
+type = "string"
+
+[provides.operations."pulumi.stacks.create".output_schema]
+required = [
+    "orgName",
+    "projectName",
+    "stackName",
+]
+type = "object"
+
+[provides.operations."pulumi.stacks.create".output_schema.properties.orgName]
+type = "string"
+
+[provides.operations."pulumi.stacks.create".output_schema.properties.projectName]
+type = "string"
+
+[provides.operations."pulumi.stacks.create".output_schema.properties.stackName]
+type = "string"
+
+[provides.operations."pulumi.stacks.create".network_constraints]
+host_allow = ["api.pulumi.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."pulumi.stacks.create".ai_hints]
+when_to_use = "Create a new Pulumi stack."
+common_mistakes = []
+examples = ['{"organization": "myorg", "project": "myproject", "stack": "staging"}']
+related = [
+    "pulumi.stacks.list",
+    "pulumi.stacks.delete",
+]
+
+[provides.operations."pulumi.stacks.delete"]
+description = "Delete a stack"
+capability = "pulumi.stacks.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."pulumi.stacks.delete".input_schema]
+required = [
+    "organization",
+    "project",
+    "stack",
+]
+type = "object"
+
+[provides.operations."pulumi.stacks.delete".input_schema.properties.organization]
+type = "string"
+
+[provides.operations."pulumi.stacks.delete".input_schema.properties.project]
+type = "string"
+
+[provides.operations."pulumi.stacks.delete".input_schema.properties.stack]
+type = "string"
+
+[provides.operations."pulumi.stacks.delete".output_schema]
+type = "object"
+
+[provides.operations."pulumi.stacks.delete".network_constraints]
+host_allow = ["api.pulumi.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."pulumi.stacks.delete".ai_hints]
+when_to_use = "Delete a stack. Cannot be undone; all resources and history are removed."
+common_mistakes = ["Deleting a stack with active resources — destroy first."]
+examples = ['{"organization": "myorg", "project": "myproject", "stack": "staging"}']
+related = ["pulumi.stacks.list"]
+
+[provides.operations."pulumi.stacks.export"]
+description = "Export stack state as a deployment checkpoint"
+capability = "pulumi.stacks.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."pulumi.stacks.export".input_schema]
+required = [
+    "organization",
+    "project",
+    "stack",
+]
+type = "object"
+
+[provides.operations."pulumi.stacks.export".input_schema.properties.organization]
+type = "string"
+
+[provides.operations."pulumi.stacks.export".input_schema.properties.project]
+type = "string"
+
+[provides.operations."pulumi.stacks.export".input_schema.properties.stack]
+type = "string"
+
+[provides.operations."pulumi.stacks.export".output_schema]
+required = ["deployment"]
+type = "object"
+
+[provides.operations."pulumi.stacks.export".output_schema.properties.deployment]
+type = "object"
+
+[provides.operations."pulumi.stacks.export".network_constraints]
+host_allow = ["api.pulumi.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 52428800
+
+[provides.operations."pulumi.stacks.export".ai_hints]
+when_to_use = "Export the full state of a stack for backup or inspection."
+common_mistakes = []
+examples = ['{"organization": "myorg", "project": "myproject", "stack": "production"}']
+related = ["pulumi.stacks.get"]
+
+[provides.operations."pulumi.stacks.get"]
+description = "Get stack details including outputs and resources"
+capability = "pulumi.stacks.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."pulumi.stacks.get".input_schema]
+required = [
+    "organization",
+    "project",
+    "stack",
+]
+type = "object"
+
+[provides.operations."pulumi.stacks.get".input_schema.properties.organization]
+type = "string"
+
+[provides.operations."pulumi.stacks.get".input_schema.properties.project]
+type = "string"
+
+[provides.operations."pulumi.stacks.get".input_schema.properties.stack]
+type = "string"
+
+[provides.operations."pulumi.stacks.get".output_schema]
+required = [
+    "orgName",
+    "projectName",
+    "stackName",
+]
+type = "object"
+
+[provides.operations."pulumi.stacks.get".output_schema.properties.orgName]
+type = "string"
+
+[provides.operations."pulumi.stacks.get".output_schema.properties.projectName]
+type = "string"
+
+[provides.operations."pulumi.stacks.get".output_schema.properties.stackName]
+type = "string"
+
+[provides.operations."pulumi.stacks.get".network_constraints]
+host_allow = ["api.pulumi.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."pulumi.stacks.get".ai_hints]
+when_to_use = "Get details for a specific stack including outputs."
+common_mistakes = []
+examples = ['{"organization": "myorg", "project": "myproject", "stack": "production"}']
+related = [
+    "pulumi.stacks.list",
+    "pulumi.stacks.export",
+]
+
+[provides.operations."pulumi.stacks.list"]
+description = "List stacks in an organization"
+capability = "pulumi.stacks.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."pulumi.stacks.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."pulumi.stacks.list".input_schema.properties.organization]
+type = "string"
+
+[provides.operations."pulumi.stacks.list".input_schema.properties.project]
+type = "string"
+
+[provides.operations."pulumi.stacks.list".output_schema]
+required = ["stacks"]
+type = "object"
+
+[provides.operations."pulumi.stacks.list".output_schema.properties.stacks]
+type = "array"
+
+[provides.operations."pulumi.stacks.list".network_constraints]
+host_allow = ["api.pulumi.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."pulumi.stacks.list".ai_hints]
+when_to_use = "List Pulumi stacks."
+common_mistakes = []
+examples = ['{"organization": "myorg", "project": "myproject"}']
+related = [
+    "pulumi.stacks.get",
+    "pulumi.stacks.create",
+]
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "pulumi.stacks.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "pulumi.stacks.write"
+requests = 30
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "pulumi.deployments.read"
+requests = 100
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[rate_limits.operation_pools]
+"pulumi.stacks.create" = ["pulumi.stacks.write"]
+"pulumi.stacks.export" = ["pulumi.stacks.read"]
+"pulumi.deployments.list" = ["pulumi.deployments.read"]
+"pulumi.stacks.get" = ["pulumi.stacks.read"]
+"pulumi.stacks.list" = ["pulumi.stacks.read"]
+"pulumi.stacks.delete" = ["pulumi.stacks.write"]

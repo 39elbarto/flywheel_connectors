@@ -1,0 +1,1386 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:b480f9e8abfedf5703226f15ee12a2de143ca468a3ababd2a4614ba9d3d9bdd8"
+
+[connector]
+id = "fcp.microsoft365"
+name = "Microsoft 365 Connector"
+version = "0.1.0"
+description = "FCP connector for Microsoft 365 via Microsoft Graph API (Outlook mail, OneDrive files, Calendar events, To Do tasks, OneNote notes, Excel/Word Online)"
+archetypes = [
+    "knowledge",
+    "operational",
+    "streaming",
+    "storage",
+]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores Graph API delta tokens for incremental sync, webhook subscription IDs with expiry timestamps, and per-resource change cursors."
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = [
+    "z:work",
+    "z:private",
+]
+forbidden = [
+    "z:public",
+    "z:community",
+]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+    "media.download",
+    "media.upload",
+]
+optional = ["network.tls.mtls"]
+forbidden = [
+    "system.exec",
+    "network.listen",
+]
+
+[provides.operations."m365.calendar.create_event"]
+description = "Create a calendar event with optional attendees"
+capability = "m365.calendar.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."m365.calendar.create_event".input_schema]
+required = [
+    "user_id",
+    "subject",
+    "start",
+    "end",
+]
+type = "object"
+
+[provides.operations."m365.calendar.create_event".input_schema.properties.attendees]
+description = "List of attendee objects"
+type = "array"
+
+[provides.operations."m365.calendar.create_event".input_schema.properties.body]
+description = "Event body with contentType and content"
+type = "object"
+
+[provides.operations."m365.calendar.create_event".input_schema.properties.end]
+description = "End time object with dateTime and timeZone"
+type = "object"
+
+[provides.operations."m365.calendar.create_event".input_schema.properties.location]
+description = "Event location"
+type = "object"
+
+[provides.operations."m365.calendar.create_event".input_schema.properties.start]
+description = "Start time object with dateTime and timeZone"
+type = "object"
+
+[provides.operations."m365.calendar.create_event".input_schema.properties.subject]
+type = "string"
+
+[provides.operations."m365.calendar.create_event".input_schema.properties.user_id]
+description = "User principal name or 'me'"
+type = "string"
+
+[provides.operations."m365.calendar.create_event".output_schema]
+required = ["event"]
+type = "object"
+
+[provides.operations."m365.calendar.create_event".output_schema.properties.event]
+type = "object"
+
+[provides.operations."m365.calendar.create_event".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."m365.calendar.create_event".ai_hints]
+when_to_use = "Create a calendar event. Adding attendees sends meeting invitations."
+common_mistakes = [
+    "Adding attendees without user confirmation (sends real meeting invites).",
+    "Not specifying timeZone in start/end objects.",
+]
+examples = ['{"user_id": "me", "subject": "Team Standup", "start": {"dateTime": "2026-03-03T09:00:00", "timeZone": "America/Chicago"}, "end": {"dateTime": "2026-03-03T09:30:00", "timeZone": "America/Chicago"}}']
+related = [
+    "m365.calendar.list_events",
+    "m365.calendar.delete_event",
+]
+
+[provides.operations."m365.calendar.delete_event"]
+description = "Delete a calendar event"
+capability = "m365.calendar.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."m365.calendar.delete_event".input_schema]
+required = [
+    "user_id",
+    "event_id",
+]
+type = "object"
+
+[provides.operations."m365.calendar.delete_event".input_schema.properties.event_id]
+description = "Event ID to delete"
+type = "string"
+
+[provides.operations."m365.calendar.delete_event".input_schema.properties.user_id]
+description = "User principal name or 'me'"
+type = "string"
+
+[provides.operations."m365.calendar.delete_event".output_schema]
+type = "object"
+
+[provides.operations."m365.calendar.delete_event".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."m365.calendar.delete_event".ai_hints]
+when_to_use = "Delete a calendar event. Sends cancellation notices to attendees."
+common_mistakes = ["Deleting recurring event master instead of a single instance."]
+examples = ['{"user_id": "me", "event_id": "AAMkAG..."}']
+related = [
+    "m365.calendar.list_events",
+    "m365.calendar.create_event",
+]
+
+[provides.operations."m365.calendar.get_freebusy"]
+description = "Check free/busy availability for one or more users"
+capability = "m365.calendar.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."m365.calendar.get_freebusy".input_schema]
+required = [
+    "schedules",
+    "start_time",
+    "end_time",
+]
+type = "object"
+
+[provides.operations."m365.calendar.get_freebusy".input_schema.properties.end_time]
+description = "End of availability window"
+type = "object"
+
+[provides.operations."m365.calendar.get_freebusy".input_schema.properties.schedules]
+description = "List of email addresses to check"
+type = "array"
+
+[provides.operations."m365.calendar.get_freebusy".input_schema.properties.start_time]
+description = "Start of availability window"
+type = "object"
+
+[provides.operations."m365.calendar.get_freebusy".output_schema]
+required = ["schedules"]
+type = "object"
+
+[provides.operations."m365.calendar.get_freebusy".output_schema.properties.schedules]
+type = "array"
+
+[provides.operations."m365.calendar.get_freebusy".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."m365.calendar.get_freebusy".ai_hints]
+when_to_use = "Check when users are free or busy to schedule meetings."
+common_mistakes = ["Querying too many schedules at once (max 20 per request)."]
+examples = ['{"schedules": ["alice@contoso.com", "bob@contoso.com"], "start_time": {"dateTime": "2026-03-03T08:00:00", "timeZone": "UTC"}, "end_time": {"dateTime": "2026-03-03T18:00:00", "timeZone": "UTC"}}']
+related = [
+    "m365.calendar.create_event",
+    "m365.calendar.list_events",
+]
+
+[provides.operations."m365.calendar.list_events"]
+description = "List calendar events within a time range"
+capability = "m365.calendar.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."m365.calendar.list_events".input_schema]
+required = ["user_id"]
+type = "object"
+
+[provides.operations."m365.calendar.list_events".input_schema.properties.calendar_id]
+description = "Specific calendar ID (default: primary)"
+type = "string"
+
+[provides.operations."m365.calendar.list_events".input_schema.properties.end_datetime]
+description = "ISO 8601 end of time range"
+type = "string"
+
+[provides.operations."m365.calendar.list_events".input_schema.properties.start_datetime]
+description = "ISO 8601 start of time range"
+type = "string"
+
+[provides.operations."m365.calendar.list_events".input_schema.properties.user_id]
+description = "User principal name or 'me'"
+type = "string"
+
+[provides.operations."m365.calendar.list_events".output_schema]
+required = ["events"]
+type = "object"
+
+[provides.operations."m365.calendar.list_events".output_schema.properties.events]
+type = "array"
+
+[provides.operations."m365.calendar.list_events".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."m365.calendar.list_events".ai_hints]
+when_to_use = "List calendar events. Use calendarView for expanded recurring events."
+common_mistakes = [
+    "Not using calendarView endpoint for recurring events (list only returns master events).",
+    "Querying unbounded time ranges.",
+]
+examples = ['{"user_id": "me", "start_datetime": "2026-03-01T00:00:00Z", "end_datetime": "2026-03-08T00:00:00Z"}']
+related = [
+    "m365.calendar.create_event",
+    "m365.calendar.get_freebusy",
+]
+
+[provides.operations."m365.delta.sync"]
+description = "Perform incremental delta query to get changes since last sync"
+capability = "m365.delta.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."m365.delta.sync".input_schema]
+required = ["resource"]
+type = "object"
+
+[provides.operations."m365.delta.sync".input_schema.properties.delta_token]
+description = "Delta token from previous sync (omit for initial full sync)"
+type = "string"
+
+[provides.operations."m365.delta.sync".input_schema.properties.resource]
+description = "Graph resource path (e.g., /me/messages, /me/events, /me/drive/root/children)"
+type = "string"
+
+[provides.operations."m365.delta.sync".output_schema]
+required = [
+    "changes",
+    "delta_token",
+]
+type = "object"
+
+[provides.operations."m365.delta.sync".output_schema.properties.changes]
+type = "array"
+
+[provides.operations."m365.delta.sync".output_schema.properties.delta_token]
+description = "Token for next incremental sync"
+type = "string"
+
+[provides.operations."m365.delta.sync".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 52428800
+
+[provides.operations."m365.delta.sync".ai_hints]
+when_to_use = "Incrementally sync changes for mail, calendar, or files since last sync."
+common_mistakes = [
+    "Not persisting delta_token between syncs (forces full re-sync).",
+    "Not handling @removed items in the delta response.",
+]
+examples = [
+    '{"resource": "/me/messages"}',
+    '{"resource": "/me/events", "delta_token": "opaquetoken123"}',
+]
+related = ["m365.subscriptions.create"]
+
+[provides.operations."m365.files.delete_item"]
+description = "Delete a file or folder from OneDrive"
+capability = "m365.files.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."m365.files.delete_item".input_schema]
+required = [
+    "user_id",
+    "item_id",
+]
+type = "object"
+
+[provides.operations."m365.files.delete_item".input_schema.properties.item_id]
+description = "Drive item ID to delete"
+type = "string"
+
+[provides.operations."m365.files.delete_item".input_schema.properties.user_id]
+description = "User principal name or 'me'"
+type = "string"
+
+[provides.operations."m365.files.delete_item".output_schema]
+type = "object"
+
+[provides.operations."m365.files.delete_item".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."m365.files.delete_item".ai_hints]
+when_to_use = "Permanently delete a file or folder. Items go to the recycle bin first."
+common_mistakes = ["Deleting folders with contents without user confirmation."]
+examples = ['{"user_id": "me", "item_id": "01ABCDEF..."}']
+related = ["m365.files.list_items"]
+
+[provides.operations."m365.files.download_file"]
+description = "Download a file from OneDrive"
+capability = "m365.files.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."m365.files.download_file".input_schema]
+required = [
+    "user_id",
+    "item_id",
+]
+type = "object"
+
+[provides.operations."m365.files.download_file".input_schema.properties.item_id]
+description = "Drive item ID"
+type = "string"
+
+[provides.operations."m365.files.download_file".input_schema.properties.user_id]
+description = "User principal name or 'me'"
+type = "string"
+
+[provides.operations."m365.files.download_file".output_schema]
+required = ["content"]
+type = "object"
+
+[provides.operations."m365.files.download_file".output_schema.properties.content]
+description = "File content (base64-encoded)"
+type = "string"
+
+[provides.operations."m365.files.download_file".output_schema.properties.name]
+type = "string"
+
+[provides.operations."m365.files.download_file".output_schema.properties.size]
+type = "integer"
+
+[provides.operations."m365.files.download_file".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 30000
+total_timeout_ms = 120000
+max_response_bytes = 104857600
+
+[provides.operations."m365.files.download_file".ai_hints]
+when_to_use = "Download a file from OneDrive by item ID."
+common_mistakes = ["Downloading very large files without checking size first."]
+examples = ['{"user_id": "me", "item_id": "01ABCDEF..."}']
+related = [
+    "m365.files.list_items",
+    "m365.files.upload_file",
+]
+
+[provides.operations."m365.files.list_items"]
+description = "List files and folders in a OneDrive path or drive root"
+capability = "m365.files.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."m365.files.list_items".input_schema]
+required = ["user_id"]
+type = "object"
+
+[provides.operations."m365.files.list_items".input_schema.properties.drive_id]
+description = "Specific drive ID (default: user's OneDrive)"
+type = "string"
+
+[provides.operations."m365.files.list_items".input_schema.properties.path]
+description = "Folder path (default: root)"
+type = "string"
+
+[provides.operations."m365.files.list_items".input_schema.properties.user_id]
+description = "User principal name or 'me'"
+type = "string"
+
+[provides.operations."m365.files.list_items".output_schema]
+required = ["items"]
+type = "object"
+
+[provides.operations."m365.files.list_items".output_schema.properties.items]
+type = "array"
+
+[provides.operations."m365.files.list_items".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."m365.files.list_items".ai_hints]
+when_to_use = "Browse files and folders in OneDrive or SharePoint document libraries."
+common_mistakes = ["Not handling pagination for large directories."]
+examples = ['{"user_id": "me", "path": "/Documents"}']
+related = [
+    "m365.files.download_file",
+    "m365.files.upload_file",
+]
+
+[provides.operations."m365.files.upload_file"]
+description = "Upload a file to OneDrive (simple upload for files up to 4 MB)"
+capability = "m365.files.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."m365.files.upload_file".input_schema]
+required = [
+    "user_id",
+    "path",
+    "content",
+]
+type = "object"
+
+[provides.operations."m365.files.upload_file".input_schema.properties.conflict_behavior]
+description = "What to do on name conflict: fail, replace, rename"
+type = "string"
+
+[provides.operations."m365.files.upload_file".input_schema.properties.content]
+description = "File content (base64-encoded)"
+type = "string"
+
+[provides.operations."m365.files.upload_file".input_schema.properties.path]
+description = "Destination path including filename (e.g., /Documents/report.pdf)"
+type = "string"
+
+[provides.operations."m365.files.upload_file".input_schema.properties.user_id]
+description = "User principal name or 'me'"
+type = "string"
+
+[provides.operations."m365.files.upload_file".output_schema]
+required = ["item"]
+type = "object"
+
+[provides.operations."m365.files.upload_file".output_schema.properties.item]
+type = "object"
+
+[provides.operations."m365.files.upload_file".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 30000
+total_timeout_ms = 120000
+max_response_bytes = 1048576
+
+[provides.operations."m365.files.upload_file".ai_hints]
+when_to_use = "Upload a file to OneDrive. For files >4 MB, use a resumable upload session."
+common_mistakes = [
+    "Uploading files >4 MB via simple upload (use upload session instead).",
+    "Not specifying conflict_behavior, which defaults to fail on existing files.",
+]
+examples = ['{"user_id": "me", "path": "/Documents/notes.txt", "content": "SGVsbG8gV29ybGQ="}']
+related = [
+    "m365.files.download_file",
+    "m365.files.list_items",
+]
+
+[provides.operations."m365.mail.create_draft"]
+description = "Create a draft email message"
+capability = "m365.mail.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."m365.mail.create_draft".input_schema]
+required = [
+    "user_id",
+    "message",
+]
+type = "object"
+
+[provides.operations."m365.mail.create_draft".input_schema.properties.message]
+description = "Draft message object"
+type = "object"
+
+[provides.operations."m365.mail.create_draft".input_schema.properties.user_id]
+description = "User principal name or 'me'"
+type = "string"
+
+[provides.operations."m365.mail.create_draft".output_schema]
+required = ["message"]
+type = "object"
+
+[provides.operations."m365.mail.create_draft".output_schema.properties.message]
+type = "object"
+
+[provides.operations."m365.mail.create_draft".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."m365.mail.create_draft".ai_hints]
+when_to_use = "Create a draft email without sending it. Safer for review workflows."
+common_mistakes = []
+examples = ['{"user_id": "me", "message": {"subject": "Draft", "body": {"contentType": "Text", "content": "Review before sending"}}}']
+related = ["m365.mail.send_message"]
+
+[provides.operations."m365.mail.get_message"]
+description = "Get a specific email message with headers and body"
+capability = "m365.mail.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."m365.mail.get_message".input_schema]
+required = [
+    "user_id",
+    "message_id",
+]
+type = "object"
+
+[provides.operations."m365.mail.get_message".input_schema.properties.message_id]
+description = "Message ID"
+type = "string"
+
+[provides.operations."m365.mail.get_message".input_schema.properties.user_id]
+description = "User principal name or 'me'"
+type = "string"
+
+[provides.operations."m365.mail.get_message".output_schema]
+required = ["message"]
+type = "object"
+
+[provides.operations."m365.mail.get_message".output_schema.properties.message]
+type = "object"
+
+[provides.operations."m365.mail.get_message".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."m365.mail.get_message".ai_hints]
+when_to_use = "Read a specific email message by ID."
+common_mistakes = []
+examples = ['{"user_id": "me", "message_id": "AAMkAG..."}']
+related = ["m365.mail.list_messages"]
+
+[provides.operations."m365.mail.list_messages"]
+description = "List messages in a mailbox folder with optional filtering"
+capability = "m365.mail.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."m365.mail.list_messages".input_schema]
+required = ["user_id"]
+type = "object"
+
+[provides.operations."m365.mail.list_messages".input_schema.properties.filter]
+description = "OData $filter expression"
+type = "string"
+
+[provides.operations."m365.mail.list_messages".input_schema.properties.folder_id]
+description = "Mail folder ID (default: inbox)"
+type = "string"
+
+[provides.operations."m365.mail.list_messages".input_schema.properties.skip]
+description = "Pagination offset"
+type = "integer"
+
+[provides.operations."m365.mail.list_messages".input_schema.properties.top]
+description = "Page size (max 1000)"
+maximum = 1000
+minimum = 1
+type = "integer"
+
+[provides.operations."m365.mail.list_messages".input_schema.properties.user_id]
+description = "User principal name or 'me'"
+type = "string"
+
+[provides.operations."m365.mail.list_messages".output_schema]
+required = ["messages"]
+type = "object"
+
+[provides.operations."m365.mail.list_messages".output_schema.properties.messages]
+type = "array"
+
+[provides.operations."m365.mail.list_messages".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."m365.mail.list_messages".ai_hints]
+when_to_use = "List email messages in a user's mailbox. Supports OData filters for search."
+common_mistakes = [
+    "Not using $filter for targeted queries, resulting in large responses.",
+    "Forgetting to handle @odata.nextLink for pagination.",
+]
+examples = ['{"user_id": "me", "folder_id": "inbox", "top": 25}']
+related = [
+    "m365.mail.get_message",
+    "m365.mail.send_message",
+]
+
+[provides.operations."m365.mail.send_message"]
+description = "Send an email message"
+capability = "m365.mail.send"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+
+[provides.operations."m365.mail.send_message".input_schema]
+required = [
+    "user_id",
+    "message",
+]
+type = "object"
+
+[provides.operations."m365.mail.send_message".input_schema.properties.message]
+description = "Message object with toRecipients, subject, body, etc."
+type = "object"
+
+[provides.operations."m365.mail.send_message".input_schema.properties.user_id]
+description = "User principal name or 'me'"
+type = "string"
+
+[provides.operations."m365.mail.send_message".output_schema]
+type = "object"
+
+[provides.operations."m365.mail.send_message".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."m365.mail.send_message".ai_hints]
+when_to_use = "Send an email via Outlook/Microsoft 365. Triggers real email delivery."
+common_mistakes = [
+    "Sending without confirming recipients with the user first.",
+    "Not setting saveToSentItems to true (default is true, but be explicit).",
+]
+examples = ['{"user_id": "me", "message": {"subject": "Hello", "body": {"contentType": "Text", "content": "Hi there"}, "toRecipients": [{"emailAddress": {"address": "bob@contoso.com"}}]}}']
+related = [
+    "m365.mail.create_draft",
+    "m365.mail.list_messages",
+]
+
+[provides.operations."m365.subscriptions.create"]
+description = "Create a Graph API webhook subscription for change notifications"
+capability = "m365.subscriptions.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."m365.subscriptions.create".input_schema]
+required = [
+    "change_type",
+    "notification_url",
+    "resource",
+    "expiration_datetime",
+]
+type = "object"
+
+[provides.operations."m365.subscriptions.create".input_schema.properties.change_type]
+description = "Comma-separated change types: created, updated, deleted"
+type = "string"
+
+[provides.operations."m365.subscriptions.create".input_schema.properties.expiration_datetime]
+description = "ISO 8601 subscription expiry (max varies by resource)"
+type = "string"
+
+[provides.operations."m365.subscriptions.create".input_schema.properties.notification_url]
+description = "HTTPS webhook endpoint URL"
+type = "string"
+
+[provides.operations."m365.subscriptions.create".input_schema.properties.resource]
+description = "Graph resource path to monitor (e.g., /me/messages, /me/events)"
+type = "string"
+
+[provides.operations."m365.subscriptions.create".output_schema]
+required = ["subscription"]
+type = "object"
+
+[provides.operations."m365.subscriptions.create".output_schema.properties.subscription]
+type = "object"
+
+[provides.operations."m365.subscriptions.create".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."m365.subscriptions.create".ai_hints]
+when_to_use = "Subscribe to change notifications for mail, calendar, files, etc."
+common_mistakes = [
+    "Not implementing the validation endpoint that Graph calls during creation.",
+    "Setting expirationDateTime beyond the resource's max (e.g., 4230 min for messages).",
+]
+examples = ['{"change_type": "created,updated", "notification_url": "https://webhook.example.com/m365", "resource": "/me/messages", "expiration_datetime": "2026-03-04T00:00:00Z"}']
+related = [
+    "m365.subscriptions.renew",
+    "m365.subscriptions.delete",
+]
+
+[provides.operations."m365.subscriptions.delete"]
+description = "Delete a Graph API webhook subscription"
+capability = "m365.subscriptions.write"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."m365.subscriptions.delete".input_schema]
+required = ["subscription_id"]
+type = "object"
+
+[provides.operations."m365.subscriptions.delete".input_schema.properties.subscription_id]
+description = "Graph subscription ID to delete"
+type = "string"
+
+[provides.operations."m365.subscriptions.delete".output_schema]
+type = "object"
+
+[provides.operations."m365.subscriptions.delete".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."m365.subscriptions.delete".ai_hints]
+when_to_use = "Remove a webhook subscription when no longer needed."
+common_mistakes = []
+examples = ['{"subscription_id": "sub-123"}']
+related = [
+    "m365.subscriptions.create",
+    "m365.subscriptions.renew",
+]
+
+[provides.operations."m365.subscriptions.renew"]
+description = "Renew (extend) a Graph API webhook subscription before it expires"
+capability = "m365.subscriptions.write"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."m365.subscriptions.renew".input_schema]
+required = [
+    "subscription_id",
+    "expiration_datetime",
+]
+type = "object"
+
+[provides.operations."m365.subscriptions.renew".input_schema.properties.expiration_datetime]
+description = "New expiration in ISO 8601"
+type = "string"
+
+[provides.operations."m365.subscriptions.renew".input_schema.properties.subscription_id]
+description = "Graph subscription ID"
+type = "string"
+
+[provides.operations."m365.subscriptions.renew".output_schema]
+required = ["subscription"]
+type = "object"
+
+[provides.operations."m365.subscriptions.renew".output_schema.properties.subscription]
+type = "object"
+
+[provides.operations."m365.subscriptions.renew".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."m365.subscriptions.renew".ai_hints]
+when_to_use = "Renew a webhook subscription before it expires to maintain continuous notifications."
+common_mistakes = ["Letting subscriptions expire; implement proactive renewal timers."]
+examples = ['{"subscription_id": "sub-123", "expiration_datetime": "2026-03-07T00:00:00Z"}']
+related = ["m365.subscriptions.create"]
+
+[provides.operations."m365.tasks.create_task"]
+description = "Create a new task in a To Do list"
+capability = "m365.tasks.write"
+risk_level = "low"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."m365.tasks.create_task".input_schema]
+required = [
+    "user_id",
+    "task_list_id",
+    "title",
+]
+type = "object"
+
+[provides.operations."m365.tasks.create_task".input_schema.properties.body]
+description = "Task body/notes"
+type = "object"
+
+[provides.operations."m365.tasks.create_task".input_schema.properties.due_datetime]
+description = "Due date in ISO 8601"
+type = "string"
+
+[provides.operations."m365.tasks.create_task".input_schema.properties.task_list_id]
+description = "To Do task list ID"
+type = "string"
+
+[provides.operations."m365.tasks.create_task".input_schema.properties.title]
+description = "Task title"
+type = "string"
+
+[provides.operations."m365.tasks.create_task".input_schema.properties.user_id]
+description = "User principal name or 'me'"
+type = "string"
+
+[provides.operations."m365.tasks.create_task".output_schema]
+required = ["task"]
+type = "object"
+
+[provides.operations."m365.tasks.create_task".output_schema.properties.task]
+type = "object"
+
+[provides.operations."m365.tasks.create_task".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."m365.tasks.create_task".ai_hints]
+when_to_use = "Create a task in Microsoft To Do."
+common_mistakes = []
+examples = ['{"user_id": "me", "task_list_id": "AAMkAG...", "title": "Review PR #42", "due_datetime": "2026-03-05T17:00:00Z"}']
+related = [
+    "m365.tasks.list_tasks",
+    "m365.tasks.list_task_lists",
+]
+
+[provides.operations."m365.tasks.list_task_lists"]
+description = "List all To Do task lists"
+capability = "m365.tasks.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."m365.tasks.list_task_lists".input_schema]
+required = ["user_id"]
+type = "object"
+
+[provides.operations."m365.tasks.list_task_lists".input_schema.properties.user_id]
+description = "User principal name or 'me'"
+type = "string"
+
+[provides.operations."m365.tasks.list_task_lists".output_schema]
+required = ["task_lists"]
+type = "object"
+
+[provides.operations."m365.tasks.list_task_lists".output_schema.properties.task_lists]
+type = "array"
+
+[provides.operations."m365.tasks.list_task_lists".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."m365.tasks.list_task_lists".ai_hints]
+when_to_use = "List all To Do task lists for a user."
+common_mistakes = []
+examples = ['{"user_id": "me"}']
+related = ["m365.tasks.list_tasks"]
+
+[provides.operations."m365.tasks.list_tasks"]
+description = "List tasks in a To Do task list"
+capability = "m365.tasks.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."m365.tasks.list_tasks".input_schema]
+required = [
+    "user_id",
+    "task_list_id",
+]
+type = "object"
+
+[provides.operations."m365.tasks.list_tasks".input_schema.properties.task_list_id]
+description = "To Do task list ID"
+type = "string"
+
+[provides.operations."m365.tasks.list_tasks".input_schema.properties.user_id]
+description = "User principal name or 'me'"
+type = "string"
+
+[provides.operations."m365.tasks.list_tasks".output_schema]
+required = ["tasks"]
+type = "object"
+
+[provides.operations."m365.tasks.list_tasks".output_schema.properties.tasks]
+type = "array"
+
+[provides.operations."m365.tasks.list_tasks".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."m365.tasks.list_tasks".ai_hints]
+when_to_use = "List tasks from a Microsoft To Do list."
+common_mistakes = ["Not listing task lists first to get the correct task_list_id."]
+examples = ['{"user_id": "me", "task_list_id": "AAMkAG..."}']
+related = [
+    "m365.tasks.create_task",
+    "m365.tasks.list_task_lists",
+]
+
+[event_caps]
+streaming = true
+replay = false
+min_buffer_events = 100
+
+[sandbox]
+profile = "strict"
+memory_mb = 512
+cpu_percent = 50
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "m365.mail.read"
+description = "Mail read operations (messages, folders)"
+requests = 10000
+window_ms = 600000
+burst = 100
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "m365.mail.write"
+description = "Mail write operations (drafts, move, delete)"
+requests = 1000
+window_ms = 600000
+burst = 25
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "m365.mail.send"
+description = "Mail send operations (high impact)"
+requests = 100
+window_ms = 600000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "m365.files.read"
+description = "OneDrive file read operations"
+requests = 10000
+window_ms = 600000
+burst = 100
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "m365.files.write"
+description = "OneDrive file write/delete operations"
+requests = 1000
+window_ms = 600000
+burst = 25
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "m365.calendar.read"
+description = "Calendar read operations"
+requests = 10000
+window_ms = 600000
+burst = 100
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "m365.calendar.write"
+description = "Calendar write/delete operations"
+requests = 1000
+window_ms = 600000
+burst = 25
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "m365.tasks.read"
+description = "To Do tasks read operations"
+requests = 5000
+window_ms = 600000
+burst = 50
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "m365.tasks.write"
+description = "To Do tasks write operations"
+requests = 500
+window_ms = 600000
+burst = 15
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "m365.subscriptions.write"
+description = "Webhook subscription management"
+requests = 100
+window_ms = 600000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "m365.delta.read"
+description = "Delta query / incremental sync operations"
+requests = 5000
+window_ms = 600000
+burst = 50
+scope = "instance"
+
+[rate_limits.operation_pools]
+"m365.delta.sync" = ["m365.delta.read"]
+"m365.mail.get_message" = ["m365.mail.read"]
+"m365.calendar.list_events" = ["m365.calendar.read"]
+"m365.calendar.get_freebusy" = ["m365.calendar.read"]
+"m365.tasks.list_task_lists" = ["m365.tasks.read"]
+"m365.subscriptions.create" = ["m365.subscriptions.write"]
+"m365.files.download_file" = ["m365.files.read"]
+"m365.subscriptions.delete" = ["m365.subscriptions.write"]
+"m365.calendar.delete_event" = ["m365.calendar.write"]
+"m365.mail.send_message" = ["m365.mail.send"]
+"m365.calendar.create_event" = ["m365.calendar.write"]
+"m365.files.list_items" = ["m365.files.read"]
+"m365.mail.list_messages" = ["m365.mail.read"]
+"m365.files.upload_file" = ["m365.files.write"]
+"m365.tasks.create_task" = ["m365.tasks.write"]
+"m365.mail.create_draft" = ["m365.mail.write"]
+"m365.tasks.list_tasks" = ["m365.tasks.read"]
+"m365.subscriptions.renew" = ["m365.subscriptions.write"]
+"m365.files.delete_item" = ["m365.files.write"]

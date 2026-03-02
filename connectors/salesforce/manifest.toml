@@ -1,0 +1,940 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:437010b963c720e1545cb17363fab90c2e408aa579266e81200ac3737b848cb7"
+
+[connector]
+id = "fcp.salesforce"
+name = "Salesforce Connector"
+version = "0.1.0"
+description = "FCP connector for Salesforce CRM platform (accounts, contacts, opportunities, leads, cases, tasks, SOQL, reports)"
+archetypes = [
+    "knowledge",
+    "operational",
+]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores OAuth refresh token, instance URL, last-sync timestamps per sObject type, and pagination cursors."
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = [
+    "z:public",
+    "z:community",
+]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+]
+optional = []
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "media.upload",
+    "media.download",
+]
+
+[provides.operations."salesforce.accounts.get"]
+description = "Get a single account by ID"
+capability = "salesforce.accounts.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."salesforce.accounts.get".input_schema]
+required = ["account_id"]
+type = "object"
+
+[provides.operations."salesforce.accounts.get".input_schema.properties.account_id]
+type = "string"
+
+[provides.operations."salesforce.accounts.get".input_schema.properties.fields]
+type = "array"
+
+[provides.operations."salesforce.accounts.get".output_schema]
+required = ["account"]
+type = "object"
+
+[provides.operations."salesforce.accounts.get".output_schema.properties.account]
+type = "object"
+
+[provides.operations."salesforce.accounts.get".network_constraints]
+host_allow = [
+    "*.salesforce.com",
+    "*.force.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."salesforce.accounts.get".ai_hints]
+when_to_use = "Retrieve a specific Salesforce account by ID."
+common_mistakes = []
+examples = ['{"account_id": "001xx000003DGbY", "fields": ["Name", "Industry"]}']
+related = ["salesforce.accounts.list"]
+
+[provides.operations."salesforce.accounts.list"]
+description = "Query accounts with optional filters"
+capability = "salesforce.accounts.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."salesforce.accounts.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."salesforce.accounts.list".input_schema.properties.fields]
+description = "sObject fields to return"
+type = "array"
+
+[provides.operations."salesforce.accounts.list".input_schema.properties.limit]
+maximum = 2000
+minimum = 1
+type = "integer"
+
+[provides.operations."salesforce.accounts.list".input_schema.properties.offset]
+type = "integer"
+
+[provides.operations."salesforce.accounts.list".output_schema]
+required = ["records"]
+type = "object"
+
+[provides.operations."salesforce.accounts.list".output_schema.properties.records]
+type = "array"
+
+[provides.operations."salesforce.accounts.list".output_schema.properties.total_size]
+type = "integer"
+
+[provides.operations."salesforce.accounts.list".network_constraints]
+host_allow = [
+    "*.salesforce.com",
+    "*.force.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."salesforce.accounts.list".ai_hints]
+when_to_use = "List or search Salesforce accounts."
+common_mistakes = ["Not specifying fields — returns all fields which can be slow."]
+examples = ['{"limit": 50, "fields": ["Id", "Name", "Industry", "AnnualRevenue"]}']
+related = [
+    "salesforce.accounts.get",
+    "salesforce.soql.query",
+]
+
+[provides.operations."salesforce.cases.create"]
+description = "Create a new support case"
+capability = "salesforce.cases.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."salesforce.cases.create".input_schema]
+required = ["subject"]
+type = "object"
+
+[provides.operations."salesforce.cases.create".input_schema.properties.account_id]
+type = "string"
+
+[provides.operations."salesforce.cases.create".input_schema.properties.contact_id]
+type = "string"
+
+[provides.operations."salesforce.cases.create".input_schema.properties.description]
+type = "string"
+
+[provides.operations."salesforce.cases.create".input_schema.properties.priority]
+type = "string"
+
+[provides.operations."salesforce.cases.create".input_schema.properties.subject]
+type = "string"
+
+[provides.operations."salesforce.cases.create".output_schema]
+required = ["id"]
+type = "object"
+
+[provides.operations."salesforce.cases.create".output_schema.properties.id]
+type = "string"
+
+[provides.operations."salesforce.cases.create".network_constraints]
+host_allow = [
+    "*.salesforce.com",
+    "*.force.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."salesforce.cases.create".ai_hints]
+when_to_use = "Create a new support case."
+common_mistakes = []
+examples = ['{"subject": "Login issue", "priority": "High", "account_id": "001xx000003DGbY"}']
+related = ["salesforce.cases.list"]
+
+[provides.operations."salesforce.cases.list"]
+description = "Query support cases"
+capability = "salesforce.cases.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."salesforce.cases.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."salesforce.cases.list".input_schema.properties.fields]
+type = "array"
+
+[provides.operations."salesforce.cases.list".input_schema.properties.limit]
+maximum = 2000
+minimum = 1
+type = "integer"
+
+[provides.operations."salesforce.cases.list".input_schema.properties.status]
+type = "string"
+
+[provides.operations."salesforce.cases.list".output_schema]
+required = ["records"]
+type = "object"
+
+[provides.operations."salesforce.cases.list".output_schema.properties.records]
+type = "array"
+
+[provides.operations."salesforce.cases.list".network_constraints]
+host_allow = [
+    "*.salesforce.com",
+    "*.force.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."salesforce.cases.list".ai_hints]
+when_to_use = "List or search support cases."
+common_mistakes = []
+examples = ['{"limit": 50, "status": "Open", "fields": ["Id", "Subject", "Status", "Priority"]}']
+related = ["salesforce.cases.create"]
+
+[provides.operations."salesforce.contacts.create"]
+description = "Create a new contact"
+capability = "salesforce.contacts.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."salesforce.contacts.create".input_schema]
+required = ["last_name"]
+type = "object"
+
+[provides.operations."salesforce.contacts.create".input_schema.properties.account_id]
+type = "string"
+
+[provides.operations."salesforce.contacts.create".input_schema.properties.email]
+type = "string"
+
+[provides.operations."salesforce.contacts.create".input_schema.properties.first_name]
+type = "string"
+
+[provides.operations."salesforce.contacts.create".input_schema.properties.last_name]
+type = "string"
+
+[provides.operations."salesforce.contacts.create".output_schema]
+required = ["id"]
+type = "object"
+
+[provides.operations."salesforce.contacts.create".output_schema.properties.id]
+type = "string"
+
+[provides.operations."salesforce.contacts.create".network_constraints]
+host_allow = [
+    "*.salesforce.com",
+    "*.force.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."salesforce.contacts.create".ai_hints]
+when_to_use = "Create a new contact in Salesforce."
+common_mistakes = ["Creating duplicate contacts — check for existing email first."]
+examples = ['{"last_name": "Smith", "first_name": "Alice", "email": "alice@example.com", "account_id": "001xx000003DGbY"}']
+related = ["salesforce.contacts.list"]
+
+[provides.operations."salesforce.contacts.delete"]
+description = "Delete a contact"
+capability = "salesforce.contacts.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."salesforce.contacts.delete".input_schema]
+required = ["contact_id"]
+type = "object"
+
+[provides.operations."salesforce.contacts.delete".input_schema.properties.contact_id]
+type = "string"
+
+[provides.operations."salesforce.contacts.delete".output_schema]
+type = "object"
+
+[provides.operations."salesforce.contacts.delete".network_constraints]
+host_allow = [
+    "*.salesforce.com",
+    "*.force.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."salesforce.contacts.delete".ai_hints]
+when_to_use = "Permanently delete a contact. Cannot be undone."
+common_mistakes = ["Deleting contacts with active opportunities."]
+examples = ['{"contact_id": "003xx000004TmiQ"}']
+related = ["salesforce.contacts.list"]
+
+[provides.operations."salesforce.contacts.list"]
+description = "Query contacts with optional filters"
+capability = "salesforce.contacts.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."salesforce.contacts.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."salesforce.contacts.list".input_schema.properties.account_id]
+description = "Filter by parent account"
+type = "string"
+
+[provides.operations."salesforce.contacts.list".input_schema.properties.fields]
+type = "array"
+
+[provides.operations."salesforce.contacts.list".input_schema.properties.limit]
+maximum = 2000
+minimum = 1
+type = "integer"
+
+[provides.operations."salesforce.contacts.list".output_schema]
+required = ["records"]
+type = "object"
+
+[provides.operations."salesforce.contacts.list".output_schema.properties.records]
+type = "array"
+
+[provides.operations."salesforce.contacts.list".output_schema.properties.total_size]
+type = "integer"
+
+[provides.operations."salesforce.contacts.list".network_constraints]
+host_allow = [
+    "*.salesforce.com",
+    "*.force.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."salesforce.contacts.list".ai_hints]
+when_to_use = "List or search Salesforce contacts."
+common_mistakes = []
+examples = ['{"limit": 50, "fields": ["Id", "FirstName", "LastName", "Email"]}']
+related = [
+    "salesforce.contacts.create",
+    "salesforce.accounts.list",
+]
+
+[provides.operations."salesforce.leads.convert"]
+description = "Convert a lead to account/contact/opportunity"
+capability = "salesforce.leads.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."salesforce.leads.convert".input_schema]
+required = ["lead_id"]
+type = "object"
+
+[provides.operations."salesforce.leads.convert".input_schema.properties.create_opportunity]
+type = "boolean"
+
+[provides.operations."salesforce.leads.convert".input_schema.properties.lead_id]
+type = "string"
+
+[provides.operations."salesforce.leads.convert".input_schema.properties.opportunity_name]
+type = "string"
+
+[provides.operations."salesforce.leads.convert".output_schema]
+required = [
+    "account_id",
+    "contact_id",
+]
+type = "object"
+
+[provides.operations."salesforce.leads.convert".output_schema.properties.account_id]
+type = "string"
+
+[provides.operations."salesforce.leads.convert".output_schema.properties.contact_id]
+type = "string"
+
+[provides.operations."salesforce.leads.convert".output_schema.properties.opportunity_id]
+type = "string"
+
+[provides.operations."salesforce.leads.convert".network_constraints]
+host_allow = [
+    "*.salesforce.com",
+    "*.force.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 1048576
+
+[provides.operations."salesforce.leads.convert".ai_hints]
+when_to_use = "Convert a qualified lead into an account, contact, and optionally an opportunity."
+common_mistakes = ["Converting leads without checking for duplicate accounts."]
+examples = ['{"lead_id": "00Qxx000001LaPt", "create_opportunity": true, "opportunity_name": "New Deal"}']
+related = [
+    "salesforce.leads.list",
+    "salesforce.accounts.list",
+]
+
+[provides.operations."salesforce.leads.list"]
+description = "Query leads with optional status filters"
+capability = "salesforce.leads.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."salesforce.leads.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."salesforce.leads.list".input_schema.properties.fields]
+type = "array"
+
+[provides.operations."salesforce.leads.list".input_schema.properties.limit]
+maximum = 2000
+minimum = 1
+type = "integer"
+
+[provides.operations."salesforce.leads.list".input_schema.properties.status]
+description = "Filter by Status"
+type = "string"
+
+[provides.operations."salesforce.leads.list".output_schema]
+required = ["records"]
+type = "object"
+
+[provides.operations."salesforce.leads.list".output_schema.properties.records]
+type = "array"
+
+[provides.operations."salesforce.leads.list".network_constraints]
+host_allow = [
+    "*.salesforce.com",
+    "*.force.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."salesforce.leads.list".ai_hints]
+when_to_use = "List or search leads."
+common_mistakes = []
+examples = ['{"limit": 50, "fields": ["Id", "FirstName", "LastName", "Company", "Status"]}']
+related = [
+    "salesforce.leads.convert",
+    "salesforce.contacts.list",
+]
+
+[provides.operations."salesforce.opportunities.create"]
+description = "Create a new opportunity"
+capability = "salesforce.opportunities.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."salesforce.opportunities.create".input_schema]
+required = [
+    "name",
+    "stage_name",
+    "close_date",
+]
+type = "object"
+
+[provides.operations."salesforce.opportunities.create".input_schema.properties.account_id]
+type = "string"
+
+[provides.operations."salesforce.opportunities.create".input_schema.properties.amount]
+type = "number"
+
+[provides.operations."salesforce.opportunities.create".input_schema.properties.close_date]
+description = "ISO 8601 date"
+type = "string"
+
+[provides.operations."salesforce.opportunities.create".input_schema.properties.name]
+type = "string"
+
+[provides.operations."salesforce.opportunities.create".input_schema.properties.stage_name]
+type = "string"
+
+[provides.operations."salesforce.opportunities.create".output_schema]
+required = ["id"]
+type = "object"
+
+[provides.operations."salesforce.opportunities.create".output_schema.properties.id]
+type = "string"
+
+[provides.operations."salesforce.opportunities.create".network_constraints]
+host_allow = [
+    "*.salesforce.com",
+    "*.force.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."salesforce.opportunities.create".ai_hints]
+when_to_use = "Create a new sales opportunity."
+common_mistakes = ["Not specifying account_id — opportunity won't be linked to an account."]
+examples = ['{"name": "Enterprise Deal", "stage_name": "Prospecting", "close_date": "2026-06-30", "amount": 50000}']
+related = [
+    "salesforce.opportunities.list",
+    "salesforce.accounts.list",
+]
+
+[provides.operations."salesforce.opportunities.list"]
+description = "Query opportunities with optional stage/account filters"
+capability = "salesforce.opportunities.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."salesforce.opportunities.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."salesforce.opportunities.list".input_schema.properties.fields]
+type = "array"
+
+[provides.operations."salesforce.opportunities.list".input_schema.properties.limit]
+maximum = 2000
+minimum = 1
+type = "integer"
+
+[provides.operations."salesforce.opportunities.list".input_schema.properties.stage]
+description = "Filter by StageName"
+type = "string"
+
+[provides.operations."salesforce.opportunities.list".output_schema]
+required = ["records"]
+type = "object"
+
+[provides.operations."salesforce.opportunities.list".output_schema.properties.records]
+type = "array"
+
+[provides.operations."salesforce.opportunities.list".output_schema.properties.total_size]
+type = "integer"
+
+[provides.operations."salesforce.opportunities.list".network_constraints]
+host_allow = [
+    "*.salesforce.com",
+    "*.force.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."salesforce.opportunities.list".ai_hints]
+when_to_use = "List or search opportunities in the sales pipeline."
+common_mistakes = []
+examples = ['{"limit": 50, "fields": ["Id", "Name", "StageName", "Amount", "CloseDate"]}']
+related = [
+    "salesforce.opportunities.create",
+    "salesforce.accounts.list",
+]
+
+[provides.operations."salesforce.reports.get"]
+description = "Run a saved Salesforce report by ID"
+capability = "salesforce.reports.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."salesforce.reports.get".input_schema]
+required = ["report_id"]
+type = "object"
+
+[provides.operations."salesforce.reports.get".input_schema.properties.include_details]
+type = "boolean"
+
+[provides.operations."salesforce.reports.get".input_schema.properties.report_id]
+type = "string"
+
+[provides.operations."salesforce.reports.get".output_schema]
+required = [
+    "report_metadata",
+    "fact_map",
+]
+type = "object"
+
+[provides.operations."salesforce.reports.get".output_schema.properties.fact_map]
+type = "object"
+
+[provides.operations."salesforce.reports.get".output_schema.properties.report_metadata]
+type = "object"
+
+[provides.operations."salesforce.reports.get".network_constraints]
+host_allow = [
+    "*.salesforce.com",
+    "*.force.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 52428800
+
+[provides.operations."salesforce.reports.get".ai_hints]
+when_to_use = "Run a saved Salesforce report and get its data."
+common_mistakes = ["Not checking report format — tabular/summary/matrix return different structures."]
+examples = ['{"report_id": "00Oxx0000004cGr", "include_details": true}']
+related = ["salesforce.soql.query"]
+
+[provides.operations."salesforce.soql.query"]
+description = "Execute a SOQL query"
+capability = "salesforce.soql.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."salesforce.soql.query".input_schema]
+required = ["query"]
+type = "object"
+
+[provides.operations."salesforce.soql.query".input_schema.properties.query]
+description = "SOQL query string"
+type = "string"
+
+[provides.operations."salesforce.soql.query".output_schema]
+required = ["records"]
+type = "object"
+
+[provides.operations."salesforce.soql.query".output_schema.properties.done]
+type = "boolean"
+
+[provides.operations."salesforce.soql.query".output_schema.properties.records]
+type = "array"
+
+[provides.operations."salesforce.soql.query".output_schema.properties.total_size]
+type = "integer"
+
+[provides.operations."salesforce.soql.query".network_constraints]
+host_allow = [
+    "*.salesforce.com",
+    "*.force.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 52428800
+
+[provides.operations."salesforce.soql.query".ai_hints]
+when_to_use = "Run a SOQL query for complex or cross-object queries."
+common_mistakes = [
+    "Unbounded queries without LIMIT — can return huge result sets.",
+    "Not handling pagination via nextRecordsUrl when done=false.",
+]
+examples = ["""{"query": "SELECT Id, Name, Amount FROM Opportunity WHERE StageName = 'Closed Won' LIMIT 100"}"""]
+related = [
+    "salesforce.accounts.list",
+    "salesforce.contacts.list",
+    "salesforce.reports.get",
+]
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "salesforce.accounts.read"
+requests = 500
+window_ms = 60000
+burst = 50
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "salesforce.contacts.read"
+requests = 500
+window_ms = 60000
+burst = 50
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "salesforce.contacts.write"
+requests = 100
+window_ms = 60000
+burst = 15
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "salesforce.opportunities.read"
+requests = 500
+window_ms = 60000
+burst = 50
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "salesforce.opportunities.write"
+requests = 100
+window_ms = 60000
+burst = 15
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "salesforce.leads.read"
+requests = 500
+window_ms = 60000
+burst = 50
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "salesforce.leads.write"
+requests = 50
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "salesforce.cases.read"
+requests = 500
+window_ms = 60000
+burst = 50
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "salesforce.cases.write"
+requests = 100
+window_ms = 60000
+burst = 15
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "salesforce.soql.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "salesforce.reports.read"
+requests = 50
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[rate_limits.operation_pools]
+"salesforce.opportunities.create" = ["salesforce.opportunities.write"]
+"salesforce.reports.get" = ["salesforce.reports.read"]
+"salesforce.contacts.delete" = ["salesforce.contacts.write"]
+"salesforce.opportunities.list" = ["salesforce.opportunities.read"]
+"salesforce.soql.query" = ["salesforce.soql.read"]
+"salesforce.cases.create" = ["salesforce.cases.write"]
+"salesforce.contacts.list" = ["salesforce.contacts.read"]
+"salesforce.contacts.create" = ["salesforce.contacts.write"]
+"salesforce.accounts.get" = ["salesforce.accounts.read"]
+"salesforce.leads.convert" = ["salesforce.leads.write"]
+"salesforce.leads.list" = ["salesforce.leads.read"]
+"salesforce.accounts.list" = ["salesforce.accounts.read"]
+"salesforce.cases.list" = ["salesforce.cases.read"]

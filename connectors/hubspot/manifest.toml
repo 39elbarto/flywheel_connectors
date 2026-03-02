@@ -1,0 +1,776 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:4a2c940084e6a3e42e800fcb6491a65ae4f2a977962c55054f140c122497ff53"
+
+[connector]
+id = "fcp.hubspot"
+name = "HubSpot Connector"
+version = "0.1.0"
+description = "FCP connector for HubSpot CRM and marketing platform (contacts, companies, deals, tickets, pipelines, analytics, webhooks)"
+archetypes = [
+    "knowledge",
+    "operational",
+    "streaming",
+]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores webhook subscription IDs with idempotency keys, pagination cursors for incremental CRM sync, and last-seen event timestamps per object type."
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = [
+    "z:public",
+    "z:community",
+]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+]
+optional = ["media.download"]
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "media.upload",
+]
+
+[provides.operations."hubspot.analytics.report"]
+description = "Get pipeline analytics and reporting data"
+capability = "hubspot.analytics.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."hubspot.analytics.report".input_schema]
+required = ["report_type"]
+type = "object"
+
+[provides.operations."hubspot.analytics.report".input_schema.properties.date_range]
+description = "Date range for the report"
+type = "object"
+
+[provides.operations."hubspot.analytics.report".input_schema.properties.pipeline_id]
+description = "Restrict to a specific pipeline"
+type = "string"
+
+[provides.operations."hubspot.analytics.report".input_schema.properties.report_type]
+description = "Report type: deal_forecast, conversion_funnel, activity_summary"
+type = "string"
+
+[provides.operations."hubspot.analytics.report".output_schema]
+required = ["report"]
+type = "object"
+
+[provides.operations."hubspot.analytics.report".output_schema.properties.report]
+type = "object"
+
+[provides.operations."hubspot.analytics.report".network_constraints]
+host_allow = [
+    "api.hubapi.com",
+    "api.hubspot.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."hubspot.analytics.report".ai_hints]
+when_to_use = "Get pipeline analytics reports: forecasts, conversion funnels, activity summaries."
+common_mistakes = ["Not specifying date_range — defaults may return more data than expected."]
+examples = ['{"report_type": "deal_forecast", "pipeline_id": "default"}']
+related = [
+    "hubspot.pipelines.list",
+    "hubspot.deals.list",
+]
+
+[provides.operations."hubspot.companies.list"]
+description = "List companies"
+capability = "hubspot.companies.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."hubspot.companies.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."hubspot.companies.list".input_schema.properties.after]
+type = "string"
+
+[provides.operations."hubspot.companies.list".input_schema.properties.limit]
+maximum = 100
+minimum = 1
+type = "integer"
+
+[provides.operations."hubspot.companies.list".input_schema.properties.properties]
+type = "array"
+
+[provides.operations."hubspot.companies.list".output_schema]
+required = ["results"]
+type = "object"
+
+[provides.operations."hubspot.companies.list".output_schema.properties.results]
+type = "array"
+
+[provides.operations."hubspot.companies.list".network_constraints]
+host_allow = [
+    "api.hubapi.com",
+    "api.hubspot.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."hubspot.companies.list".ai_hints]
+when_to_use = "List companies in HubSpot CRM."
+common_mistakes = []
+examples = ['{"limit": 50, "properties": ["name", "domain", "industry"]}']
+related = [
+    "hubspot.contacts.list",
+    "hubspot.deals.list",
+]
+
+[provides.operations."hubspot.contacts.create"]
+description = "Create a new contact"
+capability = "hubspot.contacts.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."hubspot.contacts.create".input_schema]
+required = ["properties"]
+type = "object"
+
+[provides.operations."hubspot.contacts.create".input_schema.properties.properties]
+description = "Contact properties (email, firstname, lastname, etc.)"
+type = "object"
+
+[provides.operations."hubspot.contacts.create".output_schema]
+required = ["contact"]
+type = "object"
+
+[provides.operations."hubspot.contacts.create".output_schema.properties.contact]
+type = "object"
+
+[provides.operations."hubspot.contacts.create".network_constraints]
+host_allow = [
+    "api.hubapi.com",
+    "api.hubspot.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."hubspot.contacts.create".ai_hints]
+when_to_use = "Create a new contact in HubSpot CRM."
+common_mistakes = ["Creating duplicate contacts — check for existing email first."]
+examples = ['{"properties": {"email": "alice@example.com", "firstname": "Alice", "lastname": "Smith"}}']
+related = [
+    "hubspot.contacts.list",
+    "hubspot.contacts.update",
+]
+
+[provides.operations."hubspot.contacts.delete"]
+description = "Delete a contact from HubSpot"
+capability = "hubspot.contacts.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."hubspot.contacts.delete".input_schema]
+required = ["contact_id"]
+type = "object"
+
+[provides.operations."hubspot.contacts.delete".input_schema.properties.contact_id]
+type = "string"
+
+[provides.operations."hubspot.contacts.delete".output_schema]
+type = "object"
+
+[provides.operations."hubspot.contacts.delete".network_constraints]
+host_allow = [
+    "api.hubapi.com",
+    "api.hubspot.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."hubspot.contacts.delete".ai_hints]
+when_to_use = "Permanently delete a contact. Cannot be undone."
+common_mistakes = ["Deleting contacts with active deals or associations."]
+examples = ['{"contact_id": "12345"}']
+related = ["hubspot.contacts.get"]
+
+[provides.operations."hubspot.contacts.get"]
+description = "Get a single contact by ID"
+capability = "hubspot.contacts.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."hubspot.contacts.get".input_schema]
+required = ["contact_id"]
+type = "object"
+
+[provides.operations."hubspot.contacts.get".input_schema.properties.contact_id]
+description = "HubSpot contact ID"
+type = "string"
+
+[provides.operations."hubspot.contacts.get".input_schema.properties.properties]
+description = "List of properties to include"
+type = "array"
+
+[provides.operations."hubspot.contacts.get".output_schema]
+required = ["contact"]
+type = "object"
+
+[provides.operations."hubspot.contacts.get".output_schema.properties.contact]
+type = "object"
+
+[provides.operations."hubspot.contacts.get".network_constraints]
+host_allow = [
+    "api.hubapi.com",
+    "api.hubspot.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."hubspot.contacts.get".ai_hints]
+when_to_use = "Retrieve a specific contact by their HubSpot ID."
+common_mistakes = []
+examples = ['{"contact_id": "12345", "properties": ["email", "firstname", "lastname"]}']
+related = [
+    "hubspot.contacts.list",
+    "hubspot.contacts.update",
+]
+
+[provides.operations."hubspot.contacts.list"]
+description = "List contacts with optional filtering and property selection"
+capability = "hubspot.contacts.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."hubspot.contacts.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."hubspot.contacts.list".input_schema.properties.after]
+description = "Pagination cursor"
+type = "string"
+
+[provides.operations."hubspot.contacts.list".input_schema.properties.filter_groups]
+description = "Filter groups for search (HubSpot filter syntax)"
+type = "array"
+
+[provides.operations."hubspot.contacts.list".input_schema.properties.limit]
+description = "Page size (max 100)"
+maximum = 100
+minimum = 1
+type = "integer"
+
+[provides.operations."hubspot.contacts.list".input_schema.properties.properties]
+description = "List of contact properties to include"
+type = "array"
+
+[provides.operations."hubspot.contacts.list".output_schema]
+required = ["results"]
+type = "object"
+
+[provides.operations."hubspot.contacts.list".output_schema.properties.paging]
+type = "object"
+
+[provides.operations."hubspot.contacts.list".output_schema.properties.results]
+type = "array"
+
+[provides.operations."hubspot.contacts.list".network_constraints]
+host_allow = [
+    "api.hubapi.com",
+    "api.hubspot.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."hubspot.contacts.list".ai_hints]
+when_to_use = "List or search contacts in HubSpot CRM."
+common_mistakes = [
+    "Not specifying properties — only default properties are returned.",
+    "Not handling pagination (use 'after' cursor from paging.next).",
+]
+examples = ['{"limit": 50, "properties": ["email", "firstname", "lastname", "company"]}']
+related = [
+    "hubspot.contacts.get",
+    "hubspot.contacts.create",
+]
+
+[provides.operations."hubspot.contacts.update"]
+description = "Update an existing contact's properties"
+capability = "hubspot.contacts.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."hubspot.contacts.update".input_schema]
+required = [
+    "contact_id",
+    "properties",
+]
+type = "object"
+
+[provides.operations."hubspot.contacts.update".input_schema.properties.contact_id]
+type = "string"
+
+[provides.operations."hubspot.contacts.update".input_schema.properties.properties]
+type = "object"
+
+[provides.operations."hubspot.contacts.update".output_schema]
+required = ["contact"]
+type = "object"
+
+[provides.operations."hubspot.contacts.update".output_schema.properties.contact]
+type = "object"
+
+[provides.operations."hubspot.contacts.update".network_constraints]
+host_allow = [
+    "api.hubapi.com",
+    "api.hubspot.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."hubspot.contacts.update".ai_hints]
+when_to_use = "Update properties on an existing contact."
+common_mistakes = []
+examples = ['{"contact_id": "12345", "properties": {"phone": "+1-555-0100"}}']
+related = [
+    "hubspot.contacts.get",
+    "hubspot.contacts.create",
+]
+
+[provides.operations."hubspot.deals.create"]
+description = "Create a new deal"
+capability = "hubspot.deals.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."hubspot.deals.create".input_schema]
+required = ["properties"]
+type = "object"
+
+[provides.operations."hubspot.deals.create".input_schema.properties.associations]
+description = "Associate with contacts, companies, etc."
+type = "array"
+
+[provides.operations."hubspot.deals.create".input_schema.properties.properties]
+description = "Deal properties (dealname, amount, pipeline, dealstage, etc.)"
+type = "object"
+
+[provides.operations."hubspot.deals.create".output_schema]
+required = ["deal"]
+type = "object"
+
+[provides.operations."hubspot.deals.create".output_schema.properties.deal]
+type = "object"
+
+[provides.operations."hubspot.deals.create".network_constraints]
+host_allow = [
+    "api.hubapi.com",
+    "api.hubspot.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."hubspot.deals.create".ai_hints]
+when_to_use = "Create a new deal in a sales pipeline."
+common_mistakes = ["Not specifying pipeline and dealstage (defaults may not match expected workflow)."]
+examples = ['{"properties": {"dealname": "Enterprise License", "amount": "50000", "pipeline": "default", "dealstage": "qualifiedtobuy"}}']
+related = [
+    "hubspot.deals.list",
+    "hubspot.pipelines.list",
+]
+
+[provides.operations."hubspot.deals.list"]
+description = "List deals with optional pipeline and stage filtering"
+capability = "hubspot.deals.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."hubspot.deals.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."hubspot.deals.list".input_schema.properties.after]
+type = "string"
+
+[provides.operations."hubspot.deals.list".input_schema.properties.limit]
+maximum = 100
+minimum = 1
+type = "integer"
+
+[provides.operations."hubspot.deals.list".input_schema.properties.properties]
+type = "array"
+
+[provides.operations."hubspot.deals.list".output_schema]
+required = ["results"]
+type = "object"
+
+[provides.operations."hubspot.deals.list".output_schema.properties.results]
+type = "array"
+
+[provides.operations."hubspot.deals.list".network_constraints]
+host_allow = [
+    "api.hubapi.com",
+    "api.hubspot.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."hubspot.deals.list".ai_hints]
+when_to_use = "List deals in the CRM, optionally filtered by pipeline or stage."
+common_mistakes = []
+examples = ['{"limit": 50, "properties": ["dealname", "amount", "dealstage", "pipeline"]}']
+related = [
+    "hubspot.deals.create",
+    "hubspot.pipelines.list",
+]
+
+[provides.operations."hubspot.events.stream"]
+description = "Stream CRM webhook events (contact/deal/company changes)"
+capability = "hubspot.events.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."hubspot.events.stream".input_schema]
+required = []
+type = "object"
+
+[provides.operations."hubspot.events.stream".input_schema.properties.object_types]
+description = "Object types to subscribe to (contacts, deals, companies, tickets)"
+type = "array"
+
+[provides.operations."hubspot.events.stream".input_schema.properties.since_ts]
+description = "ISO 8601 timestamp to resume from"
+type = "string"
+
+[provides.operations."hubspot.events.stream".output_schema]
+required = ["events"]
+type = "object"
+
+[provides.operations."hubspot.events.stream".output_schema.properties.events]
+type = "array"
+
+[provides.operations."hubspot.events.stream".network_constraints]
+host_allow = [
+    "api.hubapi.com",
+    "api.hubspot.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 3600000
+max_response_bytes = 1073741824
+
+[provides.operations."hubspot.events.stream".ai_hints]
+when_to_use = "Stream real-time CRM changes via HubSpot webhooks."
+common_mistakes = [
+    "Not validating webhook signatures.",
+    "Not persisting cursor for idempotent event processing.",
+]
+examples = ['{"object_types": ["contacts", "deals"]}']
+related = [
+    "hubspot.contacts.list",
+    "hubspot.deals.list",
+]
+
+[provides.operations."hubspot.pipelines.list"]
+description = "List pipelines and their stages"
+capability = "hubspot.pipelines.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."hubspot.pipelines.list".input_schema]
+required = ["object_type"]
+type = "object"
+
+[provides.operations."hubspot.pipelines.list".input_schema.properties.object_type]
+description = "Object type: deals or tickets"
+type = "string"
+
+[provides.operations."hubspot.pipelines.list".output_schema]
+required = ["pipelines"]
+type = "object"
+
+[provides.operations."hubspot.pipelines.list".output_schema.properties.pipelines]
+type = "array"
+
+[provides.operations."hubspot.pipelines.list".network_constraints]
+host_allow = [
+    "api.hubapi.com",
+    "api.hubspot.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."hubspot.pipelines.list".ai_hints]
+when_to_use = "List available pipelines and their stages to understand the deal/ticket workflow."
+common_mistakes = []
+examples = ['{"object_type": "deals"}']
+related = [
+    "hubspot.deals.list",
+    "hubspot.deals.create",
+]
+
+[event_caps]
+streaming = true
+replay = false
+min_buffer_events = 100
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "hubspot.contacts.read"
+requests = 500
+window_ms = 60000
+burst = 50
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "hubspot.contacts.write"
+requests = 100
+window_ms = 60000
+burst = 15
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "hubspot.deals.read"
+requests = 500
+window_ms = 60000
+burst = 50
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "hubspot.deals.write"
+requests = 100
+window_ms = 60000
+burst = 15
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "hubspot.companies.read"
+requests = 500
+window_ms = 60000
+burst = 50
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "hubspot.pipelines.read"
+requests = 100
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "hubspot.analytics.read"
+requests = 50
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "hubspot.events.read"
+requests = 50
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[rate_limits.operation_pools]
+"hubspot.contacts.get" = ["hubspot.contacts.read"]
+"hubspot.contacts.delete" = ["hubspot.contacts.write"]
+"hubspot.events.stream" = ["hubspot.events.read"]
+"hubspot.analytics.report" = ["hubspot.analytics.read"]
+"hubspot.contacts.list" = ["hubspot.contacts.read"]
+"hubspot.contacts.create" = ["hubspot.contacts.write"]
+"hubspot.pipelines.list" = ["hubspot.pipelines.read"]
+"hubspot.contacts.update" = ["hubspot.contacts.write"]
+"hubspot.deals.list" = ["hubspot.deals.read"]
+"hubspot.deals.create" = ["hubspot.deals.write"]
+"hubspot.companies.list" = ["hubspot.companies.read"]

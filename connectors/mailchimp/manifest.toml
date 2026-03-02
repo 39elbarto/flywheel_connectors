@@ -1,0 +1,333 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:d01b5c19607f90aee1f48af0b0324f799b1cae4be8c94d244febb1f71a5cd338"
+
+[connector]
+id = "fcp.mailchimp"
+name = "Mailchimp Connector"
+version = "0.1.0"
+description = "FCP connector for Mailchimp email marketing (audiences, campaigns, members)"
+archetypes = ["operational"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores API key and data center prefix."
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = [
+    "z:public",
+    "z:community",
+]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+]
+optional = []
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "media.upload",
+    "media.download",
+]
+
+[provides.operations."mailchimp.campaigns.list"]
+description = "List campaigns"
+capability = "mailchimp.campaigns.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."mailchimp.campaigns.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."mailchimp.campaigns.list".output_schema]
+required = ["campaigns"]
+type = "object"
+
+[provides.operations."mailchimp.campaigns.list".output_schema.properties.campaigns]
+type = "array"
+
+[provides.operations."mailchimp.campaigns.list".network_constraints]
+host_allow = ["*.api.mailchimp.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."mailchimp.campaigns.list".ai_hints]
+when_to_use = "List email campaigns."
+common_mistakes = []
+examples = ["{}"]
+related = ["mailchimp.campaigns.send"]
+
+[provides.operations."mailchimp.campaigns.send"]
+description = "Send a campaign"
+capability = "mailchimp.campaigns.write"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."mailchimp.campaigns.send".input_schema]
+required = ["campaign_id"]
+type = "object"
+
+[provides.operations."mailchimp.campaigns.send".input_schema.properties.campaign_id]
+type = "string"
+
+[provides.operations."mailchimp.campaigns.send".output_schema]
+type = "object"
+
+[provides.operations."mailchimp.campaigns.send".network_constraints]
+host_allow = ["*.api.mailchimp.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."mailchimp.campaigns.send".ai_hints]
+when_to_use = "Send a campaign to all recipients."
+common_mistakes = ["Sending a campaign that is not in ready state."]
+examples = ['{"campaign_id": "abc123"}']
+related = ["mailchimp.campaigns.list"]
+
+[provides.operations."mailchimp.lists.list"]
+description = "List audiences/lists"
+capability = "mailchimp.lists.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."mailchimp.lists.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."mailchimp.lists.list".output_schema]
+required = ["lists"]
+type = "object"
+
+[provides.operations."mailchimp.lists.list".output_schema.properties.lists]
+type = "array"
+
+[provides.operations."mailchimp.lists.list".network_constraints]
+host_allow = ["*.api.mailchimp.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."mailchimp.lists.list".ai_hints]
+when_to_use = "List Mailchimp audiences."
+common_mistakes = []
+examples = ["{}"]
+related = [
+    "mailchimp.members.list",
+    "mailchimp.campaigns.list",
+]
+
+[provides.operations."mailchimp.members.delete"]
+description = "Permanently delete a member from an audience"
+capability = "mailchimp.members.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."mailchimp.members.delete".input_schema]
+required = [
+    "list_id",
+    "subscriber_hash",
+]
+type = "object"
+
+[provides.operations."mailchimp.members.delete".input_schema.properties.list_id]
+type = "string"
+
+[provides.operations."mailchimp.members.delete".input_schema.properties.subscriber_hash]
+description = "MD5 hash of lowercase email address"
+type = "string"
+
+[provides.operations."mailchimp.members.delete".output_schema]
+type = "object"
+
+[provides.operations."mailchimp.members.delete".network_constraints]
+host_allow = ["*.api.mailchimp.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."mailchimp.members.delete".ai_hints]
+when_to_use = "Permanently delete a member. Cannot be undone."
+common_mistakes = ["Using email directly instead of MD5 hash."]
+examples = ['{"list_id": "abc123", "subscriber_hash": "d41d8cd98f00b204e9800998ecf8427e"}']
+related = ["mailchimp.members.list"]
+
+[provides.operations."mailchimp.members.list"]
+description = "List members of an audience"
+capability = "mailchimp.members.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."mailchimp.members.list".input_schema]
+required = ["list_id"]
+type = "object"
+
+[provides.operations."mailchimp.members.list".input_schema.properties.list_id]
+type = "string"
+
+[provides.operations."mailchimp.members.list".output_schema]
+required = ["members"]
+type = "object"
+
+[provides.operations."mailchimp.members.list".output_schema.properties.members]
+type = "array"
+
+[provides.operations."mailchimp.members.list".network_constraints]
+host_allow = ["*.api.mailchimp.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."mailchimp.members.list".ai_hints]
+when_to_use = "List members of an audience."
+common_mistakes = []
+examples = ['{"list_id": "abc123"}']
+related = [
+    "mailchimp.lists.list",
+    "mailchimp.members.delete",
+]
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "mailchimp.lists.read"
+requests = 100
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "mailchimp.members.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "mailchimp.members.write"
+requests = 50
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "mailchimp.campaigns.read"
+requests = 100
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "mailchimp.campaigns.write"
+requests = 10
+window_ms = 60000
+burst = 2
+scope = "instance"
+
+[rate_limits.operation_pools]
+"mailchimp.campaigns.list" = ["mailchimp.campaigns.read"]
+"mailchimp.campaigns.send" = ["mailchimp.campaigns.write"]
+"mailchimp.lists.list" = ["mailchimp.lists.read"]
+"mailchimp.members.delete" = ["mailchimp.members.write"]
+"mailchimp.members.list" = ["mailchimp.members.read"]

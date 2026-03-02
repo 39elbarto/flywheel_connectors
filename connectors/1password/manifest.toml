@@ -1,0 +1,360 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:f3f91e4706aab252c83245d812992d6e4cdf591d5c2d7721b180139e5d06d06f"
+
+[connector]
+id = "fcp.1password"
+name = "1Password Connector"
+version = "0.1.0"
+description = "FCP connector for 1Password secret management (vaults, items, documents)"
+archetypes = ["knowledge"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores service account token and vault access cache."
+
+[zones]
+home = "z:private"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+]
+allowed_targets = ["z:private"]
+forbidden = [
+    "z:public",
+    "z:community",
+    "z:work",
+]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+]
+optional = []
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "media.upload",
+    "media.download",
+]
+
+[provides.operations."1password.items.create"]
+description = "Create a new item in a vault"
+capability = "1password.items.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."1password.items.create".input_schema]
+required = [
+    "vault_id",
+    "category",
+    "title",
+]
+type = "object"
+
+[provides.operations."1password.items.create".input_schema.properties.category]
+description = "LOGIN, PASSWORD, SECURE_NOTE, API_CREDENTIAL, etc."
+type = "string"
+
+[provides.operations."1password.items.create".input_schema.properties.fields]
+type = "array"
+
+[provides.operations."1password.items.create".input_schema.properties.title]
+type = "string"
+
+[provides.operations."1password.items.create".input_schema.properties.vault_id]
+type = "string"
+
+[provides.operations."1password.items.create".output_schema]
+required = ["id"]
+type = "object"
+
+[provides.operations."1password.items.create".output_schema.properties.id]
+type = "string"
+
+[provides.operations."1password.items.create".network_constraints]
+host_allow = [
+    "*.1password.com",
+    "*.b5dev.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."1password.items.create".ai_hints]
+when_to_use = "Create a new secret item in 1Password."
+common_mistakes = []
+examples = ['{"vault_id": "abc123", "category": "API_CREDENTIAL", "title": "Stripe Key", "fields": [{"label": "api_key", "value": "sk_live_..."}]}']
+related = [
+    "1password.items.list",
+    "1password.items.delete",
+]
+
+[provides.operations."1password.items.delete"]
+description = "Delete an item from a vault"
+capability = "1password.items.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."1password.items.delete".input_schema]
+required = [
+    "vault_id",
+    "item_id",
+]
+type = "object"
+
+[provides.operations."1password.items.delete".input_schema.properties.item_id]
+type = "string"
+
+[provides.operations."1password.items.delete".input_schema.properties.vault_id]
+type = "string"
+
+[provides.operations."1password.items.delete".output_schema]
+type = "object"
+
+[provides.operations."1password.items.delete".network_constraints]
+host_allow = [
+    "*.1password.com",
+    "*.b5dev.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."1password.items.delete".ai_hints]
+when_to_use = "Delete a secret item. Cannot be undone."
+common_mistakes = ["Deleting items that other services depend on for credentials."]
+examples = ['{"vault_id": "abc123", "item_id": "def456"}']
+related = ["1password.items.get"]
+
+[provides.operations."1password.items.get"]
+description = "Get a single item with field values"
+capability = "1password.items.read"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."1password.items.get".input_schema]
+required = [
+    "vault_id",
+    "item_id",
+]
+type = "object"
+
+[provides.operations."1password.items.get".input_schema.properties.item_id]
+type = "string"
+
+[provides.operations."1password.items.get".input_schema.properties.vault_id]
+type = "string"
+
+[provides.operations."1password.items.get".output_schema]
+required = ["item"]
+type = "object"
+
+[provides.operations."1password.items.get".output_schema.properties.item]
+type = "object"
+
+[provides.operations."1password.items.get".network_constraints]
+host_allow = [
+    "*.1password.com",
+    "*.b5dev.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."1password.items.get".ai_hints]
+when_to_use = "Retrieve a specific item including secret field values. Use with caution."
+common_mistakes = ["Logging or caching secret values — treat all field values as sensitive."]
+examples = ['{"vault_id": "abc123", "item_id": "def456"}']
+related = ["1password.items.list"]
+
+[provides.operations."1password.items.list"]
+description = "List items in a vault"
+capability = "1password.items.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."1password.items.list".input_schema]
+required = ["vault_id"]
+type = "object"
+
+[provides.operations."1password.items.list".input_schema.properties.vault_id]
+type = "string"
+
+[provides.operations."1password.items.list".output_schema]
+required = ["items"]
+type = "object"
+
+[provides.operations."1password.items.list".output_schema.properties.items]
+type = "array"
+
+[provides.operations."1password.items.list".network_constraints]
+host_allow = [
+    "*.1password.com",
+    "*.b5dev.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."1password.items.list".ai_hints]
+when_to_use = "List items in a 1Password vault (without revealing secrets)."
+common_mistakes = []
+examples = ['{"vault_id": "abc123"}']
+related = [
+    "1password.vaults.list",
+    "1password.items.get",
+]
+
+[provides.operations."1password.vaults.list"]
+description = "List vaults accessible to the service account"
+capability = "1password.vaults.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."1password.vaults.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."1password.vaults.list".output_schema]
+required = ["vaults"]
+type = "object"
+
+[provides.operations."1password.vaults.list".output_schema.properties.vaults]
+type = "array"
+
+[provides.operations."1password.vaults.list".network_constraints]
+host_allow = [
+    "*.1password.com",
+    "*.b5dev.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."1password.vaults.list".ai_hints]
+when_to_use = "List available vaults."
+common_mistakes = []
+examples = ["{}"]
+related = ["1password.items.list"]
+
+[sandbox]
+profile = "strict"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "1password.vaults.read"
+requests = 100
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "1password.items.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "1password.items.write"
+requests = 50
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[rate_limits.operation_pools]
+"1password.vaults.list" = ["1password.vaults.read"]
+"1password.items.list" = ["1password.items.read"]
+"1password.items.create" = ["1password.items.write"]
+"1password.items.get" = ["1password.items.read"]
+"1password.items.delete" = ["1password.items.write"]

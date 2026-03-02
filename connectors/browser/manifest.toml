@@ -1,0 +1,851 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:9d598f8320f1d425528d303083f34a08a91b2c5392fd38f2fbbeade48f9023da"
+
+[connector]
+id = "fcp.browser"
+name = "Browser Connector"
+version = "0.1.0"
+description = "FCP connector for headless browser automation — navigation, screenshots, extraction, form interaction, JS evaluation"
+archetypes = ["operational"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores session cookies, browser profile state, and page cache metadata."
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = [
+    "z:work",
+    "z:private",
+]
+forbidden = [
+    "z:public",
+    "z:community",
+]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+    "media.download",
+]
+optional = ["media.upload"]
+forbidden = [
+    "system.exec",
+    "network.listen",
+]
+
+[provides.operations."browser.click"]
+description = "Click an element identified by CSS selector"
+capability = "browser.interact"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."browser.click".input_schema]
+required = ["selector"]
+type = "object"
+
+[provides.operations."browser.click".input_schema.properties.selector]
+description = "CSS selector for the element to click"
+type = "string"
+
+[provides.operations."browser.click".input_schema.properties.timeout_ms]
+default = 5000
+type = "integer"
+
+[provides.operations."browser.click".output_schema]
+required = ["clicked"]
+type = "object"
+
+[provides.operations."browser.click".output_schema.properties.clicked]
+type = "boolean"
+
+[provides.operations."browser.click".output_schema.properties.navigation_url]
+description = "New URL if click caused navigation"
+type = "string"
+
+[provides.operations."browser.click".network_constraints]
+host_allow = [
+    "*.github.com",
+    "*.google.com",
+    "*.wikipedia.org",
+    "*.amazonaws.com",
+]
+port_allow = [
+    80,
+    443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 10
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."browser.click".ai_hints]
+when_to_use = "Click a button, link, or interactive element on the page."
+common_mistakes = ["Clicking before element is visible/interactable."]
+examples = ['{"selector": "button.submit"}']
+related = [
+    "browser.fill_form",
+    "browser.wait_for_selector",
+]
+
+[provides.operations."browser.evaluate_js"]
+description = "Execute JavaScript in the page context and return the result"
+capability = "browser.execute"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+
+[provides.operations."browser.evaluate_js".input_schema]
+required = ["expression"]
+type = "object"
+
+[provides.operations."browser.evaluate_js".input_schema.properties.expression]
+description = "JavaScript expression to evaluate"
+type = "string"
+
+[provides.operations."browser.evaluate_js".output_schema]
+required = ["result"]
+type = "object"
+
+[provides.operations."browser.evaluate_js".output_schema.properties.result]
+description = "JSON-serialized return value"
+type = "string"
+
+[provides.operations."browser.evaluate_js".network_constraints]
+host_allow = [
+    "*.github.com",
+    "*.google.com",
+    "*.wikipedia.org",
+    "*.amazonaws.com",
+]
+port_allow = [
+    80,
+    443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."browser.evaluate_js".ai_hints]
+when_to_use = "Execute arbitrary JavaScript in page context. Dangerous — use only when extraction or interaction APIs are insufficient."
+common_mistakes = [
+    "Injecting untrusted user input into expressions (XSS risk).",
+    "Returning non-serializable objects (Promises, DOM nodes).",
+]
+examples = ['{"expression": "document.title"}']
+related = ["browser.extract_text"]
+
+[provides.operations."browser.extract_links"]
+description = "Extract all links from the page or a specific element"
+capability = "browser.extract"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."browser.extract_links".input_schema]
+required = []
+type = "object"
+
+[provides.operations."browser.extract_links".input_schema.properties.selector]
+description = "CSS selector scope"
+type = "string"
+
+[provides.operations."browser.extract_links".output_schema]
+required = ["links"]
+type = "object"
+
+[provides.operations."browser.extract_links".output_schema.properties.links]
+type = "array"
+
+[provides.operations."browser.extract_links".network_constraints]
+host_allow = [
+    "*.github.com",
+    "*.google.com",
+    "*.wikipedia.org",
+    "*.amazonaws.com",
+]
+port_allow = [
+    80,
+    443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."browser.extract_links".ai_hints]
+when_to_use = "Extract all hyperlinks from the current page."
+common_mistakes = []
+examples = ['{"selector": "nav"}']
+related = [
+    "browser.extract_text",
+    "browser.navigate",
+]
+
+[provides.operations."browser.extract_text"]
+description = "Extract text content from the page or a specific element"
+capability = "browser.extract"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."browser.extract_text".input_schema]
+required = []
+type = "object"
+
+[provides.operations."browser.extract_text".input_schema.properties.include_hidden]
+default = false
+description = "Include hidden/aria-hidden text"
+type = "boolean"
+
+[provides.operations."browser.extract_text".input_schema.properties.selector]
+description = "CSS selector to extract from (default: body)"
+type = "string"
+
+[provides.operations."browser.extract_text".output_schema]
+required = ["text"]
+type = "object"
+
+[provides.operations."browser.extract_text".output_schema.properties.text]
+type = "string"
+
+[provides.operations."browser.extract_text".output_schema.properties.word_count]
+type = "integer"
+
+[provides.operations."browser.extract_text".network_constraints]
+host_allow = [
+    "*.github.com",
+    "*.google.com",
+    "*.wikipedia.org",
+    "*.amazonaws.com",
+]
+port_allow = [
+    80,
+    443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."browser.extract_text".ai_hints]
+when_to_use = "Extract text content from the currently loaded page."
+common_mistakes = []
+examples = ['{"selector": "article"}']
+related = [
+    "browser.extract_links",
+    "browser.navigate",
+]
+
+[provides.operations."browser.fill_form"]
+description = "Fill form fields with provided values"
+capability = "browser.interact"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."browser.fill_form".input_schema]
+required = ["fields"]
+type = "object"
+
+[provides.operations."browser.fill_form".input_schema.properties.fields]
+description = "Map of CSS selector to value"
+type = "object"
+
+[provides.operations."browser.fill_form".input_schema.properties.submit_selector]
+description = "Optional selector for submit button to click after filling"
+type = "string"
+
+[provides.operations."browser.fill_form".output_schema]
+required = ["filled_count"]
+type = "object"
+
+[provides.operations."browser.fill_form".output_schema.properties.filled_count]
+type = "integer"
+
+[provides.operations."browser.fill_form".output_schema.properties.submitted]
+type = "boolean"
+
+[provides.operations."browser.fill_form".network_constraints]
+host_allow = [
+    "*.github.com",
+    "*.google.com",
+    "*.wikipedia.org",
+    "*.amazonaws.com",
+]
+port_allow = [
+    80,
+    443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 10
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."browser.fill_form".ai_hints]
+when_to_use = "Fill in form fields (inputs, textareas, selects) and optionally submit."
+common_mistakes = [
+    "Filling fields before they are rendered.",
+    "Not handling dynamic forms that add fields after interaction.",
+]
+examples = ['{"fields": {"#email": "test@example.com", "#password": "secret"}, "submit_selector": "button[type=submit]"}']
+related = [
+    "browser.click",
+    "browser.wait_for_selector",
+]
+
+[provides.operations."browser.get_cookies"]
+description = "Get cookies for the current page or a specific domain"
+capability = "browser.cookies"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."browser.get_cookies".input_schema]
+required = []
+type = "object"
+
+[provides.operations."browser.get_cookies".input_schema.properties.domain]
+type = "string"
+
+[provides.operations."browser.get_cookies".output_schema]
+required = ["cookies"]
+type = "object"
+
+[provides.operations."browser.get_cookies".output_schema.properties.cookies]
+type = "array"
+
+[provides.operations."browser.get_cookies".network_constraints]
+host_allow = [
+    "*.github.com",
+    "*.google.com",
+    "*.wikipedia.org",
+    "*.amazonaws.com",
+]
+port_allow = [
+    80,
+    443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 15000
+max_response_bytes = 1048576
+
+[provides.operations."browser.get_cookies".ai_hints]
+when_to_use = "Retrieve cookies for session inspection or debugging."
+common_mistakes = ["Leaking session cookies to untrusted contexts."]
+examples = ['{"domain": "example.com"}']
+related = ["browser.set_cookies"]
+
+[provides.operations."browser.navigate"]
+description = "Navigate to a URL and wait for page load"
+capability = "browser.navigate"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."browser.navigate".input_schema]
+required = ["url"]
+type = "object"
+
+[provides.operations."browser.navigate".input_schema.properties.timeout_ms]
+default = 30000
+description = "Navigation timeout in milliseconds"
+type = "integer"
+
+[provides.operations."browser.navigate".input_schema.properties.url]
+description = "Target URL to navigate to"
+type = "string"
+
+[provides.operations."browser.navigate".input_schema.properties.user_agent]
+description = "Override User-Agent header"
+type = "string"
+
+[provides.operations."browser.navigate".input_schema.properties.wait_until]
+default = "load"
+description = "Wait condition: load, domcontentloaded, networkidle"
+type = "string"
+
+[provides.operations."browser.navigate".output_schema]
+required = [
+    "url",
+    "status",
+]
+type = "object"
+
+[provides.operations."browser.navigate".output_schema.properties.status]
+description = "HTTP response status code"
+type = "integer"
+
+[provides.operations."browser.navigate".output_schema.properties.title]
+type = "string"
+
+[provides.operations."browser.navigate".output_schema.properties.url]
+description = "Final URL after redirects"
+type = "string"
+
+[provides.operations."browser.navigate".network_constraints]
+host_allow = [
+    "*.github.com",
+    "*.google.com",
+    "*.wikipedia.org",
+    "*.amazonaws.com",
+]
+port_allow = [
+    80,
+    443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 10
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 52428800
+
+[provides.operations."browser.navigate".ai_hints]
+when_to_use = "Navigate the browser to a URL. Always call this before extraction or screenshot operations."
+common_mistakes = [
+    "Not waiting for page load before extracting content.",
+    "Navigating to internal/private IPs — denied by network constraints.",
+]
+examples = ['{"url": "https://example.com", "wait_until": "networkidle"}']
+related = [
+    "browser.screenshot",
+    "browser.extract_text",
+]
+
+[provides.operations."browser.render_pdf"]
+description = "Render the current page as a PDF document"
+capability = "browser.capture"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."browser.render_pdf".input_schema]
+required = []
+type = "object"
+
+[provides.operations."browser.render_pdf".input_schema.properties.format]
+default = "letter"
+description = "Paper format: letter, a4, legal, etc."
+type = "string"
+
+[provides.operations."browser.render_pdf".input_schema.properties.landscape]
+default = false
+type = "boolean"
+
+[provides.operations."browser.render_pdf".input_schema.properties.print_background]
+default = true
+type = "boolean"
+
+[provides.operations."browser.render_pdf".output_schema]
+required = [
+    "pdf_data",
+    "page_count",
+]
+type = "object"
+
+[provides.operations."browser.render_pdf".output_schema.properties.page_count]
+type = "integer"
+
+[provides.operations."browser.render_pdf".output_schema.properties.pdf_data]
+description = "Base64-encoded PDF"
+type = "string"
+
+[provides.operations."browser.render_pdf".network_constraints]
+host_allow = [
+    "*.github.com",
+    "*.google.com",
+    "*.wikipedia.org",
+    "*.amazonaws.com",
+]
+port_allow = [
+    80,
+    443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 52428800
+
+[provides.operations."browser.render_pdf".ai_hints]
+when_to_use = "Render the current page as a PDF for archival or offline reading."
+common_mistakes = []
+examples = ['{"format": "a4", "print_background": true}']
+related = ["browser.screenshot"]
+
+[provides.operations."browser.screenshot"]
+description = "Capture a screenshot of the current page or a specific element"
+capability = "browser.capture"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."browser.screenshot".input_schema]
+required = []
+type = "object"
+
+[provides.operations."browser.screenshot".input_schema.properties.format]
+default = "png"
+description = "Image format: png or jpeg"
+type = "string"
+
+[provides.operations."browser.screenshot".input_schema.properties.full_page]
+default = false
+description = "Capture full scrollable page"
+type = "boolean"
+
+[provides.operations."browser.screenshot".input_schema.properties.quality]
+description = "JPEG quality (0-100)"
+type = "integer"
+
+[provides.operations."browser.screenshot".input_schema.properties.selector]
+description = "CSS selector to screenshot a specific element"
+type = "string"
+
+[provides.operations."browser.screenshot".output_schema]
+required = [
+    "image_data",
+    "width",
+    "height",
+]
+type = "object"
+
+[provides.operations."browser.screenshot".output_schema.properties.height]
+type = "integer"
+
+[provides.operations."browser.screenshot".output_schema.properties.image_data]
+description = "Base64-encoded image"
+type = "string"
+
+[provides.operations."browser.screenshot".output_schema.properties.width]
+type = "integer"
+
+[provides.operations."browser.screenshot".network_constraints]
+host_allow = [
+    "*.github.com",
+    "*.google.com",
+    "*.wikipedia.org",
+    "*.amazonaws.com",
+]
+port_allow = [
+    80,
+    443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 52428800
+
+[provides.operations."browser.screenshot".ai_hints]
+when_to_use = "Capture a visual screenshot of the current page or element for inspection."
+common_mistakes = ["Taking screenshots before page fully loads."]
+examples = ['{"full_page": true, "format": "png"}']
+related = [
+    "browser.navigate",
+    "browser.render_pdf",
+]
+
+[provides.operations."browser.set_cookies"]
+description = "Set cookies in the browser session"
+capability = "browser.cookies"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."browser.set_cookies".input_schema]
+required = ["cookies"]
+type = "object"
+
+[provides.operations."browser.set_cookies".input_schema.properties.cookies]
+description = "Array of cookie objects {name, value, domain, path, ...}"
+type = "array"
+
+[provides.operations."browser.set_cookies".output_schema]
+required = ["set_count"]
+type = "object"
+
+[provides.operations."browser.set_cookies".output_schema.properties.set_count]
+type = "integer"
+
+[provides.operations."browser.set_cookies".network_constraints]
+host_allow = [
+    "*.github.com",
+    "*.google.com",
+    "*.wikipedia.org",
+    "*.amazonaws.com",
+]
+port_allow = [
+    80,
+    443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 15000
+max_response_bytes = 1048576
+
+[provides.operations."browser.set_cookies".ai_hints]
+when_to_use = "Inject cookies for authenticated session setup."
+common_mistakes = ["Setting cookies on wrong domain — they won't be sent."]
+examples = ['{"cookies": [{"name": "session", "value": "abc123", "domain": "example.com", "path": "/"}]}']
+related = ["browser.get_cookies"]
+
+[provides.operations."browser.wait_for_selector"]
+description = "Wait for an element matching a CSS selector to appear"
+capability = "browser.extract"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."browser.wait_for_selector".input_schema]
+required = ["selector"]
+type = "object"
+
+[provides.operations."browser.wait_for_selector".input_schema.properties.selector]
+type = "string"
+
+[provides.operations."browser.wait_for_selector".input_schema.properties.state]
+default = "visible"
+description = "Wait for: visible, hidden, attached, detached"
+type = "string"
+
+[provides.operations."browser.wait_for_selector".input_schema.properties.timeout_ms]
+default = 10000
+type = "integer"
+
+[provides.operations."browser.wait_for_selector".output_schema]
+required = ["found"]
+type = "object"
+
+[provides.operations."browser.wait_for_selector".output_schema.properties.found]
+type = "boolean"
+
+[provides.operations."browser.wait_for_selector".network_constraints]
+host_allow = [
+    "*.github.com",
+    "*.google.com",
+    "*.wikipedia.org",
+    "*.amazonaws.com",
+]
+port_allow = [
+    80,
+    443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."browser.wait_for_selector".ai_hints]
+when_to_use = "Wait for a dynamic element to appear before interacting with it."
+common_mistakes = []
+examples = ['{"selector": ".results-loaded", "timeout_ms": 5000}']
+related = [
+    "browser.click",
+    "browser.extract_text",
+]
+
+[sandbox]
+profile = "moderate"
+memory_mb = 1024
+cpu_percent = 75
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = false
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "browser.navigate"
+requests = 30
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "browser.capture"
+requests = 60
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "browser.extract"
+requests = 120
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "browser.interact"
+requests = 60
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "browser.execute"
+requests = 30
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "browser.cookies"
+requests = 60
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[rate_limits.operation_pools]
+"browser.navigate" = ["browser.navigate"]
+"browser.click" = ["browser.interact"]
+"browser.extract_links" = ["browser.extract"]
+"browser.render_pdf" = ["browser.capture"]
+"browser.evaluate_js" = ["browser.execute"]
+"browser.screenshot" = ["browser.capture"]
+"browser.set_cookies" = ["browser.cookies"]
+"browser.wait_for_selector" = ["browser.extract"]
+"browser.extract_text" = ["browser.extract"]
+"browser.get_cookies" = ["browser.cookies"]
+"browser.fill_form" = ["browser.interact"]

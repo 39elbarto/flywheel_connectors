@@ -1,0 +1,961 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:8705e9d7e6210015a17b51b37d09d8774012f5f2209f173868df5eb7c00eca68"
+
+[connector]
+id = "fcp.kubernetes"
+name = "Kubernetes Connector"
+version = "0.1.0"
+description = "FCP connector for Kubernetes cluster management (pods, deployments, services, configmaps, secrets, events, logs)"
+archetypes = [
+    "operational",
+    "streaming",
+]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores watch resourceVersion cursors and event stream checkpoints per namespace."
+
+[zones]
+home = "z:infra"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+    "z:infra",
+]
+allowed_targets = [
+    "z:infra",
+    "z:work",
+]
+forbidden = [
+    "z:public",
+    "z:community",
+]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+]
+optional = ["network.tls.mtls"]
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "media.download",
+]
+
+[provides.operations."kubernetes.delete_pod"]
+description = "Delete a pod (force eviction)"
+capability = "kubernetes.admin"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "best_effort"
+
+[provides.operations."kubernetes.delete_pod".input_schema]
+required = [
+    "namespace",
+    "name",
+]
+type = "object"
+
+[provides.operations."kubernetes.delete_pod".input_schema.properties.grace_period_seconds]
+type = "integer"
+
+[provides.operations."kubernetes.delete_pod".input_schema.properties.name]
+type = "string"
+
+[provides.operations."kubernetes.delete_pod".input_schema.properties.namespace]
+type = "string"
+
+[provides.operations."kubernetes.delete_pod".output_schema]
+required = ["deleted"]
+type = "object"
+
+[provides.operations."kubernetes.delete_pod".output_schema.properties.deleted]
+type = "boolean"
+
+[provides.operations."kubernetes.delete_pod".network_constraints]
+host_allow = ["$KUBE_API_HOST"]
+port_allow = [
+    443,
+    6443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 1048576
+
+[provides.operations."kubernetes.delete_pod".ai_hints]
+when_to_use = "Force-delete a pod to trigger rescheduling."
+common_mistakes = [
+    "Deleting pods managed by a Deployment (they respawn)",
+    "Using grace_period_seconds=0 on stateful pods",
+]
+examples = ['{"namespace": "production", "name": "api-server-5f4b8c9-x7k2p"}']
+related = [
+    "kubernetes.get_pod",
+    "kubernetes.scale_deployment",
+]
+
+[provides.operations."kubernetes.get_configmap"]
+description = "Get a ConfigMap by name in a namespace"
+capability = "kubernetes.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."kubernetes.get_configmap".input_schema]
+required = [
+    "namespace",
+    "name",
+]
+type = "object"
+
+[provides.operations."kubernetes.get_configmap".input_schema.properties.name]
+type = "string"
+
+[provides.operations."kubernetes.get_configmap".input_schema.properties.namespace]
+type = "string"
+
+[provides.operations."kubernetes.get_configmap".output_schema]
+required = ["configmap"]
+type = "object"
+
+[provides.operations."kubernetes.get_configmap".output_schema.properties.configmap]
+type = "object"
+
+[provides.operations."kubernetes.get_configmap".network_constraints]
+host_allow = ["$KUBE_API_HOST"]
+port_allow = [
+    443,
+    6443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."kubernetes.get_configmap".ai_hints]
+when_to_use = "Read configuration data from a ConfigMap."
+common_mistakes = []
+examples = ['{"namespace": "production", "name": "app-config"}']
+related = [
+    "kubernetes.update_configmap",
+    "kubernetes.get_secret",
+]
+
+[provides.operations."kubernetes.get_deployment"]
+description = "Get a deployment by name in a namespace"
+capability = "kubernetes.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."kubernetes.get_deployment".input_schema]
+required = [
+    "namespace",
+    "name",
+]
+type = "object"
+
+[provides.operations."kubernetes.get_deployment".input_schema.properties.name]
+type = "string"
+
+[provides.operations."kubernetes.get_deployment".input_schema.properties.namespace]
+type = "string"
+
+[provides.operations."kubernetes.get_deployment".output_schema]
+required = ["deployment"]
+type = "object"
+
+[provides.operations."kubernetes.get_deployment".output_schema.properties.deployment]
+type = "object"
+
+[provides.operations."kubernetes.get_deployment".network_constraints]
+host_allow = ["$KUBE_API_HOST"]
+port_allow = [
+    443,
+    6443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."kubernetes.get_deployment".ai_hints]
+when_to_use = "Retrieve details about a specific deployment."
+common_mistakes = []
+examples = ['{"namespace": "production", "name": "api-server"}']
+related = [
+    "kubernetes.list_deployments",
+    "kubernetes.scale_deployment",
+]
+
+[provides.operations."kubernetes.get_pod"]
+description = "Get a pod by name in a namespace"
+capability = "kubernetes.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."kubernetes.get_pod".input_schema]
+required = [
+    "namespace",
+    "name",
+]
+type = "object"
+
+[provides.operations."kubernetes.get_pod".input_schema.properties.name]
+type = "string"
+
+[provides.operations."kubernetes.get_pod".input_schema.properties.namespace]
+type = "string"
+
+[provides.operations."kubernetes.get_pod".output_schema]
+required = ["pod"]
+type = "object"
+
+[provides.operations."kubernetes.get_pod".output_schema.properties.pod]
+type = "object"
+
+[provides.operations."kubernetes.get_pod".network_constraints]
+host_allow = ["$KUBE_API_HOST"]
+port_allow = [
+    443,
+    6443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."kubernetes.get_pod".ai_hints]
+when_to_use = "Retrieve details about a specific pod."
+common_mistakes = ["Forgetting to specify namespace (defaults to 'default')"]
+examples = ['{"namespace": "production", "name": "api-server-5f4b8c9-x7k2p"}']
+related = [
+    "kubernetes.list_pods",
+    "kubernetes.get_pod_logs",
+]
+
+[provides.operations."kubernetes.get_pod_logs"]
+description = "Retrieve logs from a pod container"
+capability = "kubernetes.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."kubernetes.get_pod_logs".input_schema]
+required = [
+    "namespace",
+    "name",
+]
+type = "object"
+
+[provides.operations."kubernetes.get_pod_logs".input_schema.properties.container]
+type = "string"
+
+[provides.operations."kubernetes.get_pod_logs".input_schema.properties.name]
+type = "string"
+
+[provides.operations."kubernetes.get_pod_logs".input_schema.properties.namespace]
+type = "string"
+
+[provides.operations."kubernetes.get_pod_logs".input_schema.properties.since_seconds]
+type = "integer"
+
+[provides.operations."kubernetes.get_pod_logs".input_schema.properties.tail_lines]
+type = "integer"
+
+[provides.operations."kubernetes.get_pod_logs".output_schema]
+required = ["logs"]
+type = "object"
+
+[provides.operations."kubernetes.get_pod_logs".output_schema.properties.logs]
+type = "string"
+
+[provides.operations."kubernetes.get_pod_logs".network_constraints]
+host_allow = ["$KUBE_API_HOST"]
+port_allow = [
+    443,
+    6443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 52428800
+
+[provides.operations."kubernetes.get_pod_logs".ai_hints]
+when_to_use = "Read container logs from a pod."
+common_mistakes = [
+    "Not specifying container in multi-container pods",
+    "Requesting unbounded logs on high-throughput pods",
+]
+examples = ['{"namespace": "production", "name": "api-server-5f4b8c9-x7k2p", "tail_lines": 100}']
+related = [
+    "kubernetes.get_pod",
+    "kubernetes.stream_pod_logs",
+]
+
+[provides.operations."kubernetes.get_secret"]
+description = "Get a Secret by name (returns metadata only; data is redacted unless explicitly unmasked)"
+capability = "kubernetes.secrets"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."kubernetes.get_secret".input_schema]
+required = [
+    "namespace",
+    "name",
+]
+type = "object"
+
+[provides.operations."kubernetes.get_secret".input_schema.properties.name]
+type = "string"
+
+[provides.operations."kubernetes.get_secret".input_schema.properties.namespace]
+type = "string"
+
+[provides.operations."kubernetes.get_secret".input_schema.properties.unmask]
+type = "boolean"
+
+[provides.operations."kubernetes.get_secret".output_schema]
+required = ["secret"]
+type = "object"
+
+[provides.operations."kubernetes.get_secret".output_schema.properties.secret]
+type = "object"
+
+[provides.operations."kubernetes.get_secret".network_constraints]
+host_allow = ["$KUBE_API_HOST"]
+port_allow = [
+    443,
+    6443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."kubernetes.get_secret".ai_hints]
+when_to_use = "Read a Kubernetes secret (metadata only by default)."
+common_mistakes = [
+    "Logging or exposing secret data",
+    "Not setting unmask=false for audit-only reads",
+]
+examples = ['{"namespace": "production", "name": "db-credentials"}']
+related = ["kubernetes.get_configmap"]
+
+[provides.operations."kubernetes.get_service"]
+description = "Get a service by name in a namespace"
+capability = "kubernetes.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."kubernetes.get_service".input_schema]
+required = [
+    "namespace",
+    "name",
+]
+type = "object"
+
+[provides.operations."kubernetes.get_service".input_schema.properties.name]
+type = "string"
+
+[provides.operations."kubernetes.get_service".input_schema.properties.namespace]
+type = "string"
+
+[provides.operations."kubernetes.get_service".output_schema]
+required = ["service"]
+type = "object"
+
+[provides.operations."kubernetes.get_service".output_schema.properties.service]
+type = "object"
+
+[provides.operations."kubernetes.get_service".network_constraints]
+host_allow = ["$KUBE_API_HOST"]
+port_allow = [
+    443,
+    6443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."kubernetes.get_service".ai_hints]
+when_to_use = "Retrieve details about a Kubernetes service."
+common_mistakes = []
+examples = ['{"namespace": "production", "name": "api-server"}']
+related = ["kubernetes.list_pods"]
+
+[provides.operations."kubernetes.list_deployments"]
+description = "List deployments in a namespace"
+capability = "kubernetes.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."kubernetes.list_deployments".input_schema]
+required = ["namespace"]
+type = "object"
+
+[provides.operations."kubernetes.list_deployments".input_schema.properties.label_selector]
+type = "string"
+
+[provides.operations."kubernetes.list_deployments".input_schema.properties.namespace]
+type = "string"
+
+[provides.operations."kubernetes.list_deployments".output_schema]
+required = ["deployments"]
+type = "object"
+
+[provides.operations."kubernetes.list_deployments".output_schema.properties.deployments]
+type = "array"
+
+[provides.operations."kubernetes.list_deployments".network_constraints]
+host_allow = ["$KUBE_API_HOST"]
+port_allow = [
+    443,
+    6443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 52428800
+
+[provides.operations."kubernetes.list_deployments".ai_hints]
+when_to_use = "List all deployments in a namespace."
+common_mistakes = []
+examples = ['{"namespace": "production"}']
+related = [
+    "kubernetes.get_deployment",
+    "kubernetes.scale_deployment",
+]
+
+[provides.operations."kubernetes.list_pods"]
+description = "List pods in a namespace with optional label selector"
+capability = "kubernetes.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."kubernetes.list_pods".input_schema]
+required = ["namespace"]
+type = "object"
+
+[provides.operations."kubernetes.list_pods".input_schema.properties.field_selector]
+type = "string"
+
+[provides.operations."kubernetes.list_pods".input_schema.properties.label_selector]
+type = "string"
+
+[provides.operations."kubernetes.list_pods".input_schema.properties.namespace]
+type = "string"
+
+[provides.operations."kubernetes.list_pods".output_schema]
+required = ["pods"]
+type = "object"
+
+[provides.operations."kubernetes.list_pods".output_schema.properties.pods]
+type = "array"
+
+[provides.operations."kubernetes.list_pods".network_constraints]
+host_allow = ["$KUBE_API_HOST"]
+port_allow = [
+    443,
+    6443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 52428800
+
+[provides.operations."kubernetes.list_pods".ai_hints]
+when_to_use = "List pods in a namespace, optionally filtered by labels."
+common_mistakes = ["Not using label selectors on large namespaces"]
+examples = ['{"namespace": "production", "label_selector": "app=api-server"}']
+related = [
+    "kubernetes.get_pod",
+    "kubernetes.get_deployment",
+]
+
+[provides.operations."kubernetes.rollout_restart"]
+description = "Trigger a rolling restart of a deployment"
+capability = "kubernetes.write"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "interactive"
+idempotency = "none"
+
+[provides.operations."kubernetes.rollout_restart".input_schema]
+required = [
+    "namespace",
+    "name",
+]
+type = "object"
+
+[provides.operations."kubernetes.rollout_restart".input_schema.properties.name]
+type = "string"
+
+[provides.operations."kubernetes.rollout_restart".input_schema.properties.namespace]
+type = "string"
+
+[provides.operations."kubernetes.rollout_restart".output_schema]
+required = ["deployment"]
+type = "object"
+
+[provides.operations."kubernetes.rollout_restart".output_schema.properties.deployment]
+type = "object"
+
+[provides.operations."kubernetes.rollout_restart".network_constraints]
+host_allow = ["$KUBE_API_HOST"]
+port_allow = [
+    443,
+    6443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."kubernetes.rollout_restart".ai_hints]
+when_to_use = "Restart all pods in a deployment with zero downtime."
+common_mistakes = ["Restarting during an active rollout"]
+examples = ['{"namespace": "production", "name": "api-server"}']
+related = [
+    "kubernetes.scale_deployment",
+    "kubernetes.get_deployment",
+]
+
+[provides.operations."kubernetes.scale_deployment"]
+description = "Scale a deployment to a target replica count"
+capability = "kubernetes.write"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "interactive"
+idempotency = "best_effort"
+
+[provides.operations."kubernetes.scale_deployment".input_schema]
+required = [
+    "namespace",
+    "name",
+    "replicas",
+]
+type = "object"
+
+[provides.operations."kubernetes.scale_deployment".input_schema.properties.name]
+type = "string"
+
+[provides.operations."kubernetes.scale_deployment".input_schema.properties.namespace]
+type = "string"
+
+[provides.operations."kubernetes.scale_deployment".input_schema.properties.replicas]
+type = "integer"
+
+[provides.operations."kubernetes.scale_deployment".output_schema]
+required = ["deployment"]
+type = "object"
+
+[provides.operations."kubernetes.scale_deployment".output_schema.properties.deployment]
+type = "object"
+
+[provides.operations."kubernetes.scale_deployment".network_constraints]
+host_allow = ["$KUBE_API_HOST"]
+port_allow = [
+    443,
+    6443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."kubernetes.scale_deployment".ai_hints]
+when_to_use = "Scale a deployment up or down."
+common_mistakes = [
+    "Scaling to 0 unintentionally",
+    "Not checking HPA before manual scaling",
+]
+examples = ['{"namespace": "production", "name": "api-server", "replicas": 3}']
+related = [
+    "kubernetes.get_deployment",
+    "kubernetes.rollout_restart",
+]
+
+[provides.operations."kubernetes.stream_pod_logs"]
+description = "Stream live logs from a pod container (follow mode)"
+capability = "kubernetes.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."kubernetes.stream_pod_logs".input_schema]
+required = [
+    "namespace",
+    "name",
+]
+type = "object"
+
+[provides.operations."kubernetes.stream_pod_logs".input_schema.properties.container]
+type = "string"
+
+[provides.operations."kubernetes.stream_pod_logs".input_schema.properties.name]
+type = "string"
+
+[provides.operations."kubernetes.stream_pod_logs".input_schema.properties.namespace]
+type = "string"
+
+[provides.operations."kubernetes.stream_pod_logs".input_schema.properties.tail_lines]
+type = "integer"
+
+[provides.operations."kubernetes.stream_pod_logs".output_schema]
+required = ["log_line"]
+type = "object"
+
+[provides.operations."kubernetes.stream_pod_logs".output_schema.properties.log_line]
+type = "string"
+
+[provides.operations."kubernetes.stream_pod_logs".network_constraints]
+host_allow = ["$KUBE_API_HOST"]
+port_allow = [
+    443,
+    6443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 3600000
+max_response_bytes = 1073741824
+
+[provides.operations."kubernetes.stream_pod_logs".ai_hints]
+when_to_use = "Follow live log output from a pod container."
+common_mistakes = ["Not specifying container in multi-container pods"]
+examples = ['{"namespace": "production", "name": "api-server-5f4b8c9-x7k2p", "tail_lines": 50}']
+related = [
+    "kubernetes.get_pod_logs",
+    "kubernetes.watch_events",
+]
+
+[provides.operations."kubernetes.update_configmap"]
+description = "Update a ConfigMap in a namespace"
+capability = "kubernetes.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "best_effort"
+
+[provides.operations."kubernetes.update_configmap".input_schema]
+required = [
+    "namespace",
+    "name",
+    "data",
+]
+type = "object"
+
+[provides.operations."kubernetes.update_configmap".input_schema.properties.data]
+type = "object"
+
+[provides.operations."kubernetes.update_configmap".input_schema.properties.name]
+type = "string"
+
+[provides.operations."kubernetes.update_configmap".input_schema.properties.namespace]
+type = "string"
+
+[provides.operations."kubernetes.update_configmap".output_schema]
+required = ["configmap"]
+type = "object"
+
+[provides.operations."kubernetes.update_configmap".output_schema.properties.configmap]
+type = "object"
+
+[provides.operations."kubernetes.update_configmap".network_constraints]
+host_allow = ["$KUBE_API_HOST"]
+port_allow = [
+    443,
+    6443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."kubernetes.update_configmap".ai_hints]
+when_to_use = "Update configuration data in a ConfigMap."
+common_mistakes = [
+    "Overwriting all data instead of merging",
+    "Not restarting pods that consume the ConfigMap",
+]
+examples = ['{"namespace": "production", "name": "app-config", "data": {"LOG_LEVEL": "debug"}}']
+related = [
+    "kubernetes.get_configmap",
+    "kubernetes.rollout_restart",
+]
+
+[provides.operations."kubernetes.watch_events"]
+description = "Watch Kubernetes events in a namespace (streaming)"
+capability = "kubernetes.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."kubernetes.watch_events".input_schema]
+required = ["namespace"]
+type = "object"
+
+[provides.operations."kubernetes.watch_events".input_schema.properties.field_selector]
+type = "string"
+
+[provides.operations."kubernetes.watch_events".input_schema.properties.namespace]
+type = "string"
+
+[provides.operations."kubernetes.watch_events".input_schema.properties.resource_version]
+type = "string"
+
+[provides.operations."kubernetes.watch_events".output_schema]
+required = ["events"]
+type = "object"
+
+[provides.operations."kubernetes.watch_events".output_schema.properties.events]
+type = "array"
+
+[provides.operations."kubernetes.watch_events".network_constraints]
+host_allow = ["$KUBE_API_HOST"]
+port_allow = [
+    443,
+    6443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 3600000
+max_response_bytes = 1073741824
+
+[provides.operations."kubernetes.watch_events".ai_hints]
+when_to_use = "Stream cluster events for monitoring or debugging."
+common_mistakes = ["Not handling resourceVersion for reconnection"]
+examples = ['{"namespace": "production"}']
+related = ["kubernetes.stream_pod_logs"]
+
+[event_caps]
+streaming = true
+replay = false
+min_buffer_events = 200
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "kubernetes.read"
+requests = 600
+window_ms = 60000
+burst = 50
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "kubernetes.write"
+requests = 120
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "kubernetes.admin"
+requests = 30
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "kubernetes.secrets"
+requests = 30
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[rate_limits.operation_pools]
+"kubernetes.rollout_restart" = ["kubernetes.write"]
+"kubernetes.get_secret" = ["kubernetes.secrets"]
+"kubernetes.get_pod_logs" = ["kubernetes.read"]
+"kubernetes.list_deployments" = ["kubernetes.read"]
+"kubernetes.list_pods" = ["kubernetes.read"]
+"kubernetes.delete_pod" = ["kubernetes.admin"]
+"kubernetes.get_service" = ["kubernetes.read"]
+"kubernetes.scale_deployment" = ["kubernetes.write"]
+"kubernetes.get_deployment" = ["kubernetes.read"]
+"kubernetes.get_pod" = ["kubernetes.read"]
+"kubernetes.stream_pod_logs" = ["kubernetes.read"]
+"kubernetes.update_configmap" = ["kubernetes.write"]
+"kubernetes.get_configmap" = ["kubernetes.read"]
+"kubernetes.watch_events" = ["kubernetes.read"]

@@ -1,0 +1,294 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:3a3bd53286443298578e6d5f51af2015c31df4f02b14c35279dc1a7a404fd70a"
+
+[connector]
+id = "fcp.linkedin"
+name = "LinkedIn Connector"
+version = "0.1.0"
+description = "FCP connector for LinkedIn (profile, posts, connections, companies)"
+archetypes = [
+    "knowledge",
+    "operational",
+]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores OAuth2 access token."
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = [
+    "z:public",
+    "z:community",
+]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+]
+optional = []
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "media.upload",
+    "media.download",
+]
+
+[provides.operations."linkedin.posts.create"]
+description = "Create a post"
+capability = "linkedin.posts.write"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."linkedin.posts.create".input_schema]
+required = [
+    "author",
+    "commentary",
+]
+type = "object"
+
+[provides.operations."linkedin.posts.create".input_schema.properties.author]
+description = "URN of the author (e.g. urn:li:person:abc123)"
+type = "string"
+
+[provides.operations."linkedin.posts.create".input_schema.properties.commentary]
+type = "string"
+
+[provides.operations."linkedin.posts.create".input_schema.properties.visibility]
+description = "PUBLIC or CONNECTIONS"
+type = "string"
+
+[provides.operations."linkedin.posts.create".output_schema]
+required = ["id"]
+type = "object"
+
+[provides.operations."linkedin.posts.create".output_schema.properties.id]
+type = "string"
+
+[provides.operations."linkedin.posts.create".network_constraints]
+host_allow = ["api.linkedin.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."linkedin.posts.create".ai_hints]
+when_to_use = "Create a LinkedIn post. Visible to connections or public."
+common_mistakes = ["Posting without specifying visibility."]
+examples = ['{"author": "urn:li:person:abc123", "commentary": "Excited to announce...", "visibility": "PUBLIC"}']
+related = [
+    "linkedin.posts.list",
+    "linkedin.posts.delete",
+]
+
+[provides.operations."linkedin.posts.delete"]
+description = "Delete a post"
+capability = "linkedin.posts.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."linkedin.posts.delete".input_schema]
+required = ["post_id"]
+type = "object"
+
+[provides.operations."linkedin.posts.delete".input_schema.properties.post_id]
+type = "string"
+
+[provides.operations."linkedin.posts.delete".output_schema]
+type = "object"
+
+[provides.operations."linkedin.posts.delete".network_constraints]
+host_allow = ["api.linkedin.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."linkedin.posts.delete".ai_hints]
+when_to_use = "Delete a LinkedIn post. Cannot be undone."
+common_mistakes = []
+examples = ['{"post_id": "urn:li:share:abc123"}']
+related = ["linkedin.posts.list"]
+
+[provides.operations."linkedin.posts.list"]
+description = "List recent posts"
+capability = "linkedin.posts.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."linkedin.posts.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."linkedin.posts.list".input_schema.properties.count]
+maximum = 100
+type = "integer"
+
+[provides.operations."linkedin.posts.list".output_schema]
+required = ["elements"]
+type = "object"
+
+[provides.operations."linkedin.posts.list".output_schema.properties.elements]
+type = "array"
+
+[provides.operations."linkedin.posts.list".network_constraints]
+host_allow = ["api.linkedin.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."linkedin.posts.list".ai_hints]
+when_to_use = "List recent LinkedIn posts."
+common_mistakes = []
+examples = ['{"count": 20}']
+related = ["linkedin.posts.create"]
+
+[provides.operations."linkedin.profile.get"]
+description = "Get the authenticated user's profile"
+capability = "linkedin.profile.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."linkedin.profile.get".input_schema]
+required = []
+type = "object"
+
+[provides.operations."linkedin.profile.get".output_schema]
+required = [
+    "id",
+    "localizedFirstName",
+    "localizedLastName",
+]
+type = "object"
+
+[provides.operations."linkedin.profile.get".output_schema.properties.id]
+type = "string"
+
+[provides.operations."linkedin.profile.get".output_schema.properties.localizedFirstName]
+type = "string"
+
+[provides.operations."linkedin.profile.get".output_schema.properties.localizedLastName]
+type = "string"
+
+[provides.operations."linkedin.profile.get".network_constraints]
+host_allow = ["api.linkedin.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."linkedin.profile.get".ai_hints]
+when_to_use = "Get the authenticated LinkedIn profile."
+common_mistakes = []
+examples = ["{}"]
+related = ["linkedin.posts.list"]
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "linkedin.profile.read"
+requests = 100
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "linkedin.posts.read"
+requests = 100
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "linkedin.posts.write"
+requests = 25
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[rate_limits.operation_pools]
+"linkedin.posts.create" = ["linkedin.posts.write"]
+"linkedin.posts.list" = ["linkedin.posts.read"]
+"linkedin.posts.delete" = ["linkedin.posts.write"]
+"linkedin.profile.get" = ["linkedin.profile.read"]

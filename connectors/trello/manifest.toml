@@ -1,0 +1,341 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:579b1d9f03d85653ce50a70efee7741523937a11d3d37ccc751f795daf53903a"
+
+[connector]
+id = "fcp.trello"
+name = "Trello Connector"
+version = "0.1.0"
+description = "FCP connector for Trello project management (boards, lists, cards)"
+archetypes = [
+    "knowledge",
+    "operational",
+]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores API key, token, and board membership cache."
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = [
+    "z:public",
+    "z:community",
+]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+]
+optional = []
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "media.upload",
+    "media.download",
+]
+
+[provides.operations."trello.boards.list"]
+description = "List boards for the authenticated user"
+capability = "trello.boards.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."trello.boards.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."trello.boards.list".output_schema]
+required = ["boards"]
+type = "object"
+
+[provides.operations."trello.boards.list".output_schema.properties.boards]
+type = "array"
+
+[provides.operations."trello.boards.list".network_constraints]
+host_allow = ["api.trello.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."trello.boards.list".ai_hints]
+when_to_use = "List Trello boards."
+common_mistakes = []
+examples = ["{}"]
+related = [
+    "trello.lists.get",
+    "trello.cards.list",
+]
+
+[provides.operations."trello.cards.create"]
+description = "Create a new card"
+capability = "trello.cards.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."trello.cards.create".input_schema]
+required = [
+    "idList",
+    "name",
+]
+type = "object"
+
+[provides.operations."trello.cards.create".input_schema.properties.desc]
+type = "string"
+
+[provides.operations."trello.cards.create".input_schema.properties.idList]
+description = "ID of the list to add the card to"
+type = "string"
+
+[provides.operations."trello.cards.create".input_schema.properties.name]
+type = "string"
+
+[provides.operations."trello.cards.create".output_schema]
+required = ["id"]
+type = "object"
+
+[provides.operations."trello.cards.create".output_schema.properties.id]
+type = "string"
+
+[provides.operations."trello.cards.create".network_constraints]
+host_allow = ["api.trello.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."trello.cards.create".ai_hints]
+when_to_use = "Create a new Trello card."
+common_mistakes = ["Forgetting to specify idList."]
+examples = ['{"idList": "list_abc123", "name": "Fix login bug", "desc": "Users report intermittent 500 errors"}']
+related = [
+    "trello.cards.list",
+    "trello.lists.get",
+]
+
+[provides.operations."trello.cards.delete"]
+description = "Delete a card"
+capability = "trello.cards.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."trello.cards.delete".input_schema]
+required = ["card_id"]
+type = "object"
+
+[provides.operations."trello.cards.delete".input_schema.properties.card_id]
+type = "string"
+
+[provides.operations."trello.cards.delete".output_schema]
+type = "object"
+
+[provides.operations."trello.cards.delete".network_constraints]
+host_allow = ["api.trello.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."trello.cards.delete".ai_hints]
+when_to_use = "Delete a Trello card. Cannot be undone."
+common_mistakes = []
+examples = ['{"card_id": "card_abc123"}']
+related = ["trello.cards.list"]
+
+[provides.operations."trello.cards.list"]
+description = "List cards on a board or list"
+capability = "trello.cards.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."trello.cards.list".input_schema]
+required = ["board_id"]
+type = "object"
+
+[provides.operations."trello.cards.list".input_schema.properties.board_id]
+type = "string"
+
+[provides.operations."trello.cards.list".input_schema.properties.list_id]
+type = "string"
+
+[provides.operations."trello.cards.list".output_schema]
+required = ["cards"]
+type = "object"
+
+[provides.operations."trello.cards.list".output_schema.properties.cards]
+type = "array"
+
+[provides.operations."trello.cards.list".network_constraints]
+host_allow = ["api.trello.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."trello.cards.list".ai_hints]
+when_to_use = "List cards on a board, optionally filtered by list."
+common_mistakes = []
+examples = ['{"board_id": "abc123"}']
+related = [
+    "trello.cards.create",
+    "trello.cards.delete",
+]
+
+[provides.operations."trello.lists.get"]
+description = "Get lists on a board"
+capability = "trello.boards.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."trello.lists.get".input_schema]
+required = ["board_id"]
+type = "object"
+
+[provides.operations."trello.lists.get".input_schema.properties.board_id]
+type = "string"
+
+[provides.operations."trello.lists.get".output_schema]
+required = ["lists"]
+type = "object"
+
+[provides.operations."trello.lists.get".output_schema.properties.lists]
+type = "array"
+
+[provides.operations."trello.lists.get".network_constraints]
+host_allow = ["api.trello.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."trello.lists.get".ai_hints]
+when_to_use = "Get lists on a Trello board."
+common_mistakes = []
+examples = ['{"board_id": "abc123"}']
+related = [
+    "trello.boards.list",
+    "trello.cards.list",
+]
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "trello.boards.read"
+requests = 300
+window_ms = 60000
+burst = 30
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "trello.cards.read"
+requests = 300
+window_ms = 60000
+burst = 30
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "trello.cards.write"
+requests = 100
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[rate_limits.operation_pools]
+"trello.cards.list" = ["trello.cards.read"]
+"trello.lists.get" = ["trello.boards.read"]
+"trello.cards.delete" = ["trello.cards.write"]
+"trello.boards.list" = ["trello.boards.read"]
+"trello.cards.create" = ["trello.cards.write"]

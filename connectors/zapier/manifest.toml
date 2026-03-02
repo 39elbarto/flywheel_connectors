@@ -1,0 +1,183 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:11ad925c18667ad105ba11f48a0b29db4c5d77463d528b3e8500eb52b3624be7"
+
+[connector]
+id = "fcp.zapier"
+name = "Zapier Connector"
+version = "0.1.0"
+description = "FCP connector for Zapier automation (zaps, tasks, executions)"
+archetypes = ["operational"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores NLA API key."
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = [
+    "z:public",
+    "z:community",
+]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+]
+optional = []
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "media.upload",
+    "media.download",
+]
+
+[provides.operations."zapier.zaps.execute"]
+description = "Execute a zap action"
+capability = "zapier.zaps.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."zapier.zaps.execute".input_schema]
+required = [
+    "action_id",
+    "params",
+]
+type = "object"
+
+[provides.operations."zapier.zaps.execute".input_schema.properties.action_id]
+description = "NLA action ID"
+type = "string"
+
+[provides.operations."zapier.zaps.execute".input_schema.properties.params]
+description = "Action parameters"
+type = "object"
+
+[provides.operations."zapier.zaps.execute".output_schema]
+required = ["result"]
+type = "object"
+
+[provides.operations."zapier.zaps.execute".output_schema.properties.result]
+type = "object"
+
+[provides.operations."zapier.zaps.execute".network_constraints]
+host_allow = [
+    "nla.zapier.com",
+    "api.zapier.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 1048576
+
+[provides.operations."zapier.zaps.execute".ai_hints]
+when_to_use = "Execute a Zapier NLA action."
+common_mistakes = ["Forgetting to include required params for the action"]
+examples = ['{"action_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV", "params": {"body": "Hello from FCP"}}']
+related = ["zapier.zaps.list"]
+
+[provides.operations."zapier.zaps.list"]
+description = "List zaps for the authenticated user"
+capability = "zapier.zaps.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."zapier.zaps.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."zapier.zaps.list".output_schema]
+required = ["zaps"]
+type = "object"
+
+[provides.operations."zapier.zaps.list".output_schema.properties.zaps]
+type = "array"
+
+[provides.operations."zapier.zaps.list".network_constraints]
+host_allow = [
+    "nla.zapier.com",
+    "api.zapier.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."zapier.zaps.list".ai_hints]
+when_to_use = "List all zaps for the authenticated Zapier user."
+common_mistakes = []
+examples = ["{}"]
+related = ["zapier.zaps.execute"]
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "zapier.zaps.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "zapier.zaps.write"
+requests = 50
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[rate_limits.operation_pools]
+"zapier.zaps.list" = ["zapier.zaps.read"]
+"zapier.zaps.execute" = ["zapier.zaps.write"]

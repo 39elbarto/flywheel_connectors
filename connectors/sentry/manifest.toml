@@ -1,0 +1,1370 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:07208b0dc54263b20f7b2044321aba3623f4a14e638b38f3c601ed3c0eb73d15"
+
+[connector]
+id = "fcp.sentry"
+name = "Sentry Connector"
+version = "0.1.0"
+description = "FCP connector for Sentry error tracking (issues, events, performance, alerts, releases, webhooks)"
+archetypes = [
+    "knowledge",
+    "operational",
+    "streaming",
+]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores webhook cursor timestamps, event idempotency keys, and auto-create-beads mapping state."
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+    "z:infra",
+]
+allowed_targets = [
+    "z:work",
+    "z:infra",
+]
+forbidden = [
+    "z:public",
+    "z:community",
+]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+]
+optional = ["media.download"]
+forbidden = [
+    "system.exec",
+    "network.listen",
+]
+
+[provides.operations."sentry.create_alert_rule"]
+description = "Create an issue or metric alert rule for a project"
+capability = "sentry.alerts"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."sentry.create_alert_rule".input_schema]
+required = [
+    "organization_slug",
+    "project_slug",
+    "name",
+    "conditions",
+    "actions",
+]
+type = "object"
+
+[provides.operations."sentry.create_alert_rule".input_schema.properties.action_match]
+description = "Match behavior for conditions"
+enum = [
+    "all",
+    "any",
+    "none",
+]
+type = "string"
+
+[provides.operations."sentry.create_alert_rule".input_schema.properties.actions]
+description = "Actions to execute (e.g., notify email, Slack, PagerDuty)"
+type = "array"
+
+[provides.operations."sentry.create_alert_rule".input_schema.properties.actions.items]
+type = "object"
+
+[provides.operations."sentry.create_alert_rule".input_schema.properties.conditions]
+description = "Trigger conditions (e.g., first seen, regression, frequency threshold)"
+type = "array"
+
+[provides.operations."sentry.create_alert_rule".input_schema.properties.conditions.items]
+type = "object"
+
+[provides.operations."sentry.create_alert_rule".input_schema.properties.filters]
+description = "Optional filters to narrow which events trigger the rule"
+type = "array"
+
+[provides.operations."sentry.create_alert_rule".input_schema.properties.filters.items]
+type = "object"
+
+[provides.operations."sentry.create_alert_rule".input_schema.properties.frequency]
+description = "Rate limit in minutes (don't re-trigger within this window)"
+minimum = 5
+type = "integer"
+
+[provides.operations."sentry.create_alert_rule".input_schema.properties.name]
+description = "Alert rule name"
+type = "string"
+
+[provides.operations."sentry.create_alert_rule".input_schema.properties.organization_slug]
+description = "Sentry organization slug"
+type = "string"
+
+[provides.operations."sentry.create_alert_rule".input_schema.properties.project_slug]
+description = "Sentry project slug"
+type = "string"
+
+[provides.operations."sentry.create_alert_rule".output_schema]
+required = ["rule"]
+type = "object"
+
+[provides.operations."sentry.create_alert_rule".output_schema.properties.rule]
+type = "object"
+
+[provides.operations."sentry.create_alert_rule".network_constraints]
+host_allow = [
+    "sentry.io",
+    "*.sentry.io",
+    "$sentry_host",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."sentry.create_alert_rule".ai_hints]
+when_to_use = "Create a new alert rule to be notified about specific error conditions."
+common_mistakes = [
+    "Mixing up issue alert conditions with metric alert trigger syntax.",
+    "Not specifying frequency, resulting in alert storms.",
+    "Using incorrect condition IDs (they differ between SaaS and self-hosted).",
+]
+examples = ['{"organization_slug": "my-org", "project_slug": "backend", "name": "High error rate", "conditions": [{"id": "sentry.rules.conditions.first_seen_event.FirstSeenEventCondition"}], "actions": [{"id": "sentry.mail.actions.NotifyEmailAction", "targetType": "IssueOwners"}], "action_match": "any", "frequency": 30}']
+related = [
+    "sentry.list_alert_rules",
+    "sentry.update_alert_rule",
+    "sentry.delete_alert_rule",
+]
+
+[provides.operations."sentry.delete_alert_rule"]
+description = "Delete an alert rule (irreversible)"
+capability = "sentry.admin"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."sentry.delete_alert_rule".input_schema]
+required = [
+    "organization_slug",
+    "project_slug",
+    "rule_id",
+]
+type = "object"
+
+[provides.operations."sentry.delete_alert_rule".input_schema.properties.organization_slug]
+description = "Sentry organization slug"
+type = "string"
+
+[provides.operations."sentry.delete_alert_rule".input_schema.properties.project_slug]
+description = "Sentry project slug"
+type = "string"
+
+[provides.operations."sentry.delete_alert_rule".input_schema.properties.rule_id]
+description = "Alert rule ID to delete"
+type = "string"
+
+[provides.operations."sentry.delete_alert_rule".output_schema]
+type = "object"
+
+[provides.operations."sentry.delete_alert_rule".network_constraints]
+host_allow = [
+    "sentry.io",
+    "*.sentry.io",
+    "$sentry_host",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."sentry.delete_alert_rule".ai_hints]
+when_to_use = "Permanently delete an alert rule. Cannot be undone."
+common_mistakes = ["Deleting rules that should be disabled instead (no disable API — consider updating conditions)."]
+examples = ['{"organization_slug": "my-org", "project_slug": "backend", "rule_id": "12345"}']
+related = [
+    "sentry.list_alert_rules",
+    "sentry.create_alert_rule",
+]
+
+[provides.operations."sentry.delete_issue"]
+description = "Permanently delete a Sentry issue and all its events (irreversible)"
+capability = "sentry.admin"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."sentry.delete_issue".input_schema]
+required = ["issue_id"]
+type = "object"
+
+[provides.operations."sentry.delete_issue".input_schema.properties.issue_id]
+description = "Sentry issue ID"
+type = "string"
+
+[provides.operations."sentry.delete_issue".output_schema]
+type = "object"
+
+[provides.operations."sentry.delete_issue".network_constraints]
+host_allow = [
+    "sentry.io",
+    "*.sentry.io",
+    "$sentry_host",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."sentry.delete_issue".ai_hints]
+when_to_use = "Permanently delete an issue and all its events. This cannot be undone."
+common_mistakes = [
+    "Deleting issues that should be resolved or ignored instead.",
+    "Not confirming with the user before permanent deletion.",
+]
+examples = ['{"issue_id": "1234567890"}']
+related = [
+    "sentry.update_issue",
+    "sentry.get_issue",
+]
+
+[provides.operations."sentry.discover_query"]
+description = "Run a Discover query for events, transactions, or errors with aggregation"
+capability = "sentry.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."sentry.discover_query".input_schema]
+required = [
+    "organization_slug",
+    "query",
+    "fields",
+]
+type = "object"
+
+[provides.operations."sentry.discover_query".input_schema.properties.end]
+description = "ISO 8601 end time for the query range"
+type = "string"
+
+[provides.operations."sentry.discover_query".input_schema.properties.fields]
+description = "Fields to return (e.g., ['transaction', 'p95()', 'count()'])"
+type = "array"
+
+[provides.operations."sentry.discover_query".input_schema.properties.fields.items]
+type = "string"
+
+[provides.operations."sentry.discover_query".input_schema.properties.organization_slug]
+description = "Sentry organization slug"
+type = "string"
+
+[provides.operations."sentry.discover_query".input_schema.properties.per_page]
+description = "Results per page (default: 50, max: 100)"
+maximum = 100
+minimum = 1
+type = "integer"
+
+[provides.operations."sentry.discover_query".input_schema.properties.query]
+description = "Discover search query (e.g., 'transaction:/api/users event.type:transaction')"
+type = "string"
+
+[provides.operations."sentry.discover_query".input_schema.properties.sort]
+description = "Sort field with optional - prefix for descending"
+type = "string"
+
+[provides.operations."sentry.discover_query".input_schema.properties.start]
+description = "ISO 8601 start time for the query range"
+type = "string"
+
+[provides.operations."sentry.discover_query".input_schema.properties.statsPeriod]
+description = "Relative time period (e.g., '24h', '7d', '30d')"
+type = "string"
+
+[provides.operations."sentry.discover_query".output_schema]
+required = ["data"]
+type = "object"
+
+[provides.operations."sentry.discover_query".output_schema.properties.data]
+description = "Query result rows"
+type = "array"
+
+[provides.operations."sentry.discover_query".output_schema.properties.data.items]
+type = "object"
+
+[provides.operations."sentry.discover_query".output_schema.properties.meta]
+description = "Field type metadata"
+type = "object"
+
+[provides.operations."sentry.discover_query".network_constraints]
+host_allow = [
+    "sentry.io",
+    "*.sentry.io",
+    "$sentry_host",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."sentry.discover_query".ai_hints]
+when_to_use = "Run Discover (Snuba) queries for performance data, transaction aggregations, or custom event analytics."
+common_mistakes = [
+    "Not specifying statsPeriod or start/end for time-bounded queries.",
+    "Using SQL syntax instead of Sentry Discover query syntax.",
+    "Requesting too many fields with high-cardinality groupings.",
+]
+examples = ['{"organization_slug": "my-org", "query": "event.type:transaction transaction:/api/users", "fields": ["transaction", "p95()", "count()", "failure_rate()"], "statsPeriod": "24h", "sort": "-p95()"}']
+related = [
+    "sentry.get_transaction",
+    "sentry.list_issues",
+]
+
+[provides.operations."sentry.get_event"]
+description = "Get a single event with full stacktrace, context, tags, and breadcrumbs"
+capability = "sentry.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."sentry.get_event".input_schema]
+required = [
+    "organization_slug",
+    "project_slug",
+    "event_id",
+]
+type = "object"
+
+[provides.operations."sentry.get_event".input_schema.properties.event_id]
+description = "Event ID (UUID)"
+type = "string"
+
+[provides.operations."sentry.get_event".input_schema.properties.organization_slug]
+description = "Sentry organization slug"
+type = "string"
+
+[provides.operations."sentry.get_event".input_schema.properties.project_slug]
+description = "Sentry project slug"
+type = "string"
+
+[provides.operations."sentry.get_event".output_schema]
+required = ["event"]
+type = "object"
+
+[provides.operations."sentry.get_event".output_schema.properties.event]
+description = "Full event with stacktrace, contexts, tags, breadcrumbs, and user info"
+type = "object"
+
+[provides.operations."sentry.get_event".network_constraints]
+host_allow = [
+    "sentry.io",
+    "*.sentry.io",
+    "$sentry_host",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."sentry.get_event".ai_hints]
+when_to_use = "Retrieve full event details including stacktrace, breadcrumbs, and context for debugging."
+common_mistakes = [
+    "Using issue ID instead of event ID (UUID).",
+    "Not specifying both organization_slug and project_slug.",
+]
+examples = ['{"organization_slug": "my-org", "project_slug": "backend", "event_id": "a1b2c3d4e5f6"}']
+related = [
+    "sentry.list_issue_events",
+    "sentry.get_issue",
+]
+
+[provides.operations."sentry.get_issue"]
+description = "Get a single Sentry issue by ID with full details"
+capability = "sentry.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."sentry.get_issue".input_schema]
+required = ["issue_id"]
+type = "object"
+
+[provides.operations."sentry.get_issue".input_schema.properties.issue_id]
+description = "Sentry issue ID (numeric)"
+type = "string"
+
+[provides.operations."sentry.get_issue".output_schema]
+required = ["issue"]
+type = "object"
+
+[provides.operations."sentry.get_issue".output_schema.properties.issue]
+description = "Full issue object with stats, tags, assignee, status"
+type = "object"
+
+[provides.operations."sentry.get_issue".network_constraints]
+host_allow = [
+    "sentry.io",
+    "*.sentry.io",
+    "$sentry_host",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."sentry.get_issue".ai_hints]
+when_to_use = "Retrieve full details for a specific Sentry issue."
+common_mistakes = ["Confusing issue ID (numeric) with short ID (e.g., PROJECT-123)."]
+examples = ['{"issue_id": "1234567890"}']
+related = [
+    "sentry.list_issues",
+    "sentry.list_issue_events",
+    "sentry.update_issue",
+]
+
+[provides.operations."sentry.get_release"]
+description = "Get release details including commit info, authors, and issue stats"
+capability = "sentry.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."sentry.get_release".input_schema]
+required = [
+    "organization_slug",
+    "version",
+]
+type = "object"
+
+[provides.operations."sentry.get_release".input_schema.properties.organization_slug]
+description = "Sentry organization slug"
+type = "string"
+
+[provides.operations."sentry.get_release".input_schema.properties.version]
+description = "Release version identifier"
+type = "string"
+
+[provides.operations."sentry.get_release".output_schema]
+required = ["release"]
+type = "object"
+
+[provides.operations."sentry.get_release".output_schema.properties.release]
+description = "Release with commits, authors, new/resolved issue counts, and deploy info"
+type = "object"
+
+[provides.operations."sentry.get_release".network_constraints]
+host_allow = [
+    "sentry.io",
+    "*.sentry.io",
+    "$sentry_host",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."sentry.get_release".ai_hints]
+when_to_use = "Get full release details to inspect commits, authors, and issue regression data."
+common_mistakes = ["URL-encoding issues with version strings containing special characters (e.g., '+')."]
+examples = ['{"organization_slug": "my-org", "version": "backend@1.2.3"}']
+related = [
+    "sentry.list_releases",
+    "sentry.list_release_deploys",
+]
+
+[provides.operations."sentry.get_transaction"]
+description = "Get a single performance transaction event with spans and measurements"
+capability = "sentry.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."sentry.get_transaction".input_schema]
+required = [
+    "organization_slug",
+    "project_slug",
+    "event_id",
+]
+type = "object"
+
+[provides.operations."sentry.get_transaction".input_schema.properties.event_id]
+description = "Transaction event ID (UUID)"
+type = "string"
+
+[provides.operations."sentry.get_transaction".input_schema.properties.organization_slug]
+description = "Sentry organization slug"
+type = "string"
+
+[provides.operations."sentry.get_transaction".input_schema.properties.project_slug]
+description = "Sentry project slug"
+type = "string"
+
+[provides.operations."sentry.get_transaction".output_schema]
+required = ["event"]
+type = "object"
+
+[provides.operations."sentry.get_transaction".output_schema.properties.event]
+description = "Transaction event with spans, measurements, and trace context"
+type = "object"
+
+[provides.operations."sentry.get_transaction".network_constraints]
+host_allow = [
+    "sentry.io",
+    "*.sentry.io",
+    "$sentry_host",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."sentry.get_transaction".ai_hints]
+when_to_use = "Retrieve a specific performance transaction with span waterfall and measurements."
+common_mistakes = ["Confusing error event IDs with transaction event IDs."]
+examples = ['{"organization_slug": "my-org", "project_slug": "backend", "event_id": "a1b2c3d4e5f6"}']
+related = [
+    "sentry.discover_query",
+    "sentry.get_event",
+]
+
+[provides.operations."sentry.list_alert_rules"]
+description = "List metric and issue alert rules for a project"
+capability = "sentry.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."sentry.list_alert_rules".input_schema]
+required = [
+    "organization_slug",
+    "project_slug",
+]
+type = "object"
+
+[provides.operations."sentry.list_alert_rules".input_schema.properties.organization_slug]
+description = "Sentry organization slug"
+type = "string"
+
+[provides.operations."sentry.list_alert_rules".input_schema.properties.project_slug]
+description = "Sentry project slug"
+type = "string"
+
+[provides.operations."sentry.list_alert_rules".output_schema]
+required = ["rules"]
+type = "object"
+
+[provides.operations."sentry.list_alert_rules".output_schema.properties.rules]
+type = "array"
+
+[provides.operations."sentry.list_alert_rules".output_schema.properties.rules.items]
+type = "object"
+
+[provides.operations."sentry.list_alert_rules".network_constraints]
+host_allow = [
+    "sentry.io",
+    "*.sentry.io",
+    "$sentry_host",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."sentry.list_alert_rules".ai_hints]
+when_to_use = "List configured alert rules for a project."
+common_mistakes = []
+examples = ['{"organization_slug": "my-org", "project_slug": "backend"}']
+related = [
+    "sentry.create_alert_rule",
+    "sentry.update_alert_rule",
+]
+
+[provides.operations."sentry.list_issue_events"]
+description = "List events for a specific issue with pagination"
+capability = "sentry.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."sentry.list_issue_events".input_schema]
+required = ["issue_id"]
+type = "object"
+
+[provides.operations."sentry.list_issue_events".input_schema.properties.cursor]
+description = "Pagination cursor"
+type = "string"
+
+[provides.operations."sentry.list_issue_events".input_schema.properties.full]
+description = "Include full event payloads (default: false)"
+type = "boolean"
+
+[provides.operations."sentry.list_issue_events".input_schema.properties.issue_id]
+description = "Sentry issue ID"
+type = "string"
+
+[provides.operations."sentry.list_issue_events".output_schema]
+required = ["events"]
+type = "object"
+
+[provides.operations."sentry.list_issue_events".output_schema.properties.events]
+type = "array"
+
+[provides.operations."sentry.list_issue_events".output_schema.properties.events.items]
+type = "object"
+
+[provides.operations."sentry.list_issue_events".network_constraints]
+host_allow = [
+    "sentry.io",
+    "*.sentry.io",
+    "$sentry_host",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."sentry.list_issue_events".ai_hints]
+when_to_use = "List individual error events for a grouped issue."
+common_mistakes = ["Setting full=true for large event lists (slow and large responses)."]
+examples = ['{"issue_id": "1234567890", "full": false}']
+related = [
+    "sentry.get_event",
+    "sentry.get_issue",
+]
+
+[provides.operations."sentry.list_issues"]
+description = "List and search issues in a Sentry project with optional query filters"
+capability = "sentry.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."sentry.list_issues".input_schema]
+required = [
+    "organization_slug",
+    "project_slug",
+]
+type = "object"
+
+[provides.operations."sentry.list_issues".input_schema.properties.cursor]
+description = "Pagination cursor from Link header"
+type = "string"
+
+[provides.operations."sentry.list_issues".input_schema.properties.organization_slug]
+description = "Sentry organization slug"
+type = "string"
+
+[provides.operations."sentry.list_issues".input_schema.properties.project_slug]
+description = "Sentry project slug"
+type = "string"
+
+[provides.operations."sentry.list_issues".input_schema.properties.query]
+description = "Search query (Sentry search syntax, e.g., 'is:unresolved assigned:me level:error')"
+type = "string"
+
+[provides.operations."sentry.list_issues".input_schema.properties.sort]
+description = "Sort order"
+enum = [
+    "date",
+    "new",
+    "priority",
+    "freq",
+    "user",
+]
+type = "string"
+
+[provides.operations."sentry.list_issues".output_schema]
+required = ["issues"]
+type = "object"
+
+[provides.operations."sentry.list_issues".output_schema.properties.issues]
+description = "List of issue objects"
+type = "array"
+
+[provides.operations."sentry.list_issues".output_schema.properties.issues.items]
+type = "object"
+
+[provides.operations."sentry.list_issues".network_constraints]
+host_allow = [
+    "sentry.io",
+    "*.sentry.io",
+    "$sentry_host",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."sentry.list_issues".ai_hints]
+when_to_use = "List or search issues in a Sentry project. Supports Sentry search syntax for filtering."
+common_mistakes = [
+    "Using Jira/GitHub search syntax instead of Sentry search syntax.",
+    "Not using cursor-based pagination for large result sets.",
+]
+examples = ['{"organization_slug": "my-org", "project_slug": "backend", "query": "is:unresolved level:error", "sort": "priority"}']
+related = [
+    "sentry.get_issue",
+    "sentry.list_issue_events",
+]
+
+[provides.operations."sentry.list_projects"]
+description = "List projects in a Sentry organization"
+capability = "sentry.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."sentry.list_projects".input_schema]
+required = ["organization_slug"]
+type = "object"
+
+[provides.operations."sentry.list_projects".input_schema.properties.cursor]
+description = "Pagination cursor"
+type = "string"
+
+[provides.operations."sentry.list_projects".input_schema.properties.organization_slug]
+description = "Sentry organization slug"
+type = "string"
+
+[provides.operations."sentry.list_projects".output_schema]
+required = ["projects"]
+type = "object"
+
+[provides.operations."sentry.list_projects".output_schema.properties.projects]
+type = "array"
+
+[provides.operations."sentry.list_projects".output_schema.properties.projects.items]
+type = "object"
+
+[provides.operations."sentry.list_projects".network_constraints]
+host_allow = [
+    "sentry.io",
+    "*.sentry.io",
+    "$sentry_host",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."sentry.list_projects".ai_hints]
+when_to_use = "List all projects in an organization. Useful for discovery before querying issues or events."
+common_mistakes = []
+examples = ['{"organization_slug": "my-org"}']
+related = [
+    "sentry.list_issues",
+    "sentry.discover_query",
+]
+
+[provides.operations."sentry.list_release_deploys"]
+description = "List deploys for a release (correlate with environment rollouts)"
+capability = "sentry.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."sentry.list_release_deploys".input_schema]
+required = [
+    "organization_slug",
+    "version",
+]
+type = "object"
+
+[provides.operations."sentry.list_release_deploys".input_schema.properties.organization_slug]
+description = "Sentry organization slug"
+type = "string"
+
+[provides.operations."sentry.list_release_deploys".input_schema.properties.version]
+description = "Release version identifier"
+type = "string"
+
+[provides.operations."sentry.list_release_deploys".output_schema]
+required = ["deploys"]
+type = "object"
+
+[provides.operations."sentry.list_release_deploys".output_schema.properties.deploys]
+type = "array"
+
+[provides.operations."sentry.list_release_deploys".output_schema.properties.deploys.items]
+type = "object"
+
+[provides.operations."sentry.list_release_deploys".network_constraints]
+host_allow = [
+    "sentry.io",
+    "*.sentry.io",
+    "$sentry_host",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."sentry.list_release_deploys".ai_hints]
+when_to_use = "List deployment environments and timestamps for a release to correlate with error spikes."
+common_mistakes = []
+examples = ['{"organization_slug": "my-org", "version": "backend@1.2.3"}']
+related = [
+    "sentry.get_release",
+    "sentry.list_releases",
+]
+
+[provides.operations."sentry.list_releases"]
+description = "List releases for an organization, optionally filtered by project"
+capability = "sentry.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."sentry.list_releases".input_schema]
+required = ["organization_slug"]
+type = "object"
+
+[provides.operations."sentry.list_releases".input_schema.properties.cursor]
+description = "Pagination cursor"
+type = "string"
+
+[provides.operations."sentry.list_releases".input_schema.properties.organization_slug]
+description = "Sentry organization slug"
+type = "string"
+
+[provides.operations."sentry.list_releases".input_schema.properties.project_slug]
+description = "Filter to a specific project"
+type = "string"
+
+[provides.operations."sentry.list_releases".input_schema.properties.query]
+description = "Search releases by version string"
+type = "string"
+
+[provides.operations."sentry.list_releases".output_schema]
+required = ["releases"]
+type = "object"
+
+[provides.operations."sentry.list_releases".output_schema.properties.releases]
+type = "array"
+
+[provides.operations."sentry.list_releases".output_schema.properties.releases.items]
+type = "object"
+
+[provides.operations."sentry.list_releases".network_constraints]
+host_allow = [
+    "sentry.io",
+    "*.sentry.io",
+    "$sentry_host",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."sentry.list_releases".ai_hints]
+when_to_use = "List releases to correlate errors with deploys."
+common_mistakes = ["Not filtering by project when the organization has many projects."]
+examples = ['{"organization_slug": "my-org", "project_slug": "backend"}']
+related = [
+    "sentry.get_release",
+    "sentry.list_release_deploys",
+]
+
+[provides.operations."sentry.stream_webhook_events"]
+description = "Stream Sentry webhook events (issue created/resolved, alert triggered, deployment, error)"
+capability = "sentry.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."sentry.stream_webhook_events".input_schema]
+required = ["organization_slug"]
+type = "object"
+
+[provides.operations."sentry.stream_webhook_events".input_schema.properties.organization_slug]
+description = "Sentry organization slug"
+type = "string"
+
+[provides.operations."sentry.stream_webhook_events".input_schema.properties.resource]
+description = "Filter to specific resource type"
+enum = [
+    "issue",
+    "error",
+    "comment",
+    "metric_alert",
+    "installation",
+]
+type = "string"
+
+[provides.operations."sentry.stream_webhook_events".input_schema.properties.since_ts]
+description = "ISO 8601 timestamp to resume from (cursor-based deduplication)"
+type = "string"
+
+[provides.operations."sentry.stream_webhook_events".output_schema]
+required = ["event"]
+type = "object"
+
+[provides.operations."sentry.stream_webhook_events".output_schema.properties.event]
+description = "Webhook event payload"
+type = "object"
+
+[provides.operations."sentry.stream_webhook_events".network_constraints]
+host_allow = [
+    "sentry.io",
+    "*.sentry.io",
+    "$sentry_host",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 3600000
+max_response_bytes = 1073741824
+
+[provides.operations."sentry.stream_webhook_events".ai_hints]
+when_to_use = "Stream real-time Sentry webhook events for reactive automation (e.g., auto-create beads from new issues)."
+common_mistakes = [
+    "Not persisting the cursor/since_ts for reconnection idempotency.",
+    "Not verifying webhook signatures (HMAC) in the connector implementation.",
+]
+examples = ['{"organization_slug": "my-org", "resource": "issue"}']
+related = [
+    "sentry.list_issues",
+    "sentry.get_event",
+]
+
+[provides.operations."sentry.update_alert_rule"]
+description = "Update an existing alert rule's conditions, actions, or filters"
+capability = "sentry.alerts"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."sentry.update_alert_rule".input_schema]
+required = [
+    "organization_slug",
+    "project_slug",
+    "rule_id",
+]
+type = "object"
+
+[provides.operations."sentry.update_alert_rule".input_schema.properties.actions]
+description = "Updated actions"
+type = "array"
+
+[provides.operations."sentry.update_alert_rule".input_schema.properties.actions.items]
+type = "object"
+
+[provides.operations."sentry.update_alert_rule".input_schema.properties.conditions]
+description = "Updated trigger conditions"
+type = "array"
+
+[provides.operations."sentry.update_alert_rule".input_schema.properties.conditions.items]
+type = "object"
+
+[provides.operations."sentry.update_alert_rule".input_schema.properties.frequency]
+description = "Updated rate limit in minutes"
+minimum = 5
+type = "integer"
+
+[provides.operations."sentry.update_alert_rule".input_schema.properties.name]
+description = "Updated rule name"
+type = "string"
+
+[provides.operations."sentry.update_alert_rule".input_schema.properties.organization_slug]
+description = "Sentry organization slug"
+type = "string"
+
+[provides.operations."sentry.update_alert_rule".input_schema.properties.project_slug]
+description = "Sentry project slug"
+type = "string"
+
+[provides.operations."sentry.update_alert_rule".input_schema.properties.rule_id]
+description = "Alert rule ID"
+type = "string"
+
+[provides.operations."sentry.update_alert_rule".output_schema]
+required = ["rule"]
+type = "object"
+
+[provides.operations."sentry.update_alert_rule".output_schema.properties.rule]
+type = "object"
+
+[provides.operations."sentry.update_alert_rule".network_constraints]
+host_allow = [
+    "sentry.io",
+    "*.sentry.io",
+    "$sentry_host",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."sentry.update_alert_rule".ai_hints]
+when_to_use = "Modify an existing alert rule. Sends the full rule definition (not a partial patch)."
+common_mistakes = [
+    "Sending partial updates — the API replaces the full rule definition.",
+    "Not fetching the current rule first before modifying.",
+]
+examples = ['{"organization_slug": "my-org", "project_slug": "backend", "rule_id": "12345", "name": "Updated rule name", "frequency": 60}']
+related = [
+    "sentry.list_alert_rules",
+    "sentry.create_alert_rule",
+]
+
+[provides.operations."sentry.update_issue"]
+description = "Update issue status, assignment, or merge/bookmark state"
+capability = "sentry.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."sentry.update_issue".input_schema]
+required = ["issue_id"]
+type = "object"
+
+[provides.operations."sentry.update_issue".input_schema.properties.assignedTo]
+description = "Assign to user (email or 'team:slug') or empty string to unassign"
+type = "string"
+
+[provides.operations."sentry.update_issue".input_schema.properties.hasSeen]
+description = "Mark as seen/unseen"
+type = "boolean"
+
+[provides.operations."sentry.update_issue".input_schema.properties.isBookmarked]
+description = "Bookmark the issue"
+type = "boolean"
+
+[provides.operations."sentry.update_issue".input_schema.properties.isSubscribed]
+description = "Subscribe to notifications for this issue"
+type = "boolean"
+
+[provides.operations."sentry.update_issue".input_schema.properties.issue_id]
+description = "Sentry issue ID"
+type = "string"
+
+[provides.operations."sentry.update_issue".input_schema.properties.status]
+description = "Issue status"
+enum = [
+    "resolved",
+    "unresolved",
+    "ignored",
+]
+type = "string"
+
+[provides.operations."sentry.update_issue".input_schema.properties.substatus]
+description = "Issue substatus (e.g., 'ongoing', 'escalating', 'regressed', 'archived_until_escalating')"
+type = "string"
+
+[provides.operations."sentry.update_issue".output_schema]
+required = ["issue"]
+type = "object"
+
+[provides.operations."sentry.update_issue".output_schema.properties.issue]
+description = "Updated issue object"
+type = "object"
+
+[provides.operations."sentry.update_issue".network_constraints]
+host_allow = [
+    "sentry.io",
+    "*.sentry.io",
+    "$sentry_host",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."sentry.update_issue".ai_hints]
+when_to_use = "Update issue status (resolve, ignore), assignment, or bookmark state."
+common_mistakes = [
+    "Using user display name instead of email or 'team:slug' for assignedTo.",
+    "Setting status=resolved without specifying substatus for conditional resolution.",
+]
+examples = [
+    '{"issue_id": "1234567890", "status": "resolved"}',
+    '{"issue_id": "1234567890", "assignedTo": "alice@example.com"}',
+]
+related = [
+    "sentry.get_issue",
+    "sentry.list_issues",
+]
+
+[event_caps]
+streaming = true
+replay = false
+min_buffer_events = 100
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "sentry.read"
+description = "Read operations against Sentry API"
+requests = 100
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "sentry.write"
+description = "Write/mutation operations against Sentry API"
+requests = 60
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "sentry.alerts"
+description = "Alert rule management operations"
+requests = 30
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "sentry.admin"
+description = "Destructive/administrative operations"
+requests = 20
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[rate_limits.operation_pools]
+"sentry.discover_query" = ["sentry.read"]
+"sentry.get_release" = ["sentry.read"]
+"sentry.update_alert_rule" = ["sentry.alerts"]
+"sentry.get_event" = ["sentry.read"]
+"sentry.update_issue" = ["sentry.write"]
+"sentry.create_alert_rule" = ["sentry.alerts"]
+"sentry.list_projects" = ["sentry.read"]
+"sentry.list_releases" = ["sentry.read"]
+"sentry.list_issue_events" = ["sentry.read"]
+"sentry.delete_issue" = ["sentry.admin"]
+"sentry.get_issue" = ["sentry.read"]
+"sentry.list_alert_rules" = ["sentry.read"]
+"sentry.list_issues" = ["sentry.read"]
+"sentry.delete_alert_rule" = ["sentry.admin"]
+"sentry.list_release_deploys" = ["sentry.read"]
+"sentry.stream_webhook_events" = ["sentry.read"]
+"sentry.get_transaction" = ["sentry.read"]

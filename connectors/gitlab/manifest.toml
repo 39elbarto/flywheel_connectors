@@ -1,0 +1,356 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:927ca412885b3f4872d4ad20c4ad482ac056581275f91c984f187b8392db32da"
+
+[connector]
+id = "fcp.gitlab"
+name = "GitLab Connector"
+version = "0.1.0"
+description = "FCP connector for GitLab (projects, issues, merge requests, pipelines)"
+archetypes = [
+    "knowledge",
+    "operational",
+]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores personal access token and project membership cache."
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = [
+    "z:public",
+    "z:community",
+]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+]
+optional = []
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "media.upload",
+    "media.download",
+]
+
+[provides.operations."gitlab.issues.create"]
+description = "Create an issue"
+capability = "gitlab.issues.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."gitlab.issues.create".input_schema]
+required = [
+    "project_id",
+    "title",
+]
+type = "object"
+
+[provides.operations."gitlab.issues.create".input_schema.properties.description]
+type = "string"
+
+[provides.operations."gitlab.issues.create".input_schema.properties.project_id]
+type = "string"
+
+[provides.operations."gitlab.issues.create".input_schema.properties.title]
+type = "string"
+
+[provides.operations."gitlab.issues.create".output_schema]
+required = ["iid"]
+type = "object"
+
+[provides.operations."gitlab.issues.create".output_schema.properties.iid]
+type = "integer"
+
+[provides.operations."gitlab.issues.create".network_constraints]
+host_allow = ["gitlab.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."gitlab.issues.create".ai_hints]
+when_to_use = "Create a new issue."
+common_mistakes = []
+examples = ['{"project_id": "12345", "title": "Fix login timeout", "description": "Users report timeouts after 30s"}']
+related = ["gitlab.issues.list"]
+
+[provides.operations."gitlab.issues.list"]
+description = "List issues in a project"
+capability = "gitlab.issues.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."gitlab.issues.list".input_schema]
+required = ["project_id"]
+type = "object"
+
+[provides.operations."gitlab.issues.list".input_schema.properties.project_id]
+type = "string"
+
+[provides.operations."gitlab.issues.list".output_schema]
+required = ["issues"]
+type = "object"
+
+[provides.operations."gitlab.issues.list".output_schema.properties.issues]
+type = "array"
+
+[provides.operations."gitlab.issues.list".network_constraints]
+host_allow = ["gitlab.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."gitlab.issues.list".ai_hints]
+when_to_use = "List issues in a project."
+common_mistakes = []
+examples = ['{"project_id": "12345"}']
+related = [
+    "gitlab.issues.create",
+    "gitlab.projects.list",
+]
+
+[provides.operations."gitlab.merge_requests.list"]
+description = "List merge requests"
+capability = "gitlab.merge_requests.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."gitlab.merge_requests.list".input_schema]
+required = ["project_id"]
+type = "object"
+
+[provides.operations."gitlab.merge_requests.list".input_schema.properties.project_id]
+type = "string"
+
+[provides.operations."gitlab.merge_requests.list".output_schema]
+required = ["merge_requests"]
+type = "object"
+
+[provides.operations."gitlab.merge_requests.list".output_schema.properties.merge_requests]
+type = "array"
+
+[provides.operations."gitlab.merge_requests.list".network_constraints]
+host_allow = ["gitlab.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."gitlab.merge_requests.list".ai_hints]
+when_to_use = "List merge requests in a project."
+common_mistakes = []
+examples = ['{"project_id": "12345"}']
+related = [
+    "gitlab.projects.list",
+    "gitlab.pipelines.list",
+]
+
+[provides.operations."gitlab.pipelines.list"]
+description = "List pipelines"
+capability = "gitlab.pipelines.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."gitlab.pipelines.list".input_schema]
+required = ["project_id"]
+type = "object"
+
+[provides.operations."gitlab.pipelines.list".input_schema.properties.project_id]
+type = "string"
+
+[provides.operations."gitlab.pipelines.list".output_schema]
+required = ["pipelines"]
+type = "object"
+
+[provides.operations."gitlab.pipelines.list".output_schema.properties.pipelines]
+type = "array"
+
+[provides.operations."gitlab.pipelines.list".network_constraints]
+host_allow = ["gitlab.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."gitlab.pipelines.list".ai_hints]
+when_to_use = "List CI/CD pipelines."
+common_mistakes = []
+examples = ['{"project_id": "12345"}']
+related = ["gitlab.merge_requests.list"]
+
+[provides.operations."gitlab.projects.list"]
+description = "List projects"
+capability = "gitlab.projects.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."gitlab.projects.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."gitlab.projects.list".input_schema.properties.per_page]
+maximum = 100
+type = "integer"
+
+[provides.operations."gitlab.projects.list".output_schema]
+required = ["projects"]
+type = "object"
+
+[provides.operations."gitlab.projects.list".output_schema.properties.projects]
+type = "array"
+
+[provides.operations."gitlab.projects.list".network_constraints]
+host_allow = ["gitlab.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."gitlab.projects.list".ai_hints]
+when_to_use = "List GitLab projects."
+common_mistakes = []
+examples = ["{}"]
+related = [
+    "gitlab.issues.list",
+    "gitlab.merge_requests.list",
+]
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "gitlab.projects.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "gitlab.issues.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "gitlab.issues.write"
+requests = 50
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "gitlab.merge_requests.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "gitlab.pipelines.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[rate_limits.operation_pools]
+"gitlab.issues.list" = ["gitlab.issues.read"]
+"gitlab.merge_requests.list" = ["gitlab.merge_requests.read"]
+"gitlab.pipelines.list" = ["gitlab.pipelines.read"]
+"gitlab.issues.create" = ["gitlab.issues.write"]
+"gitlab.projects.list" = ["gitlab.projects.read"]

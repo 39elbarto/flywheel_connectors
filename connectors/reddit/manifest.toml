@@ -1,0 +1,859 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:799a225698f538bb72e8a48614eb71b1e56d7ce36128cae17c5fd53df78b4db1"
+
+[connector]
+id = "fcp.reddit"
+name = "Reddit Connector"
+version = "0.1.0"
+description = "FCP connector for Reddit browsing/search, posting, messaging, moderation, and polling streams"
+archetypes = [
+    "knowledge",
+    "operational",
+    "streaming",
+]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores subreddit polling checkpoints, pagination cursors, and idempotency keys for write operations."
+
+[zones]
+home = "z:community"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+    "z:community",
+]
+allowed_targets = [
+    "z:community",
+    "z:work",
+]
+forbidden = ["z:public"]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+]
+optional = ["media.download"]
+forbidden = [
+    "system.exec",
+    "network.listen",
+]
+
+[provides.operations."reddit.create_comment"]
+description = "Add a comment to a post or comment."
+capability = "reddit.comment"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "best_effort"
+
+[provides.operations."reddit.create_comment".rate_limit]
+max = 30
+per_ms = 60000
+
+[provides.operations."reddit.create_comment".input_schema]
+required = [
+    "parent_fullname",
+    "text",
+]
+type = "object"
+
+[provides.operations."reddit.create_comment".input_schema.properties.idempotency_key]
+description = "Client key used to avoid duplicate comments."
+maxLength = 128
+type = "string"
+
+[provides.operations."reddit.create_comment".input_schema.properties.parent_fullname]
+description = "Thing fullname, usually t3_... (post) or t1_... (comment)."
+pattern = "^t[13]_[A-Za-z0-9]+$"
+type = "string"
+
+[provides.operations."reddit.create_comment".input_schema.properties.text]
+description = "Comment markdown text."
+maxLength = 10000
+minLength = 1
+type = "string"
+
+[provides.operations."reddit.create_comment".output_schema]
+required = ["fullname"]
+type = "object"
+
+[provides.operations."reddit.create_comment".output_schema.properties.fullname]
+type = "string"
+
+[provides.operations."reddit.create_comment".network_constraints]
+host_allow = [
+    "www.reddit.com",
+    "oauth.reddit.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 1
+connect_timeout_ms = 10000
+total_timeout_ms = 45000
+max_response_bytes = 2097152
+
+[provides.operations."reddit.create_comment".ai_hints]
+when_to_use = "Use to reply to posts/comments with approval-gated write behavior."
+common_mistakes = [
+    "Using post IDs instead of fullnames.",
+    "Submitting duplicate comments during retries.",
+]
+examples = ['{"parent_fullname":"t3_1abcde", "text":"Nice write-up.", "idempotency_key":"cmt-001"}']
+related = [
+    "reddit.get_post_thread",
+    "reddit.create_post",
+]
+
+[provides.operations."reddit.create_post"]
+description = "Submit a new Reddit post."
+capability = "reddit.post"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "best_effort"
+
+[provides.operations."reddit.create_post".rate_limit]
+max = 15
+per_ms = 60000
+
+[provides.operations."reddit.create_post".input_schema]
+required = [
+    "subreddit",
+    "kind",
+    "title",
+]
+type = "object"
+
+[provides.operations."reddit.create_post".input_schema.properties.idempotency_key]
+description = "Client-provided key used to suppress duplicate submissions."
+maxLength = 128
+type = "string"
+
+[provides.operations."reddit.create_post".input_schema.properties.kind]
+description = "Post type."
+enum = [
+    "self",
+    "link",
+]
+type = "string"
+
+[provides.operations."reddit.create_post".input_schema.properties.nsfw]
+description = "Mark post NSFW."
+type = "boolean"
+
+[provides.operations."reddit.create_post".input_schema.properties.spoiler]
+description = "Mark post as spoiler."
+type = "boolean"
+
+[provides.operations."reddit.create_post".input_schema.properties.subreddit]
+description = "Target subreddit name."
+pattern = "^[A-Za-z0-9_]{2,21}$"
+type = "string"
+
+[provides.operations."reddit.create_post".input_schema.properties.text]
+description = "Body for self-posts."
+type = "string"
+
+[provides.operations."reddit.create_post".input_schema.properties.title]
+description = "Post title."
+maxLength = 300
+minLength = 1
+type = "string"
+
+[provides.operations."reddit.create_post".input_schema.properties.url]
+description = "URL for link posts."
+format = "uri"
+type = "string"
+
+[provides.operations."reddit.create_post".output_schema]
+required = [
+    "fullname",
+    "permalink",
+]
+type = "object"
+
+[provides.operations."reddit.create_post".output_schema.properties.fullname]
+type = "string"
+
+[provides.operations."reddit.create_post".output_schema.properties.permalink]
+type = "string"
+
+[provides.operations."reddit.create_post".network_constraints]
+host_allow = [
+    "www.reddit.com",
+    "oauth.reddit.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 1
+connect_timeout_ms = 10000
+total_timeout_ms = 45000
+max_response_bytes = 2097152
+
+[provides.operations."reddit.create_post".ai_hints]
+when_to_use = "Use this to publish a new post after explicit human confirmation."
+common_mistakes = [
+    "Providing `text` for a link post without `url`.",
+    "Posting to a subreddit where the account lacks permission.",
+]
+examples = ['{"subreddit":"agentflywheel", "kind":"self", "title":"Release notes", "text":"..."}']
+related = [
+    "reddit.create_comment",
+    "reddit.send_message",
+]
+
+[provides.operations."reddit.download_media"]
+description = "Download media referenced by Reddit posts from explicitly allowed media hosts."
+capability = "reddit.media.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."reddit.download_media".rate_limit]
+max = 40
+per_ms = 60000
+
+[provides.operations."reddit.download_media".input_schema]
+required = ["url"]
+type = "object"
+
+[provides.operations."reddit.download_media".input_schema.properties.max_bytes]
+default = 10485760
+description = "Optional hard cap for downloaded content."
+maximum = 26214400
+minimum = 1024
+type = "integer"
+
+[provides.operations."reddit.download_media".input_schema.properties.url]
+description = "Media URL hosted on an explicitly allowlisted Reddit media domain."
+format = "uri"
+type = "string"
+
+[provides.operations."reddit.download_media".output_schema]
+required = [
+    "content_type",
+    "bytes",
+]
+type = "object"
+
+[provides.operations."reddit.download_media".output_schema.properties.bytes]
+type = "integer"
+
+[provides.operations."reddit.download_media".output_schema.properties.content_type]
+type = "string"
+
+[provides.operations."reddit.download_media".output_schema.properties.sha256]
+type = "string"
+
+[provides.operations."reddit.download_media".network_constraints]
+host_allow = [
+    "i.redd.it",
+    "v.redd.it",
+    "preview.redd.it",
+    "external-preview.redd.it",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 8
+max_redirects = 2
+connect_timeout_ms = 10000
+total_timeout_ms = 90000
+max_response_bytes = 26214400
+
+[provides.operations."reddit.download_media".ai_hints]
+when_to_use = "Use only when media artifacts are required for downstream processing."
+common_mistakes = [
+    "Attempting to fetch arbitrary external URLs.",
+    "Not enforcing max_bytes for large videos.",
+]
+examples = ['{"url":"https://i.redd.it/example123.png", "max_bytes":5242880}']
+related = [
+    "reddit.get_post_thread",
+    "reddit.search_posts",
+]
+
+[provides.operations."reddit.get_post_thread"]
+description = "Fetch a post and its comment tree."
+capability = "reddit.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."reddit.get_post_thread".rate_limit]
+max = 60
+per_ms = 60000
+
+[provides.operations."reddit.get_post_thread".input_schema]
+required = ["post_fullname"]
+type = "object"
+
+[provides.operations."reddit.get_post_thread".input_schema.properties.comment_limit]
+default = 100
+description = "Maximum comments to include."
+maximum = 500
+minimum = 1
+type = "integer"
+
+[provides.operations."reddit.get_post_thread".input_schema.properties.post_fullname]
+description = "Thing fullname, typically prefixed with t3_."
+pattern = "^t3_[A-Za-z0-9]+$"
+type = "string"
+
+[provides.operations."reddit.get_post_thread".input_schema.properties.sort]
+default = "confidence"
+description = "Comment sort mode."
+enum = [
+    "confidence",
+    "top",
+    "new",
+    "controversial",
+    "old",
+    "qa",
+]
+type = "string"
+
+[provides.operations."reddit.get_post_thread".output_schema]
+required = [
+    "post",
+    "comments",
+]
+type = "object"
+
+[provides.operations."reddit.get_post_thread".output_schema.properties.comments]
+type = "array"
+
+[provides.operations."reddit.get_post_thread".output_schema.properties.post]
+type = "object"
+
+[provides.operations."reddit.get_post_thread".network_constraints]
+host_allow = [
+    "oauth.reddit.com",
+    "www.reddit.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 2
+connect_timeout_ms = 10000
+total_timeout_ms = 45000
+max_response_bytes = 10485760
+
+[provides.operations."reddit.get_post_thread".ai_hints]
+when_to_use = "Use this for full context around one post."
+common_mistakes = ["Passing a bare post ID instead of a fullname (t3_...)."]
+examples = ['{"post_fullname":"t3_1abcde", "sort":"top", "comment_limit":50}']
+related = [
+    "reddit.search_posts",
+    "reddit.list_subreddit_new",
+]
+
+[provides.operations."reddit.list_subreddit_new"]
+description = "List newest posts from a subreddit."
+capability = "reddit.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."reddit.list_subreddit_new".rate_limit]
+max = 120
+per_ms = 60000
+
+[provides.operations."reddit.list_subreddit_new".input_schema]
+required = ["subreddit"]
+type = "object"
+
+[provides.operations."reddit.list_subreddit_new".input_schema.properties.after]
+description = "Pagination cursor from a prior response."
+type = "string"
+
+[provides.operations."reddit.list_subreddit_new".input_schema.properties.limit]
+default = 25
+description = "Maximum posts to return."
+maximum = 100
+minimum = 1
+type = "integer"
+
+[provides.operations."reddit.list_subreddit_new".input_schema.properties.subreddit]
+description = "Subreddit name without r/ prefix."
+pattern = "^[A-Za-z0-9_]{2,21}$"
+type = "string"
+
+[provides.operations."reddit.list_subreddit_new".output_schema]
+required = ["posts"]
+type = "object"
+
+[provides.operations."reddit.list_subreddit_new".output_schema.properties.next_after]
+type = "string"
+
+[provides.operations."reddit.list_subreddit_new".output_schema.properties.posts]
+type = "array"
+
+[provides.operations."reddit.list_subreddit_new".network_constraints]
+host_allow = ["oauth.reddit.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 2
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 6291456
+
+[provides.operations."reddit.list_subreddit_new".ai_hints]
+when_to_use = "Use this for incremental ingestion from one subreddit."
+common_mistakes = ["Forgetting to store and replay the `next_after` cursor."]
+examples = ['{"subreddit":"machinelearning", "limit":25}']
+related = [
+    "reddit.stream_subreddit_new",
+    "reddit.search_posts",
+]
+
+[provides.operations."reddit.mod_remove"]
+description = "Remove a post/comment via moderator privileges."
+capability = "reddit.moderate"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."reddit.mod_remove".rate_limit]
+max = 20
+per_ms = 60000
+
+[provides.operations."reddit.mod_remove".input_schema]
+required = ["thing_fullname"]
+type = "object"
+
+[provides.operations."reddit.mod_remove".input_schema.properties.mod_note]
+description = "Optional moderation note."
+maxLength = 500
+type = "string"
+
+[provides.operations."reddit.mod_remove".input_schema.properties.spam]
+description = "Mark removed content as spam."
+type = "boolean"
+
+[provides.operations."reddit.mod_remove".input_schema.properties.thing_fullname]
+description = "Thing fullname to moderate, such as t3_... or t1_...."
+pattern = "^t[13]_[A-Za-z0-9]+$"
+type = "string"
+
+[provides.operations."reddit.mod_remove".output_schema]
+required = ["removed"]
+type = "object"
+
+[provides.operations."reddit.mod_remove".output_schema.properties.removed]
+type = "boolean"
+
+[provides.operations."reddit.mod_remove".network_constraints]
+host_allow = ["oauth.reddit.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 1
+connect_timeout_ms = 10000
+total_timeout_ms = 45000
+max_response_bytes = 2097152
+
+[provides.operations."reddit.mod_remove".ai_hints]
+when_to_use = "Use only for moderation workflows where dangerous actions are explicitly approved."
+common_mistakes = ["Removing the wrong thing due to truncated IDs."]
+examples = ['{"thing_fullname":"t1_xy12ab", "spam":false, "mod_note":"Rule 2 violation"}']
+related = ["reddit.get_post_thread"]
+
+[provides.operations."reddit.search_posts"]
+description = "Search Reddit posts using query text and optional subreddit filters."
+capability = "reddit.search"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."reddit.search_posts".rate_limit]
+max = 60
+per_ms = 60000
+
+[provides.operations."reddit.search_posts".input_schema]
+required = ["query"]
+type = "object"
+
+[provides.operations."reddit.search_posts".input_schema.properties.after]
+description = "Pagination cursor returned by a prior call."
+type = "string"
+
+[provides.operations."reddit.search_posts".input_schema.properties.limit]
+default = 25
+description = "Maximum posts to return."
+maximum = 100
+minimum = 1
+type = "integer"
+
+[provides.operations."reddit.search_posts".input_schema.properties.query]
+description = "Search text, matching Reddit search syntax."
+maxLength = 512
+minLength = 1
+type = "string"
+
+[provides.operations."reddit.search_posts".input_schema.properties.sort]
+default = "relevance"
+description = "Sort mode for search results."
+enum = [
+    "relevance",
+    "hot",
+    "new",
+    "top",
+    "comments",
+]
+type = "string"
+
+[provides.operations."reddit.search_posts".input_schema.properties.subreddit]
+description = "Optional subreddit name without r/ prefix."
+pattern = "^[A-Za-z0-9_]{2,21}$"
+type = "string"
+
+[provides.operations."reddit.search_posts".input_schema.properties.time_range]
+default = "all"
+description = "Time window for ranking."
+enum = [
+    "hour",
+    "day",
+    "week",
+    "month",
+    "year",
+    "all",
+]
+type = "string"
+
+[provides.operations."reddit.search_posts".output_schema]
+required = ["posts"]
+type = "object"
+
+[provides.operations."reddit.search_posts".output_schema.properties.next_after]
+description = "Pagination cursor for next page."
+type = "string"
+
+[provides.operations."reddit.search_posts".output_schema.properties.posts]
+description = "Reddit post summaries."
+type = "array"
+
+[provides.operations."reddit.search_posts".output_schema.properties.posts.items]
+type = "object"
+
+[provides.operations."reddit.search_posts".network_constraints]
+host_allow = ["oauth.reddit.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 2
+connect_timeout_ms = 10000
+total_timeout_ms = 45000
+max_response_bytes = 8388608
+
+[provides.operations."reddit.search_posts".ai_hints]
+when_to_use = "Use this for keyword discovery across Reddit."
+common_mistakes = [
+    "Passing subreddit names with the r/ prefix.",
+    "Using large limits without handling pagination.",
+]
+examples = ['{"query":"agentic coding", "subreddit":"rust", "sort":"new", "limit":20}']
+related = [
+    "reddit.list_subreddit_new",
+    "reddit.get_post_thread",
+]
+
+[provides.operations."reddit.send_message"]
+description = "Send a private message through Reddit messaging."
+capability = "reddit.message"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "best_effort"
+
+[provides.operations."reddit.send_message".rate_limit]
+max = 20
+per_ms = 60000
+
+[provides.operations."reddit.send_message".input_schema]
+required = [
+    "recipient",
+    "subject",
+    "message",
+]
+type = "object"
+
+[provides.operations."reddit.send_message".input_schema.properties.idempotency_key]
+description = "Client key used to avoid duplicate sends."
+maxLength = 128
+type = "string"
+
+[provides.operations."reddit.send_message".input_schema.properties.message]
+description = "Message body."
+maxLength = 10000
+minLength = 1
+type = "string"
+
+[provides.operations."reddit.send_message".input_schema.properties.recipient]
+description = "Reddit username without u/ prefix."
+pattern = "^[A-Za-z0-9_-]{3,20}$"
+type = "string"
+
+[provides.operations."reddit.send_message".input_schema.properties.subject]
+description = "Message subject."
+maxLength = 100
+minLength = 1
+type = "string"
+
+[provides.operations."reddit.send_message".output_schema]
+required = ["sent"]
+type = "object"
+
+[provides.operations."reddit.send_message".output_schema.properties.sent]
+type = "boolean"
+
+[provides.operations."reddit.send_message".network_constraints]
+host_allow = [
+    "www.reddit.com",
+    "oauth.reddit.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 1
+connect_timeout_ms = 10000
+total_timeout_ms = 45000
+max_response_bytes = 2097152
+
+[provides.operations."reddit.send_message".ai_hints]
+when_to_use = "Use this for direct user communication when an explicit human decision approved it."
+common_mistakes = ["Using a display name instead of exact Reddit username."]
+examples = ['{"recipient":"example_user", "subject":"Follow-up", "message":"Thanks for your report."}']
+related = ["reddit.create_comment"]
+
+[provides.operations."reddit.stream_subreddit_new"]
+description = "Poll new subreddit posts and emit streaming event batches."
+capability = "reddit.stream"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."reddit.stream_subreddit_new".rate_limit]
+max = 30
+per_ms = 60000
+
+[provides.operations."reddit.stream_subreddit_new".input_schema]
+required = ["subreddit"]
+type = "object"
+
+[provides.operations."reddit.stream_subreddit_new".input_schema.properties.batch_limit]
+default = 25
+description = "Maximum events to emit per polling cycle."
+maximum = 100
+minimum = 1
+type = "integer"
+
+[provides.operations."reddit.stream_subreddit_new".input_schema.properties.checkpoint_key]
+default = "subreddit:new"
+description = "State key for persisted checkpoint cursor."
+maxLength = 128
+type = "string"
+
+[provides.operations."reddit.stream_subreddit_new".input_schema.properties.poll_interval_ms]
+default = 30000
+description = "Polling interval in milliseconds."
+maximum = 300000
+minimum = 5000
+type = "integer"
+
+[provides.operations."reddit.stream_subreddit_new".input_schema.properties.subreddit]
+description = "Subreddit name to poll."
+pattern = "^[A-Za-z0-9_]{2,21}$"
+type = "string"
+
+[provides.operations."reddit.stream_subreddit_new".output_schema]
+required = [
+    "events",
+    "next_checkpoint",
+]
+type = "object"
+
+[provides.operations."reddit.stream_subreddit_new".output_schema.properties.events]
+type = "array"
+
+[provides.operations."reddit.stream_subreddit_new".output_schema.properties.next_checkpoint]
+type = "string"
+
+[provides.operations."reddit.stream_subreddit_new".network_constraints]
+host_allow = ["oauth.reddit.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 1
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 6291456
+
+[provides.operations."reddit.stream_subreddit_new".ai_hints]
+when_to_use = "Use for incremental event ingestion from subreddit feeds."
+common_mistakes = [
+    "Too-short polling intervals that trigger API throttling.",
+    "Not persisting checkpoint keys across restarts.",
+]
+examples = ['{"subreddit":"agentflywheel", "poll_interval_ms":30000, "batch_limit":20}']
+related = [
+    "reddit.list_subreddit_new",
+    "reddit.search_posts",
+]
+
+[event_caps]
+streaming = true
+replay = true
+min_buffer_events = 500
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 40
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "reddit.read"
+requests = 120
+window_ms = 60000
+burst = 30
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "reddit.write"
+requests = 30
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "reddit.moderation"
+requests = 20
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "reddit.stream"
+requests = 30
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "reddit.media"
+requests = 40
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[rate_limits.operation_pools]
+"reddit.mod_remove" = ["reddit.moderation"]
+"reddit.get_post_thread" = ["reddit.read"]
+"reddit.create_post" = ["reddit.write"]
+"reddit.list_subreddit_new" = ["reddit.read"]
+"reddit.search_posts" = ["reddit.read"]
+"reddit.stream_subreddit_new" = ["reddit.stream"]
+"reddit.download_media" = ["reddit.media"]
+"reddit.create_comment" = ["reddit.write"]
+"reddit.send_message" = ["reddit.write"]

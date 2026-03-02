@@ -1,0 +1,669 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.spotify"
+name = "Spotify Connector"
+version = "0.1.0"
+description = "FCP connector for Spotify Web API (search, metadata, library, playback, and player-state streaming)"
+archetypes = ["knowledge", "operational", "streaming"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "oauth_refresh_state_managed_by_platform;player_polling_cursor_persisted"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
+optional = ["media.download"]
+forbidden = ["system.exec", "network.listen"]
+
+# ── Knowledge operations ───────────────────────────────────────────────────────
+
+[provides.operations."spotify.search"]
+description = "Search tracks, albums, artists, playlists, and podcast episodes"
+capability = "spotify.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."spotify.search".input_schema]
+required = ["query"]
+type = "object"
+[provides.operations."spotify.search".input_schema.properties.query]
+type = "string"
+maxLength = 512
+[provides.operations."spotify.search".input_schema.properties.type]
+type = "string"
+enum = ["track", "album", "artist", "playlist", "show", "episode"]
+[provides.operations."spotify.search".input_schema.properties.limit]
+type = "integer"
+minimum = 1
+maximum = 50
+[provides.operations."spotify.search".input_schema.properties.market]
+type = "string"
+pattern = "^[A-Z]{2}$"
+
+[provides.operations."spotify.search".output_schema]
+required = ["items"]
+type = "object"
+[provides.operations."spotify.search".output_schema.properties.items]
+type = "array"
+[provides.operations."spotify.search".output_schema.properties.next]
+type = "string"
+
+[provides.operations."spotify.search".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 6291456
+
+[provides.operations."spotify.search".ai_hints]
+when_to_use = "Find Spotify entities by text query."
+common_mistakes = ["Using lowercase country codes for market.", "Forgetting type filter when expecting a single entity class."]
+examples = ['{"query": "kind of blue", "type": "album", "limit": 10, "market": "US"}']
+related = ["spotify.track.get", "spotify.album.get", "spotify.artist.get"]
+
+[provides.operations."spotify.track.get"]
+description = "Get track metadata by Spotify track ID"
+capability = "spotify.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."spotify.track.get".input_schema]
+required = ["track_id"]
+type = "object"
+[provides.operations."spotify.track.get".input_schema.properties.track_id]
+type = "string"
+
+[provides.operations."spotify.track.get".output_schema]
+required = ["track"]
+type = "object"
+[provides.operations."spotify.track.get".output_schema.properties.track]
+type = "object"
+
+[provides.operations."spotify.track.get".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."spotify.track.get".ai_hints]
+when_to_use = "Fetch full metadata for a known Spotify track ID."
+common_mistakes = ["Passing a Spotify URL instead of a track ID."]
+examples = ['{"track_id": "11dFghVXANMlKmJXsNCbNl"}']
+related = ["spotify.search", "spotify.album.get", "spotify.artist.get"]
+
+[provides.operations."spotify.album.get"]
+description = "Get album metadata by Spotify album ID"
+capability = "spotify.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."spotify.album.get".input_schema]
+required = ["album_id"]
+type = "object"
+[provides.operations."spotify.album.get".input_schema.properties.album_id]
+type = "string"
+
+[provides.operations."spotify.album.get".output_schema]
+required = ["album"]
+type = "object"
+[provides.operations."spotify.album.get".output_schema.properties.album]
+type = "object"
+
+[provides.operations."spotify.album.get".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."spotify.album.get".ai_hints]
+when_to_use = "Fetch album metadata for a known album ID."
+common_mistakes = ["Passing a URI prefix (spotify:album:...) without stripping it."]
+examples = ['{"album_id": "4aawyAB9vmqN3uQ7FjRGTy"}']
+related = ["spotify.search", "spotify.track.get", "spotify.artist.get"]
+
+[provides.operations."spotify.artist.get"]
+description = "Get artist metadata by Spotify artist ID"
+capability = "spotify.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."spotify.artist.get".input_schema]
+required = ["artist_id"]
+type = "object"
+[provides.operations."spotify.artist.get".input_schema.properties.artist_id]
+type = "string"
+
+[provides.operations."spotify.artist.get".output_schema]
+required = ["artist"]
+type = "object"
+[provides.operations."spotify.artist.get".output_schema.properties.artist]
+type = "object"
+
+[provides.operations."spotify.artist.get".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."spotify.artist.get".ai_hints]
+when_to_use = "Fetch artist metadata for a known artist ID."
+common_mistakes = []
+examples = ['{"artist_id": "06HL4z0CvFAxyc27GXpf02"}']
+related = ["spotify.search", "spotify.album.get", "spotify.track.get"]
+
+[provides.operations."spotify.playlist.get"]
+description = "Get playlist metadata and track summaries"
+capability = "spotify.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."spotify.playlist.get".input_schema]
+required = ["playlist_id"]
+type = "object"
+[provides.operations."spotify.playlist.get".input_schema.properties.playlist_id]
+type = "string"
+[provides.operations."spotify.playlist.get".input_schema.properties.market]
+type = "string"
+pattern = "^[A-Z]{2}$"
+
+[provides.operations."spotify.playlist.get".output_schema]
+required = ["playlist"]
+type = "object"
+[provides.operations."spotify.playlist.get".output_schema.properties.playlist]
+type = "object"
+
+[provides.operations."spotify.playlist.get".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 4194304
+
+[provides.operations."spotify.playlist.get".ai_hints]
+when_to_use = "Read playlist metadata and track references."
+common_mistakes = ["Expecting all tracks when playlist is paginated."]
+examples = ['{"playlist_id": "37i9dQZF1DXcBWIGoYBM5M", "market": "US"}']
+related = ["spotify.search", "spotify.library.list_saved_tracks", "spotify.media.download_cover"]
+
+# ── Operational operations ─────────────────────────────────────────────────────
+
+[provides.operations."spotify.library.list_saved_tracks"]
+description = "List current user's saved tracks"
+capability = "spotify.library.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."spotify.library.list_saved_tracks".input_schema]
+required = []
+type = "object"
+[provides.operations."spotify.library.list_saved_tracks".input_schema.properties.limit]
+type = "integer"
+minimum = 1
+maximum = 50
+[provides.operations."spotify.library.list_saved_tracks".input_schema.properties.offset]
+type = "integer"
+minimum = 0
+
+[provides.operations."spotify.library.list_saved_tracks".output_schema]
+required = ["items"]
+type = "object"
+[provides.operations."spotify.library.list_saved_tracks".output_schema.properties.items]
+type = "array"
+[provides.operations."spotify.library.list_saved_tracks".output_schema.properties.total]
+type = "integer"
+
+[provides.operations."spotify.library.list_saved_tracks".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."spotify.library.list_saved_tracks".ai_hints]
+when_to_use = "Read the current user's saved tracks."
+common_mistakes = ["Forgetting pagination for large libraries."]
+examples = ["{}"]
+related = ["spotify.library.save_track", "spotify.library.remove_track"]
+
+[provides.operations."spotify.library.save_track"]
+description = "Save a track to the current user's library"
+capability = "spotify.library.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."spotify.library.save_track".input_schema]
+required = ["track_id"]
+type = "object"
+[provides.operations."spotify.library.save_track".input_schema.properties.track_id]
+type = "string"
+
+[provides.operations."spotify.library.save_track".output_schema]
+required = ["saved"]
+type = "object"
+[provides.operations."spotify.library.save_track".output_schema.properties.saved]
+type = "boolean"
+
+[provides.operations."spotify.library.save_track".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."spotify.library.save_track".ai_hints]
+when_to_use = "Persist a track to the user's saved library."
+common_mistakes = ["Passing a URI instead of the ID value."]
+examples = ['{"track_id": "11dFghVXANMlKmJXsNCbNl"}']
+related = ["spotify.library.list_saved_tracks", "spotify.library.remove_track"]
+
+[provides.operations."spotify.library.remove_track"]
+description = "Remove a track from the current user's library"
+capability = "spotify.library.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."spotify.library.remove_track".input_schema]
+required = ["track_id"]
+type = "object"
+[provides.operations."spotify.library.remove_track".input_schema.properties.track_id]
+type = "string"
+
+[provides.operations."spotify.library.remove_track".output_schema]
+required = ["removed"]
+type = "object"
+[provides.operations."spotify.library.remove_track".output_schema.properties.removed]
+type = "boolean"
+
+[provides.operations."spotify.library.remove_track".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."spotify.library.remove_track".ai_hints]
+when_to_use = "Remove a saved track from the user's library."
+common_mistakes = []
+examples = ['{"track_id": "11dFghVXANMlKmJXsNCbNl"}']
+related = ["spotify.library.list_saved_tracks", "spotify.library.save_track"]
+
+[provides.operations."spotify.playback.get_state"]
+description = "Get current playback state and active device"
+capability = "spotify.playback.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."spotify.playback.get_state".input_schema]
+required = []
+type = "object"
+
+[provides.operations."spotify.playback.get_state".output_schema]
+required = ["is_playing", "device"]
+type = "object"
+[provides.operations."spotify.playback.get_state".output_schema.properties.is_playing]
+type = "boolean"
+[provides.operations."spotify.playback.get_state".output_schema.properties.device]
+type = "object"
+
+[provides.operations."spotify.playback.get_state".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."spotify.playback.get_state".ai_hints]
+when_to_use = "Read current playback state before issuing playback control operations."
+common_mistakes = ["Assuming an active playback device always exists."]
+examples = ["{}"]
+related = ["spotify.playback.play", "spotify.playback.pause", "spotify.player.stream"]
+
+[provides.operations."spotify.playback.play"]
+description = "Start or resume playback on the active Spotify device"
+capability = "spotify.playback.write"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "interactive"
+idempotency = "best_effort"
+
+[provides.operations."spotify.playback.play".input_schema]
+required = []
+type = "object"
+[provides.operations."spotify.playback.play".input_schema.properties.context_uri]
+type = "string"
+[provides.operations."spotify.playback.play".input_schema.properties.uris]
+type = "array"
+[provides.operations."spotify.playback.play".input_schema.properties.position_ms]
+type = "integer"
+minimum = 0
+
+[provides.operations."spotify.playback.play".output_schema]
+required = ["started"]
+type = "object"
+[provides.operations."spotify.playback.play".output_schema.properties.started]
+type = "boolean"
+
+[provides.operations."spotify.playback.play".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."spotify.playback.play".ai_hints]
+when_to_use = "Start or resume playback."
+common_mistakes = ["No active device available.", "Sending both context_uri and uris incorrectly."]
+examples = ['{"context_uri": "spotify:album:4aawyAB9vmqN3uQ7FjRGTy"}']
+related = ["spotify.playback.pause", "spotify.playback.get_state"]
+
+[provides.operations."spotify.playback.pause"]
+description = "Pause playback on the active Spotify device"
+capability = "spotify.playback.write"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "interactive"
+idempotency = "best_effort"
+
+[provides.operations."spotify.playback.pause".input_schema]
+required = []
+type = "object"
+
+[provides.operations."spotify.playback.pause".output_schema]
+required = ["paused"]
+type = "object"
+[provides.operations."spotify.playback.pause".output_schema.properties.paused]
+type = "boolean"
+
+[provides.operations."spotify.playback.pause".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."spotify.playback.pause".ai_hints]
+when_to_use = "Pause current playback."
+common_mistakes = ["No active playback device."]
+examples = ["{}"]
+related = ["spotify.playback.play", "spotify.playback.get_state"]
+
+# ── Streaming + media operations ───────────────────────────────────────────────
+
+[provides.operations."spotify.player.stream"]
+description = "Poll-backed stream of player-state snapshots for subscribers"
+capability = "spotify.stream"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."spotify.player.stream".input_schema]
+required = []
+type = "object"
+[provides.operations."spotify.player.stream".input_schema.properties.poll_interval_ms]
+type = "integer"
+minimum = 1000
+maximum = 60000
+[provides.operations."spotify.player.stream".input_schema.properties.include_device]
+type = "boolean"
+
+[provides.operations."spotify.player.stream".output_schema]
+required = ["snapshot"]
+type = "object"
+[provides.operations."spotify.player.stream".output_schema.properties.snapshot]
+type = "object"
+
+[provides.operations."spotify.player.stream".network_constraints]
+host_allow = ["api.spotify.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."spotify.player.stream".ai_hints]
+when_to_use = "Subscribe to near-real-time player state updates."
+common_mistakes = ["Setting poll interval below API-friendly thresholds."]
+examples = ['{"poll_interval_ms": 3000, "include_device": true}']
+related = ["spotify.playback.get_state", "spotify.playback.play", "spotify.playback.pause"]
+
+[provides.operations."spotify.media.download_cover"]
+description = "Download Spotify artwork from pinned CDN hosts"
+capability = "spotify.media.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."spotify.media.download_cover".input_schema]
+required = ["url"]
+type = "object"
+[provides.operations."spotify.media.download_cover".input_schema.properties.url]
+type = "string"
+format = "uri"
+
+[provides.operations."spotify.media.download_cover".output_schema]
+required = ["content_type", "size_bytes"]
+type = "object"
+[provides.operations."spotify.media.download_cover".output_schema.properties.content_type]
+type = "string"
+[provides.operations."spotify.media.download_cover".output_schema.properties.size_bytes]
+type = "integer"
+
+[provides.operations."spotify.media.download_cover".network_constraints]
+host_allow = ["i.scdn.co", "mosaic.scdn.co"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 2
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."spotify.media.download_cover".ai_hints]
+when_to_use = "Fetch cover-art/image bytes from pinned Spotify CDN hosts."
+common_mistakes = ["Passing non-Spotify CDN URLs."]
+examples = ['{"url": "https://i.scdn.co/image/ab67616d0000b2735f8f6f3f87f6f2d5f3f4f5f6"}']
+related = ["spotify.track.get", "spotify.album.get", "spotify.playlist.get"]
+
+[event_caps]
+streaming = true
+replay = false
+min_buffer_events = 256
+
+[sandbox]
+profile = "strict"
+memory_mb = 192
+cpu_percent = 40
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "spotify.read"
+requests = 1200
+window_ms = 3600000
+burst = 60
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "spotify.library"
+requests = 600
+window_ms = 3600000
+burst = 30
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "spotify.playback"
+requests = 300
+window_ms = 3600000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "spotify.stream"
+requests = 3600
+window_ms = 3600000
+burst = 120
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "spotify.media"
+requests = 300
+window_ms = 3600000
+burst = 20
+scope = "instance"
+
+[rate_limits.operation_pools]
+"spotify.search" = ["spotify.read"]
+"spotify.track.get" = ["spotify.read"]
+"spotify.album.get" = ["spotify.read"]
+"spotify.artist.get" = ["spotify.read"]
+"spotify.playlist.get" = ["spotify.read"]
+"spotify.library.list_saved_tracks" = ["spotify.library"]
+"spotify.library.save_track" = ["spotify.library"]
+"spotify.library.remove_track" = ["spotify.library"]
+"spotify.playback.get_state" = ["spotify.playback"]
+"spotify.playback.play" = ["spotify.playback"]
+"spotify.playback.pause" = ["spotify.playback"]
+"spotify.player.stream" = ["spotify.stream"]
+"spotify.media.download_cover" = ["spotify.media"]

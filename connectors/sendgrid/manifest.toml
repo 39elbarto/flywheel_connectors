@@ -1,0 +1,356 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:a70876e5fbdeb908a5567993f3085faf382c2282c9bd167ff54a3d026af3a650"
+
+[connector]
+id = "fcp.sendgrid"
+name = "SendGrid Connector"
+version = "0.1.0"
+description = "FCP connector for SendGrid email delivery (send, contacts, templates, stats)"
+archetypes = ["operational"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores API key and sender identity."
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = [
+    "z:public",
+    "z:community",
+]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+]
+optional = []
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "media.upload",
+    "media.download",
+]
+
+[provides.operations."sendgrid.contacts.delete"]
+description = "Delete marketing contacts"
+capability = "sendgrid.contacts.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."sendgrid.contacts.delete".input_schema]
+required = ["ids"]
+type = "object"
+
+[provides.operations."sendgrid.contacts.delete".input_schema.properties.ids]
+description = "Array of contact IDs to delete"
+type = "array"
+
+[provides.operations."sendgrid.contacts.delete".output_schema]
+required = ["job_id"]
+type = "object"
+
+[provides.operations."sendgrid.contacts.delete".output_schema.properties.job_id]
+type = "string"
+
+[provides.operations."sendgrid.contacts.delete".network_constraints]
+host_allow = ["api.sendgrid.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."sendgrid.contacts.delete".ai_hints]
+when_to_use = "Delete marketing contacts. Cannot be undone."
+common_mistakes = []
+examples = ['{"ids": ["abc123", "def456"]}']
+related = ["sendgrid.contacts.list"]
+
+[provides.operations."sendgrid.contacts.list"]
+description = "List marketing contacts"
+capability = "sendgrid.contacts.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."sendgrid.contacts.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."sendgrid.contacts.list".output_schema]
+required = ["result"]
+type = "object"
+
+[provides.operations."sendgrid.contacts.list".output_schema.properties.result]
+type = "array"
+
+[provides.operations."sendgrid.contacts.list".network_constraints]
+host_allow = ["api.sendgrid.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."sendgrid.contacts.list".ai_hints]
+when_to_use = "List marketing contacts."
+common_mistakes = []
+examples = ["{}"]
+related = ["sendgrid.contacts.delete"]
+
+[provides.operations."sendgrid.mail.send"]
+description = "Send an email"
+capability = "sendgrid.mail.write"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."sendgrid.mail.send".input_schema]
+required = [
+    "personalizations",
+    "from",
+    "subject",
+    "content",
+]
+type = "object"
+
+[provides.operations."sendgrid.mail.send".input_schema.properties.content]
+description = "Array of content objects [{type, value}]"
+type = "array"
+
+[provides.operations."sendgrid.mail.send".input_schema.properties.from]
+description = "Sender email object {email, name}"
+type = "object"
+
+[provides.operations."sendgrid.mail.send".input_schema.properties.personalizations]
+description = "Array of recipient groups"
+type = "array"
+
+[provides.operations."sendgrid.mail.send".input_schema.properties.subject]
+type = "string"
+
+[provides.operations."sendgrid.mail.send".input_schema.properties.template_id]
+type = "string"
+
+[provides.operations."sendgrid.mail.send".output_schema]
+type = "object"
+
+[provides.operations."sendgrid.mail.send".network_constraints]
+host_allow = ["api.sendgrid.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."sendgrid.mail.send".ai_hints]
+when_to_use = "Send an email via SendGrid."
+common_mistakes = [
+    "Not verifying sender identity first.",
+    "Sending to too many recipients in one call.",
+]
+examples = ['{"personalizations": [{"to": [{"email": "bob@example.com"}]}], "from": {"email": "noreply@myapp.com"}, "subject": "Hello", "content": [{"type": "text/plain", "value": "Hi Bob!"}]}']
+related = ["sendgrid.templates.list"]
+
+[provides.operations."sendgrid.stats.get"]
+description = "Get email delivery statistics"
+capability = "sendgrid.stats.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."sendgrid.stats.get".input_schema]
+required = ["start_date"]
+type = "object"
+
+[provides.operations."sendgrid.stats.get".input_schema.properties.end_date]
+type = "string"
+
+[provides.operations."sendgrid.stats.get".input_schema.properties.start_date]
+description = "Start date (YYYY-MM-DD)"
+type = "string"
+
+[provides.operations."sendgrid.stats.get".output_schema]
+required = ["stats"]
+type = "object"
+
+[provides.operations."sendgrid.stats.get".output_schema.properties.stats]
+type = "array"
+
+[provides.operations."sendgrid.stats.get".network_constraints]
+host_allow = ["api.sendgrid.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."sendgrid.stats.get".ai_hints]
+when_to_use = "Get email delivery statistics for a date range."
+common_mistakes = []
+examples = ['{"start_date": "2026-01-01", "end_date": "2026-01-31"}']
+related = ["sendgrid.mail.send"]
+
+[provides.operations."sendgrid.templates.list"]
+description = "List email templates"
+capability = "sendgrid.templates.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."sendgrid.templates.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."sendgrid.templates.list".input_schema.properties.generations]
+description = "legacy or dynamic"
+type = "string"
+
+[provides.operations."sendgrid.templates.list".output_schema]
+required = ["templates"]
+type = "object"
+
+[provides.operations."sendgrid.templates.list".output_schema.properties.templates]
+type = "array"
+
+[provides.operations."sendgrid.templates.list".network_constraints]
+host_allow = ["api.sendgrid.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."sendgrid.templates.list".ai_hints]
+when_to_use = "List available email templates."
+common_mistakes = []
+examples = ['{"generations": "dynamic"}']
+related = ["sendgrid.mail.send"]
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "sendgrid.mail.write"
+requests = 100
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "sendgrid.contacts.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "sendgrid.contacts.write"
+requests = 50
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "sendgrid.templates.read"
+requests = 100
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "sendgrid.stats.read"
+requests = 100
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[rate_limits.operation_pools]
+"sendgrid.stats.get" = ["sendgrid.stats.read"]
+"sendgrid.contacts.list" = ["sendgrid.contacts.read"]
+"sendgrid.mail.send" = ["sendgrid.mail.write"]
+"sendgrid.contacts.delete" = ["sendgrid.contacts.write"]
+"sendgrid.templates.list" = ["sendgrid.templates.read"]

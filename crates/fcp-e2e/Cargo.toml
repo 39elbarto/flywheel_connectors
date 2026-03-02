@@ -26,6 +26,13 @@ youtube = []
 twitter = []
 google_calendar = []
 s3 = []
+browser = []
+jira = []
+microsoft365 = []
+figma = []
+airtable = []
+zendesk = []
+vectordb = []
 
 [dependencies]
 fcp-core = { workspace = true }
@@ -59,9 +66,17 @@ fcp-youtube = { path = "../../connectors/youtube" }
 fcp-twitter = { path = "../../connectors/twitter" }
 fcp-google-calendar = { path = "../../connectors/google-calendar" }
 fcp-s3 = { path = "../../connectors/s3" }
+fcp-browser = { path = "../../connectors/browser" }
+fcp-jira = { path = "../../connectors/jira" }
+fcp-microsoft365 = { path = "../../connectors/microsoft365" }
+fcp-figma = { path = "../../connectors/figma" }
+fcp-airtable = { path = "../../connectors/airtable" }
+fcp-zendesk = { path = "../../connectors/zendesk" }
+fcp-vectordb = { path = "../../connectors/vectordb" }
 pretty_assertions = { workspace = true }
 reqwest = { workspace = true }
 fcp-manifest = { workspace = true }
 futures-util = { workspace = true }
 wiremock = { workspace = true }
 toml = { workspace = true }
+base64 = { workspace = true }

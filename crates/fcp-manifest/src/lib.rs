@@ -1200,6 +1200,30 @@ fn lint_capability_id_no_network_addressing(
 #[serde(deny_unknown_fields)]
 pub struct ProvidesSection {
     pub operations: BTreeMap<String, OperationSection>,
+    /// Optional event declarations for streaming connectors.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub events: BTreeMap<String, EventSection>,
+}
+
+/// `[provides.events.<id>]` section.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventSection {
+    pub description: String,
+    /// Whether this event supports streaming delivery.
+    #[serde(default)]
+    pub streaming: bool,
+    /// Whether this event supports replay/backfill.
+    #[serde(default)]
+    pub replay: bool,
+    /// Topic identifier for event routing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic: Option<String>,
+    /// Whether the event requires explicit acknowledgement.
+    #[serde(default)]
+    pub requires_ack: bool,
+    /// Optional schema for the event payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<serde_json::Value>,
 }
 
 impl ProvidesSection {

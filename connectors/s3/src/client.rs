@@ -255,8 +255,7 @@ impl S3Client {
         let url = self.object_url(dest_bucket, dest_key);
         let copy_source = format!("/{source_bucket}/{source_key}");
 
-        let response: serde_json::Value =
-            self.put_with_copy_source(&url, &copy_source).await?;
+        let response: serde_json::Value = self.put_with_copy_source(&url, &copy_source).await?;
 
         let etag = response
             .get("etag")
@@ -655,9 +654,7 @@ fn parse_error_response(status: StatusCode, bytes: &[u8]) -> S3Error {
                     bucket: error.message,
                 };
             }
-            return S3Error::NotFound {
-                key: error.message,
-            };
+            return S3Error::NotFound { key: error.message };
         }
 
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
@@ -700,8 +697,7 @@ mod tests {
         Mock::given(method("PUT"))
             .and(path("/test-bucket/test-key"))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"etag": "\"abc123\""})),
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"etag": "\"abc123\""})),
             )
             .mount(&mock_server)
             .await;
@@ -735,10 +731,7 @@ mod tests {
             .unwrap()
             .with_base_url(mock_server.uri());
 
-        let result = client
-            .get_object("test-bucket", "test-key")
-            .await
-            .unwrap();
+        let result = client.get_object("test-bucket", "test-key").await.unwrap();
 
         assert_eq!(result.body, "hello world");
         assert_eq!(result.content_type, "text/plain");
@@ -864,10 +857,7 @@ mod tests {
         let result = client.get_object("test-bucket", "test-key").await;
 
         assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            S3Error::RateLimited { .. }
-        ));
+        assert!(matches!(result.unwrap_err(), S3Error::RateLimited { .. }));
     }
 
     #[fcp_async_core::runtime::test]
@@ -886,30 +876,33 @@ mod tests {
 
     #[test]
     fn test_error_is_retryable() {
-        assert!(S3Error::RateLimited {
-            retry_after_ms: 1000
-        }
-        .is_retryable());
+        assert!(
+            S3Error::RateLimited {
+                retry_after_ms: 1000
+            }
+            .is_retryable()
+        );
 
         assert!(!S3Error::Unauthorized.is_retryable());
 
-        assert!(!S3Error::NotFound {
-            key: "test".into()
-        }
-        .is_retryable());
+        assert!(!S3Error::NotFound { key: "test".into() }.is_retryable());
 
-        assert!(S3Error::Api {
-            code: "InternalError".into(),
-            message: "Internal".into(),
-            status_code: Some(500),
-        }
-        .is_retryable());
+        assert!(
+            S3Error::Api {
+                code: "InternalError".into(),
+                message: "Internal".into(),
+                status_code: Some(500),
+            }
+            .is_retryable()
+        );
 
-        assert!(!S3Error::Api {
-            code: "NoSuchKey".into(),
-            message: "Not found".into(),
-            status_code: Some(404),
-        }
-        .is_retryable());
+        assert!(
+            !S3Error::Api {
+                code: "NoSuchKey".into(),
+                message: "Not found".into(),
+                status_code: Some(404),
+            }
+            .is_retryable()
+        );
     }
 }

@@ -58,9 +58,7 @@ impl GmailError {
     #[must_use]
     pub const fn retry_after(&self) -> Option<Duration> {
         match self {
-            Self::RateLimited { retry_after_secs } => {
-                Some(Duration::from_secs(*retry_after_secs))
-            }
+            Self::RateLimited { retry_after_secs } => Some(Duration::from_secs(*retry_after_secs)),
             _ => None,
         }
     }

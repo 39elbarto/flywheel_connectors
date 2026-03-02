@@ -274,13 +274,11 @@ impl AnthropicConnector {
         let auth = self
             .config
             .as_ref()
-            .map(|c| c.auth.redacted_label())
-            .unwrap_or_else(|| "unconfigured".to_string());
+            .map_or_else(|| "unconfigured".to_string(), |c| c.auth.redacted_label());
         let base_url = self
             .config
             .as_ref()
-            .map(|c| c.base_url.clone())
-            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
+            .map_or_else(|| DEFAULT_BASE_URL.to_string(), |c| c.base_url.clone());
         Ok(json!({
             "status": if configured { "healthy" } else { "not_configured" },
             "auth": auth,
@@ -367,9 +365,7 @@ impl AnthropicConnector {
         let allowed_hosts = ["api.anthropic.com"];
         let host_ok = config.base_url.starts_with("http://localhost")
             || config.base_url.starts_with("http://127.0.0.1")
-            || allowed_hosts
-                .iter()
-                .any(|h| config.base_url.contains(h));
+            || allowed_hosts.iter().any(|h| config.base_url.contains(h));
         checks.push(DoctorCheck {
             name: "network_constraints".into(),
             passed: host_ok,
@@ -410,8 +406,7 @@ impl AnthropicConnector {
     /// Returns an error if the self-check report cannot be serialized.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
         let Some(client) = &self.client else {
-            let report =
-                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
             return serde_json::to_value(report).map_err(|e| FcpError::Internal {
                 message: format!("Failed to serialize self-check report: {e}"),
             });
@@ -1296,10 +1291,7 @@ mod tests {
 
         // Rate limited is retryable -> Degraded
         assert_eq!(report.status, fcp_core::SelfCheckStatus::Degraded);
-        assert_eq!(
-            report.reason_code.as_deref(),
-            Some("self_check_retryable")
-        );
+        assert_eq!(report.reason_code.as_deref(), Some("self_check_retryable"));
     }
 
     // --- Existing invoke tests ---
@@ -1383,9 +1375,7 @@ mod tests {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("messages"));
             }
-            _ => panic!(
-                "Expected InvalidRequest for missing messages, got: {err:?}"
-            ),
+            _ => panic!("Expected InvalidRequest for missing messages, got: {err:?}"),
         }
     }
 

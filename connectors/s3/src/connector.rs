@@ -39,14 +39,12 @@ impl S3Connector {
         &mut self,
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
-        let access_key_id =
-            params
-                .get("access_key_id")
-                .and_then(|v| v.as_str())
-                .ok_or(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing access_key_id in configuration".into(),
-                })?;
+        let access_key_id = params.get("access_key_id").and_then(|v| v.as_str()).ok_or(
+            FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing access_key_id in configuration".into(),
+            },
+        )?;
 
         let secret_access_key = params
             .get("secret_access_key")
@@ -63,12 +61,11 @@ impl S3Connector {
 
         let base_url = params.get("base_url").and_then(|v| v.as_str());
 
-        let mut client =
-            S3Client::new(access_key_id, secret_access_key, region).map_err(|e| {
-                FcpError::Internal {
-                    message: format!("Failed to create HTTP client: {e}"),
-                }
-            })?;
+        let mut client = S3Client::new(access_key_id, secret_access_key, region).map_err(|e| {
+            FcpError::Internal {
+                message: format!("Failed to create HTTP client: {e}"),
+            }
+        })?;
 
         if let Some(url) = base_url {
             client = client.with_base_url(url);
@@ -363,10 +360,7 @@ impl S3Connector {
     }
 
     /// Handle simulate method.
-    pub async fn handle_simulate(
-        &self,
-        params: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    pub async fn handle_simulate(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
         let req: SimulateRequest =
             serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {
                 code: 1003,
@@ -746,11 +740,15 @@ mod tests {
 
         let raw = std::fs::read_to_string(&manifest_path).expect("read manifest");
         let manifest = ConnectorManifest::parse_str(&raw).expect("manifest should validate");
-        let computed = manifest.compute_interface_hash().expect("compute interface hash");
+        let computed = manifest
+            .compute_interface_hash()
+            .expect("compute interface hash");
         assert_eq!(manifest.manifest.interface_hash, computed);
 
         let manifest2 = ConnectorManifest::parse_str_unchecked(&raw).expect("parse unchecked");
-        let computed2 = manifest2.compute_interface_hash().expect("compute interface hash");
+        let computed2 = manifest2
+            .compute_interface_hash()
+            .expect("compute interface hash");
         assert_eq!(computed, computed2);
     }
 }

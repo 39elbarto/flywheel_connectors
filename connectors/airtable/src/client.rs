@@ -127,10 +127,8 @@ impl AirtableClient {
             } else {
                 url.push('&');
             }
-            let encoded = percent_encoding::utf8_percent_encode(
-                value,
-                percent_encoding::NON_ALPHANUMERIC,
-            );
+            let encoded =
+                percent_encoding::utf8_percent_encode(value, percent_encoding::NON_ALPHANUMERIC);
             let _ = write!(url, "{key}={encoded}");
         };
 
@@ -309,10 +307,7 @@ impl AirtableClient {
 
     // ── Internal HTTP helpers ────────────────────────────────────────
 
-    async fn get_raw_url<T: serde::de::DeserializeOwned>(
-        &self,
-        url: &str,
-    ) -> AirtableResult<T> {
+    async fn get_raw_url<T: serde::de::DeserializeOwned>(&self, url: &str) -> AirtableResult<T> {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
 
         let mut attempt = 0;
@@ -320,12 +315,7 @@ impl AirtableClient {
 
         loop {
             attempt += 1;
-            let response = self
-                .client
-                .get(url)
-                .bearer_auth(&self.token)
-                .send()
-                .await;
+            let response = self.client.get(url).bearer_auth(&self.token).send().await;
 
             match response {
                 Ok(resp) => {
@@ -385,12 +375,7 @@ impl AirtableClient {
 
         loop {
             attempt += 1;
-            let response = self
-                .client
-                .get(&url)
-                .bearer_auth(&self.token)
-                .send()
-                .await;
+            let response = self.client.get(&url).bearer_auth(&self.token).send().await;
 
             match response {
                 Ok(resp) => {
@@ -643,7 +628,10 @@ mod tests {
         let client = AirtableClient::new("test_token")
             .unwrap()
             .with_base_url(server.uri());
-        let record = client.get_record("appABC", "tblXYZ", "recDEF").await.unwrap();
+        let record = client
+            .get_record("appABC", "tblXYZ", "recDEF")
+            .await
+            .unwrap();
         assert_eq!(record.id, "recDEF");
         assert_eq!(record.fields["Name"], "Test Record");
     }
@@ -667,7 +655,10 @@ mod tests {
             .unwrap()
             .with_base_url(server.uri());
         let fields = serde_json::json!({ "Name": "New Record" });
-        let record = client.create_record("appABC", "tblXYZ", &fields, None).await.unwrap();
+        let record = client
+            .create_record("appABC", "tblXYZ", &fields, None)
+            .await
+            .unwrap();
         assert_eq!(record.id, "recNEW");
     }
 
@@ -687,7 +678,10 @@ mod tests {
         let client = AirtableClient::new("test_token")
             .unwrap()
             .with_base_url(server.uri());
-        let result = client.delete_record("appABC", "tblXYZ", "recDEL").await.unwrap();
+        let result = client
+            .delete_record("appABC", "tblXYZ", "recDEL")
+            .await
+            .unwrap();
         assert!(result.deleted);
         assert_eq!(result.id, "recDEL");
     }
@@ -716,10 +710,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/meta/bases"))
-            .respond_with(
-                ResponseTemplate::new(429)
-                    .insert_header("retry-after", "30"),
-            )
+            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "30"))
             .mount(&server)
             .await;
 
@@ -731,7 +722,9 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            AirtableError::RateLimited { retry_after_secs: 30 }
+            AirtableError::RateLimited {
+                retry_after_secs: 30
+            }
         ));
     }
 

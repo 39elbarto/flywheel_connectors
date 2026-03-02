@@ -151,7 +151,9 @@ impl StripeConnector {
                     IdempotencyClass::None,
                     AgentHint {
                         when_to_use: "Create a new customer record in Stripe.".into(),
-                        common_mistakes: vec!["Not checking for duplicate customers by email".into()],
+                        common_mistakes: vec![
+                            "Not checking for duplicate customers by email".into(),
+                        ],
                         examples: vec![
                             r#"{"email": "user@example.com", "name": "Jane Doe"}"#.into(),
                         ],
@@ -224,13 +226,16 @@ impl StripeConnector {
                     SafetyTier::Dangerous,
                     IdempotencyClass::None,
                     AgentHint {
-                        when_to_use: "Initiate a payment. Amount is in smallest currency unit (e.g. cents).".into(),
+                        when_to_use:
+                            "Initiate a payment. Amount is in smallest currency unit (e.g. cents)."
+                                .into(),
                         common_mistakes: vec![
                             "Using dollars instead of cents for amount".into(),
                             "Invalid ISO 4217 currency code".into(),
                         ],
                         examples: vec![
-                            r#"{"amount": 2000, "currency": "usd", "customer": "cus_abc123"}"#.into(),
+                            r#"{"amount": 2000, "currency": "usd", "customer": "cus_abc123"}"#
+                                .into(),
                         ],
                         related: vec![
                             CapabilityId::from_static("stripe.get_payment_intent"),
@@ -275,11 +280,12 @@ impl StripeConnector {
                     SafetyTier::Dangerous,
                     IdempotencyClass::None,
                     AgentHint {
-                        when_to_use: "Refund all or part of a payment. Omit amount for full refund.".into(),
-                        common_mistakes: vec!["Refunding more than the original charge amount".into()],
-                        examples: vec![
-                            r#"{"payment_intent": "pi_abc123", "amount": 500}"#.into(),
+                        when_to_use:
+                            "Refund all or part of a payment. Omit amount for full refund.".into(),
+                        common_mistakes: vec![
+                            "Refunding more than the original charge amount".into(),
                         ],
+                        examples: vec![r#"{"payment_intent": "pi_abc123", "amount": 500}"#.into()],
                         related: vec![CapabilityId::from_static("stripe.get_payment_intent")],
                     },
                 ),
@@ -301,7 +307,9 @@ impl StripeConnector {
                     IdempotencyClass::None,
                     AgentHint {
                         when_to_use: "Start a recurring subscription for a customer.".into(),
-                        common_mistakes: vec!["Not attaching a payment method to the customer first".into()],
+                        common_mistakes: vec![
+                            "Not attaching a payment method to the customer first".into(),
+                        ],
                         examples: vec![
                             r#"{"customer": "cus_abc123", "price": "price_abc123"}"#.into(),
                         ],
@@ -326,7 +334,9 @@ impl StripeConnector {
                     IdempotencyClass::None,
                     AgentHint {
                         when_to_use: "Cancel a customer's subscription.".into(),
-                        common_mistakes: vec!["Not specifying whether to cancel immediately or at period end".into()],
+                        common_mistakes: vec![
+                            "Not specifying whether to cancel immediately or at period end".into(),
+                        ],
                         examples: vec![r#"{"subscription_id": "sub_abc123"}"#.into()],
                         related: vec![CapabilityId::from_static("stripe.create_subscription")],
                     },
@@ -464,45 +474,79 @@ impl StripeConnector {
 
     // ── Operation implementations ─────────────────────────────────
 
-    async fn invoke_create_customer(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+    async fn invoke_create_customer(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let email = require_str(&input, "email")?;
         let name = input.get("name").and_then(|v| v.as_str());
-        let customer = client.create_customer(email, name).await.map_err(|e: StripeError| e.to_fcp_error())?;
+        let customer = client
+            .create_customer(email, name)
+            .await
+            .map_err(|e: StripeError| e.to_fcp_error())?;
         Ok(json!({ "customer": customer }))
     }
 
     async fn invoke_get_customer(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let customer_id = require_str(&input, "customer_id")?;
-        let customer = client.get_customer(customer_id).await.map_err(|e: StripeError| e.to_fcp_error())?;
+        let customer = client
+            .get_customer(customer_id)
+            .await
+            .map_err(|e: StripeError| e.to_fcp_error())?;
         Ok(json!({ "customer": customer }))
     }
 
-    async fn invoke_list_customers(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+    async fn invoke_list_customers(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
-        let limit = input.get("limit").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let limit = input
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
         let email = input.get("email").and_then(|v| v.as_str());
-        let result = client.list_customers(limit, email).await.map_err(|e: StripeError| e.to_fcp_error())?;
+        let result = client
+            .list_customers(limit, email)
+            .await
+            .map_err(|e: StripeError| e.to_fcp_error())?;
         Ok(json!({ "data": result.data, "has_more": result.has_more }))
     }
 
-    async fn invoke_create_payment_intent(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+    async fn invoke_create_payment_intent(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
-        let amount = input.get("amount").and_then(|v| v.as_i64()).ok_or(FcpError::InvalidRequest {
-            code: 1003,
-            message: "Missing required field: amount".into(),
-        })?;
+        let amount =
+            input
+                .get("amount")
+                .and_then(|v| v.as_i64())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing required field: amount".into(),
+                })?;
         let currency = require_str(&input, "currency")?;
         let customer = input.get("customer").and_then(|v| v.as_str());
-        let pi = client.create_payment_intent(amount, currency, customer).await.map_err(|e: StripeError| e.to_fcp_error())?;
+        let pi = client
+            .create_payment_intent(amount, currency, customer)
+            .await
+            .map_err(|e: StripeError| e.to_fcp_error())?;
         Ok(json!({ "payment_intent": pi }))
     }
 
-    async fn invoke_get_payment_intent(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+    async fn invoke_get_payment_intent(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let pi_id = require_str(&input, "payment_intent_id")?;
-        let pi = client.get_payment_intent(pi_id).await.map_err(|e: StripeError| e.to_fcp_error())?;
+        let pi = client
+            .get_payment_intent(pi_id)
+            .await
+            .map_err(|e: StripeError| e.to_fcp_error())?;
         Ok(json!({ "payment_intent": pi }))
     }
 
@@ -510,41 +554,68 @@ impl StripeConnector {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let payment_intent = require_str(&input, "payment_intent")?;
         let amount = input.get("amount").and_then(|v| v.as_i64());
-        let refund = client.create_refund(payment_intent, amount).await.map_err(|e: StripeError| e.to_fcp_error())?;
+        let refund = client
+            .create_refund(payment_intent, amount)
+            .await
+            .map_err(|e: StripeError| e.to_fcp_error())?;
         Ok(json!({ "refund": refund }))
     }
 
-    async fn invoke_create_subscription(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+    async fn invoke_create_subscription(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let customer = require_str(&input, "customer")?;
         let price = require_str(&input, "price")?;
-        let sub = client.create_subscription(customer, price).await.map_err(|e: StripeError| e.to_fcp_error())?;
+        let sub = client
+            .create_subscription(customer, price)
+            .await
+            .map_err(|e: StripeError| e.to_fcp_error())?;
         Ok(json!({ "subscription": sub }))
     }
 
-    async fn invoke_cancel_subscription(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+    async fn invoke_cancel_subscription(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let sub_id = require_str(&input, "subscription_id")?;
-        let sub = client.cancel_subscription(sub_id).await.map_err(|e: StripeError| e.to_fcp_error())?;
+        let sub = client
+            .cancel_subscription(sub_id)
+            .await
+            .map_err(|e: StripeError| e.to_fcp_error())?;
         Ok(json!({ "subscription": sub }))
     }
 
     async fn invoke_list_invoices(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let customer = input.get("customer").and_then(|v| v.as_str());
-        let limit = input.get("limit").and_then(|v| v.as_u64()).map(|v| v as u32);
-        let result = client.list_invoices(customer, limit).await.map_err(|e: StripeError| e.to_fcp_error())?;
+        let limit = input
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+        let result = client
+            .list_invoices(customer, limit)
+            .await
+            .map_err(|e: StripeError| e.to_fcp_error())?;
         Ok(json!({ "data": result.data, "has_more": result.has_more }))
     }
 
     async fn invoke_get_balance(&self) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
-        let balance = client.get_balance().await.map_err(|e: StripeError| e.to_fcp_error())?;
+        let balance = client
+            .get_balance()
+            .await
+            .map_err(|e: StripeError| e.to_fcp_error())?;
         Ok(json!({ "balance": balance }))
     }
 
     /// Handle shutdown.
-    pub async fn handle_shutdown(&self, _params: serde_json::Value) -> FcpResult<serde_json::Value> {
+    pub async fn handle_shutdown(
+        &self,
+        _params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         info!("Stripe connector shutting down");
         Ok(json!({ "status": "shutdown" }))
     }
@@ -737,11 +808,15 @@ mod tests {
 
         let raw = std::fs::read_to_string(&manifest_path).expect("read manifest");
         let manifest = ConnectorManifest::parse_str(&raw).expect("manifest should validate");
-        let computed = manifest.compute_interface_hash().expect("compute interface hash");
+        let computed = manifest
+            .compute_interface_hash()
+            .expect("compute interface hash");
         assert_eq!(manifest.manifest.interface_hash, computed);
 
         let manifest2 = ConnectorManifest::parse_str_unchecked(&raw).expect("parse unchecked");
-        let computed2 = manifest2.compute_interface_hash().expect("compute interface hash");
+        let computed2 = manifest2
+            .compute_interface_hash()
+            .expect("compute interface hash");
         assert_eq!(computed, computed2);
     }
 }

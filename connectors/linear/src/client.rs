@@ -91,8 +91,7 @@ impl LinearClient {
         ";
 
         let data = self.execute_graphql(query, Some(variables)).await?;
-        let payload: IssueCreatePayload =
-            serde_json::from_value(data["issueCreate"].clone())?;
+        let payload: IssueCreatePayload = serde_json::from_value(data["issueCreate"].clone())?;
 
         payload.issue.ok_or(LinearError::Api {
             message: "Issue creation returned no issue".into(),
@@ -168,8 +167,7 @@ impl LinearClient {
         });
 
         let data = self.execute_graphql(query, Some(variables)).await?;
-        let payload: IssueUpdatePayload =
-            serde_json::from_value(data["issueUpdate"].clone())?;
+        let payload: IssueUpdatePayload = serde_json::from_value(data["issueUpdate"].clone())?;
 
         payload.issue.ok_or(LinearError::Api {
             message: "Issue update returned no issue".into(),
@@ -298,8 +296,7 @@ impl LinearClient {
         });
 
         let data = self.execute_graphql(query, Some(variables)).await?;
-        let payload: CommentCreatePayload =
-            serde_json::from_value(data["commentCreate"].clone())?;
+        let payload: CommentCreatePayload = serde_json::from_value(data["commentCreate"].clone())?;
 
         payload.comment.ok_or(LinearError::Api {
             message: "Comment creation returned no comment".into(),
@@ -500,10 +497,7 @@ mod tests {
             .unwrap()
             .with_api_url(&format!("{}/graphql", mock_server.uri()));
 
-        let issue = client
-            .create_issue("New bug", "t1", None)
-            .await
-            .unwrap();
+        let issue = client.create_issue("New bug", "t1", None).await.unwrap();
         assert_eq!(issue.identifier, "LIN-2");
     }
 

@@ -10,8 +10,7 @@ use tracing::{debug, instrument, warn};
 use crate::{
     error::{GmailError, GmailResult},
     types::{
-        GmailDraft, GmailLabel, GmailMessage, GmailThread, LabelsListResponse,
-        MessagesListResponse,
+        GmailDraft, GmailLabel, GmailMessage, GmailThread, LabelsListResponse, MessagesListResponse,
     },
 };
 

@@ -9,8 +9,7 @@ use crate::{
     error::{YouTubeError, YouTubeResult},
     types::{
         ApiErrorResponse, CaptionListResponse, ChannelListResponse, Comment,
-        CommentThreadListResponse, PlaylistItemListResponse, SearchListResponse,
-        VideoListResponse,
+        CommentThreadListResponse, PlaylistItemListResponse, SearchListResponse, VideoListResponse,
     },
 };
 
@@ -153,11 +152,7 @@ impl YouTubeClient {
     }
 
     /// Post a comment on a video (requires OAuth token, not API key).
-    pub async fn post_comment(
-        &self,
-        video_id: &str,
-        text: &str,
-    ) -> YouTubeResult<Comment> {
+    pub async fn post_comment(&self, video_id: &str, text: &str) -> YouTubeResult<Comment> {
         let url = format!(
             "{}/commentThreads?part=snippet&key={}",
             self.base_url, self.api_key
@@ -215,7 +210,8 @@ impl YouTubeClient {
                         return Ok(parsed);
                     }
 
-                    let err = parse_error_response(status, &response.text().await.unwrap_or_default());
+                    let err =
+                        parse_error_response(status, &response.text().await.unwrap_or_default());
                     if err.is_retryable() && attempt < self.max_retries {
                         warn!(attempt, status = %status, "retryable error");
                         last_err = Some(err);
@@ -456,9 +452,15 @@ mod tests {
             .unwrap()
             .with_base_url(&mock_server.uri());
 
-        let result = client.get_channel("UCuAXFkgsw1L7xaCfnd5JJOw").await.unwrap();
+        let result = client
+            .get_channel("UCuAXFkgsw1L7xaCfnd5JJOw")
+            .await
+            .unwrap();
         assert_eq!(result.items.len(), 1);
-        assert_eq!(result.items[0].snippet.as_ref().unwrap().title, "Rick Astley");
+        assert_eq!(
+            result.items[0].snippet.as_ref().unwrap().title,
+            "Rick Astley"
+        );
     }
 
     #[fcp_async_core::runtime::test]
@@ -503,7 +505,10 @@ mod tests {
             .unwrap()
             .with_base_url(&mock_server.uri());
 
-        let result = client.list_playlist_items("PLtest", Some(5), None).await.unwrap();
+        let result = client
+            .list_playlist_items("PLtest", Some(5), None)
+            .await
+            .unwrap();
         assert_eq!(result.items.len(), 2);
     }
 
@@ -577,7 +582,12 @@ mod tests {
         let result = client.get_captions("dQw4w9WgXcQ").await.unwrap();
         assert_eq!(result.items.len(), 1);
         assert_eq!(
-            result.items[0].snippet.as_ref().unwrap().language.as_deref(),
+            result.items[0]
+                .snippet
+                .as_ref()
+                .unwrap()
+                .language
+                .as_deref(),
             Some("en")
         );
     }

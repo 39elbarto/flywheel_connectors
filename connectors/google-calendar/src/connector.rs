@@ -59,10 +59,9 @@ impl GoogleCalendarConnector {
 
         let base_url = params.get("base_url").and_then(|v| v.as_str());
 
-        let mut client =
-            GoogleCalendarClient::new(token).map_err(|e| FcpError::Internal {
-                message: format!("Failed to create HTTP client: {e}"),
-            })?;
+        let mut client = GoogleCalendarClient::new(token).map_err(|e| FcpError::Internal {
+            message: format!("Failed to create HTTP client: {e}"),
+        })?;
 
         if let Some(url) = base_url {
             client = client.with_base_url(url);
@@ -517,10 +516,7 @@ impl GoogleCalendarConnector {
         }))
     }
 
-    async fn invoke_create_event(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_create_event(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let calendar_id = require_str(&input, "calendar_id")?;
         let summary = require_str(&input, "summary")?;
@@ -573,10 +569,7 @@ impl GoogleCalendarConnector {
         Ok(json!({ "event": created }))
     }
 
-    async fn invoke_update_event(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_update_event(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let calendar_id = require_str(&input, "calendar_id")?;
         let event_id = require_str(&input, "event_id")?;
@@ -594,20 +587,22 @@ impl GoogleCalendarConnector {
             .and_then(|v| v.as_str())
             .map(String::from);
 
-        let start = input.get("start").and_then(|v| v.as_str()).map(|s| {
-            EventDateTime {
+        let start = input
+            .get("start")
+            .and_then(|v| v.as_str())
+            .map(|s| EventDateTime {
                 date_time: Some(s.to_string()),
                 date: None,
                 time_zone: None,
-            }
-        });
-        let end = input.get("end").and_then(|v| v.as_str()).map(|s| {
-            EventDateTime {
+            });
+        let end = input
+            .get("end")
+            .and_then(|v| v.as_str())
+            .map(|s| EventDateTime {
                 date_time: Some(s.to_string()),
                 date: None,
                 time_zone: None,
-            }
-        });
+            });
 
         let attendees: Vec<Attendee> = input
             .get("attendees")
@@ -638,10 +633,7 @@ impl GoogleCalendarConnector {
         Ok(json!({ "event": updated }))
     }
 
-    async fn invoke_delete_event(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_delete_event(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let calendar_id = require_str(&input, "calendar_id")?;
         let event_id = require_str(&input, "event_id")?;

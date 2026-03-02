@@ -442,7 +442,10 @@ impl YouTubeConnector {
     async fn invoke_search(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let query = require_str(&input, "query")?;
-        let max_results = input.get("max_results").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let max_results = input
+            .get("max_results")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
         let result_type = input.get("type").and_then(|v| v.as_str());
 
         let results = client
@@ -470,9 +473,13 @@ impl YouTubeConnector {
             .await
             .map_err(|e: YouTubeError| e.to_fcp_error())?;
 
-        let video = results.items.into_iter().next().ok_or(FcpError::ResourceNotFound {
-            resource: format!("video:{video_id}"),
-        })?;
+        let video = results
+            .items
+            .into_iter()
+            .next()
+            .ok_or(FcpError::ResourceNotFound {
+                resource: format!("video:{video_id}"),
+            })?;
 
         Ok(json!({ "video": video }))
     }
@@ -486,9 +493,13 @@ impl YouTubeConnector {
             .await
             .map_err(|e: YouTubeError| e.to_fcp_error())?;
 
-        let channel = results.items.into_iter().next().ok_or(FcpError::ResourceNotFound {
-            resource: format!("channel:{channel_id}"),
-        })?;
+        let channel = results
+            .items
+            .into_iter()
+            .next()
+            .ok_or(FcpError::ResourceNotFound {
+                resource: format!("channel:{channel_id}"),
+            })?;
 
         Ok(json!({ "channel": channel }))
     }
@@ -499,7 +510,10 @@ impl YouTubeConnector {
     ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let playlist_id = require_str(&input, "playlist_id")?;
-        let max_results = input.get("max_results").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let max_results = input
+            .get("max_results")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
         let page_token = input.get("page_token").and_then(|v| v.as_str());
 
         let results = client
@@ -513,13 +527,13 @@ impl YouTubeConnector {
         }))
     }
 
-    async fn invoke_list_comments(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_list_comments(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let video_id = require_str(&input, "video_id")?;
-        let max_results = input.get("max_results").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let max_results = input
+            .get("max_results")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
 
         let results = client
             .list_comments(video_id, max_results)
@@ -529,10 +543,7 @@ impl YouTubeConnector {
         Ok(json!({ "items": results.items }))
     }
 
-    async fn invoke_post_comment(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_post_comment(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let video_id = require_str(&input, "video_id")?;
         let text = require_str(&input, "text")?;
@@ -545,10 +556,7 @@ impl YouTubeConnector {
         Ok(json!({ "comment": comment }))
     }
 
-    async fn invoke_get_captions(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_get_captions(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let video_id = require_str(&input, "video_id")?;
 

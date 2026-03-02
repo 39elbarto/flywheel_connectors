@@ -479,10 +479,7 @@ impl GmailConnector {
 
     // ── Operation implementations ─────────────────────────────────
 
-    async fn invoke_send_message(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_send_message(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let raw = require_str(&input, "raw")?;
 
@@ -551,10 +548,7 @@ impl GmailConnector {
         Ok(json!({ "message": message }))
     }
 
-    async fn invoke_trash_message(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_trash_message(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let message_id = require_str(&input, "message_id")?;
 

@@ -206,7 +206,8 @@ impl LinearConnector {
                     SafetyTier::Risky,
                     IdempotencyClass::Strict,
                     AgentHint {
-                        when_to_use: "Update issue title, status, assignee, or other fields.".into(),
+                        when_to_use: "Update issue title, status, assignee, or other fields."
+                            .into(),
                         common_mistakes: vec![],
                         examples: vec![
                             r#"{"issue_id": "LIN-123", "state_id": "done-state-id"}"#.into(),
@@ -434,10 +435,7 @@ impl LinearConnector {
 
     // ── Operation implementations ─────────────────────────────────
 
-    async fn invoke_create_issue(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_create_issue(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let title = require_str(&input, "title")?;
         let team_id = require_str(&input, "team_id")?;
@@ -463,10 +461,7 @@ impl LinearConnector {
         Ok(json!({ "issue": issue }))
     }
 
-    async fn invoke_update_issue(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_update_issue(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let issue_id = require_str(&input, "issue_id")?;
         let title = input.get("title").and_then(|v| v.as_str());
@@ -481,10 +476,7 @@ impl LinearConnector {
         Ok(json!({ "issue": issue }))
     }
 
-    async fn invoke_search_issues(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_search_issues(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let query = require_str(&input, "query")?;
 

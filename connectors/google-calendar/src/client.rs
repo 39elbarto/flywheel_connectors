@@ -88,14 +88,10 @@ impl GoogleCalendarClient {
     /// Get a single event by ID.
     #[instrument(skip(self))]
     pub async fn get_event(&self, calendar_id: &str, event_id: &str) -> GCalResult<Event> {
-        let encoded_cal = percent_encoding::utf8_percent_encode(
-            calendar_id,
-            percent_encoding::NON_ALPHANUMERIC,
-        );
-        let encoded_evt = percent_encoding::utf8_percent_encode(
-            event_id,
-            percent_encoding::NON_ALPHANUMERIC,
-        );
+        let encoded_cal =
+            percent_encoding::utf8_percent_encode(calendar_id, percent_encoding::NON_ALPHANUMERIC);
+        let encoded_evt =
+            percent_encoding::utf8_percent_encode(event_id, percent_encoding::NON_ALPHANUMERIC);
         let url = format!(
             "{}/calendars/{encoded_cal}/events/{encoded_evt}",
             self.base_url
@@ -113,10 +109,8 @@ impl GoogleCalendarClient {
         max_results: Option<u32>,
         page_token: Option<&str>,
     ) -> GCalResult<EventsListResponse> {
-        let encoded_cal = percent_encoding::utf8_percent_encode(
-            calendar_id,
-            percent_encoding::NON_ALPHANUMERIC,
-        );
+        let encoded_cal =
+            percent_encoding::utf8_percent_encode(calendar_id, percent_encoding::NON_ALPHANUMERIC);
         let base = format!("{}/calendars/{encoded_cal}/events", self.base_url);
 
         let mut params = Vec::new();
@@ -139,10 +133,8 @@ impl GoogleCalendarClient {
     /// Create a new event in a calendar.
     #[instrument(skip(self, event))]
     pub async fn create_event(&self, calendar_id: &str, event: &Event) -> GCalResult<Event> {
-        let encoded_cal = percent_encoding::utf8_percent_encode(
-            calendar_id,
-            percent_encoding::NON_ALPHANUMERIC,
-        );
+        let encoded_cal =
+            percent_encoding::utf8_percent_encode(calendar_id, percent_encoding::NON_ALPHANUMERIC);
         let url = format!("{}/calendars/{encoded_cal}/events", self.base_url);
         let body = serde_json::to_value(event).map_err(GoogleCalendarError::Json)?;
         self.post_json(&url, &body).await
@@ -156,14 +148,10 @@ impl GoogleCalendarClient {
         event_id: &str,
         event: &Event,
     ) -> GCalResult<Event> {
-        let encoded_cal = percent_encoding::utf8_percent_encode(
-            calendar_id,
-            percent_encoding::NON_ALPHANUMERIC,
-        );
-        let encoded_evt = percent_encoding::utf8_percent_encode(
-            event_id,
-            percent_encoding::NON_ALPHANUMERIC,
-        );
+        let encoded_cal =
+            percent_encoding::utf8_percent_encode(calendar_id, percent_encoding::NON_ALPHANUMERIC);
+        let encoded_evt =
+            percent_encoding::utf8_percent_encode(event_id, percent_encoding::NON_ALPHANUMERIC);
         let url = format!(
             "{}/calendars/{encoded_cal}/events/{encoded_evt}",
             self.base_url
@@ -175,14 +163,10 @@ impl GoogleCalendarClient {
     /// Delete an event.
     #[instrument(skip(self))]
     pub async fn delete_event(&self, calendar_id: &str, event_id: &str) -> GCalResult<()> {
-        let encoded_cal = percent_encoding::utf8_percent_encode(
-            calendar_id,
-            percent_encoding::NON_ALPHANUMERIC,
-        );
-        let encoded_evt = percent_encoding::utf8_percent_encode(
-            event_id,
-            percent_encoding::NON_ALPHANUMERIC,
-        );
+        let encoded_cal =
+            percent_encoding::utf8_percent_encode(calendar_id, percent_encoding::NON_ALPHANUMERIC);
+        let encoded_evt =
+            percent_encoding::utf8_percent_encode(event_id, percent_encoding::NON_ALPHANUMERIC);
         let url = format!(
             "{}/calendars/{encoded_cal}/events/{encoded_evt}",
             self.base_url
@@ -193,14 +177,10 @@ impl GoogleCalendarClient {
     /// Quick-add an event using natural language.
     #[instrument(skip(self))]
     pub async fn quick_add(&self, calendar_id: &str, text: &str) -> GCalResult<Event> {
-        let encoded_cal = percent_encoding::utf8_percent_encode(
-            calendar_id,
-            percent_encoding::NON_ALPHANUMERIC,
-        );
-        let encoded_text = percent_encoding::utf8_percent_encode(
-            text,
-            percent_encoding::NON_ALPHANUMERIC,
-        );
+        let encoded_cal =
+            percent_encoding::utf8_percent_encode(calendar_id, percent_encoding::NON_ALPHANUMERIC);
+        let encoded_text =
+            percent_encoding::utf8_percent_encode(text, percent_encoding::NON_ALPHANUMERIC);
         let url = format!(
             "{}/calendars/{encoded_cal}/events/quickAdd?text={encoded_text}",
             self.base_url

@@ -54,10 +54,7 @@ impl AirtableError {
             Self::Api { error_type, .. } => {
                 matches!(
                     error_type.as_str(),
-                    "SERVER_ERROR"
-                        | "SERVICE_UNAVAILABLE"
-                        | "REQUEST_TIMEOUT"
-                        | "GATEWAY_TIMEOUT"
+                    "SERVER_ERROR" | "SERVICE_UNAVAILABLE" | "REQUEST_TIMEOUT" | "GATEWAY_TIMEOUT"
                 )
             }
             _ => false,
@@ -68,9 +65,7 @@ impl AirtableError {
     #[must_use]
     pub const fn retry_after(&self) -> Option<Duration> {
         match self {
-            Self::RateLimited { retry_after_secs } => {
-                Some(Duration::from_secs(*retry_after_secs))
-            }
+            Self::RateLimited { retry_after_secs } => Some(Duration::from_secs(*retry_after_secs)),
             _ => None,
         }
     }

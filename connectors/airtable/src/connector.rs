@@ -11,11 +11,7 @@ use fcp_core::{
 use serde_json::json;
 use tracing::{info, instrument};
 
-use crate::{
-    client::AirtableClient,
-    error::AirtableError,
-    types::SortSpec,
-};
+use crate::{client::AirtableClient, error::AirtableError, types::SortSpec};
 
 /// FCP Airtable Connector.
 pub struct AirtableConnector {
@@ -631,10 +627,7 @@ impl AirtableConnector {
         Ok(json!({ "tables": result.tables }))
     }
 
-    async fn invoke_list_records(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_list_records(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let base_id = require_str(&input, "base_id")?;
         let table_id = require_str(&input, "table_id")?;
@@ -657,9 +650,9 @@ impl AirtableConnector {
             .and_then(|v| v.as_u64())
             .map(|v| v as u32);
 
-        let sort: Option<Vec<SortSpec>> = input.get("sort").and_then(|v| {
-            serde_json::from_value(v.clone()).ok()
-        });
+        let sort: Option<Vec<SortSpec>> = input
+            .get("sort")
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
 
         let view = input.get("view").and_then(|v| v.as_str());
         let offset = input.get("offset").and_then(|v| v.as_str());
@@ -702,19 +695,14 @@ impl AirtableConnector {
         })
     }
 
-    async fn invoke_create_record(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_create_record(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let base_id = require_str(&input, "base_id")?;
         let table_id = require_str(&input, "table_id")?;
-        let fields = input
-            .get("fields")
-            .ok_or(FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing required field: fields".into(),
-            })?;
+        let fields = input.get("fields").ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "Missing required field: fields".into(),
+        })?;
         let typecast = input.get("typecast").and_then(|v| v.as_bool());
 
         let record = client
@@ -734,13 +722,14 @@ impl AirtableConnector {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let base_id = require_str(&input, "base_id")?;
         let table_id = require_str(&input, "table_id")?;
-        let records = input
-            .get("records")
-            .and_then(|v| v.as_array())
-            .ok_or(FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing required field: records (must be an array)".into(),
-            })?;
+        let records =
+            input
+                .get("records")
+                .and_then(|v| v.as_array())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing required field: records (must be an array)".into(),
+                })?;
         let typecast = input.get("typecast").and_then(|v| v.as_bool());
 
         let result = client
@@ -751,20 +740,15 @@ impl AirtableConnector {
         Ok(json!({ "records": result.records }))
     }
 
-    async fn invoke_update_record(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_update_record(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let base_id = require_str(&input, "base_id")?;
         let table_id = require_str(&input, "table_id")?;
         let record_id = require_str(&input, "record_id")?;
-        let fields = input
-            .get("fields")
-            .ok_or(FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing required field: fields".into(),
-            })?;
+        let fields = input.get("fields").ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "Missing required field: fields".into(),
+        })?;
         let typecast = input.get("typecast").and_then(|v| v.as_bool());
 
         let record = client
@@ -785,12 +769,10 @@ impl AirtableConnector {
         let base_id = require_str(&input, "base_id")?;
         let table_id = require_str(&input, "table_id")?;
         let record_id = require_str(&input, "record_id")?;
-        let fields = input
-            .get("fields")
-            .ok_or(FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing required field: fields".into(),
-            })?;
+        let fields = input.get("fields").ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "Missing required field: fields".into(),
+        })?;
 
         let record = client
             .replace_record(base_id, table_id, record_id, fields)
@@ -802,10 +784,7 @@ impl AirtableConnector {
         })
     }
 
-    async fn invoke_delete_record(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_delete_record(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let base_id = require_str(&input, "base_id")?;
         let table_id = require_str(&input, "table_id")?;

@@ -7,7 +7,9 @@ use tracing::{debug, warn};
 
 use crate::{
     error::{StripeError, StripeResult},
-    types::{ApiErrorResponse, Balance, Customer, ListResponse, PaymentIntent, Refund, Subscription},
+    types::{
+        ApiErrorResponse, Balance, Customer, ListResponse, PaymentIntent, Refund, Subscription,
+    },
 };
 
 const DEFAULT_API_URL: &str = "https://api.stripe.com/v1";
@@ -58,11 +60,7 @@ impl StripeClient {
     // ── Customer operations ───────────────────────────────────────
 
     /// Create a customer.
-    pub async fn create_customer(
-        &self,
-        email: &str,
-        name: Option<&str>,
-    ) -> StripeResult<Customer> {
+    pub async fn create_customer(&self, email: &str, name: Option<&str>) -> StripeResult<Customer> {
         let url = format!("{}/customers", self.api_url);
         let mut body = serde_json::json!({ "email": email });
         if let Some(n) = name {
@@ -122,10 +120,7 @@ impl StripeClient {
     }
 
     /// Get a payment intent by ID.
-    pub async fn get_payment_intent(
-        &self,
-        payment_intent_id: &str,
-    ) -> StripeResult<PaymentIntent> {
+    pub async fn get_payment_intent(&self, payment_intent_id: &str) -> StripeResult<PaymentIntent> {
         let url = format!("{}/payment_intents/{payment_intent_id}", self.api_url);
         let data = self.get(&url).await?;
         Ok(serde_json::from_value(data)?)
@@ -166,10 +161,7 @@ impl StripeClient {
     }
 
     /// Cancel a subscription.
-    pub async fn cancel_subscription(
-        &self,
-        subscription_id: &str,
-    ) -> StripeResult<Subscription> {
+    pub async fn cancel_subscription(&self, subscription_id: &str) -> StripeResult<Subscription> {
         let url = format!("{}/subscriptions/{subscription_id}", self.api_url);
         let data = self.delete(&url).await?;
         Ok(serde_json::from_value(data)?)
@@ -289,8 +281,7 @@ impl StripeClient {
 
                     if !status.is_success() {
                         let body = response.text().await.unwrap_or_default();
-                        let api_err: Option<ApiErrorResponse> =
-                            serde_json::from_str(&body).ok();
+                        let api_err: Option<ApiErrorResponse> = serde_json::from_str(&body).ok();
                         let (message, error_type) = api_err
                             .as_ref()
                             .and_then(|e| e.error.as_ref())

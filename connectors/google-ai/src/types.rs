@@ -15,9 +15,7 @@ pub struct Content {
 #[serde(untagged)]
 pub enum Part {
     /// Text content.
-    Text {
-        text: String,
-    },
+    Text { text: String },
     /// Function call from the model.
     FunctionCall {
         #[serde(rename = "functionCall")]

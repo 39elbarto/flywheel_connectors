@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:b161c8785ffd21bf97921ca36be3c0b5fdb32d19cac1efd12a27d4fdaf377a0e"
+interface_hash = "blake3-256:fcp.interface.v2:db5c33dffc2f762d82bfadcc2272cb1b6ff26543e40f93c738331b084df7b1df"
 
 [connector]
 id = "fcp.pinecone"
@@ -48,6 +48,85 @@ forbidden = [
     "network.listen",
     "media.upload",
     "media.download",
+]
+
+[provides.operations."pinecone.create_index"]
+description = "Create a new index"
+capability = "pinecone.indexes.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "best_effort"
+
+[provides.operations."pinecone.create_index".input_schema]
+required = [
+    "name",
+    "dimension",
+]
+type = "object"
+
+[provides.operations."pinecone.create_index".input_schema.properties.dimension]
+type = "integer"
+
+[provides.operations."pinecone.create_index".input_schema.properties.metric]
+default = "cosine"
+type = "string"
+
+[provides.operations."pinecone.create_index".input_schema.properties.name]
+type = "string"
+
+[provides.operations."pinecone.create_index".input_schema.properties.spec]
+description = "Index spec (serverless or pod configuration)"
+type = "object"
+
+[provides.operations."pinecone.create_index".output_schema]
+required = [
+    "name",
+    "dimension",
+    "metric",
+]
+type = "object"
+
+[provides.operations."pinecone.create_index".output_schema.properties.dimension]
+type = "integer"
+
+[provides.operations."pinecone.create_index".output_schema.properties.host]
+type = "string"
+
+[provides.operations."pinecone.create_index".output_schema.properties.metric]
+type = "string"
+
+[provides.operations."pinecone.create_index".output_schema.properties.name]
+type = "string"
+
+[provides.operations."pinecone.create_index".output_schema.properties.status]
+type = "object"
+
+[provides.operations."pinecone.create_index".network_constraints]
+host_allow = ["*.pinecone.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 1048576
+
+[provides.operations."pinecone.create_index".ai_hints]
+when_to_use = "Create a new Pinecone index. Choose dimension and metric carefully."
+common_mistakes = ["Wrong dimension for your embedding model."]
+examples = ['{"name": "my-index", "dimension": 1536, "metric": "cosine", "spec": {"serverless": {"cloud": "aws", "region": "us-east-1"}}}']
+related = [
+    "pinecone.list_indexes",
+    "pinecone.delete_index",
 ]
 
 [provides.operations."pinecone.delete"]
@@ -104,6 +183,61 @@ when_to_use = "Delete vectors by ID, metadata filter, or clear an entire namespa
 common_mistakes = ["Setting delete_all=true without specifying namespace — deletes everything."]
 examples = ['{"index_name": "my-index", "ids": ["vec-1", "vec-2"]}']
 related = ["pinecone.upsert"]
+
+[provides.operations."pinecone.delete_index"]
+description = "Delete an index and all its data"
+capability = "pinecone.indexes.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."pinecone.delete_index".input_schema]
+required = ["index_name"]
+type = "object"
+
+[provides.operations."pinecone.delete_index".input_schema.properties.index_name]
+type = "string"
+
+[provides.operations."pinecone.delete_index".output_schema]
+required = [
+    "deleted",
+    "index_name",
+]
+type = "object"
+
+[provides.operations."pinecone.delete_index".output_schema.properties.deleted]
+type = "boolean"
+
+[provides.operations."pinecone.delete_index".output_schema.properties.index_name]
+type = "string"
+
+[provides.operations."pinecone.delete_index".network_constraints]
+host_allow = ["*.pinecone.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."pinecone.delete_index".ai_hints]
+when_to_use = "Delete a Pinecone index. This is irreversible and deletes all data."
+common_mistakes = ["Deleting production indexes without backup."]
+examples = ['{"index_name": "my-index"}']
+related = [
+    "pinecone.create_index",
+    "pinecone.list_indexes",
+]
 
 [provides.operations."pinecone.describe_index"]
 description = "Get index configuration and statistics"
@@ -495,6 +629,13 @@ burst = 10
 scope = "instance"
 
 [[rate_limits.pools]]
+id = "pinecone.indexes.write"
+requests = 10
+window_ms = 60000
+burst = 3
+scope = "instance"
+
+[[rate_limits.pools]]
 id = "pinecone.vectors.read"
 requests = 300
 window_ms = 60000
@@ -509,10 +650,12 @@ burst = 20
 scope = "instance"
 
 [rate_limits.operation_pools]
-"pinecone.describe_index_stats" = ["pinecone.indexes.read"]
-"pinecone.list_indexes" = ["pinecone.indexes.read"]
-"pinecone.delete" = ["pinecone.vectors.write"]
+"pinecone.delete_index" = ["pinecone.indexes.write"]
+"pinecone.create_index" = ["pinecone.indexes.write"]
 "pinecone.query" = ["pinecone.vectors.read"]
-"pinecone.fetch" = ["pinecone.vectors.read"]
-"pinecone.upsert" = ["pinecone.vectors.write"]
+"pinecone.list_indexes" = ["pinecone.indexes.read"]
 "pinecone.describe_index" = ["pinecone.indexes.read"]
+"pinecone.fetch" = ["pinecone.vectors.read"]
+"pinecone.delete" = ["pinecone.vectors.write"]
+"pinecone.describe_index_stats" = ["pinecone.indexes.read"]
+"pinecone.upsert" = ["pinecone.vectors.write"]

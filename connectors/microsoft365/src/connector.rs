@@ -1,6 +1,6 @@
 //! FCP Microsoft 365 Connector implementation.
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, fmt::Write as _, sync::Arc};
 
 use base64::{
     Engine,
@@ -8,11 +8,11 @@ use base64::{
 };
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
-    ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest,
-    HandshakeResponse, IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel,
-    SafetyTier, SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
+    ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
+    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
 
@@ -177,6 +177,16 @@ struct OAuthTokenResponse {
     access_token: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct ThreadSummary {
+    thread_id: String,
+    message_count: u64,
+    unread_count: u64,
+    latest_received_datetime: Option<String>,
+    last_message_id: Option<String>,
+    subject_preview: Option<String>,
+}
+
 /// FCP Microsoft 365 Connector.
 pub struct M365Connector {
     base: Arc<BaseConnector>,
@@ -240,10 +250,14 @@ impl M365Connector {
         let credential_id = parse_credential_id(&params)?;
         let app_credentials = parse_app_credentials(&params)?;
 
-        let selected = [access_token.is_some(), credential_id.is_some(), app_credentials.is_some()]
-            .into_iter()
-            .filter(|selected_mode| *selected_mode)
-            .count();
+        let selected = [
+            access_token.is_some(),
+            credential_id.is_some(),
+            app_credentials.is_some(),
+        ]
+        .into_iter()
+        .filter(|selected_mode| *selected_mode)
+        .count();
 
         if selected != 1 {
             return Err(FcpError::InvalidRequest {
@@ -262,7 +276,7 @@ impl M365Connector {
             )
         } else if let Some(credential_id) = credential_id {
             (
-                M365AuthMode::CredentialId(credential_id.clone()),
+                M365AuthMode::CredentialId(credential_id),
                 M365Auth::CredentialId(credential_id),
                 None,
             )
@@ -367,8 +381,7 @@ impl M365Connector {
         let auth_mode = self
             .config
             .as_ref()
-            .map(|c| c.auth_mode.label())
-            .unwrap_or("unconfigured");
+            .map_or("unconfigured", |c| c.auth_mode.label());
         let permissions = self
             .config
             .as_ref()
@@ -522,9 +535,15 @@ impl M365Connector {
         match operation {
             // ── Mail ─────────────────────────────────────────
             "m365.mail.list_messages" => self.invoke_list_messages(input).await,
+            "m365.mail.search_messages" => self.invoke_search_messages(input).await,
+            "m365.mail.list_threads" => self.invoke_list_threads(input).await,
             "m365.mail.get_message" => self.invoke_get_message(input).await,
             "m365.mail.send_message" => self.invoke_send_message(input).await,
             "m365.mail.create_draft" => self.invoke_create_draft(input).await,
+            "m365.mail.reply_message" => self.invoke_reply_message(input).await,
+            "m365.mail.forward_message" => self.invoke_forward_message(input).await,
+            "m365.mail.list_attachments" => self.invoke_list_attachments(input).await,
+            "m365.mail.add_attachment" => self.invoke_add_attachment(input).await,
             // ── Files ────────────────────────────────────────
             "m365.files.list_items" => self.invoke_list_items(input).await,
             "m365.files.download_file" => self.invoke_download_file(input).await,
@@ -606,6 +625,160 @@ impl M365Connector {
         Ok(json!({ "message": draft }))
     }
 
+    async fn invoke_search_messages(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let user_id = require_str(&input, "user_id")?;
+        let query = require_str(&input, "query")?;
+        let top = input.get("top").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let skip = input.get("skip").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let result = client
+            .search_messages(user_id, query, top, skip)
+            .await
+            .map_err(|e: M365Error| e.to_fcp_error())?;
+        Ok(json!({ "messages": result.value }))
+    }
+
+    async fn invoke_list_threads(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let user_id = require_str(&input, "user_id")?;
+        let folder_id = input.get("folder_id").and_then(|v| v.as_str());
+        let top = input.get("top").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let skip = input.get("skip").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let filter = input.get("filter").and_then(|v| v.as_str());
+        let result = client
+            .list_messages(user_id, folder_id, top, skip, filter)
+            .await
+            .map_err(|e: M365Error| e.to_fcp_error())?;
+
+        let source_message_count = result.value.len();
+        let mut grouped: BTreeMap<String, ThreadSummary> = BTreeMap::new();
+        for message in result.value {
+            let thread_id = message
+                .get("conversationId")
+                .and_then(|v| v.as_str())
+                .or_else(|| message.get("id").and_then(|v| v.as_str()))
+                .unwrap_or("unknown")
+                .to_string();
+
+            let entry = grouped
+                .entry(thread_id.clone())
+                .or_insert_with(|| ThreadSummary {
+                    thread_id: thread_id.clone(),
+                    message_count: 0,
+                    unread_count: 0,
+                    latest_received_datetime: None,
+                    last_message_id: None,
+                    subject_preview: message
+                        .get("subject")
+                        .and_then(|v| v.as_str())
+                        .map(ToString::to_string),
+                });
+
+            entry.message_count += 1;
+            if message.get("isRead").and_then(|v| v.as_bool()) == Some(false) {
+                entry.unread_count += 1;
+            }
+
+            if let Some(received) = message.get("receivedDateTime").and_then(|v| v.as_str()) {
+                let should_update = match entry.latest_received_datetime.as_deref() {
+                    Some(current) => received > current,
+                    None => true,
+                };
+                if should_update {
+                    entry.latest_received_datetime = Some(received.to_string());
+                    entry.last_message_id = message
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .map(ToString::to_string);
+                }
+            }
+        }
+
+        let threads: Vec<ThreadSummary> = grouped.into_values().collect();
+        Ok(json!({
+            "threads": threads,
+            "source_message_count": source_message_count
+        }))
+    }
+
+    async fn invoke_reply_message(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let user_id = require_str(&input, "user_id")?;
+        let message_id = require_str(&input, "message_id")?;
+        let comment = input.get("comment").and_then(|v| v.as_str());
+        let message = input.get("message");
+        if comment.is_none() && message.is_none() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Provide at least one of: comment, message".into(),
+            });
+        }
+        client
+            .reply_message(user_id, message_id, comment, message)
+            .await
+            .map_err(|e: M365Error| e.to_fcp_error())?;
+        Ok(json!({ "status": "replied" }))
+    }
+
+    async fn invoke_forward_message(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let user_id = require_str(&input, "user_id")?;
+        let message_id = require_str(&input, "message_id")?;
+        let comment = input.get("comment").and_then(|v| v.as_str());
+        let to_recipients = input
+            .get("to_recipients")
+            .and_then(|v| v.as_array())
+            .ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing required field: to_recipients (must be an array)".into(),
+            })?;
+        client
+            .forward_message(user_id, message_id, comment, to_recipients)
+            .await
+            .map_err(|e: M365Error| e.to_fcp_error())?;
+        Ok(json!({ "status": "forwarded" }))
+    }
+
+    async fn invoke_list_attachments(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let user_id = require_str(&input, "user_id")?;
+        let message_id = require_str(&input, "message_id")?;
+        let top = input.get("top").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let skip = input.get("skip").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let result = client
+            .list_attachments(user_id, message_id, top, skip)
+            .await
+            .map_err(|e: M365Error| e.to_fcp_error())?;
+        Ok(json!({ "attachments": result.value }))
+    }
+
+    async fn invoke_add_attachment(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let user_id = require_str(&input, "user_id")?;
+        let message_id = require_str(&input, "message_id")?;
+        let attachment = input.get("attachment").ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "Missing required field: attachment".into(),
+        })?;
+        let result = client
+            .add_attachment(user_id, message_id, attachment)
+            .await
+            .map_err(|e: M365Error| e.to_fcp_error())?;
+        Ok(json!({ "attachment": result }))
+    }
+
     // ── Files operation implementations ──────────────────────────
 
     async fn invoke_list_items(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
@@ -619,10 +792,7 @@ impl M365Connector {
         Ok(json!({ "items": result.value }))
     }
 
-    async fn invoke_download_file(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_download_file(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let user_id = require_str(&input, "user_id")?;
         let item_id = require_str(&input, "item_id")?;
@@ -642,10 +812,12 @@ impl M365Connector {
         let user_id = require_str(&input, "user_id")?;
         let path = require_str(&input, "path")?;
         let content_b64 = require_str(&input, "content")?;
-        let content = BASE64.decode(content_b64).map_err(|e| FcpError::InvalidRequest {
-            code: 1003,
-            message: format!("Invalid base64 content: {e}"),
-        })?;
+        let content = BASE64
+            .decode(content_b64)
+            .map_err(|e| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid base64 content: {e}"),
+            })?;
         let item = client
             .upload_file(user_id, path, &content)
             .await
@@ -880,7 +1052,10 @@ impl M365Connector {
     }
 
     /// Handle shutdown.
-    pub async fn handle_shutdown(&self, _params: serde_json::Value) -> FcpResult<serde_json::Value> {
+    pub async fn handle_shutdown(
+        &self,
+        _params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         info!("Microsoft 365 connector shutting down");
         Ok(json!({ "status": "shutdown" }))
     }
@@ -1021,7 +1196,7 @@ fn validate_endpoint(
         });
     }
 
-    if parsed.host().is_some_and(|value| value.is_ipv4() || value.is_ipv6()) && !allow_test_endpoints {
+    if host.parse::<std::net::IpAddr>().is_ok() && !allow_test_endpoints {
         return Err(FcpError::InvalidRequest {
             code: 1003,
             message: format!("{field_name} must not use an IP literal"),
@@ -1029,8 +1204,10 @@ fn validate_endpoint(
     }
 
     let host_lower = host.to_ascii_lowercase();
-    let allowed = allowed_hosts.iter().any(|allowed_host| host_lower == *allowed_host);
-    if !allowed && !(allow_test_endpoints && is_local_test_host(&host_lower)) {
+    let allowed = allowed_hosts
+        .iter()
+        .any(|allowed_host| host_lower == *allowed_host);
+    if !(allowed || (allow_test_endpoints && is_local_test_host(&host_lower))) {
         return Err(FcpError::InvalidRequest {
             code: 1003,
             message: format!(
@@ -1056,18 +1233,24 @@ async fn exchange_client_credentials(
         config.tenant_id
     );
 
+    let form_body = encode_form_body(&[
+        ("grant_type", "client_credentials"),
+        ("client_id", config.client_id.as_str()),
+        ("client_secret", config.client_secret.as_str()),
+        ("scope", config.scope.as_str()),
+    ]);
+
     let response = reqwest::Client::builder()
         .build()
         .map_err(|e| FcpError::Internal {
             message: format!("Failed to build OAuth HTTP client: {e}"),
         })?
         .post(&token_endpoint)
-        .form(&[
-            ("grant_type", "client_credentials"),
-            ("client_id", config.client_id.as_str()),
-            ("client_secret", config.client_secret.as_str()),
-            ("scope", config.scope.as_str()),
-        ])
+        .header(
+            reqwest::header::CONTENT_TYPE,
+            "application/x-www-form-urlencoded",
+        )
+        .body(form_body)
         .send()
         .await
         .map_err(|e| FcpError::External {
@@ -1110,6 +1293,35 @@ async fn exchange_client_credentials(
     }
 
     Ok(payload.access_token)
+}
+
+fn encode_form_body(params: &[(&str, &str)]) -> String {
+    let mut body = String::new();
+    for (index, (key, value)) in params.iter().enumerate() {
+        if index > 0 {
+            body.push('&');
+        }
+
+        append_form_component(&mut body, key);
+        body.push('=');
+        append_form_component(&mut body, value);
+    }
+
+    body
+}
+
+fn append_form_component(target: &mut String, value: &str) {
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                target.push(byte as char);
+            }
+            b' ' => target.push('+'),
+            _ => {
+                let _ = write!(target, "%{byte:02X}");
+            }
+        }
+    }
 }
 
 impl Default for M365Connector {
@@ -1266,6 +1478,210 @@ fn build_operations() -> Vec<OperationInfo> {
                 common_mistakes: vec![],
                 examples: vec![r#"{"user_id": "me", "message": {"subject": "Draft", "body": {"contentType": "Text", "content": "Review before sending"}}}"#.into()],
                 related: vec![CapabilityId::from_static("m365.mail.send_message")],
+            },
+        ),
+        op_info(
+            "m365.mail.search_messages",
+            "Search email messages using Graph full-text query",
+            json!({
+                "type": "object",
+                "required": ["user_id", "query"],
+                "properties": {
+                    "user_id": { "type": "string" },
+                    "query": { "type": "string" },
+                    "top": { "type": "integer", "minimum": 1, "maximum": 1000 },
+                    "skip": { "type": "integer" }
+                }
+            }),
+            json!({ "type": "object", "properties": { "messages": { "type": "array" } } }),
+            "m365.mail.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Find messages by content/subject/sender using Graph search semantics."
+                    .into(),
+                common_mistakes: vec![
+                    "Passing empty search queries that match everything.".into(),
+                    "Ignoring pagination and truncating results.".into(),
+                ],
+                examples: vec![r#"{"user_id":"me","query":"incident report","top":25}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("m365.mail.list_messages"),
+                    CapabilityId::from_static("m365.mail.get_message"),
+                ],
+            },
+        ),
+        op_info(
+            "m365.mail.list_threads",
+            "List mailbox conversation threads grouped by conversation ID",
+            json!({
+                "type": "object",
+                "required": ["user_id"],
+                "properties": {
+                    "user_id": { "type": "string" },
+                    "folder_id": { "type": "string" },
+                    "top": { "type": "integer", "minimum": 1, "maximum": 1000 },
+                    "skip": { "type": "integer" },
+                    "filter": { "type": "string" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "properties": {
+                    "threads": { "type": "array" },
+                    "source_message_count": { "type": "integer" }
+                }
+            }),
+            "m365.mail.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use:
+                    "Summarize mailbox conversations before drilling into individual messages."
+                        .into(),
+                common_mistakes: vec![
+                    "Assuming conversation ordering is stable without checking timestamps.".into(),
+                ],
+                examples: vec![r#"{"user_id":"me","folder_id":"inbox","top":100}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("m365.mail.list_messages"),
+                    CapabilityId::from_static("m365.mail.get_message"),
+                ],
+            },
+        ),
+        op_info(
+            "m365.mail.reply_message",
+            "Reply to an existing message",
+            json!({
+                "type": "object",
+                "required": ["user_id", "message_id"],
+                "properties": {
+                    "user_id": { "type": "string" },
+                    "message_id": { "type": "string" },
+                    "comment": { "type": "string" },
+                    "message": { "type": "object" }
+                },
+                "anyOf": [
+                    { "required": ["comment"] },
+                    { "required": ["message"] }
+                ]
+            }),
+            json!({ "type": "object", "properties": { "status": { "type": "string" } } }),
+            "m365.mail.send",
+            RiskLevel::High,
+            SafetyTier::Dangerous,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Reply to a specific email thread.".into(),
+                common_mistakes: vec![
+                    "Replying without confirming recipients and quoted content.".into(),
+                ],
+                examples: vec![
+                    r#"{"user_id":"me","message_id":"AAMkAG...","comment":"Thanks, will do."}"#
+                        .into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("m365.mail.get_message"),
+                    CapabilityId::from_static("m365.mail.forward_message"),
+                ],
+            },
+        ),
+        op_info(
+            "m365.mail.forward_message",
+            "Forward an existing message to new recipients",
+            json!({
+                "type": "object",
+                "required": ["user_id", "message_id", "to_recipients"],
+                "properties": {
+                    "user_id": { "type": "string" },
+                    "message_id": { "type": "string" },
+                    "comment": { "type": "string" },
+                    "to_recipients": { "type": "array" }
+                }
+            }),
+            json!({ "type": "object", "properties": { "status": { "type": "string" } } }),
+            "m365.mail.send",
+            RiskLevel::High,
+            SafetyTier::Dangerous,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Forward a message while preserving original context.".into(),
+                common_mistakes: vec![
+                    "Forwarding sensitive content without redaction review.".into(),
+                    "Omitting recipients in to_recipients.".into(),
+                ],
+                examples: vec![
+                    r#"{"user_id":"me","message_id":"AAMkAG...","to_recipients":[{"emailAddress":{"address":"ops@contoso.com"}}]}"#
+                        .into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("m365.mail.get_message"),
+                    CapabilityId::from_static("m365.mail.reply_message"),
+                ],
+            },
+        ),
+        op_info(
+            "m365.mail.list_attachments",
+            "List attachments for a message",
+            json!({
+                "type": "object",
+                "required": ["user_id", "message_id"],
+                "properties": {
+                    "user_id": { "type": "string" },
+                    "message_id": { "type": "string" },
+                    "top": { "type": "integer", "minimum": 1, "maximum": 1000 },
+                    "skip": { "type": "integer" }
+                }
+            }),
+            json!({ "type": "object", "properties": { "attachments": { "type": "array" } } }),
+            "m365.mail.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Inspect message attachments before download or forwarding.".into(),
+                common_mistakes: vec![
+                    "Assuming attachment list is complete without pagination.".into(),
+                ],
+                examples: vec![r#"{"user_id":"me","message_id":"AAMkAG..."}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("m365.mail.get_message"),
+                    CapabilityId::from_static("m365.mail.add_attachment"),
+                ],
+            },
+        ),
+        op_info(
+            "m365.mail.add_attachment",
+            "Attach a file/item to an existing message or draft",
+            json!({
+                "type": "object",
+                "required": ["user_id", "message_id", "attachment"],
+                "properties": {
+                    "user_id": { "type": "string" },
+                    "message_id": { "type": "string" },
+                    "attachment": { "type": "object" }
+                }
+            }),
+            json!({ "type": "object", "properties": { "attachment": { "type": "object" } } }),
+            "m365.mail.write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Add a prepared attachment to a draft before sending.".into(),
+                common_mistakes: vec![
+                    "Passing non-Graph attachment payloads without @odata.type.".into(),
+                ],
+                examples: vec![
+                    r##"{"user_id":"me","message_id":"AAMkAG...","attachment":{"@odata.type":"#microsoft.graph.fileAttachment","name":"report.pdf","contentBytes":"dGVzdA=="}}"##
+                        .into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("m365.mail.list_attachments"),
+                    CapabilityId::from_static("m365.mail.send_message"),
+                ],
             },
         ),
         // ── Files operations ─────────────────────────────────────
@@ -1844,10 +2260,64 @@ mod tests {
             .unwrap();
         let result = connector.handle_self_check().await.unwrap();
         assert_eq!(result["status"], "degraded");
-        assert_eq!(
-            result["reason_code"],
-            "credential_injection_required"
+        assert_eq!(result["reason_code"], "credential_injection_required");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_list_threads_groups_conversations() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/users/me/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [
+                    {
+                        "id": "msg-1",
+                        "conversationId": "conv-1",
+                        "subject": "Incident update",
+                        "isRead": false,
+                        "receivedDateTime": "2026-03-01T10:00:00Z"
+                    },
+                    {
+                        "id": "msg-2",
+                        "conversationId": "conv-1",
+                        "subject": "Incident update",
+                        "isRead": true,
+                        "receivedDateTime": "2026-03-01T11:00:00Z"
+                    },
+                    {
+                        "id": "msg-3",
+                        "conversationId": "conv-2",
+                        "subject": "Weekly report",
+                        "isRead": true,
+                        "receivedDateTime": "2026-03-01T09:00:00Z"
+                    }
+                ]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let mut connector = M365Connector::new();
+        connector.client = Some(
+            M365Client::new("test_token")
+                .unwrap()
+                .with_api_url(&mock_server.uri()),
         );
+
+        let result = connector
+            .invoke_list_threads(json!({ "user_id": "me" }))
+            .await
+            .unwrap();
+        assert_eq!(result["source_message_count"], 3);
+        let threads = result["threads"].as_array().unwrap();
+        assert_eq!(threads.len(), 2);
+        let conv_1 = threads
+            .iter()
+            .find(|value| value["thread_id"] == "conv-1")
+            .unwrap();
+        assert_eq!(conv_1["message_count"], 2);
+        assert_eq!(conv_1["unread_count"], 1);
+        assert_eq!(conv_1["last_message_id"], "msg-2");
     }
 
     #[fcp_async_core::runtime::test]
@@ -1924,11 +2394,17 @@ mod tests {
         let ops = result["operations"].as_array().unwrap();
         let op_ids: Vec<&str> = ops.iter().map(|o| o["id"].as_str().unwrap()).collect();
 
-        // Mail (4)
+        // Mail (10)
         assert!(op_ids.contains(&"m365.mail.list_messages"));
+        assert!(op_ids.contains(&"m365.mail.search_messages"));
+        assert!(op_ids.contains(&"m365.mail.list_threads"));
         assert!(op_ids.contains(&"m365.mail.get_message"));
         assert!(op_ids.contains(&"m365.mail.send_message"));
         assert!(op_ids.contains(&"m365.mail.create_draft"));
+        assert!(op_ids.contains(&"m365.mail.reply_message"));
+        assert!(op_ids.contains(&"m365.mail.forward_message"));
+        assert!(op_ids.contains(&"m365.mail.list_attachments"));
+        assert!(op_ids.contains(&"m365.mail.add_attachment"));
         // Files (4)
         assert!(op_ids.contains(&"m365.files.list_items"));
         assert!(op_ids.contains(&"m365.files.download_file"));
@@ -1950,7 +2426,7 @@ mod tests {
         // Delta (1)
         assert!(op_ids.contains(&"m365.delta.sync"));
 
-        assert_eq!(ops.len(), 19);
+        assert_eq!(ops.len(), 25);
     }
 
     #[test]
@@ -1963,11 +2439,15 @@ mod tests {
 
         let raw = std::fs::read_to_string(&manifest_path).expect("read manifest");
         let manifest = ConnectorManifest::parse_str(&raw).expect("manifest should validate");
-        let computed = manifest.compute_interface_hash().expect("compute interface hash");
+        let computed = manifest
+            .compute_interface_hash()
+            .expect("compute interface hash");
         assert_eq!(manifest.manifest.interface_hash, computed);
 
         let manifest2 = ConnectorManifest::parse_str_unchecked(&raw).expect("parse unchecked");
-        let computed2 = manifest2.compute_interface_hash().expect("compute interface hash");
+        let computed2 = manifest2
+            .compute_interface_hash()
+            .expect("compute interface hash");
         assert_eq!(computed, computed2);
     }
 }

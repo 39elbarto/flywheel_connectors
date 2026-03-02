@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:b480f9e8abfedf5703226f15ee12a2de143ca468a3ababd2a4614ba9d3d9bdd8"
+interface_hash = "blake3-256:fcp.interface.v2:4972246c3015ec04a6e020b0f0e7c8426c3159bb4523c8121dbabdec10257332"
 
 [connector]
 id = "fcp.microsoft365"
@@ -649,6 +649,71 @@ related = [
     "m365.files.list_items",
 ]
 
+[provides.operations."m365.mail.add_attachment"]
+description = "Attach a file/item to an existing message or draft"
+capability = "m365.mail.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."m365.mail.add_attachment".input_schema]
+required = [
+    "user_id",
+    "message_id",
+    "attachment",
+]
+type = "object"
+
+[provides.operations."m365.mail.add_attachment".input_schema.properties.attachment]
+description = "Graph attachment object including @odata.type and content fields"
+type = "object"
+
+[provides.operations."m365.mail.add_attachment".input_schema.properties.message_id]
+description = "Message ID"
+type = "string"
+
+[provides.operations."m365.mail.add_attachment".input_schema.properties.user_id]
+description = "User principal name or 'me'"
+type = "string"
+
+[provides.operations."m365.mail.add_attachment".output_schema]
+required = ["attachment"]
+type = "object"
+
+[provides.operations."m365.mail.add_attachment".output_schema.properties.attachment]
+type = "object"
+
+[provides.operations."m365.mail.add_attachment".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."m365.mail.add_attachment".ai_hints]
+when_to_use = "Add an attachment to a draft before sending."
+common_mistakes = ["Passing malformed attachment payloads without @odata.type."]
+examples = ['{"user_id": "me", "message_id": "AAMkAG...", "attachment": {"@odata.type": "#microsoft.graph.fileAttachment", "name": "report.pdf", "contentBytes": "dGVzdA=="}}']
+related = [
+    "m365.mail.list_attachments",
+    "m365.mail.send_message",
+]
+
 [provides.operations."m365.mail.create_draft"]
 description = "Create a draft email message"
 capability = "m365.mail.write"
@@ -706,6 +771,78 @@ common_mistakes = []
 examples = ['{"user_id": "me", "message": {"subject": "Draft", "body": {"contentType": "Text", "content": "Review before sending"}}}']
 related = ["m365.mail.send_message"]
 
+[provides.operations."m365.mail.forward_message"]
+description = "Forward an existing message to new recipients"
+capability = "m365.mail.send"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+
+[provides.operations."m365.mail.forward_message".input_schema]
+required = [
+    "user_id",
+    "message_id",
+    "to_recipients",
+]
+type = "object"
+
+[provides.operations."m365.mail.forward_message".input_schema.properties.comment]
+description = "Optional comment added to the forwarded message"
+type = "string"
+
+[provides.operations."m365.mail.forward_message".input_schema.properties.message_id]
+description = "Message ID"
+type = "string"
+
+[provides.operations."m365.mail.forward_message".input_schema.properties.to_recipients]
+description = "Recipient array in Graph toRecipients format"
+type = "array"
+
+[provides.operations."m365.mail.forward_message".input_schema.properties.user_id]
+description = "User principal name or 'me'"
+type = "string"
+
+[provides.operations."m365.mail.forward_message".output_schema]
+required = ["status"]
+type = "object"
+
+[provides.operations."m365.mail.forward_message".output_schema.properties.status]
+type = "string"
+
+[provides.operations."m365.mail.forward_message".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."m365.mail.forward_message".ai_hints]
+when_to_use = "Forward an existing message while preserving context."
+common_mistakes = [
+    "Forwarding sensitive content without explicit redaction review.",
+    "Omitting required recipients in to_recipients.",
+]
+examples = ['{"user_id": "me", "message_id": "AAMkAG...", "to_recipients": [{"emailAddress": {"address": "ops@contoso.com"}}]}']
+related = [
+    "m365.mail.get_message",
+    "m365.mail.reply_message",
+]
+
 [provides.operations."m365.mail.get_message"]
 description = "Get a specific email message with headers and body"
 capability = "m365.mail.read"
@@ -762,6 +899,76 @@ when_to_use = "Read a specific email message by ID."
 common_mistakes = []
 examples = ['{"user_id": "me", "message_id": "AAMkAG..."}']
 related = ["m365.mail.list_messages"]
+
+[provides.operations."m365.mail.list_attachments"]
+description = "List attachments for a message"
+capability = "m365.mail.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."m365.mail.list_attachments".input_schema]
+required = [
+    "user_id",
+    "message_id",
+]
+type = "object"
+
+[provides.operations."m365.mail.list_attachments".input_schema.properties.message_id]
+description = "Message ID"
+type = "string"
+
+[provides.operations."m365.mail.list_attachments".input_schema.properties.skip]
+description = "Pagination offset"
+type = "integer"
+
+[provides.operations."m365.mail.list_attachments".input_schema.properties.top]
+description = "Page size (max 1000)"
+maximum = 1000
+minimum = 1
+type = "integer"
+
+[provides.operations."m365.mail.list_attachments".input_schema.properties.user_id]
+description = "User principal name or 'me'"
+type = "string"
+
+[provides.operations."m365.mail.list_attachments".output_schema]
+required = ["attachments"]
+type = "object"
+
+[provides.operations."m365.mail.list_attachments".output_schema.properties.attachments]
+type = "array"
+
+[provides.operations."m365.mail.list_attachments".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."m365.mail.list_attachments".ai_hints]
+when_to_use = "Inspect message attachments before download, forward, or send."
+common_mistakes = ["Assuming the first page includes all attachments."]
+examples = ['{"user_id": "me", "message_id": "AAMkAG..."}']
+related = [
+    "m365.mail.get_message",
+    "m365.mail.add_attachment",
+]
 
 [provides.operations."m365.mail.list_messages"]
 description = "List messages in a mailbox folder with optional filtering"
@@ -835,6 +1042,227 @@ examples = ['{"user_id": "me", "folder_id": "inbox", "top": 25}']
 related = [
     "m365.mail.get_message",
     "m365.mail.send_message",
+]
+
+[provides.operations."m365.mail.list_threads"]
+description = "List mailbox conversation threads grouped by conversation ID"
+capability = "m365.mail.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."m365.mail.list_threads".input_schema]
+required = ["user_id"]
+type = "object"
+
+[provides.operations."m365.mail.list_threads".input_schema.properties.filter]
+description = "OData $filter expression"
+type = "string"
+
+[provides.operations."m365.mail.list_threads".input_schema.properties.folder_id]
+description = "Mail folder ID (default: inbox)"
+type = "string"
+
+[provides.operations."m365.mail.list_threads".input_schema.properties.skip]
+description = "Pagination offset"
+type = "integer"
+
+[provides.operations."m365.mail.list_threads".input_schema.properties.top]
+description = "Page size (max 1000)"
+maximum = 1000
+minimum = 1
+type = "integer"
+
+[provides.operations."m365.mail.list_threads".input_schema.properties.user_id]
+description = "User principal name or 'me'"
+type = "string"
+
+[provides.operations."m365.mail.list_threads".output_schema]
+required = [
+    "threads",
+    "source_message_count",
+]
+type = "object"
+
+[provides.operations."m365.mail.list_threads".output_schema.properties.source_message_count]
+type = "integer"
+
+[provides.operations."m365.mail.list_threads".output_schema.properties.threads]
+type = "array"
+
+[provides.operations."m365.mail.list_threads".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."m365.mail.list_threads".ai_hints]
+when_to_use = "Summarize mailbox conversations before drilling into individual messages."
+common_mistakes = ["Assuming conversation ordering is stable without checking timestamps."]
+examples = ['{"user_id": "me", "folder_id": "inbox", "top": 100}']
+related = [
+    "m365.mail.list_messages",
+    "m365.mail.get_message",
+]
+
+[provides.operations."m365.mail.reply_message"]
+description = "Reply to an existing message"
+capability = "m365.mail.send"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+
+[provides.operations."m365.mail.reply_message".input_schema]
+required = [
+    "user_id",
+    "message_id",
+]
+type = "object"
+
+[provides.operations."m365.mail.reply_message".input_schema.properties.comment]
+description = "Optional plain-text comment to include in the reply"
+type = "string"
+
+[provides.operations."m365.mail.reply_message".input_schema.properties.message]
+description = "Optional full reply message object for advanced scenarios"
+type = "object"
+
+[provides.operations."m365.mail.reply_message".input_schema.properties.message_id]
+description = "Message ID"
+type = "string"
+
+[provides.operations."m365.mail.reply_message".input_schema.properties.user_id]
+description = "User principal name or 'me'"
+type = "string"
+
+[provides.operations."m365.mail.reply_message".output_schema]
+required = ["status"]
+type = "object"
+
+[provides.operations."m365.mail.reply_message".output_schema.properties.status]
+type = "string"
+
+[provides.operations."m365.mail.reply_message".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."m365.mail.reply_message".ai_hints]
+when_to_use = "Reply directly in an existing email thread."
+common_mistakes = [
+    "Replying without confirming recipients and quoted content.",
+    "Sending an empty reply payload (provide comment or message).",
+]
+examples = ['{"user_id": "me", "message_id": "AAMkAG...", "comment": "Thanks, will do."}']
+related = [
+    "m365.mail.get_message",
+    "m365.mail.forward_message",
+]
+
+[provides.operations."m365.mail.search_messages"]
+description = "Search messages in a mailbox using full-text Graph search"
+capability = "m365.mail.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."m365.mail.search_messages".input_schema]
+required = [
+    "user_id",
+    "query",
+]
+type = "object"
+
+[provides.operations."m365.mail.search_messages".input_schema.properties.query]
+description = "Full-text search query"
+type = "string"
+
+[provides.operations."m365.mail.search_messages".input_schema.properties.skip]
+description = "Pagination offset"
+type = "integer"
+
+[provides.operations."m365.mail.search_messages".input_schema.properties.top]
+description = "Page size (max 1000)"
+maximum = 1000
+minimum = 1
+type = "integer"
+
+[provides.operations."m365.mail.search_messages".input_schema.properties.user_id]
+description = "User principal name or 'me'"
+type = "string"
+
+[provides.operations."m365.mail.search_messages".output_schema]
+required = ["messages"]
+type = "object"
+
+[provides.operations."m365.mail.search_messages".output_schema.properties.messages]
+type = "array"
+
+[provides.operations."m365.mail.search_messages".network_constraints]
+host_allow = [
+    "graph.microsoft.com",
+    "login.microsoftonline.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."m365.mail.search_messages".ai_hints]
+when_to_use = "Find messages by content/subject/sender using Graph search semantics."
+common_mistakes = [
+    "Passing empty search queries that match everything.",
+    "Ignoring pagination and truncating results.",
+]
+examples = ['{"user_id": "me", "query": "incident report", "top": 25}']
+related = [
+    "m365.mail.list_messages",
+    "m365.mail.get_message",
 ]
 
 [provides.operations."m365.mail.send_message"]
@@ -1365,22 +1793,28 @@ burst = 50
 scope = "instance"
 
 [rate_limits.operation_pools]
-"m365.delta.sync" = ["m365.delta.read"]
-"m365.mail.get_message" = ["m365.mail.read"]
-"m365.calendar.list_events" = ["m365.calendar.read"]
-"m365.calendar.get_freebusy" = ["m365.calendar.read"]
-"m365.tasks.list_task_lists" = ["m365.tasks.read"]
+"m365.mail.search_messages" = ["m365.mail.read"]
+"m365.mail.reply_message" = ["m365.mail.send"]
 "m365.subscriptions.create" = ["m365.subscriptions.write"]
-"m365.files.download_file" = ["m365.files.read"]
-"m365.subscriptions.delete" = ["m365.subscriptions.write"]
-"m365.calendar.delete_event" = ["m365.calendar.write"]
-"m365.mail.send_message" = ["m365.mail.send"]
-"m365.calendar.create_event" = ["m365.calendar.write"]
-"m365.files.list_items" = ["m365.files.read"]
-"m365.mail.list_messages" = ["m365.mail.read"]
 "m365.files.upload_file" = ["m365.files.write"]
-"m365.tasks.create_task" = ["m365.tasks.write"]
-"m365.mail.create_draft" = ["m365.mail.write"]
-"m365.tasks.list_tasks" = ["m365.tasks.read"]
 "m365.subscriptions.renew" = ["m365.subscriptions.write"]
+"m365.mail.create_draft" = ["m365.mail.write"]
+"m365.files.list_items" = ["m365.files.read"]
+"m365.files.download_file" = ["m365.files.read"]
+"m365.tasks.create_task" = ["m365.tasks.write"]
+"m365.subscriptions.delete" = ["m365.subscriptions.write"]
+"m365.calendar.list_events" = ["m365.calendar.read"]
+"m365.calendar.delete_event" = ["m365.calendar.write"]
+"m365.mail.list_threads" = ["m365.mail.read"]
+"m365.mail.send_message" = ["m365.mail.send"]
+"m365.mail.get_message" = ["m365.mail.read"]
+"m365.tasks.list_task_lists" = ["m365.tasks.read"]
+"m365.tasks.list_tasks" = ["m365.tasks.read"]
 "m365.files.delete_item" = ["m365.files.write"]
+"m365.calendar.get_freebusy" = ["m365.calendar.read"]
+"m365.delta.sync" = ["m365.delta.read"]
+"m365.mail.forward_message" = ["m365.mail.send"]
+"m365.mail.list_messages" = ["m365.mail.read"]
+"m365.mail.add_attachment" = ["m365.mail.write"]
+"m365.calendar.create_event" = ["m365.calendar.write"]
+"m365.mail.list_attachments" = ["m365.mail.read"]

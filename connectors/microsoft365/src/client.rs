@@ -180,11 +180,7 @@ impl M365Client {
     }
 
     /// Send a mail message.
-    pub async fn send_message(
-        &self,
-        user_id: &str,
-        message: &serde_json::Value,
-    ) -> M365Result<()> {
+    pub async fn send_message(&self, user_id: &str, message: &serde_json::Value) -> M365Result<()> {
         let url = format!("{}/users/{user_id}/sendMail", self.api_url);
         let body = serde_json::json!({ "message": message });
         self.post_json_no_content(&url, &body).await
@@ -198,6 +194,133 @@ impl M365Client {
     ) -> M365Result<serde_json::Value> {
         let url = format!("{}/users/{user_id}/messages", self.api_url);
         self.post_json(&url, message).await
+    }
+
+    /// Search messages in a mailbox using Microsoft Graph `$search`.
+    pub async fn search_messages(
+        &self,
+        user_id: &str,
+        query: &str,
+        top: Option<u32>,
+        skip: Option<u32>,
+    ) -> M365Result<GraphListResponse> {
+        let base = format!("{}/users/{user_id}/messages", self.api_url);
+        let mut url = reqwest::Url::parse(&base)
+            .map_err(|e| M365Error::InvalidConfig(format!("Invalid Graph base URL: {e}")))?;
+        {
+            let mut pairs = url.query_pairs_mut();
+            pairs.append_pair("$search", &format!("\"{query}\""));
+            if let Some(t) = top {
+                pairs.append_pair("$top", &t.to_string());
+            }
+            if let Some(s) = skip {
+                pairs.append_pair("$skip", &s.to_string());
+            }
+        }
+
+        let data = self
+            .execute(|| {
+                self.apply_auth(
+                    self.http
+                        .get(url.as_str())
+                        .header("ConsistencyLevel", "eventual"),
+                )
+            })
+            .await?;
+        Ok(serde_json::from_value(data)?)
+    }
+
+    /// Reply to an existing message.
+    pub async fn reply_message(
+        &self,
+        user_id: &str,
+        message_id: &str,
+        comment: Option<&str>,
+        message: Option<&serde_json::Value>,
+    ) -> M365Result<()> {
+        let url = format!(
+            "{}/users/{user_id}/messages/{message_id}/reply",
+            self.api_url
+        );
+        let mut body = serde_json::Map::new();
+        if let Some(comment) = comment {
+            body.insert(
+                "comment".into(),
+                serde_json::Value::String(comment.to_string()),
+            );
+        }
+        if let Some(message) = message {
+            body.insert("message".into(), message.clone());
+        }
+        self.post_json_no_content(&url, &serde_json::Value::Object(body))
+            .await
+    }
+
+    /// Forward an existing message.
+    pub async fn forward_message(
+        &self,
+        user_id: &str,
+        message_id: &str,
+        comment: Option<&str>,
+        to_recipients: &[serde_json::Value],
+    ) -> M365Result<()> {
+        let url = format!(
+            "{}/users/{user_id}/messages/{message_id}/forward",
+            self.api_url
+        );
+        let mut body = serde_json::Map::new();
+        body.insert(
+            "toRecipients".into(),
+            serde_json::Value::Array(to_recipients.to_vec()),
+        );
+        if let Some(comment) = comment {
+            body.insert(
+                "comment".into(),
+                serde_json::Value::String(comment.to_string()),
+            );
+        }
+        self.post_json_no_content(&url, &serde_json::Value::Object(body))
+            .await
+    }
+
+    /// List message attachments.
+    pub async fn list_attachments(
+        &self,
+        user_id: &str,
+        message_id: &str,
+        top: Option<u32>,
+        skip: Option<u32>,
+    ) -> M365Result<GraphListResponse> {
+        let mut url = format!(
+            "{}/users/{user_id}/messages/{message_id}/attachments",
+            self.api_url
+        );
+        let mut params = Vec::new();
+        if let Some(t) = top {
+            params.push(format!("$top={t}"));
+        }
+        if let Some(s) = skip {
+            params.push(format!("$skip={s}"));
+        }
+        if !params.is_empty() {
+            url = format!("{url}?{}", params.join("&"));
+        }
+        let data = self.get(&url).await?;
+        Ok(serde_json::from_value(data)?)
+    }
+
+    /// Add an attachment to an existing message.
+    pub async fn add_attachment(
+        &self,
+        user_id: &str,
+        message_id: &str,
+        attachment: &serde_json::Value,
+    ) -> M365Result<serde_json::Value> {
+        let url = format!(
+            "{}/users/{user_id}/messages/{message_id}/attachments",
+            self.api_url
+        );
+        self.post_json(&url, attachment).await
     }
 
     // ── Files operations ─────────────────────────────────────────
@@ -322,11 +445,7 @@ impl M365Client {
     }
 
     /// List tasks in a To Do list.
-    pub async fn list_tasks(
-        &self,
-        user_id: &str,
-        list_id: &str,
-    ) -> M365Result<GraphListResponse> {
+    pub async fn list_tasks(&self, user_id: &str, list_id: &str) -> M365Result<GraphListResponse> {
         let url = format!(
             "{}/users/{user_id}/todo/lists/{list_id}/tasks",
             self.api_url
@@ -437,11 +556,7 @@ impl M365Client {
             .await
     }
 
-    async fn post_json_no_content(
-        &self,
-        url: &str,
-        body: &serde_json::Value,
-    ) -> M365Result<()> {
+    async fn post_json_no_content(&self, url: &str, body: &serde_json::Value) -> M365Result<()> {
         self.execute_no_content(|| self.apply_auth(self.http.post(url).json(body)))
             .await
     }
@@ -455,11 +570,7 @@ impl M365Client {
             .await
     }
 
-    async fn put_bytes(
-        &self,
-        url: &str,
-        content: &[u8],
-    ) -> M365Result<serde_json::Value> {
+    async fn put_bytes(&self, url: &str, content: &[u8]) -> M365Result<serde_json::Value> {
         let content = content.to_vec();
         self.execute(|| {
             self.apply_auth(
@@ -696,7 +807,7 @@ mod tests {
     use super::*;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
-        matchers::{header, method, path},
+        matchers::{header, method, path, query_param},
     };
 
     #[fcp_async_core::runtime::test]
@@ -767,6 +878,126 @@ mod tests {
         });
 
         client.send_message("me", &message).await.unwrap();
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_search_messages() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/users/me/messages"))
+            .and(query_param("$search", "\"project status\""))
+            .and(query_param("$top", "10"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [
+                    { "id": "msg_1", "subject": "Project status" }
+                ]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = M365Client::new("test_token")
+            .unwrap()
+            .with_api_url(&mock_server.uri());
+        let result = client
+            .search_messages("me", "project status", Some(10), None)
+            .await
+            .unwrap();
+        assert_eq!(result.value.len(), 1);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_reply_message() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/users/me/messages/msg_123/reply"))
+            .respond_with(ResponseTemplate::new(202))
+            .mount(&mock_server)
+            .await;
+
+        let client = M365Client::new("test_token")
+            .unwrap()
+            .with_api_url(&mock_server.uri());
+        client
+            .reply_message("me", "msg_123", Some("Thanks!"), None)
+            .await
+            .unwrap();
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_forward_message() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/users/me/messages/msg_123/forward"))
+            .respond_with(ResponseTemplate::new(202))
+            .mount(&mock_server)
+            .await;
+
+        let client = M365Client::new("test_token")
+            .unwrap()
+            .with_api_url(&mock_server.uri());
+        let recipients = vec![serde_json::json!({
+            "emailAddress": { "address": "alice@contoso.com" }
+        })];
+        client
+            .forward_message("me", "msg_123", Some("FYI"), &recipients)
+            .await
+            .unwrap();
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_list_attachments() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/users/me/messages/msg_123/attachments"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "value": [
+                    { "id": "att_1", "name": "report.pdf" }
+                ]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = M365Client::new("test_token")
+            .unwrap()
+            .with_api_url(&mock_server.uri());
+        let result = client
+            .list_attachments("me", "msg_123", None, None)
+            .await
+            .unwrap();
+        assert_eq!(result.value.len(), 1);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_add_attachment() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/users/me/messages/msg_123/attachments"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": "att_1",
+                "name": "report.pdf"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = M365Client::new("test_token")
+            .unwrap()
+            .with_api_url(&mock_server.uri());
+        let attachment = serde_json::json!({
+            "@odata.type": "#microsoft.graph.fileAttachment",
+            "name": "report.pdf",
+            "contentType": "application/pdf",
+            "contentBytes": "dGVzdA=="
+        });
+        let result = client
+            .add_attachment("me", "msg_123", &attachment)
+            .await
+            .unwrap();
+        assert_eq!(result["id"], "att_1");
     }
 
     #[fcp_async_core::runtime::test]

@@ -526,9 +526,27 @@ impl GoogleAiConnector {
             .generate_content(model, &input)
             .await
             .map_err(|e: GoogleAiError| e.to_fcp_error())?;
-        serde_json::to_value(resp).map_err(|e| FcpError::Internal {
+
+        let has_tool_calls = resp.candidates.iter().any(|c| {
+            c.content.as_ref().is_some_and(|content| {
+                content
+                    .parts
+                    .iter()
+                    .any(|p| matches!(p, crate::types::Part::FunctionCall { .. }))
+            })
+        });
+
+        let mut result = serde_json::to_value(&resp).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize response: {e}"),
-        })
+        })?;
+        result["provenance"] = json!({
+            "source": "google-ai",
+            "model": model,
+            "integrity": "untrusted",
+            "has_tool_calls": has_tool_calls,
+            "chunk_count": 1,
+        });
+        Ok(result)
     }
 
     async fn invoke_generate_content_stream(
@@ -547,6 +565,7 @@ impl GoogleAiConnector {
             .map_err(|e: GoogleAiError| e.to_fcp_error())?;
 
         // Merge all chunks into a combined response
+        let chunk_count = chunks.len();
         let mut all_candidates = Vec::new();
         let mut final_usage = None;
         for chunk in chunks {
@@ -556,16 +575,29 @@ impl GoogleAiConnector {
             }
         }
 
+        let has_tool_calls = all_candidates.iter().any(|c| {
+            c.content.as_ref().is_some_and(|content| {
+                content
+                    .parts
+                    .iter()
+                    .any(|p| matches!(p, crate::types::Part::FunctionCall { .. }))
+            })
+        });
+
         Ok(json!({
             "candidates": all_candidates,
             "usage_metadata": final_usage,
+            "provenance": {
+                "source": "google-ai",
+                "model": model,
+                "integrity": "untrusted",
+                "has_tool_calls": has_tool_calls,
+                "chunk_count": chunk_count,
+            },
         }))
     }
 
-    async fn invoke_embed_content(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_embed_content(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let model = input
             .get("model")
@@ -600,10 +632,7 @@ impl GoogleAiConnector {
         })
     }
 
-    async fn invoke_count_tokens(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_count_tokens(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let model = input
             .get("model")
@@ -617,10 +646,7 @@ impl GoogleAiConnector {
         Ok(json!({ "total_tokens": resp.total_tokens }))
     }
 
-    async fn invoke_list_models(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_list_models(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let page_size = input
             .get("page_size")
@@ -637,10 +663,7 @@ impl GoogleAiConnector {
         })
     }
 
-    async fn invoke_get_model(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_get_model(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let model = require_str(&input, "model")?;
 
@@ -665,7 +688,10 @@ impl GoogleAiConnector {
     }
 
     /// Handle shutdown.
-    pub async fn handle_shutdown(&self, _params: serde_json::Value) -> FcpResult<serde_json::Value> {
+    pub async fn handle_shutdown(
+        &self,
+        _params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         info!("Google AI connector shutting down");
         Ok(json!({ "status": "shutdown" }))
     }
@@ -885,11 +911,15 @@ mod tests {
 
         let raw = std::fs::read_to_string(&manifest_path).expect("read manifest");
         let manifest = ConnectorManifest::parse_str(&raw).expect("manifest should validate");
-        let computed = manifest.compute_interface_hash().expect("compute interface hash");
+        let computed = manifest
+            .compute_interface_hash()
+            .expect("compute interface hash");
         assert_eq!(manifest.manifest.interface_hash, computed);
 
         let manifest2 = ConnectorManifest::parse_str_unchecked(&raw).expect("parse unchecked");
-        let computed2 = manifest2.compute_interface_hash().expect("compute interface hash");
+        let computed2 = manifest2
+            .compute_interface_hash()
+            .expect("compute interface hash");
         assert_eq!(computed, computed2);
     }
 }

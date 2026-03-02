@@ -11,9 +11,8 @@ use tracing::{debug, warn};
 use crate::{
     error::{GoogleAiError, GoogleAiResult},
     types::{
-        ApiErrorResponse, BatchEmbedContentsResponse, CountTokensResponse,
-        EmbedContentResponse, GenerateContentResponse, ListModelsResponse, ModelInfo,
-        UsageCounters, UsageMetadata,
+        ApiErrorResponse, BatchEmbedContentsResponse, CountTokensResponse, EmbedContentResponse,
+        GenerateContentResponse, ListModelsResponse, ModelInfo, UsageCounters, UsageMetadata,
     },
 };
 
@@ -294,8 +293,7 @@ impl GoogleAiClient {
 
                     if !status.is_success() {
                         let body = response.text().await.unwrap_or_default();
-                        let api_err: Option<ApiErrorResponse> =
-                            serde_json::from_str(&body).ok();
+                        let api_err: Option<ApiErrorResponse> = serde_json::from_str(&body).ok();
                         let (message, error_type) = api_err
                             .as_ref()
                             .and_then(|e| e.error.as_ref())
@@ -375,7 +373,10 @@ mod tests {
         let body = serde_json::json!({
             "contents": [{"role": "user", "parts": [{"text": "Hello"}]}]
         });
-        let resp = client.generate_content("gemini-2.0-flash", &body).await.unwrap();
+        let resp = client
+            .generate_content("gemini-2.0-flash", &body)
+            .await
+            .unwrap();
         assert_eq!(resp.candidates.len(), 1);
         assert_eq!(resp.usage_metadata.as_ref().unwrap().prompt_token_count, 5);
 
@@ -407,7 +408,10 @@ mod tests {
         let body = serde_json::json!({
             "content": {"parts": [{"text": "test text"}]}
         });
-        let resp = client.embed_content("text-embedding-004", &body).await.unwrap();
+        let resp = client
+            .embed_content("text-embedding-004", &body)
+            .await
+            .unwrap();
         assert_eq!(resp.embedding.values.len(), 4);
     }
 
@@ -430,7 +434,10 @@ mod tests {
         let body = serde_json::json!({
             "contents": [{"role": "user", "parts": [{"text": "Hello world"}]}]
         });
-        let resp = client.count_tokens("gemini-2.0-flash", &body).await.unwrap();
+        let resp = client
+            .count_tokens("gemini-2.0-flash", &body)
+            .await
+            .unwrap();
         assert_eq!(resp.total_tokens, 42);
     }
 
@@ -520,7 +527,10 @@ mod tests {
                 {"content": {"parts": [{"text": "doc 2"}]}}
             ]
         });
-        let resp = client.batch_embed_contents("text-embedding-004", &body).await.unwrap();
+        let resp = client
+            .batch_embed_contents("text-embedding-004", &body)
+            .await
+            .unwrap();
         assert_eq!(resp.embeddings.len(), 2);
     }
 
@@ -541,7 +551,10 @@ mod tests {
 
         let result = client.list_models(None, None).await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), GoogleAiError::RateLimit { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            GoogleAiError::RateLimit { .. }
+        ));
     }
 
     #[fcp_async_core::runtime::test]
@@ -593,8 +606,14 @@ mod tests {
 
         // Two requests
         let body = serde_json::json!({"contents": [{"role": "user", "parts": [{"text": "hi"}]}]});
-        client.generate_content("gemini-2.0-flash", &body).await.unwrap();
-        client.generate_content("gemini-2.0-flash", &body).await.unwrap();
+        client
+            .generate_content("gemini-2.0-flash", &body)
+            .await
+            .unwrap();
+        client
+            .generate_content("gemini-2.0-flash", &body)
+            .await
+            .unwrap();
 
         let usage = client.get_usage();
         assert_eq!(usage.input_tokens, 20);
@@ -605,7 +624,9 @@ mod tests {
 
     #[test]
     fn test_error_is_retryable() {
-        let err = GoogleAiError::RateLimit { retry_after_ms: 1000 };
+        let err = GoogleAiError::RateLimit {
+            retry_after_ms: 1000,
+        };
         assert!(err.is_retryable());
 
         let err = GoogleAiError::InvalidConfig("bad config".into());

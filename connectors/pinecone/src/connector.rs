@@ -226,6 +226,78 @@ impl PineconeConnector {
                     },
                 ),
                 op_info(
+                    "pinecone.create_index",
+                    "Create a new index",
+                    json!({
+                        "type": "object",
+                        "required": ["name", "dimension"],
+                        "properties": {
+                            "name": { "type": "string" },
+                            "dimension": { "type": "integer" },
+                            "metric": { "type": "string", "default": "cosine" },
+                            "spec": { "type": "object", "description": "Index spec (serverless or pod configuration)" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": ["name", "dimension", "metric"],
+                        "properties": {
+                            "name": { "type": "string" },
+                            "dimension": { "type": "integer" },
+                            "metric": { "type": "string" },
+                            "host": { "type": "string" },
+                            "status": { "type": "object" }
+                        }
+                    }),
+                    "pinecone.indexes.write",
+                    RiskLevel::Medium,
+                    SafetyTier::Risky,
+                    IdempotencyClass::BestEffort,
+                    AgentHint {
+                        when_to_use: "Create a new Pinecone index. Choose dimension and metric carefully.".into(),
+                        common_mistakes: vec!["Wrong dimension for your embedding model.".into()],
+                        examples: vec![
+                            r#"{"name": "my-index", "dimension": 1536, "metric": "cosine", "spec": {"serverless": {"cloud": "aws", "region": "us-east-1"}}}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("pinecone.list_indexes"),
+                            CapabilityId::from_static("pinecone.delete_index"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "pinecone.delete_index",
+                    "Delete an index and all its data",
+                    json!({
+                        "type": "object",
+                        "required": ["index_name"],
+                        "properties": {
+                            "index_name": { "type": "string" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": ["deleted", "index_name"],
+                        "properties": {
+                            "deleted": { "type": "boolean" },
+                            "index_name": { "type": "string" }
+                        }
+                    }),
+                    "pinecone.indexes.write",
+                    RiskLevel::High,
+                    SafetyTier::Dangerous,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Delete a Pinecone index. This is irreversible and deletes all data.".into(),
+                        common_mistakes: vec!["Deleting production indexes without backup.".into()],
+                        examples: vec![r#"{"index_name": "my-index"}"#.into()],
+                        related: vec![
+                            CapabilityId::from_static("pinecone.create_index"),
+                            CapabilityId::from_static("pinecone.list_indexes"),
+                        ],
+                    },
+                ),
+                op_info(
                     "pinecone.query",
                     "Query vectors by similarity",
                     json!({
@@ -436,6 +508,8 @@ impl PineconeConnector {
             "pinecone.list_indexes" => self.invoke_list_indexes().await,
             "pinecone.describe_index" => self.invoke_describe_index(input).await,
             "pinecone.describe_index_stats" => self.invoke_describe_index_stats(input).await,
+            "pinecone.create_index" => self.invoke_create_index(input).await,
+            "pinecone.delete_index" => self.invoke_delete_index(input).await,
             "pinecone.query" => self.invoke_query(input).await,
             "pinecone.fetch" => self.invoke_fetch(input).await,
             "pinecone.upsert" => self.invoke_upsert(input).await,
@@ -486,6 +560,42 @@ impl PineconeConnector {
         serde_json::to_value(&stats).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize stats: {e}"),
         })
+    }
+
+    async fn invoke_create_index(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let name = require_str(&input, "name")?;
+        let dimension =
+            input
+                .get("dimension")
+                .and_then(|v| v.as_u64())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing required field: dimension".into(),
+                })? as u32;
+        let metric = input
+            .get("metric")
+            .and_then(|v| v.as_str())
+            .unwrap_or("cosine");
+        let spec = input.get("spec");
+
+        let index = client
+            .create_index(name, dimension, metric, spec)
+            .await
+            .map_err(|e: PineconeError| e.to_fcp_error())?;
+        serde_json::to_value(&index).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize index: {e}"),
+        })
+    }
+
+    async fn invoke_delete_index(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let index_name = require_str(&input, "index_name")?;
+        client
+            .delete_index(index_name)
+            .await
+            .map_err(|e: PineconeError| e.to_fcp_error())?;
+        Ok(json!({ "deleted": true, "index_name": index_name }))
     }
 
     async fn invoke_query(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
@@ -592,7 +702,10 @@ impl PineconeConnector {
     }
 
     /// Handle shutdown.
-    pub async fn handle_shutdown(&self, _params: serde_json::Value) -> FcpResult<serde_json::Value> {
+    pub async fn handle_shutdown(
+        &self,
+        _params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         info!("Pinecone connector shutting down");
         Ok(json!({ "status": "shutdown" }))
     }
@@ -766,11 +879,13 @@ mod tests {
         assert!(op_ids.contains(&"pinecone.list_indexes"));
         assert!(op_ids.contains(&"pinecone.describe_index"));
         assert!(op_ids.contains(&"pinecone.describe_index_stats"));
+        assert!(op_ids.contains(&"pinecone.create_index"));
+        assert!(op_ids.contains(&"pinecone.delete_index"));
         assert!(op_ids.contains(&"pinecone.query"));
         assert!(op_ids.contains(&"pinecone.fetch"));
         assert!(op_ids.contains(&"pinecone.upsert"));
         assert!(op_ids.contains(&"pinecone.delete"));
-        assert_eq!(ops.len(), 7);
+        assert_eq!(ops.len(), 9);
     }
 
     #[test]
@@ -783,11 +898,15 @@ mod tests {
 
         let raw = std::fs::read_to_string(&manifest_path).expect("read manifest");
         let manifest = ConnectorManifest::parse_str(&raw).expect("manifest should validate");
-        let computed = manifest.compute_interface_hash().expect("compute interface hash");
+        let computed = manifest
+            .compute_interface_hash()
+            .expect("compute interface hash");
         assert_eq!(manifest.manifest.interface_hash, computed);
 
         let manifest2 = ConnectorManifest::parse_str_unchecked(&raw).expect("parse unchecked");
-        let computed2 = manifest2.compute_interface_hash().expect("compute interface hash");
+        let computed2 = manifest2
+            .compute_interface_hash()
+            .expect("compute interface hash");
         assert_eq!(computed, computed2);
     }
 }

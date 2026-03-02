@@ -31,9 +31,9 @@ impl PineconeClient {
         let mut headers = header::HeaderMap::new();
         headers.insert(
             "Api-Key",
-            api_key.parse().map_err(|_| {
-                PineconeError::InvalidConfig("Invalid API key format".into())
-            })?,
+            api_key
+                .parse()
+                .map_err(|_| PineconeError::InvalidConfig("Invalid API key format".into()))?,
         );
 
         let http = Client::builder()
@@ -94,6 +94,34 @@ impl PineconeClient {
         let url = format!("{}/indexes/{index_name}", self.control_plane_url);
         let data = self.get(&url).await?;
         Ok(serde_json::from_value(data)?)
+    }
+
+    /// Create a new index.
+    pub async fn create_index(
+        &self,
+        name: &str,
+        dimension: u32,
+        metric: &str,
+        spec: Option<&serde_json::Value>,
+    ) -> PineconeResult<Index> {
+        let url = format!("{}/indexes", self.control_plane_url);
+        let mut body = serde_json::json!({
+            "name": name,
+            "dimension": dimension,
+            "metric": metric,
+        });
+        if let Some(s) = spec {
+            body["spec"] = s.clone();
+        }
+        let data = self.post_json(&url, &body).await?;
+        Ok(serde_json::from_value(data)?)
+    }
+
+    /// Delete an index by name.
+    pub async fn delete_index(&self, index_name: &str) -> PineconeResult<()> {
+        let url = format!("{}/indexes/{index_name}", self.control_plane_url);
+        self.execute_delete(&url).await?;
+        Ok(())
     }
 
     // ── Data plane operations ─────────────────────────────────────
@@ -225,6 +253,10 @@ impl PineconeClient {
         self.execute(|| self.http.post(url).json(body)).await
     }
 
+    async fn execute_delete(&self, url: &str) -> PineconeResult<serde_json::Value> {
+        self.execute(|| self.http.delete(url)).await
+    }
+
     async fn execute(
         &self,
         build_request: impl Fn() -> reqwest::RequestBuilder,
@@ -295,14 +327,13 @@ impl PineconeClient {
 
                     if !status.is_success() {
                         let body = response.text().await.unwrap_or_default();
-                        let api_err: Option<ApiErrorResponse> =
-                            serde_json::from_str(&body).ok();
+                        let api_err: Option<ApiErrorResponse> = serde_json::from_str(&body).ok();
                         let message = api_err
                             .as_ref()
                             .and_then(|e| {
-                                e.message.clone().or_else(|| {
-                                    e.error.as_ref().and_then(|d| d.message.clone())
-                                })
+                                e.message
+                                    .clone()
+                                    .or_else(|| e.error.as_ref().and_then(|d| d.message.clone()))
                             })
                             .unwrap_or_else(|| format!("HTTP {status}: {body}"));
                         return Err(PineconeError::Api {
@@ -398,6 +429,53 @@ mod tests {
         assert_eq!(index.dimension, 1536);
         assert_eq!(index.metric, "cosine");
         assert!(index.status.as_ref().unwrap().ready.unwrap());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_create_index() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/indexes"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "name": "new-index",
+                "dimension": 1536,
+                "metric": "cosine",
+                "host": "new-index-abc.svc.pinecone.io",
+                "status": { "ready": false, "state": "Initializing" }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = PineconeClient::new("test-api-key")
+            .unwrap()
+            .with_control_plane_url(&mock_server.uri());
+
+        let index = client
+            .create_index("new-index", 1536, "cosine", None)
+            .await
+            .unwrap();
+        assert_eq!(index.name, "new-index");
+        assert_eq!(index.dimension, 1536);
+        assert!(!index.status.as_ref().unwrap().ready.unwrap());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_delete_index() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("DELETE"))
+            .and(path("/indexes/old-index"))
+            .respond_with(ResponseTemplate::new(202))
+            .mount(&mock_server)
+            .await;
+
+        let client = PineconeClient::new("test-api-key")
+            .unwrap()
+            .with_control_plane_url(&mock_server.uri());
+
+        let result = client.delete_index("old-index").await;
+        assert!(result.is_ok());
     }
 
     #[fcp_async_core::runtime::test]
@@ -562,7 +640,10 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            PineconeError::Api { status_code: Some(401), .. }
+            PineconeError::Api {
+                status_code: Some(401),
+                ..
+            }
         ));
     }
 
@@ -587,7 +668,10 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            PineconeError::Api { status_code: Some(404), .. }
+            PineconeError::Api {
+                status_code: Some(404),
+                ..
+            }
         ));
     }
 
@@ -634,7 +718,10 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            PineconeError::Api { status_code: Some(500), .. }
+            PineconeError::Api {
+                status_code: Some(500),
+                ..
+            }
         ));
     }
 

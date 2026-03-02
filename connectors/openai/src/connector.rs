@@ -309,6 +309,10 @@ impl OpenAIConnector {
     }
 
     /// Handle configure method.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if configuration parameters are invalid or the HTTP client cannot be created.
     #[instrument(skip(self, params))]
     pub async fn handle_configure(
         &mut self,
@@ -341,6 +345,10 @@ impl OpenAIConnector {
     }
 
     /// Handle handshake method.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the handshake request is malformed or serialization fails.
     pub async fn handle_handshake(
         &mut self,
         params: serde_json::Value,
@@ -394,6 +402,10 @@ impl OpenAIConnector {
     }
 
     /// Handle health check.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if health status serialization fails.
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
         let configured = self.config.is_some();
         let auth = self
@@ -425,6 +437,10 @@ impl OpenAIConnector {
     }
 
     /// Handle doctor checks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the doctor result cannot be serialized.
     pub async fn handle_doctor(&self) -> FcpResult<serde_json::Value> {
         let result = self.build_doctor_result();
         serde_json::to_value(result).map_err(|e| FcpError::Internal {
@@ -500,6 +516,10 @@ impl OpenAIConnector {
     }
 
     /// Handle connector self-check.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the self-check report cannot be serialized.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
         let Some(client) = &self.client else {
             let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
@@ -537,6 +557,10 @@ impl OpenAIConnector {
     }
 
     /// Handle introspect method.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if introspection serialization fails.
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
         let introspection = Introspection {
             operations: vec![
@@ -694,6 +718,10 @@ impl OpenAIConnector {
     }
 
     /// Handle simulate method.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the simulate request is malformed or serialization fails.
     pub async fn handle_simulate(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
         let req: SimulateRequest =
             serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {
@@ -708,6 +736,11 @@ impl OpenAIConnector {
     }
 
     /// Handle invoke method.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation is invalid, capability token verification fails,
+    /// required parameters are missing, or the API call fails.
     pub async fn handle_invoke(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
         let result = self.handle_invoke_internal(params).await;
         self.base.record_request(result.is_ok());
@@ -999,6 +1032,10 @@ impl OpenAIConnector {
     }
 
     /// Handle shutdown.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if shutdown serialization fails.
     pub async fn handle_shutdown(
         &self,
         _params: serde_json::Value,

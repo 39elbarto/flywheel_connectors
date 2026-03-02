@@ -80,11 +80,19 @@ pub struct OpenAIClient {
 
 impl OpenAIClient {
     /// Create a new OpenAI client.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HTTP client cannot be constructed.
     pub fn new(api_key: impl Into<String>) -> OpenAIResult<Self> {
         Self::new_with_auth(OpenAIAuth::ApiKey(api_key.into()))
     }
 
     /// Create a new OpenAI client with explicit auth mode.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HTTP client cannot be constructed.
     pub fn new_with_auth(auth: OpenAIAuth) -> OpenAIResult<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(120))
@@ -168,6 +176,10 @@ impl OpenAIClient {
     }
 
     /// Perform a lightweight credentials/availability check.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HTTP request fails or the API returns a non-success status.
     pub async fn health_check(&self) -> OpenAIResult<()> {
         let url = format!("{}/v1/models", self.base_url);
         let request = self
@@ -195,6 +207,10 @@ impl OpenAIClient {
     }
 
     /// Send a chat completion request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failures, rate limiting, authentication errors, or invalid request parameters.
     #[instrument(skip(self, messages, tools))]
     pub async fn chat_completion(
         &self,
@@ -231,6 +247,10 @@ impl OpenAIClient {
     }
 
     /// Send a simple text message and get the text response.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failures, rate limiting, or authentication errors.
     pub async fn chat(
         &self,
         model: Model,
@@ -261,6 +281,10 @@ impl OpenAIClient {
     }
 
     /// Stream a chat completion response.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failures, rate limiting, or authentication errors.
     #[instrument(skip(self, messages, tools))]
     pub async fn chat_completion_stream(
         &self,

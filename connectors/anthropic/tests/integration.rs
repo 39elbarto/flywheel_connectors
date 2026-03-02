@@ -17,7 +17,10 @@ use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_testkit::{AsyncTestContext, MockApiServer};
 use futures_util::StreamExt;
 use serde_json::json;
-use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{header, method, path}};
+use wiremock::{
+    Mock, MockServer, ResponseTemplate,
+    matchers::{header, method, path},
+};
 
 // ──────────────── re-export the connector under test ────────────────
 use fcp_anthropic::client::AnthropicClient;
@@ -94,12 +97,12 @@ fn anthropic_success_response(
     })
 }
 
-/// Anthropic API tool_use response.
+/// Anthropic API `tool_use` response.
 fn anthropic_tool_use_response(
     msg_id: &str,
     tool_id: &str,
     tool_name: &str,
-    tool_input: serde_json::Value,
+    tool_input: &serde_json::Value,
     input_tokens: u32,
     output_tokens: u32,
 ) -> serde_json::Value {
@@ -246,10 +249,13 @@ async fn message_invoke_with_system() {
 
 /// Build SSE body for streaming response.
 fn build_sse_body(events: &[(&str, serde_json::Value)]) -> String {
+    use std::fmt::Write;
     events
         .iter()
-        .map(|(event_type, data)| format!("event: {event_type}\ndata: {data}\n\n"))
-        .collect()
+        .fold(String::new(), |mut acc, (event_type, data)| {
+            write!(acc, "event: {event_type}\ndata: {data}\n\n").unwrap();
+            acc
+        })
 }
 
 /// Streaming: parse complete SSE chunks.
@@ -332,15 +338,22 @@ async fn streaming_sse_chunk_parsing() {
         .collect();
 
     // Should have 7 events total
-    assert_eq!(events.len(), 7, "expected 7 SSE events, got {}", events.len());
+    assert_eq!(
+        events.len(),
+        7,
+        "expected 7 SSE events, got {}",
+        events.len()
+    );
 
     // Verify text deltas
     let mut text_acc = String::new();
     for event in &events {
-        if let fcp_anthropic::types::StreamEvent::ContentBlockDelta { delta, .. } = event {
-            if let fcp_anthropic::types::ContentDelta::TextDelta { text } = delta {
-                text_acc.push_str(text);
-            }
+        if let fcp_anthropic::types::StreamEvent::ContentBlockDelta {
+            delta: fcp_anthropic::types::ContentDelta::TextDelta { text },
+            ..
+        } = event
+        {
+            text_acc.push_str(text);
         }
     }
     assert_eq!(text_acc, "Hello World");
@@ -405,10 +418,17 @@ async fn streaming_sse_error_mid_stream() {
         .expect("stream should start");
 
     let events: Vec<_> = stream.collect::<Vec<_>>().await;
-    assert!(events.len() >= 3, "should receive partial events before error");
+    assert!(
+        events.len() >= 3,
+        "should receive partial events before error"
+    );
 
     // Last valid event should be the error
-    let last = events.last().unwrap().as_ref().expect("last event should parse");
+    let last = events
+        .last()
+        .unwrap()
+        .as_ref()
+        .expect("last event should parse");
     assert!(
         matches!(last, fcp_anthropic::types::StreamEvent::Error { .. }),
         "last event should be error, got: {last:?}"
@@ -467,7 +487,7 @@ async fn streaming_sse_ping_keepalive() {
         .collect::<Vec<_>>()
         .await
         .into_iter()
-        .filter_map(|r| r.ok())
+        .filter_map(std::result::Result::ok)
         .collect();
 
     let ping_count = events
@@ -482,7 +502,7 @@ async fn streaming_sse_ping_keepalive() {
 // Tool/Function Calling Tests
 // ============================================================================
 
-/// Tool use: model requests tool call and response includes tool_use content.
+/// Tool use: model requests tool call and response includes `tool_use` content.
 #[fcp_async_core::runtime::test]
 async fn tool_use_invoke_shape() {
     let _ctx = AsyncTestContext::for_scenario("anthropic.tool_use.shape");
@@ -494,7 +514,7 @@ async fn tool_use_invoke_shape() {
             "msg_tool_001",
             "tool_call_abc",
             "get_weather",
-            json!({"city": "San Francisco", "unit": "celsius"}),
+            &json!({"city": "San Francisco", "unit": "celsius"}),
             20,
             15,
         ),
@@ -643,16 +663,18 @@ async fn tool_use_streaming_shape() {
         .collect::<Vec<_>>()
         .await
         .into_iter()
-        .filter_map(|r| r.ok())
+        .filter_map(std::result::Result::ok)
         .collect();
 
     // Collect JSON delta fragments
     let mut json_acc = String::new();
     for event in &events {
-        if let fcp_anthropic::types::StreamEvent::ContentBlockDelta { delta, .. } = event {
-            if let fcp_anthropic::types::ContentDelta::InputJsonDelta { partial_json } = delta {
-                json_acc.push_str(partial_json);
-            }
+        if let fcp_anthropic::types::StreamEvent::ContentBlockDelta {
+            delta: fcp_anthropic::types::ContentDelta::InputJsonDelta { partial_json },
+            ..
+        } = event
+        {
+            json_acc.push_str(partial_json);
         }
     }
     assert_eq!(json_acc, "{\"city\": \"Paris\"}");
@@ -674,7 +696,7 @@ async fn tool_use_streaming_shape() {
 // Error Taxonomy Tests (401/429/529/5xx → FCP error mapping)
 // ============================================================================
 
-/// 401 Unauthorized maps to FcpError::Unauthorized.
+/// 401 Unauthorized maps to `FcpError::Unauthorized`.
 #[fcp_async_core::runtime::test]
 async fn error_401_maps_to_unauthorized() {
     let _ctx = AsyncTestContext::for_scenario("anthropic.error.401");
@@ -707,7 +729,7 @@ async fn error_401_maps_to_unauthorized() {
     );
 }
 
-/// 429 Rate Limited maps to FcpError::RateLimited.
+/// 429 Rate Limited maps to `FcpError::RateLimited`.
 /// Uses client directly with minimal retry config to avoid slow backoff.
 #[fcp_async_core::runtime::test]
 async fn error_429_maps_to_rate_limited() {
@@ -733,7 +755,10 @@ async fn error_429_maps_to_rate_limited() {
 
     // Client-level error
     assert!(
-        matches!(err, fcp_anthropic::error::AnthropicError::RateLimited { .. }),
+        matches!(
+            err,
+            fcp_anthropic::error::AnthropicError::RateLimited { .. }
+        ),
         "expected RateLimited, got: {err:?}"
     );
 
@@ -745,7 +770,7 @@ async fn error_429_maps_to_rate_limited() {
     );
 }
 
-/// 529 Overloaded maps to FcpError::External with retryable=true.
+/// 529 Overloaded maps to `FcpError::External` with retryable=true.
 /// Uses client directly with minimal retry config to avoid slow backoff.
 #[fcp_async_core::runtime::test]
 async fn error_529_maps_to_external_retryable() {
@@ -792,7 +817,7 @@ async fn error_529_maps_to_external_retryable() {
     }
 }
 
-/// 500 Server Error maps to FcpError::External.
+/// 500 Server Error maps to `FcpError::External`.
 /// Uses client directly with minimal retry config.
 #[fcp_async_core::runtime::test]
 async fn error_500_maps_to_external() {
@@ -822,7 +847,7 @@ async fn error_500_maps_to_external() {
     );
 }
 
-/// 400 with context_length_exceeded maps to InvalidRequest.
+/// 400 with `context_length_exceeded` maps to `InvalidRequest`.
 #[fcp_async_core::runtime::test]
 async fn error_context_length_maps_to_invalid_request() {
     let mock = MockApiServer::start().await;
@@ -875,9 +900,10 @@ async fn usage_metrics_accumulate() {
     // Two sequential requests with different token counts
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(
-            anthropic_success_response("msg_u1", "First", 10, 5),
-        ))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(anthropic_success_response("msg_u1", "First", 10, 5)),
+        )
         .up_to_n_times(1)
         .mount(&mock_server)
         .await;
@@ -890,7 +916,8 @@ async fn usage_metrics_accumulate() {
         }))
         .await
         .unwrap();
-    let signing_key = setup_handshake(&mut connector, &["anthropic.chat", "anthropic.get_usage"]).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["anthropic.chat", "anthropic.get_usage"]).await;
 
     // First invocation
     let token = generate_valid_token(&signing_key, "anthropic.chat");
@@ -978,7 +1005,7 @@ async fn usage_cost_is_model_dependent() {
 // FCP2 Default-Deny / Capability Verification Tests
 // ============================================================================
 
-/// Invoke without capability_token fails.
+/// Invoke without `capability_token` fails.
 #[fcp_async_core::runtime::test]
 async fn capability_missing_token_fails() {
     let _ctx = AsyncTestContext::for_scenario("anthropic.capability.missing_token");
@@ -1062,7 +1089,8 @@ async fn capability_wrong_operation_fails() {
 
     let mut connector = AnthropicConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
-    let signing_key = setup_handshake(&mut connector, &["anthropic.chat", "anthropic.get_usage"]).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["anthropic.chat", "anthropic.get_usage"]).await;
 
     // Token signed for get_usage, used on chat
     let wrong_token = generate_valid_token(&signing_key, "anthropic.get_usage");
@@ -1089,7 +1117,7 @@ async fn capability_wrong_operation_fails() {
     );
 }
 
-/// Unknown operation fails with OperationNotGranted.
+/// Unknown operation fails with `OperationNotGranted`.
 #[fcp_async_core::runtime::test]
 async fn capability_unknown_operation_fails() {
     let mock = MockApiServer::start().await;
@@ -1118,11 +1146,14 @@ async fn capability_unknown_operation_fails() {
 // Lifecycle Tests
 // ============================================================================
 
-/// Health check before configure reports not_configured.
+/// Health check before configure reports `not_configured`.
 #[fcp_async_core::runtime::test]
 async fn lifecycle_health_before_configure() {
     let connector = AnthropicConnector::new();
-    let result = connector.handle_health().await.expect("health should succeed");
+    let result = connector
+        .handle_health()
+        .await
+        .expect("health should succeed");
     assert_eq!(result["status"], "not_configured");
 }
 
@@ -1133,7 +1164,10 @@ async fn lifecycle_health_after_configure() {
     let mut connector = AnthropicConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
 
-    let result = connector.handle_health().await.expect("health should succeed");
+    let result = connector
+        .handle_health()
+        .await
+        .expect("health should succeed");
     assert_eq!(result["status"], "healthy");
 }
 
@@ -1191,8 +1225,14 @@ async fn lifecycle_introspect_operations() {
 
     // Verify schemas are present
     for op in ops {
-        assert!(op["input_schema"].is_object(), "input_schema should be object");
-        assert!(op["output_schema"].is_object(), "output_schema should be object");
+        assert!(
+            op["input_schema"].is_object(),
+            "input_schema should be object"
+        );
+        assert!(
+            op["output_schema"].is_object(),
+            "output_schema should be object"
+        );
     }
 }
 

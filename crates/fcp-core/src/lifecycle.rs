@@ -1876,7 +1876,7 @@ mod tests {
     #[test]
     fn health_metrics_clone() {
         let m = HealthMetrics::default();
-        let cloned = m.clone();
+        let cloned = m;
         assert_eq!(cloned.successes, 0);
         assert_eq!(cloned.success_rate, 100);
     }
@@ -1997,7 +1997,7 @@ mod tests {
     fn lifecycle_status_clone() {
         let record = LifecycleRecord::new(test_connector_id(), test_version());
         let status = LifecycleStatus::from_record(&record, Utc::now(), false);
-        let cloned = status.clone();
+        let cloned = status;
         assert_eq!(cloned.state, LifecycleState::Pending);
         assert!(!cloned.crash_loop_detected);
     }

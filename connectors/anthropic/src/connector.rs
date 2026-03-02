@@ -66,6 +66,10 @@ impl AnthropicConnector {
     }
 
     /// Handle configure method.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `api_key` is missing or the HTTP client cannot be created.
     #[instrument(skip(self, params))]
     pub async fn handle_configure(
         &mut self,
@@ -98,6 +102,10 @@ impl AnthropicConnector {
     }
 
     /// Handle handshake method.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the handshake request is malformed or serialization fails.
     pub async fn handle_handshake(
         &mut self,
         params: serde_json::Value,
@@ -151,6 +159,10 @@ impl AnthropicConnector {
     }
 
     /// Handle health check.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if health status serialization fails (should not happen).
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
         let configured = self.client.is_some();
         Ok(json!({
@@ -164,6 +176,10 @@ impl AnthropicConnector {
     }
 
     /// Handle introspect method.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if introspection serialization fails.
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
         let introspection = Introspection {
             operations: vec![
@@ -320,6 +336,10 @@ impl AnthropicConnector {
     }
 
     /// Handle simulate method.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the simulate request is malformed or serialization fails.
     pub async fn handle_simulate(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
         let req: SimulateRequest =
             serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {
@@ -334,6 +354,11 @@ impl AnthropicConnector {
     }
 
     /// Handle invoke method.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation is invalid, capability token verification
+    /// fails, required parameters are missing, or the API call fails.
     pub async fn handle_invoke(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
         let result = self.handle_invoke_internal(params).await;
         self.base.record_request(result.is_ok());
@@ -609,6 +634,10 @@ impl AnthropicConnector {
     }
 
     /// Handle shutdown.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if shutdown serialization fails (should not happen).
     pub async fn handle_shutdown(
         &self,
         _params: serde_json::Value,

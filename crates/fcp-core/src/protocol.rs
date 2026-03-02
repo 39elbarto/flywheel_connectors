@@ -2680,7 +2680,7 @@ mod tests {
     fn usage_metric_kind_copy_clone() {
         let a = UsageMetricKind::Tokens;
         let b = a; // Copy
-        let c = a.clone();
+        let c = a;
         assert_eq!(a, b);
         assert_eq!(a, c);
     }
@@ -2802,7 +2802,7 @@ mod tests {
             current: 10,
         };
         let msg = err.to_string();
-        assert!(msg.contains("5"));
+        assert!(msg.contains('5'));
         assert!(msg.contains("10"));
     }
 
@@ -2830,7 +2830,7 @@ mod tests {
     fn invoke_status_copy_clone() {
         let a = InvokeStatus::Ok;
         let b = a; // Copy
-        let c = a.clone();
+        let c = a;
         assert_eq!(a, b);
         assert_eq!(a, c);
     }
@@ -2854,9 +2854,9 @@ mod tests {
             locale: Some("ja-JP".into()),
             pagination: Some(serde_json::json!({"page": 2})),
             trace_id: Some("trace-abc".into()),
-            request_tags: [("env".into(), "prod".into())].into_iter().collect(),
+            request_tags: std::iter::once(("env".into(), "prod".into())).collect(),
         };
-        let cloned = ctx.clone();
+        let cloned = ctx;
         assert_eq!(cloned.locale, Some("ja-JP".into()));
         assert_eq!(cloned.request_tags.get("env"), Some(&"prod".into()));
     }
@@ -2896,7 +2896,7 @@ mod tests {
             from_cache: true,
             retry_after_secs: Some(60),
         };
-        let cloned = meta.clone();
+        let cloned = meta;
         assert_eq!(cloned.processing_time_ms, Some(42));
         assert!(cloned.from_cache);
         assert_eq!(cloned.retry_after_secs, Some(60));
@@ -3113,7 +3113,7 @@ mod tests {
     fn subscribe_result_clone_and_serde() {
         let result = SubscribeResult {
             confirmed_topics: vec!["events.*".into()],
-            cursors: [("events.*".into(), "cur-1".into())].into_iter().collect(),
+            cursors: std::iter::once(("events.*".into(), "cur-1".into())).collect(),
             replay_supported: false,
             buffer: None,
         };

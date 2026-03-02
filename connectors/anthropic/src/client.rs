@@ -40,6 +40,10 @@ pub struct AnthropicClient {
 
 impl AnthropicClient {
     /// Create a new Anthropic client.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HTTP client cannot be constructed.
     pub fn new(api_key: impl Into<String>) -> AnthropicResult<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(120))
@@ -106,6 +110,11 @@ impl AnthropicClient {
     }
 
     /// Send a message to Claude.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failures, rate limiting, authentication errors,
+    /// or context length violations.
     #[instrument(skip(self, messages, system, tools))]
     pub async fn message(
         &self,
@@ -135,6 +144,11 @@ impl AnthropicClient {
     }
 
     /// Send a simple text message and get the text response.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failures, rate limiting, authentication errors,
+    /// or context length violations.
     pub async fn chat(
         &self,
         model: Model,
@@ -163,6 +177,10 @@ impl AnthropicClient {
     }
 
     /// Stream a message response.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failures, rate limiting, or authentication errors.
     #[instrument(skip(self, messages, system, tools))]
     pub async fn message_stream(
         &self,

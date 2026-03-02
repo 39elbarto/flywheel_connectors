@@ -4570,8 +4570,7 @@ mod tests {
         let mut flags = TaintFlags::new();
         flags.insert(TaintFlag::PublicInput);
         flags.insert(TaintFlag::AiGenerated);
-        let collected: Vec<_> = flags.iter().collect();
-        assert_eq!(collected.len(), 2);
+        assert_eq!(flags.iter().count(), 2);
     }
 
     #[test]

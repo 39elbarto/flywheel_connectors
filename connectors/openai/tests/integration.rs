@@ -1,14 +1,14 @@
-//! OpenAI connector integration tests (flywheel_connectors-7hb.8).
+//! `OpenAI` connector integration tests (flywheel_connectors-7hb.8).
 //!
-//! Deterministic integration tests using wiremock to mock the OpenAI API.
+//! Deterministic integration tests using wiremock to mock the `OpenAI` API.
 //! No real API calls. Covers:
-//! - Non-streaming generation (chat + simple_chat)
+//! - Non-streaming generation (chat + `simple_chat`)
 //! - Streaming SSE (chunk parsing, error mid-stream)
 //! - Tool/function calling shapes
 //! - Error taxonomy (401/429/503/5xx)
 //! - Usage metrics & cost extraction
 //! - FCP2 default-deny + capability verification
-//! - Lifecycle (health, handshake, introspect, doctor, self_check, shutdown)
+//! - Lifecycle (health, handshake, introspect, doctor, `self_check`, shutdown)
 //! - Input validation
 
 #![allow(clippy::too_many_lines)]
@@ -19,7 +19,10 @@ use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_testkit::{AsyncTestContext, MockApiServer};
 use futures_util::StreamExt;
 use serde_json::json;
-use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{header, method, path}};
+use wiremock::{
+    Mock, MockServer, ResponseTemplate,
+    matchers::{header, method, path},
+};
 
 // ──────────────── re-export the connector under test ────────────────
 use fcp_openai::client::OpenAIClient;
@@ -75,7 +78,7 @@ async fn setup_configure(connector: &mut OpenAIConnector, base_url: &str) {
         .expect("configure should succeed");
 }
 
-/// Standard OpenAI chat completion success response.
+/// Standard `OpenAI` chat completion success response.
 fn openai_success_response(
     resp_id: &str,
     text: &str,
@@ -85,7 +88,7 @@ fn openai_success_response(
     json!({
         "id": resp_id,
         "object": "chat.completion",
-        "created": 1700000000,
+        "created": 1_700_000_000,
         "model": "gpt-4o",
         "choices": [{
             "index": 0,
@@ -103,7 +106,7 @@ fn openai_success_response(
     })
 }
 
-/// OpenAI tool_calls response.
+/// `OpenAI` `tool_calls` response.
 fn openai_tool_use_response(
     resp_id: &str,
     call_id: &str,
@@ -115,7 +118,7 @@ fn openai_tool_use_response(
     json!({
         "id": resp_id,
         "object": "chat.completion",
-        "created": 1700000000,
+        "created": 1_700_000_000,
         "model": "gpt-4o",
         "choices": [{
             "index": 0,
@@ -141,7 +144,7 @@ fn openai_tool_use_response(
     })
 }
 
-/// OpenAI API error envelope.
+/// `OpenAI` API error envelope.
 fn openai_error(error_type: &str, message: &str, code: Option<&str>) -> serde_json::Value {
     json!({
         "error": {
@@ -153,11 +156,12 @@ fn openai_error(error_type: &str, message: &str, code: Option<&str>) -> serde_js
     })
 }
 
-/// Build SSE body from data-only events (OpenAI uses `data: {json}\n\n`).
+/// Build SSE body from data-only events (`OpenAI` uses `data: {json}\n\n`).
 fn build_sse_body(events: &[serde_json::Value]) -> String {
+    use std::fmt::Write;
     let mut body = String::new();
     for event in events {
-        body.push_str(&format!("data: {event}\n\n"));
+        let _ = write!(body, "data: {event}\n\n");
     }
     body.push_str("data: [DONE]\n\n");
     body
@@ -167,7 +171,7 @@ fn build_sse_body(events: &[serde_json::Value]) -> String {
 // Non-Streaming Generation Tests
 // ============================================================================
 
-/// Happy path: openai.simple_chat invoke returns text response.
+/// Happy path: `openai.simple_chat` invoke returns text response.
 #[fcp_async_core::runtime::test]
 async fn simple_chat_invoke_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("openai.simple_chat.happy_path");
@@ -238,7 +242,7 @@ async fn chat_invoke_multi_turn() {
     assert_eq!(result["id"], "chatcmpl-002");
 }
 
-/// openai.simple_chat with system prompt.
+/// `openai.simple_chat` with system prompt.
 #[fcp_async_core::runtime::test]
 async fn simple_chat_invoke_with_system() {
     let mock = MockApiServer::start().await;
@@ -284,7 +288,7 @@ async fn streaming_sse_chunk_parsing() {
         json!({
             "id": "chatcmpl-stream-001",
             "object": "chat.completion.chunk",
-            "created": 1700000000,
+            "created": 1_700_000_000,
             "model": "gpt-4o",
             "choices": [{
                 "index": 0,
@@ -295,7 +299,7 @@ async fn streaming_sse_chunk_parsing() {
         json!({
             "id": "chatcmpl-stream-001",
             "object": "chat.completion.chunk",
-            "created": 1700000000,
+            "created": 1_700_000_000,
             "model": "gpt-4o",
             "choices": [{
                 "index": 0,
@@ -306,7 +310,7 @@ async fn streaming_sse_chunk_parsing() {
         json!({
             "id": "chatcmpl-stream-001",
             "object": "chat.completion.chunk",
-            "created": 1700000000,
+            "created": 1_700_000_000,
             "model": "gpt-4o",
             "choices": [{
                 "index": 0,
@@ -317,7 +321,7 @@ async fn streaming_sse_chunk_parsing() {
         json!({
             "id": "chatcmpl-stream-001",
             "object": "chat.completion.chunk",
-            "created": 1700000000,
+            "created": 1_700_000_000,
             "model": "gpt-4o",
             "choices": [{
                 "index": 0,
@@ -356,7 +360,12 @@ async fn streaming_sse_chunk_parsing() {
         .map(|r| r.expect("each chunk should parse"))
         .collect();
 
-    assert_eq!(chunks.len(), 4, "expected 4 SSE chunks, got {}", chunks.len());
+    assert_eq!(
+        chunks.len(),
+        4,
+        "expected 4 SSE chunks, got {}",
+        chunks.len()
+    );
 
     // Verify text deltas
     let mut text_acc = String::new();
@@ -379,10 +388,11 @@ async fn streaming_sse_error_mid_stream() {
     // OpenAI returns a non-200 status for errors, even on stream requests
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .respond_with(
-            ResponseTemplate::new(500)
-                .set_body_json(openai_error("server_error", "Internal server error", None)),
-        )
+        .respond_with(ResponseTemplate::new(500).set_body_json(openai_error(
+            "server_error",
+            "Internal server error",
+            None,
+        )))
         .mount(&mock_server)
         .await;
 
@@ -407,7 +417,7 @@ async fn streaming_sse_done_terminates() {
     let sse_body = build_sse_body(&[json!({
         "id": "chatcmpl-done-001",
         "object": "chat.completion.chunk",
-        "created": 1700000000,
+        "created": 1_700_000_000,
         "model": "gpt-4o",
         "choices": [{
             "index": 0,
@@ -441,7 +451,7 @@ async fn streaming_sse_done_terminates() {
         .collect::<Vec<_>>()
         .await
         .into_iter()
-        .filter_map(|r| r.ok())
+        .filter_map(std::result::Result::ok)
         .collect();
 
     // Should have exactly 1 chunk (the [DONE] produces None, ending the stream)
@@ -452,7 +462,7 @@ async fn streaming_sse_done_terminates() {
 // Tool/Function Calling Tests
 // ============================================================================
 
-/// Tool use: model requests tool call and response includes tool_calls.
+/// Tool use: model requests tool call and response includes `tool_calls`.
 #[fcp_async_core::runtime::test]
 async fn tool_use_invoke_shape() {
     let _ctx = AsyncTestContext::for_scenario("openai.tool_use.shape");
@@ -520,7 +530,7 @@ async fn tool_use_streaming_shape() {
         json!({
             "id": "chatcmpl-tool-stream",
             "object": "chat.completion.chunk",
-            "created": 1700000000,
+            "created": 1_700_000_000,
             "model": "gpt-4o",
             "choices": [{
                 "index": 0,
@@ -539,7 +549,7 @@ async fn tool_use_streaming_shape() {
         json!({
             "id": "chatcmpl-tool-stream",
             "object": "chat.completion.chunk",
-            "created": 1700000000,
+            "created": 1_700_000_000,
             "model": "gpt-4o",
             "choices": [{
                 "index": 0,
@@ -555,7 +565,7 @@ async fn tool_use_streaming_shape() {
         json!({
             "id": "chatcmpl-tool-stream",
             "object": "chat.completion.chunk",
-            "created": 1700000000,
+            "created": 1_700_000_000,
             "model": "gpt-4o",
             "choices": [{
                 "index": 0,
@@ -610,7 +620,7 @@ async fn tool_use_streaming_shape() {
 // Error Taxonomy Tests
 // ============================================================================
 
-/// 401 maps to OpenAIError::InvalidApiKey -> FcpError::Unauthorized.
+/// 401 maps to `OpenAIError::InvalidApiKey` -> `FcpError::Unauthorized`.
 #[fcp_async_core::runtime::test]
 async fn error_401_maps_to_unauthorized() {
     let _ctx = AsyncTestContext::for_scenario("openai.error.401_unauthorized");
@@ -618,10 +628,11 @@ async fn error_401_maps_to_unauthorized() {
 
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .respond_with(
-            ResponseTemplate::new(401)
-                .set_body_json(openai_error("invalid_request_error", "Incorrect API key", Some("invalid_api_key"))),
-        )
+        .respond_with(ResponseTemplate::new(401).set_body_json(openai_error(
+            "invalid_request_error",
+            "Incorrect API key",
+            Some("invalid_api_key"),
+        )))
         .mount(&mock_server)
         .await;
 
@@ -630,9 +641,7 @@ async fn error_401_maps_to_unauthorized() {
         .with_base_url(mock_server.uri())
         .with_retry_config(1, 10, 100);
 
-    let result = client
-        .chat(Model::Gpt4o, "Hi", None, Some(1024))
-        .await;
+    let result = client.chat(Model::Gpt4o, "Hi", None, Some(1024)).await;
 
     let err = result.unwrap_err();
     assert!(matches!(err, fcp_openai::error::OpenAIError::InvalidApiKey));
@@ -641,9 +650,9 @@ async fn error_401_maps_to_unauthorized() {
     assert!(matches!(fcp_err, fcp_core::FcpError::Unauthorized { .. }));
 }
 
-/// 429 maps to OpenAIError::RateLimited -> FcpError::RateLimited.
-/// Constructs the error directly to avoid the 30s retry_after delay from RateLimited
-/// that the RetryLoop honors during retries.
+/// 429 maps to `OpenAIError::RateLimited` -> `FcpError::RateLimited`.
+/// Constructs the error directly to avoid the 30s `retry_after` delay from `RateLimited`
+/// that the `RetryLoop` honors during retries.
 #[fcp_async_core::runtime::test]
 async fn error_429_maps_to_rate_limited() {
     let _ctx = AsyncTestContext::for_scenario("openai.error.429_rate_limited");
@@ -655,23 +664,21 @@ async fn error_429_maps_to_rate_limited() {
     assert!(err.is_retryable());
     assert_eq!(
         err.retry_after(),
-        Some(std::time::Duration::from_millis(30_000))
+        Some(std::time::Duration::from_secs(30))
     );
 
     let fcp_err = err.to_fcp_error();
     match fcp_err {
-        fcp_core::FcpError::RateLimited {
-            retry_after_ms, ..
-        } => {
+        fcp_core::FcpError::RateLimited { retry_after_ms, .. } => {
             assert_eq!(retry_after_ms, 30_000);
         }
         other => panic!("expected RateLimited, got: {other:?}"),
     }
 }
 
-/// 503 maps to OpenAIError::Overloaded -> FcpError::External (retryable).
-/// Constructs the error directly to avoid the 60s retry_after delay from Overloaded
-/// that the RetryLoop honors during retries.
+/// 503 maps to `OpenAIError::Overloaded` -> `FcpError::External` (retryable).
+/// Constructs the error directly to avoid the 60s `retry_after` delay from Overloaded
+/// that the `RetryLoop` honors during retries.
 #[fcp_async_core::runtime::test]
 async fn error_503_maps_to_overloaded() {
     let _ctx = AsyncTestContext::for_scenario("openai.error.503_overloaded");
@@ -684,7 +691,7 @@ async fn error_503_maps_to_overloaded() {
     assert!(err.is_retryable());
     assert_eq!(
         err.retry_after(),
-        Some(std::time::Duration::from_millis(60_000))
+        Some(std::time::Duration::from_secs(60))
     );
 
     let fcp_err = err.to_fcp_error();
@@ -703,20 +710,18 @@ async fn error_503_maps_to_overloaded() {
     }
 }
 
-/// Context length exceeded maps to FcpError::InvalidRequest.
+/// Context length exceeded maps to `FcpError::InvalidRequest`.
 #[fcp_async_core::runtime::test]
 async fn error_context_length_maps_to_invalid_request() {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .respond_with(
-            ResponseTemplate::new(400).set_body_json(openai_error(
-                "invalid_request_error",
-                "maximum context length exceeded",
-                None,
-            )),
-        )
+        .respond_with(ResponseTemplate::new(400).set_body_json(openai_error(
+            "invalid_request_error",
+            "maximum context length exceeded",
+            None,
+        )))
         .mount(&mock_server)
         .await;
 
@@ -725,9 +730,7 @@ async fn error_context_length_maps_to_invalid_request() {
         .with_base_url(mock_server.uri())
         .with_retry_config(1, 10, 100);
 
-    let result = client
-        .chat(Model::Gpt4o, "Hi", None, Some(1024))
-        .await;
+    let result = client.chat(Model::Gpt4o, "Hi", None, Some(1024)).await;
 
     let err = result.unwrap_err();
     assert!(matches!(
@@ -739,20 +742,18 @@ async fn error_context_length_maps_to_invalid_request() {
     assert!(matches!(fcp_err, fcp_core::FcpError::InvalidRequest { .. }));
 }
 
-/// Content filter error maps to FcpError::InvalidRequest.
+/// Content filter error maps to `FcpError::InvalidRequest`.
 #[fcp_async_core::runtime::test]
 async fn error_content_filter_maps_to_invalid_request() {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .respond_with(
-            ResponseTemplate::new(400).set_body_json(openai_error(
-                "invalid_request_error",
-                "Content filtered",
-                Some("content_filter"),
-            )),
-        )
+        .respond_with(ResponseTemplate::new(400).set_body_json(openai_error(
+            "invalid_request_error",
+            "Content filtered",
+            Some("content_filter"),
+        )))
         .mount(&mock_server)
         .await;
 
@@ -761,9 +762,7 @@ async fn error_content_filter_maps_to_invalid_request() {
         .with_base_url(mock_server.uri())
         .with_retry_config(1, 10, 100);
 
-    let result = client
-        .chat(Model::Gpt4o, "Hi", None, Some(1024))
-        .await;
+    let result = client.chat(Model::Gpt4o, "Hi", None, Some(1024)).await;
 
     let err = result.unwrap_err();
     assert!(matches!(
@@ -803,8 +802,14 @@ async fn usage_metrics_accumulate() {
         .unwrap()
         .with_base_url(mock_server.uri());
 
-    client.chat(Model::Gpt4o, "Hi", None, Some(1024)).await.unwrap();
-    client.chat(Model::Gpt4o, "Hi again", None, Some(1024)).await.unwrap();
+    client
+        .chat(Model::Gpt4o, "Hi", None, Some(1024))
+        .await
+        .unwrap();
+    client
+        .chat(Model::Gpt4o, "Hi again", None, Some(1024))
+        .await
+        .unwrap();
 
     assert_eq!(client.total_prompt_tokens(), 200);
     assert_eq!(client.total_completion_tokens(), 100);
@@ -826,15 +831,21 @@ async fn usage_cost_is_model_dependent() {
     // GPT-4o: $2.50 input + $10.00 output = $12.50
     assert!((cost_4o - 12.50).abs() < 0.01, "gpt-4o cost = {cost_4o}");
     // GPT-4o-mini: $0.15 input + $0.60 output = $0.75
-    assert!((cost_mini - 0.75).abs() < 0.01, "gpt-4o-mini cost = {cost_mini}");
-    assert!(cost_4o > cost_mini, "gpt-4o should be more expensive than mini");
+    assert!(
+        (cost_mini - 0.75).abs() < 0.01,
+        "gpt-4o-mini cost = {cost_mini}"
+    );
+    assert!(
+        cost_4o > cost_mini,
+        "gpt-4o should be more expensive than mini"
+    );
 }
 
 // ============================================================================
 // FCP2 Default-Deny Tests
 // ============================================================================
 
-/// Missing capability_token in invoke fails.
+/// Missing `capability_token` in invoke fails.
 #[fcp_async_core::runtime::test]
 async fn capability_missing_token_fails() {
     let _ctx = AsyncTestContext::for_scenario("openai.cap.missing_token");
@@ -908,7 +919,7 @@ async fn capability_no_configure_fails() {
     ));
 }
 
-/// Wrong operation returns OperationNotGranted.
+/// Wrong operation returns `OperationNotGranted`.
 #[fcp_async_core::runtime::test]
 async fn capability_wrong_operation_fails() {
     let mock = MockApiServer::start().await;
@@ -964,7 +975,7 @@ async fn capability_unknown_operation_fails() {
 // Lifecycle Tests
 // ============================================================================
 
-/// Health before configure returns not_configured.
+/// Health before configure returns `not_configured`.
 #[fcp_async_core::runtime::test]
 async fn lifecycle_health_before_configure() {
     let connector = OpenAIConnector::new();
@@ -1025,7 +1036,10 @@ async fn lifecycle_introspect_operations() {
     let ops = result["operations"].as_array().unwrap();
     let op_ids: Vec<&str> = ops.iter().filter_map(|o| o["id"].as_str()).collect();
 
-    assert!(op_ids.contains(&"openai.chat"), "should include openai.chat");
+    assert!(
+        op_ids.contains(&"openai.chat"),
+        "should include openai.chat"
+    );
     assert!(
         op_ids.contains(&"openai.simple_chat"),
         "should include openai.simple_chat"
@@ -1110,7 +1124,7 @@ async fn validation_unknown_model_fails() {
     ));
 }
 
-/// Missing message in simple_chat is rejected.
+/// Missing message in `simple_chat` is rejected.
 #[fcp_async_core::runtime::test]
 async fn validation_simple_chat_missing_message_fails() {
     let mock = MockApiServer::start().await;
@@ -1131,7 +1145,10 @@ async fn validation_simple_chat_missing_message_fails() {
     let err = result.unwrap_err();
     match err {
         fcp_core::FcpError::InvalidRequest { message, .. } => {
-            assert!(message.contains("message"), "error should mention missing message: {message}");
+            assert!(
+                message.contains("message"),
+                "error should mention missing message: {message}"
+            );
         }
         _ => panic!("expected InvalidRequest, got: {err:?}"),
     }
@@ -1148,10 +1165,11 @@ async fn metrics_error_counter_increments() {
 
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .respond_with(
-            ResponseTemplate::new(401)
-                .set_body_json(openai_error("invalid_request_error", "Incorrect API key", Some("invalid_api_key"))),
-        )
+        .respond_with(ResponseTemplate::new(401).set_body_json(openai_error(
+            "invalid_request_error",
+            "Incorrect API key",
+            Some("invalid_api_key"),
+        )))
         .mount(&mock_server)
         .await;
 
@@ -1172,14 +1190,18 @@ async fn metrics_error_counter_increments() {
         }))
         .await;
 
-    assert_eq!(connector.total_errors(), 1, "error counter should increment");
+    assert_eq!(
+        connector.total_errors(),
+        1,
+        "error counter should increment"
+    );
 }
 
 // ============================================================================
 // Get Usage Tests
 // ============================================================================
 
-/// get_usage returns token and cost stats via invoke.
+/// `get_usage` returns token and cost stats via invoke.
 #[fcp_async_core::runtime::test]
 async fn get_usage_returns_stats() {
     let mock = MockApiServer::start().await;

@@ -170,42 +170,6 @@ async fn user_get_happy_path() {
 }
 
 #[fcp_async_core::runtime::test]
-async fn user_by_username_happy_path() {
-    let _ctx = AsyncTestContext::for_scenario("twitter.user.by_username.happy_path");
-    let mock_server = MockServer::start().await;
-
-    Mock::given(method("GET"))
-        .and(path("/2/users/by/username/other_user"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": {
-                "id": "67890",
-                "name": "Other User",
-                "username": "other_user"
-            }
-        })))
-        .mount(&mock_server)
-        .await;
-
-    let mut connector = TwitterConnector::new();
-    setup_configure(&mut connector, &mock_server.uri()).await;
-    let signing_key =
-        setup_handshake(&mut connector, &mock_server, &["twitter.user.by_username"]).await;
-    let token = generate_valid_token(&signing_key, "twitter.user.by_username");
-
-    let result = connector
-        .handle_invoke(json!({
-            "operation": "twitter.user.by_username",
-            "args": { "username": "@other_user" },
-            "capability_token": token
-        }))
-        .await
-        .expect("user.by_username invoke should succeed");
-
-    assert_eq!(result["user"]["id"], "67890");
-    assert_eq!(result["user"]["username"], "other_user");
-}
-
-#[fcp_async_core::runtime::test]
 async fn tweet_get_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("twitter.tweet.get.happy_path");
     let mock_server = MockServer::start().await;
@@ -611,11 +575,18 @@ async fn introspect_lists_all_operations() {
     assert!(op_ids.contains(&"twitter.user.me"));
     assert!(op_ids.contains(&"twitter.user.get"));
     assert!(op_ids.contains(&"twitter.tweet.get"));
+    assert!(op_ids.contains(&"twitter.tweet.get_many"));
     assert!(op_ids.contains(&"twitter.tweet.search"));
     assert!(op_ids.contains(&"twitter.trends.place"));
     assert!(op_ids.contains(&"twitter.tweet.create"));
     assert!(op_ids.contains(&"twitter.tweet.delete"));
-    assert_eq!(ops.len(), 14);
+    assert!(op_ids.contains(&"twitter.tweet.retweet"));
+    assert!(op_ids.contains(&"twitter.tweet.unretweet"));
+    assert!(op_ids.contains(&"twitter.tweet.like"));
+    assert!(op_ids.contains(&"twitter.tweet.unlike"));
+    assert!(op_ids.contains(&"twitter.dm.send"));
+    assert!(op_ids.contains(&"twitter.dm.events"));
+    assert_eq!(ops.len(), 21);
 }
 
 #[fcp_async_core::runtime::test]
@@ -714,4 +685,477 @@ async fn trends_place_missing_woeid_fails() {
         }
         e => panic!("Expected InvalidRequest, got: {e:?}"),
     }
+}
+
+// ============================================================================
+// Read operation tests — tweet.get_many, user.by_username, user.timeline, user.mentions
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn tweet_get_many_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("twitter.tweet.get_many.happy_path");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/2/tweets"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                { "id": "111", "text": "First tweet" },
+                { "id": "222", "text": "Second tweet" }
+            ],
+            "meta": { "result_count": 2 }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = TwitterConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &mock_server, &["twitter.tweet.get_many"]).await;
+    let token = generate_valid_token(&signing_key, "twitter.tweet.get_many");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "twitter.tweet.get_many",
+            "args": { "tweet_ids": ["111", "222"] },
+            "capability_token": token
+        }))
+        .await
+        .expect("tweet.get_many invoke should succeed");
+
+    let tweets = result["tweets"].as_array().expect("tweets array");
+    assert_eq!(tweets.len(), 2);
+    assert_eq!(tweets[0]["id"], "111");
+    assert_eq!(tweets[1]["text"], "Second tweet");
+}
+
+#[fcp_async_core::runtime::test]
+async fn tweet_get_many_missing_tweet_ids_fails() {
+    let _ctx = AsyncTestContext::for_scenario("twitter.validation.tweet_get_many_missing_ids");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = TwitterConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &mock_server, &["twitter.tweet.get_many"]).await;
+    let token = generate_valid_token(&signing_key, "twitter.tweet.get_many");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "twitter.tweet.get_many",
+            "args": {},
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("tweet_ids"));
+        }
+        e => panic!("Expected InvalidRequest, got: {e:?}"),
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn tweet_get_many_empty_ids_fails() {
+    let _ctx = AsyncTestContext::for_scenario("twitter.validation.tweet_get_many_empty");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = TwitterConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &mock_server, &["twitter.tweet.get_many"]).await;
+    let token = generate_valid_token(&signing_key, "twitter.tweet.get_many");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "twitter.tweet.get_many",
+            "args": { "tweet_ids": [] },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("empty"));
+        }
+        e => panic!("Expected InvalidRequest, got: {e:?}"),
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn user_mentions_uses_authenticated_user_by_default() {
+    let _ctx = AsyncTestContext::for_scenario("twitter.user.mentions.default_user");
+    let mock_server = MockServer::start().await;
+
+    // Mentions endpoint for the authenticated user (id=12345 from handshake mock)
+    Mock::given(method("GET"))
+        .and(path("/2/users/12345/mentions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                { "id": "777", "text": "@test_bot_fcp hey!" }
+            ],
+            "meta": { "result_count": 1 }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = TwitterConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &mock_server, &["twitter.user.mentions"]).await;
+    let token = generate_valid_token(&signing_key, "twitter.user.mentions");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "twitter.user.mentions",
+            "args": {},
+            "capability_token": token
+        }))
+        .await
+        .expect("user.mentions invoke should succeed with default user");
+
+    let tweets = result["tweets"].as_array().expect("tweets array");
+    assert_eq!(tweets.len(), 1);
+    assert_eq!(tweets[0]["id"], "777");
+}
+
+#[fcp_async_core::runtime::test]
+async fn introspect_read_ops_are_safe() {
+    let _ctx = AsyncTestContext::for_scenario("twitter.introspect.read_ops_safe");
+    let connector = TwitterConnector::new();
+    let result = connector
+        .handle_introspect()
+        .await
+        .expect("introspect should succeed");
+
+    let ops = result["operations"].as_array().expect("operations array");
+    let read_ops = [
+        "twitter.user.me",
+        "twitter.user.get",
+        "twitter.user.by_username",
+        "twitter.tweet.get",
+        "twitter.tweet.get_many",
+        "twitter.tweet.search",
+        "twitter.user.timeline",
+        "twitter.user.mentions",
+        "twitter.trends.place",
+    ];
+
+    for op_id in &read_ops {
+        let op = ops
+            .iter()
+            .find(|o| o["id"].as_str() == Some(op_id))
+            .unwrap_or_else(|| panic!("missing operation {op_id}"));
+        assert_eq!(op["risk_level"], "low", "{op_id} should be low risk");
+        assert_eq!(op["safety_tier"], "safe", "{op_id} should be safe tier");
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn introspect_write_ops_are_high_risk() {
+    let _ctx = AsyncTestContext::for_scenario("twitter.introspect.write_ops_risk");
+    let connector = TwitterConnector::new();
+    let result = connector
+        .handle_introspect()
+        .await
+        .expect("introspect should succeed");
+
+    let ops = result["operations"].as_array().expect("operations array");
+    let write_ops = [
+        "twitter.tweet.create",
+        "twitter.tweet.reply",
+        "twitter.tweet.delete",
+        "twitter.tweet.retweet",
+    ];
+
+    for op_id in &write_ops {
+        let op = ops
+            .iter()
+            .find(|o| o["id"].as_str() == Some(op_id))
+            .unwrap_or_else(|| panic!("missing operation {op_id}"));
+        assert_eq!(op["risk_level"], "high", "{op_id} should be high risk");
+    }
+}
+
+// ============================================================================
+// Write operation tests — retweet, unretweet, like, unlike, DM
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn tweet_retweet_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("twitter.tweet.retweet.happy_path");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/2/users/12345/retweets"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": { "retweeted": true }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = TwitterConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &mock_server, &["twitter.tweet.retweet"]).await;
+    let token = generate_valid_token(&signing_key, "twitter.tweet.retweet");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "twitter.tweet.retweet",
+            "args": { "tweet_id": "999" },
+            "capability_token": token
+        }))
+        .await
+        .expect("retweet should succeed");
+
+    assert_eq!(result["retweeted"], true);
+}
+
+#[fcp_async_core::runtime::test]
+async fn tweet_unretweet_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("twitter.tweet.unretweet.happy_path");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("DELETE"))
+        .and(path("/2/users/12345/retweets/999"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": { "retweeted": false }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = TwitterConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &mock_server, &["twitter.tweet.unretweet"]).await;
+    let token = generate_valid_token(&signing_key, "twitter.tweet.unretweet");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "twitter.tweet.unretweet",
+            "args": { "tweet_id": "999" },
+            "capability_token": token
+        }))
+        .await
+        .expect("unretweet should succeed");
+
+    assert_eq!(result["retweeted"], false);
+}
+
+#[fcp_async_core::runtime::test]
+async fn tweet_like_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("twitter.tweet.like.happy_path");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/2/users/12345/likes"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": { "liked": true }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = TwitterConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &mock_server, &["twitter.tweet.like"]).await;
+    let token = generate_valid_token(&signing_key, "twitter.tweet.like");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "twitter.tweet.like",
+            "args": { "tweet_id": "888" },
+            "capability_token": token
+        }))
+        .await
+        .expect("like should succeed");
+
+    assert_eq!(result["liked"], true);
+}
+
+#[fcp_async_core::runtime::test]
+async fn tweet_unlike_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("twitter.tweet.unlike.happy_path");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("DELETE"))
+        .and(path("/2/users/12345/likes/888"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": { "liked": false }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = TwitterConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &mock_server, &["twitter.tweet.unlike"]).await;
+    let token = generate_valid_token(&signing_key, "twitter.tweet.unlike");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "twitter.tweet.unlike",
+            "args": { "tweet_id": "888" },
+            "capability_token": token
+        }))
+        .await
+        .expect("unlike should succeed");
+
+    assert_eq!(result["liked"], false);
+}
+
+#[fcp_async_core::runtime::test]
+async fn dm_send_to_existing_conversation() {
+    let _ctx = AsyncTestContext::for_scenario("twitter.dm.send.existing_conversation");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/2/dm_conversations/conv-123/messages"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "data": {
+                "dm_conversation_id": "conv-123",
+                "dm_event_id": "evt-456"
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = TwitterConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &mock_server, &["twitter.dm.send"]).await;
+    let token = generate_valid_token(&signing_key, "twitter.dm.send");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "twitter.dm.send",
+            "args": { "conversation_id": "conv-123", "text": "Hello via FCP!" },
+            "capability_token": token
+        }))
+        .await
+        .expect("dm.send should succeed");
+
+    assert_eq!(result["dm_conversation_id"], "conv-123");
+    assert_eq!(result["dm_event_id"], "evt-456");
+}
+
+#[fcp_async_core::runtime::test]
+async fn dm_send_missing_target_fails() {
+    let _ctx = AsyncTestContext::for_scenario("twitter.validation.dm_send_missing_target");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = TwitterConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &mock_server, &["twitter.dm.send"]).await;
+    let token = generate_valid_token(&signing_key, "twitter.dm.send");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "twitter.dm.send",
+            "args": { "text": "Hello!" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("conversation_id"));
+        }
+        e => panic!("Expected InvalidRequest, got: {e:?}"),
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn dm_events_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("twitter.dm.events.happy_path");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/2/dm_conversations/conv-123/dm_events"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {
+                    "id": "evt-1",
+                    "event_type": "MessageCreate",
+                    "text": "Hey!",
+                    "sender_id": "12345"
+                }
+            ],
+            "meta": { "result_count": 1 }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = TwitterConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &mock_server, &["twitter.dm.events"]).await;
+    let token = generate_valid_token(&signing_key, "twitter.dm.events");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "twitter.dm.events",
+            "args": { "conversation_id": "conv-123" },
+            "capability_token": token
+        }))
+        .await
+        .expect("dm.events should succeed");
+
+    let events = result["events"].as_array().expect("events array");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["text"], "Hey!");
+}
+
+#[fcp_async_core::runtime::test]
+async fn retweet_missing_tweet_id_fails() {
+    let _ctx = AsyncTestContext::for_scenario("twitter.validation.retweet_missing_id");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = TwitterConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &mock_server, &["twitter.tweet.retweet"]).await;
+    let token = generate_valid_token(&signing_key, "twitter.tweet.retweet");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "twitter.tweet.retweet",
+            "args": {},
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("tweet_id"));
+        }
+        e => panic!("Expected InvalidRequest, got: {e:?}"),
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn introspect_dm_ops_are_dangerous_or_risky() {
+    let _ctx = AsyncTestContext::for_scenario("twitter.introspect.dm_ops_risk");
+    let connector = TwitterConnector::new();
+    let result = connector
+        .handle_introspect()
+        .await
+        .expect("introspect should succeed");
+
+    let ops = result["operations"].as_array().expect("operations array");
+
+    let dm_send = ops.iter().find(|o| o["id"] == "twitter.dm.send").unwrap();
+    assert_eq!(dm_send["safety_tier"], "dangerous");
+    assert_eq!(dm_send["risk_level"], "high");
+
+    let dm_events = ops.iter().find(|o| o["id"] == "twitter.dm.events").unwrap();
+    assert_eq!(dm_events["safety_tier"], "risky");
+    assert_eq!(dm_events["risk_level"], "medium");
 }

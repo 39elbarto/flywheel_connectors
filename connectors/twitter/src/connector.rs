@@ -409,6 +409,30 @@ impl TwitterConnector {
                     AgentHint { when_to_use: "Get trending topics for a location by WOEID.".into(), common_mistakes: vec!["Using city name instead of numeric WOEID".into()], examples: vec![r#"{"woeid": 1}"#.into()], related: vec![CapabilityId::from_static("twitter.tweet.search")] },
                 ),
                 // ── Write operations (Dangerous) ──────────────────────
+                tw_op("twitter.tweet.retweet", "Retweet a tweet",
+                    json!({ "type": "object", "required": ["tweet_id"], "properties": { "tweet_id": { "type": "string" } } }),
+                    json!({ "type": "object", "properties": { "retweeted": { "type": "boolean" } } }),
+                    "twitter.write.tweets", RiskLevel::High, SafetyTier::Risky,
+                    AgentHint { when_to_use: "Retweet a tweet to amplify it.".into(), common_mistakes: vec!["Retweeting already retweeted tweet".into()], examples: vec![r#"{"tweet_id": "1234567890"}"#.into()], related: vec![CapabilityId::from_static("twitter.tweet.unretweet")] },
+                ),
+                tw_op("twitter.tweet.unretweet", "Remove a retweet",
+                    json!({ "type": "object", "required": ["tweet_id"], "properties": { "tweet_id": { "type": "string" } } }),
+                    json!({ "type": "object", "properties": { "retweeted": { "type": "boolean" } } }),
+                    "twitter.write.tweets", RiskLevel::Medium, SafetyTier::Risky,
+                    AgentHint { when_to_use: "Remove a retweet.".into(), common_mistakes: vec![], examples: vec![r#"{"tweet_id": "1234567890"}"#.into()], related: vec![CapabilityId::from_static("twitter.tweet.retweet")] },
+                ),
+                tw_op("twitter.tweet.like", "Like a tweet",
+                    json!({ "type": "object", "required": ["tweet_id"], "properties": { "tweet_id": { "type": "string" } } }),
+                    json!({ "type": "object", "properties": { "liked": { "type": "boolean" } } }),
+                    "twitter.write.tweets", RiskLevel::Medium, SafetyTier::Risky,
+                    AgentHint { when_to_use: "Like a tweet.".into(), common_mistakes: vec![], examples: vec![r#"{"tweet_id": "1234567890"}"#.into()], related: vec![CapabilityId::from_static("twitter.tweet.unlike")] },
+                ),
+                tw_op("twitter.tweet.unlike", "Remove a like from a tweet",
+                    json!({ "type": "object", "required": ["tweet_id"], "properties": { "tweet_id": { "type": "string" } } }),
+                    json!({ "type": "object", "properties": { "liked": { "type": "boolean" } } }),
+                    "twitter.write.tweets", RiskLevel::Low, SafetyTier::Safe,
+                    AgentHint { when_to_use: "Remove a like.".into(), common_mistakes: vec![], examples: vec![r#"{"tweet_id": "1234567890"}"#.into()], related: vec![CapabilityId::from_static("twitter.tweet.like")] },
+                ),
                 tw_op("twitter.tweet.create", "Create a new tweet",
                     json!({ "type": "object", "required": ["text"], "properties": { "text": { "type": "string", "maxLength": 280 } } }),
                     json!({ "type": "object", "properties": { "tweet": { "type": "object" } } }),
@@ -439,6 +463,19 @@ impl TwitterConnector {
                     json!({ "type": "object", "properties": { "rules": { "type": "array" }, "meta": { "type": "object" } } }),
                     "twitter.stream.read", RiskLevel::High, SafetyTier::Risky,
                     AgentHint { when_to_use: "Add filter rules to the real-time stream.".into(), common_mistakes: vec!["Exceeding 25 rules on Basic tier".into()], examples: vec![r#"{"rules": [{"value": "from:elonmusk", "tag": "elon"}]}"#.into()], related: vec![CapabilityId::from_static("twitter.stream.rules.delete")] },
+                ),
+                // ── DM operations (High sensitivity) ──────────────────
+                tw_op("twitter.dm.send", "Send a direct message",
+                    json!({ "type": "object", "required": ["text"], "properties": { "text": { "type": "string", "maxLength": 10000 }, "conversation_id": { "type": "string" }, "participant_id": { "type": "string" } } }),
+                    json!({ "type": "object", "properties": { "dm_conversation_id": { "type": "string" }, "dm_event_id": { "type": "string" } } }),
+                    "twitter.write.dms", RiskLevel::High, SafetyTier::Dangerous,
+                    AgentHint { when_to_use: "Send a DM. Provide conversation_id for existing threads or participant_id for new ones.".into(), common_mistakes: vec!["Sending to wrong conversation".into(), "Not providing conversation_id or participant_id".into()], examples: vec![r#"{"conversation_id": "123", "text": "Hello!"}"#.into()], related: vec![CapabilityId::from_static("twitter.dm.events")] },
+                ),
+                tw_op("twitter.dm.events", "Get DM events in a conversation",
+                    json!({ "type": "object", "required": ["conversation_id"], "properties": { "conversation_id": { "type": "string" }, "max_results": { "type": "integer", "minimum": 1, "maximum": 100 } } }),
+                    json!({ "type": "object", "properties": { "events": { "type": "array" }, "meta": { "type": "object" } } }),
+                    "twitter.read.dms", RiskLevel::Medium, SafetyTier::Risky,
+                    AgentHint { when_to_use: "Read DM events in a conversation.".into(), common_mistakes: vec![], examples: vec![r#"{"conversation_id": "123"}"#.into()], related: vec![CapabilityId::from_static("twitter.dm.send")] },
                 ),
                 tw_op("twitter.stream.rules.delete", "Delete filtered stream rules by ID",
                     json!({ "type": "object", "required": ["rule_ids"], "properties": { "rule_ids": { "type": "array", "items": { "type": "string" } } } }),
@@ -883,6 +920,16 @@ impl TwitterConnector {
         self.client.clone().ok_or(FcpError::NotConfigured)
     }
 
+    fn require_authenticated_user_id(&self) -> Result<String, FcpError> {
+        self.authenticated_user
+            .as_ref()
+            .map(|u| u.id.clone())
+            .ok_or_else(|| FcpError::Unauthorized {
+                code: 2001,
+                message: "No authenticated user — handshake required".into(),
+            })
+    }
+
     async fn dispatch_operation(&self, operation: &str, args: Value) -> Result<Value, FcpError> {
         match operation {
             // User operations
@@ -897,6 +944,16 @@ impl TwitterConnector {
             "twitter.tweet.create" => self.op_tweet_create(args).await,
             "twitter.tweet.reply" => self.op_tweet_reply(args).await,
             "twitter.tweet.delete" => self.op_tweet_delete(args).await,
+
+            // Engagement operations
+            "twitter.tweet.retweet" => self.op_tweet_retweet(args).await,
+            "twitter.tweet.unretweet" => self.op_tweet_unretweet(args).await,
+            "twitter.tweet.like" => self.op_tweet_like(args).await,
+            "twitter.tweet.unlike" => self.op_tweet_unlike(args).await,
+
+            // DM operations
+            "twitter.dm.send" => self.op_dm_send(args).await,
+            "twitter.dm.events" => self.op_dm_events(args).await,
 
             // Timeline operations
             "twitter.user.timeline" => self.op_user_timeline(args).await,
@@ -1006,10 +1063,12 @@ impl TwitterConnector {
     async fn op_tweet_get_many(&self, args: Value) -> Result<Value, FcpError> {
         let client = self.require_client()?;
 
-        let ids_value = args.get("tweet_ids").ok_or_else(|| FcpError::InvalidRequest {
-            code: 1006,
-            message: "Missing 'tweet_ids' argument".into(),
-        })?;
+        let ids_value = args
+            .get("tweet_ids")
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1006,
+                message: "Missing 'tweet_ids' argument".into(),
+            })?;
 
         let ids: Vec<String> =
             serde_json::from_value(ids_value.clone()).map_err(|e| FcpError::InvalidRequest {
@@ -1192,6 +1251,173 @@ impl TwitterConnector {
 
         Ok(json!({
             "deleted": response.data.deleted
+        }))
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Engagement operations (retweet / like)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    async fn op_tweet_retweet(&self, args: Value) -> Result<Value, FcpError> {
+        let client = self.require_client()?;
+
+        let tweet_id = args
+            .get("tweet_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1006,
+                message: "Missing 'tweet_id' argument".into(),
+            })?;
+
+        let user_id = self.require_authenticated_user_id()?;
+
+        let response = client
+            .retweet(&user_id, tweet_id)
+            .await
+            .map_err(|e| e.to_fcp_error())?;
+
+        Ok(json!({
+            "retweeted": response.data.retweeted
+        }))
+    }
+
+    async fn op_tweet_unretweet(&self, args: Value) -> Result<Value, FcpError> {
+        let client = self.require_client()?;
+
+        let tweet_id = args
+            .get("tweet_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1006,
+                message: "Missing 'tweet_id' argument".into(),
+            })?;
+
+        let user_id = self.require_authenticated_user_id()?;
+
+        let response = client
+            .unretweet(&user_id, tweet_id)
+            .await
+            .map_err(|e| e.to_fcp_error())?;
+
+        Ok(json!({
+            "retweeted": response.data.retweeted
+        }))
+    }
+
+    async fn op_tweet_like(&self, args: Value) -> Result<Value, FcpError> {
+        let client = self.require_client()?;
+
+        let tweet_id = args
+            .get("tweet_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1006,
+                message: "Missing 'tweet_id' argument".into(),
+            })?;
+
+        let user_id = self.require_authenticated_user_id()?;
+
+        let response = client
+            .like_tweet(&user_id, tweet_id)
+            .await
+            .map_err(|e| e.to_fcp_error())?;
+
+        Ok(json!({
+            "liked": response.data.liked
+        }))
+    }
+
+    async fn op_tweet_unlike(&self, args: Value) -> Result<Value, FcpError> {
+        let client = self.require_client()?;
+
+        let tweet_id = args
+            .get("tweet_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1006,
+                message: "Missing 'tweet_id' argument".into(),
+            })?;
+
+        let user_id = self.require_authenticated_user_id()?;
+
+        let response = client
+            .unlike_tweet(&user_id, tweet_id)
+            .await
+            .map_err(|e| e.to_fcp_error())?;
+
+        Ok(json!({
+            "liked": response.data.liked
+        }))
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Direct message operations
+    // ─────────────────────────────────────────────────────────────────────────
+
+    async fn op_dm_send(&self, args: Value) -> Result<Value, FcpError> {
+        let client = self.require_client()?;
+
+        let text =
+            args.get("text")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| FcpError::InvalidRequest {
+                    code: 1006,
+                    message: "Missing 'text' argument".into(),
+                })?;
+
+        // Either conversation_id (existing) or participant_id (new conversation)
+        if let Some(conversation_id) = args.get("conversation_id").and_then(|v| v.as_str()) {
+            let response = client
+                .send_dm(conversation_id, text)
+                .await
+                .map_err(|e| e.to_fcp_error())?;
+
+            Ok(json!({
+                "dm_conversation_id": response.data.dm_conversation_id,
+                "dm_event_id": response.data.dm_event_id
+            }))
+        } else if let Some(participant_id) = args.get("participant_id").and_then(|v| v.as_str()) {
+            let response = client
+                .create_dm_conversation(participant_id, text)
+                .await
+                .map_err(|e| e.to_fcp_error())?;
+
+            Ok(json!({
+                "dm_conversation_id": response.data.dm_conversation_id,
+                "dm_event_id": response.data.dm_event_id
+            }))
+        } else {
+            Err(FcpError::InvalidRequest {
+                code: 1006,
+                message: "Missing 'conversation_id' or 'participant_id' argument".into(),
+            })
+        }
+    }
+
+    async fn op_dm_events(&self, args: Value) -> Result<Value, FcpError> {
+        let client = self.require_client()?;
+
+        let conversation_id = args
+            .get("conversation_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1006,
+                message: "Missing 'conversation_id' argument".into(),
+            })?;
+
+        let max_results = args
+            .get("max_results")
+            .and_then(serde_json::Value::as_u64)
+            .map(|v| v as u32);
+
+        let response = client
+            .get_dm_events(conversation_id, max_results)
+            .await
+            .map_err(|e| e.to_fcp_error())?;
+
+        Ok(json!({
+            "events": response.data,
+            "meta": response.meta
         }))
     }
 

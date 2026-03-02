@@ -27,8 +27,10 @@ use crate::{
     error::{TwitterError, TwitterResult},
     oauth::OAuthSigner,
     types::{
-        CreateTweetRequest, CreateTweetResponse, DeleteTweetResponse, SearchTweetsParams,
-        StreamRule, StreamRulesResponse, TrendsPlace, Tweet, TwitterResponse, User,
+        CreateTweetRequest, CreateTweetResponse, DeleteTweetResponse, DmEvent, LikeResponse,
+        RetweetResponse, SearchTweetsParams, SendDmRequest, SendDmResponse, StreamRule,
+        StreamRulesResponse, TrendsPlace, Tweet, TwitterResponse, UnlikeResponse,
+        UnretweetResponse, User,
     },
 };
 
@@ -652,6 +654,117 @@ impl TwitterApiClient {
         let params = vec![("id".to_string(), woeid.to_string())];
         self.get_with_params("/1.1/trends/place.json", &params)
             .await
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Retweet / Like endpoints
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Retweet a tweet on behalf of the authenticated user.
+    pub async fn retweet(&self, user_id: &str, tweet_id: &str) -> TwitterResult<RetweetResponse> {
+        #[derive(serde::Serialize)]
+        struct RetweetBody {
+            tweet_id: String,
+        }
+        let body = RetweetBody {
+            tweet_id: tweet_id.to_string(),
+        };
+        self.post(&format!("/2/users/{user_id}/retweets"), &body)
+            .await
+    }
+
+    /// Remove a retweet.
+    pub async fn unretweet(
+        &self,
+        user_id: &str,
+        tweet_id: &str,
+    ) -> TwitterResult<UnretweetResponse> {
+        self.delete(&format!("/2/users/{user_id}/retweets/{tweet_id}"))
+            .await
+    }
+
+    /// Like a tweet on behalf of the authenticated user.
+    pub async fn like_tweet(&self, user_id: &str, tweet_id: &str) -> TwitterResult<LikeResponse> {
+        #[derive(serde::Serialize)]
+        struct LikeBody {
+            tweet_id: String,
+        }
+        let body = LikeBody {
+            tweet_id: tweet_id.to_string(),
+        };
+        self.post(&format!("/2/users/{user_id}/likes"), &body).await
+    }
+
+    /// Remove a like.
+    pub async fn unlike_tweet(
+        &self,
+        user_id: &str,
+        tweet_id: &str,
+    ) -> TwitterResult<UnlikeResponse> {
+        self.delete(&format!("/2/users/{user_id}/likes/{tweet_id}"))
+            .await
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Direct Message endpoints
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Send a DM in an existing conversation.
+    pub async fn send_dm(
+        &self,
+        conversation_id: &str,
+        text: &str,
+    ) -> TwitterResult<SendDmResponse> {
+        let body = SendDmRequest {
+            text: text.to_string(),
+        };
+        self.post(
+            &format!("/2/dm_conversations/{conversation_id}/messages"),
+            &body,
+        )
+        .await
+    }
+
+    /// Create a new DM conversation and send the first message.
+    pub async fn create_dm_conversation(
+        &self,
+        participant_id: &str,
+        text: &str,
+    ) -> TwitterResult<SendDmResponse> {
+        #[derive(serde::Serialize)]
+        struct NewDmRequest {
+            conversation_type: String,
+            participant_ids: Vec<String>,
+            message: SendDmRequest,
+        }
+        let body = NewDmRequest {
+            conversation_type: "Group".to_string(),
+            participant_ids: vec![participant_id.to_string()],
+            message: SendDmRequest {
+                text: text.to_string(),
+            },
+        };
+        self.post("/2/dm_conversations", &body).await
+    }
+
+    /// Get DM events for a conversation.
+    pub async fn get_dm_events(
+        &self,
+        conversation_id: &str,
+        max_results: Option<u32>,
+    ) -> TwitterResult<TwitterResponse<Vec<DmEvent>>> {
+        let mut params = vec![(
+            "dm_event.fields".to_string(),
+            "id,event_type,text,sender_id,dm_conversation_id,created_at".to_string(),
+        )];
+        if let Some(max) = max_results {
+            params.push(("max_results".to_string(), max.to_string()));
+        }
+        self.get_with_params(
+            &format!("/2/dm_conversations/{conversation_id}/dm_events"),
+            &params,
+        )
+        .await
     }
 
     // ─────────────────────────────────────────────────────────────────────────

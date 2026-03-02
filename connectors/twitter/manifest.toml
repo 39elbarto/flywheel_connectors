@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:5bb4f0cfa70f1b5899cd5da8eb5f9ab042ab844f0b4948912c01bb3598046ffb"
+interface_hash = "blake3-256:fcp.interface.v2:ebd059ded9632c3497eb76dd0448805d1a4521f82b508a570afaf7209b3be62a"
 
 [connector]
 id = "fcp.twitter"
@@ -256,6 +256,333 @@ related = [
     "twitter.stream.rules.add",
     "twitter.stream.rules.delete",
 ]
+
+[provides.operations."twitter.tweet.retweet"]
+description = "Retweet a tweet"
+capability = "twitter.write"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "best_effort"
+
+[provides.operations."twitter.tweet.retweet".rate_limit]
+max = 50
+per_ms = 900000
+
+[provides.operations."twitter.tweet.retweet".input_schema]
+required = ["tweet_id"]
+type = "object"
+
+[provides.operations."twitter.tweet.retweet".input_schema.properties.tweet_id]
+description = "Tweet ID to retweet"
+type = "string"
+
+[provides.operations."twitter.tweet.retweet".output_schema]
+required = ["retweeted"]
+type = "object"
+
+[provides.operations."twitter.tweet.retweet".output_schema.properties.retweeted]
+type = "boolean"
+
+[provides.operations."twitter.tweet.retweet".network_constraints]
+host_allow = ["api.twitter.com", "api.x.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."twitter.tweet.retweet".ai_hints]
+when_to_use = "Amplify a tweet by retweeting it."
+common_mistakes = ["Retweeting the same tweet twice."]
+examples = ['{"tweet_id": "1234567890"}']
+related = ["twitter.tweet.unretweet"]
+
+[provides.operations."twitter.tweet.unretweet"]
+description = "Remove a retweet"
+capability = "twitter.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."twitter.tweet.unretweet".rate_limit]
+max = 50
+per_ms = 900000
+
+[provides.operations."twitter.tweet.unretweet".input_schema]
+required = ["tweet_id"]
+type = "object"
+
+[provides.operations."twitter.tweet.unretweet".input_schema.properties.tweet_id]
+description = "Tweet ID to unretweet"
+type = "string"
+
+[provides.operations."twitter.tweet.unretweet".output_schema]
+required = ["retweeted"]
+type = "object"
+
+[provides.operations."twitter.tweet.unretweet".output_schema.properties.retweeted]
+type = "boolean"
+
+[provides.operations."twitter.tweet.unretweet".network_constraints]
+host_allow = ["api.twitter.com", "api.x.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."twitter.tweet.unretweet".ai_hints]
+when_to_use = "Remove a retweet."
+common_mistakes = []
+examples = ['{"tweet_id": "1234567890"}']
+related = ["twitter.tweet.retweet"]
+
+[provides.operations."twitter.tweet.like"]
+description = "Like a tweet"
+capability = "twitter.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "best_effort"
+
+[provides.operations."twitter.tweet.like".rate_limit]
+max = 50
+per_ms = 900000
+
+[provides.operations."twitter.tweet.like".input_schema]
+required = ["tweet_id"]
+type = "object"
+
+[provides.operations."twitter.tweet.like".input_schema.properties.tweet_id]
+description = "Tweet ID to like"
+type = "string"
+
+[provides.operations."twitter.tweet.like".output_schema]
+required = ["liked"]
+type = "object"
+
+[provides.operations."twitter.tweet.like".output_schema.properties.liked]
+type = "boolean"
+
+[provides.operations."twitter.tweet.like".network_constraints]
+host_allow = ["api.twitter.com", "api.x.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."twitter.tweet.like".ai_hints]
+when_to_use = "Like a tweet."
+common_mistakes = []
+examples = ['{"tweet_id": "1234567890"}']
+related = ["twitter.tweet.unlike"]
+
+[provides.operations."twitter.tweet.unlike"]
+description = "Remove a like from a tweet"
+capability = "twitter.write"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."twitter.tweet.unlike".rate_limit]
+max = 50
+per_ms = 900000
+
+[provides.operations."twitter.tweet.unlike".input_schema]
+required = ["tweet_id"]
+type = "object"
+
+[provides.operations."twitter.tweet.unlike".input_schema.properties.tweet_id]
+description = "Tweet ID to unlike"
+type = "string"
+
+[provides.operations."twitter.tweet.unlike".output_schema]
+required = ["liked"]
+type = "object"
+
+[provides.operations."twitter.tweet.unlike".output_schema.properties.liked]
+type = "boolean"
+
+[provides.operations."twitter.tweet.unlike".network_constraints]
+host_allow = ["api.twitter.com", "api.x.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."twitter.tweet.unlike".ai_hints]
+when_to_use = "Remove a like from a tweet."
+common_mistakes = []
+examples = ['{"tweet_id": "1234567890"}']
+related = ["twitter.tweet.like"]
+
+[provides.operations."twitter.dm.send"]
+description = "Send a direct message"
+capability = "twitter.write.dms"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+
+[provides.operations."twitter.dm.send".rate_limit]
+max = 200
+per_ms = 86400000
+
+[provides.operations."twitter.dm.send".input_schema]
+required = ["text"]
+type = "object"
+
+[provides.operations."twitter.dm.send".input_schema.properties.text]
+description = "Message text (max 10000 characters)"
+maxLength = 10000
+type = "string"
+
+[provides.operations."twitter.dm.send".input_schema.properties.conversation_id]
+description = "Existing DM conversation ID"
+type = "string"
+
+[provides.operations."twitter.dm.send".input_schema.properties.participant_id]
+description = "User ID to start a new conversation with"
+type = "string"
+
+[provides.operations."twitter.dm.send".output_schema]
+required = []
+type = "object"
+
+[provides.operations."twitter.dm.send".output_schema.properties.dm_conversation_id]
+type = "string"
+
+[provides.operations."twitter.dm.send".output_schema.properties.dm_event_id]
+type = "string"
+
+[provides.operations."twitter.dm.send".network_constraints]
+host_allow = ["api.twitter.com", "api.x.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."twitter.dm.send".ai_hints]
+when_to_use = "Send a DM. Provide conversation_id for existing threads or participant_id for new ones."
+common_mistakes = ["Sending to wrong conversation.", "Not providing conversation_id or participant_id."]
+examples = ['{"conversation_id": "123", "text": "Hello!"}']
+related = ["twitter.dm.events"]
+
+[provides.operations."twitter.dm.events"]
+description = "Get DM events in a conversation"
+capability = "twitter.read.dms"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."twitter.dm.events".rate_limit]
+max = 300
+per_ms = 900000
+
+[provides.operations."twitter.dm.events".input_schema]
+required = ["conversation_id"]
+type = "object"
+
+[provides.operations."twitter.dm.events".input_schema.properties.conversation_id]
+description = "DM conversation ID"
+type = "string"
+
+[provides.operations."twitter.dm.events".input_schema.properties.max_results]
+description = "Maximum events to return (1-100)"
+maximum = 100
+minimum = 1
+type = "integer"
+
+[provides.operations."twitter.dm.events".output_schema]
+required = []
+type = "object"
+
+[provides.operations."twitter.dm.events".output_schema.properties.events]
+type = "array"
+
+[provides.operations."twitter.dm.events".output_schema.properties.meta]
+type = "object"
+
+[provides.operations."twitter.dm.events".network_constraints]
+host_allow = ["api.twitter.com", "api.x.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."twitter.dm.events".ai_hints]
+when_to_use = "Read DM events in a conversation."
+common_mistakes = []
+examples = ['{"conversation_id": "123"}']
+related = ["twitter.dm.send"]
 
 [provides.operations."twitter.tweet.create"]
 description = "Post a new tweet (max 280 characters)"
@@ -1157,6 +1484,12 @@ scope = "instance"
 "twitter.user.by_username" = ["twitter.read"]
 "twitter.user.mentions" = ["twitter.read"]
 "twitter.tweet.create" = ["twitter.write"]
+"twitter.tweet.retweet" = ["twitter.write"]
+"twitter.tweet.unretweet" = ["twitter.write"]
+"twitter.tweet.like" = ["twitter.write"]
+"twitter.tweet.unlike" = ["twitter.write"]
+"twitter.dm.send" = ["twitter.write"]
+"twitter.dm.events" = ["twitter.read"]
 "twitter.user.timeline" = ["twitter.read"]
 "twitter.tweet.search" = ["twitter.read"]
 "twitter.trends.place" = ["twitter.read"]

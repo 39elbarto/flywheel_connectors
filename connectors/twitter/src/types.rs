@@ -751,6 +751,119 @@ pub struct DeletedTweet {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Retweet / Like Response Types
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Retweet response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetweetResponse {
+    /// Retweet data
+    pub data: RetweetData,
+}
+
+/// Retweet data payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetweetData {
+    /// Whether the retweet was successful
+    pub retweeted: bool,
+}
+
+/// Unretweet response (same shape as delete).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnretweetResponse {
+    /// Unretweet data
+    pub data: RetweetData,
+}
+
+/// Like response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LikeResponse {
+    /// Like data
+    pub data: LikeData,
+}
+
+/// Like data payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LikeData {
+    /// Whether the like was successful
+    pub liked: bool,
+}
+
+/// Unlike response (same shape).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnlikeResponse {
+    /// Unlike data
+    pub data: LikeData,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Direct Message Types
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// DM event object (Twitter API v2 DM format).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DmEvent {
+    /// Event ID
+    pub id: String,
+
+    /// Event type: "`MessageCreate`"
+    pub event_type: String,
+
+    /// Message text
+    #[serde(default)]
+    pub text: Option<String>,
+
+    /// Sender ID
+    #[serde(default)]
+    pub sender_id: Option<String>,
+
+    /// DM conversation ID
+    #[serde(default)]
+    pub dm_conversation_id: Option<String>,
+
+    /// Creation timestamp (ISO 8601)
+    #[serde(default)]
+    pub created_at: Option<String>,
+}
+
+/// Request body to create a DM in an existing conversation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SendDmRequest {
+    /// Message text
+    pub text: String,
+}
+
+/// Response from creating a DM.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SendDmResponse {
+    /// DM event data
+    pub data: SentDmData,
+}
+
+/// Sent DM data payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SentDmData {
+    /// The DM conversation ID
+    pub dm_conversation_id: String,
+
+    /// The DM event ID
+    pub dm_event_id: String,
+}
+
+/// Request body to create a new DM conversation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateDmConversationRequest {
+    /// Conversation type (always "Group" for new convos)
+    pub conversation_type: String,
+
+    /// Participant IDs
+    pub participant_ids: Vec<String>,
+
+    /// Initial message
+    pub message: SendDmRequest,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Search Types
 // ─────────────────────────────────────────────────────────────────────────────
 

@@ -1143,7 +1143,7 @@ mod tests {
     async fn test_self_check_not_configured() {
         let connector = S3Connector::new();
         let result = connector.handle_self_check().await.unwrap();
-        assert_eq!(result["status"], "fail");
+        assert_eq!(result["status"], "failed");
         assert_eq!(result["reason_code"], "not_configured");
     }
 

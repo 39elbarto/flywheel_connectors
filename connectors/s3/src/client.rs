@@ -168,9 +168,7 @@ impl S3Client {
     /// Apply authentication to a request builder.
     fn apply_auth(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.auth {
-            S3Auth::Keys {
-                access_key_id, ..
-            } => builder.bearer_auth(access_key_id),
+            S3Auth::Keys { access_key_id, .. } => builder.bearer_auth(access_key_id),
             S3Auth::CredentialId(id) => builder.header("X-FCP-Credential-ID", id.to_string()),
         }
     }

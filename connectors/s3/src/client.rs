@@ -5,10 +5,12 @@
 //! implementation uses bearer-style auth headers for mock/test friendliness
 //! and constructs standard S3 REST API URLs.
 
+use std::fmt;
 use std::fmt::Write;
 use std::time::Duration;
 
 use fcp_async_core::time::sleep;
+use fcp_core::CredentialId;
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, warn};
 
@@ -21,7 +23,62 @@ use crate::{
 };
 
 /// Default S3 base URL.
-const DEFAULT_BASE_URL: &str = "https://s3.amazonaws.com";
+pub const DEFAULT_BASE_URL: &str = "https://s3.amazonaws.com";
+
+/// Authentication mode for S3.
+#[derive(Clone)]
+pub enum S3Auth {
+    /// Direct AWS credentials (access key + secret + region).
+    Keys {
+        access_key_id: String,
+        secret_access_key: String,
+        region: String,
+    },
+    /// Secretless credential reference (egress proxy injection).
+    CredentialId(CredentialId),
+}
+
+impl S3Auth {
+    /// Render a redacted label suitable for logs/diagnostics.
+    #[must_use]
+    pub fn redacted_label(&self) -> String {
+        match self {
+            Self::Keys {
+                access_key_id,
+                region,
+                ..
+            } => {
+                let prefix = if access_key_id.len() > 4 {
+                    &access_key_id[..4]
+                } else {
+                    access_key_id.as_str()
+                };
+                format!("keys:{prefix}***@{region}")
+            }
+            Self::CredentialId(id) => format!("credential_id:{id}"),
+        }
+    }
+
+    /// Whether this auth mode requires egress proxy credential injection.
+    #[must_use]
+    pub const fn is_secretless(&self) -> bool {
+        matches!(self, Self::CredentialId(_))
+    }
+}
+
+impl fmt::Debug for S3Auth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Keys { region, .. } => f
+                .debug_struct("Keys")
+                .field("region", region)
+                .field("access_key_id", &"<redacted>")
+                .field("secret_access_key", &"<redacted>")
+                .finish(),
+            Self::CredentialId(id) => f.debug_tuple("CredentialId").field(id).finish(),
+        }
+    }
+}
 
 /// Percent-encoding set for S3 object key paths. Preserves `/`, `-`, `_`, `.`, `~`
 /// which are valid in S3 key names and URL paths.
@@ -43,20 +100,27 @@ const S3_PATH_SET: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS
     .add(b'\\');
 
 /// S3 API client.
-#[derive(Debug)]
 pub struct S3Client {
     client: Client,
-    access_key_id: String,
-    secret_access_key: String,
-    region: String,
+    auth: S3Auth,
     base_url: String,
     max_retries: u32,
     initial_delay_ms: u64,
     max_delay_ms: u64,
 }
 
+impl fmt::Debug for S3Client {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("S3Client")
+            .field("auth", &self.auth)
+            .field("base_url", &self.base_url)
+            .field("max_retries", &self.max_retries)
+            .finish_non_exhaustive()
+    }
+}
+
 impl S3Client {
-    /// Create a new S3 client.
+    /// Create a new S3 client with direct credentials.
     ///
     /// # Errors
     ///
@@ -66,6 +130,19 @@ impl S3Client {
         secret_access_key: impl Into<String>,
         region: impl Into<String>,
     ) -> S3Result<Self> {
+        Self::new_with_auth(S3Auth::Keys {
+            access_key_id: access_key_id.into(),
+            secret_access_key: secret_access_key.into(),
+            region: region.into(),
+        })
+    }
+
+    /// Create a new S3 client with explicit auth mode.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HTTP client cannot be constructed.
+    pub fn new_with_auth(auth: S3Auth) -> S3Result<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(300))
             .build()
@@ -73,9 +150,7 @@ impl S3Client {
 
         Ok(Self {
             client,
-            access_key_id: access_key_id.into(),
-            secret_access_key: secret_access_key.into(),
-            region: region.into(),
+            auth,
             base_url: DEFAULT_BASE_URL.into(),
             max_retries: 3,
             initial_delay_ms: 500,

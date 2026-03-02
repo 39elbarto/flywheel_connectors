@@ -1,10 +1,12 @@
 //! Airtable REST API client.
 
+use std::fmt;
 use std::fmt::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use base64::Engine;
+use fcp_core::CredentialId;
 use reqwest::{Client, Response, StatusCode};
 use tracing::{instrument, warn};
 
@@ -17,13 +19,47 @@ use crate::{
 };
 
 /// Default Airtable API base URL.
-const DEFAULT_BASE_URL: &str = "https://api.airtable.com/v0";
+pub const DEFAULT_BASE_URL: &str = "https://api.airtable.com/v0";
+
+/// Authentication mode for the Airtable API.
+#[derive(Clone)]
+pub enum AirtableAuth {
+    /// Direct `OAuth2` / personal access token (bearer auth).
+    Token(String),
+    /// Secretless credential reference (egress proxy injection).
+    CredentialId(CredentialId),
+}
+
+impl AirtableAuth {
+    /// Render a redacted label suitable for logs/diagnostics.
+    #[must_use]
+    pub fn redacted_label(&self) -> String {
+        match self {
+            Self::Token(_) => "token:redacted".to_string(),
+            Self::CredentialId(id) => format!("credential_id:{id}"),
+        }
+    }
+
+    /// Whether this auth mode requires egress proxy credential injection.
+    #[must_use]
+    pub const fn is_secretless(&self) -> bool {
+        matches!(self, Self::CredentialId(_))
+    }
+}
+
+impl fmt::Debug for AirtableAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Token(_) => f.debug_tuple("Token").field(&"<redacted>").finish(),
+            Self::CredentialId(id) => f.debug_tuple("CredentialId").field(id).finish(),
+        }
+    }
+}
 
 /// Airtable REST API client with retry logic and rate limit awareness.
-#[derive(Debug)]
 pub struct AirtableClient {
     client: Client,
-    token: String,
+    auth: AirtableAuth,
     base_url: String,
     max_retries: u32,
     initial_delay_ms: u64,
@@ -31,9 +67,24 @@ pub struct AirtableClient {
     total_requests: AtomicU64,
 }
 
+impl fmt::Debug for AirtableClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AirtableClient")
+            .field("auth", &self.auth)
+            .field("base_url", &self.base_url)
+            .field("max_retries", &self.max_retries)
+            .finish_non_exhaustive()
+    }
+}
+
 impl AirtableClient {
     /// Create a new Airtable client with a personal access token.
     pub fn new(token: impl Into<String>) -> AirtableResult<Self> {
+        Self::new_with_auth(AirtableAuth::Token(token.into()))
+    }
+
+    /// Create a new Airtable client with explicit auth mode.
+    pub fn new_with_auth(auth: AirtableAuth) -> AirtableResult<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .user_agent("fcp-airtable/0.1.0")
@@ -42,7 +93,7 @@ impl AirtableClient {
 
         Ok(Self {
             client,
-            token: token.into(),
+            auth,
             base_url: DEFAULT_BASE_URL.into(),
             max_retries: 3,
             initial_delay_ms: 1000,
@@ -76,6 +127,20 @@ impl AirtableClient {
     #[must_use]
     pub fn total_requests(&self) -> u64 {
         self.total_requests.load(Ordering::Relaxed)
+    }
+
+    /// Apply authentication to an outgoing request.
+    fn apply_auth(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.auth {
+            AirtableAuth::Token(token) => builder.bearer_auth(token),
+            AirtableAuth::CredentialId(id) => builder.header("X-FCP-Credential-ID", id.to_string()),
+        }
+    }
+
+    /// Lightweight connectivity probe (list bases with no offset).
+    pub async fn health_check(&self) -> AirtableResult<()> {
+        let _: ListBasesResponse = self.get_with_params("/meta/bases", &[]).await?;
+        Ok(())
     }
 
     // ── Base operations ─────────────────────────────────────────────
@@ -315,7 +380,7 @@ impl AirtableClient {
 
         loop {
             attempt += 1;
-            let response = self.client.get(url).bearer_auth(&self.token).send().await;
+            let response = self.apply_auth(self.client.get(url)).send().await;
 
             match response {
                 Ok(resp) => {
@@ -375,7 +440,7 @@ impl AirtableClient {
 
         loop {
             attempt += 1;
-            let response = self.client.get(&url).bearer_auth(&self.token).send().await;
+            let response = self.apply_auth(self.client.get(&url)).send().await;
 
             match response {
                 Ok(resp) => {
@@ -445,12 +510,7 @@ impl AirtableClient {
 
         loop {
             attempt += 1;
-            let response = self
-                .client
-                .delete(&url)
-                .bearer_auth(&self.token)
-                .send()
-                .await;
+            let response = self.apply_auth(self.client.delete(&url)).send().await;
 
             match response {
                 Ok(resp) => {
@@ -499,9 +559,7 @@ impl AirtableClient {
         loop {
             attempt += 1;
             let response = self
-                .client
-                .request(method.clone(), &url)
-                .bearer_auth(&self.token)
+                .apply_auth(self.client.request(method.clone(), &url))
                 .json(body)
                 .send()
                 .await;

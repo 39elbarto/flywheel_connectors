@@ -460,7 +460,7 @@ impl StripeConnector {
                     "stripe.payment",
                     RiskLevel::High,
                     SafetyTier::Dangerous,
-                    IdempotencyClass::None,
+                    IdempotencyClass::Strict,
                     AgentHint {
                         when_to_use:
                             "Initiate a payment. Amount is in smallest currency unit (e.g. cents)."
@@ -515,7 +515,7 @@ impl StripeConnector {
                     "stripe.payment",
                     RiskLevel::High,
                     SafetyTier::Dangerous,
-                    IdempotencyClass::BestEffort,
+                    IdempotencyClass::Strict,
                     AgentHint {
                         when_to_use: "Confirm a payment intent after the customer has provided payment details.".into(),
                         common_mistakes: vec!["Confirming without a valid payment method attached".into()],
@@ -542,7 +542,7 @@ impl StripeConnector {
                     "stripe.payment",
                     RiskLevel::High,
                     SafetyTier::Dangerous,
-                    IdempotencyClass::None,
+                    IdempotencyClass::Strict,
                     AgentHint {
                         when_to_use: "Capture funds from a payment intent that was created with capture_method=manual.".into(),
                         common_mistakes: vec!["Capturing more than the authorized amount".into()],
@@ -569,7 +569,7 @@ impl StripeConnector {
                     "stripe.payment",
                     RiskLevel::High,
                     SafetyTier::Dangerous,
-                    IdempotencyClass::None,
+                    IdempotencyClass::Strict,
                     AgentHint {
                         when_to_use: "Cancel a payment intent that has not yet been captured.".into(),
                         common_mistakes: vec!["Cancelling an already captured payment (use refund instead)".into()],
@@ -595,7 +595,7 @@ impl StripeConnector {
                     "stripe.payment",
                     RiskLevel::High,
                     SafetyTier::Dangerous,
-                    IdempotencyClass::None,
+                    IdempotencyClass::Strict,
                     AgentHint {
                         when_to_use:
                             "Refund all or part of a payment. Omit amount for full refund.".into(),
@@ -1651,7 +1651,7 @@ mod tests {
                 op["idempotency"], "strict",
                 "{op_id} should have strict idempotency"
             );
-            assert_eq!(op["risk_level"], "dangerous", "{op_id} should be dangerous");
+            assert_eq!(op["risk_level"], "high", "{op_id} should be high risk");
         }
     }
 

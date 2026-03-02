@@ -615,6 +615,45 @@ async fn invoke_create_refund_through_connector() {
     assert_eq!(result["refund"]["amount"], 500);
 }
 
+/// Side-effect operations derive an idempotency key from invoke `operation_id`.
+#[fcp_async_core::runtime::test]
+async fn invoke_create_refund_derives_idempotency_key_from_operation_id() {
+    let mock_server = MockServer::start().await;
+    let expected_key = "fcp2:stripe.create_refund:op-789";
+
+    Mock::given(method("POST"))
+        .and(path("/v1/refunds"))
+        .and(header("Idempotency-Key", expected_key))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "re_derived",
+            "object": "refund",
+            "amount": 250,
+            "currency": "usd",
+            "status": "succeeded",
+            "payment_intent": "pi_derived"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = StripeConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["stripe.create_refund"]).await;
+    let token = generate_valid_token(&signing_key, "stripe.create_refund");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "stripe.create_refund",
+            "operation_id": "op-789",
+            "input": { "payment_intent": "pi_derived", "amount": 250 },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["refund"]["id"], "re_derived");
+    assert_eq!(result["audit"]["idempotency_key"], expected_key);
+}
+
 /// Wrong capability token is rejected.
 #[fcp_async_core::runtime::test]
 async fn wrong_capability_rejected() {

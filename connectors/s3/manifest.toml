@@ -132,7 +132,7 @@ description = "Delete an object from an S3 bucket"
 capability = "s3.delete"
 risk_level = "high"
 safety_tier = "dangerous"
-requires_approval = "interactive"
+requires_approval = "elevation_token"
 idempotency = "strict"
 
 [provides.operations."s3.delete_object".input_schema]
@@ -144,10 +144,12 @@ type = "string"
 type = "string"
 
 [provides.operations."s3.delete_object".output_schema]
-required = ["deleted"]
+required = ["deleted", "audit"]
 type = "object"
 [provides.operations."s3.delete_object".output_schema.properties.deleted]
 type = "boolean"
+[provides.operations."s3.delete_object".output_schema.properties.audit]
+type = "object"
 
 [provides.operations."s3.delete_object".network_constraints]
 host_allow = ["*.s3.amazonaws.com", "s3.amazonaws.com", "*.amazonaws.com"]
@@ -169,6 +171,100 @@ when_to_use = "Delete a file from an S3 bucket. This is permanent."
 common_mistakes = ["Deleting the wrong key — verify before deleting"]
 examples = ['{"bucket": "my-bucket", "key": "data/old-file.json"}']
 related = ["s3.get_object", "s3.list_objects"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."s3.create_bucket"]
+description = "Create a new S3 bucket"
+capability = "s3.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "elevation_token"
+idempotency = "strict"
+
+[provides.operations."s3.create_bucket".input_schema]
+required = ["bucket"]
+type = "object"
+[provides.operations."s3.create_bucket".input_schema.properties.bucket]
+type = "string"
+
+[provides.operations."s3.create_bucket".output_schema]
+required = ["bucket", "created", "audit"]
+type = "object"
+[provides.operations."s3.create_bucket".output_schema.properties.bucket]
+type = "string"
+[provides.operations."s3.create_bucket".output_schema.properties.created]
+type = "boolean"
+[provides.operations."s3.create_bucket".output_schema.properties.audit]
+type = "object"
+
+[provides.operations."s3.create_bucket".network_constraints]
+host_allow = ["*.s3.amazonaws.com", "s3.amazonaws.com", "*.amazonaws.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."s3.create_bucket".ai_hints]
+when_to_use = "Provision a new bucket for controlled storage use."
+common_mistakes = ["Bucket names are globally unique in AWS S3.", "Creating buckets in the wrong region can break clients."]
+examples = ['{"bucket": "project-logs-2026"}']
+related = ["s3.list_buckets", "s3.delete_bucket"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."s3.delete_bucket"]
+description = "Delete an empty S3 bucket"
+capability = "s3.delete"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "elevation_token"
+idempotency = "strict"
+
+[provides.operations."s3.delete_bucket".input_schema]
+required = ["bucket"]
+type = "object"
+[provides.operations."s3.delete_bucket".input_schema.properties.bucket]
+type = "string"
+
+[provides.operations."s3.delete_bucket".output_schema]
+required = ["bucket", "deleted", "audit"]
+type = "object"
+[provides.operations."s3.delete_bucket".output_schema.properties.bucket]
+type = "string"
+[provides.operations."s3.delete_bucket".output_schema.properties.deleted]
+type = "boolean"
+[provides.operations."s3.delete_bucket".output_schema.properties.audit]
+type = "object"
+
+[provides.operations."s3.delete_bucket".network_constraints]
+host_allow = ["*.s3.amazonaws.com", "s3.amazonaws.com", "*.amazonaws.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."s3.delete_bucket".ai_hints]
+when_to_use = "Remove an empty bucket that is no longer needed."
+common_mistakes = ["Delete all objects first or the request will fail.", "Verify no downstream workflows rely on this bucket."]
+examples = ['{"bucket": "old-project-artifacts"}']
+related = ["s3.list_buckets", "s3.delete_object"]
 
 # ────────────────────────────────────────────────────────────────
 
@@ -359,15 +455,15 @@ related = ["s3.list_objects"]
 # ────────────────────────────────────────────────────────────────
 
 [provides.operations."s3.generate_presigned_url"]
-description = "Generate a presigned URL for temporary access"
+description = "Generate a temporary presigned URL"
 capability = "s3.read"
-risk_level = "medium"
-safety_tier = "risky"
-requires_approval = "policy"
-idempotency = "strict"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "elevation_token"
+idempotency = "none"
 
 [provides.operations."s3.generate_presigned_url".input_schema]
-required = ["bucket", "key", "expires_in"]
+required = ["bucket", "key"]
 type = "object"
 [provides.operations."s3.generate_presigned_url".input_schema.properties.bucket]
 type = "string"
@@ -377,10 +473,12 @@ type = "string"
 type = "integer"
 
 [provides.operations."s3.generate_presigned_url".output_schema]
-required = ["url"]
+required = ["url", "audit"]
 type = "object"
 [provides.operations."s3.generate_presigned_url".output_schema.properties.url]
 type = "string"
+[provides.operations."s3.generate_presigned_url".output_schema.properties.audit]
+type = "object"
 
 [provides.operations."s3.generate_presigned_url".network_constraints]
 host_allow = ["*.s3.amazonaws.com", "s3.amazonaws.com", "*.amazonaws.com"]
@@ -442,6 +540,8 @@ scope = "instance"
 "s3.put_object" = ["s3.write"]
 "s3.get_object" = ["s3.read"]
 "s3.delete_object" = ["s3.delete"]
+"s3.create_bucket" = ["s3.write"]
+"s3.delete_bucket" = ["s3.delete"]
 "s3.list_objects" = ["s3.read"]
 "s3.head_object" = ["s3.read"]
 "s3.copy_object" = ["s3.write"]

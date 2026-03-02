@@ -354,6 +354,9 @@ impl LinearWebhook {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{EventRouter, EventSubscription};
+    use wiremock::matchers::{body_string_contains, method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn test_github_webhook() {
@@ -492,5 +495,99 @@ mod tests {
         headers.insert("x-slack-signature".to_string(), "v0=abc".to_string());
         let result = handler.verify_and_parse(&headers, b"{}");
         assert!(matches!(result, Err(WebhookError::MissingSignature(_))));
+    }
+
+    #[test]
+    fn test_webhook_registration_challenge_response_flow() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let server = MockServer::start().await;
+            let challenge = "challenge-token-abc";
+
+            Mock::given(method("POST"))
+                .and(path("/webhooks"))
+                .and(body_string_contains("message.create"))
+                .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                    "id": "wh_123",
+                    "challenge_url": format!("{}/challenge?challenge={challenge}", server.uri())
+                })))
+                .mount(&server)
+                .await;
+
+            Mock::given(method("GET"))
+                .and(path("/challenge"))
+                .and(query_param("challenge", challenge))
+                .respond_with(ResponseTemplate::new(200).set_body_string(challenge))
+                .mount(&server)
+                .await;
+
+            let client = reqwest::Client::new();
+            let registration_response = client
+                .post(format!("{}/webhooks", server.uri()))
+                .json(&serde_json::json!({
+                    "events": ["message.create"],
+                    "target": "https://connector.example.test/inbound"
+                }))
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json::<serde_json::Value>()
+                .await
+                .unwrap();
+
+            let challenge_url = registration_response
+                .get("challenge_url")
+                .and_then(serde_json::Value::as_str)
+                .unwrap();
+            let challenge_response = client
+                .get(challenge_url)
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .text()
+                .await
+                .unwrap();
+            assert_eq!(challenge_response, challenge);
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn test_challenge_event_routing() {
+        let mut router = EventRouter::new();
+        router.subscribe(
+            EventSubscription::for_types(vec!["url_verification".to_string()])
+                .with_provider("slack"),
+            "challenge_handler",
+        );
+
+        let event = WebhookEvent::new("evt_1", "url_verification", "slack");
+        let handlers = router.route(&event);
+        assert_eq!(handlers, vec!["challenge_handler"]);
+    }
+
+    #[test]
+    fn test_github_secret_rotation() {
+        let old_handler = GitHubWebhook::new("old-secret");
+        let new_handler = GitHubWebhook::new("new-secret");
+        let body = br#"{"action":"opened","issue":{"number":7}}"#;
+
+        let old_signature = format!("sha256={}", old_handler.verifier.compute(body));
+        let mut old_headers = HashMap::new();
+        old_headers.insert("x-hub-signature-256".to_string(), old_signature);
+        old_headers.insert("x-github-event".to_string(), "issues".to_string());
+
+        assert!(old_handler.verify_and_parse(&old_headers, body).is_ok());
+        assert!(new_handler.verify_and_parse(&old_headers, body).is_err());
+
+        let new_signature = format!("sha256={}", new_handler.verifier.compute(body));
+        let mut new_headers = HashMap::new();
+        new_headers.insert("x-hub-signature-256".to_string(), new_signature);
+        new_headers.insert("x-github-event".to_string(), "issues".to_string());
+
+        assert!(new_handler.verify_and_parse(&new_headers, body).is_ok());
     }
 }

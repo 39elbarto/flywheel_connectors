@@ -531,6 +531,8 @@ fn generate_state() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn test_config() -> OAuth2Config {
         OAuth2Config::new(
@@ -739,5 +741,147 @@ mod tests {
         let config = test_config();
         let client = OAuth2Client::new(config).unwrap();
         assert_eq!(client.config().client_id, "test_client_id");
+    }
+
+    #[test]
+    fn test_exchange_code_with_mock_server() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .and(body_string_contains("grant_type=authorization_code"))
+                .and(body_string_contains("code=auth-code-123"))
+                .and(body_string_contains("redirect_uri=https%3A%2F%2Flocalhost%3A3000%2Fcallback"))
+                .and(body_string_contains("client_id=test_client_id"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "access_token": "access-123",
+                    "token_type": "Bearer",
+                    "refresh_token": "refresh-123",
+                    "expires_in": 3600,
+                    "scope": "read write"
+                })))
+                .mount(&server)
+                .await;
+
+            let config = OAuth2Config::new(
+                "test_client_id",
+                "test_client_secret",
+                format!("{}/authorize", server.uri()),
+                format!("{}/token", server.uri()),
+            )
+            .with_redirect_uri("https://localhost:3000/callback");
+            let client = OAuth2Client::new(config).unwrap();
+
+            let tokens = client.exchange_code("auth-code-123").await.unwrap();
+            assert_eq!(tokens.access_token(), "access-123");
+            assert_eq!(tokens.refresh_token(), Some("refresh-123"));
+            assert_eq!(tokens.scopes(), &["read", "write"]);
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn test_exchange_code_with_pkce_sends_verifier() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let server = MockServer::start().await;
+            let pkce = Pkce::with_method(PkceMethod::S256);
+            let expected_verifier = pkce.verifier().to_string();
+
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .and(body_string_contains("grant_type=authorization_code"))
+                .and(body_string_contains("code=auth-code-pkce"))
+                .and(body_string_contains(&format!("code_verifier={expected_verifier}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "access_token": "pkce-access",
+                    "token_type": "Bearer",
+                    "refresh_token": "pkce-refresh",
+                    "expires_in": 3600
+                })))
+                .mount(&server)
+                .await;
+
+            let config = OAuth2Config::public_client(
+                "public-client",
+                format!("{}/authorize", server.uri()),
+                format!("{}/token", server.uri()),
+            )
+            .with_redirect_uri("https://localhost:3000/callback");
+            let client = OAuth2Client::new(config).unwrap();
+
+            let tokens = client
+                .exchange_code_with_pkce("auth-code-pkce", &pkce)
+                .await
+                .unwrap();
+            assert_eq!(tokens.access_token(), "pkce-access");
+            assert_eq!(tokens.refresh_token(), Some("pkce-refresh"));
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn test_refresh_tokens_with_mock_server() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .and(body_string_contains("grant_type=refresh_token"))
+                .and(body_string_contains("refresh_token=refresh-token-xyz"))
+                .and(body_string_contains("client_id=test_client_id"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "access_token": "fresh-access-token",
+                    "token_type": "Bearer",
+                    "refresh_token": "new-refresh-token",
+                    "expires_in": 7200
+                })))
+                .mount(&server)
+                .await;
+
+            let config = OAuth2Config::new(
+                "test_client_id",
+                "test_client_secret",
+                format!("{}/authorize", server.uri()),
+                format!("{}/token", server.uri()),
+            );
+            let client = OAuth2Client::new(config).unwrap();
+
+            let tokens = client.refresh_tokens("refresh-token-xyz").await.unwrap();
+            assert_eq!(tokens.access_token(), "fresh-access-token");
+            assert_eq!(tokens.refresh_token(), Some("new-refresh-token"));
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn test_exchange_code_maps_error_response() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                    "error": "invalid_grant",
+                    "error_description": "authorization code expired"
+                })))
+                .mount(&server)
+                .await;
+
+            let config = OAuth2Config::new(
+                "test_client_id",
+                "test_client_secret",
+                format!("{}/authorize", server.uri()),
+                format!("{}/token", server.uri()),
+            )
+            .with_redirect_uri("https://localhost:3000/callback");
+            let client = OAuth2Client::new(config).unwrap();
+
+            let error = client.exchange_code("expired-code").await.unwrap_err();
+            let message = match error {
+                OAuthError::TokenExchangeFailed(message) => message,
+                _ => panic!("expected token exchange error"),
+            };
+            assert!(message.contains("invalid_grant"));
+            assert!(message.contains("authorization code expired"));
+        })
+        .unwrap();
     }
 }

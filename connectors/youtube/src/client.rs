@@ -11,7 +11,8 @@ use crate::{
     error::{YouTubeError, YouTubeResult},
     types::{
         ApiErrorResponse, CaptionListResponse, ChannelListResponse, Comment,
-        CommentThreadListResponse, PlaylistItemListResponse, SearchListResponse, VideoListResponse,
+        CommentThreadListResponse, PlaylistItemListResponse, PlaylistListResponse,
+        SearchListResponse, VideoListResponse,
     },
 };
 
@@ -175,6 +176,22 @@ impl YouTubeClient {
         self.get_json(&self.url_with_key(&base)).await
     }
 
+    /// Get details for multiple videos by ID.
+    pub async fn list_videos(&self, video_ids: &[String]) -> YouTubeResult<VideoListResponse> {
+        let ids = video_ids
+            .iter()
+            .map(|id| urlencoding::encode(id))
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let base = format!(
+            "{}/videos?part=snippet,contentDetails,statistics&id={ids}",
+            self.base_url,
+        );
+
+        self.get_json(&self.url_with_key(&base)).await
+    }
+
     /// Get channel details by ID.
     pub async fn get_channel(&self, channel_id: &str) -> YouTubeResult<ChannelListResponse> {
         let base = format!(
@@ -182,6 +199,29 @@ impl YouTubeClient {
             self.base_url,
             urlencoding::encode(channel_id),
         );
+
+        self.get_json(&self.url_with_key(&base)).await
+    }
+
+    /// List playlists for a channel.
+    pub async fn list_playlists(
+        &self,
+        channel_id: &str,
+        max_results: Option<u32>,
+        page_token: Option<&str>,
+    ) -> YouTubeResult<PlaylistListResponse> {
+        let mut base = format!(
+            "{}/playlists?part=snippet,contentDetails&channelId={}",
+            self.base_url,
+            urlencoding::encode(channel_id),
+        );
+
+        if let Some(max) = max_results {
+            let _ = write!(base, "&maxResults={max}");
+        }
+        if let Some(token) = page_token {
+            let _ = write!(base, "&pageToken={}", urlencoding::encode(token));
+        }
 
         self.get_json(&self.url_with_key(&base)).await
     }
@@ -492,6 +532,45 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn test_list_videos() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex("/videos.*"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "kind": "youtube#videoListResponse",
+                "etag": "abc",
+                "pageInfo": { "totalResults": 2, "resultsPerPage": 2 },
+                "items": [
+                    {
+                        "kind": "youtube#video",
+                        "etag": "def1",
+                        "id": "vid1",
+                        "snippet": { "title": "Video 1", "description": "First", "thumbnails": {} }
+                    },
+                    {
+                        "kind": "youtube#video",
+                        "etag": "def2",
+                        "id": "vid2",
+                        "snippet": { "title": "Video 2", "description": "Second", "thumbnails": {} }
+                    }
+                ]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = YouTubeClient::new("test-key")
+            .unwrap()
+            .with_base_url(&mock_server.uri());
+
+        let result = client
+            .list_videos(&["vid1".to_string(), "vid2".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(result.items.len(), 2);
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn test_get_channel() {
         let mock_server = MockServer::start().await;
 
@@ -531,6 +610,47 @@ mod tests {
             result.items[0].snippet.as_ref().unwrap().title,
             "Rick Astley"
         );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_list_playlists() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path_regex("/playlists.*"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "kind": "youtube#playlistListResponse",
+                "etag": "abc",
+                "pageInfo": { "totalResults": 2, "resultsPerPage": 2 },
+                "items": [
+                    {
+                        "kind": "youtube#playlist",
+                        "etag": "def1",
+                        "id": "pl1",
+                        "snippet": { "title": "Playlist 1", "description": "First", "thumbnails": {} },
+                        "contentDetails": { "itemCount": 10 }
+                    },
+                    {
+                        "kind": "youtube#playlist",
+                        "etag": "def2",
+                        "id": "pl2",
+                        "snippet": { "title": "Playlist 2", "description": "Second", "thumbnails": {} },
+                        "contentDetails": { "itemCount": 20 }
+                    }
+                ]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = YouTubeClient::new("test-key")
+            .unwrap()
+            .with_base_url(&mock_server.uri());
+
+        let result = client
+            .list_playlists("UCtest", Some(10), None)
+            .await
+            .unwrap();
+        assert_eq!(result.items.len(), 2);
     }
 
     #[fcp_async_core::runtime::test]

@@ -440,6 +440,45 @@ impl YouTubeConnector {
                     },
                 ),
                 op_info(
+                    "youtube.list_videos",
+                    "Get details for multiple videos by ID",
+                    json!({
+                        "type": "object",
+                        "required": ["video_ids"],
+                        "properties": {
+                            "video_ids": {
+                                "type": "array",
+                                "items": { "type": "string" },
+                                "minItems": 1
+                            }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "videos": { "type": "array" },
+                            "total_results": { "type": "integer" }
+                        }
+                    }),
+                    "youtube.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Get metadata for multiple videos in one request.".into(),
+                        common_mistakes: vec![
+                            "Passing an empty video_ids list".into(),
+                        ],
+                        examples: vec![
+                            r#"{"video_ids": ["dQw4w9WgXcQ", "9bZkp7q19f0"]}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("youtube.get_video"),
+                            CapabilityId::from_static("youtube.search"),
+                        ],
+                    },
+                ),
+                op_info(
                     "youtube.get_channel",
                     "Get channel details",
                     json!({
@@ -464,6 +503,40 @@ impl YouTubeConnector {
                         common_mistakes: vec![],
                         examples: vec![r#"{"channel_id": "UCxxxxxxxx"}"#.into()],
                         related: vec![CapabilityId::from_static("youtube.search")],
+                    },
+                ),
+                op_info(
+                    "youtube.list_playlists",
+                    "List playlists for a channel",
+                    json!({
+                        "type": "object",
+                        "required": ["channel_id"],
+                        "properties": {
+                            "channel_id": { "type": "string" },
+                            "max_results": { "type": "integer" },
+                            "page_token": { "type": "string" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "playlists": { "type": "array" },
+                            "next_page_token": { "type": "string" }
+                        }
+                    }),
+                    "youtube.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "List playlists owned by a channel.".into(),
+                        common_mistakes: vec![
+                            "Not handling next_page_token for pagination".into(),
+                        ],
+                        examples: vec![
+                            r#"{"channel_id": "UCxxxxxxxx", "max_results": 10}"#.into(),
+                        ],
+                        related: vec![CapabilityId::from_static("youtube.list_playlist_items")],
                     },
                 ),
                 op_info(
@@ -668,7 +741,9 @@ impl YouTubeConnector {
         match operation {
             "youtube.search" => self.invoke_search(input).await,
             "youtube.get_video" => self.invoke_get_video(input).await,
+            "youtube.list_videos" => self.invoke_list_videos(input).await,
             "youtube.get_channel" => self.invoke_get_channel(input).await,
+            "youtube.list_playlists" => self.invoke_list_playlists(input).await,
             "youtube.list_playlist_items" => self.invoke_list_playlist_items(input).await,
             "youtube.list_comments" => self.invoke_list_comments(input).await,
             "youtube.post_comment" => self.invoke_post_comment(input).await,
@@ -726,6 +801,26 @@ impl YouTubeConnector {
         Ok(json!({ "video": video }))
     }
 
+    async fn invoke_list_videos(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let video_ids = require_str_array(&input, "video_ids")?;
+
+        let results = client
+            .list_videos(&video_ids)
+            .await
+            .map_err(|e: YouTubeError| e.to_fcp_error())?;
+
+        let total_results = results
+            .page_info
+            .as_ref()
+            .map_or(results.items.len() as u32, |p| p.total_results);
+
+        Ok(json!({
+            "videos": results.items,
+            "total_results": total_results
+        }))
+    }
+
     async fn invoke_get_channel(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let channel_id = require_str(&input, "channel_id")?;
@@ -744,6 +839,29 @@ impl YouTubeConnector {
             })?;
 
         Ok(json!({ "channel": channel }))
+    }
+
+    async fn invoke_list_playlists(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let channel_id = require_str(&input, "channel_id")?;
+        let max_results = input
+            .get("max_results")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+        let page_token = input.get("page_token").and_then(|v| v.as_str());
+
+        let results = client
+            .list_playlists(channel_id, max_results, page_token)
+            .await
+            .map_err(|e: YouTubeError| e.to_fcp_error())?;
+
+        Ok(json!({
+            "playlists": results.items,
+            "next_page_token": results.next_page_token
+        }))
     }
 
     async fn invoke_list_playlist_items(
@@ -836,6 +954,37 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a s
             code: 1003,
             message: format!("Missing required field: {field}"),
         })
+}
+
+fn require_str_array(input: &serde_json::Value, field: &str) -> FcpResult<Vec<String>> {
+    let values = input
+        .get(field)
+        .and_then(|v| v.as_array())
+        .ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("Missing required field: {field}"),
+        })?;
+
+    if values.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("Field {field} must not be empty"),
+        });
+    }
+
+    values
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| {
+            value
+                .as_str()
+                .map(str::to_string)
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Field {field}[{idx}] must be a string"),
+                })
+        })
+        .collect()
 }
 
 #[allow(clippy::fn_params_excessive_bools)]
@@ -999,12 +1148,14 @@ mod tests {
 
         assert!(op_ids.contains(&"youtube.search"));
         assert!(op_ids.contains(&"youtube.get_video"));
+        assert!(op_ids.contains(&"youtube.list_videos"));
         assert!(op_ids.contains(&"youtube.get_channel"));
+        assert!(op_ids.contains(&"youtube.list_playlists"));
         assert!(op_ids.contains(&"youtube.list_playlist_items"));
         assert!(op_ids.contains(&"youtube.list_comments"));
         assert!(op_ids.contains(&"youtube.post_comment"));
         assert!(op_ids.contains(&"youtube.get_captions"));
-        assert_eq!(ops.len(), 7);
+        assert_eq!(ops.len(), 9);
     }
 
     // ── Provisioning / doctor / self_check tests ──────────────

@@ -2,7 +2,7 @@
 //!
 //! Deterministic integration tests using wiremock to mock the YouTube Data API v3.
 //! No real API calls. Covers:
-//! - Happy-path operations (search, get_video, get_channel, list_playlist_items,
+//! - Happy-path operations (search, get_video, list_videos, get_channel, list_playlists, list_playlist_items,
 //!   list_comments, post_comment, get_captions)
 //! - Error taxonomy (401/403/404/429 -> FcpError mapping)
 //! - FCP2 default-deny + capability verification
@@ -179,6 +179,54 @@ async fn get_video_happy_path() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn list_videos_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("youtube.list_videos.happy_path");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path_regex("/videos.*"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "kind": "youtube#videoListResponse",
+            "etag": "abc",
+            "pageInfo": { "totalResults": 2, "resultsPerPage": 2 },
+            "items": [
+                {
+                    "kind": "youtube#video",
+                    "etag": "def1",
+                    "id": "vid001",
+                    "snippet": { "title": "Video 1", "description": "First", "thumbnails": {} }
+                },
+                {
+                    "kind": "youtube#video",
+                    "etag": "def2",
+                    "id": "vid002",
+                    "snippet": { "title": "Video 2", "description": "Second", "thumbnails": {} }
+                }
+            ]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = YouTubeConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["youtube.list_videos"]).await;
+    let token = generate_valid_token(&signing_key, "youtube.list_videos");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "youtube.list_videos",
+            "input": { "video_ids": ["vid001", "vid002"] },
+            "capability_token": token
+        }))
+        .await
+        .expect("list_videos invoke should succeed");
+
+    let videos = result["videos"].as_array().expect("videos array");
+    assert_eq!(videos.len(), 2);
+    assert_eq!(result["total_results"], 2);
+}
+
+#[fcp_async_core::runtime::test]
 async fn get_channel_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("youtube.get_channel.happy_path");
     let mock_server = MockServer::start().await;
@@ -219,6 +267,67 @@ async fn get_channel_happy_path() {
 
     assert_eq!(result["channel"]["id"], "UCuAXFkgsw1L7xaCfnd5JJOw");
     assert_eq!(result["channel"]["snippet"]["title"], "Rick Astley");
+}
+
+#[fcp_async_core::runtime::test]
+async fn list_playlists_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("youtube.list_playlists.happy_path");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path_regex("/playlists.*"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "kind": "youtube#playlistListResponse",
+            "etag": "abc",
+            "nextPageToken": "next-token",
+            "pageInfo": { "totalResults": 2, "resultsPerPage": 2 },
+            "items": [
+                {
+                    "kind": "youtube#playlist",
+                    "etag": "pl1",
+                    "id": "PL001",
+                    "snippet": {
+                        "channelId": "UCtest",
+                        "title": "Playlist 1",
+                        "description": "First playlist",
+                        "thumbnails": {}
+                    },
+                    "contentDetails": { "itemCount": 10 }
+                },
+                {
+                    "kind": "youtube#playlist",
+                    "etag": "pl2",
+                    "id": "PL002",
+                    "snippet": {
+                        "channelId": "UCtest",
+                        "title": "Playlist 2",
+                        "description": "Second playlist",
+                        "thumbnails": {}
+                    },
+                    "contentDetails": { "itemCount": 8 }
+                }
+            ]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = YouTubeConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["youtube.list_playlists"]).await;
+    let token = generate_valid_token(&signing_key, "youtube.list_playlists");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "youtube.list_playlists",
+            "input": { "channel_id": "UCtest", "max_results": 10 },
+            "capability_token": token
+        }))
+        .await
+        .expect("list_playlists invoke should succeed");
+
+    let playlists = result["playlists"].as_array().expect("playlists array");
+    assert_eq!(playlists.len(), 2);
+    assert_eq!(result["next_page_token"], "next-token");
 }
 
 #[fcp_async_core::runtime::test]
@@ -644,12 +753,14 @@ async fn introspect_lists_all_operations() {
 
     assert!(op_ids.contains(&"youtube.search"));
     assert!(op_ids.contains(&"youtube.get_video"));
+    assert!(op_ids.contains(&"youtube.list_videos"));
     assert!(op_ids.contains(&"youtube.get_channel"));
+    assert!(op_ids.contains(&"youtube.list_playlists"));
     assert!(op_ids.contains(&"youtube.list_playlist_items"));
     assert!(op_ids.contains(&"youtube.list_comments"));
     assert!(op_ids.contains(&"youtube.post_comment"));
     assert!(op_ids.contains(&"youtube.get_captions"));
-    assert_eq!(ops.len(), 7);
+    assert_eq!(ops.len(), 9);
 }
 
 #[fcp_async_core::runtime::test]
@@ -716,6 +827,60 @@ async fn get_video_missing_video_id_fails() {
     match result.unwrap_err() {
         fcp_core::FcpError::InvalidRequest { message, .. } => {
             assert!(message.contains("video_id"));
+        }
+        e => panic!("Expected InvalidRequest, got: {e:?}"),
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn list_videos_empty_video_ids_fails() {
+    let _ctx = AsyncTestContext::for_scenario("youtube.validation.list_videos_empty_ids");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = YouTubeConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["youtube.list_videos"]).await;
+    let token = generate_valid_token(&signing_key, "youtube.list_videos");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "youtube.list_videos",
+            "input": { "video_ids": [] },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("video_ids"));
+        }
+        e => panic!("Expected InvalidRequest, got: {e:?}"),
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn list_playlists_missing_channel_id_fails() {
+    let _ctx = AsyncTestContext::for_scenario("youtube.validation.list_playlists_missing_channel");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = YouTubeConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["youtube.list_playlists"]).await;
+    let token = generate_valid_token(&signing_key, "youtube.list_playlists");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "youtube.list_playlists",
+            "input": {},
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("channel_id"));
         }
         e => panic!("Expected InvalidRequest, got: {e:?}"),
     }

@@ -201,6 +201,50 @@ pub struct ChannelListResponse {
     pub items: Vec<Channel>,
 }
 
+// ── Playlists ───────────────────────────────────────────────────
+
+/// Playlist resource.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Playlist {
+    pub kind: String,
+    pub etag: String,
+    pub id: String,
+    pub snippet: Option<PlaylistSnippet>,
+    pub content_details: Option<PlaylistContentDetails>,
+}
+
+/// Playlist snippet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaylistSnippet {
+    pub published_at: Option<String>,
+    pub channel_id: Option<String>,
+    pub title: String,
+    pub description: String,
+    pub thumbnails: Option<ThumbnailSet>,
+    pub channel_title: Option<String>,
+}
+
+/// Playlist content details.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaylistContentDetails {
+    pub item_count: Option<u32>,
+}
+
+/// Playlist list response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaylistListResponse {
+    pub kind: String,
+    pub etag: String,
+    pub next_page_token: Option<String>,
+    pub prev_page_token: Option<String>,
+    pub page_info: Option<PageInfo>,
+    pub items: Vec<Playlist>,
+}
+
 // ── Playlist Items ──────────────────────────────────────────────
 
 /// Playlist item resource.

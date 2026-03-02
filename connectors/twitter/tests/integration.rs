@@ -2,7 +2,7 @@
 //!
 //! Deterministic integration tests using wiremock to mock the Twitter API v2.
 //! No real API calls. Covers:
-//! - Happy-path operations (user.me, user.get, tweet.get, tweet.search, tweet.create)
+//! - Happy-path operations (lookups, search, timeline, trends, tweet.create)
 //! - Error taxonomy (401/403/429 -> FcpError mapping)
 //! - FCP2 default-deny + capability verification
 //! - Lifecycle (health, handshake, introspect, shutdown)
@@ -170,6 +170,42 @@ async fn user_get_happy_path() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn user_by_username_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("twitter.user.by_username.happy_path");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/2/users/by/username/other_user"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "id": "67890",
+                "name": "Other User",
+                "username": "other_user"
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = TwitterConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &mock_server, &["twitter.user.by_username"]).await;
+    let token = generate_valid_token(&signing_key, "twitter.user.by_username");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "twitter.user.by_username",
+            "args": { "username": "@other_user" },
+            "capability_token": token
+        }))
+        .await
+        .expect("user.by_username invoke should succeed");
+
+    assert_eq!(result["user"]["id"], "67890");
+    assert_eq!(result["user"]["username"], "other_user");
+}
+
+#[fcp_async_core::runtime::test]
 async fn tweet_get_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("twitter.tweet.get.happy_path");
     let mock_server = MockServer::start().await;
@@ -284,6 +320,96 @@ async fn tweet_create_happy_path() {
         .expect("tweet.create invoke should succeed");
 
     assert_eq!(result["tweet"]["id"], "new-tweet-1");
+}
+
+#[fcp_async_core::runtime::test]
+async fn user_timeline_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("twitter.user.timeline.happy_path");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/2/users/67890/tweets"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {
+                    "id": "tl-1",
+                    "text": "Timeline tweet one",
+                    "author_id": "67890"
+                }
+            ],
+            "meta": {
+                "result_count": 1
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = TwitterConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &mock_server, &["twitter.user.timeline"]).await;
+    let token = generate_valid_token(&signing_key, "twitter.user.timeline");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "twitter.user.timeline",
+            "args": { "user_id": "67890", "max_results": 10 },
+            "capability_token": token
+        }))
+        .await
+        .expect("user.timeline invoke should succeed");
+
+    let tweets = result["tweets"].as_array().expect("tweets array");
+    assert_eq!(tweets.len(), 1);
+    assert_eq!(tweets[0]["id"], "tl-1");
+}
+
+#[fcp_async_core::runtime::test]
+async fn trends_place_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("twitter.trends.place.happy_path");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/1.1/trends/place.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {
+                "trends": [
+                    {
+                        "name": "#rustlang",
+                        "url": "https://twitter.com/search?q=%23rustlang",
+                        "query": "%23rustlang",
+                        "tweet_volume": 12345
+                    }
+                ],
+                "as_of": "2026-03-02T00:00:00Z",
+                "created_at": "2026-03-02T00:00:00Z",
+                "locations": [
+                    { "name": "Worldwide", "woeid": 1 }
+                ]
+            }
+        ])))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = TwitterConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &mock_server, &["twitter.trends.place"]).await;
+    let token = generate_valid_token(&signing_key, "twitter.trends.place");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "twitter.trends.place",
+            "args": { "woeid": 1 },
+            "capability_token": token
+        }))
+        .await
+        .expect("trends.place invoke should succeed");
+
+    let locations = result["locations"].as_array().expect("locations array");
+    assert_eq!(locations.len(), 1);
+    assert_eq!(locations[0]["locations"][0]["name"], "Worldwide");
+    assert_eq!(locations[0]["trends"][0]["name"], "#rustlang");
 }
 
 // ============================================================================
@@ -486,9 +612,10 @@ async fn introspect_lists_all_operations() {
     assert!(op_ids.contains(&"twitter.user.get"));
     assert!(op_ids.contains(&"twitter.tweet.get"));
     assert!(op_ids.contains(&"twitter.tweet.search"));
+    assert!(op_ids.contains(&"twitter.trends.place"));
     assert!(op_ids.contains(&"twitter.tweet.create"));
     assert!(op_ids.contains(&"twitter.tweet.delete"));
-    assert_eq!(ops.len(), 13);
+    assert_eq!(ops.len(), 14);
 }
 
 #[fcp_async_core::runtime::test]
@@ -556,6 +683,34 @@ async fn tweet_search_missing_query_fails() {
     match result.unwrap_err() {
         fcp_core::FcpError::InvalidRequest { message, .. } => {
             assert!(message.contains("query"));
+        }
+        e => panic!("Expected InvalidRequest, got: {e:?}"),
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn trends_place_missing_woeid_fails() {
+    let _ctx = AsyncTestContext::for_scenario("twitter.validation.trends_place_missing_woeid");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = TwitterConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &mock_server, &["twitter.trends.place"]).await;
+    let token = generate_valid_token(&signing_key, "twitter.trends.place");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "twitter.trends.place",
+            "args": {},
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("woeid"));
         }
         e => panic!("Expected InvalidRequest, got: {e:?}"),
     }

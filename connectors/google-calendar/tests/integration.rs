@@ -534,3 +534,527 @@ async fn invoke_missing_required_field_rejected() {
         e => panic!("Expected InvalidRequest, got: {e:?}"),
     }
 }
+
+// ── FreeBusy client ─────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn client_freebusy() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/freeBusy"))
+        .and(bearer_token("test_tok"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "kind": "calendar#freeBusy",
+            "calendars": {
+                "primary": {
+                    "busy": [
+                        { "start": "2026-03-02T10:00:00Z", "end": "2026-03-02T11:00:00Z" }
+                    ]
+                }
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GoogleCalendarClient::new("test_tok")
+        .unwrap()
+        .with_base_url(server.uri());
+
+    let request = fcp_google_calendar::types::FreeBusyRequest {
+        time_min: "2026-03-02T00:00:00Z".into(),
+        time_max: "2026-03-03T00:00:00Z".into(),
+        items: vec![fcp_google_calendar::types::FreeBusyRequestItem {
+            id: "primary".into(),
+        }],
+    };
+    let result = client.freebusy(&request).await.unwrap();
+    assert!(result.calendars.contains_key("primary"));
+    assert_eq!(result.calendars["primary"].busy.len(), 1);
+}
+
+// ── FreeBusy connector-level ────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn invoke_freebusy_through_connector() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/freeBusy"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "calendars": {
+                "primary": {
+                    "busy": [
+                        { "start": "2026-03-02T10:00:00Z", "end": "2026-03-02T11:00:00Z" }
+                    ]
+                }
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let mut connector = GoogleCalendarConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+
+    setup_handshake(&mut connector, &signing_key, &["gcal.freebusy"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "gcal.freebusy");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "gcal.freebusy",
+            "input": {
+                "time_min": "2026-03-02T00:00:00Z",
+                "time_max": "2026-03-03T00:00:00Z",
+                "items": [{ "id": "primary" }]
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert!(result["calendars"].is_object());
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_freebusy_missing_fields() {
+    let server = MockServer::start().await;
+
+    let mut connector = GoogleCalendarConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+
+    setup_handshake(&mut connector, &signing_key, &["gcal.freebusy"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "gcal.freebusy");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "gcal.freebusy",
+            "input": {},
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("time_min"));
+        }
+        e => panic!("Expected InvalidRequest, got: {e:?}"),
+    }
+}
+
+// ── Event instances client ──────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn client_list_event_instances() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/calendars/primary/events/recurring001/instances"))
+        .and(bearer_token("test_tok"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "items": [
+                event_json("recurring001_20260301", "Weekly standup"),
+                event_json("recurring001_20260308", "Weekly standup")
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GoogleCalendarClient::new("test_tok")
+        .unwrap()
+        .with_base_url(server.uri());
+    let result = client
+        .list_event_instances("primary", "recurring001", None, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(result.items.len(), 2);
+}
+
+// ── Event instances connector-level ─────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn invoke_list_event_instances_through_connector() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/calendars/primary/events/recurring001/instances"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "items": [
+                event_json("recurring001_20260301", "Weekly standup")
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let mut connector = GoogleCalendarConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+
+    setup_handshake(&mut connector, &signing_key, &["gcal.list_event_instances"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "gcal.list_event_instances");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "gcal.list_event_instances",
+            "input": {
+                "calendar_id": "primary",
+                "event_id": "recurring001"
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert!(result["events"].as_array().is_some());
+}
+
+// ── Get calendar client ─────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn client_get_calendar() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/users/me/calendarList/primary"))
+        .and(bearer_token("test_tok"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "primary",
+            "summary": "My Calendar",
+            "timeZone": "America/New_York",
+            "primary": true
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GoogleCalendarClient::new("test_tok")
+        .unwrap()
+        .with_base_url(server.uri());
+    let result: serde_json::Value = client.get_calendar("primary").await.unwrap();
+    assert_eq!(result["id"], "primary");
+    assert_eq!(result["summary"], "My Calendar");
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_get_calendar_unauthorized() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/users/me/calendarList/nonexistent"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            "error": { "code": 401, "message": "Invalid Credentials" }
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GoogleCalendarClient::new("bad_token")
+        .unwrap()
+        .with_base_url(server.uri())
+        .with_retry_config(0, 100, 100);
+    let result: Result<serde_json::Value, _> = client.get_calendar("nonexistent").await;
+    assert!(result.is_err());
+    assert!(matches!(
+        result.unwrap_err(),
+        GoogleCalendarError::Unauthorized
+    ));
+}
+
+// ── Get calendar connector-level ────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn invoke_get_calendar_through_connector() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/users/me/calendarList/primary"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "primary",
+            "summary": "My Calendar",
+            "timeZone": "America/New_York"
+        })))
+        .mount(&server)
+        .await;
+
+    let mut connector = GoogleCalendarConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+
+    setup_handshake(&mut connector, &signing_key, &["gcal.get_calendar"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "gcal.get_calendar");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "gcal.get_calendar",
+            "input": { "calendar_id": "primary" },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert!(result["calendar"].is_object());
+    assert_eq!(result["calendar"]["id"], "primary");
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_get_calendar_missing_field() {
+    let server = MockServer::start().await;
+
+    let mut connector = GoogleCalendarConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+
+    setup_handshake(&mut connector, &signing_key, &["gcal.get_calendar"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "gcal.get_calendar");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "gcal.get_calendar",
+            "input": {},
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("calendar_id"));
+        }
+        e => panic!("Expected InvalidRequest, got: {e:?}"),
+    }
+}
+
+// ── Quick-add connector-level ───────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn invoke_quick_add_through_connector() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/calendars/primary/events/quickAdd"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(event_json("evtQA2", "Dinner at 7pm")),
+        )
+        .mount(&server)
+        .await;
+
+    let mut connector = GoogleCalendarConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+
+    setup_handshake(&mut connector, &signing_key, &["gcal.quick_add"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "gcal.quick_add");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "gcal.quick_add",
+            "input": {
+                "calendar_id": "primary",
+                "text": "Dinner at 7pm"
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["event"]["id"], "evtQA2");
+}
+
+// ── Risk level verification ─────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn introspect_risk_levels() {
+    let connector = GoogleCalendarConnector::new();
+    let result = connector.handle_introspect().await.unwrap();
+    let ops = result["operations"].as_array().unwrap();
+
+    for op in ops {
+        let id = op["id"].as_str().unwrap();
+        let risk = op["risk_level"].as_str().unwrap();
+        match id {
+            "gcal.list_calendars"
+            | "gcal.get_event"
+            | "gcal.list_events"
+            | "gcal.freebusy"
+            | "gcal.list_event_instances"
+            | "gcal.get_calendar"
+            | "gcal.sync_events" => {
+                assert_eq!(risk, "low", "Read op {id} should be low risk");
+            }
+            "gcal.create_event" | "gcal.update_event" | "gcal.quick_add" => {
+                assert_eq!(risk, "medium", "Write op {id} should be medium risk");
+            }
+            "gcal.delete_event" => {
+                assert_eq!(risk, "high", "Delete op {id} should be high risk");
+            }
+            _ => panic!("Unknown operation: {id}"),
+        }
+    }
+}
+
+// ── Sync events client ──────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn client_sync_events_initial() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/calendars/primary/events"))
+        .and(bearer_token("test_tok"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "items": [
+                event_json("evt001", "Meeting A"),
+                event_json("evt002", "Meeting B")
+            ],
+            "nextSyncToken": "CPDAlvXkExample123"
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GoogleCalendarClient::new("test_tok")
+        .unwrap()
+        .with_base_url(server.uri());
+    let result = client
+        .sync_events("primary", None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(result.items.len(), 2);
+    assert_eq!(
+        result.next_sync_token.as_deref(),
+        Some("CPDAlvXkExample123")
+    );
+    assert!(result.next_page_token.is_none());
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_sync_events_incremental() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/calendars/primary/events"))
+        .and(bearer_token("test_tok"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "items": [
+                {
+                    "id": "evt003",
+                    "summary": "New meeting",
+                    "status": "confirmed",
+                    "start": { "dateTime": "2026-03-03T10:00:00Z" },
+                    "end": { "dateTime": "2026-03-03T11:00:00Z" }
+                },
+                {
+                    "id": "evt001",
+                    "status": "cancelled"
+                }
+            ],
+            "nextSyncToken": "CPDAlvXkUpdated456"
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GoogleCalendarClient::new("test_tok")
+        .unwrap()
+        .with_base_url(server.uri());
+    let result = client
+        .sync_events("primary", Some("CPDAlvXkExample123"), None, None)
+        .await
+        .unwrap();
+    assert_eq!(result.items.len(), 2);
+    assert_eq!(
+        result.next_sync_token.as_deref(),
+        Some("CPDAlvXkUpdated456")
+    );
+    // Verify cancelled event is present (incremental sync includes deleted events)
+    let cancelled = result.items.iter().find(|e| e.id.as_deref() == Some("evt001"));
+    assert_eq!(
+        cancelled.unwrap().status.as_deref(),
+        Some("cancelled")
+    );
+}
+
+// ── Sync events connector-level ─────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn invoke_sync_events_initial_through_connector() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/calendars/primary/events"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "items": [event_json("evt001", "Standup")],
+            "nextSyncToken": "sync-token-abc"
+        })))
+        .mount(&server)
+        .await;
+
+    let mut connector = GoogleCalendarConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+
+    setup_handshake(&mut connector, &signing_key, &["gcal.sync_events"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "gcal.sync_events");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "gcal.sync_events",
+            "input": { "calendar_id": "primary" },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert!(result["events"].as_array().is_some());
+    assert_eq!(result["next_sync_token"], "sync-token-abc");
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_sync_events_incremental_through_connector() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/calendars/primary/events"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "items": [{ "id": "evt002", "status": "cancelled" }],
+            "nextSyncToken": "sync-token-def"
+        })))
+        .mount(&server)
+        .await;
+
+    let mut connector = GoogleCalendarConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+
+    setup_handshake(&mut connector, &signing_key, &["gcal.sync_events"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "gcal.sync_events");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "gcal.sync_events",
+            "input": {
+                "calendar_id": "primary",
+                "sync_token": "sync-token-abc"
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["events"].as_array().unwrap().len(), 1);
+    assert_eq!(result["next_sync_token"], "sync-token-def");
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_sync_events_missing_calendar_id() {
+    let server = MockServer::start().await;
+
+    let mut connector = GoogleCalendarConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+
+    setup_handshake(&mut connector, &signing_key, &["gcal.sync_events"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "gcal.sync_events");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "gcal.sync_events",
+            "input": {},
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("calendar_id"));
+        }
+        e => panic!("Expected InvalidRequest, got: {e:?}"),
+    }
+}

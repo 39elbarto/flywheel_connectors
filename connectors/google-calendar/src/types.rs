@@ -106,5 +106,44 @@ pub struct EventsListResponse {
     #[serde(default)]
     pub next_page_token: Option<String>,
     #[serde(default)]
+    pub next_sync_token: Option<String>,
+    #[serde(default)]
     pub summary: Option<String>,
+}
+
+/// A calendar item in a freebusy request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FreeBusyRequestItem {
+    pub id: String,
+}
+
+/// Request body for the freebusy query.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FreeBusyRequest {
+    pub time_min: String,
+    pub time_max: String,
+    pub items: Vec<FreeBusyRequestItem>,
+}
+
+/// A busy time range within a calendar's freebusy response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BusyTime {
+    pub start: String,
+    pub end: String,
+}
+
+/// Per-calendar freebusy information.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CalendarFreeBusy {
+    #[serde(default)]
+    pub busy: Vec<BusyTime>,
+}
+
+/// Response from the freebusy endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FreeBusyResponse {
+    #[serde(default)]
+    pub calendars: std::collections::HashMap<String, CalendarFreeBusy>,
 }

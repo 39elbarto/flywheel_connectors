@@ -11,7 +11,7 @@ use tracing::{debug, instrument, warn};
 
 use crate::{
     error::{GCalResult, GoogleCalendarError},
-    types::{CalendarListResponse, Event, EventsListResponse},
+    types::{CalendarListResponse, Event, EventsListResponse, FreeBusyRequest, FreeBusyResponse},
 };
 
 /// Default Google Calendar API base URL.
@@ -151,6 +151,15 @@ impl GoogleCalendarClient {
         self.get(&url).await
     }
 
+    /// Get a specific calendar by ID from the user's calendar list.
+    #[instrument(skip(self))]
+    pub async fn get_calendar(&self, calendar_id: &str) -> GCalResult<serde_json::Value> {
+        let encoded =
+            percent_encoding::utf8_percent_encode(calendar_id, percent_encoding::NON_ALPHANUMERIC);
+        let url = format!("{}/users/me/calendarList/{encoded}", self.base_url);
+        self.get(&url).await
+    }
+
     // ── Event operations ────────────────────────────────────────
 
     /// Get a single event by ID.
@@ -187,6 +196,40 @@ impl GoogleCalendarClient {
         }
         if let Some(t_max) = time_max {
             params.push(("timeMax", t_max.to_string()));
+        }
+        if let Some(max) = max_results {
+            params.push(("maxResults", max.to_string()));
+        }
+        if let Some(token) = page_token {
+            params.push(("pageToken", token.to_string()));
+        }
+
+        self.get_with_params(&base, &params).await
+    }
+
+    /// Sync events using an incremental sync token.
+    ///
+    /// On the first call, pass `sync_token: None` to perform a full sync.
+    /// The last page of results will include a `nextSyncToken` in the response.
+    /// On subsequent calls, pass the previous `nextSyncToken` as `sync_token`
+    /// to receive only changes (created, updated, deleted) since that point.
+    ///
+    /// Deleted events appear with `status: "cancelled"`.
+    #[instrument(skip(self))]
+    pub async fn sync_events(
+        &self,
+        calendar_id: &str,
+        sync_token: Option<&str>,
+        max_results: Option<u32>,
+        page_token: Option<&str>,
+    ) -> GCalResult<EventsListResponse> {
+        let encoded_cal =
+            percent_encoding::utf8_percent_encode(calendar_id, percent_encoding::NON_ALPHANUMERIC);
+        let base = format!("{}/calendars/{encoded_cal}/events", self.base_url);
+
+        let mut params = Vec::new();
+        if let Some(token) = sync_token {
+            params.push(("syncToken", token.to_string()));
         }
         if let Some(max) = max_results {
             params.push(("maxResults", max.to_string()));
@@ -254,6 +297,55 @@ impl GoogleCalendarClient {
             self.base_url
         );
         self.post_json(&url, &serde_json::json!({})).await
+    }
+
+    // ── FreeBusy operations ──────────────────────────────────────
+
+    /// Query free/busy information for a set of calendars.
+    #[instrument(skip(self, request))]
+    pub async fn freebusy(&self, request: &FreeBusyRequest) -> GCalResult<FreeBusyResponse> {
+        let url = format!("{}/freeBusy", self.base_url);
+        let body = serde_json::to_value(request).map_err(GoogleCalendarError::Json)?;
+        self.post_json(&url, &body).await
+    }
+
+    // ── Event instances ─────────────────────────────────────────
+
+    /// List instances of a recurring event.
+    #[instrument(skip(self))]
+    pub async fn list_event_instances(
+        &self,
+        calendar_id: &str,
+        event_id: &str,
+        time_min: Option<&str>,
+        time_max: Option<&str>,
+        max_results: Option<u32>,
+        page_token: Option<&str>,
+    ) -> GCalResult<EventsListResponse> {
+        let encoded_cal =
+            percent_encoding::utf8_percent_encode(calendar_id, percent_encoding::NON_ALPHANUMERIC);
+        let encoded_evt =
+            percent_encoding::utf8_percent_encode(event_id, percent_encoding::NON_ALPHANUMERIC);
+        let base = format!(
+            "{}/calendars/{encoded_cal}/events/{encoded_evt}/instances",
+            self.base_url
+        );
+
+        let mut params = Vec::new();
+        if let Some(t_min) = time_min {
+            params.push(("timeMin", t_min.to_string()));
+        }
+        if let Some(t_max) = time_max {
+            params.push(("timeMax", t_max.to_string()));
+        }
+        if let Some(max) = max_results {
+            params.push(("maxResults", max.to_string()));
+        }
+        if let Some(token) = page_token {
+            params.push(("pageToken", token.to_string()));
+        }
+
+        self.get_with_params(&base, &params).await
     }
 
     // ── Internal HTTP helpers ───────────────────────────────────

@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:0d080ba5c607270694d7908542b62a4349ad7746fed27e31ef59423199f6c231"
+interface_hash = "blake3-256:fcp.interface.v2:3212739e38cdad82f6c67da7d528e0a8ae4cc5fa4cd06c3fc4f85bf7b37bb373"
 
 [connector]
 id = "fcp.google-calendar"
@@ -352,6 +352,199 @@ common_mistakes = []
 examples = ['{"time_min": "2026-03-01T00:00:00Z", "time_max": "2026-03-02T00:00:00Z", "items": [{"id": "primary"}]}']
 related = ["gcal.list_events"]
 
+[provides.operations."gcal.list_event_instances"]
+description = "List instances of a recurring event"
+capability = "gcal.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."gcal.list_event_instances".input_schema]
+required = ["calendar_id", "event_id"]
+type = "object"
+[provides.operations."gcal.list_event_instances".input_schema.properties.calendar_id]
+type = "string"
+[provides.operations."gcal.list_event_instances".input_schema.properties.event_id]
+type = "string"
+[provides.operations."gcal.list_event_instances".input_schema.properties.time_min]
+type = "string"
+[provides.operations."gcal.list_event_instances".input_schema.properties.time_max]
+type = "string"
+[provides.operations."gcal.list_event_instances".input_schema.properties.max_results]
+type = "integer"
+[provides.operations."gcal.list_event_instances".input_schema.properties.page_token]
+type = "string"
+
+[provides.operations."gcal.list_event_instances".output_schema]
+type = "object"
+[provides.operations."gcal.list_event_instances".output_schema.properties.events]
+type = "array"
+[provides.operations."gcal.list_event_instances".output_schema.properties.next_page_token]
+type = "string"
+
+[provides.operations."gcal.list_event_instances".network_constraints]
+host_allow = ["www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."gcal.list_event_instances".ai_hints]
+when_to_use = "Get individual occurrences of a recurring event."
+common_mistakes = ["Using a non-recurring event ID"]
+examples = ['{"calendar_id": "primary", "event_id": "abc123_R20260301", "time_min": "2026-03-01T00:00:00Z", "time_max": "2026-04-01T00:00:00Z"}']
+related = ["gcal.get_event", "gcal.list_events"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."gcal.quick_add"]
+description = "Quick-add an event using natural language"
+capability = "gcal.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."gcal.quick_add".input_schema]
+required = ["calendar_id", "text"]
+type = "object"
+[provides.operations."gcal.quick_add".input_schema.properties.calendar_id]
+type = "string"
+[provides.operations."gcal.quick_add".input_schema.properties.text]
+type = "string"
+
+[provides.operations."gcal.quick_add".output_schema]
+required = ["event"]
+type = "object"
+[provides.operations."gcal.quick_add".output_schema.properties.event]
+type = "object"
+
+[provides.operations."gcal.quick_add".network_constraints]
+host_allow = ["www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."gcal.quick_add".ai_hints]
+when_to_use = "Quick-add an event using a natural language string like 'Lunch with Alice tomorrow at noon'."
+common_mistakes = ["Using ambiguous dates without specifying year"]
+examples = ['{"calendar_id": "primary", "text": "Meeting with Alice tomorrow at 3pm"}']
+related = ["gcal.create_event"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."gcal.get_calendar"]
+description = "Get details of a specific calendar"
+capability = "gcal.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."gcal.get_calendar".input_schema]
+required = ["calendar_id"]
+type = "object"
+[provides.operations."gcal.get_calendar".input_schema.properties.calendar_id]
+type = "string"
+
+[provides.operations."gcal.get_calendar".output_schema]
+required = ["calendar"]
+type = "object"
+[provides.operations."gcal.get_calendar".output_schema.properties.calendar]
+type = "object"
+
+[provides.operations."gcal.get_calendar".network_constraints]
+host_allow = ["www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."gcal.get_calendar".ai_hints]
+when_to_use = "Get details of a specific calendar by its ID."
+common_mistakes = []
+examples = ['{"calendar_id": "primary"}']
+related = ["gcal.list_calendars", "gcal.list_events"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."gcal.sync_events"]
+description = "Incremental sync of calendar events using syncToken"
+capability = "gcal.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."gcal.sync_events".input_schema]
+required = ["calendar_id"]
+type = "object"
+[provides.operations."gcal.sync_events".input_schema.properties.calendar_id]
+type = "string"
+[provides.operations."gcal.sync_events".input_schema.properties.sync_token]
+type = "string"
+description = "Token from a previous sync response. Omit for initial full sync."
+[provides.operations."gcal.sync_events".input_schema.properties.max_results]
+type = "integer"
+[provides.operations."gcal.sync_events".input_schema.properties.page_token]
+type = "string"
+
+[provides.operations."gcal.sync_events".output_schema]
+type = "object"
+[provides.operations."gcal.sync_events".output_schema.properties.events]
+type = "array"
+[provides.operations."gcal.sync_events".output_schema.properties.next_page_token]
+type = "string"
+[provides.operations."gcal.sync_events".output_schema.properties.next_sync_token]
+type = "string"
+
+[provides.operations."gcal.sync_events".network_constraints]
+host_allow = ["www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."gcal.sync_events".ai_hints]
+when_to_use = "Sync calendar events incrementally. First call without sync_token for full sync; subsequent calls with next_sync_token for changes only."
+common_mistakes = ["Do not mix sync_token with timeMin/timeMax filters", "Deleted events appear with status 'cancelled'"]
+examples = ['{"calendar_id": "primary"}', '{"calendar_id": "primary", "sync_token": "CPDAlvXk..."}']
+related = ["gcal.list_events"]
+
 # ── Events ──────────────────────────────────────────────────────
 
 [event_caps]
@@ -402,3 +595,7 @@ scope = "instance"
 "gcal.list_events" = ["gcal.read"]
 "gcal.list_calendars" = ["gcal.read"]
 "gcal.freebusy" = ["gcal.read"]
+"gcal.list_event_instances" = ["gcal.read"]
+"gcal.quick_add" = ["gcal.write"]
+"gcal.get_calendar" = ["gcal.read"]
+"gcal.sync_events" = ["gcal.read"]

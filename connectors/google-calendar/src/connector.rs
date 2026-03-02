@@ -15,7 +15,7 @@ use tracing::{info, instrument};
 use crate::{
     client::{DEFAULT_BASE_URL, GoogleCalendarAuth, GoogleCalendarClient},
     error::GoogleCalendarError,
-    types::{Attendee, Event, EventDateTime},
+    types::{Attendee, Event, EventDateTime, FreeBusyRequest, FreeBusyRequestItem},
 };
 
 /// Validated configuration for the Google Calendar connector.
@@ -614,6 +614,142 @@ impl GoogleCalendarConnector {
                         related: vec![CapabilityId::from_static("gcal.create_event")],
                     },
                 ),
+                op_info(
+                    "gcal.freebusy",
+                    "Query free/busy information for calendars",
+                    json!({
+                        "type": "object",
+                        "required": ["time_min", "time_max", "items"],
+                        "properties": {
+                            "time_min": { "type": "string", "description": "Start of time range (RFC3339)" },
+                            "time_max": { "type": "string", "description": "End of time range (RFC3339)" },
+                            "items": { "type": "array", "description": "Calendar IDs to query, e.g. [{\"id\": \"primary\"}]" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "calendars": { "type": "object", "description": "Map of calendar ID to busy times" }
+                        }
+                    }),
+                    "gcal.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Check when people are free or busy across one or more calendars.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![
+                            r#"{"time_min": "2026-03-01T00:00:00Z", "time_max": "2026-03-02T00:00:00Z", "items": [{"id": "primary"}]}"#.into(),
+                        ],
+                        related: vec![CapabilityId::from_static("gcal.list_events")],
+                    },
+                ),
+                op_info(
+                    "gcal.list_event_instances",
+                    "List instances of a recurring event",
+                    json!({
+                        "type": "object",
+                        "required": ["calendar_id", "event_id"],
+                        "properties": {
+                            "calendar_id": { "type": "string" },
+                            "event_id": { "type": "string", "description": "ID of the recurring event" },
+                            "time_min": { "type": "string", "description": "Lower bound (RFC3339)" },
+                            "time_max": { "type": "string", "description": "Upper bound (RFC3339)" },
+                            "max_results": { "type": "integer" },
+                            "page_token": { "type": "string" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "events": { "type": "array" },
+                            "next_page_token": { "type": "string" }
+                        }
+                    }),
+                    "gcal.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Get individual instances of a recurring event, optionally filtered by time range.".into(),
+                        common_mistakes: vec![
+                            "Using a non-recurring event ID (only works for events with recurrence rules)".into(),
+                        ],
+                        examples: vec![
+                            r#"{"calendar_id": "primary", "event_id": "abc123_R20260301"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("gcal.get_event"),
+                            CapabilityId::from_static("gcal.list_events"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "gcal.get_calendar",
+                    "Get details of a specific calendar",
+                    json!({
+                        "type": "object",
+                        "required": ["calendar_id"],
+                        "properties": {
+                            "calendar_id": { "type": "string" }
+                        }
+                    }),
+                    json!({ "type": "object", "properties": { "calendar": { "type": "object" } } }),
+                    "gcal.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Get details of a specific calendar by its ID.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![r#"{"calendar_id": "primary"}"#.into()],
+                        related: vec![
+                            CapabilityId::from_static("gcal.list_calendars"),
+                            CapabilityId::from_static("gcal.list_events"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "gcal.sync_events",
+                    "Incremental sync of calendar events using syncToken",
+                    json!({
+                        "type": "object",
+                        "required": ["calendar_id"],
+                        "properties": {
+                            "calendar_id": { "type": "string" },
+                            "sync_token": { "type": "string", "description": "Token from a previous sync response. Omit for initial full sync." },
+                            "max_results": { "type": "integer" },
+                            "page_token": { "type": "string" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "events": { "type": "array" },
+                            "next_page_token": { "type": "string" },
+                            "next_sync_token": { "type": "string" }
+                        }
+                    }),
+                    "gcal.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Sync calendar events incrementally. First call without sync_token for full sync; subsequent calls with the returned next_sync_token for changes only.".into(),
+                        common_mistakes: vec![
+                            "Do not mix sync_token with timeMin/timeMax filters.".into(),
+                            "Deleted events appear with status 'cancelled'.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"calendar_id": "primary"}"#.into(),
+                            r#"{"calendar_id": "primary", "sync_token": "CPDAlvXk..."}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("gcal.list_events"),
+                        ],
+                    },
+                ),
             ],
             events: vec![],
             resource_types: vec![],
@@ -704,6 +840,10 @@ impl GoogleCalendarConnector {
             "gcal.update_event" => self.invoke_update_event(input).await,
             "gcal.delete_event" => self.invoke_delete_event(input).await,
             "gcal.quick_add" => self.invoke_quick_add(input).await,
+            "gcal.freebusy" => self.invoke_freebusy(input).await,
+            "gcal.list_event_instances" => self.invoke_list_event_instances(input).await,
+            "gcal.get_calendar" => self.invoke_get_calendar(input).await,
+            "gcal.sync_events" => self.invoke_sync_events(input).await,
             _ => Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
             }),
@@ -902,6 +1042,105 @@ impl GoogleCalendarConnector {
         Ok(json!({ "event": event }))
     }
 
+    async fn invoke_get_calendar(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let calendar_id = require_str(&input, "calendar_id")?;
+
+        let calendar = client
+            .get_calendar(calendar_id)
+            .await
+            .map_err(|e: GoogleCalendarError| e.to_fcp_error())?;
+
+        Ok(json!({ "calendar": calendar }))
+    }
+
+    async fn invoke_freebusy(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let time_min = require_str(&input, "time_min")?;
+        let time_max = require_str(&input, "time_max")?;
+
+        let items_raw = input.get("items").ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "Missing required field: items".into(),
+        })?;
+        let items: Vec<FreeBusyRequestItem> =
+            serde_json::from_value(items_raw.clone()).map_err(|e| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid items format: {e}"),
+            })?;
+
+        let request = FreeBusyRequest {
+            time_min: time_min.to_string(),
+            time_max: time_max.to_string(),
+            items,
+        };
+
+        let result = client
+            .freebusy(&request)
+            .await
+            .map_err(|e: GoogleCalendarError| e.to_fcp_error())?;
+
+        Ok(json!({ "calendars": result.calendars }))
+    }
+
+    async fn invoke_list_event_instances(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let calendar_id = require_str(&input, "calendar_id")?;
+        let event_id = require_str(&input, "event_id")?;
+        let time_min = input.get("time_min").and_then(|v| v.as_str());
+        let time_max = input.get("time_max").and_then(|v| v.as_str());
+        let max_results = input
+            .get("max_results")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+        let page_token = input.get("page_token").and_then(|v| v.as_str());
+
+        let result = client
+            .list_event_instances(
+                calendar_id,
+                event_id,
+                time_min,
+                time_max,
+                max_results,
+                page_token,
+            )
+            .await
+            .map_err(|e: GoogleCalendarError| e.to_fcp_error())?;
+
+        Ok(json!({
+            "events": result.items,
+            "next_page_token": result.next_page_token
+        }))
+    }
+
+    async fn invoke_sync_events(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let calendar_id = require_str(&input, "calendar_id")?;
+        let sync_token = input.get("sync_token").and_then(|v| v.as_str());
+        let max_results = input
+            .get("max_results")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+        let page_token = input.get("page_token").and_then(|v| v.as_str());
+
+        let result = client
+            .sync_events(calendar_id, sync_token, max_results, page_token)
+            .await
+            .map_err(|e: GoogleCalendarError| e.to_fcp_error())?;
+
+        Ok(json!({
+            "events": result.items,
+            "next_page_token": result.next_page_token,
+            "next_sync_token": result.next_sync_token
+        }))
+    }
+
     /// Handle shutdown.
     ///
     /// # Errors
@@ -1097,7 +1336,11 @@ mod tests {
         assert!(op_ids.contains(&"gcal.update_event"));
         assert!(op_ids.contains(&"gcal.delete_event"));
         assert!(op_ids.contains(&"gcal.quick_add"));
-        assert_eq!(ops.len(), 7);
+        assert!(op_ids.contains(&"gcal.freebusy"));
+        assert!(op_ids.contains(&"gcal.list_event_instances"));
+        assert!(op_ids.contains(&"gcal.get_calendar"));
+        assert!(op_ids.contains(&"gcal.sync_events"));
+        assert_eq!(ops.len(), 11);
     }
 
     // ── Provisioning automation tests ──────────────────────────

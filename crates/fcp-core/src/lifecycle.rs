@@ -27,6 +27,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::fmt;
 
 use crate::ConnectorId;
@@ -382,10 +383,7 @@ impl LifecycleRecord {
     /// Check if the connector should be auto-promoted based on health.
     #[must_use]
     pub fn should_auto_promote(&self) -> bool {
-        self.state == LifecycleState::Canary
-            && self.health.success_rate >= self.canary_policy.promotion_threshold
-            && self.health.samples >= self.canary_policy.min_samples
-            && self.canary_duration_exceeded()
+        self.should_auto_promote_at(Utc::now())
     }
 
     /// Check if the connector should be auto-rolled-back based on health.
@@ -396,17 +394,47 @@ impl LifecycleRecord {
             && self.health.samples >= self.canary_policy.min_samples
     }
 
-    /// Check if the minimum canary duration has passed.
-    fn canary_duration_exceeded(&self) -> bool {
-        let canary_start = self
-            .transitions
+    /// Check if the connector should be auto-promoted at a specific instant.
+    #[must_use]
+    pub fn should_auto_promote_at(&self, now: DateTime<Utc>) -> bool {
+        self.state == LifecycleState::Canary
+            && self.health.success_rate >= self.canary_policy.promotion_threshold
+            && self.health.samples >= self.canary_policy.min_samples
+            && self.canary_duration_exceeded_at(now)
+    }
+
+    /// Compute remaining canary time at a specific instant, if currently in canary.
+    #[must_use]
+    pub fn canary_expires_in_secs_at(&self, now: DateTime<Utc>) -> Option<u32> {
+        if self.state != LifecycleState::Canary {
+            return None;
+        }
+
+        let elapsed = now
+            .signed_duration_since(self.canary_start_timestamp())
+            .num_seconds();
+        let max = i64::from(self.canary_policy.max_canary_duration_secs);
+        if elapsed <= 0 {
+            return Some(self.canary_policy.max_canary_duration_secs);
+        }
+        if elapsed >= max {
+            return Some(0);
+        }
+
+        u32::try_from(max - elapsed).ok()
+    }
+
+    fn canary_duration_exceeded_at(&self, now: DateTime<Utc>) -> bool {
+        let duration = now.signed_duration_since(self.canary_start_timestamp());
+        duration.num_seconds() >= i64::from(self.canary_policy.min_canary_duration_secs)
+    }
+
+    fn canary_start_timestamp(&self) -> DateTime<Utc> {
+        self.transitions
             .iter()
             .rev()
             .find(|t| t.to == LifecycleState::Canary)
-            .map_or(self.deployed_at, |t| t.timestamp);
-
-        let duration = Utc::now().signed_duration_since(canary_start);
-        duration.num_seconds() >= i64::from(self.canary_policy.min_canary_duration_secs)
+            .map_or(self.deployed_at, |t| t.timestamp)
     }
 
     /// Update health metrics.
@@ -443,6 +471,46 @@ impl LifecycleRecord {
     /// Reset health metrics (e.g., when entering canary).
     pub fn reset_health(&mut self) {
         self.health = HealthMetrics::default();
+    }
+
+    /// Record a crash and rollback when a crash loop is detected.
+    ///
+    /// Returns `Ok(true)` when the crash threshold is reached and rollback is applied.
+    /// Returns `Ok(false)` when the threshold is not yet reached.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`LifecycleError::NoRollbackTarget`] if crash-loop threshold is reached but no previous
+    ///   version is available.
+    /// - [`LifecycleError::InvalidTransition`] if crash-loop threshold is reached but current
+    ///   state cannot transition to `RolledBack`.
+    pub fn record_crash_and_maybe_rollback(
+        &mut self,
+        detector: &mut CrashLoopDetector,
+        at: DateTime<Utc>,
+        failure_reason: impl Into<String>,
+    ) -> Result<bool, LifecycleError> {
+        detector.record_crash(at);
+        if !detector.is_crash_loop(at) {
+            return Ok(false);
+        }
+
+        if self.previous_version.is_none() {
+            return Err(LifecycleError::NoRollbackTarget);
+        }
+
+        self.transition(
+            LifecycleState::RolledBack,
+            TransitionReason::AutoRollback {
+                health_score: self.health.success_rate,
+                failure_reason: failure_reason.into(),
+            },
+        )?;
+
+        // Start clean after rollback so a retried canary doesn't inherit prior crash history.
+        detector.record_success();
+        Ok(true)
     }
 }
 
@@ -497,6 +565,79 @@ impl HealthMetrics {
         self.total_latency_ms
             .checked_div(self.samples)
             .map(|avg| avg as u32)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Crash Loop Detection
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Sliding-window crash-loop detector for connector supervisors.
+///
+/// A connector is considered to be crash-looping when at least `max_crashes`
+/// crashes occur within `window_secs`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CrashLoopDetector {
+    /// Number of crashes that triggers crash-loop classification.
+    pub max_crashes: usize,
+
+    /// Sliding window in seconds for crash counting.
+    pub window_secs: i64,
+
+    /// Ordered crash timestamps (oldest first).
+    #[serde(default)]
+    crashes: VecDeque<DateTime<Utc>>,
+}
+
+impl CrashLoopDetector {
+    /// Create a crash-loop detector with explicit threshold and window.
+    #[must_use]
+    pub const fn new(max_crashes: usize, window_secs: i64) -> Self {
+        Self {
+            max_crashes,
+            window_secs,
+            crashes: VecDeque::new(),
+        }
+    }
+
+    /// Record a crash at the provided timestamp.
+    pub fn record_crash(&mut self, at: DateTime<Utc>) {
+        self.prune_old(at);
+        self.crashes.push_back(at);
+    }
+
+    /// Record a successful run and reset crash history.
+    pub fn record_success(&mut self) {
+        self.crashes.clear();
+    }
+
+    /// Return how many crashes are currently inside the active window.
+    pub fn crash_count_in_window(&mut self, now: DateTime<Utc>) -> usize {
+        self.prune_old(now);
+        self.crashes.len()
+    }
+
+    /// Return true when crash-loop threshold is met in the active window.
+    pub fn is_crash_loop(&mut self, now: DateTime<Utc>) -> bool {
+        self.crash_count_in_window(now) >= self.max_crashes
+    }
+
+    fn prune_old(&mut self, now: DateTime<Utc>) {
+        if self.window_secs < 0 {
+            self.crashes.clear();
+            return;
+        }
+
+        let cutoff = now - chrono::Duration::seconds(self.window_secs);
+        while self.crashes.front().is_some_and(|ts| *ts < cutoff) {
+            let _ = self.crashes.pop_front();
+        }
+    }
+}
+
+impl Default for CrashLoopDetector {
+    fn default() -> Self {
+        Self::new(5, 300)
     }
 }
 
@@ -717,6 +858,36 @@ pub struct LifecycleStatus {
     /// Time until canary expires (if in canary).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub canary_expires_in_secs: Option<u32>,
+
+    /// Whether a crash-loop condition is currently detected.
+    #[serde(default)]
+    pub crash_loop_detected: bool,
+
+    /// Previous version available for rollback, if present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rollback_target_version: Option<semver::Version>,
+}
+
+impl LifecycleStatus {
+    /// Build status from a lifecycle record with explicit crash-loop signal.
+    #[must_use]
+    pub fn from_record(
+        record: &LifecycleRecord,
+        now: DateTime<Utc>,
+        crash_loop_detected: bool,
+    ) -> Self {
+        Self {
+            connector_id: record.connector_id.clone(),
+            state: record.state,
+            version: record.version.clone(),
+            health: record.health.clone(),
+            auto_promote_pending: record.should_auto_promote_at(now),
+            auto_rollback_pending: record.should_auto_rollback() || crash_loop_detected,
+            canary_expires_in_secs: record.canary_expires_in_secs_at(now),
+            crash_loop_detected,
+            rollback_target_version: record.previous_version.clone(),
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1163,6 +1334,217 @@ mod tests {
     }
 
     #[test]
+    fn crash_loop_detector_triggers_at_exact_threshold() {
+        let base = DateTime::from_timestamp(1_700_000_000, 0).expect("valid timestamp");
+        let mut detector = CrashLoopDetector::new(3, 60);
+
+        detector.record_crash(base - chrono::Duration::seconds(30));
+        detector.record_crash(base - chrono::Duration::seconds(20));
+        detector.record_crash(base - chrono::Duration::seconds(10));
+
+        assert!(
+            detector.is_crash_loop(base),
+            "exact threshold should trigger crash-loop detection"
+        );
+    }
+
+    #[test]
+    fn crash_loop_detector_below_threshold_does_not_trigger() {
+        let base = DateTime::from_timestamp(1_700_000_000, 0).expect("valid timestamp");
+        let mut detector = CrashLoopDetector::new(3, 60);
+
+        detector.record_crash(base - chrono::Duration::seconds(30));
+        detector.record_crash(base - chrono::Duration::seconds(20));
+
+        assert!(
+            !detector.is_crash_loop(base),
+            "n-1 crashes should not trigger crash-loop detection"
+        );
+    }
+
+    #[test]
+    fn crash_loop_detector_sliding_window_ages_out_old_crashes() {
+        let base = DateTime::from_timestamp(1_700_000_000, 0).expect("valid timestamp");
+        let mut detector = CrashLoopDetector::new(3, 60);
+
+        detector.record_crash(base - chrono::Duration::seconds(120)); // aged out
+        detector.record_crash(base - chrono::Duration::seconds(59)); // in-window
+        detector.record_crash(base - chrono::Duration::seconds(10)); // in-window
+        assert_eq!(detector.crash_count_in_window(base), 2);
+        assert!(!detector.is_crash_loop(base));
+
+        detector.record_crash(base);
+        assert_eq!(detector.crash_count_in_window(base), 3);
+        assert!(detector.is_crash_loop(base));
+    }
+
+    #[test]
+    fn crash_loop_detector_resets_after_success() {
+        let base = DateTime::from_timestamp(1_700_000_000, 0).expect("valid timestamp");
+        let mut detector = CrashLoopDetector::new(3, 60);
+
+        detector.record_crash(base - chrono::Duration::seconds(30));
+        detector.record_crash(base - chrono::Duration::seconds(20));
+        detector.record_crash(base - chrono::Duration::seconds(10));
+        assert!(detector.is_crash_loop(base));
+
+        detector.record_success();
+        assert_eq!(detector.crash_count_in_window(base), 0);
+        assert!(!detector.is_crash_loop(base));
+    }
+
+    #[test]
+    fn record_crash_and_maybe_rollback_below_threshold_noop() {
+        let base = DateTime::from_timestamp(1_700_000_000, 0).expect("valid timestamp");
+        let mut record = LifecycleRecord::new(test_connector_id(), test_version())
+            .with_previous_version(semver::Version::new(0, 9, 0));
+        record
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
+            .unwrap();
+        record
+            .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
+            .unwrap();
+
+        let mut detector = CrashLoopDetector::new(3, 60);
+        let rolled_back = record
+            .record_crash_and_maybe_rollback(&mut detector, base, "first crash")
+            .unwrap();
+        assert!(!rolled_back);
+        assert_eq!(record.state, LifecycleState::Canary);
+    }
+
+    #[test]
+    fn record_crash_and_maybe_rollback_triggers_at_threshold() {
+        let base = DateTime::from_timestamp(1_700_000_000, 0).expect("valid timestamp");
+        let mut record = LifecycleRecord::new(test_connector_id(), test_version())
+            .with_previous_version(semver::Version::new(0, 9, 0));
+        record
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
+            .unwrap();
+        record
+            .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
+            .unwrap();
+        record.update_health(true, Some(100));
+        record.update_health(false, Some(500));
+
+        let mut detector = CrashLoopDetector::new(3, 60);
+        assert!(
+            !record
+                .record_crash_and_maybe_rollback(&mut detector, base, "crash 1")
+                .unwrap()
+        );
+        assert!(
+            !record
+                .record_crash_and_maybe_rollback(
+                    &mut detector,
+                    base + chrono::Duration::seconds(10),
+                    "crash 2",
+                )
+                .unwrap()
+        );
+
+        let rolled_back = record
+            .record_crash_and_maybe_rollback(
+                &mut detector,
+                base + chrono::Duration::seconds(20),
+                "crash loop threshold reached",
+            )
+            .unwrap();
+        assert!(rolled_back);
+        assert_eq!(record.state, LifecycleState::RolledBack);
+        assert_eq!(detector.crash_count_in_window(base), 0);
+
+        let last_transition = record.transitions.last().unwrap();
+        assert_eq!(last_transition.to, LifecycleState::RolledBack);
+        assert_eq!(
+            last_transition.reason,
+            TransitionReason::AutoRollback {
+                health_score: 50,
+                failure_reason: "crash loop threshold reached".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn record_crash_and_maybe_rollback_without_target_fails_closed() {
+        let base = DateTime::from_timestamp(1_700_000_000, 0).expect("valid timestamp");
+        let mut record = LifecycleRecord::new(test_connector_id(), test_version());
+        record
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
+            .unwrap();
+        record
+            .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
+            .unwrap();
+
+        let mut detector = CrashLoopDetector::new(3, 60);
+        record
+            .record_crash_and_maybe_rollback(&mut detector, base, "crash 1")
+            .unwrap();
+        record
+            .record_crash_and_maybe_rollback(
+                &mut detector,
+                base + chrono::Duration::seconds(10),
+                "crash 2",
+            )
+            .unwrap();
+
+        let err = record
+            .record_crash_and_maybe_rollback(
+                &mut detector,
+                base + chrono::Duration::seconds(20),
+                "crash loop",
+            )
+            .unwrap_err();
+        assert_eq!(err, LifecycleError::NoRollbackTarget);
+        assert_eq!(record.state, LifecycleState::Canary);
+    }
+
+    #[test]
+    fn record_crash_and_maybe_rollback_rejects_non_rollback_state() {
+        let base = DateTime::from_timestamp(1_700_000_000, 0).expect("valid timestamp");
+        let mut record = LifecycleRecord::new(test_connector_id(), test_version())
+            .with_previous_version(semver::Version::new(0, 9, 0));
+        let mut detector = CrashLoopDetector::new(3, 60);
+
+        record
+            .record_crash_and_maybe_rollback(&mut detector, base, "crash 1")
+            .unwrap();
+        record
+            .record_crash_and_maybe_rollback(
+                &mut detector,
+                base + chrono::Duration::seconds(10),
+                "crash 2",
+            )
+            .unwrap();
+
+        let err = record
+            .record_crash_and_maybe_rollback(
+                &mut detector,
+                base + chrono::Duration::seconds(20),
+                "crash loop",
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            LifecycleError::InvalidTransition {
+                from: LifecycleState::Pending,
+                to: LifecycleState::RolledBack,
+            }
+        );
+        assert_eq!(record.state, LifecycleState::Pending);
+    }
+
+    #[test]
     fn canary_policy_validate_invalid_duration() {
         let policy = CanaryPolicy {
             min_canary_duration_secs: 3600,
@@ -1337,6 +1719,53 @@ mod tests {
     }
 
     #[test]
+    fn canary_expires_in_secs_at_computes_remaining_time() {
+        let base = DateTime::from_timestamp(1_700_000_000, 0).expect("valid timestamp");
+        let mut record = LifecycleRecord::new(test_connector_id(), test_version())
+            .with_canary_policy(CanaryPolicy {
+                min_canary_duration_secs: 0,
+                max_canary_duration_secs: 300,
+                ..CanaryPolicy::default()
+            });
+
+        record.state = LifecycleState::Canary;
+        record.deployed_at = base - chrono::Duration::seconds(120);
+        record.transitions.clear();
+        assert_eq!(record.canary_expires_in_secs_at(base), Some(180));
+
+        record.deployed_at = base - chrono::Duration::seconds(360);
+        assert_eq!(record.canary_expires_in_secs_at(base), Some(0));
+
+        record.state = LifecycleState::Production;
+        assert_eq!(record.canary_expires_in_secs_at(base), None);
+    }
+
+    #[test]
+    fn lifecycle_status_from_record_includes_crash_and_rollback_signals() {
+        let now = DateTime::from_timestamp(1_700_000_000, 0).expect("valid timestamp");
+        let mut record = LifecycleRecord::new(test_connector_id(), test_version())
+            .with_previous_version(semver::Version::new(0, 9, 0))
+            .with_canary_policy(
+                CanaryPolicy::new()
+                    .with_rollback_threshold(80)
+                    .with_min_samples(1)
+                    .with_min_canary_duration(0),
+            );
+        record.state = LifecycleState::Canary;
+        record.deployed_at = now - chrono::Duration::seconds(10);
+        record.update_health(false, Some(250));
+
+        let status = LifecycleStatus::from_record(&record, now, true);
+        assert!(status.crash_loop_detected);
+        assert_eq!(
+            status.rollback_target_version,
+            Some(semver::Version::new(0, 9, 0))
+        );
+        assert!(status.auto_rollback_pending);
+        assert_eq!(status.canary_expires_in_secs, Some(3590));
+    }
+
+    #[test]
     fn transition_reason_serde_roundtrip() {
         let reasons = [
             TransitionReason::InstallComplete,
@@ -1360,5 +1789,292 @@ mod tests {
             let decoded: TransitionReason = serde_json::from_str(&json).unwrap();
             assert_eq!(reason, decoded);
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // LifecycleTransition additional tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn lifecycle_transition_new_and_clone() {
+        let t = LifecycleTransition::new(
+            LifecycleState::Pending,
+            LifecycleState::Installing,
+            TransitionReason::InstallComplete,
+        );
+        assert_eq!(t.from, LifecycleState::Pending);
+        assert_eq!(t.to, LifecycleState::Installing);
+        assert!(t.initiated_by.is_none());
+
+        let cloned = t.clone();
+        assert_eq!(t, cloned);
+    }
+
+    #[test]
+    fn lifecycle_transition_serde_roundtrip() {
+        let t = LifecycleTransition::new(
+            LifecycleState::Canary,
+            LifecycleState::Production,
+            TransitionReason::ManualPromotion,
+        )
+        .with_initiator("admin@example.com");
+
+        let json = serde_json::to_string(&t).unwrap();
+        let back: LifecycleTransition = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.from, LifecycleState::Canary);
+        assert_eq!(back.to, LifecycleState::Production);
+        assert_eq!(back.initiated_by, Some("admin@example.com".into()));
+    }
+
+    #[test]
+    fn lifecycle_transition_equality() {
+        let a = LifecycleTransition::new(
+            LifecycleState::Pending,
+            LifecycleState::Installing,
+            TransitionReason::InstallComplete,
+        );
+        let b = LifecycleTransition::new(
+            LifecycleState::Pending,
+            LifecycleState::Installing,
+            TransitionReason::InstallComplete,
+        );
+        // timestamp will differ but from/to/reason should be equal
+        assert_eq!(a.from, b.from);
+        assert_eq!(a.to, b.to);
+        assert_eq!(a.reason, b.reason);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // TransitionReason Display coverage for all variants
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn transition_reason_display_disabled() {
+        let r = TransitionReason::Disabled {
+            reason: "maintenance".into(),
+        };
+        assert!(r.to_string().contains("disabled"));
+        assert!(r.to_string().contains("maintenance"));
+    }
+
+    #[test]
+    fn transition_reason_display_uninstalled() {
+        assert_eq!(TransitionReason::Uninstalled.to_string(), "uninstalled");
+    }
+
+    #[test]
+    fn transition_reason_clone() {
+        let r = TransitionReason::AutoPromotion { health_score: 99 };
+        let cloned = r.clone();
+        assert_eq!(r, cloned);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // HealthMetrics additional tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn health_metrics_clone() {
+        let m = HealthMetrics::default();
+        let cloned = m.clone();
+        assert_eq!(cloned.successes, 0);
+        assert_eq!(cloned.success_rate, 100);
+    }
+
+    #[test]
+    fn health_metrics_serde_roundtrip() {
+        let m = HealthMetrics {
+            successes: 100,
+            failures: 5,
+            samples: 105,
+            success_rate: 95,
+            total_latency_ms: 21000,
+            max_latency_ms: 500,
+            last_updated: Utc::now(),
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        let back: HealthMetrics = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.successes, 100);
+        assert_eq!(back.failures, 5);
+        assert_eq!(back.samples, 105);
+        assert_eq!(back.success_rate, 95);
+        assert_eq!(back.total_latency_ms, 21000);
+        assert_eq!(back.max_latency_ms, 500);
+    }
+
+    #[test]
+    fn health_metrics_avg_latency_with_samples() {
+        let m = HealthMetrics {
+            total_latency_ms: 1000,
+            samples: 10,
+            ..Default::default()
+        };
+        assert_eq!(m.avg_latency_ms(), Some(100));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CrashLoopDetector additional tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn crash_loop_detector_default() {
+        let mut d = CrashLoopDetector::default();
+        assert_eq!(d.max_crashes, 5);
+        assert_eq!(d.window_secs, 300);
+        assert!(!d.is_crash_loop(Utc::now()));
+    }
+
+    #[test]
+    fn crash_loop_detector_clone() {
+        let mut d = CrashLoopDetector::new(3, 60);
+        d.record_crash(Utc::now());
+        let mut cloned = d.clone();
+        assert_eq!(cloned.max_crashes, 3);
+        assert_eq!(cloned.crash_count_in_window(Utc::now()), 1);
+    }
+
+    #[test]
+    fn crash_loop_detector_serde_roundtrip() {
+        let mut d = CrashLoopDetector::new(3, 120);
+        d.record_crash(Utc::now());
+        d.record_crash(Utc::now());
+        let json = serde_json::to_string(&d).unwrap();
+        let back: CrashLoopDetector = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.max_crashes, 3);
+        assert_eq!(back.window_secs, 120);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // LifecycleError additional tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn lifecycle_error_clone_and_eq() {
+        let a = LifecycleError::NoRollbackTarget;
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn lifecycle_error_invalid_policy_display() {
+        let err = LifecycleError::InvalidPolicy {
+            reason: "threshold too high".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("invalid canary policy"));
+        assert!(msg.contains("threshold too high"));
+    }
+
+    #[test]
+    fn lifecycle_error_not_found_display() {
+        let err = LifecycleError::NotFound {
+            connector_id: test_connector_id(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("connector not found"));
+    }
+
+    #[test]
+    fn lifecycle_error_std_error() {
+        let err: Box<dyn std::error::Error> = Box::new(LifecycleError::NoRollbackTarget);
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn lifecycle_error_inequality() {
+        let a = LifecycleError::NoRollbackTarget;
+        let b = LifecycleError::InvalidPolicy {
+            reason: "bad".into(),
+        };
+        assert_ne!(a, b);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // LifecycleStatus additional tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn lifecycle_status_clone() {
+        let record = LifecycleRecord::new(test_connector_id(), test_version());
+        let status = LifecycleStatus::from_record(&record, Utc::now(), false);
+        let cloned = status.clone();
+        assert_eq!(cloned.state, LifecycleState::Pending);
+        assert!(!cloned.crash_loop_detected);
+    }
+
+    #[test]
+    fn lifecycle_status_serde_roundtrip() {
+        let record = LifecycleRecord::new(test_connector_id(), test_version());
+        let status = LifecycleStatus::from_record(&record, Utc::now(), false);
+        let json = serde_json::to_string(&status).unwrap();
+        let back: LifecycleStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.state, LifecycleState::Pending);
+        assert!(!back.auto_promote_pending);
+        assert!(!back.auto_rollback_pending);
+        assert!(!back.crash_loop_detected);
+    }
+
+    #[test]
+    fn lifecycle_status_from_record_no_crash_no_rollback() {
+        let record = LifecycleRecord::new(test_connector_id(), test_version());
+        let status = LifecycleStatus::from_record(&record, Utc::now(), false);
+        assert!(!status.auto_promote_pending);
+        assert!(!status.auto_rollback_pending);
+        assert!(status.canary_expires_in_secs.is_none());
+        assert!(status.rollback_target_version.is_none());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // LifecycleState Hash + Copy
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn lifecycle_state_hash() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(LifecycleState::Pending);
+        set.insert(LifecycleState::Canary);
+        set.insert(LifecycleState::Pending); // duplicate
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn lifecycle_state_copy() {
+        let a = LifecycleState::Production;
+        let b = a; // Copy
+        assert_eq!(a, b);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // LifecycleRecord serde roundtrip
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn lifecycle_record_serde_roundtrip() {
+        let record = LifecycleRecord::new(test_connector_id(), test_version());
+        let json = serde_json::to_string(&record).unwrap();
+        let back: LifecycleRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.connector_id.as_str(), "test:lifecycle:v1");
+        assert_eq!(back.version, semver::Version::new(1, 0, 0));
+        assert_eq!(back.state, LifecycleState::Pending);
+    }
+
+    #[test]
+    fn lifecycle_record_clone() {
+        let record = LifecycleRecord::new(test_connector_id(), test_version());
+        let cloned = record.clone();
+        assert_eq!(cloned.connector_id.as_str(), record.connector_id.as_str());
+        assert_eq!(cloned.state, record.state);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CanaryPolicy Clone
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn canary_policy_clone() {
+        let policy = CanaryPolicy::default();
+        let cloned = policy.clone();
+        assert_eq!(cloned.promotion_threshold, policy.promotion_threshold);
     }
 }

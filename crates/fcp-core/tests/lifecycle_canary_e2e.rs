@@ -242,15 +242,7 @@ impl LifecycleManager for MockLifecycleManager {
                 connector_id: connector_id.clone(),
             })?;
 
-        let status = LifecycleStatus {
-            connector_id: connector_id.clone(),
-            state: record.state,
-            version: record.version.clone(),
-            health: record.health.clone(),
-            auto_promote_pending: record.should_auto_promote(),
-            auto_rollback_pending: record.should_auto_rollback(),
-            canary_expires_in_secs: None,
-        };
+        let status = LifecycleStatus::from_record(record, Utc::now(), false);
         drop(records);
         Ok(status)
     }

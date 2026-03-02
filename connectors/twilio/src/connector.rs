@@ -4,19 +4,103 @@ use std::sync::Arc;
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
-    ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier, SessionId,
-    SimulateRequest, SimulateResponse,
+    ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
+    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
 
-use crate::{client::TwilioClient, error::TwilioError};
+use crate::client::{DEFAULT_API_BASE, TwilioAuth, TwilioClient};
+use crate::error::TwilioError;
+
+/// Parsed configuration for the Twilio connector.
+struct TwilioConfig {
+    auth: TwilioAuth,
+    base_url: String,
+}
+
+impl TwilioConfig {
+    fn from_params(params: &serde_json::Value) -> FcpResult<Self> {
+        let account_sid =
+            params
+                .get("account_sid")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing account_sid in configuration".into(),
+                })?;
+
+        let auth_token = params.get("auth_token").and_then(|v| v.as_str());
+        let credential_id = params.get("credential_id").and_then(|v| v.as_str());
+        let base_url = params.get("base_url").and_then(|v| v.as_str());
+
+        let auth = match (auth_token, credential_id) {
+            (Some(_), Some(_)) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Provide either auth_token or credential_id, not both".into(),
+                });
+            }
+            (Some(token), None) => TwilioAuth::Token {
+                account_sid: account_sid.to_string(),
+                auth_token: token.to_string(),
+            },
+            (None, Some(raw)) => {
+                let cid = CredentialId::parse(raw).map_err(|e| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Invalid credential_id: {e}"),
+                })?;
+                TwilioAuth::CredentialId {
+                    account_sid: account_sid.to_string(),
+                    credential_id: cid,
+                }
+            }
+            (None, None) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing auth_token or credential_id in configuration".into(),
+                });
+            }
+        };
+
+        let url = base_url
+            .map_or_else(|| format!("{DEFAULT_API_BASE}/{account_sid}"), String::from);
+
+        Ok(Self {
+            auth,
+            base_url: url,
+        })
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DoctorResult {
+    status: String,
+    checks: Vec<DoctorCheck>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DoctorCheck {
+    name: String,
+    status: DoctorStatus,
+    message: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum DoctorStatus {
+    Pass,
+    Fail,
+    Warn,
+}
 
 /// FCP Twilio Connector.
 pub struct TwilioConnector {
     base: Arc<BaseConnector>,
     pub(crate) client: Option<TwilioClient>,
+    config: Option<TwilioConfig>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
 }
@@ -28,6 +112,7 @@ impl TwilioConnector {
         Self {
             base: Arc::new(BaseConnector::new(ConnectorId::from_static("twilio"))),
             client: None,
+            config: None,
             verifier: None,
             session_id: None,
         }
@@ -39,36 +124,16 @@ impl TwilioConnector {
         &mut self,
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
-        let account_sid =
-            params
-                .get("account_sid")
-                .and_then(|v| v.as_str())
-                .ok_or(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing account_sid in configuration".into(),
-                })?;
+        let cfg = TwilioConfig::from_params(&params)?;
 
-        let auth_token =
-            params
-                .get("auth_token")
-                .and_then(|v| v.as_str())
-                .ok_or(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing auth_token in configuration".into(),
-                })?;
-
-        let base_url = params.get("base_url").and_then(|v| v.as_str());
-
-        let mut client =
-            TwilioClient::new(account_sid, auth_token).map_err(|e| FcpError::Internal {
+        let client =
+            TwilioClient::new_with_auth(cfg.auth.clone()).map_err(|e| FcpError::Internal {
                 message: format!("Failed to create HTTP client: {e}"),
             })?;
-
-        if let Some(url) = base_url {
-            client = client.with_base_url(url);
-        }
+        let client = client.with_base_url(&cfg.base_url);
 
         self.client = Some(client);
+        self.config = Some(cfg);
         self.base.set_configured(true);
         info!("Twilio connector configured");
 
@@ -130,13 +195,161 @@ impl TwilioConnector {
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
         let configured = self.client.is_some();
         let metrics = self.base.metrics();
+        let auth_mode = self
+            .config
+            .as_ref()
+            .map_or("none", |c| c.auth.redacted_label());
+        let api_url = self
+            .config
+            .as_ref()
+            .map_or("not_configured", |c| c.base_url.as_str());
         Ok(json!({
             "status": if configured { "healthy" } else { "not_configured" },
+            "auth_mode": auth_mode,
+            "api_url": api_url,
             "metrics": {
                 "requests_total": metrics.requests_total,
                 "requests_error": metrics.requests_error,
             }
         }))
+    }
+
+    /// Handle doctor readiness diagnostics.
+    pub async fn handle_doctor(&self) -> FcpResult<serde_json::Value> {
+        let mut checks = Vec::new();
+
+        // 1. configuration
+        let configured = self.config.is_some();
+        checks.push(DoctorCheck {
+            name: "configuration".into(),
+            status: if configured {
+                DoctorStatus::Pass
+            } else {
+                DoctorStatus::Fail
+            },
+            message: if configured {
+                "Connector configured".into()
+            } else {
+                "Not configured — call configure first".into()
+            },
+        });
+
+        // 2. client_initialized
+        let has_client = self.client.is_some();
+        checks.push(DoctorCheck {
+            name: "client_initialized".into(),
+            status: if has_client {
+                DoctorStatus::Pass
+            } else {
+                DoctorStatus::Fail
+            },
+            message: if has_client {
+                "HTTP client ready".into()
+            } else {
+                "HTTP client not initialized".into()
+            },
+        });
+
+        // 3. base_url
+        let base_url = self
+            .config
+            .as_ref()
+            .map_or("not_configured", |c| c.base_url.as_str());
+        checks.push(DoctorCheck {
+            name: "base_url".into(),
+            status: DoctorStatus::Pass,
+            message: format!("API URL: {base_url}"),
+        });
+
+        // 4. auth_mode
+        if let Some(cfg) = &self.config {
+            checks.push(DoctorCheck {
+                name: "auth_mode".into(),
+                status: DoctorStatus::Pass,
+                message: format!("Auth: {}", cfg.auth.redacted_label()),
+            });
+        } else {
+            checks.push(DoctorCheck {
+                name: "auth_mode".into(),
+                status: DoctorStatus::Fail,
+                message: "No auth configured".into(),
+            });
+        }
+
+        // 5. network_constraints
+        checks.push(DoctorCheck {
+            name: "network_constraints".into(),
+            status: DoctorStatus::Pass,
+            message: format!("Egress target: api.twilio.com (via {base_url})"),
+        });
+
+        // 6. credential_injection
+        let is_secretless = self.config.as_ref().is_some_and(|c| c.auth.is_secretless());
+        checks.push(DoctorCheck {
+            name: "credential_injection".into(),
+            status: if is_secretless {
+                DoctorStatus::Warn
+            } else {
+                DoctorStatus::Pass
+            },
+            message: if is_secretless {
+                "Using credential_id — requires egress proxy for injection".into()
+            } else {
+                "Direct Basic auth — no proxy required".into()
+            },
+        });
+
+        let all_pass = checks
+            .iter()
+            .all(|c| matches!(c.status, DoctorStatus::Pass));
+        let any_fail = checks
+            .iter()
+            .any(|c| matches!(c.status, DoctorStatus::Fail));
+
+        let overall = if any_fail {
+            "unhealthy"
+        } else if all_pass {
+            "healthy"
+        } else {
+            "degraded"
+        };
+
+        let result = DoctorResult {
+            status: overall.into(),
+            checks,
+        };
+        serde_json::to_value(result).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize doctor result: {e}"),
+        })
+    }
+
+    /// Handle self-check connectivity probe.
+    pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
+        let Some(cfg) = &self.config else {
+            let report = SelfCheckReport::failed("not_configured", "Call configure first");
+            return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize self-check: {e}"),
+            });
+        };
+
+        if cfg.auth.is_secretless() {
+            let report = SelfCheckReport::degraded(
+                "credential_injection_required",
+                "credential_id mode requires egress proxy — skipping live probe",
+            );
+            return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize self-check: {e}"),
+            });
+        }
+
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let report = match client.health_check().await {
+            Ok(_) => SelfCheckReport::ok(),
+            Err(e) => SelfCheckReport::failed("connectivity_error", format!("{e}")),
+        };
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check: {e}"),
+        })
     }
 
     /// Handle introspect method.
@@ -915,11 +1128,14 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn test_invoke_missing_field() {
         let mut connector = TwilioConnector::new();
-        connector.client = Some(
-            TwilioClient::new("ACtest123", "test_token")
-                .unwrap()
-                .with_base_url("http://localhost:9999"),
-        );
+        connector
+            .handle_configure(json!({
+                "account_sid": "ACtest123",
+                "auth_token": "test_token",
+                "base_url": "http://localhost:9999"
+            }))
+            .await
+            .unwrap();
 
         let signing_key = Ed25519SigningKey::generate();
         let verifying_key = signing_key.verifying_key();
@@ -968,6 +1184,189 @@ mod tests {
         assert!(op_ids.contains(&"twilio.get_account"));
         assert!(op_ids.contains(&"twilio.list_phone_numbers"));
         assert_eq!(ops.len(), 10);
+    }
+
+    // ── Provisioning tests ─────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_with_auth_token() {
+        let mut connector = TwilioConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "account_sid": "ACtest123",
+                "auth_token": "test_token_abc"
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "configured");
+        assert!(connector.config.is_some());
+        assert_eq!(
+            connector.config.as_ref().unwrap().auth.redacted_label(),
+            "token"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_with_credential_id() {
+        let cid = uuid::Uuid::new_v4().to_string();
+        let mut connector = TwilioConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "account_sid": "ACtest123",
+                "credential_id": cid
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "configured");
+        assert!(connector.config.as_ref().unwrap().auth.is_secretless());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_both_auth_modes() {
+        let cid = uuid::Uuid::new_v4().to_string();
+        let mut connector = TwilioConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "account_sid": "ACtest123",
+                "auth_token": "test_token",
+                "credential_id": cid
+            }))
+            .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("not both"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_no_auth() {
+        let mut connector = TwilioConnector::new();
+        let result = connector
+            .handle_configure(json!({ "account_sid": "ACtest123" }))
+            .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("auth_token") || message.contains("credential_id"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_with_custom_urls() {
+        let mut connector = TwilioConnector::new();
+        connector
+            .handle_configure(json!({
+                "account_sid": "ACtest123",
+                "auth_token": "test_token",
+                "base_url": "http://localhost:8080"
+            }))
+            .await
+            .unwrap();
+        assert_eq!(
+            connector.config.as_ref().unwrap().base_url,
+            "http://localhost:8080"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_health_includes_auth_info() {
+        let cid = uuid::Uuid::new_v4().to_string();
+        let mut connector = TwilioConnector::new();
+        connector
+            .handle_configure(json!({
+                "account_sid": "ACtest123",
+                "credential_id": cid,
+                "base_url": "http://proxy:9999"
+            }))
+            .await
+            .unwrap();
+
+        let health = connector.handle_health().await.unwrap();
+        assert_eq!(health["status"], "healthy");
+        assert_eq!(health["auth_mode"], "credential_id");
+        assert_eq!(health["api_url"], "http://proxy:9999");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_not_configured() {
+        let connector = TwilioConnector::new();
+        let result = connector.handle_doctor().await.unwrap();
+        assert_eq!(result["status"], "unhealthy");
+        let checks = result["checks"].as_array().unwrap();
+        assert!(
+            checks
+                .iter()
+                .any(|c| c["name"] == "configuration" && c["status"] == "fail")
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_configured_healthy() {
+        let mut connector = TwilioConnector::new();
+        connector
+            .handle_configure(json!({
+                "account_sid": "ACtest123",
+                "auth_token": "test_token"
+            }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_doctor().await.unwrap();
+        assert_eq!(result["status"], "healthy");
+        let checks = result["checks"].as_array().unwrap();
+        assert_eq!(checks.len(), 6);
+        assert!(checks.iter().all(|c| c["status"] == "pass"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_credential_id_mode() {
+        let cid = uuid::Uuid::new_v4().to_string();
+        let mut connector = TwilioConnector::new();
+        connector
+            .handle_configure(json!({
+                "account_sid": "ACtest123",
+                "credential_id": cid
+            }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_doctor().await.unwrap();
+        assert_eq!(result["status"], "degraded");
+        let checks = result["checks"].as_array().unwrap();
+        let cred_check = checks
+            .iter()
+            .find(|c| c["name"] == "credential_injection")
+            .unwrap();
+        assert_eq!(cred_check["status"], "warn");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_not_configured() {
+        let connector = TwilioConnector::new();
+        let result = connector.handle_self_check().await.unwrap();
+        assert_eq!(result["status"], "failed");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_credential_id_degraded() {
+        let cid = uuid::Uuid::new_v4().to_string();
+        let mut connector = TwilioConnector::new();
+        connector
+            .handle_configure(json!({
+                "account_sid": "ACtest123",
+                "credential_id": cid
+            }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_self_check().await.unwrap();
+        assert_eq!(result["status"], "degraded");
+        assert_eq!(result["reason_code"], "credential_injection_required");
     }
 
     #[test]

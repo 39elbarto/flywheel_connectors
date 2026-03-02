@@ -7,6 +7,7 @@ use std::fmt::Write;
 use std::time::Duration;
 
 use base64::Engine;
+use fcp_core::CredentialId;
 use reqwest::{Client, Response, StatusCode, header};
 use tracing::{debug, warn};
 
@@ -18,26 +19,122 @@ use crate::{
     },
 };
 
+/// Default Twilio API base URL prefix.
+pub const DEFAULT_API_BASE: &str = "https://api.twilio.com/2010-04-01/Accounts";
+
+/// Authentication mode for the Twilio client.
+#[derive(Clone)]
+pub enum TwilioAuth {
+    /// Direct credentials: account SID + auth token (Basic auth).
+    Token {
+        account_sid: String,
+        auth_token: String,
+    },
+    /// Secretless credential injection via egress proxy.
+    CredentialId {
+        account_sid: String,
+        credential_id: CredentialId,
+    },
+}
+
+impl std::fmt::Debug for TwilioAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Token { account_sid, .. } => f
+                .debug_struct("Token")
+                .field("account_sid", account_sid)
+                .field("auth_token", &"[REDACTED]")
+                .finish(),
+            Self::CredentialId {
+                account_sid,
+                credential_id,
+            } => f
+                .debug_struct("CredentialId")
+                .field("account_sid", account_sid)
+                .field("credential_id", credential_id)
+                .finish(),
+        }
+    }
+}
+
+impl TwilioAuth {
+    /// Human-readable label with secrets redacted.
+    #[must_use]
+    pub const fn redacted_label(&self) -> &'static str {
+        match self {
+            Self::Token { .. } => "token",
+            Self::CredentialId { .. } => "credential_id",
+        }
+    }
+
+    /// Whether this auth mode is secretless (no raw credentials held).
+    #[must_use]
+    pub const fn is_secretless(&self) -> bool {
+        matches!(self, Self::CredentialId { .. })
+    }
+
+    /// Get the account SID regardless of auth mode.
+    #[must_use]
+    pub fn account_sid(&self) -> &str {
+        match self {
+            Self::Token { account_sid, .. } | Self::CredentialId { account_sid, .. } => account_sid,
+        }
+    }
+}
+
 /// Twilio REST API client.
 pub struct TwilioClient {
     http: Client,
+    auth: TwilioAuth,
     base_url: String,
     account_sid: String,
     max_retries: u32,
 }
 
+impl std::fmt::Debug for TwilioClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TwilioClient")
+            .field("auth", &self.auth)
+            .field("base_url", &self.base_url)
+            .field("account_sid", &self.account_sid)
+            .field("max_retries", &self.max_retries)
+            .finish_non_exhaustive()
+    }
+}
+
 impl TwilioClient {
     /// Create a new Twilio client with account SID and auth token.
     pub fn new(account_sid: &str, auth_token: &str) -> TwilioResult<Self> {
-        let credentials =
-            base64::engine::general_purpose::STANDARD.encode(format!("{account_sid}:{auth_token}"));
+        Self::new_with_auth(TwilioAuth::Token {
+            account_sid: account_sid.to_string(),
+            auth_token: auth_token.to_string(),
+        })
+    }
 
+    /// Create a new Twilio client with the specified auth mode.
+    pub fn new_with_auth(auth: TwilioAuth) -> TwilioResult<Self> {
         let mut headers = header::HeaderMap::new();
-        headers.insert(
-            header::AUTHORIZATION,
-            format!("Basic {credentials}").parse().unwrap(),
-        );
         headers.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
+
+        match &auth {
+            TwilioAuth::Token {
+                account_sid,
+                auth_token,
+            } => {
+                let credentials = base64::engine::general_purpose::STANDARD
+                    .encode(format!("{account_sid}:{auth_token}"));
+                headers.insert(
+                    header::AUTHORIZATION,
+                    format!("Basic {credentials}").parse().unwrap(),
+                );
+            }
+            TwilioAuth::CredentialId { credential_id, .. } => {
+                headers.insert(
+                    "X-FCP-Credential-ID",
+                    credential_id.to_string().parse().unwrap(),
+                );
+            }
+        }
 
         let http = Client::builder()
             .default_headers(headers)
@@ -45,14 +142,21 @@ impl TwilioClient {
             .build()
             .map_err(TwilioError::Http)?;
 
-        let base_url = format!("https://api.twilio.com/2010-04-01/Accounts/{account_sid}");
+        let sid = auth.account_sid().to_string();
+        let base_url = format!("{DEFAULT_API_BASE}/{sid}");
 
         Ok(Self {
             http,
+            auth,
             base_url,
-            account_sid: account_sid.to_string(),
+            account_sid: sid,
             max_retries: 2,
         })
+    }
+
+    /// Lightweight connectivity probe for self-check.
+    pub async fn health_check(&self) -> TwilioResult<TwilioAccount> {
+        self.get_account().await
     }
 
     /// Set a custom base URL (for testing).

@@ -662,8 +662,7 @@ impl TelegramConnector {
                 name: "token_validation".into(),
                 passed: false,
                 message: Some(format!(
-                    "credential_id {} configured; direct getMe validation unavailable without token materialization",
-                    id
+                    "credential_id {id} configured; direct getMe validation unavailable without token materialization"
                 )),
                 critical: false,
             }),

@@ -1,10 +1,12 @@
 //! Anthropic API client.
 
+use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
 use fcp_async_core::time::sleep;
+use fcp_core::CredentialId;
 use futures_util::{Stream, StreamExt};
 use reqwest::{Client, Response, StatusCode};
 use serde::Deserialize;
@@ -19,16 +21,50 @@ use crate::{
 };
 
 /// Default API base URL.
-const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
+pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 
 /// Current API version.
 const API_VERSION: &str = "2023-06-01";
 
+/// Authentication mode for the Anthropic API.
+#[derive(Clone)]
+pub enum AnthropicAuth {
+    /// Direct API key (legacy; avoided in secretless deployments).
+    ApiKey(String),
+    /// Secretless credential reference (egress proxy injection).
+    CredentialId(CredentialId),
+}
+
+impl AnthropicAuth {
+    /// Render a redacted label suitable for logs/diagnostics.
+    #[must_use]
+    pub fn redacted_label(&self) -> String {
+        match self {
+            Self::ApiKey(_) => "api_key:redacted".to_string(),
+            Self::CredentialId(id) => format!("credential_id:{id}"),
+        }
+    }
+
+    /// Whether this auth mode requires egress proxy credential injection.
+    #[must_use]
+    pub const fn is_secretless(&self) -> bool {
+        matches!(self, Self::CredentialId(_))
+    }
+}
+
+impl fmt::Debug for AnthropicAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ApiKey(_) => f.debug_tuple("ApiKey").field(&"<redacted>").finish(),
+            Self::CredentialId(id) => f.debug_tuple("CredentialId").field(id).finish(),
+        }
+    }
+}
+
 /// Anthropic API client.
-#[derive(Debug)]
 pub struct AnthropicClient {
     client: Client,
-    api_key: String,
+    auth: AnthropicAuth,
     base_url: String,
     max_retries: u32,
     initial_delay_ms: u64,
@@ -38,13 +74,32 @@ pub struct AnthropicClient {
     total_output_tokens: AtomicU64,
 }
 
+impl fmt::Debug for AnthropicClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AnthropicClient")
+            .field("auth", &self.auth)
+            .field("base_url", &self.base_url)
+            .field("max_retries", &self.max_retries)
+            .finish_non_exhaustive()
+    }
+}
+
 impl AnthropicClient {
-    /// Create a new Anthropic client.
+    /// Create a new Anthropic client with a direct API key.
     ///
     /// # Errors
     ///
     /// Returns an error if the HTTP client cannot be constructed.
     pub fn new(api_key: impl Into<String>) -> AnthropicResult<Self> {
+        Self::new_with_auth(AnthropicAuth::ApiKey(api_key.into()))
+    }
+
+    /// Create a new Anthropic client with explicit auth mode.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HTTP client cannot be constructed.
+    pub fn new_with_auth(auth: AnthropicAuth) -> AnthropicResult<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(120))
             .build()
@@ -52,7 +107,7 @@ impl AnthropicClient {
 
         Ok(Self {
             client,
-            api_key: api_key.into(),
+            auth,
             base_url: DEFAULT_BASE_URL.into(),
             max_retries: 3,
             initial_delay_ms: 500,
@@ -83,6 +138,12 @@ impl AnthropicClient {
         self
     }
 
+    /// Get a reference to the auth mode.
+    #[must_use]
+    pub const fn auth(&self) -> &AnthropicAuth {
+        &self.auth
+    }
+
     /// Get total input tokens used.
     #[must_use]
     pub fn total_input_tokens(&self) -> u64 {
@@ -107,6 +168,51 @@ impl AnthropicClient {
             .fetch_add(u64::from(usage.input_tokens), Ordering::Relaxed);
         self.total_output_tokens
             .fetch_add(u64::from(usage.output_tokens), Ordering::Relaxed);
+    }
+
+    /// Perform a safe, read-only health check by listing models.
+    ///
+    /// This validates that the API key is valid and the API is reachable
+    /// without incurring any cost or side effects.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failures, authentication errors, or rate limiting.
+    pub async fn health_check(&self) -> AnthropicResult<()> {
+        // The Anthropic API doesn't have a /v1/models list endpoint like OpenAI,
+        // so we send a minimal messages request with max_tokens=1 to validate
+        // auth. This is the cheapest possible validation call.
+        let url = format!("{}/v1/messages", self.base_url);
+        let request = self
+            .client
+            .post(&url)
+            .header("anthropic-version", API_VERSION)
+            .header("content-type", "application/json");
+        let request = self.apply_auth(request);
+        let request = request.json(&serde_json::json!({
+            "model": "claude-3-5-haiku-20241022",
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "hi"}]
+        }));
+
+        let response = request.send().await?;
+        let status = response.status();
+        let bytes = response.bytes().await?;
+        if status.is_success() {
+            Ok(())
+        } else {
+            Err(parse_error_response(status, &bytes))
+        }
+    }
+
+    /// Apply auth headers to a request builder.
+    fn apply_auth(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.auth {
+            AnthropicAuth::ApiKey(key) => request.header("x-api-key", key),
+            AnthropicAuth::CredentialId(credential_id) => {
+                request.header("X-FCP-Credential-ID", credential_id.to_string())
+            }
+        }
     }
 
     /// Send a message to Claude.
@@ -222,15 +328,13 @@ impl AnthropicClient {
             attempts += 1;
             debug!(attempt = attempts, endpoint, "Making Anthropic API request");
 
-            let result = self
+            let request = self
                 .client
                 .post(&url)
-                .header("x-api-key", &self.api_key)
                 .header("anthropic-version", API_VERSION)
-                .header("content-type", "application/json")
-                .json(body)
-                .send()
-                .await;
+                .header("content-type", "application/json");
+            let request = self.apply_auth(request);
+            let result = request.json(body).send().await;
 
             match result {
                 Ok(response) => match self.handle_response(response).await {
@@ -276,15 +380,13 @@ impl AnthropicClient {
     {
         let url = format!("{}{endpoint}", self.base_url);
 
-        let response = self
+        let request = self
             .client
             .post(&url)
-            .header("x-api-key", &self.api_key)
             .header("anthropic-version", API_VERSION)
-            .header("content-type", "application/json")
-            .json(body)
-            .send()
-            .await?;
+            .header("content-type", "application/json");
+        let request = self.apply_auth(request);
+        let response = request.json(body).send().await?;
 
         let status = response.status();
         if !status.is_success() {

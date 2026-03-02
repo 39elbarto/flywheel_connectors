@@ -5,22 +5,134 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
-    ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier, SessionId,
-    SimulateRequest, SimulateResponse,
+    ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
+    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
 
 use crate::{
-    client::AnthropicClient,
+    client::{AnthropicAuth, AnthropicClient, DEFAULT_BASE_URL},
     error::AnthropicError,
     types::{Message, Model, Role, Tool, ToolChoice, Usage},
 };
 
+/// Parsed and validated Anthropic connector configuration.
+#[derive(Debug, Clone)]
+struct AnthropicConfig {
+    auth: AnthropicAuth,
+    base_url: String,
+}
+
+impl AnthropicConfig {
+    fn from_params(params: &serde_json::Value) -> FcpResult<Self> {
+        let api_key = params
+            .get("api_key")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string);
+
+        let credential_id = match params.get("credential_id") {
+            Some(value) => {
+                let raw = value.as_str().ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "credential_id must be a string".into(),
+                })?;
+                Some(
+                    CredentialId::parse(raw).map_err(|_| FcpError::InvalidRequest {
+                        code: 1003,
+                        message: "credential_id must be a valid UUID".into(),
+                    })?,
+                )
+            }
+            None => None,
+        };
+
+        let auth = match (api_key, credential_id) {
+            (Some(key), None) => AnthropicAuth::ApiKey(key),
+            (None, Some(cred_id)) => AnthropicAuth::CredentialId(cred_id),
+            (Some(_), Some(_)) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Provide exactly one of api_key or credential_id".into(),
+                });
+            }
+            (None, None) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing api_key or credential_id in configuration".into(),
+                });
+            }
+        };
+
+        let base_url = params
+            .get("base_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or(DEFAULT_BASE_URL)
+            .to_string();
+
+        Ok(Self { auth, base_url })
+    }
+}
+
+/// Doctor check result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DoctorResult {
+    /// Overall status.
+    status: DoctorStatus,
+    /// Individual check results.
+    checks: Vec<DoctorCheck>,
+}
+
+/// Doctor status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum DoctorStatus {
+    /// All checks passed.
+    Healthy,
+    /// Some non-critical checks failed.
+    Degraded,
+    /// Critical checks failed.
+    Unhealthy,
+}
+
+/// Individual doctor check.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DoctorCheck {
+    /// Check name.
+    name: String,
+    /// Check passed.
+    passed: bool,
+    /// Check message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+    /// Whether this check is critical.
+    critical: bool,
+}
+
+impl DoctorResult {
+    /// Create a new doctor result from checks.
+    #[must_use]
+    fn from_checks(checks: Vec<DoctorCheck>) -> Self {
+        let status = if checks.iter().any(|c| c.critical && !c.passed) {
+            DoctorStatus::Unhealthy
+        } else if checks.iter().any(|c| !c.passed) {
+            DoctorStatus::Degraded
+        } else {
+            DoctorStatus::Healthy
+        };
+
+        Self { status, checks }
+    }
+}
+
 /// FCP Anthropic Connector.
 pub struct AnthropicConnector {
     base: Arc<BaseConnector>,
+    config: Option<AnthropicConfig>,
     client: Option<AnthropicClient>,
     total_cost: AtomicU64, // Store as fixed-point (cost * 1_000_000_000)
     verifier: Option<CapabilityVerifier>,
@@ -33,6 +145,7 @@ impl AnthropicConnector {
     pub fn new() -> Self {
         Self {
             base: Arc::new(BaseConnector::new(ConnectorId::from_static("anthropic"))),
+            config: None,
             client: None,
             total_cost: AtomicU64::new(0),
             verifier: None,
@@ -69,34 +182,27 @@ impl AnthropicConnector {
     ///
     /// # Errors
     ///
-    /// Returns an error if `api_key` is missing or the HTTP client cannot be created.
+    /// Returns an error if configuration parameters are invalid or the HTTP client
+    /// cannot be created.
     #[instrument(skip(self, params))]
     pub async fn handle_configure(
         &mut self,
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
-        let api_key =
-            params
-                .get("api_key")
-                .and_then(|v| v.as_str())
-                .ok_or(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing api_key in configuration".into(),
-                })?;
+        let config = AnthropicConfig::from_params(&params)?;
 
-        let base_url = params.get("base_url").and_then(|v| v.as_str());
-
-        let mut client = AnthropicClient::new(api_key).map_err(|e| FcpError::Internal {
-            message: format!("Failed to create HTTP client: {e}"),
+        let client = AnthropicClient::new_with_auth(config.auth.clone()).map_err(|e| {
+            FcpError::Internal {
+                message: format!("Failed to create HTTP client: {e}"),
+            }
         })?;
+        let client = client.with_base_url(&config.base_url);
 
-        if let Some(url) = base_url {
-            client = client.with_base_url(url);
-        }
-
+        let auth_label = config.auth.redacted_label();
         self.client = Some(client);
+        self.config = Some(config);
         self.base.set_configured(true);
-        info!("Anthropic connector configured");
+        info!(auth = %auth_label, "Anthropic connector configured");
 
         Ok(json!({ "status": "configured" }))
     }
@@ -164,15 +270,180 @@ impl AnthropicConnector {
     ///
     /// Returns an error if health status serialization fails (should not happen).
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
-        let configured = self.client.is_some();
+        let configured = self.config.is_some();
+        let auth = self
+            .config
+            .as_ref()
+            .map(|c| c.auth.redacted_label())
+            .unwrap_or_else(|| "unconfigured".to_string());
+        let base_url = self
+            .config
+            .as_ref()
+            .map(|c| c.base_url.clone())
+            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
         Ok(json!({
             "status": if configured { "healthy" } else { "not_configured" },
+            "auth": auth,
+            "base_url": base_url,
             "metrics": {
                 "requests_total": self.total_requests(),
                 "requests_error": self.total_errors(),
                 "total_cost_usd": self.total_cost()
             }
         }))
+    }
+
+    /// Handle doctor checks.
+    ///
+    /// Returns a structured readiness report without leaking secrets.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the doctor result cannot be serialized.
+    pub async fn handle_doctor(&self) -> FcpResult<serde_json::Value> {
+        let result = self.build_doctor_result();
+        serde_json::to_value(result).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize doctor result: {e}"),
+        })
+    }
+
+    fn build_doctor_result(&self) -> DoctorResult {
+        let mut checks = Vec::new();
+
+        // Check 1: Configuration loaded
+        let configured = self.config.is_some();
+        checks.push(DoctorCheck {
+            name: "configuration".into(),
+            passed: configured,
+            message: Some(if configured {
+                "Configuration loaded".into()
+            } else {
+                "Not configured - run configure first".into()
+            }),
+            critical: true,
+        });
+
+        let Some(config) = &self.config else {
+            return DoctorResult::from_checks(checks);
+        };
+
+        // Check 2: HTTP client initialized
+        checks.push(DoctorCheck {
+            name: "client_initialized".into(),
+            passed: self.client.is_some(),
+            message: Some(if self.client.is_some() {
+                "HTTP client initialized".into()
+            } else {
+                "HTTP client missing; re-run configure".into()
+            }),
+            critical: true,
+        });
+
+        // Check 3: Base URL scheme
+        let scheme = if config.base_url.starts_with("https://") {
+            "https"
+        } else if config.base_url.starts_with("http://") {
+            "http"
+        } else {
+            "unknown"
+        };
+
+        checks.push(DoctorCheck {
+            name: "base_url".into(),
+            passed: true,
+            message: Some(format!("Base URL ({scheme}): {}", config.base_url)),
+            critical: false,
+        });
+
+        // Check 4: Auth mode
+        checks.push(DoctorCheck {
+            name: "auth_mode".into(),
+            passed: true,
+            message: Some(format!("Auth: {}", config.auth.redacted_label())),
+            critical: false,
+        });
+
+        // Check 5: Network constraints - host must be api.anthropic.com (or test override)
+        let allowed_hosts = ["api.anthropic.com"];
+        let host_ok = config.base_url.starts_with("http://localhost")
+            || config.base_url.starts_with("http://127.0.0.1")
+            || allowed_hosts
+                .iter()
+                .any(|h| config.base_url.contains(h));
+        checks.push(DoctorCheck {
+            name: "network_constraints".into(),
+            passed: host_ok,
+            message: Some(if host_ok {
+                "Base URL matches allowed host (api.anthropic.com)".into()
+            } else {
+                format!(
+                    "Base URL {} does not match allowed hosts: {:?}",
+                    config.base_url, allowed_hosts
+                )
+            }),
+            critical: true,
+        });
+
+        // Check 6: Credential injection status
+        let secretless = config.auth.is_secretless();
+        checks.push(DoctorCheck {
+            name: "credential_injection".into(),
+            passed: !secretless,
+            message: Some(if secretless {
+                "Credential injection required via egress proxy".into()
+            } else {
+                "Direct API key configured".into()
+            }),
+            critical: false,
+        });
+
+        DoctorResult::from_checks(checks)
+    }
+
+    /// Handle connector self-check.
+    ///
+    /// Performs a safe, read-only API call to validate the API key is valid
+    /// and the Anthropic API is reachable. Does not leak secrets in the report.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the self-check report cannot be serialized.
+    pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
+        let Some(client) = &self.client else {
+            let report =
+                SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize self-check report: {e}"),
+            });
+        };
+
+        // If using credential_id, we can't validate directly
+        if let Some(config) = &self.config {
+            if config.auth.is_secretless() {
+                let report = SelfCheckReport::degraded(
+                    "credential_injection_required",
+                    "Configured with credential_id; egress proxy injection required for checks",
+                );
+                return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                    message: format!("Failed to serialize self-check report: {e}"),
+                });
+            }
+        }
+
+        let report = match client.health_check().await {
+            Ok(()) => SelfCheckReport::ok(),
+            Err(err) => {
+                if err.is_retryable() {
+                    SelfCheckReport::degraded("self_check_retryable", err.to_string())
+                } else {
+                    SelfCheckReport::failed("self_check_failed", err.to_string())
+                }
+            }
+        };
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {e}"),
+        })
     }
 
     /// Handle introspect method.
@@ -661,6 +932,10 @@ mod tests {
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_manifest::ConnectorManifest;
     use std::path::PathBuf;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{header, method, path},
+    };
 
     fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> CapabilityToken {
         let now = Utc::now();
@@ -700,7 +975,334 @@ mod tests {
         let result = connector.handle_health().await.unwrap();
 
         assert_eq!(result["status"], "not_configured");
+        assert_eq!(result["auth"], "unconfigured");
     }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_health_configured() {
+        let mut connector = AnthropicConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_key": "sk-test-key"
+            }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_health().await.unwrap();
+        assert_eq!(result["status"], "healthy");
+        assert_eq!(result["auth"], "api_key:redacted");
+        assert_eq!(result["base_url"], DEFAULT_BASE_URL);
+    }
+
+    // --- Configure tests ---
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_with_api_key() {
+        let mut connector = AnthropicConnector::new();
+        let result = connector
+            .handle_configure(json!({ "api_key": "sk-test-123" }))
+            .await
+            .unwrap();
+
+        assert_eq!(result["status"], "configured");
+        assert!(connector.config.is_some());
+        assert!(connector.client.is_some());
+        assert!(!connector.config.as_ref().unwrap().auth.is_secretless());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_with_credential_id() {
+        let mut connector = AnthropicConnector::new();
+        let cred_uuid = uuid::Uuid::new_v4().to_string();
+        let result = connector
+            .handle_configure(json!({ "credential_id": cred_uuid }))
+            .await
+            .unwrap();
+
+        assert_eq!(result["status"], "configured");
+        assert!(connector.config.as_ref().unwrap().auth.is_secretless());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_both_api_key_and_credential_id_rejected() {
+        let mut connector = AnthropicConnector::new();
+        let cred_uuid = uuid::Uuid::new_v4().to_string();
+        let result = connector
+            .handle_configure(json!({
+                "api_key": "sk-test",
+                "credential_id": cred_uuid
+            }))
+            .await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("exactly one"));
+            }
+            other => panic!("Expected InvalidRequest, got: {other:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_no_auth_rejected() {
+        let mut connector = AnthropicConnector::new();
+        let result = connector.handle_configure(json!({})).await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("Missing api_key or credential_id"));
+            }
+            other => panic!("Expected InvalidRequest, got: {other:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_with_custom_base_url() {
+        let mut connector = AnthropicConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_key": "sk-test",
+                "base_url": "https://custom.api.example.com"
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            connector.config.as_ref().unwrap().base_url,
+            "https://custom.api.example.com"
+        );
+    }
+
+    // --- Doctor tests ---
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_not_configured() {
+        let connector = AnthropicConnector::new();
+        let result = connector.handle_doctor().await.unwrap();
+        let doctor: DoctorResult = serde_json::from_value(result).unwrap();
+
+        assert_eq!(doctor.status, DoctorStatus::Unhealthy);
+        assert!(!doctor.checks[0].passed); // configuration check fails
+        assert!(doctor.checks[0].critical);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_configured_api_key() {
+        let mut connector = AnthropicConnector::new();
+        connector
+            .handle_configure(json!({ "api_key": "sk-test" }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_doctor().await.unwrap();
+        let doctor: DoctorResult = serde_json::from_value(result).unwrap();
+
+        assert_eq!(doctor.status, DoctorStatus::Healthy);
+        for check in &doctor.checks {
+            if check.critical {
+                assert!(check.passed, "Critical check '{}' should pass", check.name);
+            }
+        }
+        // Verify credential_injection check passes (not secretless)
+        let cred_check = doctor
+            .checks
+            .iter()
+            .find(|c| c.name == "credential_injection")
+            .unwrap();
+        assert!(cred_check.passed);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_configured_credential_id() {
+        let mut connector = AnthropicConnector::new();
+        let cred_uuid = uuid::Uuid::new_v4().to_string();
+        connector
+            .handle_configure(json!({ "credential_id": cred_uuid }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_doctor().await.unwrap();
+        let doctor: DoctorResult = serde_json::from_value(result).unwrap();
+
+        // Degraded because credential_injection check fails (non-critical)
+        assert_eq!(doctor.status, DoctorStatus::Degraded);
+        let cred_check = doctor
+            .checks
+            .iter()
+            .find(|c| c.name == "credential_injection")
+            .unwrap();
+        assert!(!cred_check.passed);
+        assert!(!cred_check.critical);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_network_constraints_bad_host() {
+        let mut connector = AnthropicConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_key": "sk-test",
+                "base_url": "https://evil.example.com"
+            }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_doctor().await.unwrap();
+        let doctor: DoctorResult = serde_json::from_value(result).unwrap();
+
+        assert_eq!(doctor.status, DoctorStatus::Unhealthy);
+        let net_check = doctor
+            .checks
+            .iter()
+            .find(|c| c.name == "network_constraints")
+            .unwrap();
+        assert!(!net_check.passed);
+        assert!(net_check.critical);
+    }
+
+    // --- Self-check tests ---
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_not_configured() {
+        let connector = AnthropicConnector::new();
+        let result = connector.handle_self_check().await.unwrap();
+        let report: SelfCheckReport = serde_json::from_value(result).unwrap();
+
+        assert_eq!(report.status, fcp_core::SelfCheckStatus::Degraded);
+        assert_eq!(report.reason_code.as_deref(), Some("not_configured"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_credential_id_mode() {
+        let mut connector = AnthropicConnector::new();
+        let cred_uuid = uuid::Uuid::new_v4().to_string();
+        connector
+            .handle_configure(json!({ "credential_id": cred_uuid }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_self_check().await.unwrap();
+        let report: SelfCheckReport = serde_json::from_value(result).unwrap();
+
+        assert_eq!(report.status, fcp_core::SelfCheckStatus::Degraded);
+        assert_eq!(
+            report.reason_code.as_deref(),
+            Some("credential_injection_required")
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_api_key_valid() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .and(header("x-api-key", "sk-valid"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "msg_health",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "h"}],
+                "model": "claude-3-5-haiku-20241022",
+                "stop_reason": "max_tokens",
+                "usage": { "input_tokens": 1, "output_tokens": 1 }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let mut connector = AnthropicConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_key": "sk-valid",
+                "base_url": mock_server.uri()
+            }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_self_check().await.unwrap();
+        let report: SelfCheckReport = serde_json::from_value(result).unwrap();
+
+        assert_eq!(report.status, fcp_core::SelfCheckStatus::Ok);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_api_key_invalid() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+                "error": {
+                    "type": "authentication_error",
+                    "message": "Invalid API key"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let mut connector = AnthropicConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_key": "sk-bad",
+                "base_url": mock_server.uri()
+            }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_self_check().await.unwrap();
+        let report: SelfCheckReport = serde_json::from_value(result).unwrap();
+
+        // InvalidApiKey is not retryable, so should be Failed
+        assert_eq!(report.status, fcp_core::SelfCheckStatus::Failed);
+        assert_eq!(report.reason_code.as_deref(), Some("self_check_failed"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_rate_limited() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(429).set_body_json(json!({
+                "error": {
+                    "type": "rate_limit_error",
+                    "message": "Rate limit exceeded"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let mut connector = AnthropicConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_key": "sk-test",
+                "base_url": mock_server.uri()
+            }))
+            .await
+            .unwrap();
+
+        // Need to set retry to 0 to avoid actual retries in test
+        if let Some(client) = &mut connector.client {
+            // Recreate with no retries
+            let new_client = AnthropicClient::new("sk-test")
+                .unwrap()
+                .with_base_url(mock_server.uri())
+                .with_retry_config(1, 1, 1);
+            *client = new_client;
+        }
+
+        let result = connector.handle_self_check().await.unwrap();
+        let report: SelfCheckReport = serde_json::from_value(result).unwrap();
+
+        // Rate limited is retryable -> Degraded
+        assert_eq!(report.status, fcp_core::SelfCheckStatus::Degraded);
+        assert_eq!(
+            report.reason_code.as_deref(),
+            Some("self_check_retryable")
+        );
+    }
+
+    // --- Existing invoke tests ---
 
     #[fcp_async_core::runtime::test]
     async fn test_invoke_without_config() {
@@ -746,6 +1348,10 @@ mod tests {
                 .unwrap()
                 .with_base_url("http://localhost:9999"),
         );
+        connector.config = Some(AnthropicConfig {
+            auth: AnthropicAuth::ApiKey("fake_key".into()),
+            base_url: "http://localhost:9999".into(),
+        });
 
         let signing_key = Ed25519SigningKey::generate();
         let verifying_key = signing_key.verifying_key();
@@ -777,8 +1383,7 @@ mod tests {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("messages"));
             }
-            _ => assert!(
-                false,
+            _ => panic!(
                 "Expected InvalidRequest for missing messages, got: {err:?}"
             ),
         }

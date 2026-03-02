@@ -5,6 +5,7 @@
 //! - `fcp budget` - Usage budget status per zone
 //! - `fcp bench` - Performance benchmarking suite
 //! - `fcp connector` - Connector discovery and introspection
+//! - `fcp context` - Manage mesh contexts for multi-mesh operation
 //! - `fcp explain` - Operation decision explanations
 //! - `fcp install` - Connector installation with verification
 //! - `fcp manifest` - Manifest repair and lint checks
@@ -12,12 +13,13 @@
 //! - `fcp policy` - Policy simulation and preflight checks
 //! - `fcp repair` - Coverage status and repair planning
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 mod audit;
 mod bench;
 mod budget;
 mod connector;
+mod context;
 mod doctor;
 mod explain;
 mod install;
@@ -62,6 +64,10 @@ struct Cli {
         conflicts_with = "no_pager"
     )]
     pager: bool,
+
+    /// Use a specific context for this command (overrides current context).
+    #[arg(long, global = true)]
+    context: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -87,6 +93,12 @@ enum Commands {
     /// List, inspect, and introspect registered connectors. The introspect
     /// subcommand provides tool schemas optimized for AI agent consumption.
     Connector(connector::ConnectorArgs),
+
+    /// Manage mesh contexts for multi-mesh operation.
+    ///
+    /// Switch between mesh endpoints like kubectl contexts. Configuration
+    /// is stored at `~/.fcp/contexts.toml` (or `$FCP_CONFIG_DIR/contexts.toml`).
+    Context(context::ContextArgs),
 
     /// Diagnose zone health and freshness.
     ///
@@ -259,6 +271,12 @@ fn main() -> Result<()> {
             budget::run(&args)
         }
         Commands::Connector(args) => connector::run(&args),
+        Commands::Context(args) => {
+            if cli.input_stdin {
+                anyhow::bail!("--input-stdin is not supported for `fcp context`");
+            }
+            context::run(&args)
+        }
         Commands::Doctor(args) => doctor::run(&args, stdin_input.as_ref()),
         Commands::Explain(args) => {
             if cli.input_stdin {

@@ -1,0 +1,851 @@
+//! Browser connector integration tests.
+//!
+//! Deterministic integration tests using wiremock to mock the browser API.
+//! No real browser connections. Covers:
+//! - Happy-path operations (navigate, screenshot, extract, interact, cookies)
+//! - Error taxonomy (429/500/400)
+//! - FCP2 default-deny + capability verification
+//! - Lifecycle (health, introspect, shutdown)
+//! - Input validation (missing required fields)
+
+#![allow(clippy::too_many_lines)]
+
+use chrono::{Duration, Utc};
+use fcp_crypto::cose::CapabilityTokenBuilder;
+use fcp_crypto::ed25519::Ed25519SigningKey;
+use fcp_testkit::AsyncTestContext;
+use serde_json::json;
+use wiremock::{
+    Mock, MockServer, ResponseTemplate,
+    matchers::{method, path},
+};
+
+use fcp_browser::connector::BrowserConnector;
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+/// Generate a valid COSE capability token signed by the given key.
+fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> fcp_core::CapabilityToken {
+    let now = Utc::now();
+    let cose = CapabilityTokenBuilder::new()
+        .capability_id(cap)
+        .zone_id("z:work")
+        .principal("user:test")
+        .operations(&[cap])
+        .issuer("node:test")
+        .validity(now, now + Duration::hours(1))
+        .sign(signing_key)
+        .unwrap();
+    fcp_core::CapabilityToken { raw: cose }
+}
+
+/// Perform handshake on a connector, returning the signing key for token generation.
+async fn setup_handshake(connector: &mut BrowserConnector, caps: &[&str]) -> Ed25519SigningKey {
+    let signing_key = Ed25519SigningKey::generate();
+    let verifying_key = signing_key.verifying_key();
+
+    connector
+        .handle_handshake(json!({
+            "protocol_version": "1.0.0",
+            "zone": "z:work",
+            "host_public_key": verifying_key.to_bytes(),
+            "nonce": vec![0u8; 32],
+            "capabilities_requested": caps
+        }))
+        .await
+        .expect("handshake should succeed");
+
+    signing_key
+}
+
+/// Configure connector with a mock server URL.
+async fn setup_configure(connector: &mut BrowserConnector, base_url: &str) {
+    connector
+        .handle_configure(json!({
+            "browser_url": base_url
+        }))
+        .await
+        .expect("configure should succeed");
+}
+
+// ============================================================================
+// Happy-path operation tests
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn test_navigate() {
+    let _ctx = AsyncTestContext::for_scenario("browser-navigate");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/navigate"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "url": "https://example.com",
+            "status": 200,
+            "title": "Example Domain"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = BrowserConnector::new();
+    let key = setup_handshake(&mut connector, &["browser.navigate"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "browser.navigate");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "browser.navigate",
+            "input": { "url": "https://example.com", "wait_until": "networkidle" },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["url"], "https://example.com");
+    assert_eq!(result["status"], 200);
+    assert_eq!(result["title"], "Example Domain");
+}
+
+#[fcp_async_core::runtime::test]
+async fn test_screenshot() {
+    let _ctx = AsyncTestContext::for_scenario("browser-screenshot");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/screenshot"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "image_data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB...",
+            "width": 1920,
+            "height": 1080
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = BrowserConnector::new();
+    let key = setup_handshake(&mut connector, &["browser.screenshot"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "browser.screenshot");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "browser.screenshot",
+            "input": { "full_page": true, "format": "png" },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["width"], 1920);
+    assert_eq!(result["height"], 1080);
+    assert!(result["image_data"].as_str().unwrap().starts_with("iVBOR"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn test_render_pdf() {
+    let _ctx = AsyncTestContext::for_scenario("browser-render-pdf");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/pdf"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "pdf_data": "JVBERi0xLjQK...",
+            "page_count": 3
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = BrowserConnector::new();
+    let key = setup_handshake(&mut connector, &["browser.render_pdf"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "browser.render_pdf");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "browser.render_pdf",
+            "input": { "format": "a4", "landscape": true, "print_background": true },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["page_count"], 3);
+    assert!(result["pdf_data"].as_str().unwrap().starts_with("JVBER"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn test_extract_text() {
+    let _ctx = AsyncTestContext::for_scenario("browser-extract-text");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/extract_text"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "text": "Hello, world! This is example content.",
+            "word_count": 6
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = BrowserConnector::new();
+    let key = setup_handshake(&mut connector, &["browser.extract_text"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "browser.extract_text");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "browser.extract_text",
+            "input": { "selector": "article" },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["text"], "Hello, world! This is example content.");
+    assert_eq!(result["word_count"], 6);
+}
+
+#[fcp_async_core::runtime::test]
+async fn test_extract_links() {
+    let _ctx = AsyncTestContext::for_scenario("browser-extract-links");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/extract_links"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "links": [
+                { "href": "https://example.com/about", "text": "About Us" },
+                { "href": "https://example.com/contact", "text": "Contact" }
+            ]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = BrowserConnector::new();
+    let key = setup_handshake(&mut connector, &["browser.extract_links"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "browser.extract_links");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "browser.extract_links",
+            "input": { "selector": "nav" },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    let links = result["links"].as_array().unwrap();
+    assert_eq!(links.len(), 2);
+    assert_eq!(links[0]["href"], "https://example.com/about");
+    assert_eq!(links[1]["text"], "Contact");
+}
+
+#[fcp_async_core::runtime::test]
+async fn test_wait_for_selector() {
+    let _ctx = AsyncTestContext::for_scenario("browser-wait-for-selector");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/wait_for_selector"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "found": true
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = BrowserConnector::new();
+    let key = setup_handshake(&mut connector, &["browser.wait_for_selector"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "browser.wait_for_selector");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "browser.wait_for_selector",
+            "input": { "selector": ".results-loaded", "timeout_ms": 5000 },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["found"], true);
+}
+
+#[fcp_async_core::runtime::test]
+async fn test_click() {
+    let _ctx = AsyncTestContext::for_scenario("browser-click");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/click"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "clicked": true,
+            "navigation_url": "https://example.com/next-page"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = BrowserConnector::new();
+    let key = setup_handshake(&mut connector, &["browser.click"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "browser.click");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "browser.click",
+            "input": { "selector": "button.submit" },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["clicked"], true);
+    assert_eq!(result["navigation_url"], "https://example.com/next-page");
+}
+
+#[fcp_async_core::runtime::test]
+async fn test_fill_form() {
+    let _ctx = AsyncTestContext::for_scenario("browser-fill-form");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/fill_form"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "filled_count": 3,
+            "submitted": true
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = BrowserConnector::new();
+    let key = setup_handshake(&mut connector, &["browser.fill_form"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "browser.fill_form");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "browser.fill_form",
+            "input": {
+                "fields": {
+                    "#name": "Alice",
+                    "#email": "alice@example.com",
+                    "#message": "Hello!"
+                },
+                "submit_selector": "button[type=submit]"
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["filled_count"], 3);
+    assert_eq!(result["submitted"], true);
+}
+
+#[fcp_async_core::runtime::test]
+async fn test_evaluate_js() {
+    let _ctx = AsyncTestContext::for_scenario("browser-evaluate-js");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/evaluate"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "result": "Example Domain"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = BrowserConnector::new();
+    let key = setup_handshake(&mut connector, &["browser.evaluate_js"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "browser.evaluate_js");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "browser.evaluate_js",
+            "input": { "expression": "document.title" },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["result"], "Example Domain");
+}
+
+#[fcp_async_core::runtime::test]
+async fn test_get_cookies() {
+    let _ctx = AsyncTestContext::for_scenario("browser-get-cookies");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/cookies"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "cookies": [
+                { "name": "session", "value": "abc123", "domain": "example.com" },
+                { "name": "pref", "value": "dark", "domain": "example.com" }
+            ]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = BrowserConnector::new();
+    let key = setup_handshake(&mut connector, &["browser.get_cookies"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "browser.get_cookies");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "browser.get_cookies",
+            "input": { "domain": "example.com" },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    let cookies = result["cookies"].as_array().unwrap();
+    assert_eq!(cookies.len(), 2);
+    assert_eq!(cookies[0]["name"], "session");
+    assert_eq!(cookies[1]["name"], "pref");
+}
+
+#[fcp_async_core::runtime::test]
+async fn test_set_cookies() {
+    let _ctx = AsyncTestContext::for_scenario("browser-set-cookies");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/set_cookies"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "set_count": 2
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = BrowserConnector::new();
+    let key = setup_handshake(&mut connector, &["browser.set_cookies"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "browser.set_cookies");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "browser.set_cookies",
+            "input": {
+                "cookies": [
+                    { "name": "session", "value": "abc123", "domain": "example.com", "path": "/" },
+                    { "name": "pref", "value": "dark", "domain": "example.com", "path": "/" }
+                ]
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["set_count"], 2);
+}
+
+// ============================================================================
+// Error taxonomy
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn test_error_429_rate_limited() {
+    let _ctx = AsyncTestContext::for_scenario("browser-error-429");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/navigate"))
+        .respond_with(ResponseTemplate::new(429))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = BrowserConnector::new();
+    let key = setup_handshake(&mut connector, &["browser.navigate"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "browser.navigate");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "browser.navigate",
+            "input": { "url": "https://example.com" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::RateLimited { retry_after_ms, .. } => assert_eq!(retry_after_ms, 5_000),
+        e => panic!("Expected RateLimited, got: {e:?}"),
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn test_error_500_server_error() {
+    let _ctx = AsyncTestContext::for_scenario("browser-error-500");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/screenshot"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("Internal Server Error"))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = BrowserConnector::new();
+    let key = setup_handshake(&mut connector, &["browser.screenshot"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "browser.screenshot");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "browser.screenshot",
+            "input": {},
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::External {
+            retryable, service, ..
+        } => {
+            assert!(retryable);
+            assert_eq!(service, "browser");
+        }
+        e => panic!("Expected External(retryable), got: {e:?}"),
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn test_error_400_client_error() {
+    let _ctx = AsyncTestContext::for_scenario("browser-error-400");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/click"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+            "error": { "message": "Element not found", "code": "element_not_found" }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = BrowserConnector::new();
+    let key = setup_handshake(&mut connector, &["browser.click"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "browser.click");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "browser.click",
+            "input": { "selector": ".nonexistent" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::External {
+            message, retryable, ..
+        } => {
+            assert!(!retryable);
+            assert!(message.contains("Element not found"));
+        }
+        e => panic!("Expected External(not retryable), got: {e:?}"),
+    }
+}
+
+// ============================================================================
+// FCP2 default-deny
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn test_invoke_not_configured() {
+    let _ctx = AsyncTestContext::for_scenario("browser-not-configured");
+
+    let mut connector = BrowserConnector::new();
+    let key = setup_handshake(&mut connector, &["browser.navigate"]).await;
+    // Skip configure — connector not configured
+
+    let token = generate_valid_token(&key, "browser.navigate");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "browser.navigate",
+            "input": { "url": "https://example.com" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    assert!(matches!(
+        result.unwrap_err(),
+        fcp_core::FcpError::NotConfigured
+    ));
+}
+
+#[fcp_async_core::runtime::test]
+async fn test_invoke_wrong_capability() {
+    let _ctx = AsyncTestContext::for_scenario("browser-wrong-capability");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = BrowserConnector::new();
+    // Handshake with navigate capability only
+    let key = setup_handshake(&mut connector, &["browser.navigate"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    // Try to invoke screenshot with a navigate token
+    let token = generate_valid_token(&key, "browser.navigate");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "browser.screenshot",
+            "input": {},
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+}
+
+#[fcp_async_core::runtime::test]
+async fn test_invoke_unknown_operation() {
+    let _ctx = AsyncTestContext::for_scenario("browser-unknown-operation");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = BrowserConnector::new();
+    let key = setup_handshake(&mut connector, &["browser.nonexistent"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "browser.nonexistent");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "browser.nonexistent",
+            "input": {},
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::OperationNotGranted { operation } => {
+            assert_eq!(operation, "browser.nonexistent");
+        }
+        e => panic!("Expected OperationNotGranted, got: {e:?}"),
+    }
+}
+
+// ============================================================================
+// Lifecycle
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn test_health_not_configured() {
+    let _ctx = AsyncTestContext::for_scenario("browser-health-not-configured");
+    let connector = BrowserConnector::new();
+    let result = connector.handle_health().await.unwrap();
+    assert_eq!(result["status"], "not_configured");
+}
+
+#[fcp_async_core::runtime::test]
+async fn test_health_configured() {
+    let _ctx = AsyncTestContext::for_scenario("browser-health-configured");
+    let mut connector = BrowserConnector::new();
+    setup_configure(&mut connector, "http://localhost:9222").await;
+
+    let result = connector.handle_health().await.unwrap();
+    assert_eq!(result["status"], "healthy");
+}
+
+#[fcp_async_core::runtime::test]
+async fn test_introspect_operations() {
+    let _ctx = AsyncTestContext::for_scenario("browser-introspect");
+    let connector = BrowserConnector::new();
+    let result = connector.handle_introspect().await.unwrap();
+
+    let ops = result["operations"].as_array().unwrap();
+    assert_eq!(ops.len(), 11);
+
+    let op_ids: Vec<&str> = ops.iter().map(|o| o["id"].as_str().unwrap()).collect();
+    assert!(op_ids.contains(&"browser.navigate"));
+    assert!(op_ids.contains(&"browser.screenshot"));
+    assert!(op_ids.contains(&"browser.render_pdf"));
+    assert!(op_ids.contains(&"browser.extract_text"));
+    assert!(op_ids.contains(&"browser.extract_links"));
+    assert!(op_ids.contains(&"browser.wait_for_selector"));
+    assert!(op_ids.contains(&"browser.click"));
+    assert!(op_ids.contains(&"browser.fill_form"));
+    assert!(op_ids.contains(&"browser.evaluate_js"));
+    assert!(op_ids.contains(&"browser.get_cookies"));
+    assert!(op_ids.contains(&"browser.set_cookies"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn test_shutdown() {
+    let _ctx = AsyncTestContext::for_scenario("browser-shutdown");
+    let connector = BrowserConnector::new();
+    let result = connector.handle_shutdown(json!({})).await.unwrap();
+    assert_eq!(result["status"], "shutdown");
+}
+
+// ============================================================================
+// Input validation
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn test_navigate_missing_url() {
+    let _ctx = AsyncTestContext::for_scenario("browser-missing-url");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = BrowserConnector::new();
+    let key = setup_handshake(&mut connector, &["browser.navigate"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "browser.navigate");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "browser.navigate",
+            "input": {},
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("url"));
+        }
+        e => panic!("Expected InvalidRequest about 'url', got: {e:?}"),
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn test_click_missing_selector() {
+    let _ctx = AsyncTestContext::for_scenario("browser-missing-selector");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = BrowserConnector::new();
+    let key = setup_handshake(&mut connector, &["browser.click"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "browser.click");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "browser.click",
+            "input": {},
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("selector"));
+        }
+        e => panic!("Expected InvalidRequest about 'selector', got: {e:?}"),
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn test_evaluate_js_missing_expression() {
+    let _ctx = AsyncTestContext::for_scenario("browser-missing-expression");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = BrowserConnector::new();
+    let key = setup_handshake(&mut connector, &["browser.evaluate_js"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "browser.evaluate_js");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "browser.evaluate_js",
+            "input": {},
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("expression"));
+        }
+        e => panic!("Expected InvalidRequest about 'expression', got: {e:?}"),
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn test_fill_form_missing_fields() {
+    let _ctx = AsyncTestContext::for_scenario("browser-missing-fields");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = BrowserConnector::new();
+    let key = setup_handshake(&mut connector, &["browser.fill_form"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "browser.fill_form");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "browser.fill_form",
+            "input": {},
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("fields"));
+        }
+        e => panic!("Expected InvalidRequest about 'fields', got: {e:?}"),
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn test_set_cookies_missing_cookies() {
+    let _ctx = AsyncTestContext::for_scenario("browser-missing-cookies");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = BrowserConnector::new();
+    let key = setup_handshake(&mut connector, &["browser.set_cookies"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "browser.set_cookies");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "browser.set_cookies",
+            "input": {},
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("cookies"));
+        }
+        e => panic!("Expected InvalidRequest about 'cookies', got: {e:?}"),
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn test_wait_for_selector_missing_selector() {
+    let _ctx = AsyncTestContext::for_scenario("browser-missing-wait-selector");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = BrowserConnector::new();
+    let key = setup_handshake(&mut connector, &["browser.wait_for_selector"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "browser.wait_for_selector");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "browser.wait_for_selector",
+            "input": {},
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("selector"));
+        }
+        e => panic!("Expected InvalidRequest about 'selector', got: {e:?}"),
+    }
+}

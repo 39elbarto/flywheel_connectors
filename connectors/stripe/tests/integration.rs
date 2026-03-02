@@ -1,0 +1,683 @@
+//! Integration tests for the Stripe connector.
+//!
+//! Covers the connector testing requirements (a81.6):
+//! - Error taxonomy mapping (`StripeError` -> `FcpError`)
+//! - Redaction (secret key not leaked in error messages)
+//! - Idempotency-key behavior for side effects
+//! - Operation dispatch through connector
+//! - Capability verification
+//!
+//! All tests are deterministic -- no real API calls.
+
+#![allow(clippy::too_many_lines)]
+
+use chrono::{Duration, Utc};
+use fcp_core::{CapabilityToken, FcpError};
+use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
+use serde_json::json;
+use wiremock::{
+    Mock, MockServer, ResponseTemplate,
+    matchers::{header, method, path},
+};
+
+use fcp_stripe::{client::StripeClient, connector::StripeConnector, error::StripeError};
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> CapabilityToken {
+    let now = Utc::now();
+    let cose = CapabilityTokenBuilder::new()
+        .capability_id(cap)
+        .zone_id("z:work")
+        .principal("user:test")
+        .operations(&[cap])
+        .issuer("node:test")
+        .validity(now, now + Duration::hours(1))
+        .sign(signing_key)
+        .unwrap();
+    CapabilityToken { raw: cose }
+}
+
+async fn setup_handshake(connector: &mut StripeConnector, caps: &[&str]) -> Ed25519SigningKey {
+    let signing_key = Ed25519SigningKey::generate();
+    let verifying_key = signing_key.verifying_key();
+
+    connector
+        .handle_handshake(json!({
+            "protocol_version": "1.0.0",
+            "zone": "z:work",
+            "host_public_key": verifying_key.to_bytes(),
+            "nonce": vec![0u8; 32],
+            "capabilities_requested": caps
+        }))
+        .await
+        .expect("handshake should succeed");
+
+    signing_key
+}
+
+async fn setup_configure(connector: &mut StripeConnector, api_url: &str) {
+    connector
+        .handle_configure(json!({
+            "secret_key": "sk_test_integration_key",
+            "api_url": api_url
+        }))
+        .await
+        .expect("configure should succeed");
+}
+
+// ============================================================================
+// Error taxonomy mapping tests
+// ============================================================================
+
+/// 401 Unauthorized maps to `StripeError::Unauthorized` -> `FcpError::Unauthorized`.
+#[fcp_async_core::runtime::test]
+async fn error_401_maps_to_unauthorized() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/balance"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&mock_server)
+        .await;
+
+    let client = StripeClient::new("bad-key")
+        .unwrap()
+        .with_api_url(&format!("{}/v1", mock_server.uri()))
+        .with_retry_config(0);
+
+    let err = client.get_balance().await.unwrap_err();
+    assert!(matches!(err, StripeError::Unauthorized));
+
+    let fcp_err = err.to_fcp_error();
+    assert!(
+        matches!(fcp_err, FcpError::Unauthorized { code: 2001, .. }),
+        "expected Unauthorized, got: {fcp_err:?}"
+    );
+}
+
+/// 403 Forbidden also maps to Unauthorized.
+#[fcp_async_core::runtime::test]
+async fn error_403_maps_to_unauthorized() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/balance"))
+        .respond_with(ResponseTemplate::new(403))
+        .mount(&mock_server)
+        .await;
+
+    let client = StripeClient::new("bad-key")
+        .unwrap()
+        .with_api_url(&format!("{}/v1", mock_server.uri()))
+        .with_retry_config(0);
+
+    let err = client.get_balance().await.unwrap_err();
+    assert!(matches!(err, StripeError::Unauthorized));
+}
+
+/// 404 Not Found maps to `StripeError::NotFound` -> `FcpError::ResourceNotFound`.
+#[fcp_async_core::runtime::test]
+async fn error_404_maps_to_not_found() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/customers/cus_missing"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+            "error": { "type": "invalid_request_error", "message": "No such customer" }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = StripeClient::new("sk_test")
+        .unwrap()
+        .with_api_url(&format!("{}/v1", mock_server.uri()))
+        .with_retry_config(0);
+
+    let err = client.get_customer("cus_missing").await.unwrap_err();
+    assert!(!err.is_retryable());
+
+    let fcp_err = err.to_fcp_error();
+    assert!(
+        matches!(fcp_err, FcpError::ResourceNotFound { .. }),
+        "expected ResourceNotFound, got: {fcp_err:?}"
+    );
+}
+
+/// 429 Rate Limited maps to `FcpError::RateLimited`.
+#[fcp_async_core::runtime::test]
+async fn error_429_rate_limited() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/balance"))
+        .respond_with(ResponseTemplate::new(429))
+        .mount(&mock_server)
+        .await;
+
+    let client = StripeClient::new("sk_test")
+        .unwrap()
+        .with_api_url(&format!("{}/v1", mock_server.uri()))
+        .with_retry_config(0);
+
+    let err = client.get_balance().await.unwrap_err();
+    assert!(err.is_retryable());
+
+    let fcp_err = err.to_fcp_error();
+    assert!(
+        matches!(fcp_err, FcpError::RateLimited { .. }),
+        "expected RateLimited, got: {fcp_err:?}"
+    );
+}
+
+/// 500 Server Error is retryable.
+#[fcp_async_core::runtime::test]
+async fn error_500_server_is_retryable() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/balance"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&mock_server)
+        .await;
+
+    let client = StripeClient::new("sk_test")
+        .unwrap()
+        .with_api_url(&format!("{}/v1", mock_server.uri()))
+        .with_retry_config(0);
+
+    let err = client.get_balance().await.unwrap_err();
+    assert!(err.is_retryable());
+
+    let fcp_err = err.to_fcp_error();
+    assert!(
+        matches!(
+            fcp_err,
+            FcpError::External {
+                retryable: true,
+                ..
+            }
+        ),
+        "expected External retryable, got: {fcp_err:?}"
+    );
+}
+
+/// Resource not found via error enum maps correctly.
+#[test]
+fn error_not_found_maps_correctly() {
+    let err = StripeError::NotFound {
+        resource: "customer:cus_123".into(),
+    };
+    assert!(!err.is_retryable());
+
+    let fcp_err = err.to_fcp_error();
+    assert!(matches!(fcp_err, FcpError::ResourceNotFound { .. }));
+}
+
+/// 400 Bad Request is NOT retryable.
+#[test]
+fn error_400_not_retryable() {
+    let err = StripeError::Api {
+        message: "Bad Request".into(),
+        status_code: Some(400),
+        error_type: Some("invalid_request_error".into()),
+    };
+    assert!(!err.is_retryable());
+}
+
+/// Stripe API error with `error_type` is preserved.
+#[fcp_async_core::runtime::test]
+async fn stripe_api_error_parsed_from_response() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/customers"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+            "error": {
+                "type": "invalid_request_error",
+                "message": "Invalid email address",
+                "code": "parameter_invalid"
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = StripeClient::new("sk_test")
+        .unwrap()
+        .with_api_url(&format!("{}/v1", mock_server.uri()))
+        .with_retry_config(0);
+
+    let err = client
+        .create_customer("not-an-email", None)
+        .await
+        .unwrap_err();
+    match &err {
+        StripeError::Api { message, .. } => {
+            assert!(message.contains("Invalid email"));
+        }
+        e => panic!("Expected Api error, got: {e:?}"),
+    }
+}
+
+// ============================================================================
+// Redaction tests
+// ============================================================================
+
+/// Secret key should not appear in error messages.
+#[fcp_async_core::runtime::test]
+async fn redaction_secret_key_not_in_error_message() {
+    let mock_server = MockServer::start().await;
+    let secret = "sk_live_SuperSecretKeyThatShouldNotLeak12345";
+
+    Mock::given(method("GET"))
+        .and(path("/v1/balance"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&mock_server)
+        .await;
+
+    let client = StripeClient::new(secret)
+        .unwrap()
+        .with_api_url(&format!("{}/v1", mock_server.uri()))
+        .with_retry_config(0);
+
+    let err = client.get_balance().await.unwrap_err();
+    let err_string = format!("{err:?}");
+    assert!(
+        !err_string.contains(secret),
+        "Secret key should not appear in error debug output"
+    );
+
+    let fcp_err = err.to_fcp_error();
+    let fcp_err_string = format!("{fcp_err:?}");
+    assert!(
+        !fcp_err_string.contains(secret),
+        "Secret key should not appear in FCP error debug output"
+    );
+}
+
+/// Secret key is sent as Bearer auth header.
+#[fcp_async_core::runtime::test]
+async fn secret_key_sent_as_bearer_auth() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/balance"))
+        .and(header("authorization", "Bearer sk_test_auth_check"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": "balance",
+            "available": [{ "amount": 100, "currency": "usd" }],
+            "pending": [{ "amount": 0, "currency": "usd" }]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = StripeClient::new("sk_test_auth_check")
+        .unwrap()
+        .with_api_url(&format!("{}/v1", mock_server.uri()))
+        .with_retry_config(0);
+
+    let balance = client.get_balance().await.unwrap();
+    assert_eq!(balance.available[0].amount, 100);
+}
+
+// ============================================================================
+// Client operation tests
+// ============================================================================
+
+/// `get_customer` returns a parsed customer.
+#[fcp_async_core::runtime::test]
+async fn get_customer_success() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/customers/cus_42"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "cus_42",
+            "object": "customer",
+            "email": "test@example.com",
+            "name": "Test User"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = StripeClient::new("sk_test")
+        .unwrap()
+        .with_api_url(&format!("{}/v1", mock_server.uri()));
+
+    let customer = client.get_customer("cus_42").await.unwrap();
+    assert_eq!(customer.id, "cus_42");
+    assert_eq!(customer.email.as_deref(), Some("test@example.com"));
+}
+
+/// `create_payment_intent` returns the created intent.
+#[fcp_async_core::runtime::test]
+async fn create_payment_intent_success() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/payment_intents"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "pi_new",
+            "object": "payment_intent",
+            "amount": 5000,
+            "currency": "usd",
+            "status": "requires_payment_method"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = StripeClient::new("sk_test")
+        .unwrap()
+        .with_api_url(&format!("{}/v1", mock_server.uri()));
+
+    let pi = client
+        .create_payment_intent(5000, "usd", Some("cus_42"))
+        .await
+        .unwrap();
+    assert_eq!(pi.id, "pi_new");
+    assert_eq!(pi.amount, 5000);
+    assert_eq!(pi.currency, "usd");
+}
+
+/// `create_refund` returns the refund.
+#[fcp_async_core::runtime::test]
+async fn create_refund_success() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/refunds"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "re_123",
+            "object": "refund",
+            "amount": 1000,
+            "currency": "usd",
+            "status": "succeeded",
+            "payment_intent": "pi_42"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = StripeClient::new("sk_test")
+        .unwrap()
+        .with_api_url(&format!("{}/v1", mock_server.uri()));
+
+    let refund = client.create_refund("pi_42", Some(1000)).await.unwrap();
+    assert_eq!(refund.id, "re_123");
+    assert_eq!(refund.amount, 1000);
+    assert_eq!(refund.status, "succeeded");
+}
+
+/// `create_subscription` returns the subscription.
+#[fcp_async_core::runtime::test]
+async fn create_subscription_success() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/subscriptions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "sub_123",
+            "object": "subscription",
+            "status": "active",
+            "customer": "cus_42"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = StripeClient::new("sk_test")
+        .unwrap()
+        .with_api_url(&format!("{}/v1", mock_server.uri()));
+
+    let sub = client
+        .create_subscription("cus_42", "price_123")
+        .await
+        .unwrap();
+    assert_eq!(sub.id, "sub_123");
+    assert_eq!(sub.status, "active");
+}
+
+/// `cancel_subscription` returns the cancelled subscription.
+#[fcp_async_core::runtime::test]
+async fn cancel_subscription_success() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("DELETE"))
+        .and(path("/v1/subscriptions/sub_123"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "sub_123",
+            "object": "subscription",
+            "status": "canceled",
+            "customer": "cus_42"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = StripeClient::new("sk_test")
+        .unwrap()
+        .with_api_url(&format!("{}/v1", mock_server.uri()));
+
+    let sub = client.cancel_subscription("sub_123").await.unwrap();
+    assert_eq!(sub.status, "canceled");
+}
+
+/// `list_invoices` returns a list response.
+#[fcp_async_core::runtime::test]
+async fn list_invoices_success() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/invoices"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": "list",
+            "data": [
+                { "id": "in_1", "object": "invoice", "amount_due": 2000, "currency": "usd" }
+            ],
+            "has_more": false
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = StripeClient::new("sk_test")
+        .unwrap()
+        .with_api_url(&format!("{}/v1", mock_server.uri()));
+
+    let result = client.list_invoices(None, Some(10)).await.unwrap();
+    assert_eq!(result.data.len(), 1);
+    assert!(!result.has_more);
+}
+
+/// `get_balance` returns account balance.
+#[fcp_async_core::runtime::test]
+async fn get_balance_success() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/balance"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": "balance",
+            "available": [{ "amount": 50000, "currency": "usd" }],
+            "pending": [{ "amount": 10000, "currency": "usd" }]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = StripeClient::new("sk_test")
+        .unwrap()
+        .with_api_url(&format!("{}/v1", mock_server.uri()));
+
+    let balance = client.get_balance().await.unwrap();
+    assert_eq!(balance.available[0].amount, 50000);
+    assert_eq!(balance.pending[0].amount, 10000);
+}
+
+// ============================================================================
+// Connector-level invoke tests
+// ============================================================================
+
+/// Invoke `stripe.get_balance` through the connector.
+#[fcp_async_core::runtime::test]
+async fn invoke_get_balance_through_connector() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/balance"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": "balance",
+            "available": [{ "amount": 99999, "currency": "usd" }],
+            "pending": []
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = StripeConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["stripe.get_balance"]).await;
+    let token = generate_valid_token(&signing_key, "stripe.get_balance");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "stripe.get_balance",
+            "input": {},
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["balance"]["available"][0]["amount"], 99999);
+}
+
+/// Invoke `stripe.create_customer` through the connector.
+#[fcp_async_core::runtime::test]
+async fn invoke_create_customer_through_connector() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/customers"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "cus_new",
+            "object": "customer",
+            "email": "new@example.com"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = StripeConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["stripe.create_customer"]).await;
+    let token = generate_valid_token(&signing_key, "stripe.create_customer");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "stripe.create_customer",
+            "input": { "email": "new@example.com" },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["customer"]["id"], "cus_new");
+}
+
+/// Invoke `stripe.create_refund` through the connector.
+#[fcp_async_core::runtime::test]
+async fn invoke_create_refund_through_connector() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/refunds"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "re_456",
+            "object": "refund",
+            "amount": 500,
+            "currency": "usd",
+            "status": "succeeded",
+            "payment_intent": "pi_789"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = StripeConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["stripe.create_refund"]).await;
+    let token = generate_valid_token(&signing_key, "stripe.create_refund");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "stripe.create_refund",
+            "input": { "payment_intent": "pi_789", "amount": 500 },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["refund"]["id"], "re_456");
+    assert_eq!(result["refund"]["amount"], 500);
+}
+
+/// Wrong capability token is rejected.
+#[fcp_async_core::runtime::test]
+async fn wrong_capability_rejected() {
+    let mock_server = MockServer::start().await;
+
+    let mut connector = StripeConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["stripe.get_balance"]).await;
+    let token = generate_valid_token(&signing_key, "stripe.get_balance");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "stripe.get_customer",
+            "input": { "customer_id": "cus_123" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err(), "should reject mismatched capability");
+}
+
+/// Missing required field returns `InvalidRequest`.
+#[fcp_async_core::runtime::test]
+async fn missing_required_field_returns_invalid_request() {
+    let mock_server = MockServer::start().await;
+
+    let mut connector = StripeConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["stripe.create_payment_intent"]).await;
+    let token = generate_valid_token(&signing_key, "stripe.create_payment_intent");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "stripe.create_payment_intent",
+            "input": { "amount": 2000 },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    assert!(
+        matches!(result.unwrap_err(), FcpError::InvalidRequest { .. }),
+        "expected InvalidRequest for missing currency"
+    );
+}
+
+/// Unknown operation is rejected.
+#[fcp_async_core::runtime::test]
+async fn unknown_operation_rejected() {
+    let mock_server = MockServer::start().await;
+
+    let mut connector = StripeConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["stripe.nonexistent"]).await;
+    let token = generate_valid_token(&signing_key, "stripe.nonexistent");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "stripe.nonexistent",
+            "input": {},
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+}

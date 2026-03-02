@@ -1,0 +1,536 @@
+//! Integration tests for the Google Calendar connector.
+//!
+//! Covers error taxonomy mapping, credential redaction, client operations
+//! (calendars, events CRUD, quick-add), and connector-level invoke routing.
+
+use std::time::Duration;
+
+use chrono::Utc;
+use fcp_core::{CapabilityToken, FcpError};
+use fcp_crypto::cose::CapabilityTokenBuilder;
+use fcp_crypto::ed25519::Ed25519SigningKey;
+use fcp_google_calendar::{
+    client::GoogleCalendarClient, connector::GoogleCalendarConnector, error::GoogleCalendarError,
+};
+use serde_json::json;
+use wiremock::matchers::{bearer_token, header, method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+// ── Helpers ──────────────────────────────────────────────────────────
+
+fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> CapabilityToken {
+    let now = Utc::now();
+    let cose = CapabilityTokenBuilder::new()
+        .capability_id(cap)
+        .zone_id("z:work")
+        .principal("user:test")
+        .operations(&[cap])
+        .issuer("node:test")
+        .validity(now, now + chrono::Duration::hours(1))
+        .sign(signing_key)
+        .unwrap();
+    CapabilityToken { raw: cose }
+}
+
+async fn setup_handshake(
+    connector: &mut GoogleCalendarConnector,
+    signing_key: &Ed25519SigningKey,
+    capabilities: &[&str],
+) {
+    let verifying_key = signing_key.verifying_key();
+    connector
+        .handle_handshake(json!({
+            "protocol_version": "1.0.0",
+            "zone": "z:work",
+            "host_public_key": verifying_key.to_bytes(),
+            "nonce": vec![0u8; 32],
+            "capabilities_requested": capabilities
+        }))
+        .await
+        .unwrap();
+}
+
+async fn setup_configure(connector: &mut GoogleCalendarConnector, api_url: &str) {
+    connector
+        .handle_configure(json!({
+            "token": "ya29.test-oauth-token",
+            "base_url": api_url
+        }))
+        .await
+        .unwrap();
+}
+
+fn event_json(id: &str, summary: &str) -> serde_json::Value {
+    json!({
+        "id": id,
+        "summary": summary,
+        "status": "confirmed",
+        "start": { "dateTime": "2025-06-01T10:00:00Z" },
+        "end": { "dateTime": "2025-06-01T11:00:00Z" }
+    })
+}
+
+// ── Error taxonomy ──────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn error_http_maps_to_external() {
+    let err = GoogleCalendarError::Http(
+        reqwest::Client::new()
+            .get("http://[::ffff:0.0.0.0]:1")
+            .send()
+            .await
+            .unwrap_err(),
+    );
+    let fcp = err.to_fcp_error();
+    assert!(matches!(fcp, FcpError::External { service, .. } if service == "google-calendar"));
+    assert!(err.is_retryable());
+}
+
+#[fcp_async_core::runtime::test]
+async fn error_json_maps_to_internal() {
+    let bad: Result<serde_json::Value, _> = serde_json::from_str("not json");
+    let err = GoogleCalendarError::Json(bad.unwrap_err());
+    let fcp = err.to_fcp_error();
+    assert!(matches!(fcp, FcpError::Internal { .. }));
+    assert!(!err.is_retryable());
+}
+
+#[fcp_async_core::runtime::test]
+async fn error_api_auth_maps_to_unauthorized() {
+    let err = GoogleCalendarError::Api {
+        code: 401,
+        message: "Invalid credentials".into(),
+    };
+    let fcp = err.to_fcp_error();
+    assert!(matches!(fcp, FcpError::Unauthorized { .. }));
+}
+
+#[fcp_async_core::runtime::test]
+async fn error_api_not_found_maps_to_resource_not_found() {
+    let err = GoogleCalendarError::Api {
+        code: 404,
+        message: "Not found".into(),
+    };
+    let fcp = err.to_fcp_error();
+    assert!(matches!(fcp, FcpError::ResourceNotFound { .. }));
+}
+
+#[fcp_async_core::runtime::test]
+async fn error_api_rate_limited_maps_to_fcp() {
+    let err = GoogleCalendarError::Api {
+        code: 429,
+        message: "Rate limit exceeded".into(),
+    };
+    let fcp = err.to_fcp_error();
+    assert!(matches!(fcp, FcpError::RateLimited { .. }));
+    assert!(err.is_retryable());
+}
+
+#[fcp_async_core::runtime::test]
+async fn error_api_server_error_is_retryable() {
+    for code in [500, 502, 503] {
+        let err = GoogleCalendarError::Api {
+            code,
+            message: "Server error".into(),
+        };
+        assert!(err.is_retryable(), "code {code} should be retryable");
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn error_rate_limited_maps_to_fcp_rate_limited() {
+    let err = GoogleCalendarError::RateLimited {
+        retry_after_secs: 30,
+    };
+    let fcp = err.to_fcp_error();
+    assert!(matches!(
+        fcp,
+        FcpError::RateLimited {
+            retry_after_ms: 30000,
+            ..
+        }
+    ));
+    assert!(err.is_retryable());
+    assert_eq!(err.retry_after(), Some(Duration::from_secs(30)));
+}
+
+#[fcp_async_core::runtime::test]
+async fn error_unauthorized_maps_to_fcp_unauthorized() {
+    let err = GoogleCalendarError::Unauthorized;
+    let fcp = err.to_fcp_error();
+    assert!(matches!(fcp, FcpError::Unauthorized { .. }));
+    assert!(!err.is_retryable());
+}
+
+#[fcp_async_core::runtime::test]
+async fn error_not_found_variants_map_to_resource_not_found() {
+    let event_err = GoogleCalendarError::EventNotFound {
+        event_id: "evt123".into(),
+    };
+    assert!(
+        matches!(event_err.to_fcp_error(), FcpError::ResourceNotFound { resource } if resource.contains("evt123"))
+    );
+
+    let cal_err = GoogleCalendarError::CalendarNotFound {
+        calendar_id: "cal456".into(),
+    };
+    assert!(
+        matches!(cal_err.to_fcp_error(), FcpError::ResourceNotFound { resource } if resource.contains("cal456"))
+    );
+}
+
+// ── Redaction ───────────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn error_display_does_not_leak_token() {
+    let err = GoogleCalendarError::Unauthorized;
+    let msg = err.to_string();
+    assert!(!msg.contains("ya29.test-oauth-token"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn api_error_display_does_not_leak_token() {
+    let err = GoogleCalendarError::Api {
+        code: 401,
+        message: "Invalid token".into(),
+    };
+    let msg = err.to_string();
+    assert!(!msg.contains("ya29.test-oauth-token"));
+}
+
+// ── Client operations ───────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn client_list_calendars() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/users/me/calendarList"))
+        .and(bearer_token("test_tok"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "items": [
+                { "id": "primary", "summary": "Main Calendar" },
+                { "id": "work@example.com", "summary": "Work" }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GoogleCalendarClient::new("test_tok")
+        .unwrap()
+        .with_base_url(server.uri());
+    let result = client.list_calendars().await.unwrap();
+    assert_eq!(result.items.len(), 2);
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_get_event() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/calendars/primary/events/evt001"))
+        .and(bearer_token("test_tok"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(event_json("evt001", "Team standup")),
+        )
+        .mount(&server)
+        .await;
+
+    let client = GoogleCalendarClient::new("test_tok")
+        .unwrap()
+        .with_base_url(server.uri());
+    let event = client.get_event("primary", "evt001").await.unwrap();
+    assert_eq!(event.id.as_deref(), Some("evt001"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_list_events() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/calendars/primary/events"))
+        .and(bearer_token("test_tok"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "items": [
+                event_json("evt001", "Meeting A"),
+                event_json("evt002", "Meeting B")
+            ],
+            "summary": "Main Calendar"
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GoogleCalendarClient::new("test_tok")
+        .unwrap()
+        .with_base_url(server.uri());
+    let result = client
+        .list_events("primary", None, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(result.items.len(), 2);
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_create_event() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/calendars/primary/events"))
+        .and(bearer_token("test_tok"))
+        .and(header("content-type", "application/json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(event_json("evtNEW", "New Meeting")))
+        .mount(&server)
+        .await;
+
+    let client = GoogleCalendarClient::new("test_tok")
+        .unwrap()
+        .with_base_url(server.uri());
+    let event: fcp_google_calendar::types::Event =
+        serde_json::from_value(event_json("", "New Meeting")).unwrap();
+    let created = client.create_event("primary", &event).await.unwrap();
+    assert_eq!(created.id.as_deref(), Some("evtNEW"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_delete_event() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/calendars/primary/events/evtDEL"))
+        .and(bearer_token("test_tok"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+
+    let client = GoogleCalendarClient::new("test_tok")
+        .unwrap()
+        .with_base_url(server.uri());
+    client.delete_event("primary", "evtDEL").await.unwrap();
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_quick_add() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/calendars/primary/events/quickAdd"))
+        .and(bearer_token("test_tok"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(event_json("evtQA", "Lunch at noon")),
+        )
+        .mount(&server)
+        .await;
+
+    let client = GoogleCalendarClient::new("test_tok")
+        .unwrap()
+        .with_base_url(server.uri());
+    let event = client.quick_add("primary", "Lunch at noon").await.unwrap();
+    assert_eq!(event.id.as_deref(), Some("evtQA"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_unauthorized() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/users/me/calendarList"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            "error": { "code": 401, "message": "Invalid Credentials" }
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GoogleCalendarClient::new("bad_token")
+        .unwrap()
+        .with_base_url(server.uri());
+    let result = client.list_calendars().await;
+    assert!(result.is_err());
+    assert!(matches!(
+        result.unwrap_err(),
+        GoogleCalendarError::Unauthorized
+    ));
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_rate_limited_no_retry() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/users/me/calendarList"))
+        .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "60"))
+        .mount(&server)
+        .await;
+
+    let client = GoogleCalendarClient::new("test_tok")
+        .unwrap()
+        .with_base_url(server.uri())
+        .with_retry_config(0, 100, 100);
+    let result = client.list_calendars().await;
+    assert!(result.is_err());
+    assert!(matches!(
+        result.unwrap_err(),
+        GoogleCalendarError::RateLimited { .. }
+    ));
+}
+
+// ── Connector-level invoke ──────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn invoke_list_calendars_through_connector() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/users/me/calendarList"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "items": [{ "id": "primary", "summary": "Main" }]
+        })))
+        .mount(&server)
+        .await;
+
+    let mut connector = GoogleCalendarConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+
+    setup_handshake(&mut connector, &signing_key, &["gcal.list_calendars"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "gcal.list_calendars");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "gcal.list_calendars",
+            "input": {},
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert!(result["calendars"].as_array().is_some());
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_get_event_through_connector() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/calendars/primary/events/evt001"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(event_json("evt001", "Standup")))
+        .mount(&server)
+        .await;
+
+    let mut connector = GoogleCalendarConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+
+    setup_handshake(&mut connector, &signing_key, &["gcal.get_event"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "gcal.get_event");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "gcal.get_event",
+            "input": {
+                "calendar_id": "primary",
+                "event_id": "evt001"
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["event"]["id"], "evt001");
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_delete_event_through_connector() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/calendars/primary/events/evtDEL"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+
+    let mut connector = GoogleCalendarConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+
+    setup_handshake(&mut connector, &signing_key, &["gcal.delete_event"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "gcal.delete_event");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "gcal.delete_event",
+            "input": {
+                "calendar_id": "primary",
+                "event_id": "evtDEL"
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["status"], "deleted");
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_wrong_capability_rejected() {
+    let mut connector = GoogleCalendarConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+
+    setup_handshake(&mut connector, &signing_key, &["gcal.read"]).await;
+    setup_configure(&mut connector, "http://localhost:1").await;
+
+    let token = generate_valid_token(&signing_key, "gcal.read");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "gcal.create_event",
+            "input": {
+                "calendar_id": "primary",
+                "event": { "summary": "Test" }
+            },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_unknown_operation_rejected() {
+    let mut connector = GoogleCalendarConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+
+    setup_handshake(&mut connector, &signing_key, &["gcal.nonexistent"]).await;
+    setup_configure(&mut connector, "http://localhost:1").await;
+
+    let token = generate_valid_token(&signing_key, "gcal.nonexistent");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "gcal.nonexistent",
+            "input": {},
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    assert!(matches!(
+        result.unwrap_err(),
+        FcpError::OperationNotGranted { .. }
+    ));
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_missing_required_field_rejected() {
+    let server = MockServer::start().await;
+
+    let mut connector = GoogleCalendarConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+
+    setup_handshake(&mut connector, &signing_key, &["gcal.get_event"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "gcal.get_event");
+    // Missing event_id
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "gcal.get_event",
+            "input": { "calendar_id": "primary" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("event_id"));
+        }
+        e => panic!("Expected InvalidRequest, got: {e:?}"),
+    }
+}

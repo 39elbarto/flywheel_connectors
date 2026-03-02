@@ -46,7 +46,7 @@ fn generate_execution_approval(
     operation: &str,
     _input: &serde_json::Value,
 ) -> fcp_core::ApprovalToken {
-    let now_ms = Utc::now().timestamp_millis() as u64;
+    let now_ms = u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0);
     fcp_core::ApprovalToken {
         token_id: format!("approval-{operation}-{now_ms}"),
         issued_at_ms: now_ms.saturating_sub(1_000),

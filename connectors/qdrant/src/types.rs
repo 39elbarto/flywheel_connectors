@@ -82,3 +82,12 @@ pub struct OperationResponse {
     pub status: Option<String>,
     pub result: Option<serde_json::Value>,
 }
+
+/// Audit receipt for side-effecting operations.
+#[derive(Debug, Clone, Serialize)]
+pub struct OperationReceipt {
+    pub operation: String,
+    pub effect: String,
+    pub resource: String,
+    pub timestamp: String,
+}

@@ -4,18 +4,217 @@ use std::sync::Arc;
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
-    ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
+    ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
     IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier, SessionId,
     SimulateRequest, SimulateResponse,
 };
+use reqwest::Url;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
 
 use crate::{client::PlaidClient, error::PlaidError};
 
+const SANDBOX_BASE_URL: &str = "https://sandbox.plaid.com";
+const DEVELOPMENT_BASE_URL: &str = "https://development.plaid.com";
+const PRODUCTION_BASE_URL: &str = "https://production.plaid.com";
+const PLAID_HOSTS: &[&str] = &[
+    "sandbox.plaid.com",
+    "development.plaid.com",
+    "production.plaid.com",
+];
+
+#[derive(Debug, Clone, Copy)]
+enum PlaidEnvironment {
+    Sandbox,
+    Development,
+    Production,
+}
+
+impl PlaidEnvironment {
+    fn from_str(raw: &str) -> FcpResult<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "sandbox" => Ok(Self::Sandbox),
+            "development" => Ok(Self::Development),
+            "production" => Ok(Self::Production),
+            _ => Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "environment must be one of: sandbox, development, production".into(),
+            }),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Sandbox => "sandbox",
+            Self::Development => "development",
+            Self::Production => "production",
+        }
+    }
+
+    fn default_base_url(self) -> &'static str {
+        match self {
+            Self::Sandbox => SANDBOX_BASE_URL,
+            Self::Development => DEVELOPMENT_BASE_URL,
+            Self::Production => PRODUCTION_BASE_URL,
+        }
+    }
+
+    fn expected_host(self) -> &'static str {
+        match self {
+            Self::Sandbox => "sandbox.plaid.com",
+            Self::Development => "development.plaid.com",
+            Self::Production => "production.plaid.com",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum PlaidAuthMode {
+    Secret(String),
+    CredentialId(CredentialId),
+}
+
+#[derive(Debug, Clone)]
+struct PlaidConfig {
+    client_id: String,
+    auth: PlaidAuthMode,
+    environment: PlaidEnvironment,
+    base_url: String,
+}
+
+impl PlaidConfig {
+    fn from_params(params: &serde_json::Value) -> FcpResult<Self> {
+        let client_id = params
+            .get("client_id")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing client_id in configuration".into(),
+            })?
+            .to_string();
+
+        let secret = params
+            .get("secret")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string);
+
+        let credential_id = match params.get("credential_id") {
+            Some(value) => {
+                let raw = value.as_str().ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "credential_id must be a string".into(),
+                })?;
+                Some(
+                    CredentialId::parse(raw).map_err(|_| FcpError::InvalidRequest {
+                        code: 1003,
+                        message: "credential_id must be a valid UUID".into(),
+                    })?,
+                )
+            }
+            None => None,
+        };
+
+        let auth = match (secret, credential_id) {
+            (Some(secret), None) => PlaidAuthMode::Secret(secret),
+            (None, Some(id)) => PlaidAuthMode::CredentialId(id),
+            (Some(_), Some(_)) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Provide exactly one of secret or credential_id".into(),
+                });
+            }
+            (None, None) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing secret or credential_id in configuration".into(),
+                });
+            }
+        };
+
+        let environment = PlaidEnvironment::from_str(
+            params
+                .get("environment")
+                .and_then(|v| v.as_str())
+                .unwrap_or("sandbox"),
+        )?;
+
+        let base_url = params
+            .get("base_url")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or(environment.default_base_url());
+
+        let base_url = normalize_base_url(base_url)?;
+
+        Ok(Self {
+            client_id,
+            auth,
+            environment,
+            base_url,
+        })
+    }
+
+    fn auth_label(&self) -> &'static str {
+        match self.auth {
+            PlaidAuthMode::Secret(_) => "secret",
+            PlaidAuthMode::CredentialId(_) => "credential_id",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum DoctorStatus {
+    Healthy,
+    Degraded,
+    Unhealthy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DoctorCheck {
+    name: String,
+    passed: bool,
+    message: String,
+    critical: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DoctorResult {
+    status: DoctorStatus,
+    checks: Vec<DoctorCheck>,
+}
+
+impl DoctorResult {
+    fn from_checks(checks: Vec<DoctorCheck>) -> Self {
+        let status = if checks.iter().any(|check| check.critical && !check.passed) {
+            DoctorStatus::Unhealthy
+        } else if checks.iter().any(|check| !check.passed) {
+            DoctorStatus::Degraded
+        } else {
+            DoctorStatus::Healthy
+        };
+        Self { status, checks }
+    }
+
+    fn status_label(&self) -> &'static str {
+        match self.status {
+            DoctorStatus::Healthy => "healthy",
+            DoctorStatus::Degraded => "degraded",
+            DoctorStatus::Unhealthy => "unhealthy",
+        }
+    }
+}
+
 /// FCP Plaid Connector.
 pub struct PlaidConnector {
     base: Arc<BaseConnector>,
+    config: Option<PlaidConfig>,
     client: Option<PlaidClient>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
@@ -27,6 +226,7 @@ impl PlaidConnector {
     pub fn new() -> Self {
         Self {
             base: Arc::new(BaseConnector::new(ConnectorId::from_static("plaid"))),
+            config: None,
             client: None,
             verifier: None,
             session_id: None,
@@ -39,40 +239,40 @@ impl PlaidConnector {
         &mut self,
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
-        let client_id =
-            params
-                .get("client_id")
-                .and_then(|v| v.as_str())
-                .ok_or(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing client_id in configuration".into(),
-                })?;
+        let config = PlaidConfig::from_params(&params)?;
+        let mut status = "configured";
+        let mut details = json!({
+            "environment": config.environment.as_str(),
+            "base_url": config.base_url,
+            "auth_mode": config.auth_label(),
+        });
 
-        let secret =
-            params
-                .get("secret")
-                .and_then(|v| v.as_str())
-                .ok_or(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing secret in configuration".into(),
-                })?;
-
-        let base_url = params.get("base_url").and_then(|v| v.as_str());
-
-        let mut client =
-            PlaidClient::new(client_id, secret).map_err(|e| FcpError::Internal {
-                message: format!("Failed to create HTTP client: {e}"),
-            })?;
-
-        if let Some(url) = base_url {
-            client = client.with_base_url(url);
-        }
-
-        self.client = Some(client);
+        self.client = match &config.auth {
+            PlaidAuthMode::Secret(secret) => {
+                let client = PlaidClient::new(&config.client_id, secret)
+                    .map_err(|e| FcpError::Internal {
+                        message: format!("Failed to create HTTP client: {e}"),
+                    })?
+                    .with_base_url(&config.base_url);
+                Some(client)
+            }
+            PlaidAuthMode::CredentialId(id) => {
+                status = "configured_pending_secret_materialization";
+                details["credential_id"] = json!(id.to_string());
+                details["note"] = json!(
+                    "credential_id configured; direct Plaid API calls require secret materialization in current runtime"
+                );
+                None
+            }
+        };
+        self.config = Some(config);
         self.base.set_configured(true);
-        info!("Plaid connector configured");
+        info!(
+            event = "plaid.provisioning.configure",
+            status, "Plaid connector configured"
+        );
 
-        Ok(json!({ "status": "configured" }))
+        Ok(json!({ "status": status, "details": details }))
     }
 
     /// Handle handshake method.
@@ -128,15 +328,194 @@ impl PlaidConnector {
 
     /// Handle health check.
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
-        let configured = self.client.is_some();
         let metrics = self.base.metrics();
+        let status = if self.client.is_some() {
+            "healthy"
+        } else if self.config.is_some() {
+            "degraded_pending_secret_materialization"
+        } else {
+            "not_configured"
+        };
         Ok(json!({
-            "status": if configured { "healthy" } else { "not_configured" },
+            "status": status,
             "metrics": {
                 "requests_total": metrics.requests_total,
                 "requests_error": metrics.requests_error,
             }
         }))
+    }
+
+    /// Handle doctor checks.
+    pub async fn handle_doctor(&self) -> FcpResult<serde_json::Value> {
+        let result = self.build_doctor_result().await;
+        let failed_checks = result.checks.iter().filter(|check| !check.passed).count();
+        info!(
+            event = "plaid.provisioning.doctor",
+            status = result.status_label(),
+            check_count = result.checks.len(),
+            failed_checks,
+            "Plaid doctor checks completed"
+        );
+        serde_json::to_value(result).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize doctor result: {e}"),
+        })
+    }
+
+    async fn build_doctor_result(&self) -> DoctorResult {
+        let mut checks = Vec::new();
+
+        checks.push(DoctorCheck {
+            name: "configuration".into(),
+            passed: self.config.is_some(),
+            message: if self.config.is_some() {
+                "Configuration loaded".into()
+            } else {
+                "Not configured - call configure first".into()
+            },
+            critical: true,
+        });
+
+        let Some(config) = &self.config else {
+            return DoctorResult::from_checks(checks);
+        };
+
+        checks.push(DoctorCheck {
+            name: "auth_mode".into(),
+            passed: true,
+            message: format!("Auth mode: {}", config.auth_label()),
+            critical: false,
+        });
+
+        let parsed = Url::parse(&config.base_url).ok();
+        let endpoint_check = parsed.as_ref().map_or(
+            DoctorCheck {
+                name: "network_constraints".into(),
+                passed: false,
+                message: "base_url could not be parsed".into(),
+                critical: true,
+            },
+            |url| {
+                let host = url.host_str().unwrap_or_default();
+                let local = is_local_test_host(host);
+                let allowed_host = is_plaid_host(host) || local;
+                let secure_or_local = url.scheme() == "https" || local;
+
+                DoctorCheck {
+                    name: "network_constraints".into(),
+                    passed: allowed_host && secure_or_local,
+                    message: if allowed_host && secure_or_local {
+                        format!("Endpoint accepted by policy checks: {}", config.base_url)
+                    } else {
+                        format!(
+                            "Endpoint must use Plaid hosts over https (localhost/127.0.0.1 allowed for tests): {}",
+                            config.base_url
+                        )
+                    },
+                    critical: true,
+                }
+            },
+        );
+        checks.push(endpoint_check);
+
+        let environment_check = parsed.as_ref().map_or(
+            DoctorCheck {
+                name: "environment_selection".into(),
+                passed: false,
+                message: "Could not verify environment from base_url".into(),
+                critical: true,
+            },
+            |url| {
+                let host = url.host_str().unwrap_or_default();
+                let local = is_local_test_host(host);
+                let expected = config.environment.expected_host();
+                let host_matches_environment = local || host == expected;
+                DoctorCheck {
+                    name: "environment_selection".into(),
+                    passed: host_matches_environment,
+                    message: if host_matches_environment {
+                        if local {
+                            format!(
+                                "Environment {} using local test endpoint {}",
+                                config.environment.as_str(),
+                                config.base_url
+                            )
+                        } else {
+                            format!(
+                                "Environment {} resolved to {}",
+                                config.environment.as_str(),
+                                host
+                            )
+                        }
+                    } else {
+                        format!(
+                            "Environment {} expects host {}, but base_url host is {}",
+                            config.environment.as_str(),
+                            expected,
+                            host
+                        )
+                    },
+                    critical: true,
+                }
+            },
+        );
+        checks.push(environment_check);
+
+        match (&config.auth, &self.client) {
+            (PlaidAuthMode::Secret(_), Some(client)) => {
+                checks.push(DoctorCheck {
+                    name: "credential_materialization".into(),
+                    passed: true,
+                    message: "Direct secret configured in-memory".into(),
+                    critical: false,
+                });
+
+                let products = vec!["auth".to_string()];
+                let country_codes = vec!["US".to_string()];
+                match client
+                    .link_token_create("fcp-doctor", &products, &country_codes, "en", None)
+                    .await
+                {
+                    Ok(_) => checks.push(DoctorCheck {
+                        name: "credentials_valid".into(),
+                        passed: true,
+                        message: "link/token/create succeeded with current credentials".into(),
+                        critical: true,
+                    }),
+                    Err(error) => checks.push(DoctorCheck {
+                        name: "credentials_valid".into(),
+                        passed: false,
+                        message: format!("Credential validation failed: {error}"),
+                        critical: true,
+                    }),
+                }
+            }
+            (PlaidAuthMode::CredentialId(id), _) => {
+                checks.push(DoctorCheck {
+                    name: "credential_materialization".into(),
+                    passed: false,
+                    message: format!(
+                        "credential_id {id} configured; secret materialization required by egress proxy"
+                    ),
+                    critical: false,
+                });
+                checks.push(DoctorCheck {
+                    name: "credentials_valid".into(),
+                    passed: false,
+                    message: "Skipping direct credential validation in credential_id mode".into(),
+                    critical: false,
+                });
+            }
+            (PlaidAuthMode::Secret(_), None) => {
+                checks.push(DoctorCheck {
+                    name: "credential_materialization".into(),
+                    passed: false,
+                    message: "Secret mode configured but HTTP client not initialized".into(),
+                    critical: true,
+                });
+            }
+        }
+
+        DoctorResult::from_checks(checks)
     }
 
     /// Handle introspect method.
@@ -611,10 +990,7 @@ impl PlaidConnector {
         }))
     }
 
-    async fn invoke_accounts_get(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_accounts_get(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let access_token = require_str(&input, "access_token")?;
         let options = input.get("options");
@@ -662,7 +1038,10 @@ impl PlaidConnector {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let access_token = require_str(&input, "access_token")?;
         let cursor = input.get("cursor").and_then(|v| v.as_str());
-        let count = input.get("count").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let count = input
+            .get("count")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
         let result = client
             .transactions_sync(access_token, cursor, count)
             .await
@@ -676,10 +1055,7 @@ impl PlaidConnector {
         }))
     }
 
-    async fn invoke_auth_get(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_auth_get(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let access_token = require_str(&input, "access_token")?;
         let (accounts, numbers) = client
@@ -689,10 +1065,7 @@ impl PlaidConnector {
         Ok(json!({ "accounts": accounts, "numbers": numbers }))
     }
 
-    async fn invoke_identity_get(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_identity_get(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let access_token = require_str(&input, "access_token")?;
         let accounts = client
@@ -729,7 +1102,10 @@ impl PlaidConnector {
     }
 
     /// Handle shutdown.
-    pub async fn handle_shutdown(&self, _params: serde_json::Value) -> FcpResult<serde_json::Value> {
+    pub async fn handle_shutdown(
+        &self,
+        _params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         info!("Plaid connector shutting down");
         Ok(json!({ "status": "shutdown" }))
     }
@@ -739,6 +1115,56 @@ impl Default for PlaidConnector {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn normalize_base_url(base_url: &str) -> FcpResult<String> {
+    let trimmed = base_url.trim();
+    if trimmed.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url cannot be empty".into(),
+        });
+    }
+
+    let parsed = Url::parse(trimmed).map_err(|e| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("Invalid base_url: {e}"),
+    })?;
+
+    if !matches!(parsed.scheme(), "https" | "http") {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must use http or https".into(),
+        });
+    }
+
+    let host = parsed.host_str().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: "base_url must include a host".into(),
+    })?;
+    if host.parse::<std::net::IpAddr>().is_ok() && !is_local_test_host(host) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not use IP literals outside local test hosts".into(),
+        });
+    }
+
+    Ok(trimmed.trim_end_matches('/').to_string())
+}
+
+fn is_local_test_host(host: &str) -> bool {
+    matches!(
+        host.trim()
+            .trim_end_matches('.')
+            .to_ascii_lowercase()
+            .as_str(),
+        "localhost" | "127.0.0.1" | "::1"
+    )
+}
+
+fn is_plaid_host(host: &str) -> bool {
+    let normalized = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    PLAID_HOSTS.contains(&normalized.as_str())
 }
 
 fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a str> {
@@ -787,6 +1213,11 @@ mod tests {
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_manifest::ConnectorManifest;
     use std::path::PathBuf;
+    use uuid::Uuid;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
 
     fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> CapabilityToken {
         let now = Utc::now();
@@ -823,6 +1254,163 @@ mod tests {
         let connector = PlaidConnector::new();
         let result = connector.handle_health().await.unwrap();
         assert_eq!(result["status"], "not_configured");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_with_secret() {
+        let mut connector = PlaidConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "client_id": "test_client_id",
+                "secret": "test_secret",
+                "environment": "sandbox"
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(result["status"], "configured");
+        assert_eq!(result["details"]["environment"], "sandbox");
+        assert_eq!(result["details"]["auth_mode"], "secret");
+        assert!(connector.config.is_some());
+        assert!(connector.client.is_some());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_with_credential_id() {
+        let mut connector = PlaidConnector::new();
+        let credential_id = Uuid::new_v4().to_string();
+        let result = connector
+            .handle_configure(json!({
+                "client_id": "test_client_id",
+                "credential_id": credential_id
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result["status"],
+            "configured_pending_secret_materialization"
+        );
+        assert_eq!(result["details"]["auth_mode"], "credential_id");
+        assert!(connector.config.is_some());
+        assert!(connector.client.is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_ambiguous_auth_rejected() {
+        let mut connector = PlaidConnector::new();
+        let credential_id = Uuid::new_v4().to_string();
+        let result = connector
+            .handle_configure(json!({
+                "client_id": "test_client_id",
+                "secret": "test_secret",
+                "credential_id": credential_id
+            }))
+            .await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("exactly one"));
+            }
+            other => panic!("Expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_invalid_environment_rejected() {
+        let mut connector = PlaidConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "client_id": "test_client_id",
+                "secret": "test_secret",
+                "environment": "qa"
+            }))
+            .await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("sandbox, development, production"));
+            }
+            other => panic!("Expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    fn doctor_check<'a>(doctor: &'a DoctorResult, name: &str) -> &'a DoctorCheck {
+        doctor
+            .checks
+            .iter()
+            .find(|check| check.name == name)
+            .unwrap_or_else(|| panic!("missing doctor check {name}"))
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_not_configured() {
+        let connector = PlaidConnector::new();
+        let value = connector.handle_doctor().await.unwrap();
+        let doctor: DoctorResult = serde_json::from_value(value).unwrap();
+
+        assert!(matches!(doctor.status, DoctorStatus::Unhealthy));
+        let configuration = doctor_check(&doctor, "configuration");
+        assert!(!configuration.passed);
+        assert!(configuration.critical);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_secret_mode_healthy() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/link/token/create"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "link_token": "link-sandbox-test",
+                "expiration": "2026-03-02T00:00:00Z"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let mut connector = PlaidConnector::new();
+        connector
+            .handle_configure(json!({
+                "client_id": "test_client_id",
+                "secret": "test_secret",
+                "base_url": mock_server.uri(),
+                "environment": "sandbox"
+            }))
+            .await
+            .unwrap();
+
+        let value = connector.handle_doctor().await.unwrap();
+        let doctor: DoctorResult = serde_json::from_value(value).unwrap();
+
+        assert!(matches!(doctor.status, DoctorStatus::Healthy));
+        assert!(doctor_check(&doctor, "credentials_valid").passed);
+        assert!(doctor_check(&doctor, "network_constraints").passed);
+        assert!(doctor_check(&doctor, "environment_selection").passed);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_credential_id_mode_degraded() {
+        let mut connector = PlaidConnector::new();
+        connector
+            .handle_configure(json!({
+                "client_id": "test_client_id",
+                "credential_id": Uuid::new_v4().to_string(),
+                "environment": "production"
+            }))
+            .await
+            .unwrap();
+
+        let value = connector.handle_doctor().await.unwrap();
+        let doctor: DoctorResult = serde_json::from_value(value).unwrap();
+
+        assert!(matches!(doctor.status, DoctorStatus::Degraded));
+        let materialization = doctor_check(&doctor, "credential_materialization");
+        assert!(!materialization.passed);
+        assert!(!materialization.critical);
+        let validity = doctor_check(&doctor, "credentials_valid");
+        assert!(!validity.passed);
+        assert!(!validity.critical);
     }
 
     #[fcp_async_core::runtime::test]
@@ -922,11 +1510,15 @@ mod tests {
 
         let raw = std::fs::read_to_string(&manifest_path).expect("read manifest");
         let manifest = ConnectorManifest::parse_str(&raw).expect("manifest should validate");
-        let computed = manifest.compute_interface_hash().expect("compute interface hash");
+        let computed = manifest
+            .compute_interface_hash()
+            .expect("compute interface hash");
         assert_eq!(manifest.manifest.interface_hash, computed);
 
         let manifest2 = ConnectorManifest::parse_str_unchecked(&raw).expect("parse unchecked");
-        let computed2 = manifest2.compute_interface_hash().expect("compute interface hash");
+        let computed2 = manifest2
+            .compute_interface_hash()
+            .expect("compute interface hash");
         assert_eq!(computed, computed2);
     }
 }

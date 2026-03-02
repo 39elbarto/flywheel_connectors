@@ -413,7 +413,12 @@ async fn download_file_happy_path() {
 
     assert_eq!(result["file"]["id"], "F01234567");
     assert_eq!(result["file"]["name"], "report.pdf");
-    assert!(result["file"]["url_private_download"].as_str().unwrap().contains("download"));
+    assert!(
+        result["file"]["url_private_download"]
+            .as_str()
+            .unwrap()
+            .contains("download")
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -482,6 +487,238 @@ async fn set_channel_topic_happy_path() {
         .expect("invoke should succeed");
 
     assert_eq!(result["topic"], "Sprint 42 - Deployment day");
+}
+
+// ============================================================================
+// Receipt verification (side-effecting operations)
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn post_message_emits_receipt() {
+    let _ctx = AsyncTestContext::for_scenario("slack.receipt.post_message");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/chat.postMessage"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "channel": "C01234567",
+            "ts": "1234567890.123456",
+            "message": slack_message("Hello!", "1234567890.123456")
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = SlackConnector::new();
+    let key = setup_handshake(&mut connector, &["slack.post_message"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "slack.post_message");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "slack.post_message",
+            "input": { "channel": "C01234567", "text": "Hello!" },
+            "capability_token": token
+        }))
+        .await
+        .expect("invoke should succeed");
+
+    let receipt = &result["receipt"];
+    assert_eq!(receipt["operation"], "slack.post_message");
+    assert_eq!(receipt["effect"], "message_created");
+    assert_eq!(receipt["resource"], "channel:C01234567");
+    assert_eq!(receipt["timestamp"], "1234567890.123456");
+}
+
+#[fcp_async_core::runtime::test]
+async fn reply_thread_emits_receipt() {
+    let _ctx = AsyncTestContext::for_scenario("slack.receipt.reply_thread");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/chat.postMessage"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "channel": "C01234567",
+            "ts": "1234567890.654321",
+            "message": {
+                "type": "message",
+                "user": "U01234567",
+                "text": "Thread reply",
+                "ts": "1234567890.654321",
+                "thread_ts": "1234567890.111111"
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = SlackConnector::new();
+    let key = setup_handshake(&mut connector, &["slack.reply_thread"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "slack.reply_thread");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "slack.reply_thread",
+            "input": {
+                "channel": "C01234567",
+                "text": "Thread reply",
+                "thread_ts": "1234567890.111111"
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("invoke should succeed");
+
+    let receipt = &result["receipt"];
+    assert_eq!(receipt["operation"], "slack.reply_thread");
+    assert_eq!(receipt["effect"], "thread_reply_created");
+    assert!(receipt["resource"].as_str().unwrap().contains("thread:"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn upload_file_emits_receipt() {
+    let _ctx = AsyncTestContext::for_scenario("slack.receipt.upload_file");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/files.upload"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "file": {
+                "id": "F09876543",
+                "name": "data.csv",
+                "title": "data.csv",
+                "mimetype": "text/csv",
+                "filetype": "csv",
+                "size": 100
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = SlackConnector::new();
+    let key = setup_handshake(&mut connector, &["slack.upload_file"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "slack.upload_file");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "slack.upload_file",
+            "input": { "channels": "C01234567", "content": "a,b,c", "filename": "data.csv" },
+            "capability_token": token
+        }))
+        .await
+        .expect("invoke should succeed");
+
+    let receipt = &result["receipt"];
+    assert_eq!(receipt["operation"], "slack.upload_file");
+    assert_eq!(receipt["effect"], "file_uploaded");
+    assert_eq!(receipt["resource"], "file:F09876543");
+}
+
+#[fcp_async_core::runtime::test]
+async fn add_reaction_emits_receipt() {
+    let _ctx = AsyncTestContext::for_scenario("slack.receipt.add_reaction");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/reactions.add"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "ok": true })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = SlackConnector::new();
+    let key = setup_handshake(&mut connector, &["slack.add_reaction"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "slack.add_reaction");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "slack.add_reaction",
+            "input": {
+                "channel": "C01234567",
+                "timestamp": "1234567890.123456",
+                "name": "thumbsup"
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("invoke should succeed");
+
+    let receipt = &result["receipt"];
+    assert_eq!(receipt["operation"], "slack.add_reaction");
+    assert_eq!(receipt["effect"], "reaction_added");
+    assert!(receipt["resource"].as_str().unwrap().contains("message:"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn set_channel_topic_emits_receipt() {
+    let _ctx = AsyncTestContext::for_scenario("slack.receipt.set_channel_topic");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/conversations.setTopic"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "topic": "New topic"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = SlackConnector::new();
+    let key = setup_handshake(&mut connector, &["slack.set_channel_topic"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "slack.set_channel_topic");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "slack.set_channel_topic",
+            "input": { "channel": "C01234567", "topic": "New topic" },
+            "capability_token": token
+        }))
+        .await
+        .expect("invoke should succeed");
+
+    let receipt = &result["receipt"];
+    assert_eq!(receipt["operation"], "slack.set_channel_topic");
+    assert_eq!(receipt["effect"], "topic_updated");
+    assert_eq!(receipt["resource"], "channel:C01234567");
+}
+
+// ============================================================================
+// Read operations should NOT emit receipts
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn read_operations_have_no_receipt() {
+    let _ctx = AsyncTestContext::for_scenario("slack.receipt.read_no_receipt");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/conversations.list"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "channels": [slack_channel("C01234567", "general")]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = SlackConnector::new();
+    let key = setup_handshake(&mut connector, &["slack.list_channels"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "slack.list_channels");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "slack.list_channels",
+            "input": {},
+            "capability_token": token
+        }))
+        .await
+        .expect("invoke should succeed");
+
+    assert!(result.get("receipt").is_none());
 }
 
 // ============================================================================
@@ -688,6 +925,62 @@ async fn error_http_429_maps_to_rate_limited() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn error_missing_scope_maps_to_capability_denied() {
+    let _ctx = AsyncTestContext::for_scenario("slack.error.missing_scope");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/chat.postMessage"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": false,
+            "error": "missing_scope"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = SlackClient::new("valid-token")
+        .unwrap()
+        .with_base_url(mock_server.uri())
+        .with_retry_config(0, 10, 100);
+
+    let result = client.post_message("C01234567", "hello", None).await;
+    assert!(result.is_err());
+    let fcp_err = result.unwrap_err().to_fcp_error();
+    assert!(
+        matches!(fcp_err, fcp_core::FcpError::CapabilityDenied { .. }),
+        "Expected CapabilityDenied, got: {fcp_err:?}"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn error_not_in_channel_maps_to_capability_denied() {
+    let _ctx = AsyncTestContext::for_scenario("slack.error.not_in_channel");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/chat.postMessage"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": false,
+            "error": "not_in_channel"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = SlackClient::new("valid-token")
+        .unwrap()
+        .with_base_url(mock_server.uri())
+        .with_retry_config(0, 10, 100);
+
+    let result = client.post_message("C01234567", "hello", None).await;
+    assert!(result.is_err());
+    let fcp_err = result.unwrap_err().to_fcp_error();
+    assert!(
+        matches!(fcp_err, fcp_core::FcpError::CapabilityDenied { .. }),
+        "Expected CapabilityDenied, got: {fcp_err:?}"
+    );
+}
+
+#[fcp_async_core::runtime::test]
 async fn error_retryable_classification() {
     use fcp_slack::error::SlackError;
 
@@ -733,6 +1026,260 @@ async fn error_retryable_classification() {
         retry_after_secs: 30,
     };
     assert!(rate.is_retryable());
+}
+
+// ============================================================================
+// Invoke-level error tests (401/403/429 through handle_invoke)
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn invoke_401_not_authed() {
+    let _ctx = AsyncTestContext::for_scenario("slack.invoke_error.401_not_authed");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/chat.postMessage"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": false,
+            "error": "not_authed"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = SlackConnector::new();
+    let key = setup_handshake(&mut connector, &["slack.post_message"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "slack.post_message");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "slack.post_message",
+            "input": { "channel": "C01234567", "text": "test" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    assert!(
+        matches!(result.unwrap_err(), fcp_core::FcpError::Unauthorized { .. }),
+        "Expected Unauthorized"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_401_invalid_auth() {
+    let _ctx = AsyncTestContext::for_scenario("slack.invoke_error.401_invalid_auth");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/conversations.history"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": false,
+            "error": "invalid_auth"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = SlackConnector::new();
+    let key = setup_handshake(&mut connector, &["slack.get_channel_history"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "slack.get_channel_history");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "slack.get_channel_history",
+            "input": { "channel": "C01234567" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    assert!(
+        matches!(result.unwrap_err(), fcp_core::FcpError::Unauthorized { .. }),
+        "Expected Unauthorized"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_403_missing_scope() {
+    let _ctx = AsyncTestContext::for_scenario("slack.invoke_error.403_missing_scope");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/chat.postMessage"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": false,
+            "error": "missing_scope"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = SlackConnector::new();
+    let key = setup_handshake(&mut connector, &["slack.post_message"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "slack.post_message");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "slack.post_message",
+            "input": { "channel": "C01234567", "text": "test" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    assert!(
+        matches!(
+            result.unwrap_err(),
+            fcp_core::FcpError::CapabilityDenied { .. }
+        ),
+        "Expected CapabilityDenied"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_403_not_in_channel() {
+    let _ctx = AsyncTestContext::for_scenario("slack.invoke_error.403_not_in_channel");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/chat.postMessage"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": false,
+            "error": "not_in_channel"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = SlackConnector::new();
+    let key = setup_handshake(&mut connector, &["slack.post_message"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "slack.post_message");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "slack.post_message",
+            "input": { "channel": "C01234567", "text": "test" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    assert!(
+        matches!(
+            result.unwrap_err(),
+            fcp_core::FcpError::CapabilityDenied { .. }
+        ),
+        "Expected CapabilityDenied"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_403_restricted_action() {
+    let _ctx = AsyncTestContext::for_scenario("slack.invoke_error.403_restricted_action");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/conversations.setTopic"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": false,
+            "error": "restricted_action"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = SlackConnector::new();
+    let key = setup_handshake(&mut connector, &["slack.set_channel_topic"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "slack.set_channel_topic");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "slack.set_channel_topic",
+            "input": { "channel": "C01234567", "topic": "new topic" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    assert!(
+        matches!(
+            result.unwrap_err(),
+            fcp_core::FcpError::CapabilityDenied { .. }
+        ),
+        "Expected CapabilityDenied"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_429_rate_limited_api() {
+    let _ctx = AsyncTestContext::for_scenario("slack.invoke_error.429_api");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/chat.postMessage"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": false,
+            "error": "ratelimited"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = SlackConnector::new();
+    let key = setup_handshake(&mut connector, &["slack.post_message"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "slack.post_message");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "slack.post_message",
+            "input": { "channel": "C01234567", "text": "test" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    assert!(
+        matches!(result.unwrap_err(), fcp_core::FcpError::RateLimited { .. }),
+        "Expected RateLimited"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_resource_not_found() {
+    let _ctx = AsyncTestContext::for_scenario("slack.invoke_error.resource_not_found");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/conversations.history"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": false,
+            "error": "channel_not_found"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = SlackConnector::new();
+    let key = setup_handshake(&mut connector, &["slack.get_channel_history"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "slack.get_channel_history");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "slack.get_channel_history",
+            "input": { "channel": "C_INVALID" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    assert!(
+        matches!(
+            result.unwrap_err(),
+            fcp_core::FcpError::ResourceNotFound { .. }
+        ),
+        "Expected ResourceNotFound"
+    );
 }
 
 // ============================================================================

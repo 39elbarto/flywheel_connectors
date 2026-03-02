@@ -128,11 +128,8 @@ impl PlaidClient {
                 .cloned()
                 .unwrap_or(serde_json::json!([])),
         )?;
-        let item: PlaidItem = serde_json::from_value(
-            data.get("item")
-                .cloned()
-                .unwrap_or(serde_json::json!({})),
-        )?;
+        let item: PlaidItem =
+            serde_json::from_value(data.get("item").cloned().unwrap_or(serde_json::json!({})))?;
         Ok((accounts, item))
     }
 
@@ -204,10 +201,7 @@ impl PlaidClient {
     // ── Auth operations ──────────────────────────────────────────
 
     /// Get account and routing numbers for ACH.
-    pub async fn auth_get(
-        &self,
-        access_token: &str,
-    ) -> PlaidResult<(Vec<Account>, AuthNumbers)> {
+    pub async fn auth_get(&self, access_token: &str) -> PlaidResult<(Vec<Account>, AuthNumbers)> {
         let url = format!("{}/auth/get", self.base_url);
         let body = serde_json::json!({
             "access_token": access_token,
@@ -229,10 +223,7 @@ impl PlaidClient {
     // ── Identity operations ──────────────────────────────────────
 
     /// Get account holder identity information.
-    pub async fn identity_get(
-        &self,
-        access_token: &str,
-    ) -> PlaidResult<Vec<serde_json::Value>> {
+    pub async fn identity_get(&self, access_token: &str) -> PlaidResult<Vec<serde_json::Value>> {
         let url = format!("{}/identity/get", self.base_url);
         let body = serde_json::json!({
             "access_token": access_token,
@@ -318,8 +309,7 @@ impl PlaidClient {
 
                     if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
                         let body = response.text().await.unwrap_or_default();
-                        let api_err: Option<PlaidApiError> =
-                            serde_json::from_str(&body).ok();
+                        let api_err: Option<PlaidApiError> = serde_json::from_str(&body).ok();
                         let message = api_err
                             .as_ref()
                             .and_then(|e| e.error_message.clone())
@@ -369,15 +359,12 @@ impl PlaidClient {
 
                     if !status.is_success() {
                         let body = response.text().await.unwrap_or_default();
-                        let api_err: Option<PlaidApiError> =
-                            serde_json::from_str(&body).ok();
+                        let api_err: Option<PlaidApiError> = serde_json::from_str(&body).ok();
                         let (message, error_type, error_code) = api_err
                             .as_ref()
                             .map(|e| {
                                 (
-                                    e.error_message
-                                        .clone()
-                                        .unwrap_or(format!("HTTP {status}")),
+                                    e.error_message.clone().unwrap_or(format!("HTTP {status}")),
                                     e.error_type.clone(),
                                     e.error_code.clone(),
                                 )
@@ -472,7 +459,10 @@ mod tests {
             .unwrap()
             .with_base_url(&mock_server.uri());
 
-        let result = client.token_exchange("public-sandbox-abc123").await.unwrap();
+        let result = client
+            .token_exchange("public-sandbox-abc123")
+            .await
+            .unwrap();
         assert_eq!(result.access_token, "access-sandbox-abc123");
         assert_eq!(result.item_id, "item-123");
     }
@@ -513,7 +503,10 @@ mod tests {
             .unwrap()
             .with_base_url(&mock_server.uri());
 
-        let (accounts, item) = client.accounts_get("access-sandbox-xxx", None).await.unwrap();
+        let (accounts, item) = client
+            .accounts_get("access-sandbox-xxx", None)
+            .await
+            .unwrap();
         assert_eq!(accounts.len(), 1);
         assert_eq!(accounts[0].account_id, "acc-1");
         assert_eq!(accounts[0].name, "Plaid Checking");
@@ -550,7 +543,10 @@ mod tests {
             .unwrap()
             .with_base_url(&mock_server.uri());
 
-        let accounts = client.accounts_balance_get("access-sandbox-xxx", None).await.unwrap();
+        let accounts = client
+            .accounts_balance_get("access-sandbox-xxx", None)
+            .await
+            .unwrap();
         assert_eq!(accounts.len(), 1);
         assert_eq!(accounts[0].balances.available, Some(200.0));
     }

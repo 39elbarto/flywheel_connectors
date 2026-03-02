@@ -70,14 +70,30 @@ impl QdrantClient {
     }
 
     /// Get collection info.
-    pub async fn collection_info(
-        &self,
-        collection_name: &str,
-    ) -> QdrantResult<CollectionInfo> {
+    pub async fn collection_info(&self, collection_name: &str) -> QdrantResult<CollectionInfo> {
         let url = format!("{}/collections/{collection_name}", self.base_url);
         let data = self.get(&url).await?;
         let result = data.get("result").cloned().unwrap_or(serde_json::json!({}));
         Ok(serde_json::from_value(result)?)
+    }
+
+    /// Create a collection.
+    pub async fn create_collection(
+        &self,
+        collection_name: &str,
+        body: &serde_json::Value,
+    ) -> QdrantResult<serde_json::Value> {
+        let url = format!("{}/collections/{collection_name}", self.base_url);
+        self.put_json(&url, body).await
+    }
+
+    /// Delete a collection.
+    pub async fn delete_collection(
+        &self,
+        collection_name: &str,
+    ) -> QdrantResult<serde_json::Value> {
+        let url = format!("{}/collections/{collection_name}", self.base_url);
+        self.delete(&url).await
     }
 
     // -- Point read operations --
@@ -88,11 +104,56 @@ impl QdrantClient {
         collection_name: &str,
         body: &serde_json::Value,
     ) -> QdrantResult<Vec<serde_json::Value>> {
-        let url = format!("{}/collections/{collection_name}/points/search", self.base_url);
+        let url = format!(
+            "{}/collections/{collection_name}/points/search",
+            self.base_url
+        );
         let data = self.post_json(&url, body).await?;
         let result = data
             .get("result")
             .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        Ok(result)
+    }
+
+    /// Query points using Qdrant query API.
+    pub async fn query_points(
+        &self,
+        collection_name: &str,
+        body: &serde_json::Value,
+    ) -> QdrantResult<Vec<serde_json::Value>> {
+        let url = format!(
+            "{}/collections/{collection_name}/points/query",
+            self.base_url
+        );
+        let data = self.post_json(&url, body).await?;
+        if let Some(result) = data.get("result") {
+            if let Some(array) = result.as_array() {
+                return Ok(array.clone());
+            }
+            if let Some(points) = result.get("points").and_then(|value| value.as_array()) {
+                return Ok(points.clone());
+            }
+        }
+        Ok(Vec::new())
+    }
+
+    /// Batch query points using Qdrant query API.
+    pub async fn batch_query_points(
+        &self,
+        collection_name: &str,
+        queries: &[serde_json::Value],
+    ) -> QdrantResult<Vec<serde_json::Value>> {
+        let url = format!(
+            "{}/collections/{collection_name}/points/query/batch",
+            self.base_url
+        );
+        let body = serde_json::json!({ "searches": queries });
+        let data = self.post_json(&url, &body).await?;
+        let result = data
+            .get("result")
+            .and_then(|value| value.as_array())
             .cloned()
             .unwrap_or_default();
         Ok(result)
@@ -120,7 +181,10 @@ impl QdrantClient {
         collection_name: &str,
         body: &serde_json::Value,
     ) -> QdrantResult<ScrollResult> {
-        let url = format!("{}/collections/{collection_name}/points/scroll", self.base_url);
+        let url = format!(
+            "{}/collections/{collection_name}/points/scroll",
+            self.base_url
+        );
         let data = self.post_json(&url, body).await?;
         let result = data.get("result").cloned().unwrap_or(serde_json::json!({
             "points": [],
@@ -135,9 +199,15 @@ impl QdrantClient {
         collection_name: &str,
         body: &serde_json::Value,
     ) -> QdrantResult<CountResult> {
-        let url = format!("{}/collections/{collection_name}/points/count", self.base_url);
+        let url = format!(
+            "{}/collections/{collection_name}/points/count",
+            self.base_url
+        );
         let data = self.post_json(&url, body).await?;
-        let result = data.get("result").cloned().unwrap_or(serde_json::json!({ "count": 0 }));
+        let result = data
+            .get("result")
+            .cloned()
+            .unwrap_or(serde_json::json!({ "count": 0 }));
         Ok(serde_json::from_value(result)?)
     }
 
@@ -188,6 +258,10 @@ impl QdrantClient {
         body: &serde_json::Value,
     ) -> QdrantResult<serde_json::Value> {
         self.execute(|| self.http.put(url).json(body)).await
+    }
+
+    async fn delete(&self, url: &str) -> QdrantResult<serde_json::Value> {
+        self.execute(|| self.http.delete(url)).await
     }
 
     async fn execute(
@@ -314,8 +388,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = QdrantClient::new("test-key", &mock_server.uri())
-            .unwrap();
+        let client = QdrantClient::new("test-key", &mock_server.uri()).unwrap();
 
         let result = client.list_collections().await.unwrap();
         assert_eq!(result.collections.len(), 2);
@@ -343,13 +416,54 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = QdrantClient::new("test-key", &mock_server.uri())
-            .unwrap();
+        let client = QdrantClient::new("test-key", &mock_server.uri()).unwrap();
 
         let info = client.collection_info("docs").await.unwrap();
         assert_eq!(info.status, "green");
         assert_eq!(info.vectors_count, Some(1000));
         assert_eq!(info.points_count, Some(500));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_create_collection() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("PUT"))
+            .and(path("/collections/docs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "ok",
+                "result": { "status": "acknowledged" },
+                "time": 0.01
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = QdrantClient::new("test-key", &mock_server.uri()).unwrap();
+
+        let body = serde_json::json!({
+            "vectors": { "size": 3, "distance": "Cosine" }
+        });
+        let result = client.create_collection("docs", &body).await.unwrap();
+        assert_eq!(result["status"], "ok");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_delete_collection() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("DELETE"))
+            .and(path("/collections/docs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "ok",
+                "result": { "status": "completed" },
+                "time": 0.01
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = QdrantClient::new("test-key", &mock_server.uri()).unwrap();
+        let result = client.delete_collection("docs").await.unwrap();
+        assert_eq!(result["status"], "ok");
     }
 
     #[fcp_async_core::runtime::test]
@@ -369,8 +483,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = QdrantClient::new("test-key", &mock_server.uri())
-            .unwrap();
+        let client = QdrantClient::new("test-key", &mock_server.uri()).unwrap();
 
         let body = serde_json::json!({
             "vector": [0.1, 0.2, 0.3],
@@ -378,6 +491,88 @@ mod tests {
             "with_payload": true
         });
         let result = client.search("docs", &body).await.unwrap();
+        assert_eq!(result.len(), 2);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_query_points() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/collections/docs/points/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "ok",
+                "result": {
+                    "points": [
+                        { "id": 1, "score": 0.92, "payload": { "text": "hello" } },
+                        { "id": 2, "score": 0.88, "payload": { "text": "world" } }
+                    ]
+                },
+                "time": 0.01
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = QdrantClient::new("test-key", &mock_server.uri()).unwrap();
+        let body = serde_json::json!({
+            "query": [0.1, 0.2, 0.3],
+            "limit": 2,
+            "with_payload": true
+        });
+        let result = client.query_points("docs", &body).await.unwrap();
+        assert_eq!(result.len(), 2);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_query_points_array_result() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/collections/docs/points/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "ok",
+                "result": [
+                    { "id": 11, "score": 0.91 },
+                    { "id": 12, "score": 0.84 }
+                ],
+                "time": 0.01
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = QdrantClient::new("test-key", &mock_server.uri()).unwrap();
+        let body = serde_json::json!({
+            "query": [0.1, 0.2, 0.3],
+            "limit": 2
+        });
+        let result = client.query_points("docs", &body).await.unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0]["id"], 11);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_batch_query_points() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/collections/docs/points/query/batch"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "ok",
+                "result": [
+                    { "points": [{ "id": 1, "score": 0.9 }] },
+                    { "points": [{ "id": 2, "score": 0.8 }] }
+                ],
+                "time": 0.02
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = QdrantClient::new("test-key", &mock_server.uri()).unwrap();
+        let queries = vec![
+            serde_json::json!({ "query": [0.1, 0.2, 0.3], "limit": 1 }),
+            serde_json::json!({ "query": [0.4, 0.5, 0.6], "limit": 1 }),
+        ];
+        let result = client.batch_query_points("docs", &queries).await.unwrap();
         assert_eq!(result.len(), 2);
     }
 
@@ -398,8 +593,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = QdrantClient::new("test-key", &mock_server.uri())
-            .unwrap();
+        let client = QdrantClient::new("test-key", &mock_server.uri()).unwrap();
 
         let body = serde_json::json!({ "ids": [1, 2], "with_payload": true });
         let result = client.get_points("docs", &body).await.unwrap();
@@ -425,8 +619,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = QdrantClient::new("test-key", &mock_server.uri())
-            .unwrap();
+        let client = QdrantClient::new("test-key", &mock_server.uri()).unwrap();
 
         let body = serde_json::json!({ "limit": 1, "with_payload": true });
         let result = client.scroll("docs", &body).await.unwrap();
@@ -448,8 +641,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = QdrantClient::new("test-key", &mock_server.uri())
-            .unwrap();
+        let client = QdrantClient::new("test-key", &mock_server.uri()).unwrap();
 
         let body = serde_json::json!({ "exact": true });
         let result = client.count("docs", &body).await.unwrap();
@@ -470,8 +662,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = QdrantClient::new("test-key", &mock_server.uri())
-            .unwrap();
+        let client = QdrantClient::new("test-key", &mock_server.uri()).unwrap();
 
         let body = serde_json::json!({
             "points": [
@@ -496,8 +687,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = QdrantClient::new("test-key", &mock_server.uri())
-            .unwrap();
+        let client = QdrantClient::new("test-key", &mock_server.uri()).unwrap();
 
         let body = serde_json::json!({ "points": [1, 2, 3] });
         let result = client.delete_points("docs", &body).await.unwrap();
@@ -521,7 +711,13 @@ mod tests {
         let result = client.list_collections().await;
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, QdrantError::Api { status_code: Some(401), .. }));
+        assert!(matches!(
+            err,
+            QdrantError::Api {
+                status_code: Some(401),
+                ..
+            }
+        ));
     }
 
     #[fcp_async_core::runtime::test]
@@ -545,7 +741,13 @@ mod tests {
         let result = client.collection_info("missing").await;
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, QdrantError::Api { status_code: Some(404), .. }));
+        assert!(matches!(
+            err,
+            QdrantError::Api {
+                status_code: Some(404),
+                ..
+            }
+        ));
     }
 
     #[fcp_async_core::runtime::test]
@@ -565,6 +767,22 @@ mod tests {
         let result = client.list_collections().await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), QdrantError::RateLimit { .. }));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invalid_json_response() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/collections"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not-json"))
+            .mount(&mock_server)
+            .await;
+
+        let client = QdrantClient::new("test-key", &mock_server.uri()).unwrap();
+        let result = client.list_collections().await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), QdrantError::Serialization(_)));
     }
 
     #[test]

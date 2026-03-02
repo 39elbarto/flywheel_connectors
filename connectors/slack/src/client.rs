@@ -10,8 +10,8 @@ use tracing::{debug, instrument, warn};
 use crate::{
     error::{SlackError, SlackResult},
     types::{
-        ChannelListData, FileUploadData, HistoryData, Message, PostMessageData, SearchData,
-        SlackApiResponse, TopicSetData, UserInfoData,
+        AuthTestData, AuthTestInfo, ChannelListData, FileUploadData, HistoryData, Message,
+        PostMessageData, SearchData, SlackApiResponse, TopicSetData, UserInfoData,
     },
 };
 
@@ -77,6 +77,63 @@ impl SlackClient {
         self.total_requests.load(Ordering::Relaxed)
     }
 
+    // ── Provisioning / Doctor ────────────────────────────────────
+
+    /// Call `auth.test` to validate the token and return identity info.
+    ///
+    /// Also extracts the granted OAuth scopes from the `x-oauth-scopes`
+    /// response header when available.
+    #[instrument(skip(self))]
+    pub async fn auth_test(&self) -> SlackResult<(AuthTestInfo, Vec<String>)> {
+        let url = format!("{}/auth.test", self.base_url);
+        self.total_requests.fetch_add(1, Ordering::Relaxed);
+
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(SlackError::Http)?;
+
+        // Extract scopes from response header before consuming the body.
+        let scopes: Vec<String> = resp
+            .headers()
+            .get("x-oauth-scopes")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.split(',').map(|scope| scope.trim().to_string()).collect())
+            .unwrap_or_default();
+
+        let api_resp: SlackApiResponse<AuthTestData> =
+            resp.json().await.map_err(SlackError::Http)?;
+        Self::check_response(&api_resp)?;
+
+        let data = api_resp.data.expect("ok response has data");
+        let info = AuthTestInfo {
+            url: data.url,
+            team: data.team,
+            user: data.user,
+            team_id: data.team_id,
+            user_id: data.user_id,
+            bot_id: data.bot_id,
+            is_enterprise_install: data.is_enterprise_install,
+        };
+
+        Ok((info, scopes))
+    }
+
+    /// Check that all required scopes are present in the granted set.
+    ///
+    /// Returns the list of missing scopes (empty if all present).
+    #[must_use]
+    pub fn validate_scopes(granted: &[String], required: &[&str]) -> Vec<String> {
+        required
+            .iter()
+            .filter(|req| !granted.iter().any(|g| g == **req))
+            .map(|s| (*s).to_string())
+            .collect()
+    }
+
     // ── Message operations ───────────────────────────────────────
 
     /// Post a message to a channel.
@@ -113,8 +170,9 @@ impl SlackClient {
             params.push(("limit", limit.to_string()));
         }
 
-        let resp: SlackApiResponse<HistoryData> =
-            self.get_with_params("conversations.history", &params).await?;
+        let resp: SlackApiResponse<HistoryData> = self
+            .get_with_params("conversations.history", &params)
+            .await?;
         Self::check_response(&resp)?;
         Ok(resp.data.expect("ok response has data").messages)
     }
@@ -133,7 +191,10 @@ impl SlackClient {
 
     /// List channels in the workspace.
     #[instrument(skip(self))]
-    pub async fn list_channels(&self, types: Option<&str>) -> SlackResult<Vec<crate::types::Channel>> {
+    pub async fn list_channels(
+        &self,
+        types: Option<&str>,
+    ) -> SlackResult<Vec<crate::types::Channel>> {
         let mut params: Vec<(&str, String)> = vec![];
         if let Some(types) = types {
             params.push(("types", types.to_string()));
@@ -147,11 +208,7 @@ impl SlackClient {
 
     /// Set the topic for a channel.
     #[instrument(skip(self))]
-    pub async fn set_channel_topic(
-        &self,
-        channel: &str,
-        topic: &str,
-    ) -> SlackResult<String> {
+    pub async fn set_channel_topic(&self, channel: &str, topic: &str) -> SlackResult<String> {
         let body = serde_json::json!({
             "channel": channel,
             "topic": topic,
@@ -189,8 +246,7 @@ impl SlackClient {
             "content": content,
             "filename": filename.unwrap_or("upload.txt"),
         });
-        let resp: SlackApiResponse<FileUploadData> =
-            self.post_json("files.upload", &body).await?;
+        let resp: SlackApiResponse<FileUploadData> = self.post_json("files.upload", &body).await?;
         Self::check_response(&resp)?;
         Ok(resp.data.expect("ok response has data").file)
     }
@@ -240,7 +296,10 @@ impl SlackClient {
                 if i > 0 {
                     url.push('&');
                 }
-                let encoded = percent_encoding::utf8_percent_encode(value, percent_encoding::NON_ALPHANUMERIC);
+                let encoded = percent_encoding::utf8_percent_encode(
+                    value,
+                    percent_encoding::NON_ALPHANUMERIC,
+                );
                 let _ = write!(url, "{key}={encoded}");
             }
         }
@@ -251,12 +310,7 @@ impl SlackClient {
 
         loop {
             attempt += 1;
-            let response = self
-                .client
-                .get(&url)
-                .bearer_auth(&self.token)
-                .send()
-                .await;
+            let response = self.client.get(&url).bearer_auth(&self.token).send().await;
 
             match response {
                 Ok(resp) => {
@@ -268,8 +322,7 @@ impl SlackClient {
                             continue;
                         }
                         return Err(SlackError::RateLimited {
-                            retry_after_secs: retry_result
-                                .map_or(60, |d| d.as_secs()),
+                            retry_after_secs: retry_result.map_or(60, |d| d.as_secs()),
                         });
                     }
                     return resp.json::<T>().await.map_err(Into::into);
@@ -315,8 +368,7 @@ impl SlackClient {
                             continue;
                         }
                         return Err(SlackError::RateLimited {
-                            retry_after_secs: retry_result
-                                .map_or(60, |d| d.as_secs()),
+                            retry_after_secs: retry_result.map_or(60, |d| d.as_secs()),
                         });
                     }
                     return resp.json::<T>().await.map_err(Into::into);

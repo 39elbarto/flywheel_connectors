@@ -11,7 +11,11 @@ use fcp_core::{
 use serde_json::json;
 use tracing::{info, instrument};
 
-use crate::{client::SlackClient, error::SlackError};
+use crate::{
+    client::SlackClient,
+    error::SlackError,
+    types::{DoctorCheck, DoctorReport, OperationReceipt},
+};
 
 /// FCP Slack Connector.
 pub struct SlackConnector {
@@ -514,10 +518,7 @@ impl SlackConnector {
 
     // ── Operation implementations ─────────────────────────────────
 
-    async fn invoke_post_message(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_post_message(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let channel = require_str(&input, "channel")?;
         let text = require_str(&input, "text")?;
@@ -528,13 +529,17 @@ impl SlackConnector {
             .await
             .map_err(|e: SlackError| e.to_fcp_error())?;
 
-        Ok(json!({ "message": message }))
+        let receipt = OperationReceipt {
+            operation: "slack.post_message".into(),
+            effect: "message_created".into(),
+            resource: format!("channel:{channel}"),
+            timestamp: message.ts.clone(),
+        };
+
+        Ok(json!({ "message": message, "receipt": receipt }))
     }
 
-    async fn invoke_reply_thread(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_reply_thread(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let channel = require_str(&input, "channel")?;
         let text = require_str(&input, "text")?;
@@ -545,7 +550,14 @@ impl SlackConnector {
             .await
             .map_err(|e: SlackError| e.to_fcp_error())?;
 
-        Ok(json!({ "message": message }))
+        let receipt = OperationReceipt {
+            operation: "slack.reply_thread".into(),
+            effect: "thread_reply_created".into(),
+            resource: format!("channel:{channel}:thread:{thread_ts}"),
+            timestamp: message.ts.clone(),
+        };
+
+        Ok(json!({ "message": message, "receipt": receipt }))
     }
 
     async fn invoke_get_channel_history(
@@ -586,10 +598,7 @@ impl SlackConnector {
         }))
     }
 
-    async fn invoke_list_channels(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_list_channels(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let types = input.get("types").and_then(|v| v.as_str());
 
@@ -601,10 +610,7 @@ impl SlackConnector {
         Ok(json!({ "channels": channels }))
     }
 
-    async fn invoke_get_user_info(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_get_user_info(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let user = require_str(&input, "user")?;
 
@@ -616,10 +622,7 @@ impl SlackConnector {
         Ok(json!({ "user": user_info }))
     }
 
-    async fn invoke_upload_file(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_upload_file(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let channels = require_str(&input, "channels")?;
         let content = require_str(&input, "content")?;
@@ -630,13 +633,17 @@ impl SlackConnector {
             .await
             .map_err(|e: SlackError| e.to_fcp_error())?;
 
-        Ok(json!({ "file": file }))
+        let receipt = OperationReceipt {
+            operation: "slack.upload_file".into(),
+            effect: "file_uploaded".into(),
+            resource: format!("file:{id}", id = file.id),
+            timestamp: String::new(),
+        };
+
+        Ok(json!({ "file": file, "receipt": receipt }))
     }
 
-    async fn invoke_download_file(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_download_file(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let file_id = require_str(&input, "file_id")?;
 
@@ -648,10 +655,7 @@ impl SlackConnector {
         Ok(json!({ "file": file }))
     }
 
-    async fn invoke_add_reaction(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_add_reaction(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let channel = require_str(&input, "channel")?;
         let timestamp = require_str(&input, "timestamp")?;
@@ -662,7 +666,14 @@ impl SlackConnector {
             .await
             .map_err(|e: SlackError| e.to_fcp_error())?;
 
-        Ok(json!({ "ok": true }))
+        let receipt = OperationReceipt {
+            operation: "slack.add_reaction".into(),
+            effect: "reaction_added".into(),
+            resource: format!("channel:{channel}:message:{timestamp}"),
+            timestamp: timestamp.to_string(),
+        };
+
+        Ok(json!({ "ok": true, "receipt": receipt }))
     }
 
     async fn invoke_set_channel_topic(
@@ -678,7 +689,130 @@ impl SlackConnector {
             .await
             .map_err(|e: SlackError| e.to_fcp_error())?;
 
-        Ok(json!({ "topic": result }))
+        let receipt = OperationReceipt {
+            operation: "slack.set_channel_topic".into(),
+            effect: "topic_updated".into(),
+            resource: format!("channel:{channel}"),
+            timestamp: String::new(),
+        };
+
+        Ok(json!({ "topic": result, "receipt": receipt }))
+    }
+
+    /// Required OAuth scopes for core connector functionality.
+    ///
+    /// Read scopes allow channel/user/message listing.
+    /// Write scopes allow posting messages and reactions.
+    const REQUIRED_SCOPES: &'static [&'static str] = &[
+        "channels:read",
+        "channels:history",
+        "chat:write",
+        "users:read",
+    ];
+
+    /// Handle doctor readiness check.
+    ///
+    /// Validates:
+    /// 1. Token is present (client configured)
+    /// 2. Token is valid (auth.test succeeds)
+    /// 3. Required OAuth scopes are granted
+    ///
+    /// # Errors
+    /// Returns [`FcpError`] if serialization of the doctor report fails.
+    #[instrument(skip(self))]
+    pub async fn handle_doctor(&self) -> FcpResult<serde_json::Value> {
+        let mut checks = Vec::new();
+
+        // Check 1: Client configured (token present)
+        let client_present = self.client.is_some();
+        checks.push(DoctorCheck {
+            name: "token_present".into(),
+            passed: client_present,
+            message: if client_present {
+                "Bot token is configured".into()
+            } else {
+                "No token configured — call configure with a valid bot token".into()
+            },
+        });
+
+        // If no client, remaining checks cannot proceed.
+        if !client_present {
+            let report = DoctorReport {
+                ready: false,
+                checks,
+            };
+            return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize doctor report: {e}"),
+            });
+        }
+
+        let client = self.client.as_ref().expect("checked above");
+
+        // Check 2: Token validity via auth.test (also proves network reachability)
+        match client.auth_test().await {
+            Ok((auth_info, scopes)) => {
+                checks.push(DoctorCheck {
+                    name: "token_valid".into(),
+                    passed: true,
+                    message: format!(
+                        "Token valid — team: {} ({}), user: {} ({})",
+                        auth_info.team, auth_info.team_id, auth_info.user, auth_info.user_id
+                    ),
+                });
+
+                // Check 3: Required scopes
+                let missing = SlackClient::validate_scopes(&scopes, Self::REQUIRED_SCOPES);
+                if missing.is_empty() {
+                    checks.push(DoctorCheck {
+                        name: "scopes_valid".into(),
+                        passed: true,
+                        message: format!("All required scopes granted ({})", scopes.join(", ")),
+                    });
+                } else {
+                    checks.push(DoctorCheck {
+                        name: "scopes_valid".into(),
+                        passed: false,
+                        message: format!(
+                            "Missing required scopes: {}. Granted: {}",
+                            missing.join(", "),
+                            scopes.join(", ")
+                        ),
+                    });
+                }
+            }
+            Err(e) => {
+                let is_auth = matches!(
+                    &e,
+                    SlackError::Api { error, .. }
+                        if error == "not_authed" || error == "invalid_auth" || error == "token_revoked"
+                );
+                checks.push(DoctorCheck {
+                    name: "token_valid".into(),
+                    passed: false,
+                    message: if is_auth {
+                        format!("Token invalid or revoked: {e}")
+                    } else {
+                        format!("auth.test failed (network or server issue): {e}")
+                    },
+                });
+                // Skip scope check since auth failed
+                checks.push(DoctorCheck {
+                    name: "scopes_valid".into(),
+                    passed: false,
+                    message: "Cannot validate scopes — auth.test failed".into(),
+                });
+            }
+        }
+
+        let all_passed = checks.iter().all(|c| c.passed);
+        let report = DoctorReport {
+            ready: all_passed,
+            checks,
+        };
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize doctor report: {e}"),
+        })
     }
 
     /// Handle shutdown.
@@ -746,6 +880,8 @@ mod tests {
     use chrono::{Duration, Utc};
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> CapabilityToken {
         let now = Utc::now();
@@ -878,5 +1014,162 @@ mod tests {
         assert!(op_ids.contains(&"slack.add_reaction"));
         assert!(op_ids.contains(&"slack.set_channel_topic"));
         assert_eq!(ops.len(), 10);
+    }
+
+    // ── Doctor / Provisioning tests ──────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_not_configured() {
+        let connector = SlackConnector::new();
+        let result = connector.handle_doctor().await.unwrap();
+
+        assert!(!result["ready"].as_bool().unwrap());
+        let checks = result["checks"].as_array().unwrap();
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0]["name"], "token_present");
+        assert!(!checks[0]["passed"].as_bool().unwrap());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_valid_token_all_scopes() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/auth.test"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header(
+                        "x-oauth-scopes",
+                        "channels:read,channels:history,chat:write,users:read,reactions:write",
+                    )
+                    .set_body_json(json!({
+                        "ok": true,
+                        "url": "https://test-workspace.slack.com/",
+                        "team": "Test Workspace",
+                        "user": "testbot",
+                        "team_id": "T00000001",
+                        "user_id": "U00000001",
+                        "bot_id": "B00000001",
+                        "is_enterprise_install": false
+                    })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let mut connector = SlackConnector::new();
+        connector.client = Some(
+            SlackClient::new("xoxb-test-token")
+                .unwrap()
+                .with_base_url(mock_server.uri()),
+        );
+
+        let result = connector.handle_doctor().await.unwrap();
+
+        assert!(result["ready"].as_bool().unwrap());
+        let checks = result["checks"].as_array().unwrap();
+        assert_eq!(checks.len(), 3);
+
+        // All checks should pass
+        for check in checks {
+            assert!(
+                check["passed"].as_bool().unwrap(),
+                "Check {} failed: {}",
+                check["name"],
+                check["message"]
+            );
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_missing_scopes() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/auth.test"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("x-oauth-scopes", "channels:read")
+                    .set_body_json(json!({
+                        "ok": true,
+                        "url": "https://test.slack.com/",
+                        "team": "Test",
+                        "user": "bot",
+                        "team_id": "T1",
+                        "user_id": "U1"
+                    })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let mut connector = SlackConnector::new();
+        connector.client = Some(
+            SlackClient::new("xoxb-test")
+                .unwrap()
+                .with_base_url(mock_server.uri()),
+        );
+
+        let result = connector.handle_doctor().await.unwrap();
+
+        assert!(!result["ready"].as_bool().unwrap());
+        let checks = result["checks"].as_array().unwrap();
+
+        let scope_check = checks.iter().find(|c| c["name"] == "scopes_valid").unwrap();
+        assert!(!scope_check["passed"].as_bool().unwrap());
+        let msg = scope_check["message"].as_str().unwrap();
+        assert!(msg.contains("channels:history"));
+        assert!(msg.contains("chat:write"));
+        assert!(msg.contains("users:read"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_invalid_token() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/auth.test"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "ok": false,
+                "error": "invalid_auth"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let mut connector = SlackConnector::new();
+        connector.client = Some(
+            SlackClient::new("xoxb-bad-token")
+                .unwrap()
+                .with_base_url(mock_server.uri()),
+        );
+
+        let result = connector.handle_doctor().await.unwrap();
+
+        assert!(!result["ready"].as_bool().unwrap());
+        let checks = result["checks"].as_array().unwrap();
+
+        let token_check = checks.iter().find(|c| c["name"] == "token_valid").unwrap();
+        assert!(!token_check["passed"].as_bool().unwrap());
+        assert!(token_check["message"].as_str().unwrap().contains("invalid"));
+    }
+
+    #[test]
+    fn test_validate_scopes_all_present() {
+        let granted: Vec<String> = vec![
+            "channels:read".into(),
+            "channels:history".into(),
+            "chat:write".into(),
+            "users:read".into(),
+        ];
+        let missing = SlackClient::validate_scopes(&granted, &["channels:read", "chat:write"]);
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn test_validate_scopes_some_missing() {
+        let granted: Vec<String> = vec!["channels:read".into()];
+        let missing =
+            SlackClient::validate_scopes(&granted, &["channels:read", "chat:write", "users:read"]);
+        assert_eq!(missing.len(), 2);
+        assert!(missing.contains(&"chat:write".to_string()));
+        assert!(missing.contains(&"users:read".to_string()));
     }
 }

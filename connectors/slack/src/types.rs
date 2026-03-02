@@ -192,3 +192,55 @@ pub struct ResponseMetadata {
     #[serde(default)]
     pub next_cursor: Option<String>,
 }
+
+/// Result of Slack `auth.test` — identifies the token holder.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthTestInfo {
+    pub url: String,
+    pub team: String,
+    pub user: String,
+    pub team_id: String,
+    pub user_id: String,
+    #[serde(default)]
+    pub bot_id: Option<String>,
+    #[serde(default)]
+    pub is_enterprise_install: bool,
+}
+
+/// auth.test response wrapper.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuthTestData {
+    pub url: String,
+    pub team: String,
+    pub user: String,
+    pub team_id: String,
+    pub user_id: String,
+    #[serde(default)]
+    pub bot_id: Option<String>,
+    #[serde(default)]
+    pub is_enterprise_install: bool,
+}
+
+/// Audit receipt for side-effecting operations.
+#[derive(Debug, Clone, Serialize)]
+pub struct OperationReceipt {
+    pub operation: String,
+    pub effect: String,
+    pub resource: String,
+    pub timestamp: String,
+}
+
+/// Provisioning doctor report for readiness validation.
+#[derive(Debug, Clone, Serialize)]
+pub struct DoctorReport {
+    pub ready: bool,
+    pub checks: Vec<DoctorCheck>,
+}
+
+/// A single doctor check result.
+#[derive(Debug, Clone, Serialize)]
+pub struct DoctorCheck {
+    pub name: String,
+    pub passed: bool,
+    pub message: String,
+}

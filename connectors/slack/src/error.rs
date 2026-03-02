@@ -62,9 +62,7 @@ impl SlackError {
     #[must_use]
     pub const fn retry_after(&self) -> Option<Duration> {
         match self {
-            Self::RateLimited { retry_after_secs } => {
-                Some(Duration::from_secs(*retry_after_secs))
-            }
+            Self::RateLimited { retry_after_secs } => Some(Duration::from_secs(*retry_after_secs)),
             _ => None,
         }
     }
@@ -90,6 +88,16 @@ impl SlackError {
                     FcpError::RateLimited {
                         retry_after_ms: 60_000,
                         violation: None,
+                    }
+                } else if error == "missing_scope"
+                    || error == "not_in_channel"
+                    || error == "restricted_action"
+                    || error == "ekm_access_denied"
+                    || error == "access_denied"
+                {
+                    FcpError::CapabilityDenied {
+                        capability: "slack".into(),
+                        reason: format!("Slack permission error: {error}"),
                     }
                 } else if error == "channel_not_found" {
                     FcpError::ResourceNotFound {

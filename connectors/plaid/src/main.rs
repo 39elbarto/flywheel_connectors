@@ -75,12 +75,16 @@ async fn handle_message(connector: &mut PlaidConnector, message: &str) -> serde_
 
     let method = request.get("method").and_then(|v| v.as_str()).unwrap_or("");
     let id = request.get("id").cloned();
-    let params = request.get("params").cloned().unwrap_or(serde_json::json!({}));
+    let params = request
+        .get("params")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
 
     let result = match method {
         "configure" => connector.handle_configure(params).await,
         "handshake" => connector.handle_handshake(params).await,
         "health" => connector.handle_health().await,
+        "doctor" => connector.handle_doctor().await,
         "introspect" => connector.handle_introspect().await,
         "invoke" => connector.handle_invoke(params).await,
         "simulate" => connector.handle_simulate(params).await,
@@ -94,12 +98,16 @@ async fn handle_message(connector: &mut PlaidConnector, message: &str) -> serde_
     match result {
         Ok(value) => {
             let mut response = serde_json::json!({ "jsonrpc": "2.0", "result": value });
-            if let Some(id) = id { response["id"] = id; }
+            if let Some(id) = id {
+                response["id"] = id;
+            }
             response
         }
         Err(e) => {
             let mut response = serde_json::json!({ "jsonrpc": "2.0", "error": e.to_response() });
-            if let Some(id) = id { response["id"] = id; }
+            if let Some(id) = id {
+                response["id"] = id;
+            }
             response
         }
     }

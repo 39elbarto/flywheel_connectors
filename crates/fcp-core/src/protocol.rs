@@ -2645,4 +2645,625 @@ mod tests {
         assert_eq!(deserialized.rate_limit_reset_at, Some(1_700_000_000));
         assert_eq!(deserialized.details, Some("Healthy".into()));
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // UsageMetricKind tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn usage_metric_kind_as_str_all_variants() {
+        assert_eq!(UsageMetricKind::ApiCredits.as_str(), "api_credits");
+        assert_eq!(UsageMetricKind::Tokens.as_str(), "tokens");
+        assert_eq!(UsageMetricKind::Bytes.as_str(), "bytes");
+        assert_eq!(UsageMetricKind::DurationMs.as_str(), "duration_ms");
+        assert_eq!(UsageMetricKind::Requests.as_str(), "requests");
+        assert_eq!(UsageMetricKind::Custom.as_str(), "custom");
+    }
+
+    #[test]
+    fn usage_metric_kind_serde_roundtrip_all() {
+        for kind in [
+            UsageMetricKind::ApiCredits,
+            UsageMetricKind::Tokens,
+            UsageMetricKind::Bytes,
+            UsageMetricKind::DurationMs,
+            UsageMetricKind::Requests,
+            UsageMetricKind::Custom,
+        ] {
+            let json = serde_json::to_string(&kind).unwrap();
+            let back: UsageMetricKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, kind);
+        }
+    }
+
+    #[test]
+    fn usage_metric_kind_copy_clone() {
+        let a = UsageMetricKind::Tokens;
+        let b = a; // Copy
+        let c = a.clone();
+        assert_eq!(a, b);
+        assert_eq!(a, c);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // UsageMetric factory methods
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn usage_metric_api_credits() {
+        let m = UsageMetric::api_credits(500);
+        assert!(matches!(m.kind, UsageMetricKind::ApiCredits));
+        assert_eq!(m.amount, 500);
+        assert!(m.unit.is_none());
+        assert!(m.custom_id.is_none());
+    }
+
+    #[test]
+    fn usage_metric_tokens() {
+        let m = UsageMetric::tokens(1200);
+        assert!(matches!(m.kind, UsageMetricKind::Tokens));
+        assert_eq!(m.amount, 1200);
+    }
+
+    #[test]
+    fn usage_metric_bytes_factory() {
+        let m = UsageMetric::bytes(4096);
+        assert!(matches!(m.kind, UsageMetricKind::Bytes));
+        assert_eq!(m.amount, 4096);
+    }
+
+    #[test]
+    fn usage_metric_duration_ms() {
+        let m = UsageMetric::duration_ms(75);
+        assert!(matches!(m.kind, UsageMetricKind::DurationMs));
+        assert_eq!(m.amount, 75);
+    }
+
+    #[test]
+    fn usage_metric_requests() {
+        let m = UsageMetric::requests(10);
+        assert!(matches!(m.kind, UsageMetricKind::Requests));
+        assert_eq!(m.amount, 10);
+    }
+
+    #[test]
+    fn usage_metric_custom() {
+        let m = UsageMetric::custom("gpu_seconds", 42, Some("seconds".into()));
+        assert!(matches!(m.kind, UsageMetricKind::Custom));
+        assert_eq!(m.amount, 42);
+        assert_eq!(m.custom_id, Some("gpu_seconds".into()));
+        assert_eq!(m.unit, Some("seconds".into()));
+    }
+
+    #[test]
+    fn usage_metric_with_unit() {
+        let m = UsageMetric::tokens(100).with_unit("input_tokens");
+        assert_eq!(m.unit, Some("input_tokens".into()));
+        assert_eq!(m.amount, 100);
+    }
+
+    #[test]
+    fn usage_metric_serde_roundtrip() {
+        let m = UsageMetric::custom("widgets", 99, Some("count".into()));
+        let json = serde_json::to_string(&m).unwrap();
+        let back: UsageMetric = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back.kind, UsageMetricKind::Custom));
+        assert_eq!(back.amount, 99);
+        assert_eq!(back.custom_id, Some("widgets".into()));
+        assert_eq!(back.unit, Some("count".into()));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // InvokeValidationError all variants
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn invoke_validation_error_holder_proof_required() {
+        let err = InvokeValidationError::HolderProofRequired;
+        let msg = err.to_string();
+        assert!(msg.contains("holder_proof required"));
+    }
+
+    #[test]
+    fn invoke_validation_error_holder_proof_invalid() {
+        let err = InvokeValidationError::HolderProofInvalid;
+        assert!(err.to_string().contains("signature verification failed"));
+    }
+
+    #[test]
+    fn invoke_validation_error_holder_node_mismatch() {
+        let err = InvokeValidationError::HolderNodeMismatch {
+            proof_node: "node-A".into(),
+            token_node: "node-B".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("node-A"));
+        assert!(msg.contains("node-B"));
+    }
+
+    #[test]
+    fn invoke_validation_error_idempotency_key_required() {
+        let err = InvokeValidationError::IdempotencyKeyRequired {
+            safety_tier: SafetyTier::Dangerous,
+        };
+        assert!(err.to_string().contains("idempotency_key required"));
+    }
+
+    #[test]
+    fn invoke_validation_error_lease_seq_required() {
+        let err = InvokeValidationError::LeaseSeqRequired;
+        assert!(err.to_string().contains("lease_seq required"));
+    }
+
+    #[test]
+    fn invoke_validation_error_lease_seq_stale() {
+        let err = InvokeValidationError::LeaseSeqStale {
+            provided: 5,
+            current: 10,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("5"));
+        assert!(msg.contains("10"));
+    }
+
+    #[test]
+    fn invoke_validation_error_clone() {
+        let err = InvokeValidationError::HolderProofRequired;
+        let cloned = err.clone();
+        assert_eq!(err.to_string(), cloned.to_string());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // InvokeStatus trait coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn invoke_status_serde_roundtrip() {
+        for status in [InvokeStatus::Ok, InvokeStatus::Error] {
+            let json = serde_json::to_string(&status).unwrap();
+            let back: InvokeStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, status);
+        }
+    }
+
+    #[test]
+    fn invoke_status_copy_clone() {
+        let a = InvokeStatus::Ok;
+        let b = a; // Copy
+        let c = a.clone();
+        assert_eq!(a, b);
+        assert_eq!(a, c);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // InvokeContext trait coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn invoke_context_default() {
+        let ctx = InvokeContext::default();
+        assert!(ctx.locale.is_none());
+        assert!(ctx.pagination.is_none());
+        assert!(ctx.trace_id.is_none());
+        assert!(ctx.request_tags.is_empty());
+    }
+
+    #[test]
+    fn invoke_context_clone() {
+        let ctx = InvokeContext {
+            locale: Some("ja-JP".into()),
+            pagination: Some(serde_json::json!({"page": 2})),
+            trace_id: Some("trace-abc".into()),
+            request_tags: [("env".into(), "prod".into())].into_iter().collect(),
+        };
+        let cloned = ctx.clone();
+        assert_eq!(cloned.locale, Some("ja-JP".into()));
+        assert_eq!(cloned.request_tags.get("env"), Some(&"prod".into()));
+    }
+
+    #[test]
+    fn invoke_context_serde_roundtrip() {
+        let ctx = InvokeContext {
+            locale: Some("de-DE".into()),
+            pagination: None,
+            trace_id: Some("trace-xyz".into()),
+            request_tags: HashMap::new(),
+        };
+        let json = serde_json::to_string(&ctx).unwrap();
+        let back: InvokeContext = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.locale, Some("de-DE".into()));
+        assert_eq!(back.trace_id, Some("trace-xyz".into()));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ResponseMetadata trait coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn response_metadata_default() {
+        let meta = ResponseMetadata::default();
+        assert!(meta.processing_time_ms.is_none());
+        assert!(meta.cache_ttl_secs.is_none());
+        assert!(!meta.from_cache);
+        assert!(meta.retry_after_secs.is_none());
+    }
+
+    #[test]
+    fn response_metadata_clone() {
+        let meta = ResponseMetadata {
+            processing_time_ms: Some(42),
+            cache_ttl_secs: Some(300),
+            from_cache: true,
+            retry_after_secs: Some(60),
+        };
+        let cloned = meta.clone();
+        assert_eq!(cloned.processing_time_ms, Some(42));
+        assert!(cloned.from_cache);
+        assert_eq!(cloned.retry_after_secs, Some(60));
+    }
+
+    #[test]
+    fn response_metadata_serde_roundtrip() {
+        let meta = ResponseMetadata {
+            processing_time_ms: Some(100),
+            cache_ttl_secs: None,
+            from_cache: false,
+            retry_after_secs: Some(30),
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        let back: ResponseMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.processing_time_ms, Some(100));
+        assert_eq!(back.retry_after_secs, Some(30));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // AuthCaps / OAuthConfig / AgentHint / EventInfo / ResourceTypeInfo
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn auth_caps_clone_and_serde() {
+        let caps = AuthCaps {
+            methods: vec!["oauth2".into(), "api_key".into()],
+            oauth: Some(OAuthConfig {
+                authorize_url: "https://auth.example.com/authorize".into(),
+                token_url: "https://auth.example.com/token".into(),
+                scopes: vec!["read".into(), "write".into()],
+            }),
+        };
+        let cloned = caps.clone();
+        assert_eq!(cloned.methods.len(), 2);
+        assert!(cloned.oauth.is_some());
+
+        let json = serde_json::to_string(&caps).unwrap();
+        let back: AuthCaps = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.methods, vec!["oauth2", "api_key"]);
+        let oauth = back.oauth.unwrap();
+        assert_eq!(oauth.scopes.len(), 2);
+    }
+
+    #[test]
+    fn oauth_config_clone_and_serde() {
+        let cfg = OAuthConfig {
+            authorize_url: "https://a.test/auth".into(),
+            token_url: "https://a.test/token".into(),
+            scopes: vec!["admin".into()],
+        };
+        let cloned = cfg.clone();
+        assert_eq!(cloned.authorize_url, "https://a.test/auth");
+
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: OAuthConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.token_url, "https://a.test/token");
+        assert_eq!(back.scopes, vec!["admin"]);
+    }
+
+    #[test]
+    fn agent_hint_default_and_serde() {
+        let hint = AgentHint::default();
+        assert!(hint.when_to_use.is_empty());
+        assert!(hint.common_mistakes.is_empty());
+        assert!(hint.examples.is_empty());
+        assert!(hint.related.is_empty());
+
+        let json = serde_json::to_string(&hint).unwrap();
+        let back: AgentHint = serde_json::from_str(&json).unwrap();
+        assert!(back.when_to_use.is_empty());
+    }
+
+    #[test]
+    fn event_info_clone_and_serde() {
+        let info = EventInfo {
+            topic: "messages.new".into(),
+            schema: serde_json::json!({"type": "object"}),
+            requires_ack: true,
+        };
+        let cloned = info.clone();
+        assert_eq!(cloned.topic, "messages.new");
+        assert!(cloned.requires_ack);
+
+        let json = serde_json::to_string(&info).unwrap();
+        let back: EventInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.topic, "messages.new");
+    }
+
+    #[test]
+    fn resource_type_info_clone_and_serde() {
+        let info = ResourceTypeInfo {
+            name: "Email".into(),
+            uri_pattern: "fcp://fcp.gmail/message/{id}".into(),
+            schema: serde_json::json!({"type": "object"}),
+        };
+        let cloned = info.clone();
+        assert_eq!(cloned.name, "Email");
+
+        let json = serde_json::to_string(&info).unwrap();
+        let back: ResourceTypeInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.uri_pattern, "fcp://fcp.gmail/message/{id}");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ProvisioningSessionId
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn provisioning_session_id_new_and_display() {
+        let id = ProvisioningSessionId::new("prov-123");
+        assert_eq!(id.as_str(), "prov-123");
+        assert_eq!(id.to_string(), "prov-123");
+    }
+
+    #[test]
+    fn provisioning_session_id_random_unique() {
+        let a = ProvisioningSessionId::random();
+        let b = ProvisioningSessionId::random();
+        assert_ne!(a.as_str(), b.as_str());
+        assert!(a.as_str().starts_with("prov_"));
+    }
+
+    #[test]
+    fn provisioning_session_id_serde_roundtrip() {
+        let id = ProvisioningSessionId::new("my-session");
+        let json = serde_json::to_string(&id).unwrap();
+        let back: ProvisioningSessionId = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.as_str(), "my-session");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Provisioning payloads (zero-test types)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn provisioning_start_input_serde() {
+        let input = ProvisioningStartInput {
+            recipe_id: Some(RecipeId::new("default-recipe")),
+            config: Some(serde_json::json!({"mode": "fast"})),
+        };
+        let json = serde_json::to_string(&input).unwrap();
+        let back: ProvisioningStartInput = serde_json::from_str(&json).unwrap();
+        assert!(back.recipe_id.is_some());
+        assert!(back.config.is_some());
+    }
+
+    #[test]
+    fn provisioning_poll_input_serde() {
+        let input = ProvisioningPollInput {
+            session_id: Some(ProvisioningSessionId::new("sess-1")),
+        };
+        let json = serde_json::to_string(&input).unwrap();
+        let back: ProvisioningPollInput = serde_json::from_str(&json).unwrap();
+        assert!(back.session_id.is_some());
+    }
+
+    #[test]
+    fn provisioning_input_serde() {
+        let input = ProvisioningInput {
+            step_id: StepId::new("step-oauth"),
+            value: serde_json::json!({"token": "abc123"}),
+        };
+        let json = serde_json::to_string(&input).unwrap();
+        let back: ProvisioningInput = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.step_id.as_str(), "step-oauth");
+    }
+
+    #[test]
+    fn provisioning_complete_input_serde() {
+        let input = ProvisioningCompleteInput {
+            session_id: Some(ProvisioningSessionId::new("sess-2")),
+            inputs: vec![ProvisioningInput {
+                step_id: StepId::new("step-1"),
+                value: serde_json::json!("done"),
+            }],
+        };
+        let json = serde_json::to_string(&input).unwrap();
+        let back: ProvisioningCompleteInput = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.inputs.len(), 1);
+    }
+
+    #[test]
+    fn provisioning_abort_input_serde() {
+        let input = ProvisioningAbortInput {
+            session_id: None,
+            reason: Some("User cancelled".into()),
+        };
+        let json = serde_json::to_string(&input).unwrap();
+        let back: ProvisioningAbortInput = serde_json::from_str(&json).unwrap();
+        assert!(back.session_id.is_none());
+        assert_eq!(back.reason, Some("User cancelled".into()));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ReplayBufferInfo / SubscribeResult / EventAckRequest / EventNackRequest
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn replay_buffer_info_clone_and_serde() {
+        let info = ReplayBufferInfo {
+            min_events: 5000,
+            overflow: "stream.reset".into(),
+        };
+        let cloned = info.clone();
+        assert_eq!(cloned.min_events, 5000);
+
+        let json = serde_json::to_string(&info).unwrap();
+        let back: ReplayBufferInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.overflow, "stream.reset");
+    }
+
+    #[test]
+    fn subscribe_result_clone_and_serde() {
+        let result = SubscribeResult {
+            confirmed_topics: vec!["events.*".into()],
+            cursors: [("events.*".into(), "cur-1".into())].into_iter().collect(),
+            replay_supported: false,
+            buffer: None,
+        };
+        let cloned = result.clone();
+        assert_eq!(cloned.confirmed_topics.len(), 1);
+        assert!(!cloned.replay_supported);
+
+        let json = serde_json::to_string(&result).unwrap();
+        let back: SubscribeResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.cursors.get("events.*"), Some(&"cur-1".into()));
+    }
+
+    #[test]
+    fn event_ack_request_serde() {
+        let req = EventAckRequest {
+            r#type: "ack".into(),
+            id: RequestId::new("ack-1"),
+            ack: EventAck {
+                r#type: "ack".into(),
+                topic: "messages.new".into(),
+                seqs: vec![1, 2, 3],
+                cursors: vec!["cur-1".into()],
+            },
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: EventAckRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.r#type, "ack");
+        assert_eq!(back.ack.seqs.len(), 3);
+    }
+
+    #[test]
+    fn event_nack_request_serde() {
+        let req = EventNackRequest {
+            r#type: "nack".into(),
+            id: RequestId::new("nack-1"),
+            nack: EventNack {
+                r#type: "nack".into(),
+                topic: "events.new".into(),
+                seqs: vec![5],
+                reason: "Processing failed".into(),
+                delay_ms: Some(5000),
+            },
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: EventNackRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.r#type, "nack");
+        assert_eq!(back.nack.delay_ms, Some(5000));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // InvokeResponse builder coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn invoke_response_with_audit_event_id() {
+        let resp = InvokeResponse::ok(RequestId::new("req-audit"), serde_json::json!({}))
+            .with_audit_event_id(ObjectId::test_id("audit-1"));
+        assert!(resp.audit_event_id.is_some());
+    }
+
+    #[test]
+    fn invoke_response_with_decision_receipt_id() {
+        let resp = InvokeResponse::error(
+            RequestId::new("req-deny"),
+            FcpError::CapabilityDenied {
+                capability: "cap.write".into(),
+                reason: "denied".into(),
+            },
+        )
+        .with_decision_receipt_id(ObjectId::test_id("decision-1"));
+        assert!(resp.decision_receipt_id.is_some());
+    }
+
+    #[test]
+    fn invoke_response_with_usage_metrics() {
+        let resp = InvokeResponse::ok(RequestId::new("req-usage"), serde_json::json!({}))
+            .with_usage_metrics(vec![UsageMetric::tokens(500), UsageMetric::api_credits(10)]);
+        let metrics = resp.usage_metrics.unwrap();
+        assert_eq!(metrics.len(), 2);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // RequestId Hash + Eq
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn request_id_eq_and_hash() {
+        use std::collections::HashSet;
+        let a = RequestId::new("r1");
+        let b = RequestId::new("r1");
+        let c = RequestId::new("r2");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        let mut set = HashSet::new();
+        set.insert(a);
+        assert!(set.contains(&b));
+        assert!(!set.contains(&c));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // HostInfo optional fields
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn host_info_minimal() {
+        let info = HostInfo {
+            name: "hub".into(),
+            version: None,
+            build: None,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(!json.contains("version"));
+        assert!(!json.contains("build"));
+        let back: HostInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name, "hub");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // EventCaps serde roundtrip
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn event_caps_serde_roundtrip() {
+        let caps = EventCaps {
+            streaming: true,
+            replay: true,
+            min_buffer_events: 500,
+            requires_ack: true,
+        };
+        let json = serde_json::to_string(&caps).unwrap();
+        let back: EventCaps = serde_json::from_str(&json).unwrap();
+        assert!(back.streaming);
+        assert!(back.replay);
+        assert_eq!(back.min_buffer_events, 500);
+        assert!(back.requires_ack);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // TransportCaps serde roundtrip
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn transport_caps_serde_roundtrip() {
+        let caps = TransportCaps {
+            compression: vec!["zstd".into(), "lz4".into()],
+            max_frame_size: Some(65536),
+        };
+        let json = serde_json::to_string(&caps).unwrap();
+        let back: TransportCaps = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.compression.len(), 2);
+        assert_eq!(back.max_frame_size, Some(65536));
+    }
 }

@@ -4298,4 +4298,904 @@ mod tests {
             );
         }
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Batch 12: IntegrityLevel Display/Default/as_u8/serde
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn integrity_level_display_all_variants() {
+        assert_eq!(IntegrityLevel::Untrusted.to_string(), "untrusted");
+        assert_eq!(IntegrityLevel::Community.to_string(), "community");
+        assert_eq!(IntegrityLevel::Work.to_string(), "work");
+        assert_eq!(IntegrityLevel::Private.to_string(), "private");
+        assert_eq!(IntegrityLevel::Owner.to_string(), "owner");
+    }
+
+    #[test]
+    fn integrity_level_default() {
+        assert_eq!(IntegrityLevel::default(), IntegrityLevel::Untrusted);
+    }
+
+    #[test]
+    fn integrity_level_as_u8() {
+        assert_eq!(IntegrityLevel::Untrusted.as_u8(), 0);
+        assert_eq!(IntegrityLevel::Community.as_u8(), 1);
+        assert_eq!(IntegrityLevel::Work.as_u8(), 2);
+        assert_eq!(IntegrityLevel::Private.as_u8(), 3);
+        assert_eq!(IntegrityLevel::Owner.as_u8(), 4);
+    }
+
+    #[test]
+    fn integrity_level_serde_roundtrip() {
+        for level in [
+            IntegrityLevel::Untrusted,
+            IntegrityLevel::Community,
+            IntegrityLevel::Work,
+            IntegrityLevel::Private,
+            IntegrityLevel::Owner,
+        ] {
+            let json = serde_json::to_string(&level).unwrap();
+            let back: IntegrityLevel = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, level);
+        }
+    }
+
+    #[test]
+    fn integrity_level_copy_clone() {
+        let level = IntegrityLevel::Work;
+        let copied = level;
+        let cloned = Clone::clone(&level);
+        assert_eq!(copied, cloned);
+        assert_eq!(level, IntegrityLevel::Work);
+    }
+
+    #[test]
+    fn integrity_level_hash() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(IntegrityLevel::Owner);
+        set.insert(IntegrityLevel::Owner);
+        assert_eq!(set.len(), 1);
+        set.insert(IntegrityLevel::Work);
+        assert_eq!(set.len(), 2);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Batch 12: ConfidentialityLevel Display/Default/as_u8/serde
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn confidentiality_level_display_all_variants() {
+        assert_eq!(ConfidentialityLevel::Public.to_string(), "public");
+        assert_eq!(ConfidentialityLevel::Community.to_string(), "community");
+        assert_eq!(ConfidentialityLevel::Work.to_string(), "work");
+        assert_eq!(ConfidentialityLevel::Private.to_string(), "private");
+        assert_eq!(ConfidentialityLevel::Owner.to_string(), "owner");
+    }
+
+    #[test]
+    fn confidentiality_level_default() {
+        assert_eq!(
+            ConfidentialityLevel::default(),
+            ConfidentialityLevel::Public
+        );
+    }
+
+    #[test]
+    fn confidentiality_level_as_u8() {
+        assert_eq!(ConfidentialityLevel::Public.as_u8(), 0);
+        assert_eq!(ConfidentialityLevel::Community.as_u8(), 1);
+        assert_eq!(ConfidentialityLevel::Work.as_u8(), 2);
+        assert_eq!(ConfidentialityLevel::Private.as_u8(), 3);
+        assert_eq!(ConfidentialityLevel::Owner.as_u8(), 4);
+    }
+
+    #[test]
+    fn confidentiality_level_serde_roundtrip() {
+        for level in [
+            ConfidentialityLevel::Public,
+            ConfidentialityLevel::Community,
+            ConfidentialityLevel::Work,
+            ConfidentialityLevel::Private,
+            ConfidentialityLevel::Owner,
+        ] {
+            let json = serde_json::to_string(&level).unwrap();
+            let back: ConfidentialityLevel = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, level);
+        }
+    }
+
+    #[test]
+    fn confidentiality_level_copy_clone() {
+        let level = ConfidentialityLevel::Private;
+        let copied = level;
+        let cloned = Clone::clone(&level);
+        assert_eq!(copied, cloned);
+        assert_eq!(level, ConfidentialityLevel::Private);
+    }
+
+    #[test]
+    fn confidentiality_level_hash() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(ConfidentialityLevel::Owner);
+        set.insert(ConfidentialityLevel::Owner);
+        assert_eq!(set.len(), 1);
+        set.insert(ConfidentialityLevel::Public);
+        assert_eq!(set.len(), 2);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Batch 12: TaintFlag Display/is_critical/serde
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn taint_flag_display_all_variants() {
+        assert_eq!(TaintFlag::PublicInput.to_string(), "PUBLIC_INPUT");
+        assert_eq!(TaintFlag::UnverifiedLink.to_string(), "UNVERIFIED_LINK");
+        assert_eq!(
+            TaintFlag::UntrustedTransform.to_string(),
+            "UNTRUSTED_TRANSFORM"
+        );
+        assert_eq!(TaintFlag::WebhookInjected.to_string(), "WEBHOOK_INJECTED");
+        assert_eq!(TaintFlag::UserGenerated.to_string(), "USER_GENERATED");
+        assert_eq!(
+            TaintFlag::PotentiallyMalicious.to_string(),
+            "POTENTIALLY_MALICIOUS"
+        );
+        assert_eq!(TaintFlag::AiGenerated.to_string(), "AI_GENERATED");
+        assert_eq!(
+            TaintFlag::CrossZoneUnapproved.to_string(),
+            "CROSS_ZONE_UNAPPROVED"
+        );
+    }
+
+    #[test]
+    fn taint_flag_is_critical_three_flags() {
+        assert!(TaintFlag::PublicInput.is_critical());
+        assert!(TaintFlag::PotentiallyMalicious.is_critical());
+        assert!(TaintFlag::CrossZoneUnapproved.is_critical());
+    }
+
+    #[test]
+    fn taint_flag_is_not_critical() {
+        assert!(!TaintFlag::UnverifiedLink.is_critical());
+        assert!(!TaintFlag::UntrustedTransform.is_critical());
+        assert!(!TaintFlag::WebhookInjected.is_critical());
+        assert!(!TaintFlag::UserGenerated.is_critical());
+        assert!(!TaintFlag::AiGenerated.is_critical());
+    }
+
+    #[test]
+    fn taint_flag_serde_roundtrip_all() {
+        for flag in [
+            TaintFlag::PublicInput,
+            TaintFlag::UnverifiedLink,
+            TaintFlag::UntrustedTransform,
+            TaintFlag::WebhookInjected,
+            TaintFlag::UserGenerated,
+            TaintFlag::PotentiallyMalicious,
+            TaintFlag::AiGenerated,
+            TaintFlag::CrossZoneUnapproved,
+        ] {
+            let json = serde_json::to_string(&flag).unwrap();
+            let back: TaintFlag = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, flag);
+        }
+    }
+
+    #[test]
+    fn taint_flag_serde_screaming_snake_case() {
+        let json = serde_json::to_string(&TaintFlag::PublicInput).unwrap();
+        assert_eq!(json, "\"PUBLIC_INPUT\"");
+        let json2 = serde_json::to_string(&TaintFlag::AiGenerated).unwrap();
+        assert_eq!(json2, "\"AI_GENERATED\"");
+    }
+
+    #[test]
+    fn taint_flag_copy_clone() {
+        let f = TaintFlag::WebhookInjected;
+        let copied = f;
+        let cloned = Clone::clone(&f);
+        assert_eq!(copied, cloned);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Batch 12: TaintFlags default/from_flag/methods/serde
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn taint_flags_default_is_empty() {
+        let flags = TaintFlags::default();
+        assert!(flags.is_empty());
+        assert_eq!(flags.len(), 0);
+        assert!(!flags.has_critical());
+    }
+
+    #[test]
+    fn taint_flags_new_is_empty() {
+        let flags = TaintFlags::new();
+        assert!(flags.is_empty());
+        assert_eq!(flags.len(), 0);
+    }
+
+    #[test]
+    fn taint_flags_from_flag() {
+        let flags = TaintFlags::from_flag(TaintFlag::AiGenerated);
+        assert!(!flags.is_empty());
+        assert_eq!(flags.len(), 1);
+        assert!(flags.contains(TaintFlag::AiGenerated));
+        assert!(!flags.contains(TaintFlag::PublicInput));
+    }
+
+    #[test]
+    fn taint_flags_insert_and_remove() {
+        let mut flags = TaintFlags::new();
+        flags.insert(TaintFlag::PublicInput);
+        flags.insert(TaintFlag::UserGenerated);
+        assert_eq!(flags.len(), 2);
+        assert!(flags.contains(TaintFlag::PublicInput));
+
+        flags.remove(TaintFlag::PublicInput);
+        assert_eq!(flags.len(), 1);
+        assert!(!flags.contains(TaintFlag::PublicInput));
+        assert!(flags.contains(TaintFlag::UserGenerated));
+    }
+
+    #[test]
+    fn taint_flags_merge_or_semantics() {
+        let a = TaintFlags::from_flag(TaintFlag::PublicInput);
+        let b = TaintFlags::from_flag(TaintFlag::AiGenerated);
+        let merged = a.merge(&b);
+        assert_eq!(merged.len(), 2);
+        assert!(merged.contains(TaintFlag::PublicInput));
+        assert!(merged.contains(TaintFlag::AiGenerated));
+    }
+
+    #[test]
+    fn taint_flags_has_critical_true() {
+        let flags = TaintFlags::from_flag(TaintFlag::PublicInput);
+        assert!(flags.has_critical());
+    }
+
+    #[test]
+    fn taint_flags_has_critical_false() {
+        let flags = TaintFlags::from_flag(TaintFlag::UserGenerated);
+        assert!(!flags.has_critical());
+    }
+
+    #[test]
+    fn taint_flags_iter() {
+        let mut flags = TaintFlags::new();
+        flags.insert(TaintFlag::PublicInput);
+        flags.insert(TaintFlag::AiGenerated);
+        let collected: Vec<_> = flags.iter().collect();
+        assert_eq!(collected.len(), 2);
+    }
+
+    #[test]
+    fn taint_flags_from_iterator() {
+        let flags: TaintFlags = vec![
+            TaintFlag::PublicInput,
+            TaintFlag::UserGenerated,
+            TaintFlag::PublicInput,
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(flags.len(), 2); // set deduplication
+    }
+
+    #[test]
+    fn taint_flags_serde_roundtrip() {
+        let mut flags = TaintFlags::new();
+        flags.insert(TaintFlag::PublicInput);
+        flags.insert(TaintFlag::AiGenerated);
+        let json = serde_json::to_string(&flags).unwrap();
+        let back: TaintFlags = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, flags);
+        assert_eq!(back.len(), 2);
+    }
+
+    #[test]
+    fn taint_flags_clone() {
+        let mut flags = TaintFlags::new();
+        flags.insert(TaintFlag::WebhookInjected);
+        let cloned = Clone::clone(&flags);
+        assert_eq!(cloned, flags);
+        assert!(cloned.contains(TaintFlag::WebhookInjected));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Batch 12: AdjustmentKind serde/clone
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn adjustment_kind_serde_roundtrip() {
+        for kind in [AdjustmentKind::Elevation, AdjustmentKind::Declassification] {
+            let json = serde_json::to_string(&kind).unwrap();
+            let back: AdjustmentKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, kind);
+        }
+    }
+
+    #[test]
+    fn adjustment_kind_elevation_serde_value() {
+        let json = serde_json::to_string(&AdjustmentKind::Elevation).unwrap();
+        assert_eq!(json, "\"elevation\"");
+    }
+
+    #[test]
+    fn adjustment_kind_copy_clone() {
+        let k = AdjustmentKind::Declassification;
+        let copied = k;
+        let cloned = Clone::clone(&k);
+        assert_eq!(copied, cloned);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Batch 12: LabelAdjustment clone/serde
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn label_adjustment_elevation_serde_roundtrip() {
+        let adj = LabelAdjustment {
+            timestamp_ms: 1_000,
+            kind: AdjustmentKind::Elevation,
+            approval_token_id: test_object_id("token-1"),
+            prev_integrity: Some(IntegrityLevel::Community),
+            new_integrity: Some(IntegrityLevel::Work),
+            prev_confidentiality: None,
+            new_confidentiality: None,
+        };
+        let json = serde_json::to_string(&adj).unwrap();
+        let back: LabelAdjustment = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.timestamp_ms, 1_000);
+        assert_eq!(back.kind, AdjustmentKind::Elevation);
+        assert_eq!(back.prev_integrity, Some(IntegrityLevel::Community));
+        assert_eq!(back.new_integrity, Some(IntegrityLevel::Work));
+        assert!(back.prev_confidentiality.is_none());
+    }
+
+    #[test]
+    fn label_adjustment_declassification_serde_roundtrip() {
+        let adj = LabelAdjustment {
+            timestamp_ms: 2_000,
+            kind: AdjustmentKind::Declassification,
+            approval_token_id: test_object_id("token-2"),
+            prev_integrity: None,
+            new_integrity: None,
+            prev_confidentiality: Some(ConfidentialityLevel::Owner),
+            new_confidentiality: Some(ConfidentialityLevel::Work),
+        };
+        let json = serde_json::to_string(&adj).unwrap();
+        let back: LabelAdjustment = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.kind, AdjustmentKind::Declassification);
+        assert_eq!(back.prev_confidentiality, Some(ConfidentialityLevel::Owner));
+    }
+
+    #[test]
+    fn label_adjustment_clone() {
+        let adj = LabelAdjustment {
+            timestamp_ms: 5_000,
+            kind: AdjustmentKind::Elevation,
+            approval_token_id: test_object_id("token-3"),
+            prev_integrity: Some(IntegrityLevel::Untrusted),
+            new_integrity: Some(IntegrityLevel::Owner),
+            prev_confidentiality: None,
+            new_confidentiality: None,
+        };
+        let cloned = Clone::clone(&adj);
+        assert_eq!(cloned.timestamp_ms, 5_000);
+        assert_eq!(cloned.kind, AdjustmentKind::Elevation);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Batch 12: TaintReduction clone/serde
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn taint_reduction_serde_roundtrip() {
+        let tr = TaintReduction {
+            timestamp_ms: 3_000,
+            sanitizer_receipt_id: test_object_id("receipt-1"),
+            cleared_flags: vec![TaintFlag::PublicInput, TaintFlag::UserGenerated],
+            covered_inputs: vec![test_object_id("input-1"), test_object_id("input-2")],
+        };
+        let json = serde_json::to_string(&tr).unwrap();
+        let back: TaintReduction = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.timestamp_ms, 3_000);
+        assert_eq!(back.cleared_flags.len(), 2);
+        assert_eq!(back.covered_inputs.len(), 2);
+    }
+
+    #[test]
+    fn taint_reduction_clone() {
+        let tr = TaintReduction {
+            timestamp_ms: 4_000,
+            sanitizer_receipt_id: test_object_id("receipt-2"),
+            cleared_flags: vec![TaintFlag::AiGenerated],
+            covered_inputs: vec![],
+        };
+        let cloned = Clone::clone(&tr);
+        assert_eq!(cloned.timestamp_ms, 4_000);
+        assert_eq!(cloned.cleared_flags.len(), 1);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Batch 12: ZoneCrossing clone/serde
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn zone_crossing_serde_roundtrip() {
+        let zc = ZoneCrossing {
+            timestamp_ms: 5_000,
+            from_zone: ZoneId::work(),
+            to_zone: ZoneId::private(),
+            approved: true,
+            approval_token_id: Some(test_object_id("token-zc")),
+        };
+        let json = serde_json::to_string(&zc).unwrap();
+        let back: ZoneCrossing = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.from_zone, ZoneId::work());
+        assert_eq!(back.to_zone, ZoneId::private());
+        assert!(back.approved);
+        assert!(back.approval_token_id.is_some());
+    }
+
+    #[test]
+    fn zone_crossing_unapproved_serde_roundtrip() {
+        let zc = ZoneCrossing {
+            timestamp_ms: 6_000,
+            from_zone: ZoneId::public(),
+            to_zone: ZoneId::work(),
+            approved: false,
+            approval_token_id: None,
+        };
+        let json = serde_json::to_string(&zc).unwrap();
+        let back: ZoneCrossing = serde_json::from_str(&json).unwrap();
+        assert!(!back.approved);
+        assert!(back.approval_token_id.is_none());
+    }
+
+    #[test]
+    fn zone_crossing_clone() {
+        let zc = ZoneCrossing {
+            timestamp_ms: 7_000,
+            from_zone: ZoneId::owner(),
+            to_zone: ZoneId::community(),
+            approved: true,
+            approval_token_id: None,
+        };
+        let cloned = Clone::clone(&zc);
+        assert_eq!(cloned.from_zone, ZoneId::owner());
+        assert_eq!(cloned.timestamp_ms, 7_000);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Batch 12: FlowCheckResult clone/copy/eq
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn flow_check_result_copy_clone() {
+        let r = FlowCheckResult::Allowed;
+        let copied = r;
+        let cloned = Clone::clone(&r);
+        assert_eq!(copied, cloned);
+    }
+
+    #[test]
+    fn flow_check_result_all_variants_eq() {
+        assert_eq!(FlowCheckResult::Allowed, FlowCheckResult::Allowed);
+        assert_eq!(
+            FlowCheckResult::RequiresElevation,
+            FlowCheckResult::RequiresElevation
+        );
+        assert_eq!(
+            FlowCheckResult::RequiresDeclassification,
+            FlowCheckResult::RequiresDeclassification
+        );
+        assert_eq!(FlowCheckResult::RequiresBoth, FlowCheckResult::RequiresBoth);
+        assert_ne!(FlowCheckResult::Allowed, FlowCheckResult::RequiresBoth);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Batch 12: ProvenanceViolation Display/clone
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn provenance_violation_display_public_input() {
+        let v = ProvenanceViolation::PublicInputForDangerousOperation;
+        assert_eq!(
+            v.to_string(),
+            "public input cannot drive dangerous operation"
+        );
+    }
+
+    #[test]
+    fn provenance_violation_display_malicious() {
+        let v = ProvenanceViolation::MaliciousInputDetected;
+        assert_eq!(v.to_string(), "malicious input pattern detected");
+    }
+
+    #[test]
+    fn provenance_violation_display_cross_zone() {
+        let v = ProvenanceViolation::CrossZoneUnapprovedForDangerousOperation;
+        assert_eq!(
+            v.to_string(),
+            "unapproved cross-zone input cannot drive dangerous operation"
+        );
+    }
+
+    #[test]
+    fn provenance_violation_display_tainted_risky() {
+        let v = ProvenanceViolation::TaintedInputForRiskyOperation {
+            taint_flags: vec![TaintFlag::PublicInput],
+        };
+        let s = v.to_string();
+        assert!(s.contains("tainted input cannot drive risky operation"));
+        assert!(s.contains("PublicInput"));
+    }
+
+    #[test]
+    fn provenance_violation_display_insufficient_integrity() {
+        let v = ProvenanceViolation::InsufficientIntegrity {
+            required: IntegrityLevel::Work,
+            actual: IntegrityLevel::Untrusted,
+        };
+        let s = v.to_string();
+        assert!(s.contains("insufficient integrity"));
+        assert!(s.contains("work"));
+        assert!(s.contains("untrusted"));
+    }
+
+    #[test]
+    fn provenance_violation_display_invalid_elevation() {
+        let v = ProvenanceViolation::InvalidElevation {
+            current: IntegrityLevel::Owner,
+            requested: IntegrityLevel::Work,
+        };
+        let s = v.to_string();
+        assert!(s.contains("invalid elevation"));
+        assert!(s.contains("owner"));
+        assert!(s.contains("work"));
+    }
+
+    #[test]
+    fn provenance_violation_display_invalid_declassification() {
+        let v = ProvenanceViolation::InvalidDeclassification {
+            current: ConfidentialityLevel::Public,
+            requested: ConfidentialityLevel::Owner,
+        };
+        let s = v.to_string();
+        assert!(s.contains("invalid declassification"));
+    }
+
+    #[test]
+    fn provenance_violation_display_sanitizer_coverage() {
+        let v = ProvenanceViolation::SanitizerCoverageInsufficient;
+        assert_eq!(
+            v.to_string(),
+            "sanitizer receipt does not cover required inputs"
+        );
+    }
+
+    #[test]
+    fn provenance_violation_display_approval_invalid() {
+        let v = ProvenanceViolation::ApprovalTokenInvalid;
+        assert_eq!(v.to_string(), "approval token expired or invalid");
+    }
+
+    #[test]
+    fn provenance_violation_clone() {
+        let v = ProvenanceViolation::InsufficientIntegrity {
+            required: IntegrityLevel::Private,
+            actual: IntegrityLevel::Community,
+        };
+        let cloned = Clone::clone(&v);
+        assert_eq!(cloned.to_string(), v.to_string());
+    }
+
+    #[test]
+    fn provenance_violation_is_std_error() {
+        let v = ProvenanceViolation::MaliciousInputDetected;
+        let _: &dyn std::error::Error = &v;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Batch 12: TaintDecision (ZERO tests before)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn taint_decision_allowed_serde_roundtrip() {
+        let td = TaintDecision {
+            allowed: true,
+            reason_code: "safe_tier".into(),
+            safety_tier: SafetyTier::Safe,
+            contributing_flags: vec![],
+            approval_token_id: None,
+            sanitizer_receipt_id: None,
+        };
+        let json = serde_json::to_string(&td).unwrap();
+        let back: TaintDecision = serde_json::from_str(&json).unwrap();
+        assert!(back.allowed);
+        assert_eq!(back.reason_code, "safe_tier");
+        assert!(back.contributing_flags.is_empty());
+    }
+
+    #[test]
+    fn taint_decision_denied_with_flags_serde_roundtrip() {
+        let td = TaintDecision {
+            allowed: false,
+            reason_code: "public_input_dangerous".into(),
+            safety_tier: SafetyTier::Dangerous,
+            contributing_flags: vec![TaintFlag::PublicInput, TaintFlag::PotentiallyMalicious],
+            approval_token_id: None,
+            sanitizer_receipt_id: None,
+        };
+        let json = serde_json::to_string(&td).unwrap();
+        let back: TaintDecision = serde_json::from_str(&json).unwrap();
+        assert!(!back.allowed);
+        assert_eq!(back.contributing_flags.len(), 2);
+    }
+
+    #[test]
+    fn taint_decision_with_approval_token() {
+        let td = TaintDecision {
+            allowed: true,
+            reason_code: "approved_elevation".into(),
+            safety_tier: SafetyTier::Risky,
+            contributing_flags: vec![TaintFlag::UserGenerated],
+            approval_token_id: Some(test_object_id("approval-1")),
+            sanitizer_receipt_id: None,
+        };
+        let json = serde_json::to_string(&td).unwrap();
+        let back: TaintDecision = serde_json::from_str(&json).unwrap();
+        assert!(back.approval_token_id.is_some());
+        assert!(back.sanitizer_receipt_id.is_none());
+    }
+
+    #[test]
+    fn taint_decision_with_sanitizer_receipt() {
+        let td = TaintDecision {
+            allowed: true,
+            reason_code: "sanitized".into(),
+            safety_tier: SafetyTier::Dangerous,
+            contributing_flags: vec![],
+            approval_token_id: None,
+            sanitizer_receipt_id: Some(test_object_id("receipt-1")),
+        };
+        let json = serde_json::to_string(&td).unwrap();
+        let back: TaintDecision = serde_json::from_str(&json).unwrap();
+        assert!(back.sanitizer_receipt_id.is_some());
+    }
+
+    #[test]
+    fn taint_decision_clone() {
+        let td = TaintDecision {
+            allowed: false,
+            reason_code: "denied".into(),
+            safety_tier: SafetyTier::Critical,
+            contributing_flags: vec![TaintFlag::CrossZoneUnapproved],
+            approval_token_id: None,
+            sanitizer_receipt_id: None,
+        };
+        let cloned = Clone::clone(&td);
+        assert_eq!(cloned.allowed, td.allowed);
+        assert_eq!(cloned.reason_code, td.reason_code);
+        assert_eq!(cloned.contributing_flags.len(), 1);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Batch 12: InputConstraint clone/serde
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn input_constraint_serde_roundtrip() {
+        let ic = InputConstraint {
+            pointer: "/data/user".into(),
+            expected: json!("alice"),
+        };
+        let json_str = serde_json::to_string(&ic).unwrap();
+        let back: InputConstraint = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(back.pointer, "/data/user");
+        assert_eq!(back.expected, json!("alice"));
+    }
+
+    #[test]
+    fn input_constraint_clone() {
+        let ic = InputConstraint {
+            pointer: "/status".into(),
+            expected: json!(200),
+        };
+        let cloned = Clone::clone(&ic);
+        assert_eq!(cloned.pointer, ic.pointer);
+        assert_eq!(cloned.expected, ic.expected);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Batch 12: ElevationScope/DeclassificationScope/ExecutionScope serde
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn elevation_scope_serde_roundtrip() {
+        let es = ElevationScope {
+            operation_id: "op.write".into(),
+            original_provenance_id: test_object_id("prov-1"),
+            target_integrity: IntegrityLevel::Work,
+        };
+        let json = serde_json::to_string(&es).unwrap();
+        let back: ElevationScope = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.operation_id, "op.write");
+        assert_eq!(back.target_integrity, IntegrityLevel::Work);
+    }
+
+    #[test]
+    fn declassification_scope_serde_roundtrip() {
+        let ds = DeclassificationScope {
+            from_zone: ZoneId::private(),
+            to_zone: ZoneId::work(),
+            object_ids: vec![test_object_id("obj-1")],
+            target_confidentiality: ConfidentialityLevel::Work,
+        };
+        let json = serde_json::to_string(&ds).unwrap();
+        let back: DeclassificationScope = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.from_zone, ZoneId::private());
+        assert_eq!(back.to_zone, ZoneId::work());
+        assert_eq!(back.object_ids.len(), 1);
+    }
+
+    #[test]
+    fn elevation_scope_clone() {
+        let es = ElevationScope {
+            operation_id: "op.read".into(),
+            original_provenance_id: test_object_id("prov-2"),
+            target_integrity: IntegrityLevel::Owner,
+        };
+        let cloned = Clone::clone(&es);
+        assert_eq!(cloned.operation_id, "op.read");
+    }
+
+    #[test]
+    fn declassification_scope_clone() {
+        let ds = DeclassificationScope {
+            from_zone: ZoneId::owner(),
+            to_zone: ZoneId::public(),
+            object_ids: vec![],
+            target_confidentiality: ConfidentialityLevel::Public,
+        };
+        let cloned = Clone::clone(&ds);
+        assert_eq!(cloned.from_zone, ZoneId::owner());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Batch 12: ApprovalToken serde
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn approval_token_serde_roundtrip() {
+        let at = ApprovalToken {
+            token_id: "at-1".into(),
+            issued_at_ms: 1_000,
+            expires_at_ms: 10_000,
+            issuer: "node-1".into(),
+            scope: ApprovalScope::Elevation(ElevationScope {
+                operation_id: "op.test".into(),
+                original_provenance_id: test_object_id("prov-1"),
+                target_integrity: IntegrityLevel::Work,
+            }),
+            zone_id: ZoneId::work(),
+            signature: None,
+        };
+        let json = serde_json::to_string(&at).unwrap();
+        let back: ApprovalToken = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.token_id, "at-1");
+        assert_eq!(back.issued_at_ms, 1_000);
+        assert_eq!(back.expires_at_ms, 10_000);
+        assert!(back.is_valid(5_000));
+    }
+
+    #[test]
+    fn approval_token_clone() {
+        let at = ApprovalToken {
+            token_id: "at-2".into(),
+            issued_at_ms: 100,
+            expires_at_ms: 200,
+            issuer: "node-2".into(),
+            scope: ApprovalScope::Execution(ExecutionScope {
+                connector_id: "test-conn".into(),
+                method_pattern: "op.*".into(),
+                request_object_id: None,
+                input_hash: None,
+                input_constraints: vec![],
+            }),
+            zone_id: ZoneId::owner(),
+            signature: Some(vec![0u8; 64]),
+        };
+        let cloned = Clone::clone(&at);
+        assert_eq!(cloned.token_id, "at-2");
+        assert!(cloned.signature.is_some());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Batch 12: SanitizerReceipt serde
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn sanitizer_receipt_serde_roundtrip() {
+        let sr = SanitizerReceipt {
+            receipt_id: "sr-1".into(),
+            timestamp_ms: 5_000,
+            sanitizer_id: "sanitizer-1".into(),
+            sanitizer_zone: ZoneId::work(),
+            authorized_flags: vec![TaintFlag::PublicInput, TaintFlag::UserGenerated],
+            covered_inputs: vec![test_object_id("input-1")],
+            cleared_flags: vec![TaintFlag::PublicInput],
+            signature: None,
+        };
+        let json = serde_json::to_string(&sr).unwrap();
+        let back: SanitizerReceipt = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.receipt_id, "sr-1");
+        assert_eq!(back.authorized_flags.len(), 2);
+        assert_eq!(back.cleared_flags.len(), 1);
+        assert!(back.is_valid());
+    }
+
+    #[test]
+    fn sanitizer_receipt_clone() {
+        let sr = SanitizerReceipt {
+            receipt_id: "sr-2".into(),
+            timestamp_ms: 6_000,
+            sanitizer_id: "sanitizer-2".into(),
+            sanitizer_zone: ZoneId::private(),
+            authorized_flags: vec![TaintFlag::AiGenerated],
+            covered_inputs: vec![],
+            cleared_flags: vec![TaintFlag::AiGenerated],
+            signature: Some(vec![1, 2, 3]),
+        };
+        let cloned = Clone::clone(&sr);
+        assert_eq!(cloned.receipt_id, "sr-2");
+        assert!(cloned.signature.is_some());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Batch 12: ProvenanceRecord serde (more thorough than existing)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn provenance_record_with_adjustments_serde_roundtrip() {
+        let mut record = ProvenanceRecord::new(ZoneId::community());
+        record
+            .apply_elevation(IntegrityLevel::Work, test_object_id("token-elev"), 1_000)
+            .unwrap();
+        record.taint_flags.insert(TaintFlag::UserGenerated);
+        record.apply_taint_reduction(
+            &[TaintFlag::UserGenerated],
+            test_object_id("receipt-1"),
+            vec![test_object_id("input-1")],
+            2_000,
+        );
+        record.record_zone_crossing(ZoneId::work(), true, Some(test_object_id("tok")), 3_000);
+
+        let json = serde_json::to_string(&record).unwrap();
+        let back: ProvenanceRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.origin_zone, ZoneId::community());
+        assert_eq!(back.current_zone, ZoneId::work());
+        assert_eq!(back.integrity_label, IntegrityLevel::Work);
+        assert_eq!(back.label_adjustments.len(), 1);
+        assert_eq!(back.taint_reductions.len(), 1);
+        assert_eq!(back.zone_crossings.len(), 1);
+    }
+
+    #[test]
+    fn provenance_record_clone() {
+        let mut record = ProvenanceRecord::new(ZoneId::owner());
+        record.taint_flags.insert(TaintFlag::AiGenerated);
+        record.input_sources.push(test_object_id("src-1"));
+
+        let cloned = Clone::clone(&record);
+        assert_eq!(cloned.origin_zone, record.origin_zone);
+        assert_eq!(cloned.taint_flags, record.taint_flags);
+        assert_eq!(cloned.input_sources.len(), 1);
+    }
 }

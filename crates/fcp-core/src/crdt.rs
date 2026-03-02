@@ -832,6 +832,239 @@ mod tests {
         assert_eq!(counter, snapshot);
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // CrdtActorId – additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn actor_id_clone() {
+        let a = actor("node-1");
+        let cloned = a.clone();
+        assert_eq!(a, cloned);
+    }
+
+    #[test]
+    fn actor_id_hash_consistency() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(actor("a"));
+        set.insert(actor("a"));
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn actor_id_serde_roundtrip() {
+        let a = actor("node-42");
+        let json = serde_json::to_string(&a).unwrap();
+        let decoded: CrdtActorId = serde_json::from_str(&json).unwrap();
+        assert_eq!(a, decoded);
+    }
+
+    #[test]
+    fn actor_id_equality() {
+        assert_eq!(actor("same"), actor("same"));
+        assert_ne!(actor("a"), actor("b"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // OrSetTag – additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn or_set_tag_serde_roundtrip() {
+        let t = tag("actor1", 99);
+        let json = serde_json::to_string(&t).unwrap();
+        let decoded: OrSetTag = serde_json::from_str(&json).unwrap();
+        assert_eq!(t, decoded);
+    }
+
+    #[test]
+    fn or_set_tag_equality() {
+        assert_eq!(tag("a", 1), tag("a", 1));
+        assert_ne!(tag("a", 1), tag("a", 2));
+        assert_ne!(tag("a", 1), tag("b", 1));
+    }
+
+    #[test]
+    fn or_set_tag_ordering() {
+        let a = tag("a", 1);
+        let b = tag("b", 1);
+        assert!(a < b);
+    }
+
+    #[test]
+    fn or_set_tag_hash() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(tag("x", 1));
+        set.insert(tag("x", 1));
+        assert_eq!(set.len(), 1);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // LwwEntry – additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn lww_entry_clone() {
+        let entry = LwwEntry {
+            value: 42,
+            timestamp: 100,
+            actor: actor("A"),
+        };
+        let cloned = entry.clone();
+        assert_eq!(entry, cloned);
+    }
+
+    #[test]
+    fn lww_entry_serde_roundtrip() {
+        let entry = LwwEntry {
+            value: "hello".to_string(),
+            timestamp: 500,
+            actor: actor("B"),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let decoded: LwwEntry<String> = serde_json::from_str(&json).unwrap();
+        assert_eq!(entry, decoded);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // LwwMap – additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn lww_map_serde_roundtrip() {
+        let mut map: LwwMap<String, i32> = LwwMap::default();
+        map.insert("x".to_string(), 10, 100, actor("A"));
+        map.insert("y".to_string(), 20, 200, actor("B"));
+
+        let json = serde_json::to_string(&map).unwrap();
+        let decoded: LwwMap<String, i32> = serde_json::from_str(&json).unwrap();
+        assert_eq!(map, decoded);
+    }
+
+    #[test]
+    fn lww_map_get_nonexistent() {
+        let map: LwwMap<String, i32> = LwwMap::default();
+        assert!(map.get(&"missing".to_string()).is_none());
+    }
+
+    #[test]
+    fn lww_map_same_timestamp_actor_tiebreak() {
+        let mut map: LwwMap<String, i32> = LwwMap::default();
+        map.insert("k".to_string(), 1, 100, actor("aaa"));
+        map.insert("k".to_string(), 2, 100, actor("zzz")); // zzz > aaa
+        assert_eq!(map.get(&"k".to_string()).unwrap().value, 2);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // OrSet – additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn or_set_serde_roundtrip() {
+        let mut set: OrSet<String> = OrSet::default();
+        set.add("a".to_string(), tag("A", 1));
+        set.add("b".to_string(), tag("A", 2));
+
+        let json = serde_json::to_string(&set).unwrap();
+        let decoded: OrSet<String> = serde_json::from_str(&json).unwrap();
+        assert_eq!(set, decoded);
+    }
+
+    #[test]
+    fn or_set_is_empty_when_default() {
+        let set: OrSet<String> = OrSet::default();
+        assert!(set.is_empty());
+        assert_eq!(set.len(), 0);
+    }
+
+    #[test]
+    fn or_set_is_empty_after_all_removed() {
+        let mut set: OrSet<String> = OrSet::default();
+        set.add("x".to_string(), tag("A", 1));
+        set.remove_observed(&"x".to_string());
+        assert!(set.is_empty());
+        assert_eq!(set.len(), 0);
+        assert!(set.values().is_empty());
+    }
+
+    #[test]
+    fn or_set_multiple_tags_same_value() {
+        let mut set: OrSet<String> = OrSet::default();
+        set.add("x".to_string(), tag("A", 1));
+        set.add("x".to_string(), tag("B", 1));
+        assert!(set.contains(&"x".to_string()));
+        assert_eq!(set.len(), 1); // Still one value
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // GCounter – additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn gcounter_serde_roundtrip() {
+        let mut counter = GCounter::default();
+        counter.increment(actor("A"), 10);
+        counter.increment(actor("B"), 20);
+
+        let json = serde_json::to_string(&counter).unwrap();
+        let decoded: GCounter = serde_json::from_str(&json).unwrap();
+        assert_eq!(counter, decoded);
+    }
+
+    #[test]
+    fn gcounter_clone() {
+        let mut counter = GCounter::default();
+        counter.increment(actor("A"), 5);
+        let cloned = counter.clone();
+        assert_eq!(counter, cloned);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // PnCounter – additional coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn pn_counter_serde_roundtrip() {
+        let mut counter = PnCounter::default();
+        counter.increment(actor("A"), 100);
+        counter.decrement(actor("B"), 30);
+
+        let json = serde_json::to_string(&counter).unwrap();
+        let decoded: PnCounter = serde_json::from_str(&json).unwrap();
+        assert_eq!(counter, decoded);
+    }
+
+    #[test]
+    fn pn_counter_clone() {
+        let mut counter = PnCounter::default();
+        counter.increment(actor("X"), 50);
+        counter.decrement(actor("Y"), 10);
+        let cloned = counter.clone();
+        assert_eq!(counter, cloned);
+    }
+
+    #[test]
+    fn pn_counter_value_clamps_positive_overflow() {
+        let mut counter = PnCounter::default();
+        // Make positive extremely large
+        counter.increment(actor("A"), u64::MAX);
+        counter.increment(actor("B"), u64::MAX);
+        // Value should clamp to i64::MAX
+        let v = counter.value();
+        assert_eq!(v, i64::MAX);
+    }
+
+    #[test]
+    fn pn_counter_value_clamps_negative_overflow() {
+        let mut counter = PnCounter::default();
+        counter.decrement(actor("A"), u64::MAX);
+        counter.decrement(actor("B"), u64::MAX);
+        let v = counter.value();
+        assert_eq!(v, i64::MIN);
+    }
+
     #[test]
     fn pn_counter_large_values_precision() {
         let mut counter = PnCounter::default();

@@ -5700,4 +5700,305 @@ mod tests {
         let back: PolicyRiskCode = serde_json::from_str(&json).unwrap();
         assert_eq!(back, code);
     }
+
+    // ── Batch 12: BudgetStatus ────────────────────────────────────────────
+
+    #[test]
+    fn budget_status_ok_serde_roundtrip() {
+        let s = BudgetStatus::Ok;
+        let json = serde_json::to_string(&s).unwrap();
+        assert_eq!(json, "\"ok\"");
+        let back: BudgetStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, s);
+    }
+
+    #[test]
+    fn budget_status_exceeded_serde_roundtrip() {
+        let s = BudgetStatus::Exceeded;
+        let json = serde_json::to_string(&s).unwrap();
+        assert_eq!(json, "\"exceeded\"");
+        let back: BudgetStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, s);
+    }
+
+    #[test]
+    fn budget_status_copy_clone() {
+        let s = BudgetStatus::Ok;
+        let copied = s;
+        let cloned = Clone::clone(&s);
+        assert_eq!(copied, cloned);
+        assert_eq!(s, BudgetStatus::Ok);
+    }
+
+    #[test]
+    fn budget_status_eq() {
+        assert_eq!(BudgetStatus::Ok, BudgetStatus::Ok);
+        assert_eq!(BudgetStatus::Exceeded, BudgetStatus::Exceeded);
+        assert_ne!(BudgetStatus::Ok, BudgetStatus::Exceeded);
+    }
+
+    // ── Batch 12: UsageBudgetUsage ────────────────────────────────────────
+
+    #[test]
+    fn usage_budget_usage_serde_roundtrip() {
+        let u = UsageBudgetUsage {
+            metric: crate::UsageMetricKind::ApiCredits,
+            used: 500,
+            limit: 1000,
+            remaining: 500,
+            window_started_at: 1_700_000_000,
+            window_resets_at: 1_700_003_600,
+            status: BudgetStatus::Ok,
+        };
+        let json = serde_json::to_string(&u).unwrap();
+        let back: UsageBudgetUsage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.used, 500);
+        assert_eq!(back.limit, 1000);
+        assert_eq!(back.remaining, 500);
+        assert_eq!(back.status, BudgetStatus::Ok);
+    }
+
+    #[test]
+    fn usage_budget_usage_clone() {
+        let u = UsageBudgetUsage {
+            metric: crate::UsageMetricKind::Tokens,
+            used: 100,
+            limit: 200,
+            remaining: 100,
+            window_started_at: 1_000,
+            window_resets_at: 2_000,
+            status: BudgetStatus::Exceeded,
+        };
+        let cloned = Clone::clone(&u);
+        assert_eq!(cloned.used, u.used);
+        assert_eq!(cloned.limit, u.limit);
+        assert_eq!(cloned.status, u.status);
+    }
+
+    #[test]
+    fn usage_budget_usage_exceeded_status() {
+        let u = UsageBudgetUsage {
+            metric: crate::UsageMetricKind::Bytes,
+            used: 2000,
+            limit: 1000,
+            remaining: 0,
+            window_started_at: 1_000,
+            window_resets_at: 2_000,
+            status: BudgetStatus::Exceeded,
+        };
+        assert_eq!(u.status, BudgetStatus::Exceeded);
+        assert_eq!(u.remaining, 0);
+    }
+
+    // ── Batch 12: UsageBudgetSnapshot ─────────────────────────────────────
+
+    #[test]
+    fn usage_budget_snapshot_serde_roundtrip() {
+        let snap = UsageBudgetSnapshot {
+            zone_id: ZoneId::work(),
+            enforcement: BudgetEnforcement::Warn,
+            budgets: vec![UsageBudgetUsage {
+                metric: crate::UsageMetricKind::Requests,
+                used: 50,
+                limit: 100,
+                remaining: 50,
+                window_started_at: 1_000,
+                window_resets_at: 2_000,
+                status: BudgetStatus::Ok,
+            }],
+            updated_at: 1_500,
+        };
+        let json = serde_json::to_string(&snap).unwrap();
+        let back: UsageBudgetSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.zone_id, ZoneId::work());
+        assert_eq!(back.budgets.len(), 1);
+        assert_eq!(back.updated_at, 1_500);
+    }
+
+    #[test]
+    fn usage_budget_snapshot_clone() {
+        let snap = UsageBudgetSnapshot {
+            zone_id: ZoneId::owner(),
+            enforcement: BudgetEnforcement::Deny,
+            budgets: vec![],
+            updated_at: 9_000,
+        };
+        let cloned = Clone::clone(&snap);
+        assert_eq!(cloned.zone_id, snap.zone_id);
+        assert_eq!(cloned.updated_at, snap.updated_at);
+        assert!(cloned.budgets.is_empty());
+    }
+
+    #[test]
+    fn budget_enforcement_serde_roundtrip() {
+        let w = BudgetEnforcement::Warn;
+        let json = serde_json::to_string(&w).unwrap();
+        let back: BudgetEnforcement = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, w);
+
+        let d = BudgetEnforcement::Deny;
+        let json2 = serde_json::to_string(&d).unwrap();
+        let back2: BudgetEnforcement = serde_json::from_str(&json2).unwrap();
+        assert_eq!(back2, d);
+    }
+
+    // ── Batch 12: PolicySimulationError ───────────────────────────────────
+
+    #[test]
+    fn policy_simulation_error_missing_claim_display() {
+        let e = PolicySimulationError::MissingClaim { claim: "iss" };
+        assert_eq!(e.to_string(), "missing required claim: iss");
+    }
+
+    #[test]
+    fn policy_simulation_error_invalid_principal_display() {
+        let e = PolicySimulationError::InvalidPrincipal {
+            value: "bad".into(),
+            message: "not a principal".into(),
+        };
+        assert_eq!(e.to_string(), "invalid principal id 'bad': not a principal");
+    }
+
+    #[test]
+    fn policy_simulation_error_invalid_capability_display() {
+        let e = PolicySimulationError::InvalidCapability {
+            value: "cap-x".into(),
+            message: "unknown".into(),
+        };
+        assert_eq!(e.to_string(), "invalid capability id 'cap-x': unknown");
+    }
+
+    #[test]
+    fn policy_simulation_error_token_claims_display() {
+        let e = PolicySimulationError::TokenClaims {
+            message: "bad claims".into(),
+        };
+        assert_eq!(e.to_string(), "failed to parse token claims: bad claims");
+    }
+
+    #[test]
+    fn policy_simulation_error_zone_mismatch_display() {
+        let e = PolicySimulationError::ZoneMismatch {
+            request_zone: "z:work".into(),
+            policy_zone: "z:owner".into(),
+        };
+        assert_eq!(
+            e.to_string(),
+            "zone mismatch: request zone 'z:work' vs policy zone 'z:owner'"
+        );
+    }
+
+    #[test]
+    fn policy_simulation_error_is_std_error() {
+        let e = PolicySimulationError::MissingClaim { claim: "sub" };
+        let _: &dyn std::error::Error = &e;
+    }
+
+    // ── Batch 12: PreviewSummary ──────────────────────────────────────────
+
+    #[test]
+    fn preview_summary_default() {
+        let s = PreviewSummary::default();
+        assert_eq!(s.total_samples, 0);
+        assert_eq!(s.changed_count, 0);
+        assert_eq!(s.newly_allowed, 0);
+        assert_eq!(s.newly_denied, 0);
+        assert_eq!(s.unchanged, 0);
+    }
+
+    #[test]
+    fn preview_summary_clone() {
+        let s = PreviewSummary {
+            total_samples: 10,
+            changed_count: 3,
+            newly_allowed: 2,
+            newly_denied: 1,
+            unchanged: 7,
+        };
+        let cloned = Clone::clone(&s);
+        assert_eq!(cloned.total_samples, 10);
+        assert_eq!(cloned.changed_count, 3);
+        assert_eq!(cloned.unchanged, 7);
+    }
+
+    #[test]
+    fn preview_summary_serde_roundtrip() {
+        let s = PreviewSummary {
+            total_samples: 5,
+            changed_count: 2,
+            newly_allowed: 1,
+            newly_denied: 1,
+            unchanged: 3,
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let back: PreviewSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.total_samples, s.total_samples);
+        assert_eq!(back.newly_allowed, s.newly_allowed);
+    }
+
+    // ── Batch 12: PreviewOutcome ──────────────────────────────────────────
+
+    #[test]
+    fn preview_outcome_from_decision_allow() {
+        let o: PreviewOutcome = Decision::Allow.into();
+        assert_eq!(o, PreviewOutcome::Allow);
+    }
+
+    #[test]
+    fn preview_outcome_from_decision_deny() {
+        let o: PreviewOutcome = Decision::Deny.into();
+        assert_eq!(o, PreviewOutcome::Deny);
+    }
+
+    #[test]
+    fn preview_outcome_clone_eq() {
+        let a = PreviewOutcome::Allow;
+        let b = Clone::clone(&a);
+        assert_eq!(a, b);
+        assert_ne!(PreviewOutcome::Allow, PreviewOutcome::Deny);
+    }
+
+    // ── Batch 12: PreviewDeltaEntry ───────────────────────────────────────
+
+    #[test]
+    fn preview_delta_entry_clone() {
+        let entry = PreviewDeltaEntry {
+            sample_index: 0,
+            baseline_outcome: PreviewOutcome::Allow,
+            baseline_reason: "allowed".into(),
+            proposed_outcome: PreviewOutcome::Deny,
+            proposed_reason: "denied".into(),
+            changed: true,
+        };
+        let cloned = Clone::clone(&entry);
+        assert_eq!(cloned.sample_index, 0);
+        assert!(cloned.changed);
+        assert_eq!(cloned.proposed_outcome, PreviewOutcome::Deny);
+    }
+
+    // ── Batch 12: PreviewResult ───────────────────────────────────────────
+
+    #[test]
+    fn preview_result_clone() {
+        let result = PreviewResult {
+            deltas: vec![PreviewDeltaEntry {
+                sample_index: 0,
+                baseline_outcome: PreviewOutcome::Allow,
+                baseline_reason: "ok".into(),
+                proposed_outcome: PreviewOutcome::Allow,
+                proposed_reason: "ok".into(),
+                changed: false,
+            }],
+            summary: PreviewSummary {
+                total_samples: 1,
+                changed_count: 0,
+                newly_allowed: 0,
+                newly_denied: 0,
+                unchanged: 1,
+            },
+        };
+        let cloned = Clone::clone(&result);
+        assert_eq!(cloned.deltas.len(), 1);
+        assert_eq!(cloned.summary.unchanged, 1);
+    }
 }

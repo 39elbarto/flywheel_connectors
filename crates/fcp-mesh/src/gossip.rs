@@ -1100,6 +1100,18 @@ impl MeshGossip {
         }
     }
 
+    /// List admitted objects for a zone (up to `limit`).
+    ///
+    /// Returns object IDs known locally in the given zone. Used by
+    /// test harnesses to drive simulated gossip replication.
+    #[must_use]
+    pub fn list_objects_in_zone(&self, zone_id: &ZoneId, limit: usize) -> Vec<ObjectId> {
+        self.zone_states
+            .get(zone_id)
+            .map(|s| s.list_objects(limit))
+            .unwrap_or_default()
+    }
+
     /// Get stats for a zone.
     #[must_use]
     pub fn zone_stats(&self, zone_id: &ZoneId) -> Option<GossipStats> {

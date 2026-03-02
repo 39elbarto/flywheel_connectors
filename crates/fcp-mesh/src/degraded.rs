@@ -18,7 +18,7 @@
 //! - Symbol records containing RaptorQ-encoded control-plane object
 //! - Each symbol is encrypted with zone key (per-symbol AEAD)
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use fcp_core::{ObjectId, TailscaleNodeId, ZoneId, ZoneIdHash, ZoneKeyId};
 use fcp_crypto::{Ed25519SigningKey, Ed25519VerifyingKey};
@@ -102,6 +102,8 @@ pub struct ControlPlaneEnvelope {
     pub zone_id: ZoneId,
     /// Zone key ID for decryption.
     pub zone_key_id: ZoneKeyId,
+    /// Epoch this control-plane object belongs to.
+    pub epoch_id: u64,
     /// Retention class.
     pub retention: RetentionClass,
 }
@@ -115,6 +117,7 @@ impl ControlPlaneEnvelope {
         object_id: ObjectId,
         zone_id: ZoneId,
         zone_key_id: ZoneKeyId,
+        epoch_id: u64,
         retention: RetentionClass,
     ) -> Self {
         Self {
@@ -123,6 +126,7 @@ impl ControlPlaneEnvelope {
             object_id,
             zone_id,
             zone_key_id,
+            epoch_id,
             retention,
         }
     }
@@ -408,6 +412,7 @@ impl DegradedModeDecoder {
                     object_id,
                     zone_id: pending.zone_id,
                     zone_key_id: pending.zone_key_id,
+                    epoch_id: frame.header.epoch_id,
                     retention: pending.retention,
                 }));
             }
@@ -499,7 +504,13 @@ pub trait ControlPlaneHandler: Send + Sync {
 /// Simple in-memory handler that stores Required objects.
 #[derive(Default)]
 pub struct InMemoryControlPlaneHandler {
-    stored: std::sync::Mutex<HashMap<ObjectId, ControlPlaneEnvelope>>,
+    state: std::sync::Mutex<InMemoryReplayState>,
+}
+
+#[derive(Default)]
+struct InMemoryReplayState {
+    stored: HashMap<ObjectId, ControlPlaneEnvelope>,
+    epoch_index: HashMap<ZoneId, BTreeMap<u64, Vec<ObjectId>>>,
 }
 
 impl InMemoryControlPlaneHandler {
@@ -516,7 +527,7 @@ impl InMemoryControlPlaneHandler {
     /// Panics if the internal mutex is poisoned.
     #[must_use]
     pub fn get(&self, object_id: &ObjectId) -> Option<ControlPlaneEnvelope> {
-        self.stored.lock().unwrap().get(object_id).cloned()
+        self.state.lock().unwrap().stored.get(object_id).cloned()
     }
 
     /// Get the number of stored objects.
@@ -526,7 +537,53 @@ impl InMemoryControlPlaneHandler {
     /// Panics if the internal mutex is poisoned.
     #[must_use]
     pub fn count(&self) -> usize {
-        self.stored.lock().unwrap().len()
+        self.state.lock().unwrap().stored.len()
+    }
+
+    /// List epochs with stored Required objects for a zone.
+    ///
+    /// If `since_epoch` is provided, returns epochs strictly greater than that epoch.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned.
+    #[must_use]
+    pub fn list_epochs(&self, zone_id: &ZoneId, since_epoch: Option<u64>) -> Vec<u64> {
+        let state = self.state.lock().unwrap();
+        let Some(zone_epochs) = state.epoch_index.get(zone_id) else {
+            return Vec::new();
+        };
+        let epochs = zone_epochs
+            .keys()
+            .copied()
+            .filter(|epoch| since_epoch.is_none_or(|since| *epoch > since))
+            .collect();
+        drop(state);
+        epochs
+    }
+
+    /// Fetch all stored Required objects for a specific zone/epoch.
+    ///
+    /// Returns an empty vector if the epoch has no stored objects.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned.
+    #[must_use]
+    pub fn fetch_epoch(&self, zone_id: &ZoneId, epoch_id: u64) -> Vec<ControlPlaneEnvelope> {
+        let state = self.state.lock().unwrap();
+        let Some(zone_epochs) = state.epoch_index.get(zone_id) else {
+            return Vec::new();
+        };
+        let Some(object_ids) = zone_epochs.get(&epoch_id) else {
+            return Vec::new();
+        };
+        let envelopes = object_ids
+            .iter()
+            .filter_map(|object_id| state.stored.get(object_id).cloned())
+            .collect();
+        drop(state);
+        envelopes
     }
 }
 
@@ -536,13 +593,38 @@ impl ControlPlaneHandler for InMemoryControlPlaneHandler {
             RetentionClass::Required => {
                 // MUST store
                 let object_id = envelope.object_id.clone();
+                let zone_id = envelope.zone_id.clone();
+                let epoch_id = envelope.epoch_id;
                 info!(
                     object_id = %object_id,
-                    zone_id = %envelope.zone_id,
+                    zone_id = %zone_id,
+                    epoch_id,
                     retention = "Required",
                     "degraded_mode: storing required control-plane object"
                 );
-                self.stored.lock().unwrap().insert(object_id, envelope);
+
+                let mut state = self.state.lock().unwrap();
+
+                if let Some(previous) = state.stored.insert(object_id.clone(), envelope) {
+                    if let Some(zone_epochs) = state.epoch_index.get_mut(&previous.zone_id) {
+                        if let Some(object_ids) = zone_epochs.get_mut(&previous.epoch_id) {
+                            object_ids.retain(|id| id != &object_id);
+                            if object_ids.is_empty() {
+                                zone_epochs.remove(&previous.epoch_id);
+                            }
+                        }
+                        if zone_epochs.is_empty() {
+                            state.epoch_index.remove(&previous.zone_id);
+                        }
+                    }
+                }
+
+                let zone_epochs = state.epoch_index.entry(zone_id).or_default();
+                let object_ids = zone_epochs.entry(epoch_id).or_default();
+                if !object_ids.contains(&object_id) {
+                    object_ids.push(object_id);
+                }
+                drop(state);
                 Ok(())
             }
             RetentionClass::Ephemeral => {
@@ -585,6 +667,7 @@ mod tests {
             object_id: ObjectId::from_bytes([0x11; 32]),
             zone_id: test_zone_id(),
             zone_key_id: ZoneKeyId::from_bytes([0x22; 8]),
+            epoch_id: 0,
             retention: RetentionClass::Required,
         }
     }
@@ -648,6 +731,7 @@ mod tests {
         assert_eq!(decoded_envelope.payload, envelope.payload);
         assert_eq!(decoded_envelope.schema_hash, envelope.schema_hash);
         assert_eq!(decoded_envelope.object_id, envelope.object_id);
+        assert_eq!(decoded_envelope.epoch_id, 2000);
     }
 
     #[test]
@@ -791,6 +875,40 @@ mod tests {
 
         assert_eq!(handler.count(), 1);
         assert!(handler.get(&object_id).is_some());
+    }
+
+    #[test]
+    fn handler_list_epochs_and_fetch_epoch() {
+        let handler = InMemoryControlPlaneHandler::new();
+        let zone_id = test_zone_id();
+
+        let mut epoch_10_obj = test_envelope();
+        epoch_10_obj.object_id = ObjectId::from_bytes([0x31; 32]);
+        epoch_10_obj.zone_id = zone_id.clone();
+        epoch_10_obj.epoch_id = 10;
+
+        let mut epoch_11_obj = test_envelope();
+        epoch_11_obj.object_id = ObjectId::from_bytes([0x32; 32]);
+        epoch_11_obj.zone_id = zone_id.clone();
+        epoch_11_obj.epoch_id = 11;
+
+        let epoch_10_object_id = epoch_10_obj.object_id.clone();
+
+        handler.handle(epoch_10_obj).expect("store epoch 10");
+        handler.handle(epoch_11_obj).expect("store epoch 11");
+
+        let all_epochs = handler.list_epochs(&zone_id, None);
+        assert_eq!(all_epochs, vec![10, 11]);
+
+        let newer_epochs = handler.list_epochs(&zone_id, Some(10));
+        assert_eq!(newer_epochs, vec![11]);
+
+        let epoch_10_objects = handler.fetch_epoch(&zone_id, 10);
+        assert_eq!(epoch_10_objects.len(), 1);
+        assert_eq!(epoch_10_objects[0].object_id, epoch_10_object_id);
+        assert_eq!(epoch_10_objects[0].epoch_id, 10);
+
+        assert!(handler.fetch_epoch(&zone_id, 99).is_empty());
     }
 
     #[test]

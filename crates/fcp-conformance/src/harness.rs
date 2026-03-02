@@ -12,7 +12,11 @@ use std::time::Duration;
 
 use crate::schemas::{SchemaValidationError, validate_e2e_log_jsonl};
 use chrono::{DateTime, TimeZone, Utc};
-use fcp_mesh::{MeshNode, MeshNodeConfig};
+use fcp_core::{EpochId, ZoneId};
+use fcp_mesh::{
+    AvailabilityProfile, CpuArch, DeviceProfile, LatencyClass, MeshNode, MeshNodeConfig,
+    PowerSource,
+};
 use fcp_store::{
     MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore, MemorySymbolStoreConfig,
     ObjectAdmissionPolicy, ObjectStore, QuarantineStore, SymbolStore,
@@ -425,7 +429,9 @@ impl SimulatedNetwork {
         self.queue.peek().map(|queued| queued.deliver_at_ms)
     }
 
-    fn is_partitioned(&self, from: &NodeId, to: &NodeId) -> bool {
+    /// Check if two nodes are in different partitions (can't communicate).
+    #[must_use]
+    pub fn is_partitioned(&self, from: &NodeId, to: &NodeId) -> bool {
         self.partitions.iter().any(|partition| {
             let from_in = partition.contains(from);
             let to_in = partition.contains(to);
@@ -586,6 +592,23 @@ impl TestMeshNode {
     pub const fn mesh(&self) -> Option<&MeshNode> {
         self.mesh.as_ref()
     }
+
+    /// Mutable access to the underlying `MeshNode` (if running).
+    pub const fn mesh_mut(&mut self) -> Option<&mut MeshNode> {
+        self.mesh.as_mut()
+    }
+
+    /// Access the object store.
+    #[must_use]
+    pub fn object_store(&self) -> &Arc<dyn ObjectStore> {
+        &self.object_store
+    }
+
+    /// Access the symbol store.
+    #[must_use]
+    pub fn symbol_store(&self) -> &Arc<dyn SymbolStore> {
+        &self.symbol_store
+    }
 }
 
 /// Multi-node test harness.
@@ -695,6 +718,169 @@ impl TestHarness {
     /// Inject latency between two nodes.
     pub fn set_latency(&mut self, from: &NodeId, to: &NodeId, latency: Duration) {
         self.network.set_latency(from, to, latency);
+    }
+
+    /// Register all running nodes as peers of each other with default device profiles.
+    ///
+    /// Each node receives peer state updates for every other running node,
+    /// enabling gossip exchange and execution planning.
+    pub fn register_all_peers(&mut self) {
+        let now_ms = self.now_ms();
+        let node_ids: Vec<NodeId> = self
+            .nodes
+            .iter()
+            .filter(|n| n.is_running())
+            .map(|n| n.node_id.clone())
+            .collect();
+
+        for i in 0..self.nodes.len() {
+            if !self.nodes[i].is_running() {
+                continue;
+            }
+            let local_node_id = self.nodes[i].node_id.clone();
+            if let Some(mesh) = self.nodes[i].mesh_mut() {
+                // Set the node's own local profile so it participates in planning.
+                let local_profile = DeviceProfile::builder(local_node_id.clone())
+                    .cpu_cores(4)
+                    .cpu_arch(CpuArch::X86_64)
+                    .memory_mb(8192)
+                    .power_source(PowerSource::Mains)
+                    .latency_class(LatencyClass::Lan)
+                    .availability(AvailabilityProfile::AlwaysOn)
+                    .bandwidth_estimate_kbps(100_000)
+                    .build();
+                mesh.update_local_state(
+                    local_profile,
+                    std::collections::HashSet::new(),
+                    Vec::new(),
+                );
+
+                for peer_id in &node_ids {
+                    if *peer_id == local_node_id {
+                        continue;
+                    }
+                    let profile = DeviceProfile::builder(peer_id.clone())
+                        .cpu_cores(4)
+                        .cpu_arch(CpuArch::X86_64)
+                        .memory_mb(8192)
+                        .power_source(PowerSource::Mains)
+                        .latency_class(LatencyClass::Lan)
+                        .availability(AvailabilityProfile::AlwaysOn)
+                        .bandwidth_estimate_kbps(100_000)
+                        .build();
+                    mesh.update_peer_state(
+                        peer_id.clone(),
+                        profile,
+                        std::collections::HashSet::new(),
+                        Vec::new(),
+                        now_ms,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Perform one round of gossip summary exchange between all running nodes.
+    ///
+    /// Each running node creates a gossip summary and shares it with every
+    /// other running node. This simulates a single gossip protocol round.
+    pub fn gossip_exchange_round(&mut self) {
+        let now_ms = self.now_ms();
+        let now_secs = now_ms / 1000;
+        let epoch = EpochId::new("test-epoch-1");
+        let zone_id = ZoneId::work();
+        let running_indices: Vec<usize> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.is_running())
+            .map(|(i, _)| i)
+            .collect();
+
+        // Phase 1: Collect summaries from all running nodes.
+        let mut summaries = Vec::new();
+        for &idx in &running_indices {
+            if let Some(mesh) = self.nodes[idx].mesh_mut() {
+                if let Some(summary) = mesh.gossip_mut().create_summary(&zone_id, epoch.clone()) {
+                    summaries.push((idx, summary));
+                }
+            }
+        }
+
+        // Phase 2: Distribute each summary to reachable running nodes (respecting partitions).
+        for (source_idx, summary) in &summaries {
+            let source_id = self.nodes[*source_idx].node_id.clone();
+            for &target_idx in &running_indices {
+                if target_idx == *source_idx {
+                    continue;
+                }
+                let target_id = &self.nodes[target_idx].node_id;
+                if self.network.is_partitioned(&source_id, target_id) {
+                    continue;
+                }
+                if let Some(mesh) = self.nodes[target_idx].mesh_mut() {
+                    mesh.gossip_mut().handle_summary(summary.clone(), now_secs);
+                }
+            }
+        }
+
+        // Phase 3: Simulate full gossip replication — propagate object awareness.
+        // Collect each node's known objects, then announce missing objects on reachable peers.
+        // This simulates the request/response cycle that would happen in production.
+        let mut per_node_objects: Vec<(usize, Vec<fcp_core::ObjectId>)> = Vec::new();
+        for &idx in &running_indices {
+            if let Some(mesh) = self.nodes[idx].mesh_mut() {
+                let objects = mesh.gossip_mut().list_objects_in_zone(&zone_id, 10_000);
+                per_node_objects.push((idx, objects));
+            }
+        }
+
+        let mut objects_replicated = 0usize;
+        for (source_idx, source_objects) in &per_node_objects {
+            let source_id = self.nodes[*source_idx].node_id.clone();
+            for &target_idx in &running_indices {
+                if target_idx == *source_idx {
+                    continue;
+                }
+                let target_id = &self.nodes[target_idx].node_id;
+                if self.network.is_partitioned(&source_id, target_id) {
+                    continue;
+                }
+                for obj in source_objects {
+                    if let Some(mesh) = self.nodes[target_idx].mesh_mut() {
+                        if !mesh.gossip_mut().has_object(&zone_id, obj) {
+                            mesh.gossip_mut().announce_object(
+                                &zone_id,
+                                obj,
+                                fcp_mesh::ObjectAdmissionClass::Admitted,
+                                now_secs,
+                            );
+                            objects_replicated += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        self.logs.push(LogEntry::new_with_clock(
+            &self.clock,
+            "harness",
+            "gossip",
+            "exchange",
+            "gossip-round",
+            "gossip_exchange_round",
+            serde_json::json!({
+                "participants": running_indices.len(),
+                "summaries_exchanged": summaries.len(),
+                "objects_replicated": objects_replicated,
+            }),
+        ));
+    }
+
+    /// Get the number of currently running nodes.
+    #[must_use]
+    pub fn running_count(&self) -> usize {
+        self.nodes.iter().filter(|n| n.is_running()).count()
     }
 
     /// Wait for simulated convergence (queue drained) within a timeout.

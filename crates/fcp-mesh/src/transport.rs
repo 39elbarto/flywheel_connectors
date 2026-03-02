@@ -381,4 +381,66 @@ mod tests {
         let best = TransportSelector::best_path(&paths, &policy).expect("best path");
         assert_eq!(best.path.path_id, "direct-low");
     }
+
+    #[test]
+    fn rank_paths_tie_breaks_by_path_id_then_peer() {
+        let policy = ZoneTransportPolicy {
+            allow_lan: true,
+            allow_derp: true,
+            allow_funnel: true,
+        };
+
+        let paths = vec![
+            TransportPath::new(TransportPathKind::Direct, peer("peer-z"), "alpha", Some(10)),
+            TransportPath::new(TransportPathKind::Direct, peer("peer-b"), "alpha", Some(10)),
+            TransportPath::new(TransportPathKind::Direct, peer("peer-a"), "beta", Some(10)),
+        ];
+
+        let ranked = TransportSelector::rank_paths(&paths, &policy);
+        let ordering: Vec<(&str, &str)> = ranked
+            .iter()
+            .map(|entry| (entry.path.path_id.as_str(), entry.path.peer.as_str()))
+            .collect();
+
+        assert_eq!(
+            ordering,
+            vec![("alpha", "peer-b"), ("alpha", "peer-z"), ("beta", "peer-a")]
+        );
+    }
+
+    #[test]
+    fn rank_paths_lan_denials_apply_to_direct_and_mesh() {
+        let policy = ZoneTransportPolicy {
+            allow_lan: false,
+            allow_derp: true,
+            allow_funnel: true,
+        };
+
+        let paths = vec![
+            TransportPath::new(TransportPathKind::Direct, peer("p1"), "direct", None),
+            TransportPath::new(TransportPathKind::Mesh, peer("p2"), "mesh", None),
+            TransportPath::new(TransportPathKind::Derp, peer("p3"), "derp", None),
+        ];
+
+        let ranked = TransportSelector::rank_paths(&paths, &policy);
+
+        let lan_entries: Vec<&RankedPath> = ranked
+            .iter()
+            .filter(|entry| {
+                entry.path.kind == TransportPathKind::Direct
+                    || entry.path.kind == TransportPathKind::Mesh
+            })
+            .collect();
+
+        assert_eq!(lan_entries.len(), 2);
+        assert!(lan_entries.iter().all(|entry| !entry.eligible));
+        assert!(
+            lan_entries
+                .iter()
+                .all(|entry| { entry.reason == Some(DecisionReasonCode::TransportLanForbidden) })
+        );
+
+        let best = TransportSelector::best_path(&paths, &policy).expect("best path");
+        assert_eq!(best.path.kind, TransportPathKind::Derp);
+    }
 }

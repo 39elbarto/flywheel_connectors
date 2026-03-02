@@ -1044,6 +1044,7 @@ mod meshnode {
             object_id,
             zone_id.clone(),
             zone_key_id,
+            42,
             RetentionClass::Required,
         );
 
@@ -1066,6 +1067,7 @@ mod meshnode {
         assert_eq!(decoded.payload, payload);
         assert_eq!(decoded.schema_hash, schema_hash_bytes);
         assert_eq!(decoded.object_id, object_id);
+        assert_eq!(decoded.epoch_id, 42);
     }
 
     #[fcp_async_core::runtime::test]
@@ -1099,6 +1101,7 @@ mod meshnode {
             object_id,
             zone_id.clone(),
             zone_key_id,
+            77,
             RetentionClass::Required,
         );
 
@@ -1114,7 +1117,10 @@ mod meshnode {
         }
 
         assert_eq!(handler.count(), 1);
-        assert!(handler.get(&object_id).is_some());
+        let stored = handler
+            .get(&object_id)
+            .expect("required control-plane object should be stored");
+        assert_eq!(stored.epoch_id, 77);
     }
 
     #[fcp_async_core::runtime::test]
@@ -1242,6 +1248,7 @@ mod meshnode {
             object_id,
             zone_id.clone(),
             zone_key_id,
+            99,
             RetentionClass::Required,
         );
 
@@ -1258,6 +1265,7 @@ mod meshnode {
 
         let stored = handler.get(&object_id).expect("control plane stored");
         assert_eq!(stored.payload, payload);
+        assert_eq!(stored.epoch_id, 99);
 
         emit_test_pass(
             TEST_NAME,
@@ -1409,6 +1417,130 @@ mod transport_selection {
                     "derp": derp.reason.is_some(),
                     "funnel": funnel.reason.is_some()
                 }
+            }),
+        );
+    }
+
+    #[test]
+    fn transport_ranking_tie_break_is_stable() {
+        const TEST_NAME: &str = "transport_ranking_tie_break_is_stable";
+        const CATEGORY: &str = "routing";
+
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let policy = ZoneTransportPolicy {
+            allow_lan: true,
+            allow_derp: true,
+            allow_funnel: true,
+        };
+
+        let paths = vec![
+            TransportPath::new(
+                TransportPathKind::Direct,
+                NodeId::new("peer-z"),
+                "alpha",
+                Some(10),
+            ),
+            TransportPath::new(
+                TransportPathKind::Direct,
+                NodeId::new("peer-b"),
+                "alpha",
+                Some(10),
+            ),
+            TransportPath::new(
+                TransportPathKind::Direct,
+                NodeId::new("peer-a"),
+                "beta",
+                Some(10),
+            ),
+        ];
+
+        let ranked = TransportSelector::rank_paths(&paths, &policy);
+        let ordering: Vec<(&str, &str)> = ranked
+            .iter()
+            .map(|entry| (entry.path.path_id.as_str(), entry.path.peer.as_str()))
+            .collect();
+
+        assert_eq!(
+            ordering,
+            vec![("alpha", "peer-b"), ("alpha", "peer-z"), ("beta", "peer-a")]
+        );
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "ordered_path_ids": ranked.iter().map(|entry| entry.path.path_id.as_str()).collect::<Vec<_>>(),
+                "ordered_peers": ranked.iter().map(|entry| entry.path.peer.as_str()).collect::<Vec<_>>(),
+                "tie_break_fields": ["path_id", "peer_id"]
+            }),
+        );
+    }
+
+    #[test]
+    fn transport_lan_denial_reason_code_and_derp_fallback() {
+        const TEST_NAME: &str = "transport_lan_denial_reason_code_and_derp_fallback";
+        const CATEGORY: &str = "routing";
+
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let zone_id = ZoneId::owner();
+        let policy = ZoneTransportPolicy {
+            allow_lan: false,
+            allow_derp: true,
+            allow_funnel: false,
+        };
+
+        let paths = vec![
+            TransportPath::new(
+                TransportPathKind::Direct,
+                NodeId::new("peer-direct"),
+                "direct",
+                Some(2),
+            ),
+            TransportPath::new(
+                TransportPathKind::Mesh,
+                NodeId::new("peer-mesh"),
+                "mesh",
+                Some(7),
+            ),
+            TransportPath::new(
+                TransportPathKind::Derp,
+                NodeId::new("peer-derp"),
+                "derp",
+                Some(30),
+            ),
+        ];
+
+        let ranked = TransportSelector::rank_paths(&paths, &policy);
+
+        let lan_denials: Vec<&fcp_mesh::transport::RankedPath> = ranked
+            .iter()
+            .filter(|entry| {
+                entry.path.kind == TransportPathKind::Direct
+                    || entry.path.kind == TransportPathKind::Mesh
+            })
+            .collect();
+        assert_eq!(lan_denials.len(), 2);
+        assert!(lan_denials.iter().all(|entry| !entry.eligible));
+        assert!(
+            lan_denials
+                .iter()
+                .all(|entry| { entry.reason == Some(DecisionReasonCode::TransportLanForbidden) })
+        );
+
+        let best = TransportSelector::best_path(&paths, &policy).expect("best path");
+        assert_eq!(best.path.kind, TransportPathKind::Derp);
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "zone_id": zone_id.as_str(),
+                "denied_paths": lan_denials.iter().map(|entry| entry.path.path_id.as_str()).collect::<Vec<_>>(),
+                "reason_code": DecisionReasonCode::TransportLanForbidden.as_str(),
+                "fallback_path": best.path.path_id,
+                "fallback_kind": format!("{:?}", best.path.kind),
             }),
         );
     }

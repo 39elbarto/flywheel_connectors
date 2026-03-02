@@ -428,6 +428,127 @@ impl M365Connector {
         })
     }
 
+    /// Handle doctor readiness checks.
+    pub async fn handle_doctor(&self) -> FcpResult<serde_json::Value> {
+        #[derive(Serialize)]
+        struct DoctorResult {
+            status: &'static str,
+            checks: Vec<DoctorCheck>,
+        }
+        #[derive(Serialize)]
+        struct DoctorCheck {
+            name: &'static str,
+            status: &'static str,
+            message: String,
+        }
+
+        let mut checks = Vec::new();
+
+        // 1. Configuration
+        let config_ok = self.config.is_some();
+        checks.push(DoctorCheck {
+            name: "configuration",
+            status: if config_ok { "pass" } else { "fail" },
+            message: if config_ok {
+                "Connector is configured".into()
+            } else {
+                "Connector is not configured — call 'configure' first".into()
+            },
+        });
+
+        // 2. Client initialized
+        let client_ok = self.client.is_some();
+        checks.push(DoctorCheck {
+            name: "client_initialized",
+            status: if client_ok { "pass" } else { "fail" },
+            message: if client_ok {
+                "HTTP client initialized".into()
+            } else {
+                "HTTP client not initialized".into()
+            },
+        });
+
+        // 3. Base URL
+        if let Some(ref config) = self.config {
+            checks.push(DoctorCheck {
+                name: "base_url",
+                status: "pass",
+                message: format!(
+                    "Egress target: graph.microsoft.com (via {})",
+                    config.api_url
+                ),
+            });
+        } else {
+            checks.push(DoctorCheck {
+                name: "base_url",
+                status: "warn",
+                message: "No configuration — cannot determine base URL".into(),
+            });
+        }
+
+        // 4. Auth mode
+        if let Some(ref config) = self.config {
+            checks.push(DoctorCheck {
+                name: "auth_mode",
+                status: "pass",
+                message: format!("Auth: {}", config.auth_mode.label()),
+            });
+        } else {
+            checks.push(DoctorCheck {
+                name: "auth_mode",
+                status: "fail",
+                message: "No auth configured".into(),
+            });
+        }
+
+        // 5. Network constraints
+        checks.push(DoctorCheck {
+            name: "network_constraints",
+            status: "pass",
+            message: "Egress targets: graph.microsoft.com, login.microsoftonline.com (HTTPS)"
+                .into(),
+        });
+
+        // 6. Credential injection
+        if let Some(ref config) = self.config {
+            if matches!(config.auth_mode, M365AuthMode::CredentialId(_)) {
+                checks.push(DoctorCheck {
+                    name: "credential_injection",
+                    status: "pass",
+                    message: "Secretless egress proxy mode — no secrets on disk".into(),
+                });
+            } else {
+                checks.push(DoctorCheck {
+                    name: "credential_injection",
+                    status: "warn",
+                    message: "Direct token mode — consider credential_id for production".into(),
+                });
+            }
+        } else {
+            checks.push(DoctorCheck {
+                name: "credential_injection",
+                status: "fail",
+                message: "No auth configured".into(),
+            });
+        }
+
+        let overall = if checks.iter().any(|c| c.status == "fail") {
+            "fail"
+        } else if checks.iter().any(|c| c.status == "warn") {
+            "warn"
+        } else {
+            "pass"
+        };
+
+        serde_json::to_value(DoctorResult {
+            status: overall,
+            checks,
+        })
+        .map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize doctor result: {e}"),
+        })
+    }
+
     /// Handle connector self-check for host doctor/readiness.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
         let Some(config) = &self.config else {
@@ -546,13 +667,18 @@ impl M365Connector {
             "m365.mail.add_attachment" => self.invoke_add_attachment(input).await,
             // ── Files ────────────────────────────────────────
             "m365.files.list_items" => self.invoke_list_items(input).await,
+            "m365.files.get_item" => self.invoke_get_item(input).await,
             "m365.files.download_file" => self.invoke_download_file(input).await,
             "m365.files.upload_file" => self.invoke_upload_file(input).await,
             "m365.files.delete_item" => self.invoke_delete_item(input).await,
+            "m365.files.search" => self.invoke_search_files(input).await,
+            "m365.files.create_share_link" => self.invoke_create_share_link(input).await,
             // ── Calendar ─────────────────────────────────────
             "m365.calendar.list_events" => self.invoke_list_events(input).await,
             "m365.calendar.create_event" => self.invoke_create_event(input).await,
             "m365.calendar.delete_event" => self.invoke_delete_event(input).await,
+            "m365.calendar.get_event" => self.invoke_get_event(input).await,
+            "m365.calendar.update_event" => self.invoke_update_event(input).await,
             "m365.calendar.get_freebusy" => self.invoke_get_freebusy(input).await,
             // ── Tasks ────────────────────────────────────────
             "m365.tasks.list_task_lists" => self.invoke_list_task_lists(input).await,
@@ -836,6 +962,44 @@ impl M365Connector {
         Ok(json!({ "status": "deleted" }))
     }
 
+    async fn invoke_get_item(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let user_id = require_str(&input, "user_id")?;
+        let item_id = require_str(&input, "item_id")?;
+        let item = client
+            .get_item(user_id, item_id)
+            .await
+            .map_err(|e: M365Error| e.to_fcp_error())?;
+        Ok(json!({ "item": item }))
+    }
+
+    async fn invoke_search_files(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let user_id = require_str(&input, "user_id")?;
+        let query = require_str(&input, "query")?;
+        let result = client
+            .search_files(user_id, query)
+            .await
+            .map_err(|e: M365Error| e.to_fcp_error())?;
+        Ok(json!({ "items": result.value }))
+    }
+
+    async fn invoke_create_share_link(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let user_id = require_str(&input, "user_id")?;
+        let item_id = require_str(&input, "item_id")?;
+        let link_type = require_str(&input, "type")?;
+        let scope = input.get("scope").and_then(|v| v.as_str());
+        let link = client
+            .create_share_link(user_id, item_id, link_type, scope)
+            .await
+            .map_err(|e: M365Error| e.to_fcp_error())?;
+        Ok(json!({ "link": link }))
+    }
+
     // ── Calendar operation implementations ───────────────────────
 
     async fn invoke_list_events(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
@@ -892,6 +1056,36 @@ impl M365Connector {
             .await
             .map_err(|e: M365Error| e.to_fcp_error())?;
         Ok(json!({ "status": "deleted" }))
+    }
+
+    async fn invoke_get_event(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let user_id = require_str(&input, "user_id")?;
+        let event_id = require_str(&input, "event_id")?;
+        let event = client
+            .get_event(user_id, event_id)
+            .await
+            .map_err(|e: M365Error| e.to_fcp_error())?;
+        Ok(json!({ "event": event }))
+    }
+
+    async fn invoke_update_event(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let user_id = require_str(&input, "user_id")?;
+        let event_id = require_str(&input, "event_id")?;
+
+        let mut updates = input.clone();
+        // Remove routing fields from the update payload
+        if let Some(obj) = updates.as_object_mut() {
+            obj.remove("user_id");
+            obj.remove("event_id");
+        }
+
+        let event = client
+            .update_event(user_id, event_id, &updates)
+            .await
+            .map_err(|e: M365Error| e.to_fcp_error())?;
+        Ok(json!({ "event": event }))
     }
 
     async fn invoke_get_freebusy(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
@@ -1800,6 +1994,89 @@ fn build_operations() -> Vec<OperationInfo> {
                 related: vec![CapabilityId::from_static("m365.files.list_items")],
             },
         ),
+        op_info(
+            "m365.files.get_item",
+            "Get metadata for a single file or folder by ID",
+            json!({
+                "type": "object",
+                "required": ["user_id", "item_id"],
+                "properties": {
+                    "user_id": { "type": "string", "description": "User principal name or 'me'" },
+                    "item_id": { "type": "string", "description": "Drive item ID" }
+                }
+            }),
+            json!({ "type": "object", "required": ["item"], "properties": { "item": { "type": "object" } } }),
+            "m365.files.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Get full metadata for a specific file or folder by item ID.".into(),
+                common_mistakes: vec!["Using a stale item_id after the item has been moved or deleted.".into()],
+                examples: vec![r#"{"user_id": "me", "item_id": "01ABCDEF..."}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("m365.files.list_items"),
+                    CapabilityId::from_static("m365.files.download_file"),
+                ],
+            },
+        ),
+        op_info(
+            "m365.files.search",
+            "Search for files and folders in OneDrive",
+            json!({
+                "type": "object",
+                "required": ["user_id", "query"],
+                "properties": {
+                    "user_id": { "type": "string", "description": "User principal name or 'me'" },
+                    "query": { "type": "string", "description": "Search query string" }
+                }
+            }),
+            json!({ "type": "object", "required": ["items"], "properties": { "items": { "type": "array" } } }),
+            "m365.files.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Search for files by name, content, or metadata across OneDrive.".into(),
+                common_mistakes: vec!["Using overly broad queries that return too many results.".into()],
+                examples: vec![r#"{"user_id": "me", "query": "quarterly report"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("m365.files.list_items"),
+                    CapabilityId::from_static("m365.files.get_item"),
+                ],
+            },
+        ),
+        op_info(
+            "m365.files.create_share_link",
+            "Create a sharing link for a file or folder",
+            json!({
+                "type": "object",
+                "required": ["user_id", "item_id", "type"],
+                "properties": {
+                    "user_id": { "type": "string", "description": "User principal name or 'me'" },
+                    "item_id": { "type": "string", "description": "Drive item ID to share" },
+                    "type": { "type": "string", "description": "Link type: view, edit, or embed" },
+                    "scope": { "type": "string", "description": "Link scope: anonymous or organization" }
+                }
+            }),
+            json!({ "type": "object", "required": ["link"], "properties": { "link": { "type": "object" } } }),
+            "m365.files.write",
+            RiskLevel::High,
+            SafetyTier::Dangerous,
+            IdempotencyClass::None,
+            AgentHint {
+                when_to_use: "Create a shareable link for a file or folder. Grants access to anyone with the link.".into(),
+                common_mistakes: vec![
+                    "Creating anonymous links without user confirmation (exposes data externally).".into(),
+                    "Not distinguishing between view and edit links.".into(),
+                ],
+                examples: vec![r#"{"user_id": "me", "item_id": "01ABCDEF...", "type": "view", "scope": "organization"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("m365.files.get_item"),
+                    CapabilityId::from_static("m365.files.list_items"),
+                ],
+            },
+        ),
         // ── Calendar operations ──────────────────────────────────
         op_info(
             "m365.calendar.list_events",
@@ -1888,6 +2165,63 @@ fn build_operations() -> Vec<OperationInfo> {
                 examples: vec![r#"{"user_id": "me", "event_id": "AAMkAG..."}"#.into()],
                 related: vec![
                     CapabilityId::from_static("m365.calendar.list_events"),
+                    CapabilityId::from_static("m365.calendar.create_event"),
+                ],
+            },
+        ),
+        op_info(
+            "m365.calendar.get_event",
+            "Get a single calendar event by ID",
+            json!({
+                "type": "object",
+                "required": ["user_id", "event_id"],
+                "properties": {
+                    "user_id": { "type": "string", "description": "User principal name or 'me'" },
+                    "event_id": { "type": "string", "description": "Event ID" }
+                }
+            }),
+            json!({ "type": "object", "properties": { "event": { "type": "object" } } }),
+            "m365.calendar.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Retrieve full details of a specific calendar event.".into(),
+                common_mistakes: vec!["Using display name instead of user principal name for user_id.".into()],
+                examples: vec![r#"{"user_id": "me", "event_id": "AAMkAGI2..."}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("m365.calendar.list_events"),
+                    CapabilityId::from_static("m365.calendar.update_event"),
+                ],
+            },
+        ),
+        op_info(
+            "m365.calendar.update_event",
+            "Update an existing calendar event",
+            json!({
+                "type": "object",
+                "required": ["user_id", "event_id"],
+                "properties": {
+                    "user_id": { "type": "string", "description": "User principal name or 'me'" },
+                    "event_id": { "type": "string", "description": "Event ID to update" },
+                    "subject": { "type": "string", "description": "New event subject" },
+                    "body": { "type": "object", "description": "New event body" },
+                    "start": { "type": "object", "description": "New start time" },
+                    "end": { "type": "object", "description": "New end time" },
+                    "location": { "type": "object", "description": "New location" }
+                }
+            }),
+            json!({ "type": "object", "properties": { "event": { "type": "object" } } }),
+            "m365.calendar.write",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::BestEffort,
+            AgentHint {
+                when_to_use: "Update fields of an existing calendar event. Only specified fields are changed.".into(),
+                common_mistakes: vec!["Forgetting to include the event_id.".into()],
+                examples: vec![r#"{"user_id": "me", "event_id": "AAMkAGI2...", "subject": "Updated Meeting"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("m365.calendar.get_event"),
                     CapabilityId::from_static("m365.calendar.create_event"),
                 ],
             },
@@ -2405,15 +2739,20 @@ mod tests {
         assert!(op_ids.contains(&"m365.mail.forward_message"));
         assert!(op_ids.contains(&"m365.mail.list_attachments"));
         assert!(op_ids.contains(&"m365.mail.add_attachment"));
-        // Files (4)
+        // Files (7)
         assert!(op_ids.contains(&"m365.files.list_items"));
+        assert!(op_ids.contains(&"m365.files.get_item"));
         assert!(op_ids.contains(&"m365.files.download_file"));
         assert!(op_ids.contains(&"m365.files.upload_file"));
         assert!(op_ids.contains(&"m365.files.delete_item"));
-        // Calendar (4)
+        assert!(op_ids.contains(&"m365.files.search"));
+        assert!(op_ids.contains(&"m365.files.create_share_link"));
+        // Calendar (6)
         assert!(op_ids.contains(&"m365.calendar.list_events"));
         assert!(op_ids.contains(&"m365.calendar.create_event"));
         assert!(op_ids.contains(&"m365.calendar.delete_event"));
+        assert!(op_ids.contains(&"m365.calendar.get_event"));
+        assert!(op_ids.contains(&"m365.calendar.update_event"));
         assert!(op_ids.contains(&"m365.calendar.get_freebusy"));
         // Tasks (3)
         assert!(op_ids.contains(&"m365.tasks.list_task_lists"));
@@ -2426,7 +2765,7 @@ mod tests {
         // Delta (1)
         assert!(op_ids.contains(&"m365.delta.sync"));
 
-        assert_eq!(ops.len(), 25);
+        assert_eq!(ops.len(), 30);
     }
 
     #[test]
@@ -2449,5 +2788,55 @@ mod tests {
             .compute_interface_hash()
             .expect("compute interface hash");
         assert_eq!(computed, computed2);
+    }
+
+    // ── Doctor tests ─────────────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_not_configured() {
+        let connector = M365Connector::new();
+        let result = connector.handle_doctor().await.unwrap();
+        assert_eq!(result["status"], "fail");
+        let checks = result["checks"].as_array().unwrap();
+        assert!(checks.len() >= 6);
+        assert_eq!(checks[0]["name"], "configuration");
+        assert_eq!(checks[0]["status"], "fail");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_configured_access_token() {
+        let mut connector = M365Connector::new();
+        // access_token auth mode
+        connector
+            .handle_configure(json!({
+                "access_token": make_access_token(&["User.Read"], &[])
+            }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_doctor().await.unwrap();
+        // warn because direct token mode
+        assert_eq!(result["status"], "warn");
+        let checks = result["checks"].as_array().unwrap();
+        let cred_check = checks
+            .iter()
+            .find(|c| c["name"] == "credential_injection")
+            .unwrap();
+        assert_eq!(cred_check["status"], "warn");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_configured_credential_id() {
+        let mut connector = M365Connector::new();
+        let cred_id = uuid::Uuid::new_v4().to_string();
+        connector
+            .handle_configure(json!({
+                "credential_id": cred_id
+            }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_doctor().await.unwrap();
+        assert_eq!(result["status"], "pass");
     }
 }

@@ -4,18 +4,122 @@ use std::sync::Arc;
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
-    ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier, SessionId,
-    SimulateRequest, SimulateResponse,
+    ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest,
+    HandshakeResponse, IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel,
+    SafetyTier, SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
 
-use crate::{client::ZendeskClient, error::ZendeskError};
+use crate::client::{ZendeskAuth, ZendeskClient};
+use crate::error::ZendeskError;
+
+// ── Provisioning configuration ───────────────────────────────────────
+
+/// Parsed and validated Zendesk configuration.
+struct ZendeskConfig {
+    auth: ZendeskAuth,
+    base_url: Option<String>,
+}
+
+impl ZendeskConfig {
+    /// Parse and validate configuration parameters.
+    ///
+    /// Requires `subdomain` always. Auth is xor: (`email` + `api_token`) xor `credential_id`.
+    fn from_params(params: &serde_json::Value) -> FcpResult<Self> {
+        let subdomain =
+            params
+                .get("subdomain")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing required 'subdomain' in configuration".into(),
+                })?;
+
+        let email = params.get("email").and_then(|v| v.as_str());
+        let api_token = params.get("api_token").and_then(|v| v.as_str());
+        let credential_id_raw = params.get("credential_id").and_then(|v| v.as_str());
+        let base_url = params
+            .get("base_url")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        let auth = match (email, api_token, credential_id_raw) {
+            (Some(e), Some(t), None) => ZendeskAuth::Token {
+                subdomain: subdomain.into(),
+                email: e.into(),
+                api_token: t.into(),
+            },
+            (None, None, Some(raw)) => {
+                let cred = CredentialId::parse(raw).map_err(|e| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Invalid credential_id: {e}"),
+                })?;
+                ZendeskAuth::CredentialId {
+                    subdomain: subdomain.into(),
+                    credential_id: cred,
+                }
+            }
+            (Some(_), None, None) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Incomplete auth: 'email' provided without 'api_token'".into(),
+                });
+            }
+            (None, Some(_), None) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Incomplete auth: 'api_token' provided without 'email'".into(),
+                });
+            }
+            (Some(_), _, Some(_)) | (_, Some(_), Some(_)) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Conflicting auth: provide (email + api_token) or credential_id, not both".into(),
+                });
+            }
+            (None, None, None) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing auth: provide (email + api_token) or credential_id".into(),
+                });
+            }
+        };
+
+        Ok(Self { auth, base_url })
+    }
+}
+
+// ── Doctor types ─────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DoctorResult {
+    status: DoctorStatus,
+    checks: Vec<DoctorCheck>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DoctorCheck {
+    name: String,
+    status: DoctorStatus,
+    message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum DoctorStatus {
+    Pass,
+    Warn,
+    Fail,
+}
+
+// ── Connector ────────────────────────────────────────────────────────
 
 /// FCP Zendesk Connector.
 pub struct ZendeskConnector {
     base: Arc<BaseConnector>,
+    config: Option<ZendeskConfig>,
     client: Option<ZendeskClient>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
@@ -27,6 +131,7 @@ impl ZendeskConnector {
     pub fn new() -> Self {
         Self {
             base: Arc::new(BaseConnector::new(ConnectorId::from_static("zendesk"))),
+            config: None,
             client: None,
             verifier: None,
             session_id: None,
@@ -39,47 +144,23 @@ impl ZendeskConnector {
         &mut self,
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
-        let subdomain =
-            params
-                .get("subdomain")
-                .and_then(|v| v.as_str())
-                .ok_or(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing subdomain in configuration".into(),
-                })?;
-
-        let email =
-            params
-                .get("email")
-                .and_then(|v| v.as_str())
-                .ok_or(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing email in configuration".into(),
-                })?;
-
-        let api_token =
-            params
-                .get("api_token")
-                .and_then(|v| v.as_str())
-                .ok_or(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing api_token in configuration".into(),
-                })?;
-
-        let base_url = params.get("base_url").and_then(|v| v.as_str());
+        let config = ZendeskConfig::from_params(&params)?;
 
         let mut client =
-            ZendeskClient::new(subdomain, email, api_token).map_err(|e| FcpError::Internal {
+            ZendeskClient::new_with_auth(config.auth.clone()).map_err(|e| FcpError::Internal {
                 message: format!("Failed to create HTTP client: {e}"),
             })?;
 
-        if let Some(url) = base_url {
+        if let Some(ref url) = config.base_url {
             client = client.with_base_url(url);
         }
 
+        let auth_mode = config.auth.redacted_label();
+        info!(auth_mode, subdomain = config.auth.subdomain(), "Zendesk connector configured");
+
         self.client = Some(client);
+        self.config = Some(config);
         self.base.set_configured(true);
-        info!("Zendesk connector configured");
 
         Ok(json!({ "status": "configured" }))
     }
@@ -139,13 +220,191 @@ impl ZendeskConnector {
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
         let configured = self.client.is_some();
         let metrics = self.base.metrics();
-        Ok(json!({
+
+        let mut result = json!({
             "status": if configured { "healthy" } else { "not_configured" },
             "metrics": {
                 "requests_total": metrics.requests_total,
                 "requests_error": metrics.requests_error,
             }
-        }))
+        });
+
+        if let Some(ref config) = self.config {
+            result["auth_mode"] = json!(config.auth.redacted_label());
+            result["api_domain"] = json!(format!("{}.zendesk.com", config.auth.subdomain()));
+        }
+
+        Ok(result)
+    }
+
+    /// Handle doctor readiness checks.
+    pub async fn handle_doctor(&self) -> FcpResult<serde_json::Value> {
+        let mut checks = Vec::new();
+
+        // 1. Configuration
+        let config_ok = self.config.is_some();
+        checks.push(DoctorCheck {
+            name: "configuration".into(),
+            status: if config_ok {
+                DoctorStatus::Pass
+            } else {
+                DoctorStatus::Fail
+            },
+            message: if config_ok {
+                "Connector is configured".into()
+            } else {
+                "Connector is not configured — call 'configure' first".into()
+            },
+        });
+
+        // 2. Client initialized
+        let client_ok = self.client.is_some();
+        checks.push(DoctorCheck {
+            name: "client_initialized".into(),
+            status: if client_ok {
+                DoctorStatus::Pass
+            } else {
+                DoctorStatus::Fail
+            },
+            message: if client_ok {
+                "HTTP client initialized".into()
+            } else {
+                "HTTP client not initialized".into()
+            },
+        });
+
+        // 3. Base URL
+        if let Some(ref config) = self.config {
+            let subdomain = config.auth.subdomain();
+            let default_url = format!("https://{subdomain}.zendesk.com/api/v2");
+            let url_info = config.base_url.as_deref().unwrap_or(&default_url);
+            checks.push(DoctorCheck {
+                name: "base_url".into(),
+                status: DoctorStatus::Pass,
+                message: format!("Subdomain: {subdomain}.zendesk.com (via {url_info})"),
+            });
+        } else {
+            checks.push(DoctorCheck {
+                name: "base_url".into(),
+                status: DoctorStatus::Warn,
+                message: "No configuration — cannot determine base URL".into(),
+            });
+        }
+
+        // 4. Auth mode
+        if let Some(ref config) = self.config {
+            checks.push(DoctorCheck {
+                name: "auth_mode".into(),
+                status: DoctorStatus::Pass,
+                message: format!("Auth: {}", config.auth.redacted_label()),
+            });
+        } else {
+            checks.push(DoctorCheck {
+                name: "auth_mode".into(),
+                status: DoctorStatus::Fail,
+                message: "No auth configured".into(),
+            });
+        }
+
+        // 5. Network constraints
+        checks.push(DoctorCheck {
+            name: "network_constraints".into(),
+            status: DoctorStatus::Pass,
+            message: "Egress target: *.zendesk.com (HTTPS)".into(),
+        });
+
+        // 6. Credential injection
+        if let Some(ref config) = self.config {
+            if config.auth.is_secretless() {
+                checks.push(DoctorCheck {
+                    name: "credential_injection".into(),
+                    status: DoctorStatus::Pass,
+                    message: "Secretless egress proxy mode — no secrets on disk".into(),
+                });
+            } else {
+                checks.push(DoctorCheck {
+                    name: "credential_injection".into(),
+                    status: DoctorStatus::Warn,
+                    message: "Direct token mode — consider credential_id for production".into(),
+                });
+            }
+        } else {
+            checks.push(DoctorCheck {
+                name: "credential_injection".into(),
+                status: DoctorStatus::Fail,
+                message: "No auth configured".into(),
+            });
+        }
+
+        let overall = if checks.iter().any(|c| c.status == DoctorStatus::Fail) {
+            DoctorStatus::Fail
+        } else if checks.iter().any(|c| c.status == DoctorStatus::Warn) {
+            DoctorStatus::Warn
+        } else {
+            DoctorStatus::Pass
+        };
+
+        let result = DoctorResult {
+            status: overall,
+            checks,
+        };
+
+        serde_json::to_value(result).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize doctor result: {e}"),
+        })
+    }
+
+    /// Handle connector self-check.
+    pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
+        let Some(ref config) = self.config else {
+            let report = SelfCheckReport::failed("not_configured", "Connector is not configured");
+            return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize self-check report: {e}"),
+            });
+        };
+
+        // In credential_id mode we cannot verify connectivity without egress proxy
+        if config.auth.is_secretless() {
+            let report = SelfCheckReport::degraded(
+                "credential_injection_required",
+                "Secretless mode — connectivity check requires egress proxy at runtime",
+            );
+            return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize self-check report: {e}"),
+            });
+        }
+
+        let Some(ref client) = self.client else {
+            let report = SelfCheckReport::failed("client_not_initialized", "HTTP client not available");
+            return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize self-check report: {e}"),
+            });
+        };
+
+        let report = match client.health_check().await {
+            Ok(data) => {
+                let mut report = SelfCheckReport::ok();
+                if let Some(user) = data.get("user") {
+                    report.details = Some(json!({
+                        "user_id": user.get("id"),
+                        "name": user.get("name"),
+                        "email": user.get("email"),
+                    }));
+                }
+                report
+            }
+            Err(err) => {
+                if err.is_retryable() {
+                    SelfCheckReport::degraded("self_check_retryable", err.to_string())
+                } else {
+                    SelfCheckReport::failed("self_check_failed", err.to_string())
+                }
+            }
+        };
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {e}"),
+        })
     }
 
     /// Handle introspect method.
@@ -811,11 +1070,15 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn test_invoke_missing_field() {
         let mut connector = ZendeskConnector::new();
-        connector.client = Some(
-            ZendeskClient::new("test", "user@test.com", "token123")
-                .unwrap()
-                .with_base_url("http://localhost:9999/api/v2"),
-        );
+        connector
+            .handle_configure(json!({
+                "subdomain": "test",
+                "email": "user@test.com",
+                "api_token": "token123",
+                "base_url": "http://localhost:9999/api/v2"
+            }))
+            .await
+            .unwrap();
 
         let signing_key = Ed25519SigningKey::generate();
         let verifying_key = signing_key.verifying_key();
@@ -886,5 +1149,213 @@ mod tests {
             .compute_interface_hash()
             .expect("compute interface hash");
         assert_eq!(computed, computed2);
+    }
+
+    // ── Provisioning tests ───────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_with_token_auth() {
+        let mut connector = ZendeskConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "subdomain": "mycompany",
+                "email": "agent@mycompany.com",
+                "api_token": "secret_token"
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "configured");
+        assert!(connector.config.is_some());
+        assert!(!connector.config.as_ref().unwrap().auth.is_secretless());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_with_credential_id() {
+        let mut connector = ZendeskConnector::new();
+        let cred_id = uuid::Uuid::new_v4().to_string();
+        let result = connector
+            .handle_configure(json!({
+                "subdomain": "mycompany",
+                "credential_id": cred_id
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "configured");
+        assert!(connector.config.as_ref().unwrap().auth.is_secretless());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_missing_subdomain() {
+        let mut connector = ZendeskConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "email": "user@example.com",
+                "api_token": "token"
+            }))
+            .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => assert!(message.contains("subdomain")),
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_no_auth() {
+        let mut connector = ZendeskConnector::new();
+        let result = connector
+            .handle_configure(json!({ "subdomain": "mycompany" }))
+            .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => assert!(message.contains("Missing auth")),
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_conflicting_auth() {
+        let mut connector = ZendeskConnector::new();
+        let cred_id = uuid::Uuid::new_v4().to_string();
+        let result = connector
+            .handle_configure(json!({
+                "subdomain": "mycompany",
+                "email": "user@example.com",
+                "api_token": "token",
+                "credential_id": cred_id
+            }))
+            .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("Conflicting auth"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_email_without_api_token() {
+        let mut connector = ZendeskConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "subdomain": "mycompany",
+                "email": "user@example.com"
+            }))
+            .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("email") && message.contains("api_token"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_api_token_without_email() {
+        let mut connector = ZendeskConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "subdomain": "mycompany",
+                "api_token": "token"
+            }))
+            .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("api_token") && message.contains("email"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_not_configured() {
+        let connector = ZendeskConnector::new();
+        let result = connector.handle_doctor().await.unwrap();
+        assert_eq!(result["status"], "fail");
+        let checks = result["checks"].as_array().unwrap();
+        assert!(checks.len() >= 6);
+        assert_eq!(checks[0]["name"], "configuration");
+        assert_eq!(checks[0]["status"], "fail");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_configured_token() {
+        let mut connector = ZendeskConnector::new();
+        connector
+            .handle_configure(json!({
+                "subdomain": "testco",
+                "email": "user@testco.com",
+                "api_token": "tok123"
+            }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_doctor().await.unwrap();
+        assert_eq!(result["status"], "warn"); // warn because direct token mode
+        let checks = result["checks"].as_array().unwrap();
+        let cred_check = checks.iter().find(|c| c["name"] == "credential_injection").unwrap();
+        assert_eq!(cred_check["status"], "warn");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_configured_credential_id() {
+        let mut connector = ZendeskConnector::new();
+        let cred_id = uuid::Uuid::new_v4().to_string();
+        connector
+            .handle_configure(json!({
+                "subdomain": "testco",
+                "credential_id": cred_id
+            }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_doctor().await.unwrap();
+        assert_eq!(result["status"], "pass");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_not_configured() {
+        let connector = ZendeskConnector::new();
+        let result = connector.handle_self_check().await.unwrap();
+        assert_eq!(result["status"], "failed");
+        assert_eq!(result["reason_code"], "not_configured");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_credential_id_degraded() {
+        let mut connector = ZendeskConnector::new();
+        let cred_id = uuid::Uuid::new_v4().to_string();
+        connector
+            .handle_configure(json!({
+                "subdomain": "testco",
+                "credential_id": cred_id
+            }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_self_check().await.unwrap();
+        assert_eq!(result["status"], "degraded");
+        assert_eq!(result["reason_code"], "credential_injection_required");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_health_includes_auth_mode() {
+        let mut connector = ZendeskConnector::new();
+        connector
+            .handle_configure(json!({
+                "subdomain": "testco",
+                "email": "user@testco.com",
+                "api_token": "tok123"
+            }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_health().await.unwrap();
+        assert_eq!(result["status"], "healthy");
+        assert!(result["auth_mode"].as_str().unwrap().contains("token"));
+        assert!(result["api_domain"].as_str().unwrap().contains("testco.zendesk.com"));
     }
 }

@@ -3,37 +3,137 @@
 //! Uses Basic auth with `{email}/token:{api_token}` and base64 encoding.
 //! All POST/PUT bodies use JSON (`.json()`). Query params are built manually.
 
+use std::fmt;
+
 use base64::Engine;
+use fcp_core::CredentialId;
 use reqwest::{Client, StatusCode, header};
 use tracing::{debug, warn};
 
 use crate::error::{ZendeskError, ZendeskResult};
 use crate::types::ApiErrorResponse;
 
+/// Default Zendesk API base URL template.
+pub const DEFAULT_BASE_URL_TEMPLATE: &str = "https://{subdomain}.zendesk.com/api/v2";
+
+/// Authentication mode for the Zendesk connector.
+#[derive(Clone)]
+pub enum ZendeskAuth {
+    /// Direct token authentication (email + API token).
+    Token {
+        subdomain: String,
+        email: String,
+        api_token: String,
+    },
+    /// Secretless egress-proxy credential injection.
+    CredentialId {
+        subdomain: String,
+        credential_id: CredentialId,
+    },
+}
+
+impl fmt::Debug for ZendeskAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Token { subdomain, .. } => f
+                .debug_struct("Token")
+                .field("subdomain", subdomain)
+                .field("email", &"[REDACTED]")
+                .field("api_token", &"[REDACTED]")
+                .finish(),
+            Self::CredentialId {
+                subdomain,
+                credential_id,
+            } => f
+                .debug_struct("CredentialId")
+                .field("subdomain", subdomain)
+                .field("credential_id", credential_id)
+                .finish(),
+        }
+    }
+}
+
+impl ZendeskAuth {
+    /// Human-readable label for the auth mode (redacted).
+    #[must_use]
+    pub const fn redacted_label(&self) -> &'static str {
+        match self {
+            Self::Token { .. } => "token (email+api_token)",
+            Self::CredentialId { .. } => "credential_id (egress proxy)",
+        }
+    }
+
+    /// Whether this auth mode uses secretless egress proxy injection.
+    #[must_use]
+    pub const fn is_secretless(&self) -> bool {
+        matches!(self, Self::CredentialId { .. })
+    }
+
+    /// Get the subdomain for URL building.
+    #[must_use]
+    pub fn subdomain(&self) -> &str {
+        match self {
+            Self::Token { subdomain, .. } | Self::CredentialId { subdomain, .. } => subdomain,
+        }
+    }
+}
+
 /// Zendesk REST API client.
 pub struct ZendeskClient {
     http: Client,
     base_url: String,
+    auth: ZendeskAuth,
     max_retries: u32,
 }
 
+impl fmt::Debug for ZendeskClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ZendeskClient")
+            .field("base_url", &self.base_url)
+            .field("auth", &self.auth)
+            .finish_non_exhaustive()
+    }
+}
+
 impl ZendeskClient {
-    /// Create a new Zendesk client.
+    /// Create a new Zendesk client with email/token authentication.
     ///
     /// # Arguments
     /// * `subdomain` - Zendesk subdomain (e.g. "mycompany")
     /// * `email` - User email for authentication
     /// * `api_token` - Zendesk API token
     pub fn new(subdomain: &str, email: &str, api_token: &str) -> ZendeskResult<Self> {
-        let credentials = format!("{email}/token:{api_token}");
-        let encoded = base64::engine::general_purpose::STANDARD.encode(credentials.as_bytes());
+        Self::new_with_auth(ZendeskAuth::Token {
+            subdomain: subdomain.into(),
+            email: email.into(),
+            api_token: api_token.into(),
+        })
+    }
 
+    /// Create a new Zendesk client with the given authentication mode.
+    pub fn new_with_auth(auth: ZendeskAuth) -> ZendeskResult<Self> {
         let mut headers = header::HeaderMap::new();
-        headers.insert(
-            header::AUTHORIZATION,
-            format!("Basic {encoded}").parse().unwrap(),
-        );
         headers.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
+
+        match &auth {
+            ZendeskAuth::Token {
+                email, api_token, ..
+            } => {
+                let credentials = format!("{email}/token:{api_token}");
+                let encoded =
+                    base64::engine::general_purpose::STANDARD.encode(credentials.as_bytes());
+                headers.insert(
+                    header::AUTHORIZATION,
+                    format!("Basic {encoded}").parse().unwrap(),
+                );
+            }
+            ZendeskAuth::CredentialId { credential_id, .. } => {
+                headers.insert(
+                    "X-FCP-Credential-ID",
+                    credential_id.to_string().parse().unwrap(),
+                );
+            }
+        }
 
         let http = Client::builder()
             .default_headers(headers)
@@ -41,13 +141,23 @@ impl ZendeskClient {
             .build()
             .map_err(ZendeskError::Http)?;
 
-        let base_url = format!("https://{subdomain}.zendesk.com/api/v2");
+        let base_url = format!(
+            "https://{}.zendesk.com/api/v2",
+            auth.subdomain()
+        );
 
         Ok(Self {
             http,
             base_url,
+            auth,
             max_retries: 2,
         })
+    }
+
+    /// Perform a lightweight health check by querying the current user.
+    pub async fn health_check(&self) -> ZendeskResult<serde_json::Value> {
+        let url = format!("{}/users/me.json", self.base_url);
+        self.get(&url).await
     }
 
     /// Set a custom base URL (for testing).

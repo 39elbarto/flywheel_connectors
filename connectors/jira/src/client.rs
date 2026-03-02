@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use base64::Engine;
+use fcp_core::CredentialId;
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument, warn};
 
@@ -16,10 +17,78 @@ use crate::{
     },
 };
 
+/// Default Jira REST API base URL template (append domain).
+pub const DEFAULT_REST_BASE: &str = "https://{domain}.atlassian.net/rest/api/3";
+
+/// Default Jira Agile API base URL template (append domain).
+pub const DEFAULT_AGILE_BASE: &str = "https://{domain}.atlassian.net/rest/agile/1.0";
+
+/// Authentication mode for the Jira client.
+#[derive(Clone)]
+pub enum JiraAuth {
+    /// Direct credentials: email + API token (Basic auth).
+    Token {
+        domain: String,
+        email: String,
+        api_token: String,
+    },
+    /// Secretless credential injection via egress proxy.
+    CredentialId {
+        domain: String,
+        credential_id: CredentialId,
+    },
+}
+
+impl std::fmt::Debug for JiraAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Token { domain, email, .. } => f
+                .debug_struct("Token")
+                .field("domain", domain)
+                .field("email", email)
+                .field("api_token", &"[REDACTED]")
+                .finish(),
+            Self::CredentialId {
+                domain,
+                credential_id,
+            } => f
+                .debug_struct("CredentialId")
+                .field("domain", domain)
+                .field("credential_id", credential_id)
+                .finish(),
+        }
+    }
+}
+
+impl JiraAuth {
+    /// Human-readable label with secrets redacted.
+    #[must_use]
+    pub const fn redacted_label(&self) -> &'static str {
+        match self {
+            Self::Token { .. } => "token",
+            Self::CredentialId { .. } => "credential_id",
+        }
+    }
+
+    /// Whether this auth mode is secretless (no raw credentials held).
+    #[must_use]
+    pub const fn is_secretless(&self) -> bool {
+        matches!(self, Self::CredentialId { .. })
+    }
+
+    /// Get the domain regardless of auth mode.
+    #[must_use]
+    pub fn domain(&self) -> &str {
+        match self {
+            Self::Token { domain, .. } | Self::CredentialId { domain, .. } => domain,
+        }
+    }
+}
+
 /// Jira REST API client with retry logic and rate limit awareness.
-#[derive(Debug)]
 pub struct JiraClient {
     client: Client,
+    auth: JiraAuth,
     base_url: String,
     agile_url: String,
     max_retries: u32,
@@ -28,22 +97,59 @@ pub struct JiraClient {
     total_requests: AtomicU64,
 }
 
+impl std::fmt::Debug for JiraClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JiraClient")
+            .field("auth", &self.auth)
+            .field("base_url", &self.base_url)
+            .field("agile_url", &self.agile_url)
+            .field("max_retries", &self.max_retries)
+            .finish_non_exhaustive()
+    }
+}
+
 impl JiraClient {
     /// Create a new Jira client with basic auth (email + API token).
     pub fn new(domain: &str, email: &str, api_token: &str) -> JiraResult<Self> {
-        let credentials =
-            base64::engine::general_purpose::STANDARD.encode(format!("{email}:{api_token}"));
+        Self::new_with_auth(JiraAuth::Token {
+            domain: domain.to_string(),
+            email: email.to_string(),
+            api_token: api_token.to_string(),
+        })
+    }
 
+    /// Create a new Jira client with the given auth mode.
+    pub fn new_with_auth(auth: JiraAuth) -> JiraResult<Self> {
         let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            reqwest::header::AUTHORIZATION,
-            format!("Basic {credentials}").parse().unwrap(),
-        );
+
+        match &auth {
+            JiraAuth::Token {
+                email, api_token, ..
+            } => {
+                let credentials = base64::engine::general_purpose::STANDARD
+                    .encode(format!("{email}:{api_token}"));
+                headers.insert(
+                    reqwest::header::AUTHORIZATION,
+                    format!("Basic {credentials}").parse().unwrap(),
+                );
+            }
+            JiraAuth::CredentialId { credential_id, .. } => {
+                headers.insert(
+                    "X-FCP-Credential-ID",
+                    credential_id.to_string().parse().unwrap(),
+                );
+            }
+        }
+
         headers.insert(
             reqwest::header::CONTENT_TYPE,
             "application/json".parse().unwrap(),
         );
         headers.insert(reqwest::header::ACCEPT, "application/json".parse().unwrap());
+
+        let domain = auth.domain();
+        let base_url = format!("https://{domain}.atlassian.net/rest/api/3");
+        let agile_url = format!("https://{domain}.atlassian.net/rest/agile/1.0");
 
         let client = Client::builder()
             .default_headers(headers)
@@ -54,13 +160,20 @@ impl JiraClient {
 
         Ok(Self {
             client,
-            base_url: format!("https://{domain}.atlassian.net/rest/api/3"),
-            agile_url: format!("https://{domain}.atlassian.net/rest/agile/1.0"),
+            auth,
+            base_url,
+            agile_url,
             max_retries: 3,
             initial_delay_ms: 1000,
             max_delay_ms: 60_000,
             total_requests: AtomicU64::new(0),
         })
+    }
+
+    /// Perform a health check by fetching the current user.
+    pub async fn health_check(&self) -> JiraResult<serde_json::Value> {
+        let url = format!("{}/myself", self.base_url);
+        self.get(&url).await
     }
 
     /// Set a custom base URL (for testing).

@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use fcp_async_core::time::sleep;
-use reqwest::{Client, Response, StatusCode};
+use fcp_core::CredentialId;
+use reqwest::{Client, RequestBuilder, Response, StatusCode};
 use tracing::{debug, instrument, warn};
 
 use crate::{
@@ -18,18 +19,62 @@ use crate::{
 };
 
 /// Default API base URL.
-const DEFAULT_BASE_URL: &str = "https://api.github.com";
+pub const DEFAULT_BASE_URL: &str = "https://api.github.com";
+
+/// Authentication mode for the GitHub client.
+#[derive(Clone)]
+pub enum GitHubAuth {
+    /// Direct credentials: personal access token or app token (Bearer auth).
+    Token(String),
+    /// Secretless credential injection via egress proxy.
+    CredentialId(CredentialId),
+}
+
+impl std::fmt::Debug for GitHubAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Token(_) => f.debug_tuple("Token").field(&"[REDACTED]").finish(),
+            Self::CredentialId(id) => f.debug_tuple("CredentialId").field(id).finish(),
+        }
+    }
+}
+
+impl GitHubAuth {
+    /// Human-readable label with secrets redacted.
+    #[must_use]
+    pub const fn redacted_label(&self) -> &'static str {
+        match self {
+            Self::Token(_) => "token",
+            Self::CredentialId(_) => "credential_id",
+        }
+    }
+
+    /// Whether this auth mode is secretless (no raw credentials held).
+    #[must_use]
+    pub const fn is_secretless(&self) -> bool {
+        matches!(self, Self::CredentialId(_))
+    }
+}
 
 /// GitHub API client with retry logic and rate limit awareness.
-#[derive(Debug)]
 pub struct GitHubClient {
     client: Client,
-    token: String,
+    auth: GitHubAuth,
     base_url: String,
     max_retries: u32,
     initial_delay_ms: u64,
     max_delay_ms: u64,
     total_requests: AtomicU64,
+}
+
+impl std::fmt::Debug for GitHubClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GitHubClient")
+            .field("auth", &self.auth)
+            .field("base_url", &self.base_url)
+            .field("max_retries", &self.max_retries)
+            .finish_non_exhaustive()
+    }
 }
 
 impl GitHubClient {
@@ -38,6 +83,14 @@ impl GitHubClient {
     /// # Errors
     /// Returns [`GitHubError`] if the HTTP client cannot be constructed.
     pub fn new(token: impl Into<String>) -> GitHubResult<Self> {
+        Self::new_with_auth(GitHubAuth::Token(token.into()))
+    }
+
+    /// Create a new GitHub client with the given auth mode.
+    ///
+    /// # Errors
+    /// Returns [`GitHubError`] if the HTTP client cannot be constructed.
+    pub fn new_with_auth(auth: GitHubAuth) -> GitHubResult<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .user_agent("fcp-github/0.1.0")
@@ -46,13 +99,26 @@ impl GitHubClient {
 
         Ok(Self {
             client,
-            token: token.into(),
+            auth,
             base_url: DEFAULT_BASE_URL.into(),
             max_retries: 3,
             initial_delay_ms: 1000,
             max_delay_ms: 60_000,
             total_requests: AtomicU64::new(0),
         })
+    }
+
+    /// Apply auth headers to a request builder.
+    fn apply_auth(&self, builder: RequestBuilder) -> RequestBuilder {
+        match &self.auth {
+            GitHubAuth::Token(token) => builder.header("Authorization", format!("Bearer {token}")),
+            GitHubAuth::CredentialId(id) => builder.header("X-FCP-Credential-ID", id.to_string()),
+        }
+    }
+
+    /// Perform a health check by fetching the authenticated user.
+    pub async fn health_check(&self) -> GitHubResult<serde_json::Value> {
+        self.get("/user").await
     }
 
     /// Set the base URL (for testing).
@@ -235,9 +301,7 @@ impl GitHubClient {
             debug!(attempt = attempts, "Triggering workflow dispatch");
 
             let result = self
-                .client
-                .post(&url)
-                .header("Authorization", format!("Bearer {}", self.token))
+                .apply_auth(self.client.post(&url))
                 .header("Accept", "application/vnd.github+json")
                 .header("X-GitHub-Api-Version", "2022-11-28")
                 .json(&body)
@@ -319,9 +383,7 @@ impl GitHubClient {
             debug!(attempt = attempts, endpoint, "GitHub API GET");
 
             let result = self
-                .client
-                .get(&url)
-                .header("Authorization", format!("Bearer {}", self.token))
+                .apply_auth(self.client.get(&url))
                 .header("Accept", "application/vnd.github+json")
                 .header("X-GitHub-Api-Version", "2022-11-28")
                 .send()
@@ -376,9 +438,7 @@ impl GitHubClient {
             debug!(attempt = attempts, endpoint, "GitHub API POST");
 
             let result = self
-                .client
-                .post(&url)
-                .header("Authorization", format!("Bearer {}", self.token))
+                .apply_auth(self.client.post(&url))
                 .header("Accept", "application/vnd.github+json")
                 .header("X-GitHub-Api-Version", "2022-11-28")
                 .json(body)
@@ -424,9 +484,7 @@ impl GitHubClient {
             debug!(attempt = attempts, endpoint, "GitHub API PUT");
 
             let result = self
-                .client
-                .put(&url)
-                .header("Authorization", format!("Bearer {}", self.token))
+                .apply_auth(self.client.put(&url))
                 .header("Accept", "application/vnd.github+json")
                 .header("X-GitHub-Api-Version", "2022-11-28")
                 .json(body)

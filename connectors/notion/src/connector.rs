@@ -1382,13 +1382,19 @@ mod tests {
         assert!(op_ids.contains(&"notion.get_page"));
         assert!(op_ids.contains(&"notion.update_page"));
         assert!(op_ids.contains(&"notion.delete_page"));
+        assert!(op_ids.contains(&"notion.get_database"));
+        assert!(op_ids.contains(&"notion.create_database"));
+        assert!(op_ids.contains(&"notion.update_database"));
         assert!(op_ids.contains(&"notion.query_database"));
         assert!(op_ids.contains(&"notion.search"));
+        assert!(op_ids.contains(&"notion.get_block"));
+        assert!(op_ids.contains(&"notion.update_block"));
+        assert!(op_ids.contains(&"notion.delete_block"));
         assert!(op_ids.contains(&"notion.get_block_children"));
         assert!(op_ids.contains(&"notion.append_blocks"));
         assert!(op_ids.contains(&"notion.add_comment"));
         assert!(op_ids.contains(&"notion.list_comments"));
-        assert_eq!(ops.len(), 10);
+        assert_eq!(ops.len(), 16);
     }
 
     // ── Provisioning automation tests ─────────────────────────────

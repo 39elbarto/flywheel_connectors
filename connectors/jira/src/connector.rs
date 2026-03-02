@@ -70,11 +70,10 @@ impl JiraConnector {
         let base_url = params.get("base_url").and_then(|v| v.as_str());
         let agile_url = params.get("agile_url").and_then(|v| v.as_str());
 
-        let mut client = JiraClient::new(domain, email, api_token).map_err(|e| {
-            FcpError::Internal {
+        let mut client =
+            JiraClient::new(domain, email, api_token).map_err(|e| FcpError::Internal {
                 message: format!("Failed to create HTTP client: {e}"),
-            }
-        })?;
+            })?;
 
         if let Some(url) = base_url {
             client = client.with_base_url(url);
@@ -599,10 +598,7 @@ impl JiraConnector {
     }
 
     /// Handle simulate method.
-    pub async fn handle_simulate(
-        &self,
-        params: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    pub async fn handle_simulate(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
         let req: SimulateRequest =
             serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {
                 code: 1003,
@@ -756,12 +752,10 @@ impl JiraConnector {
     async fn invoke_update_issue(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let issue_key = require_str(&input, "issue_key")?;
-        let fields = input
-            .get("fields")
-            .ok_or(FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing required field: fields".into(),
-            })?;
+        let fields = input.get("fields").ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "Missing required field: fields".into(),
+        })?;
         let notify_users = input
             .get("notify_users")
             .and_then(|v| v.as_bool())
@@ -862,18 +856,16 @@ impl JiraConnector {
         Ok(json!({ "transitioned": true }))
     }
 
-    async fn invoke_list_sprints(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_list_sprints(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
-        let board_id = input
-            .get("board_id")
-            .and_then(|v| v.as_u64())
-            .ok_or(FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing required field: board_id".into(),
-            })?;
+        let board_id =
+            input
+                .get("board_id")
+                .and_then(|v| v.as_u64())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing required field: board_id".into(),
+                })?;
         let state = input.get("state").and_then(|v| v.as_str());
         let start_at = input.get("start_at").and_then(|v| v.as_u64());
         let max_results = input.get("max_results").and_then(|v| v.as_u64());
@@ -892,20 +884,22 @@ impl JiraConnector {
         input: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
-        let sprint_id = input
-            .get("sprint_id")
-            .and_then(|v| v.as_u64())
-            .ok_or(FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing required field: sprint_id".into(),
-            })?;
-        let issues = input
-            .get("issues")
-            .and_then(|v| v.as_array())
-            .ok_or(FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing required field: issues".into(),
-            })?;
+        let sprint_id =
+            input
+                .get("sprint_id")
+                .and_then(|v| v.as_u64())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing required field: sprint_id".into(),
+                })?;
+        let issues =
+            input
+                .get("issues")
+                .and_then(|v| v.as_array())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing required field: issues".into(),
+                })?;
 
         let body = json!({ "issues": issues });
         client
@@ -934,10 +928,7 @@ impl JiraConnector {
         })
     }
 
-    async fn invoke_list_comments(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_list_comments(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let issue_key = require_str(&input, "issue_key")?;
         let start_at = input.get("start_at").and_then(|v| v.as_u64());
@@ -1177,11 +1168,15 @@ mod tests {
 
         let raw = std::fs::read_to_string(&manifest_path).expect("read manifest");
         let manifest = ConnectorManifest::parse_str(&raw).expect("manifest should validate");
-        let computed = manifest.compute_interface_hash().expect("compute interface hash");
+        let computed = manifest
+            .compute_interface_hash()
+            .expect("compute interface hash");
         assert_eq!(manifest.manifest.interface_hash, computed);
 
         let manifest2 = ConnectorManifest::parse_str_unchecked(&raw).expect("parse unchecked");
-        let computed2 = manifest2.compute_interface_hash().expect("compute interface hash");
+        let computed2 = manifest2
+            .compute_interface_hash()
+            .expect("compute interface hash");
         assert_eq!(computed, computed2);
     }
 }

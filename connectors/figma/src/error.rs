@@ -18,10 +18,7 @@ pub enum FigmaError {
 
     /// Figma API returned an error
     #[error("Figma API error: {status} - {message}")]
-    Api {
-        status: u16,
-        message: String,
-    },
+    Api { status: u16, message: String },
 
     /// Rate limited
     #[error("Rate limited, retry after {retry_after_secs}s")]
@@ -65,9 +62,7 @@ impl FigmaError {
     #[must_use]
     pub const fn retry_after(&self) -> Option<Duration> {
         match self {
-            Self::RateLimited { retry_after_secs } => {
-                Some(Duration::from_secs(*retry_after_secs))
-            }
+            Self::RateLimited { retry_after_secs } => Some(Duration::from_secs(*retry_after_secs)),
             _ => None,
         }
     }

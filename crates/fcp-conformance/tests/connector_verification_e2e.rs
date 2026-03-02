@@ -292,19 +292,27 @@ struct UnstableConnector {
 
 impl UnstableConnector {
     const fn configure_failure() -> Self {
-        Self { fail_phase: UnstablePhase::Configure }
+        Self {
+            fail_phase: UnstablePhase::Configure,
+        }
     }
 
     const fn handshake_failure() -> Self {
-        Self { fail_phase: UnstablePhase::Handshake }
+        Self {
+            fail_phase: UnstablePhase::Handshake,
+        }
     }
 
     const fn degraded() -> Self {
-        Self { fail_phase: UnstablePhase::HealthDegraded }
+        Self {
+            fail_phase: UnstablePhase::HealthDegraded,
+        }
     }
 
     const fn shutdown_failure() -> Self {
-        Self { fail_phase: UnstablePhase::Shutdown }
+        Self {
+            fail_phase: UnstablePhase::Shutdown,
+        }
     }
 }
 

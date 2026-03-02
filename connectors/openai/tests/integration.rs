@@ -662,10 +662,7 @@ async fn error_429_maps_to_rate_limited() {
     };
 
     assert!(err.is_retryable());
-    assert_eq!(
-        err.retry_after(),
-        Some(std::time::Duration::from_secs(30))
-    );
+    assert_eq!(err.retry_after(), Some(std::time::Duration::from_secs(30)));
 
     let fcp_err = err.to_fcp_error();
     match fcp_err {
@@ -689,10 +686,7 @@ async fn error_503_maps_to_overloaded() {
     };
 
     assert!(err.is_retryable());
-    assert_eq!(
-        err.retry_after(),
-        Some(std::time::Duration::from_secs(60))
-    );
+    assert_eq!(err.retry_after(), Some(std::time::Duration::from_secs(60)));
 
     let fcp_err = err.to_fcp_error();
     match fcp_err {

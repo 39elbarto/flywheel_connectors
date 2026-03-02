@@ -249,8 +249,7 @@ async fn create_call_happy_path() {
     Mock::given(method("POST"))
         .and(path_regex("/Accounts/.*/Calls\\.json"))
         .respond_with(
-            ResponseTemplate::new(201)
-                .set_body_json(twilio_call_response("CAtest001", "queued")),
+            ResponseTemplate::new(201).set_body_json(twilio_call_response("CAtest001", "queued")),
         )
         .mount(&mock_server)
         .await;
@@ -423,7 +422,10 @@ async fn list_phone_numbers_happy_path() {
         .await
         .expect("list_phone_numbers should succeed");
 
-    assert_eq!(result["incoming_phone_numbers"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        result["incoming_phone_numbers"].as_array().unwrap().len(),
+        1
+    );
 }
 
 // ============================================================================
@@ -438,9 +440,9 @@ async fn error_401_maps_to_unauthorized() {
 
     Mock::given(method("GET"))
         .and(path_regex("/Accounts/.*/Messages/.*\\.json"))
-        .respond_with(ResponseTemplate::new(401).set_body_json(
-            twilio_error_response(20003, "Authenticate"),
-        ))
+        .respond_with(
+            ResponseTemplate::new(401).set_body_json(twilio_error_response(20003, "Authenticate")),
+        )
         .mount(&mock_server)
         .await;
 
@@ -475,9 +477,12 @@ async fn error_404_maps_to_not_found() {
 
     Mock::given(method("GET"))
         .and(path_regex("/Accounts/.*/Messages/.*\\.json"))
-        .respond_with(ResponseTemplate::new(404).set_body_json(
-            twilio_error_response(20404, "The requested resource was not found"),
-        ))
+        .respond_with(
+            ResponseTemplate::new(404).set_body_json(twilio_error_response(
+                20404,
+                "The requested resource was not found",
+            )),
+        )
         .mount(&mock_server)
         .await;
 
@@ -590,7 +595,12 @@ async fn error_500_maps_to_external() {
 fn error_retryable_classification() {
     use fcp_twilio::error::TwilioError;
 
-    assert!(TwilioError::RateLimited { retry_after_ms: 1000 }.is_retryable());
+    assert!(
+        TwilioError::RateLimited {
+            retry_after_ms: 1000
+        }
+        .is_retryable()
+    );
     assert!(
         TwilioError::Api {
             message: "Server error".into(),
@@ -712,8 +722,11 @@ async fn capability_wrong_operation_fails() {
 
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
-    let signing_key =
-        setup_handshake(&mut connector, &["twilio.get_message", "twilio.send_message"]).await;
+    let signing_key = setup_handshake(
+        &mut connector,
+        &["twilio.get_message", "twilio.send_message"],
+    )
+    .await;
 
     let wrong_token = generate_valid_token(&signing_key, "twilio.send_message");
 
@@ -852,10 +865,7 @@ async fn lifecycle_introspect_all_operations() {
     ];
 
     for expected in &expected_ops {
-        assert!(
-            op_ids.contains(expected),
-            "missing operation: {expected}"
-        );
+        assert!(op_ids.contains(expected), "missing operation: {expected}");
     }
     assert_eq!(ops.len(), 10);
 
@@ -897,7 +907,10 @@ async fn validation_send_message_missing_to() {
 
     match &err {
         fcp_core::FcpError::InvalidRequest { message, .. } => {
-            assert!(message.contains("to"), "error should mention 'to': {message}");
+            assert!(
+                message.contains("to"),
+                "error should mention 'to': {message}"
+            );
         }
         other => panic!("expected InvalidRequest, got: {other:?}"),
     }
@@ -923,7 +936,10 @@ async fn validation_send_message_missing_body() {
 
     match &err {
         fcp_core::FcpError::InvalidRequest { message, .. } => {
-            assert!(message.contains("body"), "error should mention 'body': {message}");
+            assert!(
+                message.contains("body"),
+                "error should mention 'body': {message}"
+            );
         }
         other => panic!("expected InvalidRequest, got: {other:?}"),
     }
@@ -1007,7 +1023,10 @@ async fn validation_create_call_missing_url() {
 
     match &err {
         fcp_core::FcpError::InvalidRequest { message, .. } => {
-            assert!(message.contains("url"), "error should mention url: {message}");
+            assert!(
+                message.contains("url"),
+                "error should mention url: {message}"
+            );
         }
         other => panic!("expected InvalidRequest, got: {other:?}"),
     }

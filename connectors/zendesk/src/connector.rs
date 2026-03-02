@@ -670,7 +670,10 @@ impl ZendeskConnector {
     }
 
     /// Handle shutdown.
-    pub async fn handle_shutdown(&self, _params: serde_json::Value) -> FcpResult<serde_json::Value> {
+    pub async fn handle_shutdown(
+        &self,
+        _params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         info!("Zendesk connector shutting down");
         Ok(json!({ "status": "shutdown" }))
     }
@@ -873,11 +876,15 @@ mod tests {
 
         let raw = std::fs::read_to_string(&manifest_path).expect("read manifest");
         let manifest = ConnectorManifest::parse_str(&raw).expect("manifest should validate");
-        let computed = manifest.compute_interface_hash().expect("compute interface hash");
+        let computed = manifest
+            .compute_interface_hash()
+            .expect("compute interface hash");
         assert_eq!(manifest.manifest.interface_hash, computed);
 
         let manifest2 = ConnectorManifest::parse_str_unchecked(&raw).expect("parse unchecked");
-        let computed2 = manifest2.compute_interface_hash().expect("compute interface hash");
+        let computed2 = manifest2
+            .compute_interface_hash()
+            .expect("compute interface hash");
         assert_eq!(computed, computed2);
     }
 }

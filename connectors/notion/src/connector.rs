@@ -506,10 +506,7 @@ impl NotionConnector {
 
     // ── Operation implementations ─────────────────────────────────
 
-    async fn invoke_create_page(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_create_page(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
 
         if input.get("parent").is_none() {
@@ -539,10 +536,7 @@ impl NotionConnector {
         Ok(json!({ "page": page }))
     }
 
-    async fn invoke_update_page(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_update_page(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let page_id = require_str(&input, "page_id")?;
         let properties = input.get("properties").cloned().unwrap_or(json!({}));
@@ -624,17 +618,17 @@ impl NotionConnector {
         }))
     }
 
-    async fn invoke_append_blocks(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_append_blocks(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let block_id = require_str(&input, "block_id")?;
 
-        let children = input.get("children").cloned().ok_or(FcpError::InvalidRequest {
-            code: 1003,
-            message: "Missing required field: children".into(),
-        })?;
+        let children = input
+            .get("children")
+            .cloned()
+            .ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing required field: children".into(),
+            })?;
 
         let result = client
             .append_blocks(block_id, children)
@@ -662,10 +656,7 @@ impl NotionConnector {
         Ok(json!({ "comment": comment }))
     }
 
-    async fn invoke_list_comments(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_list_comments(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let block_id = require_str(&input, "block_id")?;
 

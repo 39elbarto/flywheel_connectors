@@ -257,7 +257,12 @@ async fn export_images_happy_path() {
         .await
         .expect("invoke should succeed");
 
-    assert!(result["images"]["1:2"].as_str().unwrap().contains("s3.amazonaws.com"));
+    assert!(
+        result["images"]["1:2"]
+            .as_str()
+            .unwrap()
+            .contains("s3.amazonaws.com")
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -494,10 +499,7 @@ async fn error_429_maps_to_rate_limited() {
 
     Mock::given(method("GET"))
         .and(path("/files/abc123"))
-        .respond_with(
-            ResponseTemplate::new(429)
-                .insert_header("retry-after", "30"),
-        )
+        .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "30"))
         .mount(&mock_server)
         .await;
 

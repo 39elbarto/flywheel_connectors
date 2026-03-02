@@ -651,7 +651,10 @@ impl FigmaConnector {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let file_key = require_str(&input, "file_key")?;
         let ids = input.get("ids").and_then(|v| v.as_str());
-        let depth = input.get("depth").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let depth = input
+            .get("depth")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
         let geometry = input.get("geometry").and_then(|v| v.as_str());
         let plugin_data = input.get("plugin_data").and_then(|v| v.as_str());
 
@@ -672,7 +675,10 @@ impl FigmaConnector {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let file_key = require_str(&input, "file_key")?;
         let ids = require_str(&input, "ids")?;
-        let depth = input.get("depth").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let depth = input
+            .get("depth")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
 
         let nodes = client
             .get_file_nodes(file_key, ids, depth)
@@ -718,10 +724,7 @@ impl FigmaConnector {
         })
     }
 
-    async fn invoke_export_images(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_export_images(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let file_key = require_str(&input, "file_key")?;
         let ids = require_str(&input, "ids")?;
@@ -766,10 +769,7 @@ impl FigmaConnector {
         })
     }
 
-    async fn invoke_list_comments(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_list_comments(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let file_key = require_str(&input, "file_key")?;
         let as_md = input.get("as_md").and_then(|v| v.as_bool());
@@ -784,10 +784,7 @@ impl FigmaConnector {
         })
     }
 
-    async fn invoke_post_comment(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_post_comment(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let file_key = require_str(&input, "file_key")?;
         let message = require_str(&input, "message")?;
@@ -820,10 +817,7 @@ impl FigmaConnector {
         Ok(json!({}))
     }
 
-    async fn invoke_list_webhooks(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_list_webhooks(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let team_id = require_str(&input, "team_id")?;
 

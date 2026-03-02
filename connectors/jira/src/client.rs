@@ -43,10 +43,7 @@ impl JiraClient {
             reqwest::header::CONTENT_TYPE,
             "application/json".parse().unwrap(),
         );
-        headers.insert(
-            reqwest::header::ACCEPT,
-            "application/json".parse().unwrap(),
-        );
+        headers.insert(reqwest::header::ACCEPT, "application/json".parse().unwrap());
 
         let client = Client::builder()
             .default_headers(headers)
@@ -151,11 +148,7 @@ impl JiraClient {
 
     /// Delete an issue.
     #[instrument(skip(self))]
-    pub async fn delete_issue(
-        &self,
-        issue_key: &str,
-        delete_subtasks: bool,
-    ) -> JiraResult<()> {
+    pub async fn delete_issue(&self, issue_key: &str, delete_subtasks: bool) -> JiraResult<()> {
         let mut url = format!("{}/issue/{issue_key}", self.base_url);
         if delete_subtasks {
             url.push_str("?deleteSubtasks=true");
@@ -188,8 +181,11 @@ impl JiraClient {
         issue_key: &str,
         body: &serde_json::Value,
     ) -> JiraResult<()> {
-        self.post_no_content(&format!("{}/issue/{issue_key}/transitions", self.base_url), body)
-            .await
+        self.post_no_content(
+            &format!("{}/issue/{issue_key}/transitions", self.base_url),
+            body,
+        )
+        .await
     }
 
     // ── Sprint operations ────────────────────────────────────────
@@ -224,13 +220,12 @@ impl JiraClient {
 
     /// Move issues to a sprint.
     #[instrument(skip(self, body))]
-    pub async fn move_to_sprint(
-        &self,
-        sprint_id: u64,
-        body: &serde_json::Value,
-    ) -> JiraResult<()> {
-        self.post_no_content(&format!("{}/sprint/{sprint_id}/issue", self.agile_url), body)
-            .await
+    pub async fn move_to_sprint(&self, sprint_id: u64, body: &serde_json::Value) -> JiraResult<()> {
+        self.post_no_content(
+            &format!("{}/sprint/{sprint_id}/issue", self.agile_url),
+            body,
+        )
+        .await
     }
 
     // ── Comment operations ───────────────────────────────────────
@@ -335,15 +330,12 @@ impl JiraClient {
                     if err.is_retryable() && attempts <= self.max_retries {
                         warn!(attempt = attempts, "Retrying attachment upload");
                         fcp_async_core::time::sleep(delay).await;
-                        delay =
-                            std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
+                        delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
                         continue;
                     }
                     return Err(err);
                 }
-                Err(e)
-                    if (e.is_timeout() || e.is_connect()) && attempts <= self.max_retries =>
-                {
+                Err(e) if (e.is_timeout() || e.is_connect()) && attempts <= self.max_retries => {
                     warn!(attempt = attempts, error = %e, "Retrying after connection error");
                     fcp_async_core::time::sleep(delay).await;
                     delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
@@ -378,8 +370,7 @@ impl JiraClient {
                         }
                         warn!(attempt = attempts, error = %e, "Retrying Jira API request");
                         fcp_async_core::time::sleep(delay).await;
-                        delay =
-                            std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
+                        delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
                     }
                     Err(e) => return Err(e),
                 },
@@ -416,8 +407,7 @@ impl JiraClient {
                         }
                         warn!(attempt = attempts, error = %e, "Retrying");
                         fcp_async_core::time::sleep(delay).await;
-                        delay =
-                            std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
+                        delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
                     }
                     Err(e) => return Err(e),
                 },
@@ -464,8 +454,7 @@ impl JiraClient {
                     if err.is_retryable() && attempts <= self.max_retries {
                         warn!(attempt = attempts, error = %err, "Retrying");
                         fcp_async_core::time::sleep(delay).await;
-                        delay =
-                            std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
+                        delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
                         continue;
                     }
                     return Err(err);
@@ -513,8 +502,7 @@ impl JiraClient {
                     if err.is_retryable() && attempts <= self.max_retries {
                         warn!(attempt = attempts, error = %err, "Retrying");
                         fcp_async_core::time::sleep(delay).await;
-                        delay =
-                            std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
+                        delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
                         continue;
                     }
                     return Err(err);
@@ -562,8 +550,7 @@ impl JiraClient {
                     if err.is_retryable() && attempts <= self.max_retries {
                         warn!(attempt = attempts, error = %err, "Retrying");
                         fcp_async_core::time::sleep(delay).await;
-                        delay =
-                            std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
+                        delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
                         continue;
                     }
                     return Err(err);
@@ -643,10 +630,7 @@ impl JiraClient {
                                 Some(
                                     map.into_iter()
                                         .map(|(k, v)| {
-                                            format!(
-                                                "{k}: {}",
-                                                v.as_str().unwrap_or(&v.to_string())
-                                            )
+                                            format!("{k}: {}", v.as_str().unwrap_or(&v.to_string()))
                                         })
                                         .collect::<Vec<_>>(),
                                 )
@@ -669,10 +653,7 @@ impl JiraClient {
         }
 
         JiraError::Api {
-            message: format!(
-                "HTTP {status}: {}",
-                String::from_utf8_lossy(bytes)
-            ),
+            message: format!("HTTP {status}: {}", String::from_utf8_lossy(bytes)),
             status_code: Some(status.as_u16()),
         }
     }
@@ -885,10 +866,7 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/issue/PROJ-1"))
-            .respond_with(
-                ResponseTemplate::new(429)
-                    .insert_header("retry-after", "30"),
-            )
+            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "30"))
             .mount(&mock_server)
             .await;
 

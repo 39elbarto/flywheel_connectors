@@ -127,20 +127,14 @@ impl FigmaClient {
 
     /// Get all components in a file.
     #[instrument(skip(self))]
-    pub async fn get_file_components(
-        &self,
-        file_key: &str,
-    ) -> FigmaResult<ComponentsResponse> {
+    pub async fn get_file_components(&self, file_key: &str) -> FigmaResult<ComponentsResponse> {
         self.get_with_params::<ComponentsResponse>(&format!("files/{file_key}/components"), &[])
             .await
     }
 
     /// Get all styles in a file.
     #[instrument(skip(self))]
-    pub async fn get_file_styles(
-        &self,
-        file_key: &str,
-    ) -> FigmaResult<StylesResponse> {
+    pub async fn get_file_styles(&self, file_key: &str) -> FigmaResult<StylesResponse> {
         self.get_with_params::<StylesResponse>(&format!("files/{file_key}/styles"), &[])
             .await
     }
@@ -159,10 +153,7 @@ impl FigmaClient {
         svg_simplify_stroke: Option<bool>,
         use_absolute_bounds: Option<bool>,
     ) -> FigmaResult<ExportImagesResponse> {
-        let mut params = vec![
-            ("ids", ids.to_string()),
-            ("format", format.to_string()),
-        ];
+        let mut params = vec![("ids", ids.to_string()), ("format", format.to_string())];
         if let Some(scale) = scale {
             params.push(("scale", scale.to_string()));
         }
@@ -184,10 +175,7 @@ impl FigmaClient {
 
     /// List version history for a file.
     #[instrument(skip(self))]
-    pub async fn list_file_versions(
-        &self,
-        file_key: &str,
-    ) -> FigmaResult<VersionsResponse> {
+    pub async fn list_file_versions(&self, file_key: &str) -> FigmaResult<VersionsResponse> {
         self.get_with_params::<VersionsResponse>(&format!("files/{file_key}/versions"), &[])
             .await
     }
@@ -231,11 +219,7 @@ impl FigmaClient {
 
     /// Delete a comment from a file.
     #[instrument(skip(self))]
-    pub async fn delete_comment(
-        &self,
-        file_key: &str,
-        comment_id: &str,
-    ) -> FigmaResult<()> {
+    pub async fn delete_comment(&self, file_key: &str, comment_id: &str) -> FigmaResult<()> {
         self.delete(&format!("files/{file_key}/comments/{comment_id}"))
             .await
     }
@@ -244,10 +228,7 @@ impl FigmaClient {
 
     /// List webhooks for a team.
     #[instrument(skip(self))]
-    pub async fn list_webhooks(
-        &self,
-        team_id: &str,
-    ) -> FigmaResult<WebhooksListResponse> {
+    pub async fn list_webhooks(&self, team_id: &str) -> FigmaResult<WebhooksListResponse> {
         // Webhooks use v2 API
         let path = format!("../v2/webhooks/{team_id}");
         self.get_with_params(&path, &[]).await
@@ -277,10 +258,7 @@ impl FigmaClient {
 
     /// Delete a webhook.
     #[instrument(skip(self))]
-    pub async fn delete_webhook(
-        &self,
-        webhook_id: &str,
-    ) -> FigmaResult<()> {
+    pub async fn delete_webhook(&self, webhook_id: &str) -> FigmaResult<()> {
         self.delete(&format!("../v2/webhooks/{webhook_id}")).await
     }
 
@@ -298,8 +276,10 @@ impl FigmaClient {
                 if i > 0 {
                     url.push('&');
                 }
-                let encoded =
-                    percent_encoding::utf8_percent_encode(value, percent_encoding::NON_ALPHANUMERIC);
+                let encoded = percent_encoding::utf8_percent_encode(
+                    value,
+                    percent_encoding::NON_ALPHANUMERIC,
+                );
                 let _ = write!(url, "{key}={encoded}");
             }
         }
@@ -640,10 +620,7 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/files/abc123"))
-            .respond_with(
-                ResponseTemplate::new(429)
-                    .insert_header("retry-after", "30"),
-            )
+            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "30"))
             .mount(&mock_server)
             .await;
 
@@ -656,7 +633,9 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            FigmaError::RateLimited { retry_after_secs: 30 }
+            FigmaError::RateLimited {
+                retry_after_secs: 30
+            }
         ));
     }
 

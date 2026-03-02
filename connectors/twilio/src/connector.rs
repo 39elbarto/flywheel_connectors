@@ -520,10 +520,7 @@ impl TwilioConnector {
     }
 
     /// Handle simulate method.
-    pub async fn handle_simulate(
-        &self,
-        params: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    pub async fn handle_simulate(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
         let req: SimulateRequest =
             serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {
                 code: 1003,
@@ -608,19 +605,21 @@ impl TwilioConnector {
 
     // ── Operation implementations ─────────────────────────────────
 
-    async fn invoke_send_message(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_send_message(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let to = require_str(&input, "to")?;
         let from = require_str(&input, "from")?;
         let body = require_str(&input, "body")?;
 
-        let media_url: Option<Vec<String>> = input
-            .get("media_url")
-            .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect());
+        let media_url: Option<Vec<String>> =
+            input
+                .get("media_url")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                });
         let status_callback = input.get("status_callback").and_then(|v| v.as_str());
 
         let resp = client
@@ -632,10 +631,7 @@ impl TwilioConnector {
         })
     }
 
-    async fn invoke_get_message(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_get_message(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let message_sid = require_str(&input, "message_sid")?;
 
@@ -648,15 +644,15 @@ impl TwilioConnector {
         })
     }
 
-    async fn invoke_list_messages(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_list_messages(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let to = input.get("to").and_then(|v| v.as_str());
         let from = input.get("from").and_then(|v| v.as_str());
         let date_sent = input.get("date_sent").and_then(|v| v.as_str());
-        let page_size = input.get("page_size").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let page_size = input
+            .get("page_size")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
         let page = input.get("page").and_then(|v| v.as_u64()).map(|v| v as u32);
 
         let resp = client
@@ -669,16 +665,16 @@ impl TwilioConnector {
         }))
     }
 
-    async fn invoke_create_call(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_create_call(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let to = require_str(&input, "to")?;
         let from = require_str(&input, "from")?;
         let url = require_str(&input, "url")?;
         let status_callback = input.get("status_callback").and_then(|v| v.as_str());
-        let timeout = input.get("timeout").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let timeout = input
+            .get("timeout")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
         let record = input.get("record").and_then(|v| v.as_bool());
 
         let resp = client
@@ -710,7 +706,10 @@ impl TwilioConnector {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let call_sid = input.get("call_sid").and_then(|v| v.as_str());
         let date_created = input.get("date_created").and_then(|v| v.as_str());
-        let page_size = input.get("page_size").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let page_size = input
+            .get("page_size")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
 
         let resp = client
             .list_recordings(call_sid, date_created, page_size)
@@ -769,7 +768,10 @@ impl TwilioConnector {
     ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let phone_number = input.get("phone_number").and_then(|v| v.as_str());
-        let page_size = input.get("page_size").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let page_size = input
+            .get("page_size")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
 
         let resp = client
             .list_phone_numbers(phone_number, page_size)
@@ -978,11 +980,15 @@ mod tests {
 
         let raw = std::fs::read_to_string(&manifest_path).expect("read manifest");
         let manifest = ConnectorManifest::parse_str(&raw).expect("manifest should validate");
-        let computed = manifest.compute_interface_hash().expect("compute interface hash");
+        let computed = manifest
+            .compute_interface_hash()
+            .expect("compute interface hash");
         assert_eq!(manifest.manifest.interface_hash, computed);
 
         let manifest2 = ConnectorManifest::parse_str_unchecked(&raw).expect("parse unchecked");
-        let computed2 = manifest2.compute_interface_hash().expect("compute interface hash");
+        let computed2 = manifest2
+            .compute_interface_hash()
+            .expect("compute interface hash");
         assert_eq!(computed, computed2);
     }
 }

@@ -33,10 +33,7 @@ impl ZendeskClient {
             header::AUTHORIZATION,
             format!("Basic {encoded}").parse().unwrap(),
         );
-        headers.insert(
-            header::CONTENT_TYPE,
-            "application/json".parse().unwrap(),
-        );
+        headers.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
 
         let http = Client::builder()
             .default_headers(headers)
@@ -316,8 +313,7 @@ impl ZendeskClient {
 
                     if !status.is_success() {
                         let body = response.text().await.unwrap_or_default();
-                        let api_err: Option<ApiErrorResponse> =
-                            serde_json::from_str(&body).ok();
+                        let api_err: Option<ApiErrorResponse> = serde_json::from_str(&body).ok();
                         let message = api_err
                             .as_ref()
                             .and_then(|e| {
@@ -652,7 +648,13 @@ mod tests {
         let result = client.get_ticket(1).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, ZendeskError::Api { status_code: Some(401), .. }));
+        assert!(matches!(
+            err,
+            ZendeskError::Api {
+                status_code: Some(401),
+                ..
+            }
+        ));
     }
 
     #[fcp_async_core::runtime::test]
@@ -676,7 +678,13 @@ mod tests {
         let result = client.get_ticket(999).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, ZendeskError::Api { status_code: Some(404), .. }));
+        assert!(matches!(
+            err,
+            ZendeskError::Api {
+                status_code: Some(404),
+                ..
+            }
+        ));
     }
 
     #[fcp_async_core::runtime::test]
@@ -696,7 +704,10 @@ mod tests {
 
         let result = client.get_ticket(1).await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ZendeskError::RateLimit { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            ZendeskError::RateLimit { .. }
+        ));
     }
 
     #[test]
@@ -726,6 +737,9 @@ mod tests {
     fn test_percent_encode() {
         assert_eq!(percent_encode("hello world"), "hello+world");
         assert_eq!(percent_encode("type:ticket"), "type:ticket");
-        assert_eq!(percent_encode("status:open priority:urgent"), "status:open+priority:urgent");
+        assert_eq!(
+            percent_encode("status:open priority:urgent"),
+            "status:open+priority:urgent"
+        );
     }
 }

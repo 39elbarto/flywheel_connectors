@@ -133,8 +133,11 @@ async fn create_issue_happy_path() {
     Mock::given(method("POST"))
         .and(path("/repos/octocat/hello-world/issues"))
         .respond_with(
-            ResponseTemplate::new(201)
-                .set_body_json(github_issue_response(43, "Bug report", "open")),
+            ResponseTemplate::new(201).set_body_json(github_issue_response(
+                43,
+                "Bug report",
+                "open",
+            )),
         )
         .mount(&mock_server)
         .await;
@@ -171,8 +174,11 @@ async fn get_issue_happy_path() {
     Mock::given(method("GET"))
         .and(path("/repos/octocat/hello-world/issues/42"))
         .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(github_issue_response(42, "Found a bug", "open")),
+            ResponseTemplate::new(200).set_body_json(github_issue_response(
+                42,
+                "Found a bug",
+                "open",
+            )),
         )
         .mount(&mock_server)
         .await;
@@ -246,8 +252,7 @@ async fn create_pull_request_happy_path() {
     Mock::given(method("POST"))
         .and(path("/repos/octocat/hello-world/pulls"))
         .respond_with(
-            ResponseTemplate::new(201)
-                .set_body_json(github_pr_response(1, "Fix typo", "open")),
+            ResponseTemplate::new(201).set_body_json(github_pr_response(1, "Fix typo", "open")),
         )
         .mount(&mock_server)
         .await;
@@ -285,8 +290,7 @@ async fn get_pull_request_happy_path() {
     Mock::given(method("GET"))
         .and(path("/repos/octocat/hello-world/pulls/1"))
         .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(github_pr_response(1, "Fix typo", "open")),
+            ResponseTemplate::new(200).set_body_json(github_pr_response(1, "Fix typo", "open")),
         )
         .mount(&mock_server)
         .await;
@@ -634,8 +638,7 @@ async fn error_401_maps_to_unauthorized() {
     Mock::given(method("GET"))
         .and(path("/repos/octocat/hello-world"))
         .respond_with(
-            ResponseTemplate::new(401)
-                .set_body_json(github_error_response("Bad credentials")),
+            ResponseTemplate::new(401).set_body_json(github_error_response("Bad credentials")),
         )
         .mount(&mock_server)
         .await;
@@ -670,9 +673,7 @@ async fn error_404_maps_to_not_found() {
 
     Mock::given(method("GET"))
         .and(path("/repos/octocat/nonexistent"))
-        .respond_with(
-            ResponseTemplate::new(404).set_body_json(github_error_response("Not Found")),
-        )
+        .respond_with(ResponseTemplate::new(404).set_body_json(github_error_response("Not Found")))
         .mount(&mock_server)
         .await;
 
@@ -707,8 +708,7 @@ async fn error_422_maps_to_invalid_request() {
     Mock::given(method("POST"))
         .and(path("/repos/octocat/hello-world/issues"))
         .respond_with(
-            ResponseTemplate::new(422)
-                .set_body_json(github_error_response("Validation Failed")),
+            ResponseTemplate::new(422).set_body_json(github_error_response("Validation Failed")),
         )
         .mount(&mock_server)
         .await;
@@ -734,10 +734,7 @@ async fn error_422_maps_to_invalid_request() {
         .expect_err("should fail with 422");
 
     assert!(
-        matches!(
-            err,
-            fcp_github::error::GitHubError::ValidationError { .. }
-        ),
+        matches!(err, fcp_github::error::GitHubError::ValidationError { .. }),
         "expected ValidationError, got: {err:?}"
     );
 
@@ -878,7 +875,12 @@ async fn error_500_maps_to_external() {
 fn error_retryable_classification() {
     use fcp_github::error::GitHubError;
 
-    assert!(GitHubError::RateLimited { retry_after_ms: 1000 }.is_retryable());
+    assert!(
+        GitHubError::RateLimited {
+            retry_after_ms: 1000
+        }
+        .is_retryable()
+    );
     assert!(
         GitHubError::Api {
             message: "Server error".into(),

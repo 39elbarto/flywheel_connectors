@@ -29,18 +29,15 @@ pub struct TwilioClient {
 impl TwilioClient {
     /// Create a new Twilio client with account SID and auth token.
     pub fn new(account_sid: &str, auth_token: &str) -> TwilioResult<Self> {
-        let credentials = base64::engine::general_purpose::STANDARD
-            .encode(format!("{account_sid}:{auth_token}"));
+        let credentials =
+            base64::engine::general_purpose::STANDARD.encode(format!("{account_sid}:{auth_token}"));
 
         let mut headers = header::HeaderMap::new();
         headers.insert(
             header::AUTHORIZATION,
             format!("Basic {credentials}").parse().unwrap(),
         );
-        headers.insert(
-            header::CONTENT_TYPE,
-            "application/json".parse().unwrap(),
-        );
+        headers.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
 
         let http = Client::builder()
             .default_headers(headers)
@@ -48,9 +45,7 @@ impl TwilioClient {
             .build()
             .map_err(TwilioError::Http)?;
 
-        let base_url = format!(
-            "https://api.twilio.com/2010-04-01/Accounts/{account_sid}"
-        );
+        let base_url = format!("https://api.twilio.com/2010-04-01/Accounts/{account_sid}");
 
         Ok(Self {
             http,
@@ -230,10 +225,7 @@ impl TwilioClient {
         message_sid: &str,
         media_sid: &str,
     ) -> TwilioResult<(String, String)> {
-        let url = format!(
-            "{}/Messages/{message_sid}/Media/{media_sid}",
-            self.base_url
-        );
+        let url = format!("{}/Messages/{message_sid}/Media/{media_sid}", self.base_url);
         let data = self.get_bytes(&url).await?;
         let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
         Ok((b64, "application/octet-stream".to_string()))
@@ -426,8 +418,7 @@ impl TwilioClient {
 
                     if !status.is_success() {
                         let body = response.text().await.unwrap_or_default();
-                        let api_err: Option<ApiErrorResponse> =
-                            serde_json::from_str(&body).ok();
+                        let api_err: Option<ApiErrorResponse> = serde_json::from_str(&body).ok();
                         let (message, error_code) = api_err
                             .as_ref()
                             .map(|e| {
@@ -517,7 +508,13 @@ mod tests {
 
         let client = test_client(&base);
         let msg = client
-            .send_message("+15551234567", "+15559876543", "Hello from FCP!", None, None)
+            .send_message(
+                "+15551234567",
+                "+15559876543",
+                "Hello from FCP!",
+                None,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(msg.sid, "SMtest123");
@@ -593,7 +590,14 @@ mod tests {
 
         let client = test_client(&base);
         let call = client
-            .create_call("+15551234567", "+15559876543", "https://example.com/twiml", None, None, None)
+            .create_call(
+                "+15551234567",
+                "+15559876543",
+                "https://example.com/twiml",
+                None,
+                None,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(call.sid, "CAtest");
@@ -653,7 +657,9 @@ mod tests {
         let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
 
         Mock::given(method("GET"))
-            .and(path("/2010-04-01/Accounts/ACtest123/IncomingPhoneNumbers.json"))
+            .and(path(
+                "/2010-04-01/Accounts/ACtest123/IncomingPhoneNumbers.json",
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "incoming_phone_numbers": [
                     { "sid": "PN1", "phone_number": "+15551234567", "friendly_name": "Main" }
@@ -691,7 +697,9 @@ mod tests {
         let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
 
         Mock::given(method("GET"))
-            .and(path("/2010-04-01/Accounts/ACtest123/Messages/SMmissing.json"))
+            .and(path(
+                "/2010-04-01/Accounts/ACtest123/Messages/SMmissing.json",
+            ))
             .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
                 "code": 20404,
                 "message": "The requested resource was not found"

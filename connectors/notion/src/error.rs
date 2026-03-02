@@ -41,7 +41,10 @@ impl NotionError {
         match self {
             Self::Http(_) | Self::RateLimited { .. } => true,
             Self::Api { status_code, .. } => matches!(status_code, Some(500..=599 | 429)),
-            Self::Json(_) | Self::Unauthorized | Self::NotFound { .. } | Self::Validation { .. } => false,
+            Self::Json(_)
+            | Self::Unauthorized
+            | Self::NotFound { .. }
+            | Self::Validation { .. } => false,
         }
     }
 

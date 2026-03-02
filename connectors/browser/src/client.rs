@@ -254,10 +254,7 @@ impl BrowserClient {
         let endpoint = format!("{}/set_cookies", self.browser_url);
         let body = serde_json::json!({ "cookies": cookies });
         let data = self.post_json(&endpoint, &body).await?;
-        let count = data
-            .get("set_count")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
+        let count = data.get("set_count").and_then(|v| v.as_u64()).unwrap_or(0);
         Ok(count as u32)
     }
 
@@ -319,8 +316,7 @@ impl BrowserClient {
 
                     if !status.is_success() {
                         let body = response.text().await.unwrap_or_default();
-                        let api_err: Option<ApiErrorResponse> =
-                            serde_json::from_str(&body).ok();
+                        let api_err: Option<ApiErrorResponse> = serde_json::from_str(&body).ok();
                         let message = api_err
                             .as_ref()
                             .and_then(|e| e.error.as_ref())
@@ -407,7 +403,10 @@ mod tests {
             .unwrap()
             .with_browser_url(&mock_server.uri());
 
-        let result = client.screenshot(None, Some(true), None, None).await.unwrap();
+        let result = client
+            .screenshot(None, Some(true), None, None)
+            .await
+            .unwrap();
         assert_eq!(result.width, 1920);
         assert_eq!(result.height, 1080);
     }

@@ -42,10 +42,9 @@ impl BrowserConnector {
         let api_key = params.get("api_key").and_then(|v| v.as_str());
         let browser_url = params.get("browser_url").and_then(|v| v.as_str());
 
-        let mut client =
-            BrowserClient::new(api_key).map_err(|e| FcpError::Internal {
-                message: format!("Failed to create HTTP client: {e}"),
-            })?;
+        let mut client = BrowserClient::new(api_key).map_err(|e| FcpError::Internal {
+            message: format!("Failed to create HTTP client: {e}"),
+        })?;
 
         if let Some(url) = browser_url {
             client = client.with_browser_url(url);
@@ -600,12 +599,17 @@ impl BrowserConnector {
         let selector = input.get("selector").and_then(|v| v.as_str());
         let full_page = input.get("full_page").and_then(|v| v.as_bool());
         let format = input.get("format").and_then(|v| v.as_str());
-        let quality = input.get("quality").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let quality = input
+            .get("quality")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
         let result = client
             .screenshot(selector, full_page, format, quality)
             .await
             .map_err(|e: BrowserError| e.to_fcp_error())?;
-        Ok(json!({ "image_data": result.image_data, "width": result.width, "height": result.height }))
+        Ok(
+            json!({ "image_data": result.image_data, "width": result.width, "height": result.height }),
+        )
     }
 
     async fn invoke_render_pdf(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
@@ -631,10 +635,7 @@ impl BrowserConnector {
         Ok(json!({ "text": result.text, "word_count": result.word_count }))
     }
 
-    async fn invoke_extract_links(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_extract_links(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let selector = input.get("selector").and_then(|v| v.as_str());
         let result = client
@@ -672,12 +673,10 @@ impl BrowserConnector {
 
     async fn invoke_fill_form(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
-        let fields = input
-            .get("fields")
-            .ok_or(FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing required field: fields".into(),
-            })?;
+        let fields = input.get("fields").ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "Missing required field: fields".into(),
+        })?;
         let submit_selector = input.get("submit_selector").and_then(|v| v.as_str());
         let result = client
             .fill_form(fields, submit_selector)
@@ -712,11 +711,12 @@ impl BrowserConnector {
             code: 1003,
             message: "Missing required field: cookies".into(),
         })?;
-        let cookies: Vec<Cookie> =
-            serde_json::from_value(cookies_value.clone()).map_err(|e| FcpError::InvalidRequest {
+        let cookies: Vec<Cookie> = serde_json::from_value(cookies_value.clone()).map_err(|e| {
+            FcpError::InvalidRequest {
                 code: 1003,
                 message: format!("Invalid cookies format: {e}"),
-            })?;
+            }
+        })?;
         let count = client
             .set_cookies(&cookies)
             .await
@@ -725,7 +725,10 @@ impl BrowserConnector {
     }
 
     /// Handle shutdown.
-    pub async fn handle_shutdown(&self, _params: serde_json::Value) -> FcpResult<serde_json::Value> {
+    pub async fn handle_shutdown(
+        &self,
+        _params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         info!("Browser connector shutting down");
         Ok(json!({ "status": "shutdown" }))
     }
@@ -919,11 +922,15 @@ mod tests {
 
         let raw = std::fs::read_to_string(&manifest_path).expect("read manifest");
         let manifest = ConnectorManifest::parse_str(&raw).expect("manifest should validate");
-        let computed = manifest.compute_interface_hash().expect("compute interface hash");
+        let computed = manifest
+            .compute_interface_hash()
+            .expect("compute interface hash");
         assert_eq!(manifest.manifest.interface_hash, computed);
 
         let manifest2 = ConnectorManifest::parse_str_unchecked(&raw).expect("parse unchecked");
-        let computed2 = manifest2.compute_interface_hash().expect("compute interface hash");
+        let computed2 = manifest2
+            .compute_interface_hash()
+            .expect("compute interface hash");
         assert_eq!(computed, computed2);
     }
 }

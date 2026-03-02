@@ -197,8 +197,11 @@ async fn get_issue_happy_path() {
     Mock::given(method("GET"))
         .and(path("/issue/PROJ-123"))
         .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(jira_issue_response("10001", "PROJ-123", "Test issue")),
+            ResponseTemplate::new(200).set_body_json(jira_issue_response(
+                "10001",
+                "PROJ-123",
+                "Test issue",
+            )),
         )
         .mount(&mock_server)
         .await;
@@ -733,9 +736,11 @@ async fn error_404_maps_to_not_found() {
 
     Mock::given(method("GET"))
         .and(path("/issue/PROJ-999"))
-        .respond_with(ResponseTemplate::new(404).set_body_json(jira_error_response(&[
-            "Issue does not exist or you do not have permission to see it.",
-        ])))
+        .respond_with(
+            ResponseTemplate::new(404).set_body_json(jira_error_response(&[
+                "Issue does not exist or you do not have permission to see it.",
+            ])),
+        )
         .mount(&mock_server)
         .await;
 
@@ -770,9 +775,7 @@ async fn error_429_maps_to_rate_limited() {
 
     Mock::given(method("GET"))
         .and(path("/issue/PROJ-1"))
-        .respond_with(
-            ResponseTemplate::new(429).insert_header("retry-after", "30"),
-        )
+        .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "30"))
         .mount(&mock_server)
         .await;
 
@@ -808,7 +811,8 @@ async fn error_500_maps_to_external() {
     Mock::given(method("GET"))
         .and(path("/issue/PROJ-1"))
         .respond_with(
-            ResponseTemplate::new(500).set_body_json(jira_error_response(&["Internal server error"])),
+            ResponseTemplate::new(500)
+                .set_body_json(jira_error_response(&["Internal server error"])),
         )
         .mount(&mock_server)
         .await;
@@ -845,7 +849,12 @@ fn error_retryable_classification() {
     use fcp_jira::error::JiraError;
 
     // Retryable errors
-    assert!(JiraError::RateLimited { retry_after_ms: 1000 }.is_retryable());
+    assert!(
+        JiraError::RateLimited {
+            retry_after_ms: 1000
+        }
+        .is_retryable()
+    );
     assert!(
         JiraError::Api {
             message: "Server error".into(),
@@ -1115,10 +1124,7 @@ async fn lifecycle_introspect_all_operations() {
     ];
 
     for expected in &expected_ops {
-        assert!(
-            op_ids.contains(expected),
-            "missing operation: {expected}"
-        );
+        assert!(op_ids.contains(expected), "missing operation: {expected}");
     }
     assert_eq!(ops.len(), 12);
 

@@ -73,11 +73,7 @@ impl NotionClient {
     }
 
     /// Update a page (PATCH properties).
-    pub async fn update_page(
-        &self,
-        page_id: &str,
-        body: serde_json::Value,
-    ) -> NotionResult<Page> {
+    pub async fn update_page(&self, page_id: &str, body: serde_json::Value) -> NotionResult<Page> {
         let url = format!("{}/pages/{page_id}", self.api_url);
         let data = self.patch(&url, body).await?;
         Ok(serde_json::from_value(data)?)
@@ -189,11 +185,7 @@ impl NotionClient {
         .await
     }
 
-    async fn patch(
-        &self,
-        url: &str,
-        body: serde_json::Value,
-    ) -> NotionResult<serde_json::Value> {
+    async fn patch(&self, url: &str, body: serde_json::Value) -> NotionResult<serde_json::Value> {
         self.execute(|| self.http.patch(url).json(&body)).await
     }
 
@@ -222,9 +214,7 @@ impl NotionClient {
 
                     if status == StatusCode::NOT_FOUND {
                         let body = response.text().await.unwrap_or_default();
-                        return Err(NotionError::NotFound {
-                            resource: body,
-                        });
+                        return Err(NotionError::NotFound { resource: body });
                     }
 
                     if status == StatusCode::TOO_MANY_REQUESTS {
@@ -262,8 +252,7 @@ impl NotionClient {
 
                     if !status.is_success() {
                         let body = response.text().await.unwrap_or_default();
-                        let api_err: Option<ApiErrorResponse> =
-                            serde_json::from_str(&body).ok();
+                        let api_err: Option<ApiErrorResponse> = serde_json::from_str(&body).ok();
                         let message = api_err
                             .as_ref()
                             .and_then(|e| e.message.clone())

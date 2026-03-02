@@ -632,6 +632,71 @@ related = [
     "twitter.tweet.get",
 ]
 
+[provides.operations."twitter.trends.place"]
+description = "Get trending topics for a location by WOEID"
+capability = "twitter.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."twitter.trends.place".rate_limit]
+max = 75
+per_ms = 900000
+
+[provides.operations."twitter.trends.place".input_schema]
+required = ["woeid"]
+type = "object"
+
+[provides.operations."twitter.trends.place".input_schema.properties.woeid]
+description = "Where On Earth ID (for example 1 for Worldwide)"
+minimum = 1
+type = "integer"
+
+[provides.operations."twitter.trends.place".output_schema]
+required = ["locations"]
+type = "object"
+
+[provides.operations."twitter.trends.place".output_schema.properties.locations]
+type = "array"
+
+[provides.operations."twitter.trends.place".output_schema.properties.locations.items]
+type = "object"
+
+[provides.operations."twitter.trends.place".network_constraints]
+host_allow = [
+    "api.twitter.com",
+    "api.x.com",
+    "stream.twitter.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."twitter.trends.place".ai_hints]
+when_to_use = "Retrieve trending topics for a specific geography."
+common_mistakes = [
+    "Using an invalid WOEID.",
+    "Assuming trends are globally consistent across locations.",
+]
+examples = ['{"woeid": 1}']
+related = [
+    "twitter.tweet.search",
+    "twitter.user.timeline",
+]
+
 [provides.operations."twitter.user.by_username"]
 description = "Get a user's profile by their username (handle)"
 capability = "twitter.read"
@@ -1028,5 +1093,6 @@ scope = "instance"
 "twitter.tweet.create" = ["twitter.write"]
 "twitter.user.timeline" = ["twitter.read"]
 "twitter.tweet.search" = ["twitter.read"]
+"twitter.trends.place" = ["twitter.read"]
 "twitter.tweet.delete" = ["twitter.delete"]
 "twitter.stream.rules.list" = ["twitter.stream"]

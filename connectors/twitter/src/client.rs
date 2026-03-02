@@ -28,7 +28,7 @@ use crate::{
     oauth::OAuthSigner,
     types::{
         CreateTweetRequest, CreateTweetResponse, DeleteTweetResponse, SearchTweetsParams,
-        StreamRule, StreamRulesResponse, Tweet, TwitterResponse, User,
+        StreamRule, StreamRulesResponse, TrendsPlace, Tweet, TwitterResponse, User,
     },
 };
 
@@ -647,6 +647,13 @@ impl TwitterApiClient {
             .await
     }
 
+    /// Get trending topics for a location by WOEID.
+    pub async fn get_trends_place(&self, woeid: u64) -> TwitterResult<Vec<TrendsPlace>> {
+        let params = vec![("id".to_string(), woeid.to_string())];
+        self.get_with_params("/1.1/trends/place.json", &params)
+            .await
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // Stream rules endpoints
     // ─────────────────────────────────────────────────────────────────────────
@@ -884,6 +891,43 @@ mod tests {
         let tweets = response.data.unwrap();
         assert_eq!(tweets.len(), 2);
         assert_eq!(tweets[0].text, "Hello world");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_get_trends_place_success() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/1.1/trends/place.json"))
+            .and(header_exists("Authorization"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "trends": [
+                        {
+                            "name": "#rustlang",
+                            "url": "https://twitter.com/search?q=%23rustlang",
+                            "query": "%23rustlang",
+                            "tweet_volume": 12345
+                        }
+                    ],
+                    "as_of": "2026-03-02T00:00:00Z",
+                    "created_at": "2026-03-02T00:00:00Z",
+                    "locations": [
+                        { "name": "Worldwide", "woeid": 1 }
+                    ]
+                }
+            ])))
+            .mount(&mock_server)
+            .await;
+
+        let config = test_config(&mock_server);
+        let client = TwitterApiClient::new(&config).unwrap();
+
+        let response = client.get_trends_place(1).await.unwrap();
+        assert_eq!(response.len(), 1);
+        assert_eq!(response[0].trends.len(), 1);
+        assert_eq!(response[0].trends[0].name, "#rustlang");
+        assert_eq!(response[0].locations[0].woeid, 1);
     }
 
     #[fcp_async_core::runtime::test]

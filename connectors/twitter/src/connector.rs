@@ -9,9 +9,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use fcp_async_core::channel::{broadcast, watch};
 use fcp_async_core::sync::RwLock;
 use fcp_core::{
-    BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
-    CredentialId, EventCaps, FcpError, HandshakeRequest, HandshakeResponse, SelfCheckReport,
-    SelfCheckStatus, SessionId, SimulateRequest, SimulateResponse,
+    AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
+    ConnectorId, CredentialId, EventCaps, FcpError, HandshakeRequest, HandshakeResponse,
+    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    SelfCheckReport, SelfCheckStatus, SessionId, SimulateRequest, SimulateResponse,
 };
 use fcp_sdk::runtime::{
     InMemoryStreamingSession, StreamingConnection, StreamingError, StreamingSupervisor,
@@ -350,38 +351,116 @@ impl TwitterConnector {
     /// Handle the introspect method.
     #[instrument(skip(self))]
     pub async fn handle_introspect(&self) -> Result<Value, FcpError> {
-        // Return introspection data as JSON - the proper Introspection struct
-        // requires many fields that we can't easily populate here
-        Ok(json!({
-            "connector": {
-                "id": "twitter:social:v1",
-                "name": "fcp-twitter",
-                "version": env!("CARGO_PKG_VERSION"),
-                "description": "X/Twitter API connector for the Flywheel Connector Protocol"
-            },
-            "archetypes": ["operational", "streaming", "bidirectional"],
-            "operations": [
-                {"id": "twitter.user.me", "summary": "Get the authenticated user", "risk": "low"},
-                {"id": "twitter.user.get", "summary": "Get a user by ID", "risk": "low"},
-                {"id": "twitter.user.by_username", "summary": "Get a user by username", "risk": "low"},
-                {"id": "twitter.tweet.get", "summary": "Get a tweet by ID", "risk": "low"},
-                {"id": "twitter.tweet.search", "summary": "Search recent tweets", "risk": "low"},
-                {"id": "twitter.user.timeline", "summary": "Get a user's tweets", "risk": "low"},
-                {"id": "twitter.user.mentions", "summary": "Get mentions", "risk": "low"},
-                {"id": "twitter.tweet.create", "summary": "Create a new tweet", "risk": "high"},
-                {"id": "twitter.tweet.reply", "summary": "Reply to a tweet", "risk": "high"},
-                {"id": "twitter.tweet.delete", "summary": "Delete a tweet", "risk": "high"},
-                {"id": "twitter.stream.rules.list", "summary": "List stream filter rules", "risk": "low"},
-                {"id": "twitter.stream.rules.add", "summary": "Add stream filter rules", "risk": "high"},
-                {"id": "twitter.stream.rules.delete", "summary": "Delete stream filter rules", "risk": "high"}
+        let introspection = Introspection {
+            operations: vec![
+                // ── Read operations (Safe) ─────────────────────────────
+                tw_op("twitter.user.me", "Get the authenticated user's profile",
+                    json!({ "type": "object", "properties": {} }),
+                    json!({ "type": "object", "properties": { "user": { "type": "object" }, "includes": { "type": "object" } } }),
+                    "twitter.read.account", RiskLevel::Low, SafetyTier::Safe,
+                    AgentHint { when_to_use: "Verify authenticated user identity or fetch own profile.".into(), common_mistakes: vec![], examples: vec![r"{}".into()], related: vec![CapabilityId::from_static("twitter.user.get")] },
+                ),
+                tw_op("twitter.user.get", "Get a user by ID",
+                    json!({ "type": "object", "required": ["user_id"], "properties": { "user_id": { "type": "string" } } }),
+                    json!({ "type": "object", "properties": { "user": { "type": "object" }, "includes": { "type": "object" } } }),
+                    "twitter.read.public", RiskLevel::Low, SafetyTier::Safe,
+                    AgentHint { when_to_use: "Look up a user by numeric ID.".into(), common_mistakes: vec!["Using username instead of numeric ID".into()], examples: vec![r#"{"user_id": "123456789"}"#.into()], related: vec![CapabilityId::from_static("twitter.user.by_username")] },
+                ),
+                tw_op("twitter.user.by_username", "Get a user by username",
+                    json!({ "type": "object", "required": ["username"], "properties": { "username": { "type": "string" } } }),
+                    json!({ "type": "object", "properties": { "user": { "type": "object" }, "includes": { "type": "object" } } }),
+                    "twitter.read.public", RiskLevel::Low, SafetyTier::Safe,
+                    AgentHint { when_to_use: "Look up a user by @handle.".into(), common_mistakes: vec!["Including the @ prefix (stripped automatically)".into()], examples: vec![r#"{"username": "elonmusk"}"#.into()], related: vec![CapabilityId::from_static("twitter.user.get")] },
+                ),
+                tw_op("twitter.tweet.get", "Get a single tweet by ID",
+                    json!({ "type": "object", "required": ["tweet_id"], "properties": { "tweet_id": { "type": "string" } } }),
+                    json!({ "type": "object", "properties": { "tweet": { "type": "object" }, "includes": { "type": "object" } } }),
+                    "twitter.read.public", RiskLevel::Low, SafetyTier::Safe,
+                    AgentHint { when_to_use: "Retrieve a tweet's full content and metrics.".into(), common_mistakes: vec![], examples: vec![r#"{"tweet_id": "1234567890123456789"}"#.into()], related: vec![CapabilityId::from_static("twitter.tweet.search")] },
+                ),
+                tw_op("twitter.tweet.get_many", "Get multiple tweets by IDs (up to 100)",
+                    json!({ "type": "object", "required": ["tweet_ids"], "properties": { "tweet_ids": { "type": "array", "items": { "type": "string" }, "maxItems": 100 } } }),
+                    json!({ "type": "object", "properties": { "tweets": { "type": "array" }, "includes": { "type": "object" } } }),
+                    "twitter.read.public", RiskLevel::Low, SafetyTier::Safe,
+                    AgentHint { when_to_use: "Batch-fetch multiple tweets by ID.".into(), common_mistakes: vec!["Exceeding 100 IDs per request".into()], examples: vec![r#"{"tweet_ids": ["123", "456"]}"#.into()], related: vec![CapabilityId::from_static("twitter.tweet.get")] },
+                ),
+                tw_op("twitter.tweet.search", "Search recent tweets (last 7 days)",
+                    json!({ "type": "object", "required": ["query"], "properties": { "query": { "type": "string" }, "max_results": { "type": "integer", "minimum": 10, "maximum": 100 }, "sort_order": { "type": "string", "enum": ["recency", "relevancy"] }, "next_token": { "type": "string" }, "since_id": { "type": "string" } } }),
+                    json!({ "type": "object", "properties": { "tweets": { "type": "array" }, "includes": { "type": "object" }, "meta": { "type": "object" } } }),
+                    "twitter.read.public", RiskLevel::Low, SafetyTier::Safe,
+                    AgentHint { when_to_use: "Search public tweets matching a query (last 7 days).".into(), common_mistakes: vec!["Not handling pagination with next_token".into()], examples: vec![r#"{"query": "from:elonmusk", "max_results": 10}"#.into()], related: vec![CapabilityId::from_static("twitter.user.timeline")] },
+                ),
+                tw_op("twitter.user.timeline", "Get a user's tweet timeline",
+                    json!({ "type": "object", "required": ["user_id"], "properties": { "user_id": { "type": "string" }, "max_results": { "type": "integer", "minimum": 5, "maximum": 100 }, "pagination_token": { "type": "string" } } }),
+                    json!({ "type": "object", "properties": { "tweets": { "type": "array" }, "includes": { "type": "object" }, "meta": { "type": "object" } } }),
+                    "twitter.read.account", RiskLevel::Low, SafetyTier::Safe,
+                    AgentHint { when_to_use: "Fetch a user's recent tweets.".into(), common_mistakes: vec!["Using username instead of numeric user ID".into()], examples: vec![r#"{"user_id": "123456789", "max_results": 20}"#.into()], related: vec![CapabilityId::from_static("twitter.user.mentions")] },
+                ),
+                tw_op("twitter.user.mentions", "Get mentions of a user",
+                    json!({ "type": "object", "properties": { "user_id": { "type": "string" }, "max_results": { "type": "integer", "minimum": 5, "maximum": 100 }, "pagination_token": { "type": "string" } } }),
+                    json!({ "type": "object", "properties": { "tweets": { "type": "array" }, "includes": { "type": "object" }, "meta": { "type": "object" } } }),
+                    "twitter.read.account", RiskLevel::Low, SafetyTier::Safe,
+                    AgentHint { when_to_use: "Fetch tweets mentioning a user. Uses authenticated user if user_id omitted.".into(), common_mistakes: vec![], examples: vec![r#"{"max_results": 10}"#.into()], related: vec![CapabilityId::from_static("twitter.user.timeline")] },
+                ),
+                tw_op("twitter.trends.place", "Get trending topics for a location",
+                    json!({ "type": "object", "required": ["woeid"], "properties": { "woeid": { "type": "integer", "description": "Where On Earth ID (1 = worldwide)" } } }),
+                    json!({ "type": "object", "properties": { "locations": { "type": "array" } } }),
+                    "twitter.read.public", RiskLevel::Low, SafetyTier::Safe,
+                    AgentHint { when_to_use: "Get trending topics for a location by WOEID.".into(), common_mistakes: vec!["Using city name instead of numeric WOEID".into()], examples: vec![r#"{"woeid": 1}"#.into()], related: vec![CapabilityId::from_static("twitter.tweet.search")] },
+                ),
+                // ── Write operations (Dangerous) ──────────────────────
+                tw_op("twitter.tweet.create", "Create a new tweet",
+                    json!({ "type": "object", "required": ["text"], "properties": { "text": { "type": "string", "maxLength": 280 } } }),
+                    json!({ "type": "object", "properties": { "tweet": { "type": "object" } } }),
+                    "twitter.write.tweets", RiskLevel::High, SafetyTier::Dangerous,
+                    AgentHint { when_to_use: "Post a new tweet.".into(), common_mistakes: vec!["Exceeding 280 character limit".into()], examples: vec![r#"{"text": "Hello from FCP!"}"#.into()], related: vec![CapabilityId::from_static("twitter.tweet.delete")] },
+                ),
+                tw_op("twitter.tweet.reply", "Reply to an existing tweet",
+                    json!({ "type": "object", "required": ["text", "reply_to"], "properties": { "text": { "type": "string", "maxLength": 280 }, "reply_to": { "type": "string" } } }),
+                    json!({ "type": "object", "properties": { "tweet": { "type": "object" } } }),
+                    "twitter.write.tweets", RiskLevel::High, SafetyTier::Dangerous,
+                    AgentHint { when_to_use: "Reply to a tweet by its ID.".into(), common_mistakes: vec!["Not providing reply_to tweet ID".into()], examples: vec![r#"{"text": "Great point!", "reply_to": "1234567890"}"#.into()], related: vec![CapabilityId::from_static("twitter.tweet.create")] },
+                ),
+                tw_op("twitter.tweet.delete", "Delete a tweet",
+                    json!({ "type": "object", "required": ["tweet_id"], "properties": { "tweet_id": { "type": "string" } } }),
+                    json!({ "type": "object", "properties": { "deleted": { "type": "boolean" } } }),
+                    "twitter.write.tweets", RiskLevel::High, SafetyTier::Dangerous,
+                    AgentHint { when_to_use: "Delete a tweet owned by the authenticated user.".into(), common_mistakes: vec!["Deleting tweets not owned by the authenticated user".into()], examples: vec![r#"{"tweet_id": "1234567890"}"#.into()], related: vec![CapabilityId::from_static("twitter.tweet.create")] },
+                ),
+                // ── Stream rule operations ────────────────────────────
+                tw_op("twitter.stream.rules.list", "List active filtered stream rules",
+                    json!({ "type": "object", "properties": {} }),
+                    json!({ "type": "object", "properties": { "rules": { "type": "array" } } }),
+                    "twitter.stream.read", RiskLevel::Low, SafetyTier::Safe,
+                    AgentHint { when_to_use: "Check active filter rules on the stream.".into(), common_mistakes: vec![], examples: vec![r"{}".into()], related: vec![CapabilityId::from_static("twitter.stream.rules.add")] },
+                ),
+                tw_op("twitter.stream.rules.add", "Add filtered stream rules",
+                    json!({ "type": "object", "required": ["rules"], "properties": { "rules": { "type": "array", "items": { "type": "object", "properties": { "value": { "type": "string" }, "tag": { "type": "string" } } } } } }),
+                    json!({ "type": "object", "properties": { "rules": { "type": "array" }, "meta": { "type": "object" } } }),
+                    "twitter.stream.read", RiskLevel::High, SafetyTier::Risky,
+                    AgentHint { when_to_use: "Add filter rules to the real-time stream.".into(), common_mistakes: vec!["Exceeding 25 rules on Basic tier".into()], examples: vec![r#"{"rules": [{"value": "from:elonmusk", "tag": "elon"}]}"#.into()], related: vec![CapabilityId::from_static("twitter.stream.rules.delete")] },
+                ),
+                tw_op("twitter.stream.rules.delete", "Delete filtered stream rules by ID",
+                    json!({ "type": "object", "required": ["rule_ids"], "properties": { "rule_ids": { "type": "array", "items": { "type": "string" } } } }),
+                    json!({ "type": "object", "properties": { "rules": { "type": "array" }, "meta": { "type": "object" } } }),
+                    "twitter.stream.read", RiskLevel::High, SafetyTier::Risky,
+                    AgentHint { when_to_use: "Remove filter rules from the stream.".into(), common_mistakes: vec!["Using rule values instead of rule IDs".into()], examples: vec![r#"{"rule_ids": ["12345"]}"#.into()], related: vec![CapabilityId::from_static("twitter.stream.rules.add")] },
+                ),
             ],
-            "network_constraints": {
-                "host_allow": ["api.twitter.com", "upload.twitter.com", "stream.twitter.com"],
-                "port_allow": [443],
-                "deny_localhost": true,
-                "deny_private_ranges": true
-            }
-        }))
+            events: vec![],
+            resource_types: vec![],
+            auth_caps: None,
+            event_caps: Some(EventCaps {
+                streaming: true,
+                replay: false,
+                min_buffer_events: 100,
+                requires_ack: false,
+            }),
+        };
+
+        serde_json::to_value(introspection).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize introspection: {e}"),
+        })
     }
 
     /// Handle the simulate method.
@@ -821,6 +900,7 @@ impl TwitterConnector {
             // Timeline operations
             "twitter.user.timeline" => self.op_user_timeline(args).await,
             "twitter.user.mentions" => self.op_user_mentions(args).await,
+            "twitter.trends.place" => self.op_trends_place(args).await,
 
             // Stream rule operations
             "twitter.stream.rules.list" => self.op_stream_rules_list().await,
@@ -1136,6 +1216,27 @@ impl TwitterConnector {
             "tweets": response.data,
             "includes": response.includes,
             "meta": response.meta
+        }))
+    }
+
+    async fn op_trends_place(&self, args: Value) -> Result<Value, FcpError> {
+        let client = self.require_client()?;
+
+        let woeid = args
+            .get("woeid")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1006,
+                message: "Missing 'woeid' argument".into(),
+            })?;
+
+        let locations = client
+            .get_trends_place(woeid)
+            .await
+            .map_err(|e| e.to_fcp_error())?;
+
+        Ok(json!({
+            "locations": locations
         }))
     }
 

@@ -795,6 +795,61 @@ pub struct SearchTweetsParams {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Trends Types
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A trending topic entry from the trends/place endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Trend {
+    /// Display name of the trend (for example, "#Rust").
+    pub name: String,
+
+    /// URL to the trend page.
+    pub url: String,
+
+    /// Query string representation of the trend.
+    pub query: String,
+
+    /// Promoted content indicator.
+    #[serde(default)]
+    pub promoted_content: Option<String>,
+
+    /// Estimated tweet volume when available.
+    #[serde(default)]
+    pub tweet_volume: Option<u64>,
+}
+
+/// Location descriptor returned by trends/place.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrendLocation {
+    /// Human-readable location name.
+    pub name: String,
+
+    /// Twitter WOEID for the location.
+    pub woeid: u64,
+}
+
+/// Trends payload for a location (Twitter v1.1 trends/place format).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrendsPlace {
+    /// List of trending topics.
+    #[serde(default)]
+    pub trends: Vec<Trend>,
+
+    /// Timestamp indicating when the trends snapshot was generated.
+    #[serde(default)]
+    pub as_of: Option<String>,
+
+    /// Timestamp indicating when this object was created.
+    #[serde(default)]
+    pub created_at: Option<String>,
+
+    /// Associated locations for this trends payload.
+    #[serde(default)]
+    pub locations: Vec<TrendLocation>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Stream Types
 // ─────────────────────────────────────────────────────────────────────────────
 

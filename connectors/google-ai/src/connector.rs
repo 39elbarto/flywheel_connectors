@@ -4,19 +4,120 @@ use std::sync::Arc;
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
-    ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier, SessionId,
-    SimulateRequest, SimulateResponse,
+    ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
+    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
 
-use crate::client::GoogleAiClient;
+use crate::client::{DEFAULT_BASE_URL, GoogleAiAuth, GoogleAiClient};
 use crate::error::GoogleAiError;
+
+/// Parsed and validated Google AI connector configuration.
+#[derive(Debug, Clone)]
+struct GoogleAiConfig {
+    auth: GoogleAiAuth,
+    base_url: String,
+}
+
+impl GoogleAiConfig {
+    fn from_params(params: &serde_json::Value) -> FcpResult<Self> {
+        let api_key = params
+            .get("api_key")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string);
+
+        let credential_id = match params.get("credential_id") {
+            Some(value) => {
+                let raw = value.as_str().ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "credential_id must be a string".into(),
+                })?;
+                Some(
+                    CredentialId::parse(raw).map_err(|_| FcpError::InvalidRequest {
+                        code: 1003,
+                        message: "credential_id must be a valid UUID".into(),
+                    })?,
+                )
+            }
+            None => None,
+        };
+
+        let auth = match (api_key, credential_id) {
+            (Some(key), None) => GoogleAiAuth::ApiKey(key),
+            (None, Some(cred_id)) => GoogleAiAuth::CredentialId(cred_id),
+            (Some(_), Some(_)) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Provide exactly one of api_key or credential_id".into(),
+                });
+            }
+            (None, None) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing api_key or credential_id in configuration".into(),
+                });
+            }
+        };
+
+        let base_url = params
+            .get("base_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or(DEFAULT_BASE_URL)
+            .to_string();
+
+        Ok(Self { auth, base_url })
+    }
+}
+
+/// Doctor check result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DoctorResult {
+    status: DoctorStatus,
+    checks: Vec<DoctorCheck>,
+}
+
+/// Doctor status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum DoctorStatus {
+    Healthy,
+    Degraded,
+    Unhealthy,
+}
+
+/// Individual doctor check.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DoctorCheck {
+    name: String,
+    passed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+    critical: bool,
+}
+
+impl DoctorResult {
+    #[must_use]
+    fn from_checks(checks: Vec<DoctorCheck>) -> Self {
+        let status = if checks.iter().any(|c| c.critical && !c.passed) {
+            DoctorStatus::Unhealthy
+        } else if checks.iter().any(|c| !c.passed) {
+            DoctorStatus::Degraded
+        } else {
+            DoctorStatus::Healthy
+        };
+        Self { status, checks }
+    }
+}
 
 /// FCP Google AI Connector.
 pub struct GoogleAiConnector {
     base: Arc<BaseConnector>,
+    config: Option<GoogleAiConfig>,
     client: Option<GoogleAiClient>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
@@ -28,6 +129,7 @@ impl GoogleAiConnector {
     pub fn new() -> Self {
         Self {
             base: Arc::new(BaseConnector::new(ConnectorId::from_static("google-ai"))),
+            config: None,
             client: None,
             verifier: None,
             session_id: None,
@@ -40,28 +142,19 @@ impl GoogleAiConnector {
         &mut self,
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
-        let api_key =
-            params
-                .get("api_key")
-                .and_then(|v| v.as_str())
-                .ok_or(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing api_key in configuration".into(),
-                })?;
+        let config = GoogleAiConfig::from_params(&params)?;
 
-        let base_url = params.get("base_url").and_then(|v| v.as_str());
+        let client =
+            GoogleAiClient::new_with_auth(config.auth.clone()).map_err(|e| FcpError::Internal {
+                message: format!("Failed to create HTTP client: {e}"),
+            })?;
+        let client = client.with_base_url(&config.base_url);
 
-        let mut client = GoogleAiClient::new(api_key).map_err(|e| FcpError::Internal {
-            message: format!("Failed to create HTTP client: {e}"),
-        })?;
-
-        if let Some(url) = base_url {
-            client = client.with_base_url(url);
-        }
-
+        let auth_label = config.auth.redacted_label();
         self.client = Some(client);
+        self.config = Some(config);
         self.base.set_configured(true);
-        info!("Google AI connector configured");
+        info!(auth = %auth_label, "Google AI connector configured");
 
         Ok(json!({ "status": "configured" }))
     }
@@ -119,15 +212,166 @@ impl GoogleAiConnector {
 
     /// Handle health check.
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
-        let configured = self.client.is_some();
+        let configured = self.config.is_some();
+        let auth = self
+            .config
+            .as_ref()
+            .map_or_else(|| "unconfigured".to_string(), |c| c.auth.redacted_label());
+        let base_url = self
+            .config
+            .as_ref()
+            .map_or_else(|| DEFAULT_BASE_URL.to_string(), |c| c.base_url.clone());
         let metrics = self.base.metrics();
         Ok(json!({
             "status": if configured { "healthy" } else { "not_configured" },
+            "auth": auth,
+            "base_url": base_url,
             "metrics": {
                 "requests_total": metrics.requests_total,
                 "requests_error": metrics.requests_error,
             }
         }))
+    }
+
+    /// Handle doctor checks.
+    ///
+    /// Returns a structured readiness report without leaking secrets.
+    pub async fn handle_doctor(&self) -> FcpResult<serde_json::Value> {
+        let result = self.build_doctor_result();
+        serde_json::to_value(result).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize doctor result: {e}"),
+        })
+    }
+
+    fn build_doctor_result(&self) -> DoctorResult {
+        let mut checks = Vec::new();
+
+        // Check 1: Configuration loaded
+        let configured = self.config.is_some();
+        checks.push(DoctorCheck {
+            name: "configuration".into(),
+            passed: configured,
+            message: Some(if configured {
+                "Configuration loaded".into()
+            } else {
+                "Not configured - run configure first".into()
+            }),
+            critical: true,
+        });
+
+        let Some(config) = &self.config else {
+            return DoctorResult::from_checks(checks);
+        };
+
+        // Check 2: HTTP client initialized
+        checks.push(DoctorCheck {
+            name: "client_initialized".into(),
+            passed: self.client.is_some(),
+            message: Some(if self.client.is_some() {
+                "HTTP client initialized".into()
+            } else {
+                "HTTP client missing; re-run configure".into()
+            }),
+            critical: true,
+        });
+
+        // Check 3: Base URL scheme
+        let scheme = if config.base_url.starts_with("https://") {
+            "https"
+        } else if config.base_url.starts_with("http://") {
+            "http"
+        } else {
+            "unknown"
+        };
+        checks.push(DoctorCheck {
+            name: "base_url".into(),
+            passed: true,
+            message: Some(format!("Base URL ({scheme}): {}", config.base_url)),
+            critical: false,
+        });
+
+        // Check 4: Auth mode
+        checks.push(DoctorCheck {
+            name: "auth_mode".into(),
+            passed: true,
+            message: Some(format!("Auth: {}", config.auth.redacted_label())),
+            critical: false,
+        });
+
+        // Check 5: Network constraints
+        let allowed_hosts = ["generativelanguage.googleapis.com"];
+        let host_ok = config.base_url.starts_with("http://localhost")
+            || config.base_url.starts_with("http://127.0.0.1")
+            || allowed_hosts.iter().any(|h| config.base_url.contains(h));
+        checks.push(DoctorCheck {
+            name: "network_constraints".into(),
+            passed: host_ok,
+            message: Some(if host_ok {
+                "Base URL matches allowed host (generativelanguage.googleapis.com)".into()
+            } else {
+                format!(
+                    "Base URL {} does not match allowed hosts: {:?}",
+                    config.base_url, allowed_hosts
+                )
+            }),
+            critical: true,
+        });
+
+        // Check 6: Credential injection status
+        let secretless = config.auth.is_secretless();
+        checks.push(DoctorCheck {
+            name: "credential_injection".into(),
+            passed: !secretless,
+            message: Some(if secretless {
+                "Credential injection required via egress proxy".into()
+            } else {
+                "Direct API key configured".into()
+            }),
+            critical: false,
+        });
+
+        DoctorResult::from_checks(checks)
+    }
+
+    /// Handle connector self-check.
+    ///
+    /// Performs a safe, read-only API call (list models) to validate the API key
+    /// is valid and the Google AI API is reachable.
+    pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
+        let Some(client) = &self.client else {
+            let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize self-check report: {e}"),
+            });
+        };
+
+        // If using credential_id, we can't validate directly
+        if let Some(config) = &self.config {
+            if config.auth.is_secretless() {
+                let report = SelfCheckReport::degraded(
+                    "credential_injection_required",
+                    "Configured with credential_id; egress proxy injection required for checks",
+                );
+                return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                    message: format!("Failed to serialize self-check report: {e}"),
+                });
+            }
+        }
+
+        let report = match client.health_check().await {
+            Ok(()) => SelfCheckReport::ok(),
+            Err(err) => {
+                if err.is_retryable() {
+                    SelfCheckReport::degraded("self_check_retryable", err.to_string())
+                } else {
+                    SelfCheckReport::failed("self_check_failed", err.to_string())
+                }
+            }
+        };
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {e}"),
+        })
     }
 
     /// Handle introspect method.
@@ -749,6 +993,10 @@ mod tests {
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_manifest::ConnectorManifest;
     use std::path::PathBuf;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
 
     fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> CapabilityToken {
         let now = Utc::now();
@@ -785,7 +1033,315 @@ mod tests {
         let connector = GoogleAiConnector::new();
         let result = connector.handle_health().await.unwrap();
         assert_eq!(result["status"], "not_configured");
+        assert_eq!(result["auth"], "unconfigured");
     }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_health_configured_with_api_key() {
+        let mut connector = GoogleAiConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_key": "test-key",
+                "base_url": "http://localhost:9999/v1beta"
+            }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_health().await.unwrap();
+        assert_eq!(result["status"], "healthy");
+        assert_eq!(result["auth"], "api_key:redacted");
+    }
+
+    // ── Provisioning: strict auth mode validation ──────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_api_key_mode() {
+        let mut connector = GoogleAiConnector::new();
+        let result = connector
+            .handle_configure(json!({ "api_key": "test-key-123" }))
+            .await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap()["status"], "configured");
+        assert!(connector.config.is_some());
+        assert!(!connector.config.as_ref().unwrap().auth.is_secretless());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_credential_id_mode() {
+        let mut connector = GoogleAiConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+            }))
+            .await;
+        assert!(result.is_ok());
+        assert!(connector.config.as_ref().unwrap().auth.is_secretless());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_ambiguous_auth_rejected() {
+        let mut connector = GoogleAiConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "api_key": "test-key",
+                "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+            }))
+            .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("exactly one"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_missing_auth_rejected() {
+        let mut connector = GoogleAiConnector::new();
+        let result = connector.handle_configure(json!({})).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("Missing api_key or credential_id"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_invalid_credential_id_rejected() {
+        let mut connector = GoogleAiConnector::new();
+        let result = connector
+            .handle_configure(json!({ "credential_id": "not-a-uuid" }))
+            .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("valid UUID"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_empty_api_key_rejected() {
+        let mut connector = GoogleAiConnector::new();
+        let result = connector.handle_configure(json!({ "api_key": "  " })).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("Missing api_key or credential_id"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    // ── Doctor checks ──────────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_not_configured() {
+        let connector = GoogleAiConnector::new();
+        let result = connector.handle_doctor().await.unwrap();
+        assert_eq!(result["status"], "unhealthy");
+        let checks = result["checks"].as_array().unwrap();
+        assert!(!checks.is_empty());
+        assert_eq!(checks[0]["name"], "configuration");
+        assert_eq!(checks[0]["passed"], false);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_configured_api_key() {
+        let mut connector = GoogleAiConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_key": "test-key",
+                "base_url": "http://localhost:9999/v1beta"
+            }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_doctor().await.unwrap();
+        // Localhost passes network constraint, direct API key passes injection check
+        let checks = result["checks"].as_array().unwrap();
+        let config_check = checks
+            .iter()
+            .find(|c| c["name"] == "configuration")
+            .unwrap();
+        assert_eq!(config_check["passed"], true);
+
+        let auth_check = checks.iter().find(|c| c["name"] == "auth_mode").unwrap();
+        assert!(
+            auth_check["message"]
+                .as_str()
+                .unwrap()
+                .contains("api_key:redacted")
+        );
+
+        let injection_check = checks
+            .iter()
+            .find(|c| c["name"] == "credential_injection")
+            .unwrap();
+        assert_eq!(injection_check["passed"], true);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_configured_credential_id() {
+        let mut connector = GoogleAiConnector::new();
+        connector
+            .handle_configure(json!({
+                "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+            }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_doctor().await.unwrap();
+        // credential_id mode → credential_injection check is non-critical fail → degraded
+        assert_eq!(result["status"], "degraded");
+
+        let checks = result["checks"].as_array().unwrap();
+        let injection_check = checks
+            .iter()
+            .find(|c| c["name"] == "credential_injection")
+            .unwrap();
+        assert_eq!(injection_check["passed"], false);
+        assert!(
+            injection_check["message"]
+                .as_str()
+                .unwrap()
+                .contains("egress proxy")
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_bad_host() {
+        let mut connector = GoogleAiConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_key": "test-key",
+                "base_url": "https://evil.example.com/v1"
+            }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_doctor().await.unwrap();
+        assert_eq!(result["status"], "unhealthy");
+
+        let checks = result["checks"].as_array().unwrap();
+        let net_check = checks
+            .iter()
+            .find(|c| c["name"] == "network_constraints")
+            .unwrap();
+        assert_eq!(net_check["passed"], false);
+    }
+
+    // ── Self-check ─────────────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_not_configured() {
+        let connector = GoogleAiConnector::new();
+        let result = connector.handle_self_check().await.unwrap();
+        assert_eq!(result["status"], "degraded");
+        assert_eq!(result["reason_code"], "not_configured");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_credential_id_mode() {
+        let mut connector = GoogleAiConnector::new();
+        connector
+            .handle_configure(json!({
+                "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+            }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_self_check().await.unwrap();
+        assert_eq!(result["status"], "degraded");
+        assert_eq!(result["reason_code"], "credential_injection_required");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_success() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1beta/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "models": [{"name": "models/gemini-2.0-flash"}]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let mut connector = GoogleAiConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_key": "test-key",
+                "base_url": format!("{}/v1beta", mock_server.uri())
+            }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_self_check().await.unwrap();
+        assert_eq!(result["status"], "ok");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_auth_failure() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1beta/models"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("Unauthorized"))
+            .mount(&mock_server)
+            .await;
+
+        let mut connector = GoogleAiConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_key": "bad-key",
+                "base_url": format!("{}/v1beta", mock_server.uri())
+            }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_self_check().await.unwrap();
+        assert_eq!(result["status"], "failed");
+        assert_eq!(result["reason_code"], "self_check_failed");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_retryable_error() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1beta/models"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("Service Unavailable"))
+            .mount(&mock_server)
+            .await;
+
+        let mut connector = GoogleAiConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_key": "test-key",
+                "base_url": format!("{}/v1beta", mock_server.uri())
+            }))
+            .await
+            .unwrap();
+
+        // Override retry config to avoid test slowness
+        if let Some(client) = &mut connector.client {
+            *client = GoogleAiClient::new_with_auth(GoogleAiAuth::ApiKey("test-key".into()))
+                .unwrap()
+                .with_base_url(&format!("{}/v1beta", mock_server.uri()))
+                .with_retry_config(0);
+        }
+
+        let result = connector.handle_self_check().await.unwrap();
+        assert_eq!(result["status"], "degraded");
+        assert_eq!(result["reason_code"], "self_check_retryable");
+    }
+
+    // ── Original tests (invoke, introspect, manifest) ──────────────
 
     #[fcp_async_core::runtime::test]
     async fn test_invoke_without_config() {
@@ -848,11 +1404,13 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn test_invoke_missing_field() {
         let mut connector = GoogleAiConnector::new();
-        connector.client = Some(
-            GoogleAiClient::new("test-key")
-                .unwrap()
-                .with_base_url("http://localhost:9999/v1beta"),
-        );
+        connector
+            .handle_configure(json!({
+                "api_key": "test-key",
+                "base_url": "http://localhost:9999/v1beta"
+            }))
+            .await
+            .unwrap();
 
         let signing_key = Ed25519SigningKey::generate();
         let verifying_key = signing_key.verifying_key();

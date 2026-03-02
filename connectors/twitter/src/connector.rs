@@ -10,8 +10,8 @@ use fcp_async_core::channel::{broadcast, watch};
 use fcp_async_core::sync::RwLock;
 use fcp_core::{
     BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
-    EventCaps, FcpError, HandshakeRequest, HandshakeResponse, SessionId, SimulateRequest,
-    SimulateResponse,
+    CredentialId, EventCaps, FcpError, HandshakeRequest, HandshakeResponse, SelfCheckReport,
+    SelfCheckStatus, SessionId, SimulateRequest, SimulateResponse,
 };
 use fcp_sdk::runtime::{
     InMemoryStreamingSession, StreamingConnection, StreamingError, StreamingSupervisor,
@@ -21,11 +21,132 @@ use serde_json::{Value, json};
 use tracing::{debug, info, instrument};
 
 use crate::{
-    client::TwitterApiClient,
+    client::{TwitterApiClient, TwitterAuth},
     config::TwitterConfig,
     stream::{FilteredStream, StreamEvent},
     types::{CreateTweetRequest, SearchTweetsParams, StreamRule, TweetReply, User},
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FCP-level provisioning config
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// FCP-level configuration for the Twitter connector.
+/// Parsed from `configure` params; validates exactly one auth mode.
+#[derive(Debug, Clone)]
+struct FcpTwitterConfig {
+    auth: TwitterAuth,
+    api_url: String,
+}
+
+impl FcpTwitterConfig {
+    fn from_params(params: &Value) -> Result<Self, FcpError> {
+        let api_url = params
+            .get("api_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("https://api.twitter.com")
+            .to_string();
+
+        // Check for secretless credential_id mode first
+        if let Some(cred_id) = params.get("credential_id").and_then(|v| v.as_str()) {
+            // Reject if OAuth credentials are also provided
+            if params
+                .get("consumer_key")
+                .and_then(|v| v.as_str())
+                .is_some()
+            {
+                return Err(FcpError::InvalidRequest {
+                    code: 1002,
+                    message: "Cannot specify both credential_id and OAuth credentials".into(),
+                });
+            }
+            return Ok(Self {
+                auth: TwitterAuth::CredentialId(CredentialId::parse(cred_id).map_err(|_| {
+                    FcpError::InvalidRequest {
+                        code: 1002,
+                        message: "Invalid credential_id format (expected UUID)".into(),
+                    }
+                })?),
+                api_url,
+            });
+        }
+
+        // Direct OAuth 1.0a credentials
+        let consumer_key = params
+            .get("consumer_key")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1002,
+                message: "Either credential_id or consumer_key is required".into(),
+            })?;
+        let consumer_secret = params
+            .get("consumer_secret")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1002,
+                message: "consumer_secret is required for OAuth mode".into(),
+            })?;
+        let access_token = params
+            .get("access_token")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1002,
+                message: "access_token is required for OAuth mode".into(),
+            })?;
+        let access_token_secret = params
+            .get("access_token_secret")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1002,
+                message: "access_token_secret is required for OAuth mode".into(),
+            })?;
+        let bearer_token = params
+            .get("bearer_token")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+
+        Ok(Self {
+            auth: TwitterAuth::OAuth {
+                consumer_key: consumer_key.to_string(),
+                consumer_secret: consumer_secret.to_string(),
+                access_token: access_token.to_string(),
+                access_token_secret: access_token_secret.to_string(),
+                bearer_token,
+            },
+            api_url,
+        })
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Doctor diagnostics
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DoctorResult {
+    status: DoctorStatus,
+    checks: Vec<DoctorCheck>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DoctorCheck {
+    name: String,
+    status: DoctorStatus,
+    message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DoctorStatus {
+    Pass,
+    Warn,
+    Fail,
+}
 
 /// Twitter FCP Connector.
 pub struct TwitterConnector {
@@ -34,6 +155,9 @@ pub struct TwitterConnector {
 
     /// Configuration (set via configure)
     config: Option<TwitterConfig>,
+
+    /// FCP-level provisioning config
+    fcp_config: Option<FcpTwitterConfig>,
 
     /// API client (created after configure)
     client: Option<Arc<TwitterApiClient>>,
@@ -72,6 +196,7 @@ impl TwitterConnector {
         Self {
             base: BaseConnector::new(ConnectorId::from_static("twitter:social:v1")),
             config: None,
+            fcp_config: None,
             client: None,
             authenticated_user: None,
             verifier: None,
@@ -89,48 +214,47 @@ impl TwitterConnector {
     pub async fn handle_configure(&mut self, params: Value) -> Result<Value, FcpError> {
         info!("Configuring Twitter connector");
 
-        let config: TwitterConfig =
-            serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {
-                code: 1001,
-                message: format!("Invalid configuration: {e}"),
+        let fcp_cfg = FcpTwitterConfig::from_params(&params)?;
+
+        // Create API client via the auth-aware constructor
+        let client =
+            TwitterApiClient::new_with_auth(&fcp_cfg.auth, &fcp_cfg.api_url).map_err(|e| {
+                FcpError::External {
+                    service: "twitter".into(),
+                    message: format!("Failed to create API client: {e}"),
+                    status_code: None,
+                    retryable: false,
+                    retry_after: None,
+                }
             })?;
 
-        // Validate required fields
-        if config.consumer_key.is_empty() {
-            return Err(FcpError::InvalidRequest {
-                code: 1002,
-                message: "consumer_key is required".into(),
-            });
-        }
-        if config.consumer_secret.is_empty() {
-            return Err(FcpError::InvalidRequest {
-                code: 1002,
-                message: "consumer_secret is required".into(),
-            });
-        }
-        if config.access_token.is_empty() {
-            return Err(FcpError::InvalidRequest {
-                code: 1002,
-                message: "access_token is required".into(),
-            });
-        }
-        if config.access_token_secret.is_empty() {
-            return Err(FcpError::InvalidRequest {
-                code: 1002,
-                message: "access_token_secret is required".into(),
-            });
-        }
+        // Also build a legacy TwitterConfig for stream/subscribe that still needs it
+        let legacy_config = match &fcp_cfg.auth {
+            TwitterAuth::OAuth {
+                consumer_key,
+                consumer_secret,
+                access_token,
+                access_token_secret,
+                bearer_token,
+            } => TwitterConfig {
+                consumer_key: consumer_key.clone(),
+                consumer_secret: consumer_secret.clone(),
+                access_token: access_token.clone(),
+                access_token_secret: access_token_secret.clone(),
+                bearer_token: bearer_token.clone(),
+                api_url: fcp_cfg.api_url.clone(),
+                ..Default::default()
+            },
+            TwitterAuth::CredentialId(_) => TwitterConfig {
+                api_url: fcp_cfg.api_url.clone(),
+                ..Default::default()
+            },
+        };
 
-        // Create API client
-        let client = TwitterApiClient::new(&config).map_err(|e| FcpError::External {
-            service: "twitter".into(),
-            message: format!("Failed to create API client: {e}"),
-            status_code: None,
-            retryable: false,
-            retry_after: None,
-        })?;
+        info!(auth = %fcp_cfg.auth.redacted_label(), "Twitter connector configured");
 
-        self.config = Some(config);
+        self.config = Some(legacy_config);
+        self.fcp_config = Some(fcp_cfg);
         self.client = Some(Arc::new(client));
         self.base.set_configured(true);
 
@@ -472,6 +596,178 @@ impl TwitterConnector {
             "status": "subscribed",
             "event_type": "stream"
         }))
+    }
+
+    /// Handle the doctor method — structured provisioning diagnostics.
+    #[instrument(skip(self))]
+    pub async fn handle_doctor(&self) -> Result<Value, FcpError> {
+        let mut checks = Vec::new();
+
+        // 1. Configuration check
+        let config_ok = self.fcp_config.is_some();
+        checks.push(DoctorCheck {
+            name: "configuration".into(),
+            status: if config_ok {
+                DoctorStatus::Pass
+            } else {
+                DoctorStatus::Fail
+            },
+            message: if config_ok {
+                "Connector is configured".into()
+            } else {
+                "Connector is not configured — call configure first".into()
+            },
+        });
+
+        // 2. Client initialized
+        let client_ok = self.client.is_some();
+        checks.push(DoctorCheck {
+            name: "client_initialized".into(),
+            status: if client_ok {
+                DoctorStatus::Pass
+            } else {
+                DoctorStatus::Fail
+            },
+            message: if client_ok {
+                "API client is initialized".into()
+            } else {
+                "API client is not initialized".into()
+            },
+        });
+
+        // 3. API URL scheme
+        let url_ok = self
+            .fcp_config
+            .as_ref()
+            .is_some_and(|c| c.api_url.starts_with("https://"));
+        checks.push(DoctorCheck {
+            name: "api_url_scheme".into(),
+            status: if url_ok {
+                DoctorStatus::Pass
+            } else if self.fcp_config.is_some() {
+                DoctorStatus::Warn
+            } else {
+                DoctorStatus::Fail
+            },
+            message: if url_ok {
+                "API URL uses HTTPS".into()
+            } else if self.fcp_config.is_some() {
+                "API URL does not use HTTPS — insecure in production".into()
+            } else {
+                "Cannot check API URL — not configured".into()
+            },
+        });
+
+        // 4. Auth mode
+        if let Some(cfg) = &self.fcp_config {
+            let label = cfg.auth.redacted_label();
+            let is_secretless = cfg.auth.is_secretless();
+            checks.push(DoctorCheck {
+                name: "auth_mode".into(),
+                status: DoctorStatus::Pass,
+                message: format!(
+                    "Auth mode: {label}{}",
+                    if is_secretless {
+                        " (secretless egress proxy)"
+                    } else {
+                        ""
+                    }
+                ),
+            });
+        } else {
+            checks.push(DoctorCheck {
+                name: "auth_mode".into(),
+                status: DoctorStatus::Fail,
+                message: "No auth mode configured".into(),
+            });
+        }
+
+        // 5. Network constraints
+        checks.push(DoctorCheck {
+            name: "network_constraints".into(),
+            status: DoctorStatus::Pass,
+            message:
+                "Allowed hosts: api.twitter.com, upload.twitter.com, stream.twitter.com; port 443"
+                    .into(),
+        });
+
+        // 6. Credential injection
+        let injection_status = self.fcp_config.as_ref().map_or(DoctorStatus::Fail, |c| {
+            if c.auth.is_secretless() {
+                DoctorStatus::Pass
+            } else {
+                DoctorStatus::Warn
+            }
+        });
+        checks.push(DoctorCheck {
+            name: "credential_injection".into(),
+            status: injection_status,
+            message: match injection_status {
+                DoctorStatus::Pass => "Using secretless credential injection (egress proxy)".into(),
+                DoctorStatus::Warn => {
+                    "Using direct OAuth credentials (consider egress proxy for production)".into()
+                }
+                DoctorStatus::Fail => "No credentials configured".into(),
+            },
+        });
+
+        let overall = if checks.iter().any(|c| c.status == DoctorStatus::Fail) {
+            DoctorStatus::Fail
+        } else if checks.iter().any(|c| c.status == DoctorStatus::Warn) {
+            DoctorStatus::Warn
+        } else {
+            DoctorStatus::Pass
+        };
+
+        let result = DoctorResult {
+            status: overall,
+            checks,
+        };
+
+        serde_json::to_value(result).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize doctor result: {e}"),
+        })
+    }
+
+    /// Handle the `self_check` method — live connectivity validation.
+    #[instrument(skip(self))]
+    pub async fn handle_self_check(&self) -> Result<Value, FcpError> {
+        let Some(client) = &self.client else {
+            let report = SelfCheckReport {
+                status: SelfCheckStatus::Failed,
+                reason_code: Some("not_configured".into()),
+                message: Some("Connector is not configured".into()),
+                details: None,
+            };
+            return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize self-check report: {e}"),
+            });
+        };
+
+        match client.health_check().await {
+            Ok(()) => {
+                let report = SelfCheckReport {
+                    status: SelfCheckStatus::Ok,
+                    reason_code: None,
+                    message: Some("Twitter API is reachable and credentials are valid".into()),
+                    details: None,
+                };
+                serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                    message: format!("Failed to serialize self-check report: {e}"),
+                })
+            }
+            Err(e) => {
+                let report = SelfCheckReport {
+                    status: SelfCheckStatus::Degraded,
+                    reason_code: Some("health_check_failed".into()),
+                    message: Some(format!("Twitter API health check failed: {e}")),
+                    details: None,
+                };
+                serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                    message: format!("Failed to serialize self-check report: {e}"),
+                })
+            }
+        }
     }
 
     /// Handle the shutdown method.
@@ -917,5 +1213,189 @@ impl TwitterConnector {
 impl Default for TwitterConnector {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fcp_core::SelfCheckStatus;
+
+    // ───────────────────────── Doctor tests ─────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_unconfigured() {
+        let connector = TwitterConnector::new();
+        let result = connector.handle_doctor().await.unwrap();
+
+        assert_eq!(result["status"], "fail");
+        let checks = result["checks"].as_array().unwrap();
+        assert_eq!(checks.len(), 6);
+        assert_eq!(checks[0]["name"], "configuration");
+        assert_eq!(checks[0]["status"], "fail");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_oauth_configured() {
+        let mut connector = TwitterConnector::new();
+        let params = json!({
+            "consumer_key": "ck_test",
+            "consumer_secret": "cs_test",
+            "access_token": "at_test",
+            "access_token_secret": "ats_test",
+            "api_url": "https://api.twitter.com"
+        });
+        connector.handle_configure(params).await.unwrap();
+
+        let result = connector.handle_doctor().await.unwrap();
+        assert_eq!(result["status"], "warn"); // warn because direct credentials
+        let checks = result["checks"].as_array().unwrap();
+        assert_eq!(checks[0]["status"], "pass"); // configuration
+        assert_eq!(checks[1]["status"], "pass"); // client_initialized
+        assert_eq!(checks[2]["status"], "pass"); // api_url_scheme
+        assert_eq!(checks[3]["status"], "pass"); // auth_mode
+        assert_eq!(checks[5]["status"], "warn"); // credential_injection (direct OAuth)
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_credential_id_configured() {
+        let mut connector = TwitterConnector::new();
+        let params = json!({
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+            "api_url": "https://api.twitter.com"
+        });
+        connector.handle_configure(params).await.unwrap();
+
+        let result = connector.handle_doctor().await.unwrap();
+        assert_eq!(result["status"], "pass"); // all pass with secretless
+        let checks = result["checks"].as_array().unwrap();
+        assert_eq!(checks[5]["status"], "pass"); // credential_injection
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_http_url_warns() {
+        let mut connector = TwitterConnector::new();
+        let params = json!({
+            "consumer_key": "ck_test",
+            "consumer_secret": "cs_test",
+            "access_token": "at_test",
+            "access_token_secret": "ats_test",
+            "api_url": "http://localhost:8080"
+        });
+        connector.handle_configure(params).await.unwrap();
+
+        let result = connector.handle_doctor().await.unwrap();
+        let checks = result["checks"].as_array().unwrap();
+        assert_eq!(checks[2]["name"], "api_url_scheme");
+        assert_eq!(checks[2]["status"], "warn");
+    }
+
+    // ───────────────────────── Self-check tests ─────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_not_configured() {
+        let connector = TwitterConnector::new();
+        let result = connector.handle_self_check().await.unwrap();
+
+        let report: SelfCheckReport = serde_json::from_value(result).unwrap();
+        assert_eq!(report.status, SelfCheckStatus::Failed);
+        assert_eq!(report.reason_code.as_deref(), Some("not_configured"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_degraded_on_unreachable() {
+        let mut connector = TwitterConnector::new();
+        // Configure with unreachable URL
+        let params = json!({
+            "consumer_key": "ck_test",
+            "consumer_secret": "cs_test",
+            "access_token": "at_test",
+            "access_token_secret": "ats_test",
+            "api_url": "https://127.0.0.1:1"
+        });
+        connector.handle_configure(params).await.unwrap();
+
+        let result = connector.handle_self_check().await.unwrap();
+        let report: SelfCheckReport = serde_json::from_value(result).unwrap();
+        assert_eq!(report.status, SelfCheckStatus::Degraded);
+        assert_eq!(report.reason_code.as_deref(), Some("health_check_failed"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_ok_with_mock() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "12345",
+                    "name": "Test",
+                    "username": "test"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let mut connector = TwitterConnector::new();
+        let params = json!({
+            "consumer_key": "ck_test",
+            "consumer_secret": "cs_test",
+            "access_token": "at_test",
+            "access_token_secret": "ats_test",
+            "api_url": mock_server.uri()
+        });
+        connector.handle_configure(params).await.unwrap();
+
+        let result = connector.handle_self_check().await.unwrap();
+        let report: SelfCheckReport = serde_json::from_value(result).unwrap();
+        assert_eq!(report.status, SelfCheckStatus::Ok);
+    }
+
+    // ───────────────────────── Multi-auth configure tests ─────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_oauth_mode() {
+        let mut connector = TwitterConnector::new();
+        let params = json!({
+            "consumer_key": "ck_test",
+            "consumer_secret": "cs_test",
+            "access_token": "at_test",
+            "access_token_secret": "ats_test"
+        });
+        let result = connector.handle_configure(params).await.unwrap();
+        assert_eq!(result["status"], "configured");
+        assert!(connector.fcp_config.is_some());
+        assert!(!connector.fcp_config.as_ref().unwrap().auth.is_secretless());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_credential_id_mode() {
+        let mut connector = TwitterConnector::new();
+        let params = json!({
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+        });
+        let result = connector.handle_configure(params).await.unwrap();
+        assert_eq!(result["status"], "configured");
+        assert!(connector.fcp_config.as_ref().unwrap().auth.is_secretless());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_both_modes() {
+        let mut connector = TwitterConnector::new();
+        let params = json!({
+            "consumer_key": "ck_test",
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+        });
+        let result = connector.handle_configure(params).await;
+        assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_no_auth() {
+        let mut connector = TwitterConnector::new();
+        let params = json!({});
+        let result = connector.handle_configure(params).await;
+        assert!(result.is_err());
     }
 }

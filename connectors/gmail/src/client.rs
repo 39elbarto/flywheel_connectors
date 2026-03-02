@@ -1,27 +1,65 @@
 //! Gmail API client.
 
+use std::fmt;
 use std::fmt::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use fcp_core::CredentialId;
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument, warn};
 
 use crate::{
     error::{GmailError, GmailResult},
     types::{
-        GmailDraft, GmailLabel, GmailMessage, GmailThread, LabelsListResponse, MessagesListResponse,
+        GmailDraft, GmailLabel, GmailMessage, GmailThread, HistoryListResponse, LabelsListResponse,
+        MessagesListResponse,
     },
 };
 
 /// Default Gmail API base URL.
 const DEFAULT_BASE_URL: &str = "https://gmail.googleapis.com/gmail/v1";
 
+/// Authentication mode for Gmail API requests.
+#[derive(Clone)]
+pub enum GmailAuth {
+    /// Direct OAuth access token.
+    AccessToken(String),
+    /// Secretless credential reference (egress proxy injection).
+    CredentialId(CredentialId),
+}
+
+impl GmailAuth {
+    /// Render a redacted label suitable for logs/diagnostics.
+    #[must_use]
+    pub fn redacted_label(&self) -> String {
+        match self {
+            Self::AccessToken(_) => "access_token:redacted".to_string(),
+            Self::CredentialId(id) => format!("credential_id:{id}"),
+        }
+    }
+
+    /// Whether this auth mode requires egress proxy credential injection.
+    #[must_use]
+    pub const fn is_secretless(&self) -> bool {
+        matches!(self, Self::CredentialId(_))
+    }
+}
+
+impl fmt::Debug for GmailAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AccessToken(_) => f.debug_tuple("AccessToken").field(&"<redacted>").finish(),
+            Self::CredentialId(id) => f.debug_tuple("CredentialId").field(id).finish(),
+        }
+    }
+}
+
 /// Gmail API client with retry logic and rate limit awareness.
 #[derive(Debug)]
 pub struct GmailClient {
     client: Client,
-    token: String,
+    auth: GmailAuth,
     base_url: String,
     max_retries: u32,
     initial_delay_ms: u64,
@@ -32,6 +70,11 @@ pub struct GmailClient {
 impl GmailClient {
     /// Create a new Gmail client with an `OAuth2` access token.
     pub fn new(token: impl Into<String>) -> GmailResult<Self> {
+        Self::new_with_auth(GmailAuth::AccessToken(token.into()))
+    }
+
+    /// Create a new Gmail client with explicit auth mode.
+    pub fn new_with_auth(auth: GmailAuth) -> GmailResult<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .user_agent("fcp-gmail/0.1.0")
@@ -40,7 +83,7 @@ impl GmailClient {
 
         Ok(Self {
             client,
-            token: token.into(),
+            auth,
             base_url: DEFAULT_BASE_URL.into(),
             max_retries: 3,
             initial_delay_ms: 1000,
@@ -76,6 +119,26 @@ impl GmailClient {
         self.total_requests.load(Ordering::Relaxed)
     }
 
+    /// Get current auth mode.
+    #[must_use]
+    pub const fn auth(&self) -> &GmailAuth {
+        &self.auth
+    }
+
+    /// Get the configured base URL.
+    #[must_use]
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    /// Perform a safe, read-only health check.
+    ///
+    /// Uses `list_labels` to validate API reachability and auth validity with no side effects.
+    pub async fn health_check(&self) -> GmailResult<()> {
+        let _labels = self.list_labels().await?;
+        Ok(())
+    }
+
     // ── Message operations ───────────────────────────────────────
 
     /// Get a single message by ID.
@@ -105,6 +168,33 @@ impl GmailClient {
         }
 
         let url = format!("{}/users/me/messages", self.base_url);
+        self.get_with_params(&url, &params).await
+    }
+
+    /// List mailbox history since a starting history ID.
+    #[instrument(skip(self, history_types))]
+    pub async fn list_history(
+        &self,
+        start_history_id: &str,
+        max_results: Option<u32>,
+        page_token: Option<&str>,
+        history_types: Option<&[String]>,
+    ) -> GmailResult<HistoryListResponse> {
+        let mut params = vec![("startHistoryId", start_history_id.to_string())];
+
+        if let Some(max) = max_results {
+            params.push(("maxResults", max.to_string()));
+        }
+        if let Some(token) = page_token {
+            params.push(("pageToken", token.to_string()));
+        }
+        if let Some(types) = history_types {
+            for history_type in types {
+                params.push(("historyTypes", history_type.clone()));
+            }
+        }
+
+        let url = format!("{}/users/me/history", self.base_url);
         self.get_with_params(&url, &params).await
     }
 
@@ -207,7 +297,7 @@ impl GmailClient {
 
         loop {
             attempt += 1;
-            let response = self.client.get(&url).bearer_auth(&self.token).send().await;
+            let response = self.apply_auth(self.client.get(&url)).send().await;
 
             match response {
                 Ok(resp) => {
@@ -250,9 +340,7 @@ impl GmailClient {
         loop {
             attempt += 1;
             let response = self
-                .client
-                .post(url)
-                .bearer_auth(&self.token)
+                .apply_auth(self.client.post(url))
                 .json(body)
                 .send()
                 .await;
@@ -312,5 +400,15 @@ impl GmailClient {
 
         debug!(status = %status, "Gmail API returned error status");
         None
+    }
+
+    /// Apply authentication headers to a request.
+    fn apply_auth(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.auth {
+            GmailAuth::AccessToken(token) => builder.bearer_auth(token),
+            GmailAuth::CredentialId(credential_id) => {
+                builder.header("X-FCP-Credential-ID", credential_id.to_string())
+            }
+        }
     }
 }

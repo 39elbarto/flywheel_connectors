@@ -49,6 +49,7 @@ mod oauth;
 mod stream;
 mod types;
 
+pub use client::TwitterAuth;
 pub use config::TwitterConfig;
 pub use connector::TwitterConnector;
 pub use error::TwitterError;

@@ -4,18 +4,133 @@ use std::sync::Arc;
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
-    ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier, SessionId,
-    SimulateRequest, SimulateResponse,
+    ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
+    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
 
-use crate::{client::LinearClient, error::LinearError};
+use crate::{
+    client::{DEFAULT_API_URL, LinearAuth, LinearClient},
+    error::LinearError,
+};
+
+/// Parsed and validated Linear connector configuration.
+#[derive(Debug, Clone)]
+struct LinearConfig {
+    auth: LinearAuth,
+    api_url: String,
+}
+
+impl LinearConfig {
+    fn from_params(params: &serde_json::Value) -> FcpResult<Self> {
+        let api_key = params
+            .get("api_key")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string);
+
+        let credential_id = match params.get("credential_id") {
+            Some(value) => {
+                let raw = value.as_str().ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "credential_id must be a string".into(),
+                })?;
+                Some(
+                    CredentialId::parse(raw).map_err(|_| FcpError::InvalidRequest {
+                        code: 1003,
+                        message: "credential_id must be a valid UUID".into(),
+                    })?,
+                )
+            }
+            None => None,
+        };
+
+        let auth = match (api_key, credential_id) {
+            (Some(key), None) => LinearAuth::ApiKey(key),
+            (None, Some(cred_id)) => LinearAuth::CredentialId(cred_id),
+            (Some(_), Some(_)) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Provide exactly one of api_key or credential_id".into(),
+                });
+            }
+            (None, None) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing api_key or credential_id in configuration".into(),
+                });
+            }
+        };
+
+        let api_url = params
+            .get("api_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or(DEFAULT_API_URL)
+            .to_string();
+
+        Ok(Self { auth, api_url })
+    }
+}
+
+/// Doctor check result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DoctorResult {
+    /// Overall status.
+    status: DoctorStatus,
+    /// Individual check results.
+    checks: Vec<DoctorCheck>,
+}
+
+/// Doctor status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum DoctorStatus {
+    /// All checks passed.
+    Healthy,
+    /// Some non-critical checks failed.
+    Degraded,
+    /// Critical checks failed.
+    Unhealthy,
+}
+
+/// Individual doctor check.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DoctorCheck {
+    /// Check name.
+    name: String,
+    /// Check passed.
+    passed: bool,
+    /// Check message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+    /// Whether this check is critical.
+    critical: bool,
+}
+
+impl DoctorResult {
+    /// Create a new doctor result from checks.
+    #[must_use]
+    fn from_checks(checks: Vec<DoctorCheck>) -> Self {
+        let status = if checks.iter().any(|c| c.critical && !c.passed) {
+            DoctorStatus::Unhealthy
+        } else if checks.iter().any(|c| !c.passed) {
+            DoctorStatus::Degraded
+        } else {
+            DoctorStatus::Healthy
+        };
+
+        Self { status, checks }
+    }
+}
 
 /// FCP Linear Connector.
 pub struct LinearConnector {
     base: Arc<BaseConnector>,
+    config: Option<LinearConfig>,
     client: Option<LinearClient>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
@@ -27,6 +142,7 @@ impl LinearConnector {
     pub fn new() -> Self {
         Self {
             base: Arc::new(BaseConnector::new(ConnectorId::from_static("linear"))),
+            config: None,
             client: None,
             verifier: None,
             session_id: None,
@@ -34,35 +150,171 @@ impl LinearConnector {
     }
 
     /// Handle configure method.
+    ///
+    /// Accepts either `api_key` (direct) or `credential_id` (secretless via
+    /// egress proxy injection). Exactly one must be provided.
     #[instrument(skip(self, params))]
     pub async fn handle_configure(
         &mut self,
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
-        let api_key =
-            params
-                .get("api_key")
-                .and_then(|v| v.as_str())
-                .ok_or(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing api_key in configuration".into(),
-                })?;
+        let config = LinearConfig::from_params(&params)?;
 
-        let api_url = params.get("api_url").and_then(|v| v.as_str());
+        let client =
+            LinearClient::new_with_auth(config.auth.clone()).map_err(|e| FcpError::Internal {
+                message: format!("Failed to create HTTP client: {e}"),
+            })?;
+        let client = client.with_api_url(&config.api_url);
 
-        let mut client = LinearClient::new(api_key).map_err(|e| FcpError::Internal {
-            message: format!("Failed to create HTTP client: {e}"),
-        })?;
-
-        if let Some(url) = api_url {
-            client = client.with_api_url(url);
-        }
-
+        self.config = Some(config);
         self.client = Some(client);
         self.base.set_configured(true);
         info!("Linear connector configured");
 
         Ok(json!({ "status": "configured" }))
+    }
+
+    /// Handle doctor diagnostics.
+    ///
+    /// Validates configuration, HTTP client, API URL, auth mode, network
+    /// constraints, and credential injection status without making API calls.
+    pub async fn handle_doctor(&self) -> FcpResult<serde_json::Value> {
+        let result = self.build_doctor_result();
+        serde_json::to_value(result).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize doctor result: {e}"),
+        })
+    }
+
+    fn build_doctor_result(&self) -> DoctorResult {
+        let mut checks = Vec::new();
+
+        // Check 1: Configuration loaded
+        let configured = self.config.is_some();
+        checks.push(DoctorCheck {
+            name: "configuration".into(),
+            passed: configured,
+            message: Some(if configured {
+                "Configuration loaded".into()
+            } else {
+                "Not configured - run configure first".into()
+            }),
+            critical: true,
+        });
+
+        let Some(config) = &self.config else {
+            return DoctorResult::from_checks(checks);
+        };
+
+        // Check 2: HTTP client initialized
+        checks.push(DoctorCheck {
+            name: "client_initialized".into(),
+            passed: self.client.is_some(),
+            message: Some(if self.client.is_some() {
+                "HTTP client initialized".into()
+            } else {
+                "HTTP client missing; re-run configure".into()
+            }),
+            critical: true,
+        });
+
+        // Check 3: API URL scheme
+        let scheme = if config.api_url.starts_with("https://") {
+            "https"
+        } else if config.api_url.starts_with("http://") {
+            "http"
+        } else {
+            "unknown"
+        };
+
+        checks.push(DoctorCheck {
+            name: "api_url".into(),
+            passed: true,
+            message: Some(format!("API URL ({scheme}): {}", config.api_url)),
+            critical: false,
+        });
+
+        // Check 4: Auth mode
+        checks.push(DoctorCheck {
+            name: "auth_mode".into(),
+            passed: true,
+            message: Some(format!("Auth: {}", config.auth.redacted_label())),
+            critical: false,
+        });
+
+        // Check 5: Network constraints - host must be api.linear.app (or test override)
+        let allowed_hosts = ["api.linear.app"];
+        let host_ok = config.api_url.starts_with("http://localhost")
+            || config.api_url.starts_with("http://127.0.0.1")
+            || allowed_hosts.iter().any(|h| config.api_url.contains(h));
+        checks.push(DoctorCheck {
+            name: "network_constraints".into(),
+            passed: host_ok,
+            message: Some(if host_ok {
+                "API URL matches allowed host (api.linear.app)".into()
+            } else {
+                format!(
+                    "API URL {} does not match allowed hosts: {:?}",
+                    config.api_url, allowed_hosts
+                )
+            }),
+            critical: true,
+        });
+
+        // Check 6: Credential injection status
+        let secretless = config.auth.is_secretless();
+        checks.push(DoctorCheck {
+            name: "credential_injection".into(),
+            passed: !secretless,
+            message: Some(if secretless {
+                "Credential injection required via egress proxy".into()
+            } else {
+                "Direct API key configured".into()
+            }),
+            critical: false,
+        });
+
+        DoctorResult::from_checks(checks)
+    }
+
+    /// Handle connector self-check.
+    ///
+    /// Performs a safe, read-only GraphQL query (viewer) to validate the API key
+    /// is valid and the Linear API is reachable. Does not leak secrets in the report.
+    pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
+        let Some(client) = &self.client else {
+            let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize self-check report: {e}"),
+            });
+        };
+
+        // If using credential_id, we can't validate directly
+        if let Some(config) = &self.config {
+            if config.auth.is_secretless() {
+                let report = SelfCheckReport::degraded(
+                    "credential_injection_required",
+                    "Configured with credential_id; egress proxy injection required for checks",
+                );
+                return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                    message: format!("Failed to serialize self-check report: {e}"),
+                });
+            }
+        }
+
+        let report = match client.health_check().await {
+            Ok(()) => SelfCheckReport::ok(),
+            Err(err) => {
+                if err.is_retryable() {
+                    SelfCheckReport::degraded("self_check_retryable", err.to_string())
+                } else {
+                    SelfCheckReport::failed("self_check_failed", err.to_string())
+                }
+            }
+        };
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {e}"),
+        })
     }
 
     /// Handle handshake method.
@@ -729,6 +981,213 @@ mod tests {
         assert!(op_ids.contains(&"linear.add_comment"));
         assert!(op_ids.contains(&"linear.list_projects"));
         assert_eq!(ops.len(), 8);
+    }
+
+    // ── Doctor tests ──────────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_not_configured() {
+        let connector = LinearConnector::new();
+        let result = connector.handle_doctor().await.unwrap();
+        assert_eq!(result["status"], "unhealthy");
+        let checks = result["checks"].as_array().unwrap();
+        let config_check = &checks[0];
+        assert_eq!(config_check["name"], "configuration");
+        assert!(!config_check["passed"].as_bool().unwrap());
+        assert!(config_check["critical"].as_bool().unwrap());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_configured_api_key() {
+        let mut connector = LinearConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_key": "lin_api_test123"
+            }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_doctor().await.unwrap();
+        assert_eq!(result["status"], "healthy");
+        let checks = result["checks"].as_array().unwrap();
+
+        // All critical checks should pass
+        for check in checks {
+            if check["critical"].as_bool().unwrap() {
+                assert!(
+                    check["passed"].as_bool().unwrap(),
+                    "Critical check '{}' should pass",
+                    check["name"]
+                );
+            }
+        }
+
+        // Auth mode should show redacted
+        let auth_check = checks.iter().find(|c| c["name"] == "auth_mode").unwrap();
+        assert!(
+            auth_check["message"]
+                .as_str()
+                .unwrap()
+                .contains("api_key:redacted")
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_configured_credential_id() {
+        let mut connector = LinearConnector::new();
+        connector
+            .handle_configure(json!({
+                "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+            }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_doctor().await.unwrap();
+        // Should be degraded because credential_injection check fails (not passed)
+        // but it's not critical, so status depends on other checks
+        let checks = result["checks"].as_array().unwrap();
+        let cred_check = checks
+            .iter()
+            .find(|c| c["name"] == "credential_injection")
+            .unwrap();
+        assert!(!cred_check["passed"].as_bool().unwrap());
+        assert!(!cred_check["critical"].as_bool().unwrap());
+
+        let auth_check = checks.iter().find(|c| c["name"] == "auth_mode").unwrap();
+        assert!(
+            auth_check["message"]
+                .as_str()
+                .unwrap()
+                .contains("credential_id:")
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_bad_network_host() {
+        let mut connector = LinearConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_key": "test",
+                "api_url": "https://evil.example.com/graphql"
+            }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_doctor().await.unwrap();
+        assert_eq!(result["status"], "unhealthy");
+        let checks = result["checks"].as_array().unwrap();
+        let net_check = checks
+            .iter()
+            .find(|c| c["name"] == "network_constraints")
+            .unwrap();
+        assert!(!net_check["passed"].as_bool().unwrap());
+        assert!(net_check["critical"].as_bool().unwrap());
+    }
+
+    // ── Self-check tests ────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_not_configured() {
+        use fcp_core::SelfCheckStatus;
+        let connector = LinearConnector::new();
+        let result = connector.handle_self_check().await.unwrap();
+        let report: SelfCheckReport = serde_json::from_value(result).unwrap();
+        assert_eq!(report.status, SelfCheckStatus::Degraded);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_credential_id_mode() {
+        use fcp_core::SelfCheckStatus;
+        let mut connector = LinearConnector::new();
+        connector
+            .handle_configure(json!({
+                "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+            }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_self_check().await.unwrap();
+        let report: SelfCheckReport = serde_json::from_value(result).unwrap();
+        assert_eq!(report.status, SelfCheckStatus::Degraded);
+        assert_eq!(
+            report.reason_code.as_deref(),
+            Some("credential_injection_required")
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_unreachable_api() {
+        use fcp_core::SelfCheckStatus;
+        let mut connector = LinearConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_key": "bad-key",
+                "api_url": "http://127.0.0.1:1/graphql"
+            }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_self_check().await.unwrap();
+        let report: SelfCheckReport = serde_json::from_value(result).unwrap();
+        // Should be degraded (retryable) since connection refused is an HTTP error
+        assert!(
+            report.status == SelfCheckStatus::Degraded || report.status == SelfCheckStatus::Failed
+        );
+    }
+
+    // ── Configure multi-auth tests ──────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_api_key() {
+        let mut connector = LinearConnector::new();
+        let result = connector
+            .handle_configure(json!({ "api_key": "lin_api_test" }))
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "configured");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_credential_id() {
+        let mut connector = LinearConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "configured");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_both_rejected() {
+        let mut connector = LinearConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "api_key": "test",
+                "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+            }))
+            .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("exactly one"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_none_rejected() {
+        let mut connector = LinearConnector::new();
+        let result = connector.handle_configure(json!({})).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("Missing"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
     }
 
     #[test]

@@ -154,6 +154,18 @@ pub struct ThreadRef {
     pub history_id: Option<String>,
 }
 
+/// History list response for incremental sync.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryListResponse {
+    #[serde(default)]
+    pub history: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub next_page_token: Option<String>,
+    #[serde(default)]
+    pub history_id: Option<String>,
+}
+
 /// Gmail API error response.
 #[derive(Debug, Clone, Deserialize)]
 pub struct GmailApiError {

@@ -1,9 +1,13 @@
 //! Google AI (Gemini) REST API client.
 //!
 //! API key is appended as a `?key=` query parameter to every request URL.
+//! When using credential_id mode, the `X-FCP-Credential-ID` header is sent
+//! instead so the egress proxy can inject the actual key.
 
+use std::fmt;
 use std::sync::Arc;
 
+use fcp_core::CredentialId;
 use parking_lot::Mutex;
 use reqwest::{Client, StatusCode};
 use tracing::{debug, warn};
@@ -16,20 +20,61 @@ use crate::{
     },
 };
 
-const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
+/// Default API base URL.
+pub const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
+
+/// Authentication mode for the Google AI API.
+#[derive(Clone)]
+pub enum GoogleAiAuth {
+    /// Direct API key (appended as `?key=`).
+    ApiKey(String),
+    /// Secretless credential reference (egress proxy injection).
+    CredentialId(CredentialId),
+}
+
+impl GoogleAiAuth {
+    /// Render a redacted label suitable for logs/diagnostics.
+    #[must_use]
+    pub fn redacted_label(&self) -> String {
+        match self {
+            Self::ApiKey(_) => "api_key:redacted".to_string(),
+            Self::CredentialId(id) => format!("credential_id:{id}"),
+        }
+    }
+
+    /// Whether this auth mode requires egress proxy credential injection.
+    #[must_use]
+    pub const fn is_secretless(&self) -> bool {
+        matches!(self, Self::CredentialId(_))
+    }
+}
+
+impl fmt::Debug for GoogleAiAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ApiKey(_) => f.debug_tuple("ApiKey").field(&"<redacted>").finish(),
+            Self::CredentialId(id) => f.debug_tuple("CredentialId").field(id).finish(),
+        }
+    }
+}
 
 /// Google AI REST API client.
 pub struct GoogleAiClient {
     http: Client,
     base_url: String,
-    api_key: String,
+    auth: GoogleAiAuth,
     max_retries: u32,
     usage: Arc<Mutex<UsageCounters>>,
 }
 
 impl GoogleAiClient {
-    /// Create a new Google AI client with an API key.
+    /// Create a new Google AI client with an API key (legacy convenience).
     pub fn new(api_key: &str) -> GoogleAiResult<Self> {
+        Self::new_with_auth(GoogleAiAuth::ApiKey(api_key.to_string()))
+    }
+
+    /// Create a new Google AI client with a specific auth mode.
+    pub fn new_with_auth(auth: GoogleAiAuth) -> GoogleAiResult<Self> {
         let http = Client::builder()
             .user_agent("fcp-google-ai/0.1.0")
             .build()
@@ -38,7 +83,7 @@ impl GoogleAiClient {
         Ok(Self {
             http,
             base_url: DEFAULT_BASE_URL.to_string(),
-            api_key: api_key.to_string(),
+            auth,
             max_retries: 2,
             usage: Arc::new(Mutex::new(UsageCounters::default())),
         })
@@ -58,9 +103,16 @@ impl GoogleAiClient {
         self
     }
 
-    /// Build a URL with the API key query parameter.
+    /// Build a URL, appending the API key as a query parameter when in direct mode.
     fn url(&self, path: &str) -> String {
-        format!("{}/{path}?key={}", self.base_url, self.api_key)
+        match &self.auth {
+            GoogleAiAuth::ApiKey(key) => {
+                format!("{}/{path}?key={key}", self.base_url)
+            }
+            GoogleAiAuth::CredentialId(_) => {
+                format!("{}/{path}", self.base_url)
+            }
+        }
     }
 
     /// Record token usage from a response.
@@ -206,10 +258,23 @@ impl GoogleAiClient {
         Ok(serde_json::from_value(data)?)
     }
 
+    /// Perform a safe, read-only health check by listing models.
+    ///
+    /// Validates that the API key is valid and the API is reachable
+    /// without incurring cost or side effects.
+    pub async fn health_check(&self) -> GoogleAiResult<()> {
+        let _models = self.list_models(Some(1), None).await?;
+        Ok(())
+    }
+
     // ── HTTP helpers ──────────────────────────────────────────────
 
     async fn get(&self, url: &str) -> GoogleAiResult<serde_json::Value> {
-        self.execute(|| self.http.get(url)).await
+        self.execute(|| {
+            let req = self.http.get(url);
+            self.apply_auth(req)
+        })
+        .await
     }
 
     async fn post_json(
@@ -217,7 +282,21 @@ impl GoogleAiClient {
         url: &str,
         body: &serde_json::Value,
     ) -> GoogleAiResult<serde_json::Value> {
-        self.execute(|| self.http.post(url).json(body)).await
+        self.execute(|| {
+            let req = self.http.post(url).json(body);
+            self.apply_auth(req)
+        })
+        .await
+    }
+
+    /// Apply auth headers for credential_id mode.
+    fn apply_auth(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.auth {
+            GoogleAiAuth::ApiKey(_) => request, // key is in the URL query param
+            GoogleAiAuth::CredentialId(cred_id) => {
+                request.header("X-FCP-Credential-ID", cred_id.to_string())
+            }
+        }
     }
 
     async fn execute(

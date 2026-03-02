@@ -1,5 +1,8 @@
 //! Linear GraphQL API client.
 
+use std::fmt;
+
+use fcp_core::CredentialId;
 use reqwest::{Client, StatusCode, header};
 use tracing::{debug, warn};
 
@@ -11,33 +14,69 @@ use crate::{
     },
 };
 
-const DEFAULT_API_URL: &str = "https://api.linear.app/graphql";
+/// Default Linear GraphQL API URL.
+pub const DEFAULT_API_URL: &str = "https://api.linear.app/graphql";
+
+/// Authentication mode for the Linear API.
+#[derive(Clone)]
+pub enum LinearAuth {
+    /// Direct API key.
+    ApiKey(String),
+    /// Secretless credential reference (egress proxy injection).
+    CredentialId(CredentialId),
+}
+
+impl LinearAuth {
+    /// Render a redacted label suitable for logs/diagnostics.
+    #[must_use]
+    pub fn redacted_label(&self) -> String {
+        match self {
+            Self::ApiKey(_) => "api_key:redacted".to_string(),
+            Self::CredentialId(id) => format!("credential_id:{id}"),
+        }
+    }
+
+    /// Whether this auth mode requires egress proxy credential injection.
+    #[must_use]
+    pub const fn is_secretless(&self) -> bool {
+        matches!(self, Self::CredentialId(_))
+    }
+}
+
+impl fmt::Debug for LinearAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ApiKey(_) => f.debug_tuple("ApiKey").field(&"<redacted>").finish(),
+            Self::CredentialId(id) => f.debug_tuple("CredentialId").field(id).finish(),
+        }
+    }
+}
 
 /// Linear GraphQL API client.
 pub struct LinearClient {
     http: Client,
+    auth: LinearAuth,
     api_url: String,
     max_retries: u32,
 }
 
 impl LinearClient {
-    /// Create a new Linear client with an API key.
+    /// Create a new Linear client with a direct API key.
     pub fn new(api_key: &str) -> LinearResult<Self> {
-        let mut headers = header::HeaderMap::new();
-        headers.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
-        headers.insert(
-            header::AUTHORIZATION,
-            format!("Bearer {api_key}").parse().unwrap(),
-        );
+        Self::new_with_auth(LinearAuth::ApiKey(api_key.to_string()))
+    }
 
+    /// Create a new Linear client with explicit auth mode.
+    pub fn new_with_auth(auth: LinearAuth) -> LinearResult<Self> {
         let http = Client::builder()
-            .default_headers(headers)
+            .timeout(std::time::Duration::from_secs(30))
             .user_agent("fcp-linear/0.1.0")
             .build()
             .map_err(LinearError::Http)?;
 
         Ok(Self {
             http,
+            auth,
             api_url: DEFAULT_API_URL.to_string(),
             max_retries: 2,
         })
@@ -55,6 +94,41 @@ impl LinearClient {
     pub fn with_retry_config(mut self, max_retries: u32) -> Self {
         self.max_retries = max_retries;
         self
+    }
+
+    /// Get the auth mode.
+    #[must_use]
+    pub const fn auth(&self) -> &LinearAuth {
+        &self.auth
+    }
+
+    /// Get the API URL.
+    #[must_use]
+    pub fn api_url(&self) -> &str {
+        &self.api_url
+    }
+
+    /// Perform a safe, read-only health check by querying the viewer.
+    ///
+    /// Validates that the API key is valid and the Linear API is reachable
+    /// without any side effects.
+    pub async fn health_check(&self) -> LinearResult<()> {
+        let query = r"query { viewer { id } }";
+        let _data = self.execute_graphql(query, None).await?;
+        Ok(())
+    }
+
+    /// Apply authentication headers to a request builder.
+    fn apply_auth(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.auth {
+            LinearAuth::ApiKey(key) => {
+                builder.header(header::AUTHORIZATION, format!("Bearer {key}"))
+            }
+            LinearAuth::CredentialId(_) => {
+                // Secretless: egress proxy injects credentials. Send without auth header.
+                builder
+            }
+        }
     }
 
     // ── API Methods ──────────────────────────────────────────────
@@ -354,7 +428,12 @@ impl LinearClient {
 
             debug!("GraphQL request to {}", self.api_url);
 
-            let result = self.http.post(&self.api_url).json(&request).send().await;
+            let builder = self
+                .http
+                .post(&self.api_url)
+                .header(header::CONTENT_TYPE, "application/json");
+            let builder = self.apply_auth(builder);
+            let result = builder.json(&request).send().await;
 
             match result {
                 Ok(response) => {

@@ -4,18 +4,121 @@ use std::sync::Arc;
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
-    ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier, SessionId,
-    SimulateRequest, SimulateResponse,
+    ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
+    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
 
-use crate::{client::YouTubeClient, error::YouTubeError};
+use crate::{
+    client::{DEFAULT_BASE_URL, YouTubeAuth, YouTubeClient},
+    error::YouTubeError,
+};
+
+/// Parsed and validated YouTube connector configuration.
+#[derive(Debug, Clone)]
+struct YouTubeConfig {
+    auth: YouTubeAuth,
+    base_url: String,
+}
+
+impl YouTubeConfig {
+    fn from_params(params: &serde_json::Value) -> FcpResult<Self> {
+        let api_key = params
+            .get("api_key")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string);
+
+        let credential_id = match params.get("credential_id") {
+            Some(value) => {
+                let raw = value.as_str().ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "credential_id must be a string".into(),
+                })?;
+                Some(
+                    CredentialId::parse(raw).map_err(|_| FcpError::InvalidRequest {
+                        code: 1003,
+                        message: "credential_id must be a valid UUID".into(),
+                    })?,
+                )
+            }
+            None => None,
+        };
+
+        let auth = match (api_key, credential_id) {
+            (Some(key), None) => YouTubeAuth::ApiKey(key),
+            (None, Some(cid)) => YouTubeAuth::CredentialId(cid),
+            (Some(_), Some(_)) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Provide exactly one of api_key or credential_id, not both".into(),
+                });
+            }
+            (None, None) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing authentication: provide api_key or credential_id".into(),
+                });
+            }
+        };
+
+        let base_url = params
+            .get("base_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or(DEFAULT_BASE_URL)
+            .to_string();
+
+        Ok(Self { auth, base_url })
+    }
+}
+
+// ── Doctor types ─────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DoctorResult {
+    #[serde(rename = "overall")]
+    status: DoctorStatus,
+    #[serde(rename = "checks")]
+    checks: Vec<DoctorCheck>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum DoctorStatus {
+    Healthy,
+    Degraded,
+    Unhealthy,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DoctorCheck {
+    name: String,
+    status: DoctorStatus,
+    message: String,
+}
+
+impl DoctorResult {
+    /// Derive overall status from individual checks.
+    fn from_checks(checks: Vec<DoctorCheck>) -> Self {
+        let status = if checks.iter().any(|c| c.status == DoctorStatus::Unhealthy) {
+            DoctorStatus::Unhealthy
+        } else if checks.iter().any(|c| c.status == DoctorStatus::Degraded) {
+            DoctorStatus::Degraded
+        } else {
+            DoctorStatus::Healthy
+        };
+        Self { status, checks }
+    }
+}
 
 /// FCP YouTube Connector.
 pub struct YouTubeConnector {
     base: Arc<BaseConnector>,
+    config: Option<YouTubeConfig>,
     client: Option<YouTubeClient>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
@@ -27,6 +130,7 @@ impl YouTubeConnector {
     pub fn new() -> Self {
         Self {
             base: Arc::new(BaseConnector::new(ConnectorId::from_static("youtube"))),
+            config: None,
             client: None,
             verifier: None,
             session_id: None,
@@ -39,28 +143,22 @@ impl YouTubeConnector {
         &mut self,
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
-        let api_key =
-            params
-                .get("api_key")
-                .and_then(|v| v.as_str())
-                .ok_or(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing api_key in configuration".into(),
-                })?;
+        let config = YouTubeConfig::from_params(&params)?;
 
-        let base_url = params.get("base_url").and_then(|v| v.as_str());
+        let mut client =
+            YouTubeClient::new_with_auth(config.auth.clone()).map_err(|e| FcpError::Internal {
+                message: format!("Failed to create HTTP client: {e}"),
+            })?;
 
-        let mut client = YouTubeClient::new(api_key).map_err(|e| FcpError::Internal {
-            message: format!("Failed to create HTTP client: {e}"),
-        })?;
-
-        if let Some(url) = base_url {
-            client = client.with_base_url(url);
+        if config.base_url != DEFAULT_BASE_URL {
+            client = client.with_base_url(&config.base_url);
         }
 
+        info!(auth = %config.auth.redacted_label(), "YouTube connector configured");
+
+        self.config = Some(config);
         self.client = Some(client);
         self.base.set_configured(true);
-        info!("YouTube connector configured");
 
         Ok(json!({ "status": "configured" }))
     }
@@ -120,13 +218,157 @@ impl YouTubeConnector {
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
         let configured = self.client.is_some();
         let metrics = self.base.metrics();
-        Ok(json!({
+        let mut result = json!({
             "status": if configured { "healthy" } else { "not_configured" },
             "metrics": {
                 "requests_total": metrics.requests_total,
                 "requests_error": metrics.requests_error,
             }
-        }))
+        });
+        if let Some(config) = &self.config {
+            result["auth"] = json!(config.auth.redacted_label());
+            result["base_url"] = json!(config.base_url);
+        }
+        Ok(result)
+    }
+
+    /// Handle doctor readiness checks.
+    pub async fn handle_doctor(&self) -> FcpResult<serde_json::Value> {
+        let result = self.build_doctor_result();
+        serde_json::to_value(result).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize doctor result: {e}"),
+        })
+    }
+
+    fn build_doctor_result(&self) -> DoctorResult {
+        let mut checks = Vec::new();
+
+        // 1. Configuration check
+        checks.push(DoctorCheck {
+            name: "configuration".into(),
+            status: if self.config.is_some() {
+                DoctorStatus::Healthy
+            } else {
+                DoctorStatus::Unhealthy
+            },
+            message: if self.config.is_some() {
+                "Connector is configured".into()
+            } else {
+                "Connector not configured — call configure first".into()
+            },
+        });
+
+        if self.config.is_none() {
+            return DoctorResult::from_checks(checks);
+        }
+
+        let config = self.config.as_ref().unwrap();
+
+        // 2. Client initialized
+        checks.push(DoctorCheck {
+            name: "client_initialized".into(),
+            status: if self.client.is_some() {
+                DoctorStatus::Healthy
+            } else {
+                DoctorStatus::Unhealthy
+            },
+            message: if self.client.is_some() {
+                "HTTP client is ready".into()
+            } else {
+                "HTTP client not initialized".into()
+            },
+        });
+
+        // 3. Base URL
+        checks.push(DoctorCheck {
+            name: "base_url".into(),
+            status: DoctorStatus::Healthy,
+            message: format!("base_url={}", config.base_url),
+        });
+
+        // 4. Auth mode
+        checks.push(DoctorCheck {
+            name: "auth_mode".into(),
+            status: DoctorStatus::Healthy,
+            message: format!("auth={}", config.auth.redacted_label()),
+        });
+
+        // 5. Network constraints
+        let expected_host = "www.googleapis.com";
+        let host_ok = config.base_url.contains(expected_host)
+            || config.base_url.starts_with("http://localhost")
+            || config.base_url.starts_with("http://127.0.0.1");
+        checks.push(DoctorCheck {
+            name: "network_constraints".into(),
+            status: if host_ok {
+                DoctorStatus::Healthy
+            } else {
+                DoctorStatus::Degraded
+            },
+            message: if host_ok {
+                format!("Base URL targets expected host ({expected_host})")
+            } else {
+                format!(
+                    "Base URL does not match expected host ({expected_host}); may be a test override"
+                )
+            },
+        });
+
+        // 6. Credential injection (secretless mode)
+        checks.push(DoctorCheck {
+            name: "credential_injection".into(),
+            status: if config.auth.is_secretless() {
+                DoctorStatus::Degraded
+            } else {
+                DoctorStatus::Healthy
+            },
+            message: if config.auth.is_secretless() {
+                "Secretless mode — requires egress proxy for credential injection".into()
+            } else {
+                "Direct API key — no egress proxy required".into()
+            },
+        });
+
+        DoctorResult::from_checks(checks)
+    }
+
+    /// Handle self-check connectivity probe.
+    pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
+        let Some(client) = &self.client else {
+            let report =
+                SelfCheckReport::failed("not_configured", "Not configured — call configure first");
+            return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize self-check report: {e}"),
+            });
+        };
+
+        let config = self.config.as_ref().unwrap();
+
+        // In credential_id mode, we can't verify connectivity without the egress proxy
+        if config.auth.is_secretless() {
+            let report = SelfCheckReport::degraded(
+                "credential_injection_required",
+                "Configured with credential_id; egress proxy injection required for checks",
+            );
+            return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize self-check report: {e}"),
+            });
+        }
+
+        let report = match client.health_check().await {
+            Ok(()) => SelfCheckReport::ok(),
+            Err(err) => {
+                if err.is_retryable() {
+                    SelfCheckReport::degraded("self_check_retryable", err.to_string())
+                } else {
+                    SelfCheckReport::failed("self_check_failed", err.to_string())
+                }
+            }
+        };
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {e}"),
+        })
     }
 
     /// Handle introspect method.
@@ -706,11 +948,13 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn test_invoke_missing_field() {
         let mut connector = YouTubeConnector::new();
-        connector.client = Some(
-            YouTubeClient::new("fake_key")
-                .unwrap()
-                .with_base_url("http://localhost:9999"),
-        );
+        connector
+            .handle_configure(json!({
+                "api_key": "fake_key",
+                "base_url": "http://localhost:9999"
+            }))
+            .await
+            .unwrap();
 
         let signing_key = Ed25519SigningKey::generate();
         let verifying_key = signing_key.verifying_key();
@@ -761,6 +1005,173 @@ mod tests {
         assert!(op_ids.contains(&"youtube.post_comment"));
         assert!(op_ids.contains(&"youtube.get_captions"));
         assert_eq!(ops.len(), 7);
+    }
+
+    // ── Provisioning / doctor / self_check tests ──────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_api_key_mode() {
+        let mut connector = YouTubeConnector::new();
+        let result = connector
+            .handle_configure(json!({ "api_key": "test-key-123" }))
+            .await
+            .unwrap();
+
+        assert_eq!(result["status"], "configured");
+        assert!(connector.config.is_some());
+        assert!(connector.client.is_some());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_credential_id_mode() {
+        let mut connector = YouTubeConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(result["status"], "configured");
+        let config = connector.config.as_ref().unwrap();
+        assert!(config.auth.is_secretless());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_both_auth_modes_rejected() {
+        let mut connector = YouTubeConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "api_key": "key",
+                "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+            }))
+            .await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("exactly one"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_no_auth_rejected() {
+        let mut connector = YouTubeConnector::new();
+        let result = connector.handle_configure(json!({})).await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("Missing authentication"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_custom_base_url() {
+        let mut connector = YouTubeConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_key": "test",
+                "base_url": "http://localhost:8080"
+            }))
+            .await
+            .unwrap();
+
+        let config = connector.config.as_ref().unwrap();
+        assert_eq!(config.base_url, "http://localhost:8080");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_not_configured() {
+        let connector = YouTubeConnector::new();
+        let result = connector.handle_doctor().await.unwrap();
+
+        assert_eq!(result["overall"], "unhealthy");
+        let checks = result["checks"].as_array().unwrap();
+        assert_eq!(checks[0]["name"], "configuration");
+        assert_eq!(checks[0]["status"], "unhealthy");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_configured_api_key() {
+        let mut connector = YouTubeConnector::new();
+        connector
+            .handle_configure(json!({ "api_key": "test-key" }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_doctor().await.unwrap();
+        assert_eq!(result["overall"], "healthy");
+
+        let checks = result["checks"].as_array().unwrap();
+        assert!(checks.len() >= 6);
+        assert!(checks.iter().all(|c| c["status"] != "unhealthy"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_configured_credential_id() {
+        let mut connector = YouTubeConnector::new();
+        connector
+            .handle_configure(json!({
+                "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+            }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_doctor().await.unwrap();
+        // Secretless mode → degraded due to credential_injection check
+        assert_eq!(result["overall"], "degraded");
+
+        let checks = result["checks"].as_array().unwrap();
+        let cred_check = checks
+            .iter()
+            .find(|c| c["name"] == "credential_injection")
+            .unwrap();
+        assert_eq!(cred_check["status"], "degraded");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_not_configured() {
+        let connector = YouTubeConnector::new();
+        let result = connector.handle_self_check().await.unwrap();
+        assert_eq!(result["status"], "failed");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_credential_id_returns_degraded() {
+        let mut connector = YouTubeConnector::new();
+        connector
+            .handle_configure(json!({
+                "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+            }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_self_check().await.unwrap();
+        assert_eq!(result["status"], "degraded");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_health_includes_auth_info() {
+        let mut connector = YouTubeConnector::new();
+        connector
+            .handle_configure(json!({ "api_key": "test-key" }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_health().await.unwrap();
+        assert_eq!(result["status"], "healthy");
+        assert_eq!(result["auth"], "api_key:redacted");
+        assert!(
+            result["base_url"]
+                .as_str()
+                .unwrap()
+                .contains("googleapis.com")
+        );
     }
 
     #[test]

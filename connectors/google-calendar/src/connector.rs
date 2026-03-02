@@ -4,22 +4,104 @@ use std::sync::Arc;
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
-    ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier, SessionId,
-    SimulateRequest, SimulateResponse,
+    ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
+    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
 
 use crate::{
-    client::GoogleCalendarClient,
+    client::{DEFAULT_BASE_URL, GoogleCalendarAuth, GoogleCalendarClient},
     error::GoogleCalendarError,
     types::{Attendee, Event, EventDateTime},
 };
 
+/// Validated configuration for the Google Calendar connector.
+struct GoogleCalendarConfig {
+    auth: GoogleCalendarAuth,
+    base_url: String,
+}
+
+impl GoogleCalendarConfig {
+    /// Parse and validate configuration from FCP params.
+    ///
+    /// Strict auth: exactly one of `token` or `credential_id` must be supplied.
+    fn from_params(params: &serde_json::Value) -> FcpResult<Self> {
+        let token = params
+            .get("token")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let credential_id = match params.get("credential_id") {
+            Some(value) => {
+                let raw = value.as_str().ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "credential_id must be a string".into(),
+                })?;
+                Some(
+                    CredentialId::parse(raw).map_err(|_| FcpError::InvalidRequest {
+                        code: 1003,
+                        message: "credential_id must be a valid UUID".into(),
+                    })?,
+                )
+            }
+            None => None,
+        };
+
+        let auth = match (token, credential_id) {
+            (Some(t), None) => GoogleCalendarAuth::Token(t),
+            (None, Some(cid)) => GoogleCalendarAuth::CredentialId(cid),
+            (Some(_), Some(_)) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Supply exactly one of `token` or `credential_id`, not both".into(),
+                });
+            }
+            (None, None) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing authentication: supply `token` or `credential_id`".into(),
+                });
+            }
+        };
+
+        let base_url = params
+            .get("base_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or(DEFAULT_BASE_URL)
+            .to_string();
+
+        Ok(Self { auth, base_url })
+    }
+}
+
+/// Structured readiness diagnostic for the doctor command.
+#[derive(Debug, Serialize, Deserialize)]
+struct DoctorResult {
+    status: DoctorStatus,
+    checks: Vec<DoctorCheck>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DoctorCheck {
+    name: String,
+    status: DoctorStatus,
+    message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum DoctorStatus {
+    Healthy,
+    Degraded,
+    Unhealthy,
+}
+
 /// FCP Google Calendar Connector.
 pub struct GoogleCalendarConnector {
     base: Arc<BaseConnector>,
+    config: Option<GoogleCalendarConfig>,
     client: Option<GoogleCalendarClient>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
@@ -33,6 +115,7 @@ impl GoogleCalendarConnector {
             base: Arc::new(BaseConnector::new(ConnectorId::from_static(
                 "google-calendar",
             ))),
+            config: None,
             client: None,
             verifier: None,
             session_id: None,
@@ -48,28 +131,19 @@ impl GoogleCalendarConnector {
         &mut self,
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
-        let token =
-            params
-                .get("token")
-                .and_then(|v| v.as_str())
-                .ok_or(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing token in configuration".into(),
-                })?;
+        let config = GoogleCalendarConfig::from_params(&params)?;
 
-        let base_url = params.get("base_url").and_then(|v| v.as_str());
+        let client = GoogleCalendarClient::new_with_auth(config.auth.clone())
+            .map_err(|e| FcpError::Internal {
+                message: format!("Failed to create HTTP client: {e}"),
+            })?
+            .with_base_url(&config.base_url);
 
-        let mut client = GoogleCalendarClient::new(token).map_err(|e| FcpError::Internal {
-            message: format!("Failed to create HTTP client: {e}"),
-        })?;
+        info!(auth = %config.auth.redacted_label(), "Google Calendar connector configured");
 
-        if let Some(url) = base_url {
-            client = client.with_base_url(url);
-        }
-
+        self.config = Some(config);
         self.client = Some(client);
         self.base.set_configured(true);
-        info!("Google Calendar connector configured");
 
         Ok(json!({ "status": "configured" }))
     }
@@ -135,13 +209,182 @@ impl GoogleCalendarConnector {
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
         let configured = self.client.is_some();
         let metrics = self.base.metrics();
-        Ok(json!({
+        let mut health = json!({
             "status": if configured { "healthy" } else { "not_configured" },
             "metrics": {
                 "requests_total": metrics.requests_total,
                 "requests_error": metrics.requests_error,
             }
-        }))
+        });
+        if let Some(config) = &self.config {
+            health["auth_mode"] = json!(config.auth.redacted_label());
+            health["base_url"] = json!(config.base_url);
+        }
+        Ok(health)
+    }
+
+    /// Handle doctor readiness check.
+    ///
+    /// # Errors
+    /// Returns [`FcpError`] if serialization fails.
+    pub async fn handle_doctor(&self) -> FcpResult<serde_json::Value> {
+        let mut checks = Vec::new();
+
+        // 1. Configuration
+        checks.push(if self.config.is_some() {
+            DoctorCheck {
+                name: "configuration".into(),
+                status: DoctorStatus::Healthy,
+                message: "Connector is configured".into(),
+            }
+        } else {
+            DoctorCheck {
+                name: "configuration".into(),
+                status: DoctorStatus::Unhealthy,
+                message: "Connector is not configured – call `configure` first".into(),
+            }
+        });
+
+        // 2. Client initialized
+        checks.push(if self.client.is_some() {
+            DoctorCheck {
+                name: "client_initialized".into(),
+                status: DoctorStatus::Healthy,
+                message: "HTTP client is ready".into(),
+            }
+        } else {
+            DoctorCheck {
+                name: "client_initialized".into(),
+                status: DoctorStatus::Unhealthy,
+                message: "HTTP client is not initialized".into(),
+            }
+        });
+
+        // 3. Base URL
+        if let Some(config) = &self.config {
+            checks.push(DoctorCheck {
+                name: "base_url".into(),
+                status: DoctorStatus::Healthy,
+                message: format!("Base URL: {}", config.base_url),
+            });
+        } else {
+            checks.push(DoctorCheck {
+                name: "base_url".into(),
+                status: DoctorStatus::Unhealthy,
+                message: "Base URL not set (not configured)".into(),
+            });
+        }
+
+        // 4. Auth mode
+        if let Some(config) = &self.config {
+            checks.push(DoctorCheck {
+                name: "auth_mode".into(),
+                status: DoctorStatus::Healthy,
+                message: format!("Auth: {}", config.auth.redacted_label()),
+            });
+        } else {
+            checks.push(DoctorCheck {
+                name: "auth_mode".into(),
+                status: DoctorStatus::Unhealthy,
+                message: "Auth mode not set (not configured)".into(),
+            });
+        }
+
+        // 5. Network constraints
+        let egress_target = self.config.as_ref().map_or("www.googleapis.com", |c| {
+            c.base_url
+                .strip_prefix("https://")
+                .or_else(|| c.base_url.strip_prefix("http://"))
+                .and_then(|s| s.split('/').next())
+                .unwrap_or("www.googleapis.com")
+        });
+        checks.push(DoctorCheck {
+            name: "network_constraints".into(),
+            status: DoctorStatus::Healthy,
+            message: format!("Egress target: {egress_target}"),
+        });
+
+        // 6. Credential injection
+        if let Some(config) = &self.config {
+            if config.auth.is_secretless() {
+                checks.push(DoctorCheck {
+                    name: "credential_injection".into(),
+                    status: DoctorStatus::Healthy,
+                    message: "Secretless mode – egress proxy will inject credentials".into(),
+                });
+            } else {
+                checks.push(DoctorCheck {
+                    name: "credential_injection".into(),
+                    status: DoctorStatus::Healthy,
+                    message: "Direct token mode – no proxy injection needed".into(),
+                });
+            }
+        } else {
+            checks.push(DoctorCheck {
+                name: "credential_injection".into(),
+                status: DoctorStatus::Unhealthy,
+                message: "Cannot assess – not configured".into(),
+            });
+        }
+
+        let overall = if checks.iter().any(|c| c.status == DoctorStatus::Unhealthy) {
+            DoctorStatus::Unhealthy
+        } else if checks.iter().any(|c| c.status == DoctorStatus::Degraded) {
+            DoctorStatus::Degraded
+        } else {
+            DoctorStatus::Healthy
+        };
+
+        let result = DoctorResult {
+            status: overall,
+            checks,
+        };
+
+        serde_json::to_value(result).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize doctor result: {e}"),
+        })
+    }
+
+    /// Handle self-check connectivity probe.
+    ///
+    /// # Errors
+    /// Returns [`FcpError`] if serialization fails.
+    pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
+        let Some(client) = &self.client else {
+            let report =
+                SelfCheckReport::failed("not_configured", "Connector is not configured yet");
+            return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize self-check report: {e}"),
+            });
+        };
+
+        // In credential_id mode, we can't verify connectivity without the egress proxy
+        if let Some(config) = &self.config {
+            if config.auth.is_secretless() {
+                let report = SelfCheckReport::degraded(
+                    "credential_injection_required",
+                    "Configured with credential_id; egress proxy injection required for checks",
+                );
+                return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                    message: format!("Failed to serialize self-check report: {e}"),
+                });
+            }
+        }
+
+        let report = match client.health_check().await {
+            Ok(()) => SelfCheckReport::ok(),
+            Err(err) => {
+                if err.is_retryable() {
+                    SelfCheckReport::degraded("self_check_retryable", err.to_string())
+                } else {
+                    SelfCheckReport::failed("self_check_failed", err.to_string())
+                }
+            }
+        };
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {e}"),
+        })
     }
 
     /// Handle introspect method.
@@ -798,11 +1041,13 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn test_invoke_missing_field() {
         let mut connector = GoogleCalendarConnector::new();
-        connector.client = Some(
-            GoogleCalendarClient::new("fake_key")
-                .unwrap()
-                .with_base_url("http://localhost:9999"),
-        );
+        connector
+            .handle_configure(json!({
+                "token": "fake_key",
+                "base_url": "http://localhost:9999"
+            }))
+            .await
+            .unwrap();
 
         let signing_key = Ed25519SigningKey::generate();
         let verifying_key = signing_key.verifying_key();
@@ -853,5 +1098,176 @@ mod tests {
         assert!(op_ids.contains(&"gcal.delete_event"));
         assert!(op_ids.contains(&"gcal.quick_add"));
         assert_eq!(ops.len(), 7);
+    }
+
+    // ── Provisioning automation tests ──────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_with_token() {
+        let mut connector = GoogleCalendarConnector::new();
+        let result = connector
+            .handle_configure(json!({ "token": "test-token-abc" }))
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "configured");
+        assert!(connector.client.is_some());
+        assert!(connector.config.is_some());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_with_credential_id() {
+        let mut connector = GoogleCalendarConnector::new();
+        let cid = uuid::Uuid::new_v4().to_string();
+        let result = connector
+            .handle_configure(json!({ "credential_id": cid }))
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "configured");
+        assert!(connector.config.is_some());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_both_auth() {
+        let mut connector = GoogleCalendarConnector::new();
+        let cid = uuid::Uuid::new_v4().to_string();
+        let result = connector
+            .handle_configure(json!({
+                "token": "tok",
+                "credential_id": cid
+            }))
+            .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("exactly one"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_no_auth() {
+        let mut connector = GoogleCalendarConnector::new();
+        let result = connector.handle_configure(json!({})).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("Missing authentication"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_custom_base_url() {
+        let mut connector = GoogleCalendarConnector::new();
+        connector
+            .handle_configure(json!({
+                "token": "tok",
+                "base_url": "http://localhost:8080"
+            }))
+            .await
+            .unwrap();
+        let config = connector.config.as_ref().unwrap();
+        assert_eq!(config.base_url, "http://localhost:8080");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_health_shows_auth_info() {
+        let mut connector = GoogleCalendarConnector::new();
+        connector
+            .handle_configure(json!({ "token": "tok" }))
+            .await
+            .unwrap();
+        let health = connector.handle_health().await.unwrap();
+        assert_eq!(health["status"], "healthy");
+        assert_eq!(health["auth_mode"], "token:redacted");
+        assert!(health["base_url"].as_str().is_some());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_unconfigured() {
+        let connector = GoogleCalendarConnector::new();
+        let result = connector.handle_doctor().await.unwrap();
+        assert_eq!(result["status"], "unhealthy");
+        let checks = result["checks"].as_array().unwrap();
+        assert!(checks.len() >= 6);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_configured() {
+        let mut connector = GoogleCalendarConnector::new();
+        connector
+            .handle_configure(json!({ "token": "tok" }))
+            .await
+            .unwrap();
+        let result = connector.handle_doctor().await.unwrap();
+        assert_eq!(result["status"], "healthy");
+        let checks = result["checks"].as_array().unwrap();
+        assert!(checks.iter().all(|c| c["status"] == "healthy"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_credential_id_mode() {
+        let mut connector = GoogleCalendarConnector::new();
+        let cid = uuid::Uuid::new_v4().to_string();
+        connector
+            .handle_configure(json!({ "credential_id": cid }))
+            .await
+            .unwrap();
+        let result = connector.handle_doctor().await.unwrap();
+        assert_eq!(result["status"], "healthy");
+        let checks = result["checks"].as_array().unwrap();
+        let cred_check = checks
+            .iter()
+            .find(|c| c["name"] == "credential_injection")
+            .unwrap();
+        assert!(
+            cred_check["message"]
+                .as_str()
+                .unwrap()
+                .contains("Secretless")
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_not_configured() {
+        let connector = GoogleCalendarConnector::new();
+        let result = connector.handle_self_check().await.unwrap();
+        assert_eq!(result["status"], "failed");
+        assert_eq!(result["reason_code"], "not_configured");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_credential_id_returns_degraded() {
+        let mut connector = GoogleCalendarConnector::new();
+        connector
+            .handle_configure(json!({
+                "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+            }))
+            .await
+            .unwrap();
+        let result = connector.handle_self_check().await.unwrap();
+        assert_eq!(result["status"], "degraded");
+        assert_eq!(result["reason_code"], "credential_injection_required");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_connection_failure() {
+        let mut connector = GoogleCalendarConnector::new();
+        connector
+            .handle_configure(json!({
+                "token": "tok",
+                "base_url": "http://127.0.0.1:1"
+            }))
+            .await
+            .unwrap();
+        let result = connector.handle_self_check().await.unwrap();
+        // Connection refused → Http error is retryable → degraded
+        assert!(
+            result["status"] == "failed" || result["status"] == "degraded",
+            "Expected failed or degraded, got: {}",
+            result["status"]
+        );
     }
 }

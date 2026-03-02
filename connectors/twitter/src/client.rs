@@ -20,6 +20,8 @@ const QUERY_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b'=')
     .add(b'+');
 
+use fcp_core::CredentialId;
+
 use crate::{
     config::{RateLimitInfo, TwitterConfig},
     error::{TwitterError, TwitterResult},
@@ -30,12 +32,47 @@ use crate::{
     },
 };
 
+/// Authentication mode for the Twitter connector.
+#[derive(Debug, Clone)]
+pub enum TwitterAuth {
+    /// Direct OAuth 1.0a credentials.
+    OAuth {
+        consumer_key: String,
+        consumer_secret: String,
+        access_token: String,
+        access_token_secret: String,
+        bearer_token: Option<String>,
+    },
+    /// Secretless mode: egress proxy injects credentials.
+    CredentialId(CredentialId),
+}
+
+impl TwitterAuth {
+    /// Return a redacted label for logging.
+    #[must_use]
+    pub fn redacted_label(&self) -> String {
+        match self {
+            Self::OAuth { consumer_key, .. } => {
+                let prefix: String = consumer_key.chars().take(4).collect();
+                format!("oauth:{prefix}...")
+            }
+            Self::CredentialId(id) => format!("credential:{id}"),
+        }
+    }
+
+    /// Whether this auth mode is secretless (egress proxy injection).
+    #[must_use]
+    pub const fn is_secretless(&self) -> bool {
+        matches!(self, Self::CredentialId(_))
+    }
+}
+
 /// Twitter REST API client.
 #[derive(Debug)]
 pub struct TwitterApiClient {
     client: Client,
     base_url: String,
-    oauth_signer: OAuthSigner,
+    oauth_signer: Option<OAuthSigner>,
     bearer_token: Option<String>,
     max_retries: u32,
     initial_delay_ms: u64,
@@ -53,12 +90,72 @@ impl TwitterApiClient {
         Ok(Self {
             client,
             base_url: config.api_url.trim_end_matches('/').to_string(),
-            oauth_signer: OAuthSigner::new(config),
+            oauth_signer: Some(OAuthSigner::new(config)),
             bearer_token: config.bearer_token.clone(),
             max_retries: config.retry.max_attempts,
             initial_delay_ms: config.retry.initial_delay_ms,
             max_delay_ms: config.retry.max_delay_ms,
         })
+    }
+
+    /// Create a new API client from an auth mode.
+    pub fn new_with_auth(auth: &TwitterAuth, api_url: &str) -> TwitterResult<Self> {
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .user_agent(format!("fcp-twitter/{}", env!("CARGO_PKG_VERSION")))
+            .build()?;
+
+        match auth {
+            TwitterAuth::OAuth {
+                consumer_key,
+                consumer_secret,
+                access_token,
+                access_token_secret,
+                bearer_token,
+            } => {
+                let config = TwitterConfig {
+                    consumer_key: consumer_key.clone(),
+                    consumer_secret: consumer_secret.clone(),
+                    access_token: access_token.clone(),
+                    access_token_secret: access_token_secret.clone(),
+                    bearer_token: bearer_token.clone(),
+                    api_url: api_url.to_string(),
+                    ..Default::default()
+                };
+                Ok(Self {
+                    client,
+                    base_url: api_url.trim_end_matches('/').to_string(),
+                    oauth_signer: Some(OAuthSigner::new(&config)),
+                    bearer_token: bearer_token.clone(),
+                    max_retries: 3,
+                    initial_delay_ms: 1000,
+                    max_delay_ms: 60_000,
+                })
+            }
+            TwitterAuth::CredentialId(_) => {
+                // Secretless mode: egress proxy injects auth headers
+                Ok(Self {
+                    client,
+                    base_url: api_url.trim_end_matches('/').to_string(),
+                    oauth_signer: None,
+                    bearer_token: None,
+                    max_retries: 3,
+                    initial_delay_ms: 1000,
+                    max_delay_ms: 60_000,
+                })
+            }
+        }
+    }
+
+    /// Perform a lightweight health check by fetching the authenticated user.
+    pub async fn health_check(&self) -> TwitterResult<()> {
+        let _response: TwitterResponse<User> = self
+            .get_with_params(
+                "/2/users/me",
+                &[("user.fields".to_string(), "id".to_string())],
+            )
+            .await?;
+        Ok(())
     }
 
     /// Make an authenticated GET request using OAuth 1.0a.
@@ -98,6 +195,11 @@ impl TwitterApiClient {
     /// Make a request using app-only (Bearer) authentication.
     #[instrument(skip(self))]
     pub async fn get_app_only<T: DeserializeOwned>(&self, endpoint: &str) -> TwitterResult<T> {
+        // In secretless mode, egress proxy injects auth — use OAuth path without signing
+        if self.oauth_signer.is_none() {
+            return self.request_oauth("GET", endpoint, None::<&()>, &[]).await;
+        }
+
         let bearer = self.bearer_token.as_ref().ok_or_else(|| {
             TwitterError::Config("Bearer token required for app-only auth".into())
         })?;
@@ -139,9 +241,6 @@ impl TwitterApiClient {
                 format!("{url}?{query}")
             };
 
-            // Generate OAuth signature
-            let auth_header = self.oauth_signer.sign(method, &url, params)?;
-
             let mut req = match method {
                 "GET" => self.client.get(&full_url),
                 "POST" => self.client.post(&url),
@@ -150,7 +249,11 @@ impl TwitterApiClient {
                 _ => self.client.get(&full_url),
             };
 
-            req = req.header("Authorization", &auth_header);
+            // Apply OAuth signature if signer is present (not in secretless mode)
+            if let Some(ref signer) = self.oauth_signer {
+                let auth_header = signer.sign(method, &url, params)?;
+                req = req.header("Authorization", &auth_header);
+            }
 
             if let Some(b) = body {
                 req = req.json(b);
@@ -550,6 +653,13 @@ impl TwitterApiClient {
 
     /// Get current stream rules.
     pub async fn get_stream_rules(&self) -> TwitterResult<StreamRulesResponse> {
+        // In secretless mode, egress proxy injects auth
+        if self.oauth_signer.is_none() {
+            return self
+                .request_oauth("GET", "/2/tweets/search/stream/rules", None::<&()>, &[])
+                .await;
+        }
+
         let bearer = self
             .bearer_token
             .as_ref()
@@ -569,12 +679,20 @@ impl TwitterApiClient {
             add: &'a [StreamRule],
         }
 
+        let body = AddRulesRequest { add: rules };
+
+        // In secretless mode, egress proxy injects auth
+        if self.oauth_signer.is_none() {
+            return self
+                .request_oauth("POST", "/2/tweets/search/stream/rules", Some(&body), &[])
+                .await;
+        }
+
         let bearer = self
             .bearer_token
             .as_ref()
             .ok_or_else(|| TwitterError::Config("Bearer token required for stream rules".into()))?;
 
-        let body = AddRulesRequest { add: rules };
         self.request_bearer("POST", "/2/tweets/search/stream/rules", Some(&body), bearer)
             .await
     }
@@ -594,14 +712,21 @@ impl TwitterApiClient {
             ids: &'a [&'a str],
         }
 
+        let body = DeleteRulesRequest {
+            delete: DeleteIds { ids: rule_ids },
+        };
+
+        // In secretless mode, egress proxy injects auth
+        if self.oauth_signer.is_none() {
+            return self
+                .request_oauth("POST", "/2/tweets/search/stream/rules", Some(&body), &[])
+                .await;
+        }
+
         let bearer = self
             .bearer_token
             .as_ref()
             .ok_or_else(|| TwitterError::Config("Bearer token required for stream rules".into()))?;
-
-        let body = DeleteRulesRequest {
-            delete: DeleteIds { ids: rule_ids },
-        };
 
         self.request_bearer("POST", "/2/tweets/search/stream/rules", Some(&body), bearer)
             .await

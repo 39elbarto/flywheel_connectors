@@ -693,3 +693,158 @@ async fn missing_required_field_returns_invalid_request() {
         "expected InvalidRequest for missing message_id"
     );
 }
+
+/// Doctor reports credential injection requirement for `credential_id` mode.
+#[fcp_async_core::runtime::test]
+async fn doctor_reports_pending_materialization_for_credential_mode() {
+    let mut connector = GmailConnector::new();
+
+    let doctor_before = connector.handle_doctor().await.unwrap();
+    assert_eq!(doctor_before["status"], "unhealthy");
+
+    connector
+        .handle_configure(json!({
+            "credential_id": "00000000-0000-0000-0000-000000000001"
+        }))
+        .await
+        .unwrap();
+
+    let doctor_after = connector.handle_doctor().await.unwrap();
+    assert_eq!(doctor_after["status"], "degraded");
+
+    let self_check = connector.handle_self_check().await.unwrap();
+    assert_eq!(self_check["status"], "degraded");
+    assert_eq!(self_check["reason_code"], "credential_injection_required");
+}
+
+/// OAuth refresh mode exchanges a token and passes self-check with mocked Gmail.
+#[fcp_async_core::runtime::test]
+async fn oauth_refresh_mode_self_check_ok_with_mocked_endpoints() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "ya29.integration-oauth-token",
+            "scope": "https://www.googleapis.com/auth/gmail.readonly"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/users/me/labels"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "labels": []
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = GmailConnector::new();
+    connector
+        .handle_configure(json!({
+            "base_url": mock_server.uri(),
+            "required_scopes": ["https://www.googleapis.com/auth/gmail.readonly"],
+            "oauth_refresh": {
+                "client_id": "integration-client",
+                "client_secret": "integration-secret",
+                "refresh_token": "integration-refresh",
+                "token_url": format!("{}/oauth/token", mock_server.uri())
+            }
+        }))
+        .await
+        .unwrap();
+
+    let doctor = connector.handle_doctor().await.unwrap();
+    assert_eq!(doctor["status"], "healthy");
+
+    let self_check = connector.handle_self_check().await.unwrap();
+    assert_eq!(self_check["status"], "ok");
+}
+
+/// history sync operation persists cursor and resumes via invoke dispatch.
+#[fcp_async_core::runtime::test]
+async fn invoke_sync_history_persists_and_resumes_cursor() {
+    let mock_server = MockServer::start().await;
+    let state_path =
+        std::env::temp_dir().join(format!("fcp-gmail-history-{}.json", uuid::Uuid::new_v4()));
+
+    Mock::given(method("GET"))
+        .and(path("/users/me/history"))
+        .and(query_param("startHistoryId", "500"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "history": [
+                { "id": "501", "messagesAdded": [{ "message": { "id": "m501" } }] }
+            ],
+            "historyId": "501"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/users/me/history"))
+        .and(query_param("startHistoryId", "501"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "history": [],
+            "historyId": "501"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = GmailConnector::new();
+    connector
+        .handle_configure(json!({
+            "token": "test-oauth-token-xyz",
+            "base_url": mock_server.uri(),
+            "history_cursor_path": state_path.to_string_lossy().to_string()
+        }))
+        .await
+        .unwrap();
+    let signing_key = setup_handshake(&mut connector, &["gmail.sync_history"]).await;
+    let token = generate_valid_token(&signing_key, "gmail.sync_history");
+
+    let first = connector
+        .handle_invoke(json!({
+            "operation": "gmail.sync_history",
+            "input": {
+                "start_history_id": "500",
+                "lease_seq": 1,
+                "lease_object_id": "lease-a"
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(first["effective_start_history_id"], "500");
+    assert_eq!(first["latest_history_id"], "501");
+    assert_eq!(first["history_count"], 1);
+
+    let mut restarted = GmailConnector::new();
+    restarted
+        .handle_configure(json!({
+            "token": "test-oauth-token-xyz",
+            "base_url": mock_server.uri(),
+            "history_cursor_path": state_path.to_string_lossy().to_string()
+        }))
+        .await
+        .unwrap();
+    let signing_key2 = setup_handshake(&mut restarted, &["gmail.sync_history"]).await;
+    let token2 = generate_valid_token(&signing_key2, "gmail.sync_history");
+
+    let resumed = restarted
+        .handle_invoke(json!({
+            "operation": "gmail.sync_history",
+            "input": {
+                "lease_seq": 2,
+                "lease_object_id": "lease-b"
+            },
+            "capability_token": token2
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(resumed["effective_start_history_id"], "501");
+    assert_eq!(resumed["latest_history_id"], "501");
+    assert_eq!(resumed["history_count"], 0);
+    assert_eq!(resumed["used_persisted_cursor"], true);
+}

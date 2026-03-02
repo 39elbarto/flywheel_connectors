@@ -1,9 +1,11 @@
 //! Google Calendar API client.
 
+use std::fmt;
 use std::fmt::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use fcp_core::CredentialId;
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument, warn};
 
@@ -13,13 +15,47 @@ use crate::{
 };
 
 /// Default Google Calendar API base URL.
-const DEFAULT_BASE_URL: &str = "https://www.googleapis.com/calendar/v3";
+pub const DEFAULT_BASE_URL: &str = "https://www.googleapis.com/calendar/v3";
+
+/// Authentication mode for the Google Calendar API.
+#[derive(Clone)]
+pub enum GoogleCalendarAuth {
+    /// Direct `OAuth2` bearer token.
+    Token(String),
+    /// Secretless credential reference (egress proxy injection).
+    CredentialId(CredentialId),
+}
+
+impl GoogleCalendarAuth {
+    /// Render a redacted label suitable for logs/diagnostics.
+    #[must_use]
+    pub fn redacted_label(&self) -> String {
+        match self {
+            Self::Token(_) => "token:redacted".to_string(),
+            Self::CredentialId(id) => format!("credential_id:{id}"),
+        }
+    }
+
+    /// Whether this auth mode requires egress proxy credential injection.
+    #[must_use]
+    pub const fn is_secretless(&self) -> bool {
+        matches!(self, Self::CredentialId(_))
+    }
+}
+
+impl fmt::Debug for GoogleCalendarAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Token(_) => f.debug_tuple("Token").field(&"<redacted>").finish(),
+            Self::CredentialId(id) => f.debug_tuple("CredentialId").field(id).finish(),
+        }
+    }
+}
 
 /// Google Calendar API client with retry logic and rate limit awareness.
-#[derive(Debug)]
 pub struct GoogleCalendarClient {
     client: Client,
-    token: String,
+    auth: GoogleCalendarAuth,
     base_url: String,
     max_retries: u32,
     initial_delay_ms: u64,
@@ -27,9 +63,24 @@ pub struct GoogleCalendarClient {
     total_requests: AtomicU64,
 }
 
+impl fmt::Debug for GoogleCalendarClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GoogleCalendarClient")
+            .field("auth", &self.auth)
+            .field("base_url", &self.base_url)
+            .field("max_retries", &self.max_retries)
+            .finish_non_exhaustive()
+    }
+}
+
 impl GoogleCalendarClient {
     /// Create a new Google Calendar client with an `OAuth2` access token.
     pub fn new(token: impl Into<String>) -> GCalResult<Self> {
+        Self::new_with_auth(GoogleCalendarAuth::Token(token.into()))
+    }
+
+    /// Create a new Google Calendar client with explicit auth mode.
+    pub fn new_with_auth(auth: GoogleCalendarAuth) -> GCalResult<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .user_agent("fcp-google-calendar/0.1.0")
@@ -38,7 +89,7 @@ impl GoogleCalendarClient {
 
         Ok(Self {
             client,
-            token: token.into(),
+            auth,
             base_url: DEFAULT_BASE_URL.into(),
             max_retries: 3,
             initial_delay_ms: 1000,
@@ -72,6 +123,23 @@ impl GoogleCalendarClient {
     #[must_use]
     pub fn total_requests(&self) -> u64 {
         self.total_requests.load(Ordering::Relaxed)
+    }
+
+    /// Apply authentication to an outgoing request.
+    fn apply_auth(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.auth {
+            GoogleCalendarAuth::Token(token) => builder.bearer_auth(token),
+            GoogleCalendarAuth::CredentialId(id) => {
+                builder.header("X-FCP-Credential-ID", id.to_string())
+            }
+        }
+    }
+
+    /// Lightweight connectivity probe (list calendars with maxResults=1).
+    pub async fn health_check(&self) -> GCalResult<()> {
+        let url = format!("{}/users/me/calendarList?maxResults=1", self.base_url);
+        let _: CalendarListResponse = self.get(&url).await?;
+        Ok(())
     }
 
     // ── Calendar operations ─────────────────────────────────────
@@ -220,7 +288,7 @@ impl GoogleCalendarClient {
 
         loop {
             attempt += 1;
-            let response = self.client.get(&url).bearer_auth(&self.token).send().await;
+            let response = self.apply_auth(self.client.get(&url)).send().await;
 
             match response {
                 Ok(resp) => {
@@ -263,9 +331,7 @@ impl GoogleCalendarClient {
         loop {
             attempt += 1;
             let response = self
-                .client
-                .post(url)
-                .bearer_auth(&self.token)
+                .apply_auth(self.client.post(url))
                 .json(body)
                 .send()
                 .await;
@@ -311,9 +377,7 @@ impl GoogleCalendarClient {
         loop {
             attempt += 1;
             let response = self
-                .client
-                .put(url)
-                .bearer_auth(&self.token)
+                .apply_auth(self.client.put(url))
                 .json(body)
                 .send()
                 .await;
@@ -354,12 +418,7 @@ impl GoogleCalendarClient {
 
         loop {
             attempt += 1;
-            let response = self
-                .client
-                .delete(url)
-                .bearer_auth(&self.token)
-                .send()
-                .await;
+            let response = self.apply_auth(self.client.delete(url)).send().await;
 
             match response {
                 Ok(resp) => {

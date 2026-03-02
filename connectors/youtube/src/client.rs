@@ -1,7 +1,9 @@
 //! YouTube Data API v3 HTTP client.
 
+use std::fmt;
 use std::fmt::Write as _;
 
+use fcp_core::CredentialId;
 use reqwest::{Client, StatusCode, header};
 use tracing::{debug, warn};
 
@@ -13,19 +15,60 @@ use crate::{
     },
 };
 
-const DEFAULT_BASE_URL: &str = "https://www.googleapis.com/youtube/v3";
+/// Default YouTube Data API v3 base URL.
+pub const DEFAULT_BASE_URL: &str = "https://www.googleapis.com/youtube/v3";
+
+/// Authentication mode for the YouTube API.
+#[derive(Clone)]
+pub enum YouTubeAuth {
+    /// Direct API key (appended as `?key=` query parameter).
+    ApiKey(String),
+    /// Secretless credential reference (egress proxy injection).
+    CredentialId(CredentialId),
+}
+
+impl YouTubeAuth {
+    /// Render a redacted label suitable for logs/diagnostics.
+    #[must_use]
+    pub fn redacted_label(&self) -> String {
+        match self {
+            Self::ApiKey(_) => "api_key:redacted".to_string(),
+            Self::CredentialId(id) => format!("credential_id:{id}"),
+        }
+    }
+
+    /// Whether this auth mode requires egress proxy credential injection.
+    #[must_use]
+    pub const fn is_secretless(&self) -> bool {
+        matches!(self, Self::CredentialId(_))
+    }
+}
+
+impl fmt::Debug for YouTubeAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ApiKey(_) => f.debug_tuple("ApiKey").field(&"<redacted>").finish(),
+            Self::CredentialId(id) => f.debug_tuple("CredentialId").field(id).finish(),
+        }
+    }
+}
 
 /// YouTube Data API v3 client.
 pub struct YouTubeClient {
     http: Client,
-    api_key: String,
+    auth: YouTubeAuth,
     base_url: String,
     max_retries: u32,
 }
 
 impl YouTubeClient {
-    /// Create a new YouTube client with an API key.
+    /// Create a new YouTube client with a direct API key.
     pub fn new(api_key: &str) -> YouTubeResult<Self> {
+        Self::new_with_auth(YouTubeAuth::ApiKey(api_key.to_string()))
+    }
+
+    /// Create a new YouTube client with explicit auth mode.
+    pub fn new_with_auth(auth: YouTubeAuth) -> YouTubeResult<Self> {
         let mut headers = header::HeaderMap::new();
         headers.insert(header::ACCEPT, "application/json".parse().unwrap());
 
@@ -37,10 +80,22 @@ impl YouTubeClient {
 
         Ok(Self {
             http,
-            api_key: api_key.to_string(),
+            auth,
             base_url: DEFAULT_BASE_URL.to_string(),
             max_retries: 2,
         })
+    }
+
+    /// Get the auth mode.
+    #[must_use]
+    pub const fn auth(&self) -> &YouTubeAuth {
+        &self.auth
+    }
+
+    /// Get the base URL.
+    #[must_use]
+    pub fn base_url(&self) -> &str {
+        &self.base_url
     }
 
     /// Set a custom base URL (for testing).
@@ -57,6 +112,32 @@ impl YouTubeClient {
         self
     }
 
+    // ── Auth helpers ────────────────────────────────────────────
+
+    /// Build a URL with API key appended if in ApiKey mode.
+    fn url_with_key(&self, base: &str) -> String {
+        match &self.auth {
+            YouTubeAuth::ApiKey(key) => format!("{base}&key={key}"),
+            YouTubeAuth::CredentialId(_) => base.to_string(),
+        }
+    }
+
+    /// Apply auth headers to a request builder (credential_id mode).
+    fn apply_auth(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.auth {
+            YouTubeAuth::ApiKey(_) => builder,
+            YouTubeAuth::CredentialId(id) => builder.header("X-FCP-Credential-ID", id.to_string()),
+        }
+    }
+
+    /// Perform a lightweight health check by searching with `maxResults=1`.
+    pub async fn health_check(&self) -> YouTubeResult<()> {
+        let base = format!("{}/search?part=id&maxResults=1&q=test", self.base_url);
+        let url = self.url_with_key(&base);
+        let _: SearchListResponse = self.get_json(&url).await?;
+        Ok(())
+    }
+
     // ── API Methods ──────────────────────────────────────────────
 
     /// Search for videos, channels, or playlists.
@@ -66,45 +147,43 @@ impl YouTubeClient {
         max_results: Option<u32>,
         result_type: Option<&str>,
     ) -> YouTubeResult<SearchListResponse> {
-        let mut url = format!(
-            "{}/search?part=snippet&q={}&key={}",
+        let mut base = format!(
+            "{}/search?part=snippet&q={}",
             self.base_url,
             urlencoding::encode(query),
-            self.api_key
         );
 
         if let Some(max) = max_results {
-            let _ = write!(url, "&maxResults={max}");
+            let _ = write!(base, "&maxResults={max}");
         }
         if let Some(t) = result_type {
-            let _ = write!(url, "&type={}", urlencoding::encode(t));
+            let _ = write!(base, "&type={}", urlencoding::encode(t));
         }
 
+        let url = self.url_with_key(&base);
         self.get_json(&url).await
     }
 
     /// Get video details by ID.
     pub async fn get_video(&self, video_id: &str) -> YouTubeResult<VideoListResponse> {
-        let url = format!(
-            "{}/videos?part=snippet,contentDetails,statistics&id={}&key={}",
+        let base = format!(
+            "{}/videos?part=snippet,contentDetails,statistics&id={}",
             self.base_url,
             urlencoding::encode(video_id),
-            self.api_key
         );
 
-        self.get_json(&url).await
+        self.get_json(&self.url_with_key(&base)).await
     }
 
     /// Get channel details by ID.
     pub async fn get_channel(&self, channel_id: &str) -> YouTubeResult<ChannelListResponse> {
-        let url = format!(
-            "{}/channels?part=snippet,statistics,contentDetails&id={}&key={}",
+        let base = format!(
+            "{}/channels?part=snippet,statistics,contentDetails&id={}",
             self.base_url,
             urlencoding::encode(channel_id),
-            self.api_key
         );
 
-        self.get_json(&url).await
+        self.get_json(&self.url_with_key(&base)).await
     }
 
     /// List items in a playlist.
@@ -114,21 +193,20 @@ impl YouTubeClient {
         max_results: Option<u32>,
         page_token: Option<&str>,
     ) -> YouTubeResult<PlaylistItemListResponse> {
-        let mut url = format!(
-            "{}/playlistItems?part=snippet,contentDetails&playlistId={}&key={}",
+        let mut base = format!(
+            "{}/playlistItems?part=snippet,contentDetails&playlistId={}",
             self.base_url,
             urlencoding::encode(playlist_id),
-            self.api_key
         );
 
         if let Some(max) = max_results {
-            let _ = write!(url, "&maxResults={max}");
+            let _ = write!(base, "&maxResults={max}");
         }
         if let Some(token) = page_token {
-            let _ = write!(url, "&pageToken={}", urlencoding::encode(token));
+            let _ = write!(base, "&pageToken={}", urlencoding::encode(token));
         }
 
-        self.get_json(&url).await
+        self.get_json(&self.url_with_key(&base)).await
     }
 
     /// List comment threads on a video.
@@ -137,26 +215,23 @@ impl YouTubeClient {
         video_id: &str,
         max_results: Option<u32>,
     ) -> YouTubeResult<CommentThreadListResponse> {
-        let mut url = format!(
-            "{}/commentThreads?part=snippet&videoId={}&key={}",
+        let mut base = format!(
+            "{}/commentThreads?part=snippet&videoId={}",
             self.base_url,
             urlencoding::encode(video_id),
-            self.api_key
         );
 
         if let Some(max) = max_results {
-            let _ = write!(url, "&maxResults={max}");
+            let _ = write!(base, "&maxResults={max}");
         }
 
-        self.get_json(&url).await
+        self.get_json(&self.url_with_key(&base)).await
     }
 
     /// Post a comment on a video (requires OAuth token, not API key).
     pub async fn post_comment(&self, video_id: &str, text: &str) -> YouTubeResult<Comment> {
-        let url = format!(
-            "{}/commentThreads?part=snippet&key={}",
-            self.base_url, self.api_key
-        );
+        let base = format!("{}/commentThreads?part=snippet", self.base_url);
+        let url = self.url_with_key(&base);
 
         let body = serde_json::json!({
             "snippet": {
@@ -174,14 +249,13 @@ impl YouTubeClient {
 
     /// Get available captions for a video.
     pub async fn get_captions(&self, video_id: &str) -> YouTubeResult<CaptionListResponse> {
-        let url = format!(
-            "{}/captions?part=snippet&videoId={}&key={}",
+        let base = format!(
+            "{}/captions?part=snippet&videoId={}",
             self.base_url,
             urlencoding::encode(video_id),
-            self.api_key
         );
 
-        self.get_json(&url).await
+        self.get_json(&self.url_with_key(&base)).await
     }
 
     // ── Internal HTTP helpers ────────────────────────────────────
@@ -199,7 +273,8 @@ impl YouTubeClient {
             let redacted_url = redact_key(url);
             debug!(url = %redacted_url, "GET request");
 
-            let result = self.http.get(url).send().await;
+            let builder = self.apply_auth(self.http.get(url));
+            let result = builder.send().await;
 
             match result {
                 Ok(response) => {
@@ -244,13 +319,8 @@ impl YouTubeClient {
         let redacted_url = redact_key(url);
         debug!(url = %redacted_url, "POST request");
 
-        let response = self
-            .http
-            .post(url)
-            .json(body)
-            .send()
-            .await
-            .map_err(YouTubeError::Http)?;
+        let builder = self.apply_auth(self.http.post(url).json(body));
+        let response = builder.send().await.map_err(YouTubeError::Http)?;
 
         let status = response.status();
         if status.is_success() {

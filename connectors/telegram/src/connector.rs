@@ -2,12 +2,15 @@
 //!
 //! Implements the FcpConnector trait with Telegram-specific operations.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
 use fcp_async_core::channel::{broadcast, watch};
 use fcp_async_core::sync::RwLock;
 use fcp_core::*;
+use reqwest::Url;
+use serde::{Deserialize, Serialize};
 use fcp_sdk::{
     ErrorClass, FormatMode, Formatter, Limits, classify_error_message,
     runtime::{PollResult, PollingCursor, PollingSupervisor, SupervisorConfig},
@@ -19,13 +22,45 @@ use tracing::{info, warn};
 use crate::client::{SendMessageOptions, TelegramClient, TelegramError};
 use crate::types::{GetUpdatesRequest, Message, Update, UpdateKind};
 
+const DEFAULT_TELEGRAM_BASE_URL: &str = "https://api.telegram.org";
+const MIN_POLL_TIMEOUT_SECS: i32 = 1;
+const MAX_POLL_TIMEOUT_SECS: i32 = 50;
+const KNOWN_ALLOWED_UPDATES: &[&str] = &[
+    "message",
+    "edited_message",
+    "channel_post",
+    "edited_channel_post",
+    "inline_query",
+    "chosen_inline_result",
+    "callback_query",
+    "shipping_query",
+    "pre_checkout_query",
+    "poll",
+    "poll_answer",
+    "my_chat_member",
+    "chat_member",
+    "chat_join_request",
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TelegramAuthConfig {
+    BotToken,
+    CredentialId(CredentialId),
+}
+
 /// Telegram connector configuration.
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct TelegramConfig {
     /// Bot credential (required)
+    #[serde(default)]
     pub credential: Option<String>,
 
+    /// Credential object reference for secretless setups.
+    #[serde(default)]
+    pub credential_id: Option<CredentialId>,
+
     /// Custom API base URL (optional)
+    #[serde(default)]
     pub base_url: Option<String>,
 
     /// Polling timeout in seconds
@@ -39,6 +74,144 @@ pub struct TelegramConfig {
 
 fn default_poll_timeout() -> i32 {
     30
+}
+
+impl TelegramConfig {
+    fn resolve_auth_mode(&self) -> FcpResult<TelegramAuthConfig> {
+        let token = self
+            .credential
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+
+        match (token, self.credential_id) {
+            (Some(_), None) => Ok(TelegramAuthConfig::BotToken),
+            (None, Some(id)) => Ok(TelegramAuthConfig::CredentialId(id)),
+            (Some(_), Some(_)) => Err(FcpError::InvalidRequest {
+                code: 1004,
+                message: "Provide exactly one of credential or credential_id".into(),
+            }),
+            (None, None) => Err(FcpError::InvalidRequest {
+                code: 1004,
+                message: "Missing required credential or credential_id in configuration".into(),
+            }),
+        }
+    }
+
+    fn normalize_base_url(&self) -> FcpResult<String> {
+        let raw = self
+            .base_url
+            .as_deref()
+            .unwrap_or(DEFAULT_TELEGRAM_BASE_URL)
+            .trim();
+
+        if raw.is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "base_url cannot be empty".into(),
+            });
+        }
+
+        let parsed = Url::parse(raw).map_err(|e| FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("Invalid base_url: {e}"),
+        })?;
+        if !matches!(parsed.scheme(), "https" | "http") {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "base_url must use http or https".into(),
+            });
+        }
+        if parsed.host_str().is_none() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "base_url must include a host".into(),
+            });
+        }
+
+        Ok(raw.trim_end_matches('/').to_string())
+    }
+
+    fn validate_runtime_settings(&self) -> FcpResult<()> {
+        if !(MIN_POLL_TIMEOUT_SECS..=MAX_POLL_TIMEOUT_SECS).contains(&self.poll_timeout) {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!(
+                    "poll_timeout must be between {MIN_POLL_TIMEOUT_SECS} and {MAX_POLL_TIMEOUT_SECS} seconds"
+                ),
+            });
+        }
+
+        let mut seen = HashSet::new();
+        for update in &self.allowed_updates {
+            if update.trim().is_empty() {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "allowed_updates entries must not be empty".into(),
+                });
+            }
+            if !seen.insert(update.clone()) {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("allowed_updates contains duplicate value: {update}"),
+                });
+            }
+            if !KNOWN_ALLOWED_UPDATES.contains(&update.as_str()) {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("allowed_updates contains unsupported type: {update}"),
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    fn auth_label(&self) -> &'static str {
+        if self.credential_id.is_some() {
+            "credential_id"
+        } else {
+            "bot_token"
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DoctorResult {
+    status: DoctorStatus,
+    checks: Vec<DoctorCheck>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum DoctorStatus {
+    Healthy,
+    Degraded,
+    Unhealthy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DoctorCheck {
+    name: String,
+    passed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+    critical: bool,
+}
+
+impl DoctorResult {
+    #[must_use]
+    fn from_checks(checks: Vec<DoctorCheck>) -> Self {
+        let status = if checks.iter().any(|c| c.critical && !c.passed) {
+            DoctorStatus::Unhealthy
+        } else if checks.iter().any(|c| !c.passed) {
+            DoctorStatus::Degraded
+        } else {
+            DoctorStatus::Healthy
+        };
+
+        Self { status, checks }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -106,6 +279,47 @@ pub struct TelegramConnector {
     start_time: Instant,
 }
 
+fn validate_bot_token_syntax(token: &str) -> FcpResult<()> {
+    let (bot_id, secret) = token.split_once(':').ok_or(FcpError::InvalidRequest {
+        code: 1004,
+        message: "Telegram bot token must be in '<bot_id>:<secret>' format".into(),
+    })?;
+
+    if bot_id.len() < 6 || !bot_id.chars().all(|c| c.is_ascii_digit()) {
+        return Err(FcpError::InvalidRequest {
+            code: 1004,
+            message: "Telegram bot token has invalid bot_id prefix".into(),
+        });
+    }
+    if secret.len() < 20
+        || !secret
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+    {
+        return Err(FcpError::InvalidRequest {
+            code: 1004,
+            message: "Telegram bot token has invalid secret segment".into(),
+        });
+    }
+
+    Ok(())
+}
+
+fn is_telegram_or_local_base_url(base_url: &str) -> bool {
+    let Ok(url) = Url::parse(base_url) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+
+    host.eq_ignore_ascii_case("api.telegram.org")
+        || host.eq_ignore_ascii_case("localhost")
+        || host.ends_with(".localhost")
+        || host == "127.0.0.1"
+        || host == "::1"
+}
+
 impl TelegramConnector {
     /// Create a new Telegram connector.
     pub fn new() -> Self {
@@ -131,42 +345,82 @@ impl TelegramConnector {
         &mut self,
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
-        let config: TelegramConfig =
+        let mut config: TelegramConfig =
             serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {
                 code: 1003,
                 message: format!("Invalid configuration: {e}"),
             })?;
 
-        if config.credential.is_none() {
-            return Err(FcpError::InvalidRequest {
-                code: 1004,
-                message: "Missing required 'credential' in configuration".into(),
-            });
-        }
+        config.validate_runtime_settings()?;
+        let auth_mode = config.resolve_auth_mode()?;
+        let normalized_base_url = config.normalize_base_url()?;
+        config.base_url = Some(normalized_base_url.clone());
 
-        let bot_credential = match config.credential.clone() {
-            Some(credential) => credential,
-            None => {
-                return Err(FcpError::InvalidRequest {
-                    code: 1004,
-                    message: "Missing required 'credential' in configuration".into(),
+        let mut status = "configured";
+        let mut details = json!({});
+        match auth_mode {
+            TelegramAuthConfig::BotToken => {
+                let bot_credential = config
+                    .credential
+                    .as_deref()
+                    .map(str::trim)
+                    .ok_or(FcpError::InvalidRequest {
+                        code: 1004,
+                        message: "Missing required credential in configuration".into(),
+                    })?
+                    .to_string();
+
+                validate_bot_token_syntax(&bot_credential)?;
+                config.credential = Some(bot_credential.clone());
+                config.credential_id = None;
+
+                let mut client =
+                    TelegramClient::new(&bot_credential).map_err(|e| FcpError::Internal {
+                        message: format!("Failed to create HTTP client: {e}"),
+                    })?;
+                client = client.with_base_url(&normalized_base_url);
+
+                let bot_info = client
+                    .get_me()
+                    .await
+                    .map_err(|e: TelegramError| FcpError::External {
+                        service: "telegram".into(),
+                        message: format!("Credential validation failed: {e}"),
+                        status_code: None,
+                        retryable: e.is_retryable(),
+                        retry_after: None,
+                    })?;
+
+                details = json!({
+                    "bot_id": bot_info.id,
+                    "username": bot_info.username,
+                    "base_url": normalized_base_url,
+                });
+
+                self.client = Some(client);
+            }
+            TelegramAuthConfig::CredentialId(id) => {
+                config.credential = None;
+                config.credential_id = Some(id);
+                self.client = None;
+                status = "configured_pending_token_materialization";
+                details = json!({
+                    "credential_id": id.to_string(),
+                    "base_url": normalized_base_url,
+                    "note": "credential_id configured; direct getMe validation requires token materialization in current runtime",
                 });
             }
-        };
-        let mut client = TelegramClient::new(&bot_credential).map_err(|e| FcpError::Internal {
-            message: format!("Failed to create HTTP client: {e}"),
-        })?;
-
-        if let Some(base_url) = &config.base_url {
-            client = client.with_base_url(base_url);
         }
 
-        self.client = Some(client);
         self.config = Some(config);
         self.base.set_configured(true);
 
-        info!("Telegram connector configured");
-        Ok(json!({ "status": "configured" }))
+        info!(auth_mode = ?auth_mode, "Telegram connector configured");
+        Ok(json!({
+            "status": status,
+            "auth_mode": self.config.as_ref().map_or("unknown", TelegramConfig::auth_label),
+            "details": details
+        }))
     }
 
     /// Handle handshake method.
@@ -181,7 +435,21 @@ impl TelegramConnector {
             })?;
 
         // Verify bot is reachable
-        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let client = self.client.as_ref().ok_or_else(|| {
+            if self
+                .config
+                .as_ref()
+                .and_then(|cfg| cfg.credential_id)
+                .is_some()
+            {
+                FcpError::InvalidRequest {
+                    code: 1004,
+                    message: "Connector is configured with credential_id but no materialized bot token is available for handshake validation".into(),
+                }
+            } else {
+                FcpError::NotConfigured
+            }
+        })?;
         let bot_info = client
             .get_me()
             .await
@@ -246,15 +514,23 @@ impl TelegramConnector {
 
     /// Handle health check.
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
-        let client = match &self.client {
-            Some(c) => c,
-            None => {
-                return Ok(json!({
-                    "status": "not_configured",
-                    "uptime_ms": self.start_time.elapsed().as_millis() as u64
-                }));
-            }
+        let Some(config) = &self.config else {
+            return Ok(json!({
+                "status": "not_configured",
+                "uptime_ms": self.start_time.elapsed().as_millis() as u64
+            }));
         };
+
+        if config.credential_id.is_some() && self.client.is_none() {
+            return Ok(json!({
+                "status": "degraded",
+                "uptime_ms": self.start_time.elapsed().as_millis() as u64,
+                "auth_mode": "credential_id",
+                "error": "credential_id configured; direct runtime token validation unavailable"
+            }));
+        }
+
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
 
         // Check if we can reach Telegram
         let result: Result<_, TelegramError> = client.get_me().await;
@@ -262,19 +538,164 @@ impl TelegramConnector {
             Ok(_) => Ok(json!({
                 "status": "ready",
                 "uptime_ms": self.start_time.elapsed().as_millis() as u64,
+                "auth_mode": config.auth_label(),
                 "polling": *self.poll_running.read().await,
                 "metrics": self.base.metrics()
             })),
             Err(e) => Ok(json!({
                 "status": "degraded",
                 "uptime_ms": self.start_time.elapsed().as_millis() as u64,
+                "auth_mode": config.auth_label(),
                 "error": e.to_string()
             })),
         }
     }
 
+    /// Handle doctor checks.
+    pub async fn handle_doctor(&self) -> FcpResult<serde_json::Value> {
+        let result = self.build_doctor_result().await;
+        serde_json::to_value(result).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize doctor result: {e}"),
+        })
+    }
+
+    async fn build_doctor_result(&self) -> DoctorResult {
+        let mut checks = Vec::new();
+
+        let configured = self.config.is_some();
+        checks.push(DoctorCheck {
+            name: "configuration".into(),
+            passed: configured,
+            message: Some(if configured {
+                "Configuration loaded".into()
+            } else {
+                "Not configured - run configure first".into()
+            }),
+            critical: true,
+        });
+
+        let Some(config) = &self.config else {
+            return DoctorResult::from_checks(checks);
+        };
+
+        checks.push(DoctorCheck {
+            name: "auth_mode".into(),
+            passed: true,
+            message: Some(format!("Auth mode: {}", config.auth_label())),
+            critical: true,
+        });
+
+        checks.push(DoctorCheck {
+            name: "poll_timeout".into(),
+            passed: (MIN_POLL_TIMEOUT_SECS..=MAX_POLL_TIMEOUT_SECS).contains(&config.poll_timeout),
+            message: Some(format!(
+                "poll_timeout={}s (expected {}..={}s)",
+                config.poll_timeout, MIN_POLL_TIMEOUT_SECS, MAX_POLL_TIMEOUT_SECS
+            )),
+            critical: true,
+        });
+
+        checks.push(DoctorCheck {
+            name: "allowed_updates".into(),
+            passed: true,
+            message: Some(if config.allowed_updates.is_empty() {
+                "allowed_updates not set (Telegram defaults will apply)".into()
+            } else {
+                format!("allowed_updates configured: {}", config.allowed_updates.join(", "))
+            }),
+            critical: false,
+        });
+
+        let base_url = config
+            .base_url
+            .as_deref()
+            .unwrap_or(DEFAULT_TELEGRAM_BASE_URL);
+        let network_ok = is_telegram_or_local_base_url(base_url);
+        checks.push(DoctorCheck {
+            name: "network_constraints".into(),
+            passed: network_ok,
+            message: Some(if network_ok {
+                format!("Base URL host is allowed for Telegram checks: {base_url}")
+            } else {
+                format!(
+                    "Base URL host does not match api.telegram.org or local test host: {base_url}"
+                )
+            }),
+            critical: false,
+        });
+
+        if let Some(token) = config.credential.as_deref().map(str::trim) {
+            checks.push(DoctorCheck {
+                name: "token_syntax".into(),
+                passed: validate_bot_token_syntax(token).is_ok(),
+                message: Some("Bot token syntax check completed".into()),
+                critical: true,
+            });
+        } else {
+            checks.push(DoctorCheck {
+                name: "token_syntax".into(),
+                passed: true,
+                message: Some("credential_id mode (no inline token syntax check)".into()),
+                critical: false,
+            });
+        }
+
+        match (&self.client, config.credential_id) {
+            (Some(client), _) => match client.get_me().await {
+                Ok(bot) => checks.push(DoctorCheck {
+                    name: "token_validation".into(),
+                    passed: true,
+                    message: Some(format!(
+                        "Read-only getMe check passed (bot_id={}, username={:?})",
+                        bot.id, bot.username
+                    )),
+                    critical: true,
+                }),
+                Err(err) => checks.push(DoctorCheck {
+                    name: "token_validation".into(),
+                    passed: false,
+                    message: Some(format!("Read-only getMe check failed: {err}")),
+                    critical: true,
+                }),
+            },
+            (None, Some(id)) => checks.push(DoctorCheck {
+                name: "token_validation".into(),
+                passed: false,
+                message: Some(format!(
+                    "credential_id {} configured; direct getMe validation unavailable without token materialization",
+                    id
+                )),
+                critical: false,
+            }),
+            (None, None) => checks.push(DoctorCheck {
+                name: "token_validation".into(),
+                passed: false,
+                message: Some("No Telegram client initialized".into()),
+                critical: true,
+            }),
+        }
+
+        DoctorResult::from_checks(checks)
+    }
+
     /// Handle connector self-check.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
+        if self
+            .config
+            .as_ref()
+            .and_then(|cfg| cfg.credential_id)
+            .is_some()
+            && self.client.is_none()
+        {
+            let report = SelfCheckReport::degraded(
+                "credential_injection_required",
+                "Configured with credential_id; materialized bot token is required for direct self-checks",
+            );
+            return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize self-check report: {e}"),
+            });
+        }
+
         let Some(client) = &self.client else {
             let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
             return serde_json::to_value(report).map_err(|e| FcpError::Internal {
@@ -1091,6 +1512,12 @@ mod tests {
     use wiremock::matchers::{body_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    const TEST_BOT_TOKEN: &str = "123456:ABCDEFGHIJKLMNOPQRSTUVWXyz012345";
+
+    fn token_path(method: &str) -> String {
+        format!("/bot{TEST_BOT_TOKEN}/{method}")
+    }
+
     async fn setup_connector_with_token(
         cap: &str,
     ) -> (TelegramConnector, fcp_core::CapabilityToken, MockServer) {
@@ -1098,7 +1525,7 @@ mod tests {
 
         // Mock getMe for handshake
         Mock::given(method("GET"))
-            .and(path("/botdummy_token/getMe"))
+            .and(path(token_path("getMe")))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "ok": true,
                 "result": {
@@ -1113,7 +1540,7 @@ mod tests {
 
         // Mock getUpdates for polling
         Mock::given(method("POST"))
-            .and(path("/botdummy_token/getUpdates"))
+            .and(path(token_path("getUpdates")))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "ok": true,
                 "result": []
@@ -1126,7 +1553,7 @@ mod tests {
         // Configure with dummy credential and mock base URL
         connector
             .handle_configure(serde_json::json!({
-                "credential": "dummy_token",
+                "credential": TEST_BOT_TOKEN,
                 "base_url": mock_server.uri()
             }))
             .await
@@ -1148,6 +1575,65 @@ mod tests {
 
         let capability = generate_valid_token(&signing_key, cap);
         (connector, capability, mock_server)
+    }
+
+    #[test]
+    fn test_validate_bot_token_syntax_rules() {
+        assert!(validate_bot_token_syntax(TEST_BOT_TOKEN).is_ok());
+        assert!(validate_bot_token_syntax("bad-token").is_err());
+        assert!(validate_bot_token_syntax("123:too_short").is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_ambiguous_auth_mode() {
+        let mut connector = TelegramConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "credential": TEST_BOT_TOKEN,
+                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00"
+            }))
+            .await;
+
+        assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_invalid_token_syntax() {
+        let mut connector = TelegramConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "credential": "not-a-token"
+            }))
+            .await;
+
+        assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_credential_id_mode_is_degraded() {
+        let mut connector = TelegramConnector::new();
+        connector
+            .handle_configure(json!({
+                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00"
+            }))
+            .await
+            .expect("configure");
+
+        let doctor: DoctorResult = serde_json::from_value(
+            connector
+                .handle_doctor()
+                .await
+                .expect("doctor response should serialize"),
+        )
+        .expect("doctor response parse");
+
+        assert_eq!(doctor.status, DoctorStatus::Degraded);
+        let validation = doctor
+            .checks
+            .iter()
+            .find(|check| check.name == "token_validation")
+            .expect("token_validation check present");
+        assert!(!validation.passed);
     }
 
     #[test]
@@ -1262,7 +1748,7 @@ mod tests {
         let (connector, token, server) = setup_connector_with_token("telegram.send_message").await;
 
         Mock::given(method("POST"))
-            .and(path("/botdummy_token/sendMessage"))
+            .and(path(token_path("sendMessage")))
             .and(body_json(serde_json::json!({
                 "chat_id": "123456789",
                 "text": "<b>secret message</b>",
@@ -1278,7 +1764,7 @@ mod tests {
             .await;
 
         Mock::given(method("POST"))
-            .and(path("/botdummy_token/sendMessage"))
+            .and(path(token_path("sendMessage")))
             .and(body_json(serde_json::json!({
                 "chat_id": "123456789",
                 "text": "secret message"
@@ -1318,7 +1804,7 @@ mod tests {
             "expected debug logs to be captured"
         );
         assert!(
-            !logs.contains("dummy_token"),
+            !logs.contains(TEST_BOT_TOKEN),
             "bot token should not appear in logs"
         );
         assert!(
@@ -1408,7 +1894,7 @@ mod tests {
         let (connector, token, server) = setup_connector_with_token("telegram.send_message").await;
 
         Mock::given(method("POST"))
-            .and(path("/botdummy_token/sendMessage"))
+            .and(path(token_path("sendMessage")))
             .and(body_json(serde_json::json!({
                 "chat_id": "123456789",
                 "text": "<b>Hello</b>",
@@ -1424,7 +1910,7 @@ mod tests {
             .await;
 
         Mock::given(method("POST"))
-            .and(path("/botdummy_token/sendMessage"))
+            .and(path(token_path("sendMessage")))
             .and(body_json(serde_json::json!({
                 "chat_id": "123456789",
                 "text": "Hello"

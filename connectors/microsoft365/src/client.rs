@@ -3,7 +3,10 @@
 //! Uses Bearer token auth and JSON bodies for POST/PUT/PATCH.
 //! Handles OData pagination via `@odata.nextLink`.
 
+use std::fmt;
+
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+use fcp_core::CredentialId;
 use reqwest::{Client, StatusCode, header};
 use tracing::{debug, warn};
 
@@ -12,11 +15,51 @@ use crate::{
     types::GraphListResponse,
 };
 
-const DEFAULT_API_URL: &str = "https://graph.microsoft.com/v1.0";
+pub const DEFAULT_API_URL: &str = "https://graph.microsoft.com/v1.0";
+
+/// Authentication mode for Microsoft Graph access.
+#[derive(Clone)]
+pub enum M365Auth {
+    /// Direct bearer access token.
+    AccessToken(String),
+    /// Secretless credential reference for egress proxy injection.
+    CredentialId(CredentialId),
+}
+
+impl M365Auth {
+    /// Render a redacted auth label for diagnostics/logging.
+    #[must_use]
+    pub fn redacted_label(&self) -> String {
+        match self {
+            Self::AccessToken(_) => "access_token:redacted".to_string(),
+            Self::CredentialId(id) => {
+                let id_str = id.to_string();
+                let prefix = id_str.chars().take(8).collect::<String>();
+                format!("credential_id:{prefix}…")
+            }
+        }
+    }
+
+    /// True when auth depends on credential injection.
+    #[must_use]
+    pub const fn is_secretless(&self) -> bool {
+        matches!(self, Self::CredentialId(_))
+    }
+}
+
+impl fmt::Debug for M365Auth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AccessToken(_) => f.debug_tuple("AccessToken").field(&"<redacted>").finish(),
+            Self::CredentialId(id) => f.debug_tuple("CredentialId").field(id).finish(),
+        }
+    }
+}
 
 /// Microsoft Graph REST API client.
 pub struct M365Client {
     http: Client,
+    auth: M365Auth,
     api_url: String,
     max_retries: u32,
 }
@@ -24,20 +67,19 @@ pub struct M365Client {
 impl M365Client {
     /// Create a new Graph API client with a Bearer access token.
     pub fn new(access_token: &str) -> M365Result<Self> {
-        let mut headers = header::HeaderMap::new();
-        headers.insert(
-            header::AUTHORIZATION,
-            format!("Bearer {access_token}").parse().unwrap(),
-        );
+        Self::new_with_auth(M365Auth::AccessToken(access_token.to_string()))
+    }
 
+    /// Create a new Graph API client with explicit auth mode.
+    pub fn new_with_auth(auth: M365Auth) -> M365Result<Self> {
         let http = Client::builder()
-            .default_headers(headers)
             .user_agent("fcp-microsoft365/0.1.0")
             .build()
             .map_err(M365Error::Http)?;
 
         Ok(Self {
             http,
+            auth,
             api_url: DEFAULT_API_URL.to_string(),
             max_retries: 2,
         })
@@ -55,6 +97,46 @@ impl M365Client {
     pub fn with_retry_config(mut self, max_retries: u32) -> Self {
         self.max_retries = max_retries;
         self
+    }
+
+    fn apply_auth(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.auth {
+            M365Auth::AccessToken(token) => {
+                request.header(header::AUTHORIZATION, format!("Bearer {token}"))
+            }
+            M365Auth::CredentialId(credential_id) => {
+                request.header("X-FCP-Credential-ID", credential_id.to_string())
+            }
+        }
+    }
+
+    /// Perform a lightweight credential/readiness check against Graph.
+    ///
+    /// This first probes `/me` (delegated flows) and falls back to `/organization`
+    /// for application-permission tokens that do not expose `/me`.
+    pub async fn health_check(&self) -> M365Result<serde_json::Value> {
+        let me_url = format!("{}/me?$select=id,userPrincipalName", self.api_url);
+        match self.get(&me_url).await {
+            Ok(payload) => Ok(payload),
+            Err(primary_err) => {
+                let can_fallback = matches!(
+                    primary_err,
+                    M365Error::Api {
+                        status_code: Some(401 | 403),
+                        ..
+                    }
+                );
+                if !can_fallback {
+                    return Err(primary_err);
+                }
+
+                let org_url = format!("{}/organization?$select=id,displayName", self.api_url);
+                match self.get(&org_url).await {
+                    Ok(payload) => Ok(payload),
+                    Err(_) => Err(primary_err),
+                }
+            }
+        }
     }
 
     // ── Mail operations ──────────────────────────────────────────
@@ -338,11 +420,12 @@ impl M365Client {
     // ── HTTP helpers ─────────────────────────────────────────────
 
     async fn get(&self, url: &str) -> M365Result<serde_json::Value> {
-        self.execute(|| self.http.get(url)).await
+        self.execute(|| self.apply_auth(self.http.get(url))).await
     }
 
     async fn get_bytes(&self, url: &str) -> M365Result<Vec<u8>> {
-        self.execute_bytes(|| self.http.get(url)).await
+        self.execute_bytes(|| self.apply_auth(self.http.get(url)))
+            .await
     }
 
     async fn post_json(
@@ -350,7 +433,8 @@ impl M365Client {
         url: &str,
         body: &serde_json::Value,
     ) -> M365Result<serde_json::Value> {
-        self.execute(|| self.http.post(url).json(body)).await
+        self.execute(|| self.apply_auth(self.http.post(url).json(body)))
+            .await
     }
 
     async fn post_json_no_content(
@@ -358,7 +442,7 @@ impl M365Client {
         url: &str,
         body: &serde_json::Value,
     ) -> M365Result<()> {
-        self.execute_no_content(|| self.http.post(url).json(body))
+        self.execute_no_content(|| self.apply_auth(self.http.post(url).json(body)))
             .await
     }
 
@@ -367,7 +451,8 @@ impl M365Client {
         url: &str,
         body: &serde_json::Value,
     ) -> M365Result<serde_json::Value> {
-        self.execute(|| self.http.patch(url).json(body)).await
+        self.execute(|| self.apply_auth(self.http.patch(url).json(body)))
+            .await
     }
 
     async fn put_bytes(
@@ -377,16 +462,19 @@ impl M365Client {
     ) -> M365Result<serde_json::Value> {
         let content = content.to_vec();
         self.execute(|| {
-            self.http
-                .put(url)
-                .header(header::CONTENT_TYPE, "application/octet-stream")
-                .body(content.clone())
+            self.apply_auth(
+                self.http
+                    .put(url)
+                    .header(header::CONTENT_TYPE, "application/octet-stream")
+                    .body(content.clone()),
+            )
         })
         .await
     }
 
     async fn delete_no_content(&self, url: &str) -> M365Result<()> {
-        self.execute_no_content(|| self.http.delete(url)).await
+        self.execute_no_content(|| self.apply_auth(self.http.delete(url)))
+            .await
     }
 
     async fn execute(
@@ -608,7 +696,7 @@ mod tests {
     use super::*;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
-        matchers::{method, path},
+        matchers::{header, method, path},
     };
 
     #[fcp_async_core::runtime::test]
@@ -842,6 +930,28 @@ mod tests {
         let result = client.list_messages("me", None, None, None, None).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), M365Error::RateLimit { .. }));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_health_check_with_credential_id_header() {
+        let mock_server = MockServer::start().await;
+        let credential_id = CredentialId::parse("11223344-5566-7788-99aa-bbccddeeff00").unwrap();
+
+        Mock::given(method("GET"))
+            .and(path("/me"))
+            .and(header("x-fcp-credential-id", credential_id.to_string()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "user-1",
+                "userPrincipalName": "user@contoso.com"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = M365Client::new_with_auth(M365Auth::CredentialId(credential_id))
+            .unwrap()
+            .with_api_url(&mock_server.uri());
+        let payload = client.health_check().await.unwrap();
+        assert_eq!(payload["id"], "user-1");
     }
 
     #[fcp_async_core::runtime::test]

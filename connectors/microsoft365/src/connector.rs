@@ -2,21 +2,185 @@
 
 use std::sync::Arc;
 
-use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+use base64::{
+    Engine,
+    engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD as BASE64_URL},
+};
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
-    ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier, SessionId,
-    SimulateRequest, SimulateResponse,
+    ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest,
+    HandshakeResponse, IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel,
+    SafetyTier, SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
+use serde::Deserialize;
 use serde_json::json;
 use tracing::{info, instrument};
 
-use crate::{client::M365Client, error::M365Error};
+use crate::{
+    client::{DEFAULT_API_URL, M365Auth, M365Client},
+    error::M365Error,
+};
+
+const DEFAULT_AUTH_URL: &str = "https://login.microsoftonline.com";
+const DEFAULT_CLIENT_CREDENTIAL_SCOPE: &str = "https://graph.microsoft.com/.default";
+
+#[derive(Debug, Clone)]
+struct M365Config {
+    auth_mode: M365AuthMode,
+    api_url: String,
+    required_permissions: Vec<String>,
+    token_permissions: Option<TokenPermissions>,
+}
+
+#[derive(Debug, Clone)]
+enum M365AuthMode {
+    AccessToken,
+    ClientCredentials {
+        tenant_id: String,
+        client_id: String,
+        scope: String,
+    },
+    CredentialId(CredentialId),
+}
+
+impl M365AuthMode {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::AccessToken => "access_token",
+            Self::ClientCredentials { .. } => "client_credentials",
+            Self::CredentialId(_) => "credential_id",
+        }
+    }
+
+    fn summary(&self) -> serde_json::Value {
+        match self {
+            Self::AccessToken => json!({ "mode": "access_token" }),
+            Self::ClientCredentials {
+                tenant_id,
+                client_id,
+                scope,
+            } => {
+                let prefix = client_id.chars().take(8).collect::<String>();
+                json!({
+                    "mode": "client_credentials",
+                    "tenant_id": tenant_id,
+                    "client_id_prefix": prefix,
+                    "scope": scope,
+                })
+            }
+            Self::CredentialId(credential_id) => json!({
+                "mode": "credential_id",
+                "credential_id": credential_id,
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct TokenPermissions {
+    scopes: Vec<String>,
+    roles: Vec<String>,
+}
+
+impl TokenPermissions {
+    fn parse(token: &str) -> FcpResult<Self> {
+        let mut parts = token.split('.');
+        let _header = parts.next().ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "access_token is not a JWT (missing header)".into(),
+        })?;
+        let payload_b64 = parts.next().ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "access_token is not a JWT (missing payload)".into(),
+        })?;
+
+        let payload_bytes = BASE64_URL
+            .decode(payload_b64)
+            .or_else(|_| BASE64.decode(payload_b64))
+            .map_err(|_| FcpError::InvalidRequest {
+                code: 1003,
+                message: "access_token payload is not valid base64".into(),
+            })?;
+
+        let payload_json: serde_json::Value =
+            serde_json::from_slice(&payload_bytes).map_err(|_| FcpError::InvalidRequest {
+                code: 1003,
+                message: "access_token payload is not valid JSON".into(),
+            })?;
+
+        let scopes = payload_json
+            .get("scp")
+            .and_then(|v| v.as_str())
+            .map(|raw| {
+                raw.split_whitespace()
+                    .filter(|s| !s.is_empty())
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let roles = payload_json
+            .get("roles")
+            .and_then(|v| v.as_array())
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        if scopes.is_empty() && roles.is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "access_token is missing both scp and roles claims".into(),
+            });
+        }
+
+        Ok(Self { scopes, roles })
+    }
+
+    fn all(&self) -> Vec<String> {
+        let mut perms = self.scopes.clone();
+        perms.extend(self.roles.iter().cloned());
+        perms
+    }
+
+    fn missing_required(&self, required_permissions: &[String]) -> Vec<String> {
+        let available = self.all();
+        required_permissions
+            .iter()
+            .filter(|required| !available.iter().any(|present| present == *required))
+            .cloned()
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AppCredentialsConfig {
+    tenant_id: String,
+    client_id: String,
+    client_secret: String,
+    #[serde(default = "default_client_credential_scope")]
+    scope: String,
+}
+
+fn default_client_credential_scope() -> String {
+    DEFAULT_CLIENT_CREDENTIAL_SCOPE.to_string()
+}
+
+#[derive(Debug, Deserialize)]
+struct OAuthTokenResponse {
+    access_token: String,
+}
 
 /// FCP Microsoft 365 Connector.
 pub struct M365Connector {
     base: Arc<BaseConnector>,
+    config: Option<M365Config>,
     client: Option<M365Client>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
@@ -30,6 +194,7 @@ impl M365Connector {
             base: Arc::new(BaseConnector::new(ConnectorId::from_static(
                 "fcp.microsoft365",
             ))),
+            config: None,
             client: None,
             verifier: None,
             session_id: None,
@@ -42,30 +207,106 @@ impl M365Connector {
         &mut self,
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
-        let access_token =
-            params
-                .get("access_token")
-                .and_then(|v| v.as_str())
-                .ok_or(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing access_token in configuration".into(),
-                })?;
+        let allow_test_endpoints = params
+            .get("allow_test_api_url")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
-        let api_url = params.get("api_url").and_then(|v| v.as_str());
+        let api_url = params
+            .get("api_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or(DEFAULT_API_URL);
+        let api_url = validate_endpoint(
+            api_url,
+            &["graph.microsoft.com"],
+            allow_test_endpoints,
+            "api_url",
+        )?;
 
-        let mut client = M365Client::new(access_token).map_err(|e| FcpError::Internal {
-            message: format!("Failed to create HTTP client: {e}"),
-        })?;
+        let auth_url = params
+            .get("auth_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or(DEFAULT_AUTH_URL);
+        let auth_url = validate_endpoint(
+            auth_url,
+            &["login.microsoftonline.com"],
+            allow_test_endpoints,
+            "auth_url",
+        )?;
 
-        if let Some(url) = api_url {
-            client = client.with_api_url(url);
+        let required_permissions = parse_required_permissions(&params)?;
+
+        let access_token = parse_access_token(&params);
+        let credential_id = parse_credential_id(&params)?;
+        let app_credentials = parse_app_credentials(&params)?;
+
+        let selected = [access_token.is_some(), credential_id.is_some(), app_credentials.is_some()]
+            .into_iter()
+            .filter(|selected_mode| *selected_mode)
+            .count();
+
+        if selected != 1 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Provide exactly one auth source: access_token, credential_id, or app_credentials".into(),
+            });
         }
 
+        let (auth_mode, auth, token_permissions) = if let Some(token) = access_token {
+            let permissions = TokenPermissions::parse(&token)?;
+            ensure_required_permissions(&permissions, &required_permissions)?;
+            (
+                M365AuthMode::AccessToken,
+                M365Auth::AccessToken(token),
+                Some(permissions),
+            )
+        } else if let Some(credential_id) = credential_id {
+            (
+                M365AuthMode::CredentialId(credential_id.clone()),
+                M365Auth::CredentialId(credential_id),
+                None,
+            )
+        } else if let Some(app_cfg) = app_credentials {
+            let token = exchange_client_credentials(&auth_url, &app_cfg).await?;
+            let permissions = TokenPermissions::parse(&token)?;
+            ensure_required_permissions(&permissions, &required_permissions)?;
+            (
+                M365AuthMode::ClientCredentials {
+                    tenant_id: app_cfg.tenant_id,
+                    client_id: app_cfg.client_id,
+                    scope: app_cfg.scope,
+                },
+                M365Auth::AccessToken(token),
+                Some(permissions),
+            )
+        } else {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "No supported auth mode selected".into(),
+            });
+        };
+
+        let auth_label = auth.redacted_label();
+        let mut client = M365Client::new_with_auth(auth).map_err(|e| FcpError::Internal {
+            message: format!("Failed to create HTTP client: {e}"),
+        })?;
+        client = client.with_api_url(&api_url);
+
+        self.config = Some(M365Config {
+            auth_mode,
+            api_url: api_url.clone(),
+            required_permissions,
+            token_permissions,
+        });
         self.client = Some(client);
         self.base.set_configured(true);
-        info!("Microsoft 365 connector configured");
+        info!(auth = %auth_label, api_url = %api_url, "Microsoft 365 connector configured");
 
-        Ok(json!({ "status": "configured" }))
+        Ok(json!({
+            "status": "configured",
+            "auth": auth_label,
+            "api_url": api_url
+        }))
     }
 
     /// Handle handshake method.
@@ -123,8 +364,21 @@ impl M365Connector {
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
         let configured = self.client.is_some();
         let metrics = self.base.metrics();
+        let auth_mode = self
+            .config
+            .as_ref()
+            .map(|c| c.auth_mode.label())
+            .unwrap_or("unconfigured");
+        let permissions = self
+            .config
+            .as_ref()
+            .and_then(|c| c.token_permissions.as_ref().map(TokenPermissions::all))
+            .unwrap_or_default();
         Ok(json!({
             "status": if configured { "healthy" } else { "not_configured" },
+            "auth_mode": auth_mode,
+            "api_url": self.config.as_ref().map(|c| c.api_url.clone()),
+            "permissions": permissions,
             "metrics": {
                 "requests_total": metrics.requests_total,
                 "requests_error": metrics.requests_error,
@@ -158,6 +412,60 @@ impl M365Connector {
         let response = SimulateResponse::allowed(req.id);
         serde_json::to_value(response).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize response: {e}"),
+        })
+    }
+
+    /// Handle connector self-check for host doctor/readiness.
+    pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
+        let Some(config) = &self.config else {
+            let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize self-check report: {e}"),
+            });
+        };
+
+        let Some(client) = &self.client else {
+            let report = SelfCheckReport::failed(
+                "client_not_initialized",
+                "Connector is configured but HTTP client is unavailable",
+            );
+            return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize self-check report: {e}"),
+            });
+        };
+
+        if matches!(config.auth_mode, M365AuthMode::CredentialId(_)) {
+            let mut report = SelfCheckReport::degraded(
+                "credential_injection_required",
+                "Configured with credential_id; readiness depends on egress proxy credential injection",
+            );
+            report.details = Some(json!({
+                "auth_mode": config.auth_mode.summary(),
+                "required_permissions": config.required_permissions,
+            }));
+            return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize self-check report: {e}"),
+            });
+        }
+
+        let mut report = match client.health_check().await {
+            Ok(_) => SelfCheckReport::ok(),
+            Err(err) => {
+                if err.is_retryable() {
+                    SelfCheckReport::degraded("self_check_retryable", err.to_string())
+                } else {
+                    SelfCheckReport::failed("self_check_failed", err.to_string())
+                }
+            }
+        };
+        report.details = Some(json!({
+            "auth_mode": config.auth_mode.summary(),
+            "required_permissions": config.required_permissions,
+            "permissions": config.token_permissions.as_ref().map(TokenPermissions::all).unwrap_or_default(),
+        }));
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {e}"),
         })
     }
 
@@ -576,6 +884,232 @@ impl M365Connector {
         info!("Microsoft 365 connector shutting down");
         Ok(json!({ "status": "shutdown" }))
     }
+}
+
+fn parse_access_token(params: &serde_json::Value) -> Option<String> {
+    let top_level = params
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+
+    top_level.or_else(|| {
+        params
+            .get("oauth")
+            .and_then(|oauth| oauth.get("access_token"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn parse_credential_id(params: &serde_json::Value) -> FcpResult<Option<CredentialId>> {
+    let Some(raw) = params.get("credential_id") else {
+        return Ok(None);
+    };
+    let raw = raw.as_str().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: "credential_id must be a string".into(),
+    })?;
+    let parsed = CredentialId::parse(raw).map_err(|_| FcpError::InvalidRequest {
+        code: 1003,
+        message: "credential_id must be a valid UUID".into(),
+    })?;
+    Ok(Some(parsed))
+}
+
+fn parse_app_credentials(params: &serde_json::Value) -> FcpResult<Option<AppCredentialsConfig>> {
+    let Some(raw) = params.get("app_credentials") else {
+        return Ok(None);
+    };
+    let config: AppCredentialsConfig =
+        serde_json::from_value(raw.clone()).map_err(|e| FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("Invalid app_credentials object: {e}"),
+        })?;
+
+    if config.tenant_id.trim().is_empty()
+        || config.client_id.trim().is_empty()
+        || config.client_secret.trim().is_empty()
+    {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "app_credentials tenant_id, client_id, and client_secret are required".into(),
+        });
+    }
+
+    Ok(Some(config))
+}
+
+fn parse_required_permissions(params: &serde_json::Value) -> FcpResult<Vec<String>> {
+    let Some(raw) = params.get("required_permissions") else {
+        return Ok(Vec::new());
+    };
+    let values = raw.as_array().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: "required_permissions must be an array of strings".into(),
+    })?;
+
+    let mut required = Vec::new();
+    for value in values {
+        let permission = value.as_str().ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "required_permissions entries must be strings".into(),
+        })?;
+        let permission = permission.trim();
+        if permission.is_empty() {
+            continue;
+        }
+        if !required.iter().any(|existing| existing == permission) {
+            required.push(permission.to_string());
+        }
+    }
+    Ok(required)
+}
+
+fn ensure_required_permissions(
+    token_permissions: &TokenPermissions,
+    required_permissions: &[String],
+) -> FcpResult<()> {
+    if required_permissions.is_empty() {
+        return Ok(());
+    }
+    let missing = token_permissions.missing_required(required_permissions);
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "Token is missing required permissions: {}",
+                missing.join(", ")
+            ),
+        })
+    }
+}
+
+fn validate_endpoint(
+    raw_url: &str,
+    allowed_hosts: &[&str],
+    allow_test_endpoints: bool,
+    field_name: &str,
+) -> FcpResult<String> {
+    let trimmed = raw_url.trim();
+    if trimmed.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field_name} cannot be empty"),
+        });
+    }
+
+    let parsed = reqwest::Url::parse(trimmed).map_err(|e| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("Invalid {field_name}: {e}"),
+    })?;
+
+    let host = parsed.host_str().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field_name} must include a host"),
+    })?;
+
+    if !allow_test_endpoints && parsed.scheme() != "https" {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field_name} must use https in production mode"),
+        });
+    }
+
+    if parsed.host().is_some_and(|value| value.is_ipv4() || value.is_ipv6()) && !allow_test_endpoints {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field_name} must not use an IP literal"),
+        });
+    }
+
+    let host_lower = host.to_ascii_lowercase();
+    let allowed = allowed_hosts.iter().any(|allowed_host| host_lower == *allowed_host);
+    if !allowed && !(allow_test_endpoints && is_local_test_host(&host_lower)) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "{field_name} host '{host}' is not allowed by connector NetworkConstraints"
+            ),
+        });
+    }
+
+    Ok(trimmed.trim_end_matches('/').to_string())
+}
+
+fn is_local_test_host(host: &str) -> bool {
+    host == "localhost" || host == "127.0.0.1" || host == "::1"
+}
+
+async fn exchange_client_credentials(
+    auth_url: &str,
+    config: &AppCredentialsConfig,
+) -> FcpResult<String> {
+    let token_endpoint = format!(
+        "{}/{}/oauth2/v2.0/token",
+        auth_url.trim_end_matches('/'),
+        config.tenant_id
+    );
+
+    let response = reqwest::Client::builder()
+        .build()
+        .map_err(|e| FcpError::Internal {
+            message: format!("Failed to build OAuth HTTP client: {e}"),
+        })?
+        .post(&token_endpoint)
+        .form(&[
+            ("grant_type", "client_credentials"),
+            ("client_id", config.client_id.as_str()),
+            ("client_secret", config.client_secret.as_str()),
+            ("scope", config.scope.as_str()),
+        ])
+        .send()
+        .await
+        .map_err(|e| FcpError::External {
+            service: "microsoft365_oauth".into(),
+            message: e.to_string(),
+            status_code: e.status().map(|status| status.as_u16()),
+            retryable: e.is_timeout() || e.is_connect(),
+            retry_after: None,
+        })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "<no-body>".to_string());
+        return Err(FcpError::Unauthorized {
+            code: 2001,
+            message: format!(
+                "Client credentials token exchange failed: HTTP {} ({})",
+                status.as_u16(),
+                body.chars().take(256).collect::<String>()
+            ),
+        });
+    }
+
+    let payload: OAuthTokenResponse =
+        response
+            .json()
+            .await
+            .map_err(|e| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("OAuth token response was invalid JSON: {e}"),
+            })?;
+    if payload.access_token.trim().is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "OAuth token response did not include access_token".into(),
+        });
+    }
+
+    Ok(payload.access_token)
 }
 
 impl Default for M365Connector {
@@ -1175,6 +1709,10 @@ mod tests {
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_manifest::ConnectorManifest;
     use std::path::PathBuf;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
 
     fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> CapabilityToken {
         let now = Utc::now();
@@ -1188,6 +1726,16 @@ mod tests {
             .sign(signing_key)
             .unwrap();
         CapabilityToken { raw: cose }
+    }
+
+    fn make_access_token(scopes: &[&str], roles: &[&str]) -> String {
+        let header = BASE64_URL.encode(r#"{"alg":"none","typ":"JWT"}"#);
+        let payload = serde_json::json!({
+            "scp": scopes.join(" "),
+            "roles": roles,
+        });
+        let payload = BASE64_URL.encode(serde_json::to_vec(&payload).unwrap());
+        format!("{header}.{payload}.signature")
     }
 
     #[fcp_async_core::runtime::test]
@@ -1211,6 +1759,95 @@ mod tests {
         let connector = M365Connector::new();
         let result = connector.handle_health().await.unwrap();
         assert_eq!(result["status"], "not_configured");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_with_access_token_permissions() {
+        let mut connector = M365Connector::new();
+        let token = make_access_token(&["Mail.Read", "Calendars.Read"], &[]);
+        let result = connector
+            .handle_configure(json!({
+                "access_token": token,
+                "required_permissions": ["Mail.Read"]
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "configured");
+
+        let health = connector.handle_health().await.unwrap();
+        assert_eq!(health["auth_mode"], "access_token");
+        assert_eq!(health["status"], "healthy");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_missing_required_permissions() {
+        let mut connector = M365Connector::new();
+        let token = make_access_token(&["User.Read"], &[]);
+        let result = connector
+            .handle_configure(json!({
+                "access_token": token,
+                "required_permissions": ["Mail.Read"]
+            }))
+            .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("missing required permissions"));
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_with_app_credentials_exchanges_token() {
+        let token_server = MockServer::start().await;
+        let token = make_access_token(&[], &["Mail.Read.All"]);
+
+        Mock::given(method("POST"))
+            .and(path("/tenant-id/oauth2/v2.0/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": token,
+                "token_type": "Bearer",
+                "expires_in": 3600
+            })))
+            .mount(&token_server)
+            .await;
+
+        let mut connector = M365Connector::new();
+        let result = connector
+            .handle_configure(json!({
+                "allow_test_api_url": true,
+                "auth_url": token_server.uri(),
+                "app_credentials": {
+                    "tenant_id": "tenant-id",
+                    "client_id": "11111111-2222-3333-4444-555555555555",
+                    "client_secret": "secret-value"
+                },
+                "required_permissions": ["Mail.Read.All"]
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "configured");
+
+        let health = connector.handle_health().await.unwrap();
+        assert_eq!(health["auth_mode"], "client_credentials");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_degraded_for_credential_id_mode() {
+        let mut connector = M365Connector::new();
+        connector
+            .handle_configure(json!({
+                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00"
+            }))
+            .await
+            .unwrap();
+        let result = connector.handle_self_check().await.unwrap();
+        assert_eq!(result["status"], "degraded");
+        assert_eq!(
+            result["reason_code"],
+            "credential_injection_required"
+        );
     }
 
     #[fcp_async_core::runtime::test]

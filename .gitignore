@@ -70,3 +70,4 @@ beads_*.db
 
 # Compiled binaries
 a.out
+.claude/settings.local.json

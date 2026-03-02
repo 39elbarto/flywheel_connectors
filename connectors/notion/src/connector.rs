@@ -589,29 +589,42 @@ impl NotionConnector {
                 ),
                 op_info(
                     "notion.search",
-                    "Search pages and databases across the workspace",
+                    "Search pages and databases across the workspace (sensitive — results are redacted)",
                     json!({
                         "type": "object",
                         "properties": {
-                            "query": { "type": "string" },
-                            "filter": { "type": "object" }
+                            "query": { "type": "string", "description": "Text query to search for" },
+                            "filter": {
+                                "type": "object",
+                                "description": "Optional filter (e.g. {\"value\": \"page\", \"property\": \"object\"} to restrict to pages)"
+                            }
                         }
                     }),
                     json!({
                         "type": "object",
+                        "required": ["results", "has_more", "sensitivity", "provenance", "taint"],
                         "properties": {
-                            "results": { "type": "array" },
-                            "has_more": { "type": "boolean" }
+                            "results": { "type": "array", "description": "Redacted search results" },
+                            "has_more": { "type": "boolean" },
+                            "result_count": { "type": "integer" },
+                            "sensitivity": { "type": "string" },
+                            "provenance": { "type": "object" },
+                            "taint": { "type": "array" }
                         }
                     }),
-                    "notion.read",
-                    RiskLevel::Low,
+                    "notion.search",
+                    RiskLevel::Medium,
                     SafetyTier::Safe,
                     IdempotencyClass::Strict,
                     AgentHint {
-                        when_to_use: "Search across all pages and databases.".into(),
-                        common_mistakes: vec![],
-                        examples: vec![r#"{"query": "meeting notes"}"#.into()],
+                        when_to_use: "Search across all pages and databases. Results include provenance metadata and PII is redacted.".into(),
+                        common_mistakes: vec![
+                            "Not checking the sensitivity field — search results may expose cross-workspace data".into(),
+                        ],
+                        examples: vec![
+                            r#"{"query": "meeting notes"}"#.into(),
+                            r#"{"query": "Q1 plan", "filter": {"value": "page", "property": "object"}}"#.into(),
+                        ],
                         related: vec![
                             CapabilityId::from_static("notion.query_database"),
                             CapabilityId::from_static("notion.get_page"),
@@ -1071,10 +1084,26 @@ impl NotionConnector {
             .await
             .map_err(|e: NotionError| e.to_fcp_error())?;
 
+        // Redact PII from search results — search can expose data across
+        // the entire workspace, so strip email/person fields before returning.
+        let redacted: Vec<serde_json::Value> = result
+            .results
+            .into_iter()
+            .map(redact_search_result)
+            .collect();
+
         Ok(json!({
-            "results": result.results,
+            "results": redacted,
             "has_more": result.has_more,
-            "next_cursor": result.next_cursor
+            "next_cursor": result.next_cursor,
+            "result_count": redacted.len(),
+            "sensitivity": "workspace_wide",
+            "provenance": {
+                "source": "notion.search",
+                "derived": false,
+                "scope": "workspace"
+            },
+            "taint": ["external_input", "cross_workspace"]
         }))
     }
 
@@ -1208,6 +1237,63 @@ impl Default for NotionConnector {
 }
 
 // ── Helper functions ──────────────────────────────────────────────
+
+/// Redact PII from a single search result object.
+///
+/// Search results can include person mentions with email addresses, internal
+/// URLs, and other sensitive workspace data. This strips or masks such fields
+/// to prevent accidental PII leakage in downstream processing.
+fn redact_search_result(mut item: serde_json::Value) -> serde_json::Value {
+    // Redact `people` and `person` property values (contain email addresses)
+    if let Some(props) = item.get_mut("properties") {
+        if let Some(obj) = props.as_object_mut() {
+            for value in obj.values_mut() {
+                redact_person_fields(value);
+            }
+        }
+    }
+
+    // Redact `created_by` and `last_edited_by` email fields
+    for key in &["created_by", "last_edited_by"] {
+        if let Some(user) = item.get_mut(*key) {
+            redact_user_email(user);
+        }
+    }
+
+    item
+}
+
+/// Redact email addresses from person-type property values.
+fn redact_person_fields(prop: &mut serde_json::Value) {
+    let prop_type = prop.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+    match prop_type {
+        "people" => {
+            if let Some(people) = prop.get_mut("people") {
+                if let Some(arr) = people.as_array_mut() {
+                    for person in arr.iter_mut() {
+                        redact_user_email(person);
+                    }
+                }
+            }
+        }
+        "created_by" | "last_edited_by" => {
+            if let Some(user) = prop.get_mut(prop_type) {
+                redact_user_email(user);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Replace an email field on a user object with a redacted placeholder.
+fn redact_user_email(user: &mut serde_json::Value) {
+    if let Some(person) = user.get_mut("person") {
+        if person.get("email").is_some() {
+            person["email"] = json!("[redacted]");
+        }
+    }
+}
 
 fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a str> {
     input

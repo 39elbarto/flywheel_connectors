@@ -396,9 +396,9 @@ related = ["notion.get_page", "notion.search"]
 # ────────────────────────────────────────────────────────────────
 
 [provides.operations."notion.search"]
-description = "Search pages and databases across the workspace"
-capability = "notion.read"
-risk_level = "low"
+description = "Search pages and databases across the workspace (sensitive — results are PII-redacted)"
+capability = "notion.search"
+risk_level = "medium"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
@@ -408,16 +408,27 @@ required = []
 type = "object"
 [provides.operations."notion.search".input_schema.properties.query]
 type = "string"
+description = "Text query to search for"
 [provides.operations."notion.search".input_schema.properties.filter]
 type = "object"
+description = "Optional filter (e.g. {value: 'page', property: 'object'} to restrict to pages)"
 
 [provides.operations."notion.search".output_schema]
-required = ["results", "has_more"]
+required = ["results", "has_more", "sensitivity", "provenance", "taint"]
 type = "object"
 [provides.operations."notion.search".output_schema.properties.results]
 type = "array"
+description = "Redacted search results with PII stripped"
 [provides.operations."notion.search".output_schema.properties.has_more]
 type = "boolean"
+[provides.operations."notion.search".output_schema.properties.result_count]
+type = "integer"
+[provides.operations."notion.search".output_schema.properties.sensitivity]
+type = "string"
+[provides.operations."notion.search".output_schema.properties.provenance]
+type = "object"
+[provides.operations."notion.search".output_schema.properties.taint]
+type = "array"
 
 [provides.operations."notion.search".network_constraints]
 host_allow = ["api.notion.com"]
@@ -435,9 +446,9 @@ total_timeout_ms = 60000
 max_response_bytes = 10485760
 
 [provides.operations."notion.search".ai_hints]
-when_to_use = "Search across all pages and databases."
-common_mistakes = []
-examples = ['{"query": "meeting notes"}']
+when_to_use = "Search across all pages and databases. Results include provenance metadata and PII is redacted."
+common_mistakes = ["Not checking the sensitivity field — search results may expose cross-workspace data"]
+examples = ['{"query": "meeting notes"}', '{"query": "Q1 plan", "filter": {"value": "page", "property": "object"}}']
 related = ["notion.query_database", "notion.get_page"]
 
 # ────────────────────────────────────────────────────────────────
@@ -793,6 +804,13 @@ window_ms = 1000
 burst = 3
 scope = "instance"
 
+[[rate_limits.pools]]
+id = "notion.search"
+requests = 3
+window_ms = 1000
+burst = 3
+scope = "instance"
+
 [rate_limits.operation_pools]
 "notion.create_page" = ["notion.write"]
 "notion.get_page" = ["notion.read"]
@@ -802,7 +820,7 @@ scope = "instance"
 "notion.create_database" = ["notion.write"]
 "notion.update_database" = ["notion.write"]
 "notion.query_database" = ["notion.read"]
-"notion.search" = ["notion.read"]
+"notion.search" = ["notion.search"]
 "notion.get_block" = ["notion.read"]
 "notion.update_block" = ["notion.write"]
 "notion.delete_block" = ["notion.delete"]

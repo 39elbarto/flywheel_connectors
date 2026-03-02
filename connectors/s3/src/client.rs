@@ -17,8 +17,9 @@ use tracing::{debug, warn};
 use crate::{
     error::{S3Error, S3Result},
     types::{
-        ApiErrorResponse, BucketInfo, GetObjectResponse, HeadObjectResponse, ListBucketsResponse,
-        ListObjectsResponse, ObjectInfo, PresignedUrlResponse, PutObjectResponse,
+        ApiErrorResponse, BucketInfo, CreateBucketResponse, DeleteBucketResponse,
+        GetObjectResponse, HeadObjectResponse, ListBucketsResponse, ListObjectsResponse, ObjectInfo,
+        PresignedUrlResponse, PutObjectResponse,
     },
 };
 
@@ -376,6 +377,34 @@ impl S3Client {
         Ok(ListBucketsResponse { buckets })
     }
 
+    /// Create a new bucket.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failures or auth errors.
+    pub async fn create_bucket(&self, bucket: &str) -> S3Result<CreateBucketResponse> {
+        let url = self.bucket_url(bucket);
+        self.put_empty_request(&url).await?;
+        Ok(CreateBucketResponse {
+            bucket: bucket.to_string(),
+            created: true,
+        })
+    }
+
+    /// Delete an empty bucket.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failures or auth errors.
+    pub async fn delete_bucket(&self, bucket: &str) -> S3Result<DeleteBucketResponse> {
+        let url = self.bucket_url(bucket);
+        self.delete_request(&url).await?;
+        Ok(DeleteBucketResponse {
+            bucket: bucket.to_string(),
+            deleted: true,
+        })
+    }
+
     /// Generate a presigned URL for temporary access.
     ///
     /// Note: This generates a placeholder presigned URL. Real AWS SigV4
@@ -420,6 +449,11 @@ impl S3Client {
     fn object_url(&self, bucket: &str, key: &str) -> String {
         let encoded_key = percent_encoding::utf8_percent_encode(key, S3_PATH_SET);
         format!("{}/{bucket}/{encoded_key}", self.base_url)
+    }
+
+    /// Build the URL for a bucket.
+    fn bucket_url(&self, bucket: &str) -> String {
+        format!("{}/{}", self.base_url, bucket)
     }
 
     /// GET request returning deserialized JSON.
@@ -588,6 +622,60 @@ impl S3Client {
                         delay_ms = delay.as_millis(),
                         error = %e,
                         "Retrying COPY after connection error"
+                    );
+                    sleep(delay).await;
+                    delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
+                }
+                Err(e) => return Err(S3Error::Http(e)),
+            }
+        }
+    }
+
+    /// PUT request without parsing a response body.
+    async fn put_empty_request(&self, url: &str) -> S3Result<()> {
+        let mut delay = Duration::from_millis(self.initial_delay_ms);
+        let mut attempts = 0;
+
+        loop {
+            attempts += 1;
+            debug!(attempt = attempts, url, "S3 PUT(empty) request");
+
+            let result = self
+                .apply_auth(self.client.put(url))
+                .header("x-amz-content-sha256", "UNSIGNED-PAYLOAD")
+                .send()
+                .await;
+
+            match result {
+                Ok(response) => {
+                    if let Some(retry_result) = Self::check_rate_limit(&response) {
+                        if attempts <= self.max_retries {
+                            let wait = retry_result.unwrap_or(delay);
+                            warn!(attempts, "Rate limited on PUT(empty), waiting {wait:?}");
+                            sleep(wait).await;
+                            delay =
+                                std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
+                            continue;
+                        }
+                        return Err(S3Error::RateLimited {
+                            retry_after_ms: delay.as_millis() as u64,
+                        });
+                    }
+
+                    let status = response.status();
+                    if status.is_success() || status == StatusCode::NO_CONTENT {
+                        return Ok(());
+                    }
+
+                    let bytes = response.bytes().await?;
+                    return Err(parse_error_response(status, &bytes));
+                }
+                Err(e) if (e.is_timeout() || e.is_connect()) && attempts <= self.max_retries => {
+                    warn!(
+                        attempt = attempts,
+                        delay_ms = delay.as_millis(),
+                        error = %e,
+                        "Retrying PUT(empty) after connection error"
                     );
                     sleep(delay).await;
                     delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
@@ -847,6 +935,46 @@ mod tests {
             .unwrap();
 
         assert!(result);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_create_bucket_success() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("PUT"))
+            .and(path("/test-bucket"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&mock_server)
+            .await;
+
+        let client = S3Client::new("test_key", "test_secret", "us-east-1")
+            .unwrap()
+            .with_base_url(mock_server.uri());
+
+        let result = client.create_bucket("test-bucket").await.unwrap();
+
+        assert_eq!(result.bucket, "test-bucket");
+        assert!(result.created);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_delete_bucket_success() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("DELETE"))
+            .and(path("/test-bucket"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&mock_server)
+            .await;
+
+        let client = S3Client::new("test_key", "test_secret", "us-east-1")
+            .unwrap()
+            .with_base_url(mock_server.uri());
+
+        let result = client.delete_bucket("test-bucket").await.unwrap();
+
+        assert_eq!(result.bucket, "test-bucket");
+        assert!(result.deleted);
     }
 
     #[fcp_async_core::runtime::test]

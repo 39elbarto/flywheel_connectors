@@ -2,11 +2,13 @@
 
 use std::sync::Arc;
 
+use fcp_core::ApprovalScope::Execution;
 use fcp_core::{
-    AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
-    ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
-    SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
+    AgentHint, ApprovalMode, ApprovalToken, BaseConnector, CapabilityGrant, CapabilityId,
+    CapabilityToken, CapabilityVerifier, ConnectorId, CredentialId, EventCaps, FcpError,
+    FcpResult, HandshakeRequest, HandshakeResponse, IdempotencyClass, Introspection, OperationId,
+    OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId, SimulateRequest,
+    SimulateResponse,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -21,6 +23,11 @@ use crate::{
 struct S3Config {
     auth: S3Auth,
     base_url: String,
+}
+
+#[derive(Debug, Clone)]
+struct ExecutionApprovalContext {
+    token_id: String,
 }
 
 impl S3Config {
@@ -457,7 +464,14 @@ impl S3Connector {
                             "key": { "type": "string" }
                         }
                     }),
-                    json!({ "type": "object", "properties": { "deleted": { "type": "boolean" } } }),
+                    json!({
+                        "type": "object",
+                        "required": ["deleted", "audit"],
+                        "properties": {
+                            "deleted": { "type": "boolean" },
+                            "audit": { "type": "object" }
+                        }
+                    }),
                     "s3.delete",
                     RiskLevel::High,
                     SafetyTier::Dangerous,
@@ -467,6 +481,78 @@ impl S3Connector {
                         common_mistakes: vec!["Double-check the key before deleting.".into()],
                         examples: vec![r#"{"bucket": "my-bucket", "key": "old-file.txt"}"#.into()],
                         related: vec![CapabilityId::from_static("s3.get_object")],
+                    },
+                ),
+                op_info(
+                    "s3.create_bucket",
+                    "Create a new S3 bucket",
+                    json!({
+                        "type": "object",
+                        "required": ["bucket"],
+                        "properties": {
+                            "bucket": { "type": "string" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": ["bucket", "created", "audit"],
+                        "properties": {
+                            "bucket": { "type": "string" },
+                            "created": { "type": "boolean" },
+                            "audit": { "type": "object" }
+                        }
+                    }),
+                    "s3.write",
+                    RiskLevel::High,
+                    SafetyTier::Dangerous,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Provision a new bucket for controlled storage use.".into(),
+                        common_mistakes: vec![
+                            "Bucket names are globally unique in AWS S3.".into(),
+                            "Creating buckets in the wrong region can break clients.".into(),
+                        ],
+                        examples: vec![r#"{"bucket": "project-logs-2026"}"#.into()],
+                        related: vec![
+                            CapabilityId::from_static("s3.list_buckets"),
+                            CapabilityId::from_static("s3.delete_bucket"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "s3.delete_bucket",
+                    "Delete an empty S3 bucket",
+                    json!({
+                        "type": "object",
+                        "required": ["bucket"],
+                        "properties": {
+                            "bucket": { "type": "string" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": ["bucket", "deleted", "audit"],
+                        "properties": {
+                            "bucket": { "type": "string" },
+                            "deleted": { "type": "boolean" },
+                            "audit": { "type": "object" }
+                        }
+                    }),
+                    "s3.delete",
+                    RiskLevel::High,
+                    SafetyTier::Dangerous,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Remove an empty bucket that is no longer needed.".into(),
+                        common_mistakes: vec![
+                            "Delete all objects first or the request will fail.".into(),
+                            "Verify no downstream workflows rely on this bucket.".into(),
+                        ],
+                        examples: vec![r#"{"bucket": "old-project-artifacts"}"#.into()],
+                        related: vec![
+                            CapabilityId::from_static("s3.list_buckets"),
+                            CapabilityId::from_static("s3.delete_object"),
+                        ],
                     },
                 ),
                 op_info(
@@ -584,10 +670,17 @@ impl S3Connector {
                             "expires_in": { "type": "integer" }
                         }
                     }),
-                    json!({ "type": "object", "properties": { "url": { "type": "string" } } }),
+                    json!({
+                        "type": "object",
+                        "required": ["url", "audit"],
+                        "properties": {
+                            "url": { "type": "string" },
+                            "audit": { "type": "object" }
+                        }
+                    }),
                     "s3.read",
-                    RiskLevel::Medium,
-                    SafetyTier::Risky,
+                    RiskLevel::High,
+                    SafetyTier::Dangerous,
                     IdempotencyClass::None,
                     AgentHint {
                         when_to_use: "Create a temporary URL to share object access.".into(),
@@ -677,19 +770,113 @@ impl S3Connector {
             return Err(FcpError::NotConfigured);
         }
 
+        let execution_approval = Self::require_execution_approval(operation, &input, &params)?;
+
         match operation {
             "s3.put_object" => self.invoke_put_object(input).await,
             "s3.get_object" => self.invoke_get_object(input).await,
-            "s3.delete_object" => self.invoke_delete_object(input).await,
+            "s3.delete_object" => {
+                self.invoke_delete_object(input, execution_approval.as_ref())
+                    .await
+            }
+            "s3.create_bucket" => {
+                self.invoke_create_bucket(input, execution_approval.as_ref())
+                    .await
+            }
+            "s3.delete_bucket" => {
+                self.invoke_delete_bucket(input, execution_approval.as_ref())
+                    .await
+            }
             "s3.head_object" => self.invoke_head_object(input).await,
             "s3.list_objects" => self.invoke_list_objects(input).await,
             "s3.list_buckets" => self.invoke_list_buckets().await,
             "s3.copy_object" => self.invoke_copy_object(input).await,
-            "s3.generate_presigned_url" => self.invoke_generate_presigned_url(&input),
+            "s3.generate_presigned_url" => {
+                self.invoke_generate_presigned_url(&input, execution_approval.as_ref())
+            }
             _ => Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
             }),
         }
+    }
+
+    fn require_execution_approval(
+        operation: &str,
+        input: &serde_json::Value,
+        params: &serde_json::Value,
+    ) -> FcpResult<Option<ExecutionApprovalContext>> {
+        if !requires_execution_approval(operation) {
+            return Ok(None);
+        }
+
+        let approval_value = params
+            .get("approval_token")
+            .ok_or(FcpError::CapabilityDenied {
+                capability: operation.to_string(),
+                reason: format!(
+                    "Operation '{operation}' requires an ApprovalToken with execution scope"
+                ),
+            })?;
+
+        let approval: ApprovalToken =
+            serde_json::from_value(approval_value.clone()).map_err(|e| {
+                FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Invalid approval_token format: {e}"),
+                }
+            })?;
+
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        if !approval.is_valid(now_ms) {
+            return Err(FcpError::CapabilityDenied {
+                capability: operation.to_string(),
+                reason: "approval_token is expired or not yet valid".into(),
+            });
+        }
+
+        let Execution(scope) = &approval.scope else {
+            return Err(FcpError::CapabilityDenied {
+                capability: operation.to_string(),
+                reason: "approval_token must use execution scope".into(),
+            });
+        };
+
+        if scope.connector_id != "fcp.s3" {
+            return Err(FcpError::CapabilityDenied {
+                capability: operation.to_string(),
+                reason: "approval_token connector_id does not match fcp.s3".into(),
+            });
+        }
+
+        if !operation_pattern_matches(&scope.method_pattern, operation) {
+            return Err(FcpError::CapabilityDenied {
+                capability: operation.to_string(),
+                reason: "approval_token execution scope does not allow this operation".into(),
+            });
+        }
+
+        if scope.request_object_id.is_some() || scope.input_hash.is_some() {
+            return Err(FcpError::CapabilityDenied {
+                capability: operation.to_string(),
+                reason: "approval_token binds request_object_id/input_hash, unsupported in direct connector invocation".into(),
+            });
+        }
+
+        if !scope.input_constraints.is_empty()
+            && !scope
+                .input_constraints
+                .iter()
+                .all(|constraint| input.pointer(&constraint.pointer) == Some(&constraint.expected))
+        {
+            return Err(FcpError::CapabilityDenied {
+                capability: operation.to_string(),
+                reason: "approval_token input constraints do not match this invocation".into(),
+            });
+        }
+
+        Ok(Some(ExecutionApprovalContext {
+            token_id: approval.token_id,
+        }))
     }
 
     // ── Operation implementations ─────────────────────────────────
@@ -717,7 +904,11 @@ impl S3Connector {
         Ok(json!({ "body": resp.body, "content_type": resp.content_type }))
     }
 
-    async fn invoke_delete_object(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+    async fn invoke_delete_object(
+        &self,
+        input: serde_json::Value,
+        execution_approval: Option<&ExecutionApprovalContext>,
+    ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let bucket = require_str(&input, "bucket")?;
         let key = require_str(&input, "key")?;
@@ -725,7 +916,46 @@ impl S3Connector {
             .delete_object(bucket, key)
             .await
             .map_err(|e: S3Error| e.to_fcp_error())?;
-        Ok(json!({ "deleted": true }))
+        Ok(json!({
+            "deleted": true,
+            "audit": dangerous_operation_audit("s3.delete_object", true, execution_approval),
+        }))
+    }
+
+    async fn invoke_create_bucket(
+        &self,
+        input: serde_json::Value,
+        execution_approval: Option<&ExecutionApprovalContext>,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let bucket = require_str(&input, "bucket")?;
+        let resp = client
+            .create_bucket(bucket)
+            .await
+            .map_err(|e: S3Error| e.to_fcp_error())?;
+        Ok(json!({
+            "bucket": resp.bucket,
+            "created": resp.created,
+            "audit": dangerous_operation_audit("s3.create_bucket", true, execution_approval),
+        }))
+    }
+
+    async fn invoke_delete_bucket(
+        &self,
+        input: serde_json::Value,
+        execution_approval: Option<&ExecutionApprovalContext>,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let bucket = require_str(&input, "bucket")?;
+        let resp = client
+            .delete_bucket(bucket)
+            .await
+            .map_err(|e: S3Error| e.to_fcp_error())?;
+        Ok(json!({
+            "bucket": resp.bucket,
+            "deleted": resp.deleted,
+            "audit": dangerous_operation_audit("s3.delete_bucket", true, execution_approval),
+        }))
     }
 
     async fn invoke_head_object(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
@@ -782,6 +1012,7 @@ impl S3Connector {
     fn invoke_generate_presigned_url(
         &self,
         input: &serde_json::Value,
+        execution_approval: Option<&ExecutionApprovalContext>,
     ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let bucket = require_str(input, "bucket")?;
@@ -791,9 +1022,10 @@ impl S3Connector {
             .and_then(|v| v.as_u64())
             .unwrap_or(3600);
         let resp = client.generate_presigned_url(bucket, key, expires_in);
-        serde_json::to_value(resp).map_err(|e| FcpError::Internal {
-            message: format!("Serialization error: {e}"),
-        })
+        Ok(json!({
+            "url": resp.url,
+            "audit": dangerous_operation_audit("s3.generate_presigned_url", false, execution_approval),
+        }))
     }
 
     /// Handle shutdown.
@@ -822,6 +1054,38 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a s
         })
 }
 
+fn requires_execution_approval(operation: &str) -> bool {
+    matches!(
+        operation,
+        "s3.delete_object"
+            | "s3.create_bucket"
+            | "s3.delete_bucket"
+            | "s3.generate_presigned_url"
+    )
+}
+
+fn operation_pattern_matches(pattern: &str, operation: &str) -> bool {
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        operation.starts_with(prefix)
+    } else {
+        operation == pattern
+    }
+}
+
+fn dangerous_operation_audit(
+    operation: &str,
+    side_effect: bool,
+    execution_approval: Option<&ExecutionApprovalContext>,
+) -> serde_json::Value {
+    json!({
+        "operation": operation,
+        "dangerous": true,
+        "side_effect": side_effect,
+        "approval_token_id": execution_approval.map(|ctx| ctx.token_id.clone()),
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    })
+}
+
 #[allow(clippy::fn_params_excessive_bools)]
 fn op_info(
     id: &'static str,
@@ -834,6 +1098,14 @@ fn op_info(
     idempotency: IdempotencyClass,
     ai_hints: AgentHint,
 ) -> OperationInfo {
+    let requires_approval = match safety_tier {
+        SafetyTier::Risky => Some(ApprovalMode::Policy),
+        SafetyTier::Dangerous | SafetyTier::Critical | SafetyTier::Forbidden => {
+            Some(ApprovalMode::ElevationToken)
+        }
+        SafetyTier::Safe => None,
+    };
+
     OperationInfo {
         id: OperationId::from_static(id),
         summary: summary.into(),
@@ -846,7 +1118,7 @@ fn op_info(
         idempotency,
         ai_hints,
         rate_limit: None,
-        requires_approval: None,
+        requires_approval,
     }
 }
 
@@ -977,12 +1249,14 @@ mod tests {
         assert!(op_ids.contains(&"s3.put_object"));
         assert!(op_ids.contains(&"s3.get_object"));
         assert!(op_ids.contains(&"s3.delete_object"));
+        assert!(op_ids.contains(&"s3.create_bucket"));
+        assert!(op_ids.contains(&"s3.delete_bucket"));
         assert!(op_ids.contains(&"s3.head_object"));
         assert!(op_ids.contains(&"s3.list_objects"));
         assert!(op_ids.contains(&"s3.list_buckets"));
         assert!(op_ids.contains(&"s3.copy_object"));
         assert!(op_ids.contains(&"s3.generate_presigned_url"));
-        assert_eq!(ops.len(), 8);
+        assert_eq!(ops.len(), 10);
     }
 
     // ── Provisioning automation tests ─────────────────────────────────

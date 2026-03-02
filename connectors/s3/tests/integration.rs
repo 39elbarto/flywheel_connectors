@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use chrono::Utc;
-use fcp_core::{CapabilityToken, FcpError};
+use fcp_core::{ApprovalScope, ApprovalToken, CapabilityToken, ExecutionScope, FcpError, ZoneId};
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_s3::{client::S3Client, connector::S3Connector, error::S3Error};
@@ -28,6 +28,25 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> Capabilit
         .sign(signing_key)
         .unwrap();
     CapabilityToken { raw: cose }
+}
+
+fn generate_execution_approval(method_pattern: &str) -> ApprovalToken {
+    let now_ms = u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0);
+    ApprovalToken {
+        token_id: format!("approval-{method_pattern}"),
+        issued_at_ms: now_ms.saturating_sub(1_000),
+        expires_at_ms: now_ms + 60_000,
+        issuer: "approver:test".into(),
+        scope: ApprovalScope::Execution(ExecutionScope {
+            connector_id: "fcp.s3".into(),
+            method_pattern: method_pattern.into(),
+            request_object_id: None,
+            input_hash: None,
+            input_constraints: Vec::new(),
+        }),
+        zone_id: ZoneId::work(),
+        signature: None,
+    }
 }
 
 async fn setup_handshake(
@@ -262,6 +281,25 @@ async fn client_delete_object() {
     assert!(result);
 }
 
+#[fcp_async_core::runtime::test]
+async fn client_copy_object() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/dest-bucket/copy.txt"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "etag": "\"copied-etag\""
+        })))
+        .mount(&server)
+        .await;
+
+    let client = make_client(&server.uri());
+    let result = client
+        .copy_object("src-bucket", "original.txt", "dest-bucket", "copy.txt")
+        .await
+        .unwrap();
+    assert_eq!(result.etag, "\"copied-etag\"");
+}
+
 // Note: client_head_object not tested here because wiremock strips body from HEAD
 // responses per HTTP spec, but the S3 client's head_request parses JSON body.
 // The head_object operation is tested via connector invoke below.
@@ -476,6 +514,380 @@ async fn invoke_missing_required_field_rejected() {
     match result.unwrap_err() {
         FcpError::InvalidRequest { message, .. } => {
             assert!(message.contains("key"));
+        }
+        e => panic!("Expected InvalidRequest, got: {e:?}"),
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_get_object_through_connector() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/my-bucket/data.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "body": "eyJrZXkiOiJ2YWx1ZSJ9",
+            "content_type": "application/json"
+        })))
+        .mount(&server)
+        .await;
+
+    let mut connector = S3Connector::new();
+    let signing_key = Ed25519SigningKey::generate();
+
+    setup_handshake(&mut connector, &signing_key, &["s3.get_object"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "s3.get_object");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "s3.get_object",
+            "input": {
+                "bucket": "my-bucket",
+                "key": "data.json"
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["content_type"], "application/json");
+    assert!(result["body"].as_str().is_some());
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_delete_object_through_connector() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/my-bucket/old-file.txt"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+
+    let mut connector = S3Connector::new();
+    let signing_key = Ed25519SigningKey::generate();
+
+    setup_handshake(&mut connector, &signing_key, &["s3.delete_object"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "s3.delete_object");
+    let approval = generate_execution_approval("s3.delete_object");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "s3.delete_object",
+            "input": {
+                "bucket": "my-bucket",
+                "key": "old-file.txt"
+            },
+            "capability_token": token,
+            "approval_token": approval,
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["deleted"], true);
+    assert_eq!(result["audit"]["operation"], "s3.delete_object");
+    assert_eq!(result["audit"]["dangerous"], true);
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_create_bucket_through_connector() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/new-bucket"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let mut connector = S3Connector::new();
+    let signing_key = Ed25519SigningKey::generate();
+
+    setup_handshake(&mut connector, &signing_key, &["s3.create_bucket"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "s3.create_bucket");
+    let approval = generate_execution_approval("s3.create_bucket");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "s3.create_bucket",
+            "input": {
+                "bucket": "new-bucket"
+            },
+            "capability_token": token,
+            "approval_token": approval,
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["bucket"], "new-bucket");
+    assert_eq!(result["created"], true);
+    assert_eq!(result["audit"]["operation"], "s3.create_bucket");
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_delete_bucket_through_connector() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/old-bucket"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+
+    let mut connector = S3Connector::new();
+    let signing_key = Ed25519SigningKey::generate();
+
+    setup_handshake(&mut connector, &signing_key, &["s3.delete_bucket"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "s3.delete_bucket");
+    let approval = generate_execution_approval("s3.delete_bucket");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "s3.delete_bucket",
+            "input": {
+                "bucket": "old-bucket"
+            },
+            "capability_token": token,
+            "approval_token": approval,
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["bucket"], "old-bucket");
+    assert_eq!(result["deleted"], true);
+    assert_eq!(result["audit"]["operation"], "s3.delete_bucket");
+}
+
+// Note: invoke_head_object_through_connector cannot use wiremock because HEAD
+// responses have their body stripped per HTTP spec, but the S3 client's head_request
+// tries to parse JSON from the body. The head_object dispatch is verified by:
+// 1. The unit tests in client.rs (test_put/get/delete/list cover the retry+parse pattern)
+// 2. The missing-field validation test below
+// 3. The introspect_risk_levels test confirming s3.head_object is registered
+
+#[fcp_async_core::runtime::test]
+async fn invoke_head_object_missing_field() {
+    let server = MockServer::start().await;
+
+    let mut connector = S3Connector::new();
+    let signing_key = Ed25519SigningKey::generate();
+
+    setup_handshake(&mut connector, &signing_key, &["s3.head_object"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "s3.head_object");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "s3.head_object",
+            "input": { "bucket": "my-bucket" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("key"));
+        }
+        e => panic!("Expected InvalidRequest, got: {e:?}"),
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_list_objects_through_connector() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/my-bucket"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "contents": [
+                { "key": "logs/app.log", "size": 500 },
+                { "key": "logs/error.log", "size": 200 }
+            ],
+            "is_truncated": false
+        })))
+        .mount(&server)
+        .await;
+
+    let mut connector = S3Connector::new();
+    let signing_key = Ed25519SigningKey::generate();
+
+    setup_handshake(&mut connector, &signing_key, &["s3.list_objects"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "s3.list_objects");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "s3.list_objects",
+            "input": {
+                "bucket": "my-bucket",
+                "prefix": "logs/",
+                "max_keys": 10
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["contents"].as_array().unwrap().len(), 2);
+    assert_eq!(result["is_truncated"], false);
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_copy_object_through_connector() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/dest-bucket/backup.txt"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "etag": "\"copy-etag\""
+        })))
+        .mount(&server)
+        .await;
+
+    let mut connector = S3Connector::new();
+    let signing_key = Ed25519SigningKey::generate();
+
+    setup_handshake(&mut connector, &signing_key, &["s3.copy_object"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "s3.copy_object");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "s3.copy_object",
+            "input": {
+                "source_bucket": "src-bucket",
+                "source_key": "original.txt",
+                "dest_bucket": "dest-bucket",
+                "dest_key": "backup.txt"
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert!(result["etag"].as_str().is_some());
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_generate_presigned_url_through_connector() {
+    let server = MockServer::start().await;
+
+    let mut connector = S3Connector::new();
+    let signing_key = Ed25519SigningKey::generate();
+
+    setup_handshake(&mut connector, &signing_key, &["s3.generate_presigned_url"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "s3.generate_presigned_url");
+    let approval = generate_execution_approval("s3.generate_presigned_url");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "s3.generate_presigned_url",
+            "input": {
+                "bucket": "my-bucket",
+                "key": "report.pdf",
+                "expires_in": 7200
+            },
+            "capability_token": token,
+            "approval_token": approval,
+        }))
+        .await
+        .unwrap();
+
+    let url = result["url"].as_str().unwrap();
+    assert!(url.contains("my-bucket"));
+    assert!(url.contains("X-Amz-Expires=7200"));
+    assert_eq!(result["audit"]["operation"], "s3.generate_presigned_url");
+    assert_eq!(result["audit"]["dangerous"], true);
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_dangerous_operation_requires_approval_token() {
+    let server = MockServer::start().await;
+    let mut connector = S3Connector::new();
+    let signing_key = Ed25519SigningKey::generate();
+
+    setup_handshake(&mut connector, &signing_key, &["s3.delete_object"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "s3.delete_object");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "s3.delete_object",
+            "input": {
+                "bucket": "my-bucket",
+                "key": "old-file.txt"
+            },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        FcpError::CapabilityDenied { reason, .. } => {
+            assert!(reason.contains("ApprovalToken"));
+        }
+        other => panic!("Expected CapabilityDenied, got: {other:?}"),
+    }
+}
+
+// ── Risk level verification ─────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn introspect_risk_levels() {
+    let connector = S3Connector::new();
+    let result = connector.handle_introspect().await.unwrap();
+    let ops = result["operations"].as_array().unwrap();
+
+    for op in ops {
+        let id = op["id"].as_str().unwrap();
+        let risk = op["risk_level"].as_str().unwrap();
+        match id {
+            "s3.get_object" | "s3.head_object" | "s3.list_objects" | "s3.list_buckets" => {
+                assert_eq!(risk, "low", "Read op {id} should be low risk");
+            }
+            "s3.put_object" | "s3.copy_object" => {
+                assert_eq!(risk, "medium", "Write op {id} should be medium risk");
+            }
+            "s3.delete_object"
+            | "s3.create_bucket"
+            | "s3.delete_bucket"
+            | "s3.generate_presigned_url" => {
+                assert_eq!(risk, "high", "Delete op {id} should be high risk");
+            }
+            _ => panic!("Unknown operation: {id}"),
+        }
+    }
+}
+
+// ── Copy object missing field ───────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn invoke_copy_object_missing_field() {
+    let server = MockServer::start().await;
+
+    let mut connector = S3Connector::new();
+    let signing_key = Ed25519SigningKey::generate();
+
+    setup_handshake(&mut connector, &signing_key, &["s3.copy_object"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "s3.copy_object");
+    // Missing dest_key
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "s3.copy_object",
+            "input": {
+                "source_bucket": "src",
+                "source_key": "a.txt",
+                "dest_bucket": "dst"
+            },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("dest_key"));
         }
         e => panic!("Expected InvalidRequest, got: {e:?}"),
     }

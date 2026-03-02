@@ -77,6 +77,24 @@ pub struct ListBucketsResponse {
     pub buckets: Vec<BucketInfo>,
 }
 
+/// Response from create_bucket.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateBucketResponse {
+    /// Bucket name
+    pub bucket: String,
+    /// Whether the bucket was created
+    pub created: bool,
+}
+
+/// Response from delete_bucket.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteBucketResponse {
+    /// Bucket name
+    pub bucket: String,
+    /// Whether the bucket was deleted
+    pub deleted: bool,
+}
+
 /// Response from generate_presigned_url.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PresignedUrlResponse {

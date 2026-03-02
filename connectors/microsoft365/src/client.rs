@@ -381,6 +381,43 @@ impl M365Client {
         self.delete_no_content(&url).await
     }
 
+    /// Get metadata for a single drive item by ID.
+    pub async fn get_item(&self, user_id: &str, item_id: &str) -> M365Result<serde_json::Value> {
+        let url = format!("{}/users/{user_id}/drive/items/{item_id}", self.api_url);
+        self.get(&url).await
+    }
+
+    /// Search for files and folders in OneDrive.
+    pub async fn search_files(&self, user_id: &str, query: &str) -> M365Result<GraphListResponse> {
+        let encoded =
+            percent_encoding::utf8_percent_encode(query, percent_encoding::NON_ALPHANUMERIC);
+        let url = format!(
+            "{}/users/{user_id}/drive/root/search(q='{encoded}')",
+            self.api_url
+        );
+        let data = self.get(&url).await?;
+        Ok(serde_json::from_value(data)?)
+    }
+
+    /// Create a sharing link for a drive item.
+    pub async fn create_share_link(
+        &self,
+        user_id: &str,
+        item_id: &str,
+        link_type: &str,
+        scope: Option<&str>,
+    ) -> M365Result<serde_json::Value> {
+        let url = format!(
+            "{}/users/{user_id}/drive/items/{item_id}/createLink",
+            self.api_url
+        );
+        let mut body = serde_json::json!({ "type": link_type });
+        if let Some(s) = scope {
+            body["scope"] = serde_json::Value::String(s.to_string());
+        }
+        self.post_json(&url, &body).await
+    }
+
     // ── Calendar operations ──────────────────────────────────────
 
     /// List calendar events within a time range.
@@ -417,6 +454,23 @@ impl M365Client {
     pub async fn delete_event(&self, user_id: &str, event_id: &str) -> M365Result<()> {
         let url = format!("{}/users/{user_id}/events/{event_id}", self.api_url);
         self.delete_no_content(&url).await
+    }
+
+    /// Get a single calendar event by ID.
+    pub async fn get_event(&self, user_id: &str, event_id: &str) -> M365Result<serde_json::Value> {
+        let url = format!("{}/users/{user_id}/events/{event_id}", self.api_url);
+        self.get(&url).await
+    }
+
+    /// Update an existing calendar event (PATCH).
+    pub async fn update_event(
+        &self,
+        user_id: &str,
+        event_id: &str,
+        updates: &serde_json::Value,
+    ) -> M365Result<serde_json::Value> {
+        let url = format!("{}/users/{user_id}/events/{event_id}", self.api_url);
+        self.patch_json(&url, updates).await
     }
 
     /// Get free/busy schedule for users.

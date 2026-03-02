@@ -284,6 +284,278 @@ async fn files_upload_happy_path() {
     assert_eq!(result["item"]["name"], "hello.txt");
 }
 
+#[fcp_async_core::runtime::test]
+async fn files_get_item_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("m365.files.get_item.happy_path");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/users/me/drive/items/item-42"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "item-42",
+            "name": "report.pdf",
+            "size": 204_800,
+            "webUrl": "https://onedrive.example.com/item-42",
+            "file": { "mimeType": "application/pdf" }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = M365Connector::new();
+    setup_configure_access_token(&mut connector, &mock_server.uri(), &["Files.Read"]).await;
+    let signing_key = setup_handshake(&mut connector, &["m365.files.get_item"]).await;
+    let token = generate_valid_token(&signing_key, "m365.files.get_item");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "m365.files.get_item",
+            "input": { "user_id": "me", "item_id": "item-42" },
+            "capability_token": token
+        }))
+        .await
+        .expect("get_item should succeed");
+
+    assert_eq!(result["item"]["id"], "item-42");
+    assert_eq!(result["item"]["name"], "report.pdf");
+}
+
+#[fcp_async_core::runtime::test]
+async fn files_download_file_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("m365.files.download_file.happy_path");
+    let mock_server = MockServer::start().await;
+
+    // Metadata request
+    Mock::given(method("GET"))
+        .and(path("/users/me/drive/items/doc-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "doc-1",
+            "name": "notes.txt",
+            "size": 11
+        })))
+        .mount(&mock_server)
+        .await;
+
+    // Content download
+    Mock::given(method("GET"))
+        .and(path("/users/me/drive/items/doc-1/content"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"hello world".to_vec()))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = M365Connector::new();
+    setup_configure_access_token(&mut connector, &mock_server.uri(), &["Files.Read"]).await;
+    let signing_key = setup_handshake(&mut connector, &["m365.files.download_file"]).await;
+    let token = generate_valid_token(&signing_key, "m365.files.download_file");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "m365.files.download_file",
+            "input": { "user_id": "me", "item_id": "doc-1" },
+            "capability_token": token
+        }))
+        .await
+        .expect("download_file should succeed");
+
+    assert_eq!(result["name"], "notes.txt");
+    assert_eq!(result["size"], 11);
+    // Content should be base64-encoded
+    let content_b64 = result["content"].as_str().expect("content string");
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(content_b64)
+        .expect("valid base64");
+    assert_eq!(decoded, b"hello world");
+}
+
+#[fcp_async_core::runtime::test]
+async fn files_delete_item_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("m365.files.delete_item.happy_path");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("DELETE"))
+        .and(path("/users/me/drive/items/item-99"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = M365Connector::new();
+    setup_configure_access_token(&mut connector, &mock_server.uri(), &["Files.ReadWrite"]).await;
+    let signing_key = setup_handshake(&mut connector, &["m365.files.delete_item"]).await;
+    let token = generate_valid_token(&signing_key, "m365.files.delete_item");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "m365.files.delete_item",
+            "input": { "user_id": "me", "item_id": "item-99" },
+            "capability_token": token
+        }))
+        .await
+        .expect("delete_item should succeed");
+
+    assert_eq!(result["status"], "deleted");
+}
+
+#[fcp_async_core::runtime::test]
+async fn files_search_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("m365.files.search.happy_path");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path_regex("/users/me/drive/root/search.*"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "value": [
+                { "id": "item-10", "name": "Q4 Report.xlsx", "size": 51_200 },
+                { "id": "item-11", "name": "Q4 Slides.pptx", "size": 102_400 }
+            ]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = M365Connector::new();
+    setup_configure_access_token(&mut connector, &mock_server.uri(), &["Files.Read"]).await;
+    let signing_key = setup_handshake(&mut connector, &["m365.files.search"]).await;
+    let token = generate_valid_token(&signing_key, "m365.files.search");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "m365.files.search",
+            "input": { "user_id": "me", "query": "Q4" },
+            "capability_token": token
+        }))
+        .await
+        .expect("search should succeed");
+
+    let items = result["items"].as_array().expect("items array");
+    assert_eq!(items.len(), 2);
+}
+
+#[fcp_async_core::runtime::test]
+async fn files_create_share_link_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("m365.files.create_share_link.happy_path");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/users/me/drive/items/item-42/createLink"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "id": "link-abc",
+            "link": {
+                "type": "view",
+                "scope": "organization",
+                "webUrl": "https://contoso.sharepoint.com/s/link-abc"
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = M365Connector::new();
+    setup_configure_access_token(&mut connector, &mock_server.uri(), &["Files.ReadWrite"]).await;
+    let signing_key = setup_handshake(&mut connector, &["m365.files.create_share_link"]).await;
+    let token = generate_valid_token(&signing_key, "m365.files.create_share_link");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "m365.files.create_share_link",
+            "input": {
+                "user_id": "me",
+                "item_id": "item-42",
+                "type": "view",
+                "scope": "organization"
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("create_share_link should succeed");
+
+    assert!(result["link"].is_object());
+}
+
+#[fcp_async_core::runtime::test]
+async fn files_delete_item_missing_item_id() {
+    let _ctx = AsyncTestContext::for_scenario("m365.files.delete_item.missing_item_id");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = M365Connector::new();
+    setup_configure_access_token(&mut connector, &mock_server.uri(), &["Files.ReadWrite"]).await;
+    let signing_key = setup_handshake(&mut connector, &["m365.files.delete_item"]).await;
+    let token = generate_valid_token(&signing_key, "m365.files.delete_item");
+
+    let err = connector
+        .handle_invoke(json!({
+            "operation": "m365.files.delete_item",
+            "input": { "user_id": "me" },
+            "capability_token": token
+        }))
+        .await
+        .expect_err("should fail without item_id");
+
+    assert!(
+        format!("{err:?}").contains("item_id"),
+        "error should mention missing field: {err:?}"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn files_search_missing_query() {
+    let _ctx = AsyncTestContext::for_scenario("m365.files.search.missing_query");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = M365Connector::new();
+    setup_configure_access_token(&mut connector, &mock_server.uri(), &["Files.Read"]).await;
+    let signing_key = setup_handshake(&mut connector, &["m365.files.search"]).await;
+    let token = generate_valid_token(&signing_key, "m365.files.search");
+
+    let err = connector
+        .handle_invoke(json!({
+            "operation": "m365.files.search",
+            "input": { "user_id": "me" },
+            "capability_token": token
+        }))
+        .await
+        .expect_err("should fail without query");
+
+    assert!(
+        format!("{err:?}").contains("query"),
+        "error should mention missing field: {err:?}"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn introspect_files_risk_levels() {
+    let _ctx = AsyncTestContext::for_scenario("m365.introspect.files_risk_levels");
+    let connector = M365Connector::new();
+    let result = connector
+        .handle_introspect()
+        .await
+        .expect("introspect should succeed");
+
+    let ops = result["operations"].as_array().expect("operations array");
+    for op in ops {
+        let id = op["id"].as_str().unwrap();
+        let risk = op["risk_level"].as_str().unwrap();
+        match id {
+            "m365.files.list_items"
+            | "m365.files.get_item"
+            | "m365.files.download_file"
+            | "m365.files.search" => {
+                assert_eq!(risk, "low", "read op {id} should be low risk");
+            }
+            "m365.files.upload_file" => {
+                assert_eq!(risk, "medium", "upload op {id} should be medium risk");
+            }
+            "m365.files.delete_item" | "m365.files.create_share_link" => {
+                assert_eq!(risk, "high", "dangerous op {id} should be high risk");
+            }
+            _ => {} // non-file ops, skip
+        }
+    }
+
+    let file_op_count = ops
+        .iter()
+        .filter_map(|o| o["id"].as_str())
+        .filter(|id| id.starts_with("m365.files."))
+        .count();
+    assert_eq!(file_op_count, 7, "should have exactly 7 file operations");
+}
+
 // ============================================================================
 // Happy-path: Calendar operations
 // ============================================================================
@@ -362,6 +634,338 @@ async fn calendar_create_event_happy_path() {
         .expect("create_event should succeed");
 
     assert_eq!(result["event"]["subject"], "Sprint Planning");
+}
+
+#[fcp_async_core::runtime::test]
+async fn calendar_get_event_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("m365.calendar.get_event.happy_path");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/users/me/events/evt-123"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "evt-123",
+            "subject": "1:1 with Manager",
+            "start": { "dateTime": "2026-03-03T10:00:00", "timeZone": "UTC" },
+            "end": { "dateTime": "2026-03-03T10:30:00", "timeZone": "UTC" },
+            "attendees": [{ "emailAddress": { "address": "manager@contoso.com" } }]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = M365Connector::new();
+    setup_configure_access_token(&mut connector, &mock_server.uri(), &["Calendars.Read"]).await;
+    let signing_key = setup_handshake(&mut connector, &["m365.calendar.get_event"]).await;
+    let token = generate_valid_token(&signing_key, "m365.calendar.get_event");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "m365.calendar.get_event",
+            "input": {
+                "user_id": "me",
+                "event_id": "evt-123"
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("get_event should succeed");
+
+    assert_eq!(result["event"]["id"], "evt-123");
+    assert_eq!(result["event"]["subject"], "1:1 with Manager");
+}
+
+#[fcp_async_core::runtime::test]
+async fn calendar_get_event_missing_event_id() {
+    let _ctx = AsyncTestContext::for_scenario("m365.calendar.get_event.missing_event_id");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = M365Connector::new();
+    setup_configure_access_token(&mut connector, &mock_server.uri(), &["Calendars.Read"]).await;
+    let signing_key = setup_handshake(&mut connector, &["m365.calendar.get_event"]).await;
+    let token = generate_valid_token(&signing_key, "m365.calendar.get_event");
+
+    let err = connector
+        .handle_invoke(json!({
+            "operation": "m365.calendar.get_event",
+            "input": { "user_id": "me" },
+            "capability_token": token
+        }))
+        .await
+        .expect_err("should fail without event_id");
+
+    assert!(
+        format!("{err:?}").contains("event_id"),
+        "error should mention missing field: {err:?}"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn calendar_update_event_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("m365.calendar.update_event.happy_path");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("PATCH"))
+        .and(path("/users/me/events/evt-456"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "evt-456",
+            "subject": "Updated Standup",
+            "start": { "dateTime": "2026-03-03T10:00:00", "timeZone": "America/Chicago" },
+            "end": { "dateTime": "2026-03-03T10:30:00", "timeZone": "America/Chicago" }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = M365Connector::new();
+    setup_configure_access_token(&mut connector, &mock_server.uri(), &["Calendars.ReadWrite"])
+        .await;
+    let signing_key = setup_handshake(&mut connector, &["m365.calendar.update_event"]).await;
+    let token = generate_valid_token(&signing_key, "m365.calendar.update_event");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "m365.calendar.update_event",
+            "input": {
+                "user_id": "me",
+                "event_id": "evt-456",
+                "subject": "Updated Standup",
+                "start": { "dateTime": "2026-03-03T10:00:00", "timeZone": "America/Chicago" },
+                "end": { "dateTime": "2026-03-03T10:30:00", "timeZone": "America/Chicago" }
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("update_event should succeed");
+
+    assert_eq!(result["event"]["subject"], "Updated Standup");
+}
+
+#[fcp_async_core::runtime::test]
+async fn calendar_update_event_missing_event_id() {
+    let _ctx = AsyncTestContext::for_scenario("m365.calendar.update_event.missing_event_id");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = M365Connector::new();
+    setup_configure_access_token(&mut connector, &mock_server.uri(), &["Calendars.ReadWrite"])
+        .await;
+    let signing_key = setup_handshake(&mut connector, &["m365.calendar.update_event"]).await;
+    let token = generate_valid_token(&signing_key, "m365.calendar.update_event");
+
+    let err = connector
+        .handle_invoke(json!({
+            "operation": "m365.calendar.update_event",
+            "input": {
+                "user_id": "me",
+                "subject": "No event ID"
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect_err("should fail without event_id");
+
+    assert!(
+        format!("{err:?}").contains("event_id"),
+        "error should mention missing field: {err:?}"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn calendar_delete_event_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("m365.calendar.delete_event.happy_path");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("DELETE"))
+        .and(path("/users/me/events/evt-789"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = M365Connector::new();
+    setup_configure_access_token(&mut connector, &mock_server.uri(), &["Calendars.ReadWrite"])
+        .await;
+    let signing_key = setup_handshake(&mut connector, &["m365.calendar.delete_event"]).await;
+    let token = generate_valid_token(&signing_key, "m365.calendar.delete_event");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "m365.calendar.delete_event",
+            "input": {
+                "user_id": "me",
+                "event_id": "evt-789"
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("delete_event should succeed");
+
+    assert_eq!(result["status"], "deleted");
+}
+
+#[fcp_async_core::runtime::test]
+async fn calendar_delete_event_missing_event_id() {
+    let _ctx = AsyncTestContext::for_scenario("m365.calendar.delete_event.missing_event_id");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = M365Connector::new();
+    setup_configure_access_token(&mut connector, &mock_server.uri(), &["Calendars.ReadWrite"])
+        .await;
+    let signing_key = setup_handshake(&mut connector, &["m365.calendar.delete_event"]).await;
+    let token = generate_valid_token(&signing_key, "m365.calendar.delete_event");
+
+    let err = connector
+        .handle_invoke(json!({
+            "operation": "m365.calendar.delete_event",
+            "input": { "user_id": "me" },
+            "capability_token": token
+        }))
+        .await
+        .expect_err("should fail without event_id");
+
+    assert!(
+        format!("{err:?}").contains("event_id"),
+        "error should mention missing field: {err:?}"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn calendar_get_freebusy_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("m365.calendar.get_freebusy.happy_path");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/me/calendar/getSchedule"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "value": [
+                {
+                    "scheduleId": "alice@contoso.com",
+                    "availabilityView": "0200000000",
+                    "scheduleItems": [
+                        {
+                            "status": "busy",
+                            "start": { "dateTime": "2026-03-03T10:00:00", "timeZone": "UTC" },
+                            "end": { "dateTime": "2026-03-03T11:00:00", "timeZone": "UTC" }
+                        }
+                    ]
+                }
+            ]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = M365Connector::new();
+    setup_configure_access_token(&mut connector, &mock_server.uri(), &["Calendars.Read"]).await;
+    let signing_key = setup_handshake(&mut connector, &["m365.calendar.get_freebusy"]).await;
+    let token = generate_valid_token(&signing_key, "m365.calendar.get_freebusy");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "m365.calendar.get_freebusy",
+            "input": {
+                "schedules": ["alice@contoso.com"],
+                "start_time": { "dateTime": "2026-03-03T08:00:00", "timeZone": "UTC" },
+                "end_time": { "dateTime": "2026-03-03T18:00:00", "timeZone": "UTC" }
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("get_freebusy should succeed");
+
+    let schedules = result["schedules"].as_array().expect("schedules array");
+    assert_eq!(schedules.len(), 1);
+    assert_eq!(schedules[0]["scheduleId"], "alice@contoso.com");
+}
+
+#[fcp_async_core::runtime::test]
+async fn calendar_get_freebusy_missing_schedules() {
+    let _ctx = AsyncTestContext::for_scenario("m365.calendar.get_freebusy.missing_schedules");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = M365Connector::new();
+    setup_configure_access_token(&mut connector, &mock_server.uri(), &["Calendars.Read"]).await;
+    let signing_key = setup_handshake(&mut connector, &["m365.calendar.get_freebusy"]).await;
+    let token = generate_valid_token(&signing_key, "m365.calendar.get_freebusy");
+
+    let err = connector
+        .handle_invoke(json!({
+            "operation": "m365.calendar.get_freebusy",
+            "input": {
+                "start_time": { "dateTime": "2026-03-03T08:00:00", "timeZone": "UTC" },
+                "end_time": { "dateTime": "2026-03-03T18:00:00", "timeZone": "UTC" }
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect_err("should fail without schedules");
+
+    assert!(
+        format!("{err:?}").contains("schedules"),
+        "error should mention missing field: {err:?}"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn calendar_get_freebusy_missing_start_time() {
+    let _ctx = AsyncTestContext::for_scenario("m365.calendar.get_freebusy.missing_start_time");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = M365Connector::new();
+    setup_configure_access_token(&mut connector, &mock_server.uri(), &["Calendars.Read"]).await;
+    let signing_key = setup_handshake(&mut connector, &["m365.calendar.get_freebusy"]).await;
+    let token = generate_valid_token(&signing_key, "m365.calendar.get_freebusy");
+
+    let err = connector
+        .handle_invoke(json!({
+            "operation": "m365.calendar.get_freebusy",
+            "input": {
+                "schedules": ["alice@contoso.com"],
+                "end_time": { "dateTime": "2026-03-03T18:00:00", "timeZone": "UTC" }
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect_err("should fail without start_time");
+
+    assert!(
+        format!("{err:?}").contains("start_time"),
+        "error should mention missing field: {err:?}"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn introspect_calendar_risk_levels() {
+    let _ctx = AsyncTestContext::for_scenario("m365.introspect.calendar_risk_levels");
+    let connector = M365Connector::new();
+    let result = connector
+        .handle_introspect()
+        .await
+        .expect("introspect should succeed");
+
+    let ops = result["operations"].as_array().expect("operations array");
+    for op in ops {
+        let id = op["id"].as_str().unwrap();
+        let risk = op["risk_level"].as_str().unwrap();
+        match id {
+            "m365.calendar.list_events"
+            | "m365.calendar.get_event"
+            | "m365.calendar.get_freebusy" => {
+                assert_eq!(risk, "low", "read op {id} should be low risk");
+            }
+            "m365.calendar.create_event" | "m365.calendar.update_event" => {
+                assert_eq!(risk, "medium", "write op {id} should be medium risk");
+            }
+            "m365.calendar.delete_event" => {
+                assert_eq!(risk, "high", "delete op {id} should be high risk");
+            }
+            _ => {} // non-calendar ops, skip
+        }
+    }
+
+    // Verify all 6 calendar ops are present
+    let cal_op_count = ops
+        .iter()
+        .filter_map(|o| o["id"].as_str())
+        .filter(|id| id.starts_with("m365.calendar."))
+        .count();
+    assert_eq!(cal_op_count, 6, "should have exactly 6 calendar operations");
 }
 
 // ============================================================================
@@ -832,14 +1436,23 @@ async fn introspect_lists_all_operations() {
     assert!(op_ids.contains(&"m365.mail.list_messages"));
     assert!(op_ids.contains(&"m365.mail.send_message"));
     assert!(op_ids.contains(&"m365.files.list_items"));
+    assert!(op_ids.contains(&"m365.files.get_item"));
+    assert!(op_ids.contains(&"m365.files.download_file"));
     assert!(op_ids.contains(&"m365.files.upload_file"));
+    assert!(op_ids.contains(&"m365.files.delete_item"));
+    assert!(op_ids.contains(&"m365.files.search"));
+    assert!(op_ids.contains(&"m365.files.create_share_link"));
     assert!(op_ids.contains(&"m365.calendar.list_events"));
     assert!(op_ids.contains(&"m365.calendar.create_event"));
+    assert!(op_ids.contains(&"m365.calendar.get_event"));
+    assert!(op_ids.contains(&"m365.calendar.update_event"));
+    assert!(op_ids.contains(&"m365.calendar.delete_event"));
+    assert!(op_ids.contains(&"m365.calendar.get_freebusy"));
     assert!(op_ids.contains(&"m365.tasks.list_task_lists"));
     assert!(op_ids.contains(&"m365.tasks.create_task"));
     assert!(op_ids.contains(&"m365.subscriptions.create"));
     assert!(op_ids.contains(&"m365.delta.sync"));
-    assert_eq!(ops.len(), 25);
+    assert_eq!(ops.len(), 30);
 }
 
 #[fcp_async_core::runtime::test]

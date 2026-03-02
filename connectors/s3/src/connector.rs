@@ -151,11 +151,11 @@ impl S3Connector {
     ) -> FcpResult<serde_json::Value> {
         let config = S3Config::from_params(&params)?;
 
-        let client = S3Client::new_with_auth(config.auth.clone()).map_err(|e| {
-            FcpError::Internal {
+        let client = S3Client::new_with_auth(config.auth.clone())
+            .map_err(|e| FcpError::Internal {
                 message: format!("Failed to create HTTP client: {e}"),
-            }
-        })?.with_base_url(&config.base_url);
+            })?
+            .with_base_url(&config.base_url);
 
         info!(auth = %config.auth.redacted_label(), "S3 connector configured");
 
@@ -983,6 +983,197 @@ mod tests {
         assert!(op_ids.contains(&"s3.copy_object"));
         assert!(op_ids.contains(&"s3.generate_presigned_url"));
         assert_eq!(ops.len(), 8);
+    }
+
+    // ── Provisioning automation tests ─────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_with_keys() {
+        let mut connector = S3Connector::new();
+        let result = connector
+            .handle_configure(json!({
+                "access_key_id": "AKIAIOSFODNN7EXAMPLE",
+                "secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+                "region": "us-west-2"
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "configured");
+        assert!(connector.config.is_some());
+        assert!(connector.client.is_some());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_with_credential_id() {
+        let mut connector = S3Connector::new();
+        let result = connector
+            .handle_configure(json!({
+                "credential_id": "00000000-0000-0000-0000-000000000001"
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "configured");
+        assert!(connector.config.is_some());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_both_auth_modes() {
+        let mut connector = S3Connector::new();
+        let result = connector
+            .handle_configure(json!({
+                "access_key_id": "AKIAIOSFODNN7EXAMPLE",
+                "secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+                "credential_id": "00000000-0000-0000-0000-000000000001"
+            }))
+            .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("exactly one"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_no_auth() {
+        let mut connector = S3Connector::new();
+        let result = connector.handle_configure(json!({})).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("Missing authentication"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_partial_keys() {
+        let mut connector = S3Connector::new();
+        // Only access_key_id, no secret
+        let result = connector
+            .handle_configure(json!({
+                "access_key_id": "AKIAIOSFODNN7EXAMPLE"
+            }))
+            .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("secret_access_key"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_health_includes_auth_info() {
+        let mut connector = S3Connector::new();
+        connector
+            .handle_configure(json!({
+                "access_key_id": "AKIAIOSFODNN7EXAMPLE",
+                "secret_access_key": "secret",
+                "region": "eu-west-1"
+            }))
+            .await
+            .unwrap();
+        let health = connector.handle_health().await.unwrap();
+        assert_eq!(health["status"], "healthy");
+        assert!(health["auth_mode"].as_str().unwrap().contains("keys:AKIA"));
+        assert!(health["base_url"].as_str().is_some());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_not_configured() {
+        let connector = S3Connector::new();
+        let result = connector.handle_doctor().await.unwrap();
+        assert_eq!(result["status"], "unhealthy");
+        let checks = result["checks"].as_array().unwrap();
+        assert_eq!(checks.len(), 6);
+        assert!(
+            checks
+                .iter()
+                .any(|c| c["name"] == "configuration" && c["status"] == "unhealthy")
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_configured_healthy() {
+        let mut connector = S3Connector::new();
+        connector
+            .handle_configure(json!({
+                "access_key_id": "AKIAIOSFODNN7EXAMPLE",
+                "secret_access_key": "secret",
+                "region": "us-east-1"
+            }))
+            .await
+            .unwrap();
+        let result = connector.handle_doctor().await.unwrap();
+        assert_eq!(result["status"], "healthy");
+        let checks = result["checks"].as_array().unwrap();
+        assert_eq!(checks.len(), 6);
+        assert!(checks.iter().all(|c| c["status"] == "healthy"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_credential_id_mode() {
+        let mut connector = S3Connector::new();
+        connector
+            .handle_configure(json!({
+                "credential_id": "00000000-0000-0000-0000-000000000001"
+            }))
+            .await
+            .unwrap();
+        let result = connector.handle_doctor().await.unwrap();
+        assert_eq!(result["status"], "healthy");
+        let checks = result["checks"].as_array().unwrap();
+        let cred_check = checks
+            .iter()
+            .find(|c| c["name"] == "credential_injection")
+            .unwrap();
+        assert!(
+            cred_check["message"]
+                .as_str()
+                .unwrap()
+                .contains("Secretless")
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_not_configured() {
+        let connector = S3Connector::new();
+        let result = connector.handle_self_check().await.unwrap();
+        assert_eq!(result["status"], "fail");
+        assert_eq!(result["reason_code"], "not_configured");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_credential_id_degraded() {
+        let mut connector = S3Connector::new();
+        connector
+            .handle_configure(json!({
+                "credential_id": "00000000-0000-0000-0000-000000000001"
+            }))
+            .await
+            .unwrap();
+        let result = connector.handle_self_check().await.unwrap();
+        assert_eq!(result["status"], "degraded");
+        assert_eq!(result["reason_code"], "credential_injection_required");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_with_custom_base_url() {
+        let mut connector = S3Connector::new();
+        connector
+            .handle_configure(json!({
+                "access_key_id": "test",
+                "secret_access_key": "secret",
+                "base_url": "http://localhost:9000"
+            }))
+            .await
+            .unwrap();
+        let health = connector.handle_health().await.unwrap();
+        assert_eq!(health["base_url"], "http://localhost:9000");
     }
 
     #[test]

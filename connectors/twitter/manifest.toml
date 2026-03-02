@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:ed36328e5236c5c014c011cf944ae882fd51f4ff07107bed1c4927eb27298cfd"
+interface_hash = "blake3-256:fcp.interface.v2:5bb4f0cfa70f1b5899cd5da8eb5f9ab042ab844f0b4948912c01bb3598046ffb"
 
 [connector]
 id = "fcp.twitter"
@@ -386,6 +386,71 @@ common_mistakes = [
 ]
 examples = ['{"tweet_id": "1234567890123456789"}']
 related = ["twitter.tweet.get"]
+
+[provides.operations."twitter.tweet.get_many"]
+description = "Get multiple tweets by their IDs (up to 100)"
+capability = "twitter.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."twitter.tweet.get_many".rate_limit]
+max = 300
+per_ms = 900000
+
+[provides.operations."twitter.tweet.get_many".input_schema]
+required = ["tweet_ids"]
+type = "object"
+
+[provides.operations."twitter.tweet.get_many".input_schema.properties.tweet_ids]
+description = "Array of tweet IDs to fetch (max 100)"
+maxItems = 100
+type = "array"
+
+[provides.operations."twitter.tweet.get_many".input_schema.properties.tweet_ids.items]
+type = "string"
+
+[provides.operations."twitter.tweet.get_many".output_schema]
+required = []
+type = "object"
+
+[provides.operations."twitter.tweet.get_many".output_schema.properties.tweets]
+type = "array"
+
+[provides.operations."twitter.tweet.get_many".output_schema.properties.tweets.items]
+type = "object"
+
+[provides.operations."twitter.tweet.get_many".network_constraints]
+host_allow = [
+    "api.twitter.com",
+    "api.x.com",
+    "stream.twitter.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."twitter.tweet.get_many".ai_hints]
+when_to_use = "Batch-fetch multiple tweets by ID. More efficient than calling tweet.get in a loop."
+common_mistakes = ["Exceeding 100 IDs per request."]
+examples = ['{"tweet_ids": ["1234567890", "9876543210"]}']
+related = [
+    "twitter.tweet.get",
+    "twitter.tweet.search",
+]
 
 [provides.operations."twitter.tweet.get"]
 description = "Get a single tweet by its ID"
@@ -1088,6 +1153,7 @@ scope = "instance"
 "twitter.user.me" = ["twitter.read"]
 "twitter.user.get" = ["twitter.read"]
 "twitter.tweet.get" = ["twitter.read"]
+"twitter.tweet.get_many" = ["twitter.read"]
 "twitter.user.by_username" = ["twitter.read"]
 "twitter.user.mentions" = ["twitter.read"]
 "twitter.tweet.create" = ["twitter.write"]

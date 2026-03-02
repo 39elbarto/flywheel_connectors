@@ -474,6 +474,87 @@ impl NotionConnector {
                     },
                 ),
                 op_info(
+                    "notion.get_database",
+                    "Retrieve a Notion database by ID",
+                    json!({
+                        "type": "object",
+                        "required": ["database_id"],
+                        "properties": {
+                            "database_id": { "type": "string" }
+                        }
+                    }),
+                    json!({ "type": "object", "properties": { "database": { "type": "object" } } }),
+                    "notion.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Retrieve a database schema and properties.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![r#"{"database_id": "abc123-def456"}"#.into()],
+                        related: vec![
+                            CapabilityId::from_static("notion.query_database"),
+                            CapabilityId::from_static("notion.update_database"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "notion.create_database",
+                    "Create a new database in a page",
+                    json!({
+                        "type": "object",
+                        "required": ["parent", "title", "properties"],
+                        "properties": {
+                            "parent": { "type": "object" },
+                            "title": { "type": "array" },
+                            "properties": { "type": "object" }
+                        }
+                    }),
+                    json!({ "type": "object", "properties": { "database": { "type": "object" } } }),
+                    "notion.write",
+                    RiskLevel::Medium,
+                    SafetyTier::Risky,
+                    IdempotencyClass::None,
+                    AgentHint {
+                        when_to_use: "Create a new inline database within a page.".into(),
+                        common_mistakes: vec!["Not specifying at least one property definition".into()],
+                        examples: vec![
+                            r#"{"parent": {"page_id": "abc123"}, "title": [{"text": {"content": "Tasks"}}], "properties": {"Name": {"title": {}}}}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("notion.get_database"),
+                            CapabilityId::from_static("notion.query_database"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "notion.update_database",
+                    "Update a database's title, description, or properties",
+                    json!({
+                        "type": "object",
+                        "required": ["database_id"],
+                        "properties": {
+                            "database_id": { "type": "string" },
+                            "title": { "type": "array" },
+                            "properties": { "type": "object" },
+                            "description": { "type": "array" }
+                        }
+                    }),
+                    json!({ "type": "object", "properties": { "database": { "type": "object" } } }),
+                    "notion.write",
+                    RiskLevel::Medium,
+                    SafetyTier::Risky,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Update a database schema, title, or description.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![
+                            r#"{"database_id": "abc123", "title": [{"text": {"content": "Updated Tasks"}}]}"#.into(),
+                        ],
+                        related: vec![CapabilityId::from_static("notion.get_database")],
+                    },
+                ),
+                op_info(
                     "notion.query_database",
                     "Query a Notion database with filters and sorts",
                     json!({
@@ -535,6 +616,86 @@ impl NotionConnector {
                             CapabilityId::from_static("notion.query_database"),
                             CapabilityId::from_static("notion.get_page"),
                         ],
+                    },
+                ),
+                op_info(
+                    "notion.get_block",
+                    "Retrieve a single block by ID",
+                    json!({
+                        "type": "object",
+                        "required": ["block_id"],
+                        "properties": {
+                            "block_id": { "type": "string" }
+                        }
+                    }),
+                    json!({ "type": "object", "properties": { "block": { "type": "object" } } }),
+                    "notion.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Retrieve a specific block by its ID.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![r#"{"block_id": "abc123"}"#.into()],
+                        related: vec![
+                            CapabilityId::from_static("notion.get_block_children"),
+                            CapabilityId::from_static("notion.update_block"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "notion.update_block",
+                    "Update a block's content",
+                    json!({
+                        "type": "object",
+                        "required": ["block_id"],
+                        "properties": {
+                            "block_id": { "type": "string" },
+                            "paragraph": { "type": "object" },
+                            "heading_1": { "type": "object" },
+                            "heading_2": { "type": "object" },
+                            "heading_3": { "type": "object" },
+                            "to_do": { "type": "object" },
+                            "toggle": { "type": "object" }
+                        }
+                    }),
+                    json!({ "type": "object", "properties": { "block": { "type": "object" } } }),
+                    "notion.write",
+                    RiskLevel::Medium,
+                    SafetyTier::Risky,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Update the content of a block.".into(),
+                        common_mistakes: vec!["Sending the wrong block type key for the block".into()],
+                        examples: vec![
+                            r#"{"block_id": "abc123", "paragraph": {"rich_text": [{"text": {"content": "Updated text"}}]}}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("notion.get_block"),
+                            CapabilityId::from_static("notion.delete_block"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "notion.delete_block",
+                    "Archive (soft-delete) a block",
+                    json!({
+                        "type": "object",
+                        "required": ["block_id"],
+                        "properties": {
+                            "block_id": { "type": "string" }
+                        }
+                    }),
+                    json!({ "type": "object", "properties": { "block": { "type": "object" } } }),
+                    "notion.delete",
+                    RiskLevel::High,
+                    SafetyTier::Risky,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Archive a block (soft delete).".into(),
+                        common_mistakes: vec!["Expecting permanent deletion — Notion only archives".into()],
+                        examples: vec![r#"{"block_id": "abc123"}"#.into()],
+                        related: vec![CapabilityId::from_static("notion.get_block")],
                     },
                 ),
                 op_info(
@@ -732,8 +893,14 @@ impl NotionConnector {
             "notion.get_page" => self.invoke_get_page(input).await,
             "notion.update_page" => self.invoke_update_page(input).await,
             "notion.delete_page" => self.invoke_delete_page(input).await,
+            "notion.get_database" => self.invoke_get_database(input).await,
+            "notion.create_database" => self.invoke_create_database(input).await,
+            "notion.update_database" => self.invoke_update_database(input).await,
             "notion.query_database" => self.invoke_query_database(input).await,
             "notion.search" => self.invoke_search(input).await,
+            "notion.get_block" => self.invoke_get_block(input).await,
+            "notion.update_block" => self.invoke_update_block(input).await,
+            "notion.delete_block" => self.invoke_delete_block(input).await,
             "notion.get_block_children" => self.invoke_get_block_children(input).await,
             "notion.append_blocks" => self.invoke_append_blocks(input).await,
             "notion.add_comment" => self.invoke_add_comment(input).await,
@@ -802,6 +969,77 @@ impl NotionConnector {
         Ok(json!({ "page": page }))
     }
 
+    async fn invoke_get_database(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let database_id = require_str(&input, "database_id")?;
+
+        let db = client
+            .get_database(database_id)
+            .await
+            .map_err(|e: NotionError| e.to_fcp_error())?;
+
+        Ok(json!({ "database": db }))
+    }
+
+    async fn invoke_create_database(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+
+        if input.get("parent").is_none() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing required field: parent".into(),
+            });
+        }
+        if input.get("title").is_none() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing required field: title".into(),
+            });
+        }
+        if input.get("properties").is_none() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing required field: properties".into(),
+            });
+        }
+
+        let db = client
+            .create_database(input)
+            .await
+            .map_err(|e: NotionError| e.to_fcp_error())?;
+
+        Ok(json!({ "database": db }))
+    }
+
+    async fn invoke_update_database(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let database_id = require_str(&input, "database_id")?;
+
+        let mut body = json!({});
+        if let Some(title) = input.get("title") {
+            body["title"] = title.clone();
+        }
+        if let Some(props) = input.get("properties") {
+            body["properties"] = props.clone();
+        }
+        if let Some(desc) = input.get("description") {
+            body["description"] = desc.clone();
+        }
+
+        let db = client
+            .update_database(database_id, body)
+            .await
+            .map_err(|e: NotionError| e.to_fcp_error())?;
+
+        Ok(json!({ "database": db }))
+    }
+
     async fn invoke_query_database(
         &self,
         input: serde_json::Value,
@@ -838,6 +1076,48 @@ impl NotionConnector {
             "has_more": result.has_more,
             "next_cursor": result.next_cursor
         }))
+    }
+
+    async fn invoke_get_block(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let block_id = require_str(&input, "block_id")?;
+
+        let block = client
+            .get_block(block_id)
+            .await
+            .map_err(|e: NotionError| e.to_fcp_error())?;
+
+        Ok(json!({ "block": block }))
+    }
+
+    async fn invoke_update_block(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let block_id = require_str(&input, "block_id")?;
+
+        // Extract the block content (everything except block_id)
+        let mut body = input.clone();
+        if let Some(obj) = body.as_object_mut() {
+            obj.remove("block_id");
+        }
+
+        let block = client
+            .update_block(block_id, body)
+            .await
+            .map_err(|e: NotionError| e.to_fcp_error())?;
+
+        Ok(json!({ "block": block }))
+    }
+
+    async fn invoke_delete_block(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let block_id = require_str(&input, "block_id")?;
+
+        let block = client
+            .delete_block(block_id)
+            .await
+            .map_err(|e: NotionError| e.to_fcp_error())?;
+
+        Ok(json!({ "block": block }))
     }
 
     async fn invoke_get_block_children(

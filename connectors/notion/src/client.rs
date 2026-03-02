@@ -182,6 +182,28 @@ impl NotionClient {
         Ok(serde_json::from_value(data)?)
     }
 
+    /// Get a database by ID.
+    pub async fn get_database(&self, database_id: &str) -> NotionResult<serde_json::Value> {
+        let url = format!("{}/databases/{database_id}", self.api_url);
+        self.get(&url).await
+    }
+
+    /// Create a database.
+    pub async fn create_database(&self, body: serde_json::Value) -> NotionResult<serde_json::Value> {
+        let url = format!("{}/databases", self.api_url);
+        self.post(&url, Some(body)).await
+    }
+
+    /// Update a database (PATCH title/properties/description).
+    pub async fn update_database(
+        &self,
+        database_id: &str,
+        body: serde_json::Value,
+    ) -> NotionResult<serde_json::Value> {
+        let url = format!("{}/databases/{database_id}", self.api_url);
+        self.patch(&url, body).await
+    }
+
     // ── Search ────────────────────────────────────────────────────
 
     /// Search pages and databases.
@@ -209,6 +231,29 @@ impl NotionClient {
         let url = format!("{}/blocks/{block_id}/children", self.api_url);
         let data = self.get(&url).await?;
         Ok(serde_json::from_value(data)?)
+    }
+
+    /// Get a single block by ID.
+    pub async fn get_block(&self, block_id: &str) -> NotionResult<serde_json::Value> {
+        let url = format!("{}/blocks/{block_id}", self.api_url);
+        self.get(&url).await
+    }
+
+    /// Update a block's content.
+    pub async fn update_block(
+        &self,
+        block_id: &str,
+        body: serde_json::Value,
+    ) -> NotionResult<serde_json::Value> {
+        let url = format!("{}/blocks/{block_id}", self.api_url);
+        self.patch(&url, body).await
+    }
+
+    /// Archive (soft-delete) a block.
+    pub async fn delete_block(&self, block_id: &str) -> NotionResult<serde_json::Value> {
+        let url = format!("{}/blocks/{block_id}", self.api_url);
+        let body = serde_json::json!({ "archived": true });
+        self.patch(&url, body).await
     }
 
     /// Append child blocks to a page or block.

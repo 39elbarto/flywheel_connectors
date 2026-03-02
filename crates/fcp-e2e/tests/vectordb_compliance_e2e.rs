@@ -19,11 +19,10 @@ use chrono::{Duration as ChronoDuration, Utc};
 use fcp_conformance::DynamicSuite;
 use fcp_core::{
     AgentHint, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId, ConnectorMetrics,
-    FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus,
-    OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, ShutdownRequest,
-    SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
-    ZoneId,
+    FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass,
+    InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId,
+    OperationInfo, RequestId, RiskLevel, SafetyTier, ShutdownRequest, SimulateRequest,
+    SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
@@ -70,9 +69,7 @@ fn required_capability(operation: &str) -> Option<CapabilityId> {
         "vectordb.upsert_vectors" | "vectordb.update_vector_metadata" => {
             Some(CapabilityId::from_static("vectordb.vectors.write"))
         }
-        "vectordb.delete_vectors" => {
-            Some(CapabilityId::from_static("vectordb.vectors.delete"))
-        }
+        "vectordb.delete_vectors" => Some(CapabilityId::from_static("vectordb.vectors.delete")),
         _ => None,
     }
 }
@@ -87,10 +84,7 @@ impl FcpConnector for VectorDbConnectorAdapter {
         self.connector.handle_configure(config).await.map(|_| ())
     }
 
-    async fn handshake(
-        &mut self,
-        req: HandshakeRequest,
-    ) -> fcp_core::FcpResult<HandshakeResponse> {
+    async fn handshake(&mut self, req: HandshakeRequest) -> fcp_core::FcpResult<HandshakeResponse> {
         // Set up verifier for capability token checking in invoke
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
@@ -189,10 +183,7 @@ impl FcpConnector for VectorDbConnectorAdapter {
         verifier.verify(&req.capability_token, &cap, &req.operation, &[])?;
 
         // Token verified — return stub data
-        Ok(InvokeResponse::ok(
-            request_id,
-            json!({ "collections": [] }),
-        ))
+        Ok(InvokeResponse::ok(request_id, json!({ "collections": [] })))
     }
 
     async fn simulate(&self, _req: SimulateRequest) -> fcp_core::FcpResult<SimulateResponse> {
@@ -564,7 +555,10 @@ fn vectordb_operation_risk_levels_properly_gated() {
             .and_then(toml::Value::as_str)
             .unwrap();
 
-        assert_eq!(risk, "medium", "{op_name} should be medium risk, got {risk}");
+        assert_eq!(
+            risk, "medium",
+            "{op_name} should be medium risk, got {risk}"
+        );
         assert_eq!(safety, "risky", "{op_name} should be risky, got {safety}");
         assert_eq!(
             approval, "policy",

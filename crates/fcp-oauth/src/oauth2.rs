@@ -751,7 +751,9 @@ mod tests {
                 .and(path("/token"))
                 .and(body_string_contains("grant_type=authorization_code"))
                 .and(body_string_contains("code=auth-code-123"))
-                .and(body_string_contains("redirect_uri=https%3A%2F%2Flocalhost%3A3000%2Fcallback"))
+                .and(body_string_contains(
+                    "redirect_uri=https%3A%2F%2Flocalhost%3A3000%2Fcallback",
+                ))
                 .and(body_string_contains("client_id=test_client_id"))
                 .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "access_token": "access-123",
@@ -791,7 +793,9 @@ mod tests {
                 .and(path("/token"))
                 .and(body_string_contains("grant_type=authorization_code"))
                 .and(body_string_contains("code=auth-code-pkce"))
-                .and(body_string_contains(&format!("code_verifier={expected_verifier}")))
+                .and(body_string_contains(format!(
+                    "code_verifier={expected_verifier}"
+                )))
                 .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "access_token": "pkce-access",
                     "token_type": "Bearer",
@@ -875,9 +879,8 @@ mod tests {
             let client = OAuth2Client::new(config).unwrap();
 
             let error = client.exchange_code("expired-code").await.unwrap_err();
-            let message = match error {
-                OAuthError::TokenExchangeFailed(message) => message,
-                _ => panic!("expected token exchange error"),
+            let OAuthError::TokenExchangeFailed(message) = error else {
+                panic!("expected token exchange error")
             };
             assert!(message.contains("invalid_grant"));
             assert!(message.contains("authorization code expired"));

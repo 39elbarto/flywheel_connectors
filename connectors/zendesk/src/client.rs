@@ -141,10 +141,7 @@ impl ZendeskClient {
             .build()
             .map_err(ZendeskError::Http)?;
 
-        let base_url = format!(
-            "https://{}.zendesk.com/api/v2",
-            auth.subdomain()
-        );
+        let base_url = format!("https://{}.zendesk.com/api/v2", auth.subdomain());
 
         Ok(Self {
             http,

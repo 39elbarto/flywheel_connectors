@@ -333,8 +333,7 @@ async fn figma_default_deny_compliance_suite_passes() {
 
     let mut connector = FigmaConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake =
-        handshake_request(signing_key.verifying_key().to_bytes(), &["figma.get_file"]);
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["figma.get_file"]);
     // Token grants get_file but invoke targets delete_comment → should be denied
     let token = build_token(&signing_key, "figma.get_file", &["figma.get_file"]);
     let invoke = invoke_request(
@@ -384,8 +383,7 @@ async fn figma_allow_valid_token_connector_suite_passes() {
 
     let mut connector = FigmaConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake =
-        handshake_request(signing_key.verifying_key().to_bytes(), &["figma.get_file"]);
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["figma.get_file"]);
     let token = build_token(&signing_key, "figma.get_file", &["figma.get_file"]);
     let invoke = invoke_request("figma.get_file", json!({ "file_key": "abc123" }), token);
     let suite = ConnectorSuite {
@@ -479,7 +477,10 @@ fn figma_manifest_network_guard_allows_and_denies() {
     // export_images also allows S3 hosts for image download
     let export_hosts = operation_host_allow_list(&manifest, "figma.export_images");
     assert!(export_hosts.contains(&"api.figma.com".to_string()));
-    assert!(export_hosts.len() > 1, "export_images should allow additional S3 hosts");
+    assert!(
+        export_hosts.len() > 1,
+        "export_images should allow additional S3 hosts"
+    );
     assert!(!host_allowed("localhost", &export_hosts));
     assert!(!host_allowed("example.com", &export_hosts));
 }
@@ -600,9 +601,15 @@ fn figma_operation_risk_levels_properly_gated() {
             .and_then(toml::Value::as_str)
             .unwrap();
 
-        assert_eq!(risk, "medium", "{op_name} should be medium risk, got {risk}");
+        assert_eq!(
+            risk, "medium",
+            "{op_name} should be medium risk, got {risk}"
+        );
         assert_eq!(safety, "risky", "{op_name} should be risky, got {safety}");
-        assert_eq!(approval, "policy", "{op_name} should require policy approval, got {approval}");
+        assert_eq!(
+            approval, "policy",
+            "{op_name} should require policy approval, got {approval}"
+        );
     }
 
     // Read operations should be low risk + safe + no approval
@@ -629,20 +636,33 @@ fn figma_operation_risk_levels_properly_gated() {
 
         assert_eq!(risk, "low", "{op_name} should be low risk, got {risk}");
         assert_eq!(safety, "safe", "{op_name} should be safe, got {safety}");
-        assert_eq!(approval, "none", "{op_name} should need no approval, got {approval}");
+        assert_eq!(
+            approval, "none",
+            "{op_name} should need no approval, got {approval}"
+        );
     }
 
     // post_comment: write but low risk + safe (non-destructive)
     let post_comment = operations.get("figma.post_comment").expect("post_comment");
     assert_eq!(
-        post_comment.get("risk_level").and_then(toml::Value::as_str).unwrap(),
+        post_comment
+            .get("risk_level")
+            .and_then(toml::Value::as_str)
+            .unwrap(),
         "low"
     );
     assert_eq!(
-        post_comment.get("safety_tier").and_then(toml::Value::as_str).unwrap(),
+        post_comment
+            .get("safety_tier")
+            .and_then(toml::Value::as_str)
+            .unwrap(),
         "safe"
     );
 
     // Total operation count
-    assert_eq!(operations.len(), 12, "Figma manifest should have 12 operations");
+    assert_eq!(
+        operations.len(),
+        12,
+        "Figma manifest should have 12 operations"
+    );
 }

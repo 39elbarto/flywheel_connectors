@@ -961,8 +961,7 @@ async fn tweet_like_happy_path() {
 
     let mut connector = TwitterConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
-    let signing_key =
-        setup_handshake(&mut connector, &mock_server, &["twitter.tweet.like"]).await;
+    let signing_key = setup_handshake(&mut connector, &mock_server, &["twitter.tweet.like"]).await;
     let token = generate_valid_token(&signing_key, "twitter.tweet.like");
 
     let result = connector
@@ -1026,8 +1025,7 @@ async fn dm_send_to_existing_conversation() {
 
     let mut connector = TwitterConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
-    let signing_key =
-        setup_handshake(&mut connector, &mock_server, &["twitter.dm.send"]).await;
+    let signing_key = setup_handshake(&mut connector, &mock_server, &["twitter.dm.send"]).await;
     let token = generate_valid_token(&signing_key, "twitter.dm.send");
 
     let result = connector
@@ -1050,8 +1048,7 @@ async fn dm_send_missing_target_fails() {
 
     let mut connector = TwitterConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
-    let signing_key =
-        setup_handshake(&mut connector, &mock_server, &["twitter.dm.send"]).await;
+    let signing_key = setup_handshake(&mut connector, &mock_server, &["twitter.dm.send"]).await;
     let token = generate_valid_token(&signing_key, "twitter.dm.send");
 
     let result = connector
@@ -1094,8 +1091,7 @@ async fn dm_events_happy_path() {
 
     let mut connector = TwitterConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
-    let signing_key =
-        setup_handshake(&mut connector, &mock_server, &["twitter.dm.events"]).await;
+    let signing_key = setup_handshake(&mut connector, &mock_server, &["twitter.dm.events"]).await;
     let token = generate_valid_token(&signing_key, "twitter.dm.events");
 
     let result = connector

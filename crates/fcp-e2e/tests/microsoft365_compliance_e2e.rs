@@ -242,8 +242,10 @@ fn invoke_request(
 }
 
 fn m365_manifest_toml() -> toml::Value {
-    toml::from_str(include_str!("../../../connectors/microsoft365/manifest.toml"))
-        .expect("m365 manifest toml")
+    toml::from_str(include_str!(
+        "../../../connectors/microsoft365/manifest.toml"
+    ))
+    .expect("m365 manifest toml")
 }
 
 fn operation_host_allow_list(manifest: &toml::Value, operation_name: &str) -> Vec<String> {
@@ -304,10 +306,7 @@ fn make_jwt_token(scopes: &[&str]) -> String {
 async fn m365_default_deny_compliance_suite_passes() {
     let mut connector = M365ConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(
-        signing_key.verifying_key().to_bytes(),
-        &["m365.mail.send"],
-    );
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["m365.mail.send"]);
     let token = build_token(&signing_key, "m365.mail.send", &["m365.mail.send"]);
     let invoke = invoke_request(
         "m365.calendar.list_events",
@@ -331,11 +330,7 @@ async fn m365_default_deny_compliance_suite_passes() {
         require_capability_denial: true,
         require_decision_receipt: false,
     };
-    let suite = ComplianceSuite::new(
-        "m365_default_deny",
-        reference_manifest_with_hash(),
-        dynamic,
-    );
+    let suite = ComplianceSuite::new("m365_default_deny", reference_manifest_with_hash(), dynamic);
 
     let mut runner = E2eRunner::new("fcp-e2e-microsoft365");
     let report = runner
@@ -529,10 +524,7 @@ fn m365_dangerous_operations_properly_gated() {
             .and_then(toml::Value::as_str)
             .unwrap();
 
-        assert_eq!(
-            risk, "high",
-            "{op_name} should be high risk, got {risk}"
-        );
+        assert_eq!(risk, "high", "{op_name} should be high risk, got {risk}");
         assert_eq!(
             safety, "dangerous",
             "{op_name} should be dangerous safety tier, got {safety}"

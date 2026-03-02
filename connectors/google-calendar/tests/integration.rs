@@ -955,11 +955,11 @@ async fn client_sync_events_incremental() {
         Some("CPDAlvXkUpdated456")
     );
     // Verify cancelled event is present (incremental sync includes deleted events)
-    let cancelled = result.items.iter().find(|e| e.id.as_deref() == Some("evt001"));
-    assert_eq!(
-        cancelled.unwrap().status.as_deref(),
-        Some("cancelled")
-    );
+    let cancelled = result
+        .items
+        .iter()
+        .find(|e| e.id.as_deref() == Some("evt001"));
+    assert_eq!(cancelled.unwrap().status.as_deref(), Some("cancelled"));
 }
 
 // ── Sync events connector-level ─────────────────────────────────

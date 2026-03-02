@@ -18,8 +18,8 @@ use crate::{
     error::{S3Error, S3Result},
     types::{
         ApiErrorResponse, BucketInfo, CreateBucketResponse, DeleteBucketResponse,
-        GetObjectResponse, HeadObjectResponse, ListBucketsResponse, ListObjectsResponse, ObjectInfo,
-        PresignedUrlResponse, PutObjectResponse,
+        GetObjectResponse, HeadObjectResponse, ListBucketsResponse, ListObjectsResponse,
+        ObjectInfo, PresignedUrlResponse, PutObjectResponse,
     },
 };
 

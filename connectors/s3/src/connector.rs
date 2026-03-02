@@ -5,8 +5,8 @@ use std::sync::Arc;
 use fcp_core::ApprovalScope::Execution;
 use fcp_core::{
     AgentHint, ApprovalMode, ApprovalToken, BaseConnector, CapabilityGrant, CapabilityId,
-    CapabilityToken, CapabilityVerifier, ConnectorId, CredentialId, EventCaps, FcpError,
-    FcpResult, HandshakeRequest, HandshakeResponse, IdempotencyClass, Introspection, OperationId,
+    CapabilityToken, CapabilityVerifier, ConnectorId, CredentialId, EventCaps, FcpError, FcpResult,
+    HandshakeRequest, HandshakeResponse, IdempotencyClass, Introspection, OperationId,
     OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId, SimulateRequest,
     SimulateResponse,
 };
@@ -1057,10 +1057,7 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a s
 fn requires_execution_approval(operation: &str) -> bool {
     matches!(
         operation,
-        "s3.delete_object"
-            | "s3.create_bucket"
-            | "s3.delete_bucket"
-            | "s3.generate_presigned_url"
+        "s3.delete_object" | "s3.create_bucket" | "s3.delete_bucket" | "s3.generate_presigned_url"
     )
 }
 

@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
-    ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest,
-    HandshakeResponse, IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel,
-    SafetyTier, SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
+    ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
+    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -76,7 +76,9 @@ impl ZendeskConfig {
             (Some(_), _, Some(_)) | (_, Some(_), Some(_)) => {
                 return Err(FcpError::InvalidRequest {
                     code: 1003,
-                    message: "Conflicting auth: provide (email + api_token) or credential_id, not both".into(),
+                    message:
+                        "Conflicting auth: provide (email + api_token) or credential_id, not both"
+                            .into(),
                 });
             }
             (None, None, None) => {
@@ -156,7 +158,11 @@ impl ZendeskConnector {
         }
 
         let auth_mode = config.auth.redacted_label();
-        info!(auth_mode, subdomain = config.auth.subdomain(), "Zendesk connector configured");
+        info!(
+            auth_mode,
+            subdomain = config.auth.subdomain(),
+            "Zendesk connector configured"
+        );
 
         self.client = Some(client);
         self.config = Some(config);
@@ -375,7 +381,8 @@ impl ZendeskConnector {
         }
 
         let Some(ref client) = self.client else {
-            let report = SelfCheckReport::failed("client_not_initialized", "HTTP client not available");
+            let report =
+                SelfCheckReport::failed("client_not_initialized", "HTTP client not available");
             return serde_json::to_value(report).map_err(|e| FcpError::Internal {
                 message: format!("Failed to serialize self-check report: {e}"),
             });
@@ -1296,7 +1303,10 @@ mod tests {
         let result = connector.handle_doctor().await.unwrap();
         assert_eq!(result["status"], "warn"); // warn because direct token mode
         let checks = result["checks"].as_array().unwrap();
-        let cred_check = checks.iter().find(|c| c["name"] == "credential_injection").unwrap();
+        let cred_check = checks
+            .iter()
+            .find(|c| c["name"] == "credential_injection")
+            .unwrap();
         assert_eq!(cred_check["status"], "warn");
     }
 
@@ -1356,6 +1366,11 @@ mod tests {
         let result = connector.handle_health().await.unwrap();
         assert_eq!(result["status"], "healthy");
         assert!(result["auth_mode"].as_str().unwrap().contains("token"));
-        assert!(result["api_domain"].as_str().unwrap().contains("testco.zendesk.com"));
+        assert!(
+            result["api_domain"]
+                .as_str()
+                .unwrap()
+                .contains("testco.zendesk.com")
+        );
     }
 }

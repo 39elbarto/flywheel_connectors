@@ -297,16 +297,9 @@ fn host_allowed(host: &str, host_allow: &[String]) -> bool {
 async fn zendesk_default_deny_compliance_suite_passes() {
     let mut connector = ZendeskConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(
-        signing_key.verifying_key().to_bytes(),
-        &["zendesk.delete"],
-    );
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["zendesk.delete"]);
     let token = build_token(&signing_key, "zendesk.delete", &["zendesk.delete"]);
-    let invoke = invoke_request(
-        "zendesk.get_ticket",
-        json!({ "ticket_id": 12345 }),
-        token,
-    );
+    let invoke = invoke_request("zendesk.get_ticket", json!({ "ticket_id": 12345 }), token);
 
     let dynamic = DynamicSuite {
         config: json!({
@@ -372,16 +365,8 @@ async fn zendesk_allow_valid_token_connector_suite_passes() {
         signing_key.verifying_key().to_bytes(),
         &["zendesk.get_ticket"],
     );
-    let token = build_token(
-        &signing_key,
-        "zendesk.get_ticket",
-        &["zendesk.get_ticket"],
-    );
-    let invoke = invoke_request(
-        "zendesk.get_ticket",
-        json!({ "ticket_id": 12345 }),
-        token,
-    );
+    let token = build_token(&signing_key, "zendesk.get_ticket", &["zendesk.get_ticket"]);
+    let invoke = invoke_request("zendesk.get_ticket", json!({ "ticket_id": 12345 }), token);
     let suite = ConnectorSuite {
         test_name: "zendesk_allow_valid_token".to_string(),
         config: zendesk_config(&mock.base_url()),
@@ -533,7 +518,10 @@ fn zendesk_operation_risk_levels_properly_gated() {
             .and_then(toml::Value::as_str)
             .unwrap();
 
-        assert_eq!(risk, "medium", "{op_name} should be medium risk, got {risk}");
+        assert_eq!(
+            risk, "medium",
+            "{op_name} should be medium risk, got {risk}"
+        );
         assert_eq!(safety, "risky", "{op_name} should be risky, got {safety}");
         assert_eq!(
             approval, "policy",

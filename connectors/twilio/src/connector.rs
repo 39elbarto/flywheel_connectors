@@ -65,8 +65,8 @@ impl TwilioConfig {
             }
         };
 
-        let url = base_url
-            .map_or_else(|| format!("{DEFAULT_API_BASE}/{account_sid}"), String::from);
+        let url =
+            base_url.map_or_else(|| format!("{DEFAULT_API_BASE}/{account_sid}"), String::from);
 
         Ok(Self {
             auth,

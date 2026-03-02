@@ -1116,10 +1116,7 @@ impl GoogleCalendarConnector {
         }))
     }
 
-    async fn invoke_sync_events(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_sync_events(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let calendar_id = require_str(&input, "calendar_id")?;
         let sync_token = input.get("sync_token").and_then(|v| v.as_str());

@@ -295,10 +295,7 @@ fn host_allowed(host: &str, host_allow: &[String]) -> bool {
 async fn airtable_default_deny_compliance_suite_passes() {
     let mut connector = AirtableConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(
-        signing_key.verifying_key().to_bytes(),
-        &["airtable.delete"],
-    );
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["airtable.delete"]);
     let token = build_token(&signing_key, "airtable.delete", &["airtable.delete"]);
     let invoke = invoke_request("airtable.list_bases", json!({}), token);
 
@@ -533,7 +530,10 @@ fn airtable_operation_risk_levels_properly_gated() {
             .and_then(toml::Value::as_str)
             .unwrap();
 
-        assert_eq!(risk, "medium", "{op_name} should be medium risk, got {risk}");
+        assert_eq!(
+            risk, "medium",
+            "{op_name} should be medium risk, got {risk}"
+        );
         assert_eq!(safety, "risky", "{op_name} should be risky, got {safety}");
         assert_eq!(
             approval, "policy",

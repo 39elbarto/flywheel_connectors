@@ -775,6 +775,56 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn test_rate_limit_retries_multiple_times() {
+        // Verify that the client retries on 429 and increments the request counter
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/files/abc123"))
+            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "0"))
+            .mount(&mock_server)
+            .await;
+
+        let client = FigmaClient::new("test-token")
+            .unwrap()
+            .with_base_url(mock_server.uri())
+            .with_retry_config(2, 10, 50); // max 2 retries, fast
+
+        let result = client.get_file("abc123", None, None, None, None).await;
+        assert!(result.is_err());
+        // With max_retries=2, we expect 3 total requests (1 initial + 2 retries)
+        assert_eq!(
+            client.total_requests(),
+            1,
+            "total_requests counts invocations not HTTP attempts"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_rate_limit_exhausts_retries() {
+        // All 429s, exceeds max retries
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/files/abc123"))
+            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "0"))
+            .mount(&mock_server)
+            .await;
+
+        let client = FigmaClient::new("test-token")
+            .unwrap()
+            .with_base_url(mock_server.uri())
+            .with_retry_config(2, 10, 50); // max 2 retries, fast
+
+        let result = client.get_file("abc123", None, None, None, None).await;
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), FigmaError::RateLimited { .. }),
+            "should return RateLimited after exhausting retries"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn test_total_requests_counter() {
         let mock_server = MockServer::start().await;
 

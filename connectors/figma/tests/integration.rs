@@ -6,9 +6,10 @@
 //! - Image export
 //! - Version history
 //! - Comments (list, post, delete)
+//! - Webhooks (list, create, delete) via v2 API
 //! - Error taxonomy (401/403/404/429/500 -> `FcpError` mapping)
 //! - FCP2 default-deny + capability verification
-//! - Lifecycle (health, handshake, introspect, shutdown)
+//! - Lifecycle (health, handshake, introspect, shutdown, risk levels)
 //! - Input validation edge cases
 
 #![allow(clippy::too_many_lines)]
@@ -407,6 +408,131 @@ async fn delete_comment_happy_path() {
     assert!(result.is_object());
 }
 
+// ── Webhook operations ──────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn webhook_list_webhooks_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("figma.list_webhooks.happy_path");
+    let mock_server = MockServer::start().await;
+
+    // Webhook v2 paths resolve via `../v2/webhooks` → /v2/webhooks/{team_id}
+    Mock::given(method("GET"))
+        .and(path("/v2/webhooks/team-42"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "webhooks": [
+                {
+                    "id": "wh-1",
+                    "team_id": "team-42",
+                    "event_type": "FILE_UPDATE",
+                    "endpoint": "https://hooks.example.com/figma",
+                    "status": "ACTIVE"
+                },
+                {
+                    "id": "wh-2",
+                    "team_id": "team-42",
+                    "event_type": "FILE_DELETE",
+                    "endpoint": "https://hooks.example.com/figma-delete",
+                    "status": "ACTIVE",
+                    "description": "File deletion watcher"
+                }
+            ]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = FigmaConnector::new();
+    let key = setup_handshake(&mut connector, &["figma.list_webhooks"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "figma.list_webhooks");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "figma.list_webhooks",
+            "input": { "team_id": "team-42" },
+            "capability_token": token
+        }))
+        .await
+        .expect("list_webhooks should succeed");
+
+    let webhooks = result["webhooks"].as_array().unwrap();
+    assert_eq!(webhooks.len(), 2);
+    assert_eq!(webhooks[0]["id"], "wh-1");
+    assert_eq!(webhooks[0]["event_type"], "FILE_UPDATE");
+    assert_eq!(webhooks[1]["id"], "wh-2");
+    assert_eq!(webhooks[1]["description"], "File deletion watcher");
+}
+
+#[fcp_async_core::runtime::test]
+async fn webhook_create_webhook_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("figma.create_webhook.happy_path");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v2/webhooks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "wh-new",
+            "team_id": "team-42",
+            "event_type": "FILE_UPDATE",
+            "endpoint": "https://hooks.example.com/figma",
+            "status": "ACTIVE",
+            "passcode": "secret123"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = FigmaConnector::new();
+    let key = setup_handshake(&mut connector, &["figma.create_webhook"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "figma.create_webhook");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "figma.create_webhook",
+            "input": {
+                "team_id": "team-42",
+                "event_type": "FILE_UPDATE",
+                "endpoint": "https://hooks.example.com/figma",
+                "passcode": "secret123"
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("create_webhook should succeed");
+
+    assert_eq!(result["id"], "wh-new");
+    assert_eq!(result["team_id"], "team-42");
+    assert_eq!(result["event_type"], "FILE_UPDATE");
+    assert_eq!(result["status"], "ACTIVE");
+}
+
+#[fcp_async_core::runtime::test]
+async fn webhook_delete_webhook_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("figma.delete_webhook.happy_path");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("DELETE"))
+        .and(path("/v2/webhooks/wh-123"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = FigmaConnector::new();
+    let key = setup_handshake(&mut connector, &["figma.delete_webhook"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "figma.delete_webhook");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "figma.delete_webhook",
+            "input": { "webhook_id": "wh-123" },
+            "capability_token": token
+        }))
+        .await
+        .expect("delete_webhook should succeed");
+
+    assert!(result.is_object());
+}
+
 // ============================================================================
 // Error taxonomy tests (Figma uses HTTP status codes for errors)
 // ============================================================================
@@ -778,6 +904,58 @@ async fn lifecycle_shutdown() {
     assert_eq!(result["status"], "shutdown");
 }
 
+#[fcp_async_core::runtime::test]
+async fn introspect_risk_levels() {
+    let _ctx = AsyncTestContext::for_scenario("figma.lifecycle.risk_levels");
+    let connector = FigmaConnector::new();
+    let result = connector.handle_introspect().await.unwrap();
+
+    let ops = result["operations"].as_array().unwrap();
+    assert_eq!(ops.len(), 12);
+
+    // Low-risk: all read ops + post_comment + list_webhooks
+    let low_ops = [
+        "figma.get_file",
+        "figma.get_file_nodes",
+        "figma.get_file_components",
+        "figma.get_file_styles",
+        "figma.export_images",
+        "figma.list_file_versions",
+        "figma.list_comments",
+        "figma.post_comment",
+        "figma.list_webhooks",
+    ];
+    // Medium-risk: delete_comment, create_webhook, delete_webhook
+    let medium_ops = [
+        "figma.delete_comment",
+        "figma.create_webhook",
+        "figma.delete_webhook",
+    ];
+
+    for op in ops {
+        let id = op["id"].as_str().unwrap();
+        let risk = op["risk_level"].as_str().unwrap();
+        if low_ops.contains(&id) {
+            assert_eq!(risk, "low", "op {id} should be low risk");
+        } else if medium_ops.contains(&id) {
+            assert_eq!(risk, "medium", "op {id} should be medium risk");
+        } else {
+            panic!("Unexpected operation: {id}");
+        }
+    }
+
+    let low_count = ops
+        .iter()
+        .filter(|o| o["risk_level"].as_str() == Some("low"))
+        .count();
+    let medium_count = ops
+        .iter()
+        .filter(|o| o["risk_level"].as_str() == Some("medium"))
+        .count();
+    assert_eq!(low_count, 9, "should have 9 low-risk ops");
+    assert_eq!(medium_count, 3, "should have 3 medium-risk ops");
+}
+
 // ============================================================================
 // Input validation edge cases
 // ============================================================================
@@ -918,5 +1096,277 @@ async fn validate_delete_comment_missing_comment_id() {
             assert!(message.contains("comment_id"));
         }
         e => panic!("Expected InvalidRequest about comment_id, got: {e:?}"),
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn validate_list_webhooks_missing_team_id() {
+    let _ctx = AsyncTestContext::for_scenario("figma.validation.missing_team_id");
+    let mock_server = MockServer::start().await;
+    let mut connector = FigmaConnector::new();
+    let key = setup_handshake(&mut connector, &["figma.list_webhooks"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "figma.list_webhooks");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "figma.list_webhooks",
+            "input": {},
+            "capability_token": token
+        }))
+        .await;
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("team_id"));
+        }
+        e => panic!("Expected InvalidRequest about team_id, got: {e:?}"),
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn validate_create_webhook_missing_fields() {
+    let _ctx = AsyncTestContext::for_scenario("figma.validation.missing_webhook_fields");
+    let mock_server = MockServer::start().await;
+    let mut connector = FigmaConnector::new();
+    let key = setup_handshake(&mut connector, &["figma.create_webhook"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    // Missing event_type, endpoint, passcode
+    let token = generate_valid_token(&key, "figma.create_webhook");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "figma.create_webhook",
+            "input": { "team_id": "team-42" },
+            "capability_token": token
+        }))
+        .await;
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("event_type"));
+        }
+        e => panic!("Expected InvalidRequest about event_type, got: {e:?}"),
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn validate_delete_webhook_missing_webhook_id() {
+    let _ctx = AsyncTestContext::for_scenario("figma.validation.missing_webhook_id");
+    let mock_server = MockServer::start().await;
+    let mut connector = FigmaConnector::new();
+    let key = setup_handshake(&mut connector, &["figma.delete_webhook"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "figma.delete_webhook");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "figma.delete_webhook",
+            "input": {},
+            "capability_token": token
+        }))
+        .await;
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("webhook_id"));
+        }
+        e => panic!("Expected InvalidRequest about webhook_id, got: {e:?}"),
+    }
+}
+
+// ============================================================================
+// Large data / bounded memory tests
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn get_file_nodes_large_tree() {
+    let _ctx = AsyncTestContext::for_scenario("figma.nodes.large_tree");
+    let mock_server = MockServer::start().await;
+
+    // Generate a tree with many nodes to verify bounded processing
+    let mut nodes = serde_json::Map::new();
+    for i in 0..100 {
+        let id = format!("{i}:0");
+        nodes.insert(
+            id.clone(),
+            json!({
+                "document": {
+                    "id": id,
+                    "name": format!("Node {i}"),
+                    "type": "FRAME",
+                    "children": []
+                }
+            }),
+        );
+    }
+
+    Mock::given(method("GET"))
+        .and(path("/files/bigfile/nodes"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "name": "Big File",
+            "nodes": nodes,
+            "lastModified": "2026-01-01T00:00:00Z"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = FigmaClient::new("test-token")
+        .unwrap()
+        .with_base_url(mock_server.uri());
+
+    let result = client.get_file_nodes("bigfile", "0:0,1:0,2:0", None).await;
+    assert!(result.is_ok(), "should handle large node responses");
+    let nodes_response = result.unwrap();
+    let nodes_map = nodes_response
+        .nodes
+        .as_object()
+        .expect("nodes should be object");
+    assert!(!nodes_map.is_empty(), "should return non-empty node map");
+}
+
+#[fcp_async_core::runtime::test]
+async fn export_images_multiple_nodes() {
+    let _ctx = AsyncTestContext::for_scenario("figma.export.multiple_nodes");
+    let mock_server = MockServer::start().await;
+
+    // Export images for multiple node IDs at once
+    let mut images = serde_json::Map::new();
+    for i in 0..10 {
+        images.insert(
+            format!("{i}:0"),
+            json!(format!(
+                "https://figma-alpha.s3.amazonaws.com/img/export_{i}.png"
+            )),
+        );
+    }
+
+    Mock::given(method("GET"))
+        .and(path("/images/multifile"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "images": images
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = FigmaClient::new("test-token")
+        .unwrap()
+        .with_base_url(mock_server.uri());
+
+    let ids = (0..10)
+        .map(|i| format!("{i}:0"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let result = client
+        .export_images("multifile", &ids, "png", None, None, None, None)
+        .await;
+    assert!(result.is_ok(), "should export multiple images");
+    let export = result.unwrap();
+    let images_map = export.images.as_object().expect("images should be object");
+    assert_eq!(images_map.len(), 10, "should return 10 image URLs");
+}
+
+#[fcp_async_core::runtime::test]
+async fn get_file_nodes_through_connector() {
+    let _ctx = AsyncTestContext::for_scenario("figma.invoke.get_file_nodes");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/files/abc123/nodes"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "name": "Test File",
+            "nodes": {
+                "1:2": {
+                    "document": {
+                        "id": "1:2",
+                        "name": "Frame A",
+                        "type": "FRAME",
+                        "children": [
+                            { "id": "1:3", "name": "Child", "type": "RECTANGLE" }
+                        ]
+                    }
+                }
+            },
+            "lastModified": "2026-01-01T00:00:00Z"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = FigmaConnector::new();
+    let key = setup_handshake(&mut connector, &["figma.get_file_nodes"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "figma.get_file_nodes");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "figma.get_file_nodes",
+            "input": {
+                "file_key": "abc123",
+                "ids": "1:2"
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("get_file_nodes should succeed");
+
+    assert!(result.get("nodes").is_some(), "should return nodes");
+}
+
+// ============================================================================
+// Rate limit + backoff tests (via client-level)
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn rate_limit_429_includes_retry_after_seconds() {
+    let _ctx = AsyncTestContext::for_scenario("figma.rate_limit.retry_after");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/files/abc123"))
+        .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "45"))
+        .mount(&mock_server)
+        .await;
+
+    let client = FigmaClient::new("test-token")
+        .unwrap()
+        .with_base_url(mock_server.uri())
+        .with_retry_config(0, 100, 200);
+
+    let result = client.get_file("abc123", None, None, None, None).await;
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_figma::error::FigmaError::RateLimited { retry_after_secs } => {
+            assert_eq!(retry_after_secs, 45, "should capture retry-after value");
+        }
+        e => panic!("Expected RateLimited, got: {e:?}"),
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn rate_limit_429_without_retry_after_defaults() {
+    let _ctx = AsyncTestContext::for_scenario("figma.rate_limit.no_retry_after");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/files/abc123"))
+        .respond_with(ResponseTemplate::new(429))
+        .mount(&mock_server)
+        .await;
+
+    let client = FigmaClient::new("test-token")
+        .unwrap()
+        .with_base_url(mock_server.uri())
+        .with_retry_config(0, 100, 200);
+
+    let result = client.get_file("abc123", None, None, None, None).await;
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_figma::error::FigmaError::RateLimited { retry_after_secs } => {
+            assert_eq!(
+                retry_after_secs, 60,
+                "should default to 60s without retry-after header"
+            );
+        }
+        e => panic!("Expected RateLimited, got: {e:?}"),
     }
 }

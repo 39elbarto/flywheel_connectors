@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:550eedd7af9a550533927f1964b4fb34021fca23757b006087af83010fd0b923"
+interface_hash = "blake3-256:fcp.interface.v2:409b6569f080220cf2256e828e562bf1a697e7e0daf27b096fa39df478a69d99"
 
 [connector]
 id = "fcp.notion"

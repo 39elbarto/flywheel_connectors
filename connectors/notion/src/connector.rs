@@ -1397,6 +1397,264 @@ mod tests {
         assert_eq!(ops.len(), 16);
     }
 
+    // ── Invoke missing-field tests for new operations ──────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_get_database_missing_field() {
+        let mut connector = NotionConnector::new();
+        connector
+            .handle_configure(json!({
+                "token": "ntn_test123",
+                "api_url": "http://localhost:9999/v1"
+            }))
+            .await
+            .unwrap();
+
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["notion.get_database"]
+            }))
+            .await
+            .unwrap();
+
+        let token = generate_valid_token(&signing_key, "notion.get_database");
+
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "notion.get_database",
+                "input": {},
+                "capability_token": token
+            }))
+            .await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("database_id"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_create_database_missing_fields() {
+        let mut connector = NotionConnector::new();
+        connector
+            .handle_configure(json!({
+                "token": "ntn_test123",
+                "api_url": "http://localhost:9999/v1"
+            }))
+            .await
+            .unwrap();
+
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["notion.create_database"]
+            }))
+            .await
+            .unwrap();
+
+        let token = generate_valid_token(&signing_key, "notion.create_database");
+
+        // Missing parent
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "notion.create_database",
+                "input": {"title": [], "properties": {}},
+                "capability_token": token
+            }))
+            .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("parent"));
+            }
+            e => panic!("Expected InvalidRequest for parent, got: {e:?}"),
+        }
+
+        // Missing title
+        let token2 = generate_valid_token(&signing_key, "notion.create_database");
+        let result2 = connector
+            .handle_invoke(json!({
+                "operation": "notion.create_database",
+                "input": {"parent": {"page_id": "p1"}, "properties": {}},
+                "capability_token": token2
+            }))
+            .await;
+        assert!(result2.is_err());
+        match result2.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("title"));
+            }
+            e => panic!("Expected InvalidRequest for title, got: {e:?}"),
+        }
+
+        // Missing properties
+        let token3 = generate_valid_token(&signing_key, "notion.create_database");
+        let result3 = connector
+            .handle_invoke(json!({
+                "operation": "notion.create_database",
+                "input": {"parent": {"page_id": "p1"}, "title": []},
+                "capability_token": token3
+            }))
+            .await;
+        assert!(result3.is_err());
+        match result3.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("properties"));
+            }
+            e => panic!("Expected InvalidRequest for properties, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_get_block_missing_field() {
+        let mut connector = NotionConnector::new();
+        connector
+            .handle_configure(json!({
+                "token": "ntn_test123",
+                "api_url": "http://localhost:9999/v1"
+            }))
+            .await
+            .unwrap();
+
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["notion.get_block"]
+            }))
+            .await
+            .unwrap();
+
+        let token = generate_valid_token(&signing_key, "notion.get_block");
+
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "notion.get_block",
+                "input": {},
+                "capability_token": token
+            }))
+            .await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("block_id"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_delete_block_missing_field() {
+        let mut connector = NotionConnector::new();
+        connector
+            .handle_configure(json!({
+                "token": "ntn_test123",
+                "api_url": "http://localhost:9999/v1"
+            }))
+            .await
+            .unwrap();
+
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["notion.delete_block"]
+            }))
+            .await
+            .unwrap();
+
+        let token = generate_valid_token(&signing_key, "notion.delete_block");
+
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "notion.delete_block",
+                "input": {},
+                "capability_token": token
+            }))
+            .await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("block_id"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_risk_levels() {
+        let connector = NotionConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        // Verify read ops are safe
+        for read_op in &[
+            "notion.get_page",
+            "notion.get_database",
+            "notion.query_database",
+            "notion.search",
+            "notion.get_block",
+            "notion.get_block_children",
+            "notion.list_comments",
+        ] {
+            let op = ops.iter().find(|o| o["id"] == *read_op).unwrap();
+            assert_eq!(op["risk_level"], "low", "{read_op} should be low risk");
+            assert_eq!(op["safety_tier"], "safe", "{read_op} should be safe");
+        }
+
+        // Verify write ops are risky
+        for write_op in &[
+            "notion.create_page",
+            "notion.update_page",
+            "notion.create_database",
+            "notion.update_database",
+            "notion.update_block",
+            "notion.append_blocks",
+            "notion.add_comment",
+        ] {
+            let op = ops.iter().find(|o| o["id"] == *write_op).unwrap();
+            assert_eq!(
+                op["risk_level"], "medium",
+                "{write_op} should be medium risk"
+            );
+            assert_eq!(op["safety_tier"], "risky", "{write_op} should be risky");
+        }
+
+        // Verify delete ops are high risk
+        for del_op in &["notion.delete_page", "notion.delete_block"] {
+            let op = ops.iter().find(|o| o["id"] == *del_op).unwrap();
+            assert_eq!(op["risk_level"], "high", "{del_op} should be high risk");
+        }
+    }
+
     // ── Provisioning automation tests ─────────────────────────────
 
     #[fcp_async_core::runtime::test]

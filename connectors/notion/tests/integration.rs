@@ -605,6 +605,468 @@ async fn invoke_query_database_through_connector() {
     assert_eq!(result["has_more"], false);
 }
 
+/// Invoke `notion.create_page` through the connector.
+#[fcp_async_core::runtime::test]
+async fn invoke_create_page_through_connector() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/pages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(page_json("pg-new", "New Page")))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = NotionConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["notion.create_page"]).await;
+    let token = generate_valid_token(&signing_key, "notion.create_page");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "notion.create_page",
+            "input": {
+                "parent": { "database_id": "db-1" },
+                "properties": { "Name": { "title": [{ "text": { "content": "New Page" } }] } }
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["page"]["id"], "pg-new");
+}
+
+/// Invoke `notion.update_page` through the connector.
+#[fcp_async_core::runtime::test]
+async fn invoke_update_page_through_connector() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("PATCH"))
+        .and(path("/v1/pages/pg-42"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(page_json("pg-42", "Updated Title")))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = NotionConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["notion.update_page"]).await;
+    let token = generate_valid_token(&signing_key, "notion.update_page");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "notion.update_page",
+            "input": {
+                "page_id": "pg-42",
+                "properties": { "Status": { "select": { "name": "Done" } } }
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["page"]["id"], "pg-42");
+}
+
+/// Invoke `notion.delete_page` through the connector.
+#[fcp_async_core::runtime::test]
+async fn invoke_delete_page_through_connector() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("PATCH"))
+        .and(path("/v1/pages/pg-42"))
+        .respond_with(ResponseTemplate::new(200).set_body_json({
+            let mut p = page_json("pg-42", "Archived");
+            p["archived"] = json!(true);
+            p
+        }))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = NotionConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["notion.delete_page"]).await;
+    let token = generate_valid_token(&signing_key, "notion.delete_page");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "notion.delete_page",
+            "input": { "page_id": "pg-42" },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["page"]["id"], "pg-42");
+}
+
+/// Invoke `notion.get_database` through the connector.
+#[fcp_async_core::runtime::test]
+async fn invoke_get_database_through_connector() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/databases/db-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "db-1",
+            "object": "database",
+            "title": [{"text": {"content": "Tasks"}, "plain_text": "Tasks"}],
+            "properties": { "Name": {"type": "title", "title": {}} }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = NotionConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["notion.get_database"]).await;
+    let token = generate_valid_token(&signing_key, "notion.get_database");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "notion.get_database",
+            "input": { "database_id": "db-1" },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["database"]["id"], "db-1");
+    assert_eq!(result["database"]["object"], "database");
+}
+
+/// Invoke `notion.create_database` through the connector.
+#[fcp_async_core::runtime::test]
+async fn invoke_create_database_through_connector() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/databases"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "db-new",
+            "object": "database",
+            "title": [{"text": {"content": "New DB"}, "plain_text": "New DB"}],
+            "properties": { "Name": {"type": "title", "title": {}} }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = NotionConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["notion.create_database"]).await;
+    let token = generate_valid_token(&signing_key, "notion.create_database");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "notion.create_database",
+            "input": {
+                "parent": { "page_id": "pg-1" },
+                "title": [{ "text": { "content": "New DB" } }],
+                "properties": { "Name": { "title": {} } }
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["database"]["id"], "db-new");
+}
+
+/// Invoke `notion.update_database` through the connector.
+#[fcp_async_core::runtime::test]
+async fn invoke_update_database_through_connector() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("PATCH"))
+        .and(path("/v1/databases/db-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "db-1",
+            "object": "database",
+            "title": [{"text": {"content": "Updated"}, "plain_text": "Updated"}],
+            "properties": { "Name": {"type": "title", "title": {}} }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = NotionConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["notion.update_database"]).await;
+    let token = generate_valid_token(&signing_key, "notion.update_database");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "notion.update_database",
+            "input": {
+                "database_id": "db-1",
+                "title": [{ "text": { "content": "Updated" } }]
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["database"]["id"], "db-1");
+}
+
+/// Invoke `notion.get_block` through the connector.
+#[fcp_async_core::runtime::test]
+async fn invoke_get_block_through_connector() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/blocks/blk-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "blk-1",
+            "object": "block",
+            "type": "paragraph",
+            "has_children": false,
+            "paragraph": {
+                "rich_text": [{"text": {"content": "Hello"}, "plain_text": "Hello"}]
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = NotionConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["notion.get_block"]).await;
+    let token = generate_valid_token(&signing_key, "notion.get_block");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "notion.get_block",
+            "input": { "block_id": "blk-1" },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["block"]["id"], "blk-1");
+    assert_eq!(result["block"]["type"], "paragraph");
+}
+
+/// Invoke `notion.update_block` through the connector.
+#[fcp_async_core::runtime::test]
+async fn invoke_update_block_through_connector() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("PATCH"))
+        .and(path("/v1/blocks/blk-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "blk-1",
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {
+                "rich_text": [{"text": {"content": "Updated"}, "plain_text": "Updated"}]
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = NotionConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["notion.update_block"]).await;
+    let token = generate_valid_token(&signing_key, "notion.update_block");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "notion.update_block",
+            "input": {
+                "block_id": "blk-1",
+                "paragraph": { "rich_text": [{ "text": { "content": "Updated" } }] }
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["block"]["id"], "blk-1");
+}
+
+/// Invoke `notion.delete_block` through the connector.
+#[fcp_async_core::runtime::test]
+async fn invoke_delete_block_through_connector() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("PATCH"))
+        .and(path("/v1/blocks/blk-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "blk-1",
+            "object": "block",
+            "type": "paragraph",
+            "archived": true
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = NotionConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["notion.delete_block"]).await;
+    let token = generate_valid_token(&signing_key, "notion.delete_block");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "notion.delete_block",
+            "input": { "block_id": "blk-1" },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["block"]["id"], "blk-1");
+}
+
+/// Invoke `notion.get_block_children` through the connector.
+#[fcp_async_core::runtime::test]
+async fn invoke_get_block_children_through_connector() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/blocks/blk-1/children"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": "list",
+            "results": [
+                { "object": "block", "id": "child-1", "type": "paragraph" },
+                { "object": "block", "id": "child-2", "type": "heading_1" }
+            ],
+            "has_more": false
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = NotionConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["notion.get_block_children"]).await;
+    let token = generate_valid_token(&signing_key, "notion.get_block_children");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "notion.get_block_children",
+            "input": { "block_id": "blk-1" },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["results"].as_array().unwrap().len(), 2);
+    assert_eq!(result["has_more"], false);
+}
+
+/// Invoke `notion.append_blocks` through the connector.
+#[fcp_async_core::runtime::test]
+async fn invoke_append_blocks_through_connector() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("PATCH"))
+        .and(path("/v1/blocks/blk-1/children"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": "list",
+            "results": [
+                { "object": "block", "id": "new-blk-1", "type": "paragraph" }
+            ],
+            "has_more": false
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = NotionConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["notion.append_blocks"]).await;
+    let token = generate_valid_token(&signing_key, "notion.append_blocks");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "notion.append_blocks",
+            "input": {
+                "block_id": "blk-1",
+                "children": [
+                    {
+                        "object": "block",
+                        "type": "paragraph",
+                        "paragraph": {
+                            "rich_text": [{ "text": { "content": "Hello world" } }]
+                        }
+                    }
+                ]
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["results"].as_array().unwrap().len(), 1);
+}
+
+/// Invoke `notion.add_comment` through the connector.
+#[fcp_async_core::runtime::test]
+async fn invoke_add_comment_through_connector() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/comments"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": "comment",
+            "id": "cmt-new",
+            "parent": { "page_id": "pg-1" },
+            "rich_text": [{ "text": { "content": "Looks good!" }, "plain_text": "Looks good!" }]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = NotionConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["notion.add_comment"]).await;
+    let token = generate_valid_token(&signing_key, "notion.add_comment");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "notion.add_comment",
+            "input": {
+                "parent": { "page_id": "pg-1" },
+                "rich_text": [{ "text": { "content": "Looks good!" } }]
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["comment"]["id"], "cmt-new");
+}
+
+/// Invoke `notion.list_comments` through the connector.
+#[fcp_async_core::runtime::test]
+async fn invoke_list_comments_through_connector() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/comments"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": "list",
+            "results": [
+                { "object": "comment", "id": "cmt-1" },
+                { "object": "comment", "id": "cmt-2" }
+            ],
+            "has_more": false
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = NotionConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["notion.list_comments"]).await;
+    let token = generate_valid_token(&signing_key, "notion.list_comments");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "notion.list_comments",
+            "input": { "block_id": "pg-1" },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["results"].as_array().unwrap().len(), 2);
+    assert_eq!(result["has_more"], false);
+}
+
 /// Wrong capability token is rejected.
 #[fcp_async_core::runtime::test]
 async fn wrong_capability_rejected() {

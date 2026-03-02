@@ -1,0 +1,1001 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:90cf5924ec5439414b712a706aa82f36eddafe147dca2db40b1a4589d1ba6bd0"
+
+[connector]
+id = "fcp.figma"
+name = "Figma Connector"
+version = "0.1.0"
+description = "FCP connector for Figma design platform (files, components, comments, webhooks, image export)"
+archetypes = [
+    "knowledge",
+    "operational",
+    "streaming",
+]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+]
+optional = ["media.download"]
+forbidden = [
+    "system.exec",
+    "network.listen",
+]
+
+# ---------------------------------------------------------------------------
+# Operations: Design Knowledge (Files, Components, Styles)
+# ---------------------------------------------------------------------------
+
+[provides.operations."figma.get_file"]
+description = "Get a Figma file's document tree with node hierarchy, properties, and metadata"
+capability = "figma.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."figma.get_file".rate_limit]
+max = 30
+per_ms = 60000
+
+[provides.operations."figma.get_file".input_schema]
+required = ["file_key"]
+type = "object"
+
+[provides.operations."figma.get_file".input_schema.properties.file_key]
+description = "Figma file key from the URL (e.g., 'abc123DEF456')"
+type = "string"
+
+[provides.operations."figma.get_file".input_schema.properties.ids]
+description = "Comma-separated node IDs to retrieve (returns subset of document tree)"
+type = "string"
+
+[provides.operations."figma.get_file".input_schema.properties.depth]
+description = "Depth of document tree to traverse (positive integer)"
+minimum = 1
+type = "integer"
+
+[provides.operations."figma.get_file".input_schema.properties.geometry]
+description = "Include vector path data in response"
+type = "string"
+enum = ["paths"]
+
+[provides.operations."figma.get_file".input_schema.properties.plugin_data]
+description = "Comma-separated plugin IDs to include data for"
+type = "string"
+
+[provides.operations."figma.get_file".output_schema]
+required = [
+    "name",
+    "document",
+    "lastModified",
+    "version",
+]
+type = "object"
+
+[provides.operations."figma.get_file".output_schema.properties.name]
+description = "File name"
+type = "string"
+
+[provides.operations."figma.get_file".output_schema.properties.document]
+description = "Root document node with children"
+type = "object"
+
+[provides.operations."figma.get_file".output_schema.properties.lastModified]
+description = "ISO 8601 timestamp"
+type = "string"
+
+[provides.operations."figma.get_file".output_schema.properties.version]
+description = "File version string"
+type = "string"
+
+[provides.operations."figma.get_file".output_schema.properties.components]
+description = "Map of component node IDs to component metadata"
+type = "object"
+
+[provides.operations."figma.get_file".output_schema.properties.styles]
+description = "Map of style node IDs to style metadata"
+type = "object"
+
+[provides.operations."figma.get_file".network_constraints]
+host_allow = ["api.figma.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 52428800
+
+[provides.operations."figma.get_file".ai_hints]
+when_to_use = "Retrieve a Figma file's full or partial document tree. Use ids parameter to scope to specific nodes."
+common_mistakes = [
+    "Not using ids parameter for large files — full tree can be very large.",
+    "Confusing file_key with node IDs.",
+    "Not handling pagination for very deep trees.",
+]
+examples = [
+    '{"file_key": "abc123DEF456"}',
+    '{"file_key": "abc123DEF456", "ids": "1:2,3:4", "depth": 2}',
+]
+related = [
+    "figma.get_file_nodes",
+    "figma.list_file_versions",
+    "figma.export_images",
+]
+
+[provides.operations."figma.get_file_nodes"]
+description = "Get specific nodes from a Figma file by their IDs"
+capability = "figma.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."figma.get_file_nodes".rate_limit]
+max = 30
+per_ms = 60000
+
+[provides.operations."figma.get_file_nodes".input_schema]
+required = [
+    "file_key",
+    "ids",
+]
+type = "object"
+
+[provides.operations."figma.get_file_nodes".input_schema.properties.file_key]
+description = "Figma file key"
+type = "string"
+
+[provides.operations."figma.get_file_nodes".input_schema.properties.ids]
+description = "Comma-separated node IDs (e.g., '1:2,3:4')"
+type = "string"
+
+[provides.operations."figma.get_file_nodes".input_schema.properties.depth]
+description = "Depth of traversal per node"
+minimum = 1
+type = "integer"
+
+[provides.operations."figma.get_file_nodes".output_schema]
+required = ["nodes"]
+type = "object"
+
+[provides.operations."figma.get_file_nodes".output_schema.properties.nodes]
+description = "Map of node ID to node content and metadata"
+type = "object"
+
+[provides.operations."figma.get_file_nodes".network_constraints]
+host_allow = ["api.figma.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."figma.get_file_nodes".ai_hints]
+when_to_use = "Retrieve specific nodes by ID. More efficient than get_file when you know which nodes you need."
+common_mistakes = [
+    "Using wrong node ID format (should be 'X:Y', not just numbers).",
+]
+examples = ['{"file_key": "abc123DEF456", "ids": "1:2,3:4"}']
+related = [
+    "figma.get_file",
+    "figma.export_images",
+]
+
+[provides.operations."figma.get_file_components"]
+description = "Get all components published in a file's component library"
+capability = "figma.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."figma.get_file_components".rate_limit]
+max = 30
+per_ms = 60000
+
+[provides.operations."figma.get_file_components".input_schema]
+required = ["file_key"]
+type = "object"
+
+[provides.operations."figma.get_file_components".input_schema.properties.file_key]
+description = "Figma file key"
+type = "string"
+
+[provides.operations."figma.get_file_components".output_schema]
+required = ["meta"]
+type = "object"
+
+[provides.operations."figma.get_file_components".output_schema.properties.meta]
+description = "Component metadata including name, description, containing frame"
+type = "object"
+
+[provides.operations."figma.get_file_components".network_constraints]
+host_allow = ["api.figma.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."figma.get_file_components".ai_hints]
+when_to_use = "List all published components in a file's library."
+common_mistakes = ["Confusing file components with team library components."]
+examples = ['{"file_key": "abc123DEF456"}']
+related = [
+    "figma.get_file",
+    "figma.get_file_styles",
+]
+
+[provides.operations."figma.get_file_styles"]
+description = "Get all published styles in a file (colors, text, effects, grids)"
+capability = "figma.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."figma.get_file_styles".rate_limit]
+max = 30
+per_ms = 60000
+
+[provides.operations."figma.get_file_styles".input_schema]
+required = ["file_key"]
+type = "object"
+
+[provides.operations."figma.get_file_styles".input_schema.properties.file_key]
+description = "Figma file key"
+type = "string"
+
+[provides.operations."figma.get_file_styles".output_schema]
+required = ["meta"]
+type = "object"
+
+[provides.operations."figma.get_file_styles".output_schema.properties.meta]
+description = "Style metadata including name, description, style type"
+type = "object"
+
+[provides.operations."figma.get_file_styles".network_constraints]
+host_allow = ["api.figma.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."figma.get_file_styles".ai_hints]
+when_to_use = "List all published styles (colors, text styles, effects, grids) in a file."
+common_mistakes = []
+examples = ['{"file_key": "abc123DEF456"}']
+related = [
+    "figma.get_file",
+    "figma.get_file_components",
+]
+
+# ---------------------------------------------------------------------------
+# Operations: Image Export
+# ---------------------------------------------------------------------------
+
+[provides.operations."figma.export_images"]
+description = "Render node(s) as PNG, SVG, JPG, or PDF and return download URLs"
+capability = "figma.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."figma.export_images".rate_limit]
+max = 20
+per_ms = 60000
+
+[provides.operations."figma.export_images".input_schema]
+required = [
+    "file_key",
+    "ids",
+    "format",
+]
+type = "object"
+
+[provides.operations."figma.export_images".input_schema.properties.file_key]
+description = "Figma file key"
+type = "string"
+
+[provides.operations."figma.export_images".input_schema.properties.ids]
+description = "Comma-separated node IDs to export"
+type = "string"
+
+[provides.operations."figma.export_images".input_schema.properties.format]
+description = "Export format"
+enum = ["png", "svg", "jpg", "pdf"]
+type = "string"
+
+[provides.operations."figma.export_images".input_schema.properties.scale]
+description = "Export scale (0.01 to 4.0, default 1.0)"
+minimum = 0.01
+maximum = 4.0
+type = "number"
+
+[provides.operations."figma.export_images".input_schema.properties.svg_include_id]
+description = "Include node IDs in SVG output"
+type = "boolean"
+
+[provides.operations."figma.export_images".input_schema.properties.svg_simplify_stroke]
+description = "Simplify strokes in SVG output"
+type = "boolean"
+
+[provides.operations."figma.export_images".input_schema.properties.use_absolute_bounds]
+description = "Use absolute bounds for positioning"
+type = "boolean"
+
+[provides.operations."figma.export_images".output_schema]
+required = ["images"]
+type = "object"
+
+[provides.operations."figma.export_images".output_schema.properties.images]
+description = "Map of node ID to image download URL (time-limited)"
+type = "object"
+
+[provides.operations."figma.export_images".output_schema.properties.err]
+description = "Error string if rendering failed for any node"
+type = "string"
+
+[provides.operations."figma.export_images".network_constraints]
+host_allow = [
+    "api.figma.com",
+    "figma-alpha-api.s3.us-west-2.amazonaws.com",
+    "s3-alpha.figma.com",
+    "*.figma.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 104857600
+
+[provides.operations."figma.export_images".ai_hints]
+when_to_use = "Export design nodes as images. Returns time-limited download URLs. Use media.download to fetch the actual image data."
+common_mistakes = [
+    "Not downloading images before URL expires (URLs are temporary).",
+    "Exporting at high scale for very large frames — can be slow and large.",
+    "Using PDF format for individual icons (use SVG instead).",
+]
+examples = ['{"file_key": "abc123DEF456", "ids": "1:2", "format": "png", "scale": 2.0}']
+related = [
+    "figma.get_file_nodes",
+    "figma.get_file",
+]
+
+# ---------------------------------------------------------------------------
+# Operations: Version History
+# ---------------------------------------------------------------------------
+
+[provides.operations."figma.list_file_versions"]
+description = "List version history for a file with pagination"
+capability = "figma.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."figma.list_file_versions".rate_limit]
+max = 30
+per_ms = 60000
+
+[provides.operations."figma.list_file_versions".input_schema]
+required = ["file_key"]
+type = "object"
+
+[provides.operations."figma.list_file_versions".input_schema.properties.file_key]
+description = "Figma file key"
+type = "string"
+
+[provides.operations."figma.list_file_versions".output_schema]
+required = ["versions"]
+type = "object"
+
+[provides.operations."figma.list_file_versions".output_schema.properties.versions]
+description = "Version entries with id, label, description, user, created_at"
+type = "array"
+[provides.operations."figma.list_file_versions".output_schema.properties.versions.items]
+type = "object"
+
+[provides.operations."figma.list_file_versions".output_schema.properties.pagination]
+description = "Pagination cursor info"
+type = "object"
+
+[provides.operations."figma.list_file_versions".network_constraints]
+host_allow = ["api.figma.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."figma.list_file_versions".ai_hints]
+when_to_use = "Retrieve version history for a Figma file."
+common_mistakes = []
+examples = ['{"file_key": "abc123DEF456"}']
+related = ["figma.get_file"]
+
+# ---------------------------------------------------------------------------
+# Operations: Comments
+# ---------------------------------------------------------------------------
+
+[provides.operations."figma.list_comments"]
+description = "List comments on a Figma file"
+capability = "figma.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."figma.list_comments".rate_limit]
+max = 30
+per_ms = 60000
+
+[provides.operations."figma.list_comments".input_schema]
+required = ["file_key"]
+type = "object"
+
+[provides.operations."figma.list_comments".input_schema.properties.file_key]
+description = "Figma file key"
+type = "string"
+
+[provides.operations."figma.list_comments".input_schema.properties.as_md]
+description = "Return comment bodies as Markdown"
+type = "boolean"
+
+[provides.operations."figma.list_comments".output_schema]
+required = ["comments"]
+type = "object"
+
+[provides.operations."figma.list_comments".output_schema.properties.comments]
+description = "Comment objects with message, author, resolved_at, node references"
+type = "array"
+[provides.operations."figma.list_comments".output_schema.properties.comments.items]
+type = "object"
+
+[provides.operations."figma.list_comments".network_constraints]
+host_allow = ["api.figma.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."figma.list_comments".ai_hints]
+when_to_use = "Retrieve all comments and replies on a Figma file."
+common_mistakes = []
+examples = ['{"file_key": "abc123DEF456"}']
+related = [
+    "figma.post_comment",
+    "figma.get_file",
+]
+
+[provides.operations."figma.post_comment"]
+description = "Post a comment on a Figma file, optionally anchored to a node or region"
+capability = "figma.write"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."figma.post_comment".rate_limit]
+max = 30
+per_ms = 60000
+
+[provides.operations."figma.post_comment".input_schema]
+required = [
+    "file_key",
+    "message",
+]
+type = "object"
+
+[provides.operations."figma.post_comment".input_schema.properties.file_key]
+description = "Figma file key"
+type = "string"
+
+[provides.operations."figma.post_comment".input_schema.properties.message]
+description = "Comment body text"
+type = "string"
+
+[provides.operations."figma.post_comment".input_schema.properties.comment_id]
+description = "Reply to an existing comment by ID"
+type = "string"
+
+[provides.operations."figma.post_comment".input_schema.properties.client_meta]
+description = "Anchor position: {\"node_id\": \"X:Y\", \"node_offset\": {\"x\": 0, \"y\": 0}}"
+type = "object"
+
+[provides.operations."figma.post_comment".output_schema]
+required = [
+    "id",
+    "message",
+    "created_at",
+]
+type = "object"
+
+[provides.operations."figma.post_comment".output_schema.properties.id]
+type = "string"
+
+[provides.operations."figma.post_comment".output_schema.properties.message]
+type = "string"
+
+[provides.operations."figma.post_comment".output_schema.properties.created_at]
+type = "string"
+
+[provides.operations."figma.post_comment".output_schema.properties.user]
+type = "object"
+
+[provides.operations."figma.post_comment".network_constraints]
+host_allow = ["api.figma.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."figma.post_comment".ai_hints]
+when_to_use = "Add a comment to a Figma file. Can be a top-level comment or a reply to an existing one."
+common_mistakes = [
+    "Not providing client_meta when anchoring to a specific element.",
+    "Using node_id format without the colon separator.",
+]
+examples = [
+    '{"file_key": "abc123DEF456", "message": "Looks great!"}',
+    '{"file_key": "abc123DEF456", "message": "Fix spacing here", "client_meta": {"node_id": "1:2", "node_offset": {"x": 100, "y": 200}}}',
+]
+related = [
+    "figma.list_comments",
+    "figma.delete_comment",
+]
+
+[provides.operations."figma.delete_comment"]
+description = "Delete a comment from a Figma file"
+capability = "figma.delete"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."figma.delete_comment".rate_limit]
+max = 20
+per_ms = 60000
+
+[provides.operations."figma.delete_comment".input_schema]
+required = [
+    "file_key",
+    "comment_id",
+]
+type = "object"
+
+[provides.operations."figma.delete_comment".input_schema.properties.file_key]
+description = "Figma file key"
+type = "string"
+
+[provides.operations."figma.delete_comment".input_schema.properties.comment_id]
+description = "Comment ID to delete"
+type = "string"
+
+[provides.operations."figma.delete_comment".output_schema]
+type = "object"
+
+[provides.operations."figma.delete_comment".network_constraints]
+host_allow = ["api.figma.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."figma.delete_comment".ai_hints]
+when_to_use = "Delete a comment. Only the comment author or file owner can delete."
+common_mistakes = ["Trying to delete comments authored by other users."]
+examples = ['{"file_key": "abc123DEF456", "comment_id": "12345"}']
+related = ["figma.list_comments"]
+
+# ---------------------------------------------------------------------------
+# Operations: Webhooks
+# ---------------------------------------------------------------------------
+
+[provides.operations."figma.create_webhook"]
+description = "Register a webhook for file change events"
+capability = "figma.webhook"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."figma.create_webhook".rate_limit]
+max = 10
+per_ms = 60000
+
+[provides.operations."figma.create_webhook".input_schema]
+required = [
+    "team_id",
+    "event_type",
+    "endpoint",
+    "passcode",
+]
+type = "object"
+
+[provides.operations."figma.create_webhook".input_schema.properties.team_id]
+description = "Team ID to subscribe events for"
+type = "string"
+
+[provides.operations."figma.create_webhook".input_schema.properties.event_type]
+description = "Event type to subscribe to"
+enum = [
+    "FILE_UPDATE",
+    "FILE_DELETE",
+    "FILE_VERSION_UPDATE",
+    "LIBRARY_PUBLISH",
+    "FILE_COMMENT",
+]
+type = "string"
+
+[provides.operations."figma.create_webhook".input_schema.properties.endpoint]
+description = "HTTPS URL to receive webhook POST events"
+type = "string"
+
+[provides.operations."figma.create_webhook".input_schema.properties.passcode]
+description = "Secret passcode for webhook signature verification"
+type = "string"
+
+[provides.operations."figma.create_webhook".input_schema.properties.description]
+description = "Human-readable webhook description"
+type = "string"
+
+[provides.operations."figma.create_webhook".output_schema]
+required = [
+    "id",
+    "team_id",
+    "event_type",
+    "endpoint",
+    "status",
+]
+type = "object"
+
+[provides.operations."figma.create_webhook".output_schema.properties.id]
+type = "string"
+[provides.operations."figma.create_webhook".output_schema.properties.team_id]
+type = "string"
+[provides.operations."figma.create_webhook".output_schema.properties.event_type]
+type = "string"
+[provides.operations."figma.create_webhook".output_schema.properties.endpoint]
+type = "string"
+[provides.operations."figma.create_webhook".output_schema.properties.status]
+type = "string"
+
+[provides.operations."figma.create_webhook".network_constraints]
+host_allow = ["api.figma.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."figma.create_webhook".ai_hints]
+when_to_use = "Register a webhook to receive events for file updates, deletions, comments, etc."
+common_mistakes = [
+    "Not providing a valid HTTPS endpoint URL.",
+    "Forgetting the passcode needed for signature verification.",
+    "Not handling webhook verification handshake on the endpoint.",
+]
+examples = ['{"team_id": "12345", "event_type": "FILE_UPDATE", "endpoint": "https://example.com/webhook", "passcode": "secret123"}']
+related = [
+    "figma.list_webhooks",
+    "figma.delete_webhook",
+]
+
+[provides.operations."figma.list_webhooks"]
+description = "List all webhooks registered for a team"
+capability = "figma.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."figma.list_webhooks".rate_limit]
+max = 30
+per_ms = 60000
+
+[provides.operations."figma.list_webhooks".input_schema]
+required = ["team_id"]
+type = "object"
+
+[provides.operations."figma.list_webhooks".input_schema.properties.team_id]
+description = "Team ID"
+type = "string"
+
+[provides.operations."figma.list_webhooks".output_schema]
+required = ["webhooks"]
+type = "object"
+
+[provides.operations."figma.list_webhooks".output_schema.properties.webhooks]
+description = "Webhook entries with id, event_type, endpoint, status"
+type = "array"
+[provides.operations."figma.list_webhooks".output_schema.properties.webhooks.items]
+type = "object"
+
+[provides.operations."figma.list_webhooks".network_constraints]
+host_allow = ["api.figma.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."figma.list_webhooks".ai_hints]
+when_to_use = "List all registered webhooks for a team to check status or find IDs."
+common_mistakes = []
+examples = ['{"team_id": "12345"}']
+related = [
+    "figma.create_webhook",
+    "figma.delete_webhook",
+]
+
+[provides.operations."figma.delete_webhook"]
+description = "Delete a webhook subscription"
+capability = "figma.delete"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."figma.delete_webhook".rate_limit]
+max = 10
+per_ms = 60000
+
+[provides.operations."figma.delete_webhook".input_schema]
+required = ["webhook_id"]
+type = "object"
+
+[provides.operations."figma.delete_webhook".input_schema.properties.webhook_id]
+description = "Webhook ID to delete"
+type = "string"
+
+[provides.operations."figma.delete_webhook".output_schema]
+type = "object"
+
+[provides.operations."figma.delete_webhook".network_constraints]
+host_allow = ["api.figma.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."figma.delete_webhook".ai_hints]
+when_to_use = "Remove a webhook subscription."
+common_mistakes = []
+examples = ['{"webhook_id": "67890"}']
+related = ["figma.list_webhooks"]
+
+# ---------------------------------------------------------------------------
+# Streaming / Event Capabilities
+# ---------------------------------------------------------------------------
+
+[event_caps]
+streaming = true
+replay = false
+min_buffer_events = 25
+
+# ---------------------------------------------------------------------------
+# Sandbox
+# ---------------------------------------------------------------------------
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+# ---------------------------------------------------------------------------
+# Rate Limit Pools
+# ---------------------------------------------------------------------------
+
+[[rate_limits.pools]]
+id = "figma.read"
+description = "Read operations against Figma REST API"
+requests = 30
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "figma.write"
+description = "Write operations (comments, webhooks)"
+requests = 30
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "figma.delete"
+description = "Delete operations"
+requests = 20
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "figma.export"
+description = "Image export operations (resource-intensive)"
+requests = 20
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "figma.webhook"
+description = "Webhook management operations"
+requests = 10
+window_ms = 60000
+burst = 2
+scope = "instance"
+
+[rate_limits.operation_pools]
+"figma.get_file" = ["figma.read"]
+"figma.get_file_nodes" = ["figma.read"]
+"figma.get_file_components" = ["figma.read"]
+"figma.get_file_styles" = ["figma.read"]
+"figma.export_images" = ["figma.export"]
+"figma.list_file_versions" = ["figma.read"]
+"figma.list_comments" = ["figma.read"]
+"figma.post_comment" = ["figma.write"]
+"figma.delete_comment" = ["figma.delete"]
+"figma.create_webhook" = ["figma.webhook"]
+"figma.list_webhooks" = ["figma.read"]
+"figma.delete_webhook" = ["figma.delete"]

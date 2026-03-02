@@ -1195,6 +1195,1356 @@ fn parses_singleton_writer_state_model() {
     ));
 }
 
+#[test]
+fn anthropic_good_manifest_vector_parses_and_maps_capabilities() {
+    let _log = TestLog::new(
+        "anthropic_good_manifest_vector_parses_and_maps_capabilities",
+        "fcp-manifest",
+        Some("fcp.anthropic"),
+        Some("0.1.0"),
+        Some(3),
+    );
+    let raw = read_vector_manifest("manifest_anthropic_good.toml");
+    let with_hash = with_computed_hash(&raw);
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid anthropic manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.anthropic");
+    let message_op = parsed
+        .provides
+        .operations
+        .get("anthropic.message")
+        .expect("anthropic.message operation");
+    let chat_op = parsed
+        .provides
+        .operations
+        .get("anthropic.chat")
+        .expect("anthropic.chat operation");
+    let usage_op = parsed
+        .provides
+        .operations
+        .get("anthropic.get_usage")
+        .expect("anthropic.get_usage operation");
+
+    assert_eq!(message_op.capability.as_str(), "anthropic.message");
+    assert_eq!(chat_op.capability.as_str(), "anthropic.chat");
+    assert_eq!(usage_op.capability.as_str(), "anthropic.get_usage");
+}
+
+#[test]
+fn anthropic_bad_manifest_vector_is_rejected() {
+    let _log = TestLog::new(
+        "anthropic_bad_manifest_vector_is_rejected",
+        "fcp-manifest",
+        Some("fcp.anthropic"),
+        Some("0.1.0"),
+        Some(3),
+    );
+    let raw = read_vector_manifest("manifest_anthropic_bad.toml");
+    let with_hash = with_computed_hash(&raw);
+    let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+    assert!(matches!(err, ManifestError::Invalid { .. }));
+    assert!(
+        err.to_string().contains("capabilities"),
+        "expected capability validation failure, got: {err}"
+    );
+}
+
+// =============================================================================
+// Jira Connector Vector Tests
+// =============================================================================
+
+#[test]
+fn jira_good_manifest_vector_parses_and_maps_capabilities() {
+    let _log = TestLog::new(
+        "jira_good_manifest_vector_parses_and_maps_capabilities",
+        "fcp-manifest",
+        Some("fcp.jira"),
+        Some("0.1.0"),
+        Some(4),
+    );
+    let raw = read_vector_manifest("manifest_jira_good.toml");
+    let with_hash = with_computed_hash(&raw);
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid jira manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.jira");
+    assert_eq!(parsed.connector.archetypes.len(), 2);
+    assert_eq!(parsed.connector.archetypes[0].as_str(), "operational");
+    assert_eq!(parsed.connector.archetypes[1].as_str(), "streaming");
+
+    // Verify singleton_writer state model
+    let state = parsed.connector.state.as_ref().expect("state section");
+    let model = state.to_state_model().expect("valid state model");
+    assert!(matches!(model, fcp_manifest::ConnectorStateModel::SingletonWriter));
+
+    // Verify operations
+    let create_op = parsed
+        .provides
+        .operations
+        .get("jira.create_issue")
+        .expect("jira.create_issue operation");
+    assert_eq!(create_op.capability.as_str(), "jira.write");
+
+    let search_op = parsed
+        .provides
+        .operations
+        .get("jira.search_jql")
+        .expect("jira.search_jql operation");
+    assert_eq!(search_op.capability.as_str(), "jira.read");
+
+    // Verify network constraints use wildcard host
+    let nc = create_op
+        .network_constraints
+        .as_ref()
+        .expect("network_constraints");
+    assert!(nc.host_allow.iter().any(|h| h == "*.atlassian.net"));
+    assert!(nc.port_allow.contains(&443));
+    assert!(nc.require_sni);
+
+    // Verify rate limit pools
+    let pools = parsed.rate_limits.as_ref().expect("rate_limits section");
+    assert!(pools.pools.iter().any(|p| p.id == "jira.read"));
+    assert!(pools.pools.iter().any(|p| p.id == "jira.write"));
+
+    // Verify event_caps
+    let events = parsed.event_caps.as_ref().expect("event_caps section");
+    assert!(events.streaming);
+    assert!(!events.replay);
+    assert_eq!(events.min_buffer_events, 50);
+
+    // Verify required capabilities
+    assert!(parsed.capabilities.required.iter().any(|c| c.as_str() == "storage.state"));
+}
+
+#[test]
+fn jira_full_manifest_parses_with_all_operations() {
+    let _log = TestLog::new(
+        "jira_full_manifest_parses_with_all_operations",
+        "fcp-manifest",
+        Some("fcp.jira"),
+        Some("0.1.0"),
+        Some(4),
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("../../connectors/jira/manifest.toml");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read jira manifest: {err}"));
+    let with_hash = with_computed_hash(&raw);
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid full jira manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.jira");
+
+    // Verify all 12 operations present
+    let ops = &parsed.provides.operations;
+    let expected_ops = [
+        "jira.create_issue",
+        "jira.get_issue",
+        "jira.update_issue",
+        "jira.delete_issue",
+        "jira.search_jql",
+        "jira.list_transitions",
+        "jira.transition_issue",
+        "jira.list_sprints",
+        "jira.move_to_sprint",
+        "jira.add_comment",
+        "jira.list_comments",
+        "jira.add_attachment",
+    ];
+    for op_name in &expected_ops {
+        assert!(
+            ops.contains_key(*op_name),
+            "missing operation: {op_name}"
+        );
+    }
+    assert_eq!(ops.len(), expected_ops.len());
+
+    // Print the computed interface hash for updating the manifest
+    let unchecked = ConnectorManifest::parse_str_unchecked(&raw).expect("unchecked");
+    let hash = unchecked.compute_interface_hash().expect("hash");
+    println!("JIRA_INTERFACE_HASH={hash}");
+
+    // Verify rate limit pool mapping covers all operations
+    let pools = parsed.rate_limits.as_ref().expect("rate_limits");
+    assert_eq!(pools.pools.len(), 4); // read, write, delete, attachment
+    let pool_map = &pools.operation_pools;
+    for op_name in &expected_ops {
+        assert!(
+            pool_map.contains_key(*op_name),
+            "missing rate limit pool mapping for: {op_name}"
+        );
+    }
+}
+
+#[test]
+fn jira_bad_manifest_vector_is_rejected() {
+    let _log = TestLog::new(
+        "jira_bad_manifest_vector_is_rejected",
+        "fcp-manifest",
+        Some("fcp.jira"),
+        Some("0.1.0"),
+        Some(4),
+    );
+    let raw = read_vector_manifest("manifest_jira_bad.toml");
+    let with_hash = with_computed_hash(&raw);
+    let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+    // Should fail on one of: capability duplication, zone conflict, or addressing in cap ID
+    let msg = err.to_string();
+    assert!(
+        msg.contains("capabilities") || msg.contains("zone") || msg.contains("forbidden"),
+        "expected validation failure on capabilities or zones, got: {msg}"
+    );
+}
+
+// =============================================================================
+// Figma Connector Vector Tests
+// =============================================================================
+
+#[test]
+fn figma_good_manifest_vector_parses_and_maps_capabilities() {
+    let _log = TestLog::new(
+        "figma_good_manifest_vector_parses_and_maps_capabilities",
+        "fcp-manifest",
+        Some("fcp.figma"),
+        Some("0.1.0"),
+        Some(4),
+    );
+    let raw = read_vector_manifest("manifest_figma_good.toml");
+    let with_hash = with_computed_hash(&raw);
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid figma manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.figma");
+    assert_eq!(parsed.connector.archetypes.len(), 3);
+    assert_eq!(parsed.connector.archetypes[0].as_str(), "knowledge");
+    assert_eq!(parsed.connector.archetypes[1].as_str(), "operational");
+    assert_eq!(parsed.connector.archetypes[2].as_str(), "streaming");
+
+    let get_file = parsed
+        .provides
+        .operations
+        .get("figma.get_file")
+        .expect("figma.get_file operation");
+    assert_eq!(get_file.capability.as_str(), "figma.read");
+
+    let export = parsed
+        .provides
+        .operations
+        .get("figma.export_images")
+        .expect("figma.export_images operation");
+    // Verify CDN hosts in export constraints
+    let nc = export.network_constraints.as_ref().expect("network_constraints");
+    assert!(nc.host_allow.iter().any(|h| h == "api.figma.com"));
+    assert!(nc.host_allow.iter().any(|h| h.contains("s3.us-west-2.amazonaws.com")));
+    assert!(nc.host_allow.iter().any(|h| h == "*.figma.com"));
+    // Export has 100MB response limit
+    assert_eq!(nc.max_response_bytes, 104_857_600);
+}
+
+#[test]
+fn figma_full_manifest_parses_with_all_operations() {
+    let _log = TestLog::new(
+        "figma_full_manifest_parses_with_all_operations",
+        "fcp-manifest",
+        Some("fcp.figma"),
+        Some("0.1.0"),
+        Some(4),
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("../../connectors/figma/manifest.toml");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read figma manifest: {err}"));
+    let with_hash = with_computed_hash(&raw);
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid full figma manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.figma");
+
+    // Verify all 12 operations present
+    let ops = &parsed.provides.operations;
+    let expected_ops = [
+        "figma.get_file",
+        "figma.get_file_nodes",
+        "figma.get_file_components",
+        "figma.get_file_styles",
+        "figma.export_images",
+        "figma.list_file_versions",
+        "figma.list_comments",
+        "figma.post_comment",
+        "figma.delete_comment",
+        "figma.create_webhook",
+        "figma.list_webhooks",
+        "figma.delete_webhook",
+    ];
+    for op_name in &expected_ops {
+        assert!(
+            ops.contains_key(*op_name),
+            "missing operation: {op_name}"
+        );
+    }
+    assert_eq!(ops.len(), expected_ops.len());
+
+    // Print the computed interface hash for updating the manifest
+    let unchecked = ConnectorManifest::parse_str_unchecked(&raw).expect("unchecked");
+    let hash = unchecked.compute_interface_hash().expect("hash");
+    println!("FIGMA_INTERFACE_HASH={hash}");
+
+    // Verify 5 rate limit pools
+    let pools = parsed.rate_limits.as_ref().expect("rate_limits");
+    assert_eq!(pools.pools.len(), 5);
+
+    // Verify pool mapping for all ops
+    let pool_map = &pools.operation_pools;
+    for op_name in &expected_ops {
+        assert!(
+            pool_map.contains_key(*op_name),
+            "missing rate limit pool mapping for: {op_name}"
+        );
+    }
+}
+
+#[test]
+fn figma_bad_manifest_vector_is_rejected() {
+    let _log = TestLog::new(
+        "figma_bad_manifest_vector_is_rejected",
+        "fcp-manifest",
+        Some("fcp.figma"),
+        Some("0.1.0"),
+        Some(3),
+    );
+    let raw = read_vector_manifest("manifest_figma_bad.toml");
+    let with_hash = with_computed_hash(&raw);
+    let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("capabilities") || msg.contains("zone") || msg.contains("forbidden"),
+        "expected validation failure on capabilities or zones, got: {msg}"
+    );
+}
+
+// =============================================================================
+// Twilio Connector Vector Tests
+// =============================================================================
+
+#[test]
+fn twilio_good_manifest_vector_parses_and_maps_capabilities() {
+    let _log = TestLog::new(
+        "twilio_good_manifest_vector_parses_and_maps_capabilities",
+        "fcp-manifest",
+        Some("fcp.twilio"),
+        Some("0.1.0"),
+        Some(4),
+    );
+    let raw = read_vector_manifest("manifest_twilio_good.toml");
+    let with_hash = with_computed_hash(&raw);
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid twilio manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.twilio");
+    assert_eq!(parsed.connector.archetypes.len(), 3);
+    assert_eq!(parsed.connector.archetypes[0].as_str(), "operational");
+    assert_eq!(parsed.connector.archetypes[1].as_str(), "streaming");
+    assert_eq!(parsed.connector.archetypes[2].as_str(), "bidirectional");
+
+    let send_op = parsed
+        .provides
+        .operations
+        .get("twilio.send_message")
+        .expect("twilio.send_message operation");
+    assert_eq!(send_op.capability.as_str(), "twilio.message");
+    // send_message has max_redirects=0 (deny redirects)
+    let nc = send_op.network_constraints.as_ref().expect("nc");
+    assert_eq!(nc.max_redirects, 0);
+}
+
+#[test]
+fn twilio_full_manifest_parses_with_all_operations() {
+    let _log = TestLog::new(
+        "twilio_full_manifest_parses_with_all_operations",
+        "fcp-manifest",
+        Some("fcp.twilio"),
+        Some("0.1.0"),
+        Some(4),
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("../../connectors/twilio/manifest.toml");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read twilio manifest: {err}"));
+    let with_hash = with_computed_hash(&raw);
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid full twilio manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.twilio");
+
+    let ops = &parsed.provides.operations;
+    let expected_ops = [
+        "twilio.send_message",
+        "twilio.get_message",
+        "twilio.list_messages",
+        "twilio.create_call",
+        "twilio.get_call",
+        "twilio.list_recordings",
+        "twilio.download_recording",
+        "twilio.download_media",
+        "twilio.get_account",
+        "twilio.list_phone_numbers",
+    ];
+    for op_name in &expected_ops {
+        assert!(
+            ops.contains_key(*op_name),
+            "missing operation: {op_name}"
+        );
+    }
+    assert_eq!(ops.len(), expected_ops.len());
+
+    // Print computed hash
+    let unchecked = ConnectorManifest::parse_str_unchecked(&raw).expect("unchecked");
+    let hash = unchecked.compute_interface_hash().expect("hash");
+    println!("TWILIO_INTERFACE_HASH={hash}");
+
+    // Verify media CDN host in download operations
+    let dl_rec = ops.get("twilio.download_recording").expect("download_recording");
+    let nc = dl_rec.network_constraints.as_ref().expect("nc");
+    assert!(nc.host_allow.iter().any(|h| h == "media.twiliocdn.com"));
+
+    // Verify 4 rate limit pools
+    let pools = parsed.rate_limits.as_ref().expect("rate_limits");
+    assert_eq!(pools.pools.len(), 4);
+}
+
+#[test]
+fn twilio_bad_manifest_vector_is_rejected() {
+    let _log = TestLog::new(
+        "twilio_bad_manifest_vector_is_rejected",
+        "fcp-manifest",
+        Some("fcp.twilio"),
+        Some("0.1.0"),
+        Some(3),
+    );
+    let raw = read_vector_manifest("manifest_twilio_bad.toml");
+    let with_hash = with_computed_hash(&raw);
+    let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("capabilities") || msg.contains("zone") || msg.contains("forbidden"),
+        "expected validation failure, got: {msg}"
+    );
+}
+
+// =============================================================================
+// Zendesk Connector Vector Tests
+// =============================================================================
+
+#[test]
+fn zendesk_good_manifest_vector_parses_and_maps_capabilities() {
+    let _log = TestLog::new(
+        "zendesk_good_manifest_vector_parses_and_maps_capabilities",
+        "fcp-manifest",
+        Some("fcp.zendesk"),
+        Some("0.1.0"),
+        Some(4),
+    );
+    let raw = read_vector_manifest("manifest_zendesk_good.toml");
+    let with_hash = with_computed_hash(&raw);
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid zendesk manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.zendesk");
+    assert_eq!(parsed.connector.archetypes.len(), 3);
+    assert_eq!(parsed.connector.archetypes[2].as_str(), "knowledge");
+
+    let create_op = parsed
+        .provides
+        .operations
+        .get("zendesk.create_ticket")
+        .expect("zendesk.create_ticket");
+    assert_eq!(create_op.capability.as_str(), "zendesk.write");
+}
+
+#[test]
+fn zendesk_full_manifest_parses_with_all_operations() {
+    let _log = TestLog::new(
+        "zendesk_full_manifest_parses_with_all_operations",
+        "fcp-manifest",
+        Some("fcp.zendesk"),
+        Some("0.1.0"),
+        Some(4),
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("../../connectors/zendesk/manifest.toml");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read zendesk manifest: {err}"));
+    let with_hash = with_computed_hash(&raw);
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid full zendesk manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.zendesk");
+
+    let ops = &parsed.provides.operations;
+    let expected_ops = [
+        "zendesk.create_ticket",
+        "zendesk.get_ticket",
+        "zendesk.update_ticket",
+        "zendesk.delete_ticket",
+        "zendesk.search_tickets",
+        "zendesk.list_ticket_comments",
+        "zendesk.search_articles",
+        "zendesk.get_article",
+        "zendesk.search_users",
+        "zendesk.apply_macro",
+    ];
+    for op_name in &expected_ops {
+        assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
+    }
+    assert_eq!(ops.len(), expected_ops.len());
+
+    let unchecked = ConnectorManifest::parse_str_unchecked(&raw).expect("unchecked");
+    let hash = unchecked.compute_interface_hash().expect("hash");
+    println!("ZENDESK_INTERFACE_HASH={hash}");
+
+    // Verify 4 rate limit pools
+    let pools = parsed.rate_limits.as_ref().expect("rate_limits");
+    assert_eq!(pools.pools.len(), 4);
+}
+
+#[test]
+fn zendesk_bad_manifest_vector_is_rejected() {
+    let _log = TestLog::new(
+        "zendesk_bad_manifest_vector_is_rejected",
+        "fcp-manifest",
+        Some("fcp.zendesk"),
+        Some("0.1.0"),
+        Some(3),
+    );
+    let raw = read_vector_manifest("manifest_zendesk_bad.toml");
+    let with_hash = with_computed_hash(&raw);
+    let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("capabilities") || msg.contains("zone") || msg.contains("forbidden"),
+        "expected validation failure, got: {msg}"
+    );
+}
+
+// =============================================================================
+// GitHub connector tests
+// =============================================================================
+
+#[test]
+fn github_good_manifest_vector_parses_and_maps_capabilities() {
+    let _log = TestLog::new(
+        "github_good_manifest_vector_parses_and_maps_capabilities",
+        "fcp-manifest",
+        Some("fcp.github"),
+        Some("0.1.0"),
+        Some(4),
+    );
+    let raw = read_vector_manifest("manifest_github_good.toml");
+    let with_hash = with_computed_hash(&raw);
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid github manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.github");
+    assert_eq!(parsed.connector.archetypes.len(), 3);
+    assert_eq!(parsed.connector.archetypes[2].as_str(), "knowledge");
+
+    let create_op = parsed
+        .provides
+        .operations
+        .get("github.create_issue")
+        .expect("github.create_issue");
+    assert_eq!(create_op.capability.as_str(), "github.write");
+}
+
+#[test]
+fn github_full_manifest_parses_with_all_operations() {
+    let _log = TestLog::new(
+        "github_full_manifest_parses_with_all_operations",
+        "fcp-manifest",
+        Some("fcp.github"),
+        Some("0.1.0"),
+        Some(4),
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("../../connectors/github/manifest.toml");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read github manifest: {err}"));
+    let with_hash = with_computed_hash(&raw);
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid full github manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.github");
+
+    let ops = &parsed.provides.operations;
+    let expected_ops = [
+        "github.create_issue",
+        "github.get_issue",
+        "github.search_issues",
+        "github.create_pull_request",
+        "github.get_pull_request",
+        "github.merge_pull_request",
+        "github.get_repo",
+        "github.search_repos",
+        "github.list_workflows",
+        "github.trigger_workflow",
+        "github.get_file_content",
+        "github.search_code",
+    ];
+    for op_name in &expected_ops {
+        assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
+    }
+    assert_eq!(ops.len(), expected_ops.len());
+
+    let unchecked = ConnectorManifest::parse_str_unchecked(&raw).expect("unchecked");
+    let hash = unchecked.compute_interface_hash().expect("hash");
+    println!("GITHUB_INTERFACE_HASH={hash}");
+
+    // Verify 4 rate limit pools
+    let pools = parsed.rate_limits.as_ref().expect("rate_limits");
+    assert_eq!(pools.pools.len(), 4);
+}
+
+#[test]
+fn github_bad_manifest_vector_is_rejected() {
+    let _log = TestLog::new(
+        "github_bad_manifest_vector_is_rejected",
+        "fcp-manifest",
+        Some("fcp.github"),
+        Some("0.1.0"),
+        Some(3),
+    );
+    let raw = read_vector_manifest("manifest_github_bad.toml");
+    let with_hash = with_computed_hash(&raw);
+    let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("capabilities") || msg.contains("zone") || msg.contains("forbidden"),
+        "expected validation failure, got: {msg}"
+    );
+}
+
+// =============================================================================
+// Slack connector tests
+// =============================================================================
+
+#[test]
+fn slack_good_manifest_vector_parses_and_maps_capabilities() {
+    let _log = TestLog::new(
+        "slack_good_manifest_vector_parses_and_maps_capabilities",
+        "fcp-manifest",
+        Some("fcp.slack"),
+        Some("0.1.0"),
+        Some(4),
+    );
+    let raw = read_vector_manifest("manifest_slack_good.toml");
+    let with_hash = with_computed_hash(&raw);
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid slack manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.slack");
+    assert_eq!(parsed.connector.archetypes.len(), 3);
+    assert_eq!(parsed.connector.archetypes[2].as_str(), "bidirectional");
+
+    let post_op = parsed
+        .provides
+        .operations
+        .get("slack.post_message")
+        .expect("slack.post_message");
+    assert_eq!(post_op.capability.as_str(), "slack.write");
+}
+
+#[test]
+fn slack_full_manifest_parses_with_all_operations() {
+    let _log = TestLog::new(
+        "slack_full_manifest_parses_with_all_operations",
+        "fcp-manifest",
+        Some("fcp.slack"),
+        Some("0.1.0"),
+        Some(4),
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("../../connectors/slack/manifest.toml");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read slack manifest: {err}"));
+    let with_hash = with_computed_hash(&raw);
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid full slack manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.slack");
+
+    let ops = &parsed.provides.operations;
+    let expected_ops = [
+        "slack.post_message",
+        "slack.reply_thread",
+        "slack.get_channel_history",
+        "slack.search_messages",
+        "slack.list_channels",
+        "slack.get_user_info",
+        "slack.upload_file",
+        "slack.add_reaction",
+        "slack.set_channel_topic",
+        "slack.download_file",
+    ];
+    for op_name in &expected_ops {
+        assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
+    }
+    assert_eq!(ops.len(), expected_ops.len());
+
+    let unchecked = ConnectorManifest::parse_str_unchecked(&raw).expect("unchecked");
+    let hash = unchecked.compute_interface_hash().expect("hash");
+    println!("SLACK_INTERFACE_HASH={hash}");
+
+    // Verify 4 rate limit pools
+    let pools = parsed.rate_limits.as_ref().expect("rate_limits");
+    assert_eq!(pools.pools.len(), 4);
+}
+
+#[test]
+fn slack_bad_manifest_vector_is_rejected() {
+    let _log = TestLog::new(
+        "slack_bad_manifest_vector_is_rejected",
+        "fcp-manifest",
+        Some("fcp.slack"),
+        Some("0.1.0"),
+        Some(3),
+    );
+    let raw = read_vector_manifest("manifest_slack_bad.toml");
+    let with_hash = with_computed_hash(&raw);
+    let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("capabilities") || msg.contains("zone") || msg.contains("forbidden"),
+        "expected validation failure, got: {msg}"
+    );
+}
+
+// =============================================================================
+// Stripe connector tests
+// =============================================================================
+
+#[test]
+fn stripe_good_manifest_vector_parses_and_maps_capabilities() {
+    let _log = TestLog::new(
+        "stripe_good_manifest_vector_parses_and_maps_capabilities",
+        "fcp-manifest",
+        Some("fcp.stripe"),
+        Some("0.1.0"),
+        Some(4),
+    );
+    let raw = read_vector_manifest("manifest_stripe_good.toml");
+    let with_hash = with_computed_hash(&raw);
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid stripe manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.stripe");
+    assert_eq!(parsed.connector.archetypes.len(), 2);
+    assert_eq!(parsed.connector.archetypes[1].as_str(), "streaming");
+
+    let pay_op = parsed
+        .provides
+        .operations
+        .get("stripe.create_payment_intent")
+        .expect("stripe.create_payment_intent");
+    assert_eq!(pay_op.capability.as_str(), "stripe.payment");
+    assert!(matches!(pay_op.safety_tier, fcp_core::SafetyTier::Dangerous));
+}
+
+#[test]
+fn stripe_full_manifest_parses_with_all_operations() {
+    let _log = TestLog::new(
+        "stripe_full_manifest_parses_with_all_operations",
+        "fcp-manifest",
+        Some("fcp.stripe"),
+        Some("0.1.0"),
+        Some(4),
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("../../connectors/stripe/manifest.toml");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read stripe manifest: {err}"));
+    let with_hash = with_computed_hash(&raw);
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid full stripe manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.stripe");
+
+    let ops = &parsed.provides.operations;
+    let expected_ops = [
+        "stripe.create_customer",
+        "stripe.get_customer",
+        "stripe.list_customers",
+        "stripe.create_payment_intent",
+        "stripe.get_payment_intent",
+        "stripe.create_refund",
+        "stripe.create_subscription",
+        "stripe.cancel_subscription",
+        "stripe.list_invoices",
+        "stripe.get_balance",
+    ];
+    for op_name in &expected_ops {
+        assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
+    }
+    assert_eq!(ops.len(), expected_ops.len());
+
+    let unchecked = ConnectorManifest::parse_str_unchecked(&raw).expect("unchecked");
+    let hash = unchecked.compute_interface_hash().expect("hash");
+    println!("STRIPE_INTERFACE_HASH={hash}");
+
+    // Verify 3 rate limit pools
+    let pools = parsed.rate_limits.as_ref().expect("rate_limits");
+    assert_eq!(pools.pools.len(), 3);
+}
+
+#[test]
+fn stripe_bad_manifest_vector_is_rejected() {
+    let _log = TestLog::new(
+        "stripe_bad_manifest_vector_is_rejected",
+        "fcp-manifest",
+        Some("fcp.stripe"),
+        Some("0.1.0"),
+        Some(3),
+    );
+    let raw = read_vector_manifest("manifest_stripe_bad.toml");
+    let with_hash = with_computed_hash(&raw);
+    let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("capabilities") || msg.contains("zone") || msg.contains("forbidden"),
+        "expected validation failure, got: {msg}"
+    );
+}
+
+// =============================================================================
+// Notion connector tests
+// =============================================================================
+
+#[test]
+fn notion_good_manifest_vector_parses_and_maps_capabilities() {
+    let _log = TestLog::new(
+        "notion_good_manifest_vector_parses_and_maps_capabilities",
+        "fcp-manifest",
+        Some("fcp.notion"),
+        Some("0.1.0"),
+        Some(4),
+    );
+    let raw = read_vector_manifest("manifest_notion_good.toml");
+    let with_hash = with_computed_hash(&raw);
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid notion manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.notion");
+    assert_eq!(parsed.connector.archetypes.len(), 3);
+    assert_eq!(parsed.connector.archetypes[1].as_str(), "knowledge");
+
+    let create_op = parsed
+        .provides
+        .operations
+        .get("notion.create_page")
+        .expect("notion.create_page");
+    assert_eq!(create_op.capability.as_str(), "notion.write");
+}
+
+#[test]
+fn notion_full_manifest_parses_with_all_operations() {
+    let _log = TestLog::new(
+        "notion_full_manifest_parses_with_all_operations",
+        "fcp-manifest",
+        Some("fcp.notion"),
+        Some("0.1.0"),
+        Some(4),
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("../../connectors/notion/manifest.toml");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read notion manifest: {err}"));
+    let with_hash = with_computed_hash(&raw);
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid full notion manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.notion");
+
+    let ops = &parsed.provides.operations;
+    let expected_ops = [
+        "notion.create_page",
+        "notion.get_page",
+        "notion.update_page",
+        "notion.delete_page",
+        "notion.query_database",
+        "notion.search",
+        "notion.get_block_children",
+        "notion.append_blocks",
+        "notion.add_comment",
+        "notion.list_comments",
+    ];
+    for op_name in &expected_ops {
+        assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
+    }
+    assert_eq!(ops.len(), expected_ops.len());
+
+    let unchecked = ConnectorManifest::parse_str_unchecked(&raw).expect("unchecked");
+    let hash = unchecked.compute_interface_hash().expect("hash");
+    println!("NOTION_INTERFACE_HASH={hash}");
+
+    // Verify 3 rate limit pools
+    let pools = parsed.rate_limits.as_ref().expect("rate_limits");
+    assert_eq!(pools.pools.len(), 3);
+}
+
+#[test]
+fn notion_bad_manifest_vector_is_rejected() {
+    let _log = TestLog::new(
+        "notion_bad_manifest_vector_is_rejected",
+        "fcp-manifest",
+        Some("fcp.notion"),
+        Some("0.1.0"),
+        Some(3),
+    );
+    let raw = read_vector_manifest("manifest_notion_bad.toml");
+    let with_hash = with_computed_hash(&raw);
+    let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("capabilities") || msg.contains("zone") || msg.contains("forbidden"),
+        "expected validation failure, got: {msg}"
+    );
+}
+
+// =============================================================================
+// Linear connector tests
+// =============================================================================
+
+#[test]
+fn linear_good_manifest_vector_parses_and_maps_capabilities() {
+    let _log = TestLog::new(
+        "linear_good_manifest_vector_parses_and_maps_capabilities",
+        "fcp-manifest",
+        Some("fcp.linear"),
+        Some("0.1.0"),
+        Some(4),
+    );
+    let raw = read_vector_manifest("manifest_linear_good.toml");
+    let with_hash = with_computed_hash(&raw);
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid linear manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.linear");
+    assert_eq!(parsed.connector.archetypes.len(), 2);
+    assert_eq!(parsed.connector.archetypes[1].as_str(), "streaming");
+
+    let create_op = parsed
+        .provides
+        .operations
+        .get("linear.create_issue")
+        .expect("linear.create_issue");
+    assert_eq!(create_op.capability.as_str(), "linear.write");
+}
+
+#[test]
+fn linear_full_manifest_parses_with_all_operations() {
+    let _log = TestLog::new(
+        "linear_full_manifest_parses_with_all_operations",
+        "fcp-manifest",
+        Some("fcp.linear"),
+        Some("0.1.0"),
+        Some(4),
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("../../connectors/linear/manifest.toml");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read linear manifest: {err}"));
+    let with_hash = with_computed_hash(&raw);
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid full linear manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.linear");
+
+    let ops = &parsed.provides.operations;
+    let expected_ops = [
+        "linear.create_issue",
+        "linear.get_issue",
+        "linear.update_issue",
+        "linear.search_issues",
+        "linear.list_teams",
+        "linear.list_cycles",
+        "linear.add_comment",
+        "linear.list_projects",
+    ];
+    for op_name in &expected_ops {
+        assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
+    }
+    assert_eq!(ops.len(), expected_ops.len());
+
+    let unchecked = ConnectorManifest::parse_str_unchecked(&raw).expect("unchecked");
+    let hash = unchecked.compute_interface_hash().expect("hash");
+    println!("LINEAR_INTERFACE_HASH={hash}");
+
+    // Verify 2 rate limit pools
+    let pools = parsed.rate_limits.as_ref().expect("rate_limits");
+    assert_eq!(pools.pools.len(), 2);
+}
+
+#[test]
+fn linear_bad_manifest_vector_is_rejected() {
+    let _log = TestLog::new(
+        "linear_bad_manifest_vector_is_rejected",
+        "fcp-manifest",
+        Some("fcp.linear"),
+        Some("0.1.0"),
+        Some(3),
+    );
+    let raw = read_vector_manifest("manifest_linear_bad.toml");
+    let with_hash = with_computed_hash(&raw);
+    let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("capabilities") || msg.contains("zone") || msg.contains("forbidden"),
+        "expected validation failure, got: {msg}"
+    );
+}
+
+// =============================================================================
+// S3 connector tests
+// =============================================================================
+
+#[test]
+fn s3_good_manifest_vector_parses_and_maps_capabilities() {
+    let _log = TestLog::new(
+        "s3_good_manifest_vector_parses_and_maps_capabilities",
+        "fcp-manifest",
+        Some("fcp.s3"),
+        Some("0.1.0"),
+        Some(4),
+    );
+    let raw = read_vector_manifest("manifest_s3_good.toml");
+    let with_hash = with_computed_hash(&raw);
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid s3 manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.s3");
+    assert_eq!(parsed.connector.archetypes.len(), 2);
+    assert_eq!(parsed.connector.archetypes[0].as_str(), "storage");
+
+    let put_op = parsed
+        .provides
+        .operations
+        .get("s3.put_object")
+        .expect("s3.put_object");
+    assert_eq!(put_op.capability.as_str(), "s3.write");
+}
+
+#[test]
+fn s3_full_manifest_parses_with_all_operations() {
+    let _log = TestLog::new(
+        "s3_full_manifest_parses_with_all_operations",
+        "fcp-manifest",
+        Some("fcp.s3"),
+        Some("0.1.0"),
+        Some(4),
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("../../connectors/s3/manifest.toml");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read s3 manifest: {err}"));
+    let with_hash = with_computed_hash(&raw);
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid full s3 manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.s3");
+
+    let ops = &parsed.provides.operations;
+    let expected_ops = [
+        "s3.put_object",
+        "s3.get_object",
+        "s3.delete_object",
+        "s3.list_objects",
+        "s3.head_object",
+        "s3.copy_object",
+        "s3.list_buckets",
+        "s3.generate_presigned_url",
+    ];
+    for op_name in &expected_ops {
+        assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
+    }
+    assert_eq!(ops.len(), expected_ops.len());
+
+    let unchecked = ConnectorManifest::parse_str_unchecked(&raw).expect("unchecked");
+    let hash = unchecked.compute_interface_hash().expect("hash");
+    println!("S3_INTERFACE_HASH={hash}");
+
+    // Verify 3 rate limit pools
+    let pools = parsed.rate_limits.as_ref().expect("rate_limits");
+    assert_eq!(pools.pools.len(), 3);
+}
+
+#[test]
+fn s3_bad_manifest_vector_is_rejected() {
+    let _log = TestLog::new(
+        "s3_bad_manifest_vector_is_rejected",
+        "fcp-manifest",
+        Some("fcp.s3"),
+        Some("0.1.0"),
+        Some(3),
+    );
+    let raw = read_vector_manifest("manifest_s3_bad.toml");
+    let with_hash = with_computed_hash(&raw);
+    let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("capabilities") || msg.contains("zone") || msg.contains("forbidden"),
+        "expected validation failure, got: {msg}"
+    );
+}
+
+// =============================================================================
+// Gmail connector tests
+// =============================================================================
+
+#[test]
+fn gmail_good_manifest_vector_parses_and_maps_capabilities() {
+    let _log = TestLog::new(
+        "gmail_good_manifest_vector_parses_and_maps_capabilities",
+        "fcp-manifest",
+        Some("fcp.gmail"),
+        Some("0.1.0"),
+        Some(4),
+    );
+    let raw = read_vector_manifest("manifest_gmail_good.toml");
+    let with_hash = with_computed_hash(&raw);
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid gmail manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.gmail");
+    assert_eq!(parsed.connector.archetypes.len(), 3);
+    assert_eq!(parsed.connector.archetypes[2].as_str(), "knowledge");
+
+    let send_op = parsed
+        .provides
+        .operations
+        .get("gmail.send_message")
+        .expect("gmail.send_message");
+    assert_eq!(send_op.capability.as_str(), "gmail.send");
+}
+
+#[test]
+fn gmail_full_manifest_parses_with_all_operations() {
+    let _log = TestLog::new(
+        "gmail_full_manifest_parses_with_all_operations",
+        "fcp-manifest",
+        Some("fcp.gmail"),
+        Some("0.1.0"),
+        Some(4),
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("../../connectors/gmail/manifest.toml");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read gmail manifest: {err}"));
+    let with_hash = with_computed_hash(&raw);
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid full gmail manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.gmail");
+
+    let ops = &parsed.provides.operations;
+    let expected_ops = [
+        "gmail.send_message",
+        "gmail.get_message",
+        "gmail.list_messages",
+        "gmail.search_messages",
+        "gmail.create_draft",
+        "gmail.modify_labels",
+        "gmail.list_labels",
+        "gmail.trash_message",
+    ];
+    for op_name in &expected_ops {
+        assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
+    }
+    assert_eq!(ops.len(), expected_ops.len());
+
+    let unchecked = ConnectorManifest::parse_str_unchecked(&raw).expect("unchecked");
+    let hash = unchecked.compute_interface_hash().expect("hash");
+    println!("GMAIL_INTERFACE_HASH={hash}");
+
+    // Verify 4 rate limit pools
+    let pools = parsed.rate_limits.as_ref().expect("rate_limits");
+    assert_eq!(pools.pools.len(), 4);
+}
+
+#[test]
+fn gmail_bad_manifest_vector_is_rejected() {
+    let _log = TestLog::new(
+        "gmail_bad_manifest_vector_is_rejected",
+        "fcp-manifest",
+        Some("fcp.gmail"),
+        Some("0.1.0"),
+        Some(3),
+    );
+    let raw = read_vector_manifest("manifest_gmail_bad.toml");
+    let with_hash = with_computed_hash(&raw);
+    let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("capabilities") || msg.contains("zone") || msg.contains("forbidden"),
+        "expected validation failure, got: {msg}"
+    );
+}
+
+// =============================================================================
+// Google Calendar connector tests
+// =============================================================================
+
+#[test]
+fn google_calendar_good_manifest_vector_parses_and_maps_capabilities() {
+    let _log = TestLog::new(
+        "google_calendar_good_manifest_vector_parses_and_maps_capabilities",
+        "fcp-manifest",
+        Some("fcp.google-calendar"),
+        Some("0.1.0"),
+        Some(4),
+    );
+    let raw = read_vector_manifest("manifest_google_calendar_good.toml");
+    let with_hash = with_computed_hash(&raw);
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid google-calendar manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.google-calendar");
+    assert_eq!(parsed.connector.archetypes.len(), 2);
+
+    let create_op = parsed
+        .provides
+        .operations
+        .get("gcal.create_event")
+        .expect("gcal.create_event");
+    assert_eq!(create_op.capability.as_str(), "gcal.write");
+}
+
+#[test]
+fn google_calendar_full_manifest_parses_with_all_operations() {
+    let _log = TestLog::new(
+        "google_calendar_full_manifest_parses_with_all_operations",
+        "fcp-manifest",
+        Some("fcp.google-calendar"),
+        Some("0.1.0"),
+        Some(4),
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("../../connectors/google-calendar/manifest.toml");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read google-calendar manifest: {err}"));
+    let with_hash = with_computed_hash(&raw);
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid full google-calendar manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.google-calendar");
+
+    let ops = &parsed.provides.operations;
+    let expected_ops = [
+        "gcal.create_event",
+        "gcal.get_event",
+        "gcal.update_event",
+        "gcal.delete_event",
+        "gcal.list_events",
+        "gcal.list_calendars",
+        "gcal.freebusy",
+    ];
+    for op_name in &expected_ops {
+        assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
+    }
+    assert_eq!(ops.len(), expected_ops.len());
+
+    let unchecked = ConnectorManifest::parse_str_unchecked(&raw).expect("unchecked");
+    let hash = unchecked.compute_interface_hash().expect("hash");
+    println!("GCAL_INTERFACE_HASH={hash}");
+
+    // Verify 3 rate limit pools
+    let pools = parsed.rate_limits.as_ref().expect("rate_limits");
+    assert_eq!(pools.pools.len(), 3);
+}
+
+#[test]
+fn google_calendar_bad_manifest_vector_is_rejected() {
+    let _log = TestLog::new(
+        "google_calendar_bad_manifest_vector_is_rejected",
+        "fcp-manifest",
+        Some("fcp.google-calendar"),
+        Some("0.1.0"),
+        Some(3),
+    );
+    let raw = read_vector_manifest("manifest_google_calendar_bad.toml");
+    let with_hash = with_computed_hash(&raw);
+    let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("capabilities") || msg.contains("zone") || msg.contains("forbidden"),
+        "expected validation failure, got: {msg}"
+    );
+}
+
+// =============================================================================
+// YouTube connector tests
+// =============================================================================
+
+#[test]
+fn youtube_good_manifest_vector_parses_and_maps_capabilities() {
+    let _log = TestLog::new(
+        "youtube_good_manifest_vector_parses_and_maps_capabilities",
+        "fcp-manifest",
+        Some("fcp.youtube"),
+        Some("0.1.0"),
+        Some(4),
+    );
+    let raw = read_vector_manifest("manifest_youtube_good.toml");
+    let with_hash = with_computed_hash(&raw);
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid youtube manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.youtube");
+    assert_eq!(parsed.connector.archetypes.len(), 2);
+    assert_eq!(parsed.connector.archetypes[0].as_str(), "knowledge");
+
+    let search_op = parsed
+        .provides
+        .operations
+        .get("youtube.search")
+        .expect("youtube.search");
+    assert_eq!(search_op.capability.as_str(), "youtube.read");
+}
+
+#[test]
+fn youtube_full_manifest_parses_with_all_operations() {
+    let _log = TestLog::new(
+        "youtube_full_manifest_parses_with_all_operations",
+        "fcp-manifest",
+        Some("fcp.youtube"),
+        Some("0.1.0"),
+        Some(4),
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("../../connectors/youtube/manifest.toml");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read youtube manifest: {err}"));
+    let with_hash = with_computed_hash(&raw);
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid full youtube manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.youtube");
+
+    let ops = &parsed.provides.operations;
+    let expected_ops = [
+        "youtube.search",
+        "youtube.get_video",
+        "youtube.get_channel",
+        "youtube.list_playlist_items",
+        "youtube.list_comments",
+        "youtube.post_comment",
+        "youtube.get_captions",
+    ];
+    for op_name in &expected_ops {
+        assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
+    }
+    assert_eq!(ops.len(), expected_ops.len());
+
+    let unchecked = ConnectorManifest::parse_str_unchecked(&raw).expect("unchecked");
+    let hash = unchecked.compute_interface_hash().expect("hash");
+    println!("YOUTUBE_INTERFACE_HASH={hash}");
+
+    // Verify 2 rate limit pools
+    let pools = parsed.rate_limits.as_ref().expect("rate_limits");
+    assert_eq!(pools.pools.len(), 2);
+}
+
+#[test]
+fn youtube_bad_manifest_vector_is_rejected() {
+    let _log = TestLog::new(
+        "youtube_bad_manifest_vector_is_rejected",
+        "fcp-manifest",
+        Some("fcp.youtube"),
+        Some("0.1.0"),
+        Some(3),
+    );
+    let raw = read_vector_manifest("manifest_youtube_bad.toml");
+    let with_hash = with_computed_hash(&raw);
+    let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("capabilities") || msg.contains("zone") || msg.contains("forbidden"),
+        "expected validation failure, got: {msg}"
+    );
+}
+
 // =============================================================================
 // Rate Limit Validation Tests
 // =============================================================================

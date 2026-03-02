@@ -138,7 +138,7 @@ impl AnthropicConnector {
             event_caps: Some(EventCaps {
                 streaming: true,
                 replay: false,
-                min_buffer_events: 0,
+                min_buffer_events: 10,
                 requires_ack: false,
             }),
             auth_caps: None,
@@ -212,7 +212,7 @@ impl AnthropicConnector {
                             "cost_usd": { "type": "number" }
                         }
                     }),
-                    capability: CapabilityId::from_static("anthropic.messages"),
+                    capability: CapabilityId::from_static("anthropic.message"),
                     risk_level: RiskLevel::Medium,
                     description: None,
                     rate_limit: None,
@@ -262,7 +262,7 @@ impl AnthropicConnector {
                             "cost_usd": { "type": "number" }
                         }
                     }),
-                    capability: CapabilityId::from_static("anthropic.messages"),
+                    capability: CapabilityId::from_static("anthropic.chat"),
                     risk_level: RiskLevel::Medium,
                     description: None,
                     rate_limit: None,
@@ -293,7 +293,7 @@ impl AnthropicConnector {
                             "requests_error": { "type": "integer" }
                         }
                     }),
-                    capability: CapabilityId::from_static("anthropic.messages"),
+                    capability: CapabilityId::from_static("anthropic.get_usage"),
                     risk_level: RiskLevel::Low,
                     description: None,
                     rate_limit: None,
@@ -630,6 +630,8 @@ mod tests {
     use chrono::{Duration, Utc};
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
+    use fcp_manifest::ConnectorManifest;
+    use std::path::PathBuf;
 
     fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> CapabilityToken {
         let now = Utc::now();
@@ -766,7 +768,7 @@ mod tests {
                 "zone": "z:work",
                 "host_public_key": verifying_key.to_bytes(),
                 "nonce": vec![0u8; 32],
-                "capabilities_requested": ["anthropic.messages"]
+                "capabilities_requested": ["anthropic.get_usage"]
             }))
             .await
             .unwrap();
@@ -786,5 +788,27 @@ mod tests {
         assert_eq!(result["total_input_tokens"], 0);
         assert_eq!(result["total_output_tokens"], 0);
         assert_eq!(result["requests_total"], 1);
+    }
+
+    #[test]
+    fn manifest_interface_hash_is_deterministic() {
+        let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("manifest.toml");
+        if !manifest_path.exists() {
+            eprintln!("manifest.toml missing; skipping interface_hash check");
+            return;
+        }
+
+        let raw = std::fs::read_to_string(&manifest_path).expect("read manifest");
+        let manifest = ConnectorManifest::parse_str(&raw).expect("manifest should validate");
+        let computed = manifest
+            .compute_interface_hash()
+            .expect("compute interface hash");
+        assert_eq!(manifest.manifest.interface_hash, computed);
+
+        let manifest2 = ConnectorManifest::parse_str_unchecked(&raw).expect("parse unchecked");
+        let computed2 = manifest2
+            .compute_interface_hash()
+            .expect("compute interface hash");
+        assert_eq!(computed, computed2);
     }
 }

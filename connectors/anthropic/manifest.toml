@@ -1,0 +1,342 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:b81e36b42a0ca574db6781c26e204269c973f58c2a203c712063f186d8e7df3d"
+
+[connector]
+id = "fcp.anthropic"
+name = "Anthropic Connector"
+version = "0.1.0"
+description = "FCP connector for Anthropic Claude API with message, chat, and usage operations"
+archetypes = [
+    "operational",
+    "streaming",
+]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+]
+optional = []
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "storage.state",
+]
+
+[provides.operations."anthropic.chat"]
+description = "Send a simple one-turn chat message to Claude"
+capability = "anthropic.chat"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."anthropic.chat".rate_limit]
+max = 120
+per_ms = 60000
+
+[provides.operations."anthropic.chat".input_schema]
+required = ["message"]
+type = "object"
+
+[provides.operations."anthropic.chat".input_schema.properties.max_tokens]
+default = 4096
+description = "Maximum output tokens to generate"
+maximum = 100000
+minimum = 1
+type = "integer"
+
+[provides.operations."anthropic.chat".input_schema.properties.message]
+description = "Single user message"
+minLength = 1
+type = "string"
+
+[provides.operations."anthropic.chat".input_schema.properties.model]
+default = "claude-sonnet-4-20250514"
+description = "Anthropic model to use"
+enum = [
+    "claude-opus-4-5-20251101",
+    "claude-sonnet-4-20250514",
+    "claude-3-5-haiku-20241022",
+    "claude-3-5-sonnet-20241022",
+]
+type = "string"
+
+[provides.operations."anthropic.chat".input_schema.properties.system]
+description = "Optional system prompt"
+type = "string"
+
+[provides.operations."anthropic.chat".output_schema]
+required = [
+    "response",
+    "usage",
+    "cost_usd",
+]
+type = "object"
+
+[provides.operations."anthropic.chat".output_schema.properties.cost_usd]
+type = "number"
+
+[provides.operations."anthropic.chat".output_schema.properties.response]
+type = "string"
+
+[provides.operations."anthropic.chat".output_schema.properties.usage]
+type = "object"
+
+[provides.operations."anthropic.chat".output_schema.properties.usage.properties.input_tokens]
+type = "integer"
+
+[provides.operations."anthropic.chat".output_schema.properties.usage.properties.output_tokens]
+type = "integer"
+
+[provides.operations."anthropic.chat".network_constraints]
+host_allow = ["api.anthropic.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 10485760
+
+[provides.operations."anthropic.chat".ai_hints]
+when_to_use = "Use for simple single-message chat requests."
+common_mistakes = ["Passing `messages` instead of `message`."]
+examples = ['{"message": "Summarize this text"}']
+related = [
+    "anthropic.message",
+    "anthropic.get_usage",
+]
+
+[provides.operations."anthropic.get_usage"]
+description = "Return local usage and cost totals for the current connector session"
+capability = "anthropic.get_usage"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."anthropic.get_usage".input_schema]
+type = "object"
+
+[provides.operations."anthropic.get_usage".output_schema]
+required = [
+    "total_input_tokens",
+    "total_output_tokens",
+    "total_cost_usd",
+    "requests_total",
+    "requests_error",
+]
+type = "object"
+
+[provides.operations."anthropic.get_usage".output_schema.properties.requests_error]
+type = "integer"
+
+[provides.operations."anthropic.get_usage".output_schema.properties.requests_total]
+type = "integer"
+
+[provides.operations."anthropic.get_usage".output_schema.properties.total_cost_usd]
+type = "number"
+
+[provides.operations."anthropic.get_usage".output_schema.properties.total_input_tokens]
+type = "integer"
+
+[provides.operations."anthropic.get_usage".output_schema.properties.total_output_tokens]
+type = "integer"
+
+[provides.operations."anthropic.get_usage".ai_hints]
+when_to_use = "Inspect connector token and cost usage counters."
+common_mistakes = []
+examples = ["{}"]
+related = [
+    "anthropic.chat",
+    "anthropic.message",
+]
+
+[provides.operations."anthropic.message"]
+description = "Send a structured message request to Claude models with optional tools"
+capability = "anthropic.message"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."anthropic.message".rate_limit]
+max = 120
+per_ms = 60000
+
+[provides.operations."anthropic.message".input_schema]
+required = ["messages"]
+type = "object"
+
+[provides.operations."anthropic.message".input_schema.properties.max_tokens]
+default = 4096
+description = "Maximum output tokens to generate"
+maximum = 100000
+minimum = 1
+type = "integer"
+
+[provides.operations."anthropic.message".input_schema.properties.messages]
+description = "Conversation messages"
+minItems = 1
+type = "array"
+
+[provides.operations."anthropic.message".input_schema.properties.messages.items]
+required = [
+    "role",
+    "content",
+]
+type = "object"
+
+[provides.operations."anthropic.message".input_schema.properties.messages.items.properties.content]
+type = "string"
+
+[provides.operations."anthropic.message".input_schema.properties.messages.items.properties.role]
+enum = [
+    "user",
+    "assistant",
+]
+type = "string"
+
+[provides.operations."anthropic.message".input_schema.properties.model]
+default = "claude-sonnet-4-20250514"
+description = "Anthropic model to use"
+enum = [
+    "claude-opus-4-5-20251101",
+    "claude-sonnet-4-20250514",
+    "claude-3-5-haiku-20241022",
+    "claude-3-5-sonnet-20241022",
+]
+type = "string"
+
+[provides.operations."anthropic.message".input_schema.properties.system]
+description = "Optional system prompt"
+type = "string"
+
+[provides.operations."anthropic.message".input_schema.properties.temperature]
+description = "Sampling temperature from 0.0 to 1.0"
+maximum = 1
+minimum = 0
+type = "number"
+
+[provides.operations."anthropic.message".input_schema.properties.tool_choice]
+description = "Optional tool selection policy"
+type = "object"
+
+[provides.operations."anthropic.message".input_schema.properties.tools]
+description = "Optional tool definitions for model tool use"
+type = "array"
+
+[provides.operations."anthropic.message".output_schema]
+required = [
+    "id",
+    "content",
+    "model",
+    "usage",
+    "cost_usd",
+]
+type = "object"
+
+[provides.operations."anthropic.message".output_schema.properties.content]
+type = "string"
+
+[provides.operations."anthropic.message".output_schema.properties.cost_usd]
+type = "number"
+
+[provides.operations."anthropic.message".output_schema.properties.id]
+type = "string"
+
+[provides.operations."anthropic.message".output_schema.properties.model]
+type = "string"
+
+[provides.operations."anthropic.message".output_schema.properties.stop_reason]
+type = "string"
+
+[provides.operations."anthropic.message".output_schema.properties.usage]
+type = "object"
+
+[provides.operations."anthropic.message".output_schema.properties.usage.properties.input_tokens]
+type = "integer"
+
+[provides.operations."anthropic.message".output_schema.properties.usage.properties.output_tokens]
+type = "integer"
+
+[provides.operations."anthropic.message".network_constraints]
+host_allow = ["api.anthropic.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 10485760
+
+[provides.operations."anthropic.message".ai_hints]
+when_to_use = "Use for multi-message Claude requests with optional tools."
+common_mistakes = [
+    "Sending an empty messages array.",
+    "Using an unsupported model name.",
+    "Setting max_tokens too high for the model context.",
+]
+examples = ['{"messages": [{"role": "user", "content": "Hello Claude"}]}']
+related = [
+    "anthropic.chat",
+    "anthropic.get_usage",
+]
+
+[event_caps]
+streaming = true
+replay = false
+min_buffer_events = 10
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true

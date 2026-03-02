@@ -1,0 +1,427 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:3827324180475df89e4993ca6f2f1ca7e077aa5697420088dab34de116e08475"
+
+[connector]
+id = "fcp.linear"
+name = "Linear Connector"
+version = "0.1.0"
+description = "FCP connector for Linear (issues, projects, cycles, teams, comments)"
+archetypes = ["operational", "streaming"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
+optional = []
+forbidden = ["system.exec", "network.listen"]
+
+# ── Operations ──────────────────────────────────────────────────
+
+[provides.operations."linear.create_issue"]
+description = "Create an issue in Linear"
+capability = "linear.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."linear.create_issue".input_schema]
+required = ["title", "team_id"]
+type = "object"
+[provides.operations."linear.create_issue".input_schema.properties.title]
+type = "string"
+[provides.operations."linear.create_issue".input_schema.properties.team_id]
+type = "string"
+[provides.operations."linear.create_issue".input_schema.properties.description]
+type = "string"
+
+[provides.operations."linear.create_issue".output_schema]
+required = ["issue"]
+type = "object"
+[provides.operations."linear.create_issue".output_schema.properties.issue]
+type = "object"
+
+[provides.operations."linear.create_issue".network_constraints]
+host_allow = ["api.linear.app"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."linear.create_issue".ai_hints]
+when_to_use = "Create a new issue in Linear."
+common_mistakes = ["Not specifying the team ID"]
+examples = ['{"title": "Fix login bug", "team_id": "TEAM-123"}']
+related = ["linear.get_issue", "linear.search_issues"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."linear.get_issue"]
+description = "Get a Linear issue by ID"
+capability = "linear.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."linear.get_issue".input_schema]
+required = ["issue_id"]
+type = "object"
+[provides.operations."linear.get_issue".input_schema.properties.issue_id]
+type = "string"
+
+[provides.operations."linear.get_issue".output_schema]
+required = ["issue"]
+type = "object"
+[provides.operations."linear.get_issue".output_schema.properties.issue]
+type = "object"
+
+[provides.operations."linear.get_issue".network_constraints]
+host_allow = ["api.linear.app"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."linear.get_issue".ai_hints]
+when_to_use = "Look up a specific issue by ID."
+common_mistakes = []
+examples = ['{"issue_id": "LIN-123"}']
+related = ["linear.create_issue", "linear.update_issue"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."linear.update_issue"]
+description = "Update an issue's properties"
+capability = "linear.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."linear.update_issue".input_schema]
+required = ["issue_id"]
+type = "object"
+[provides.operations."linear.update_issue".input_schema.properties.issue_id]
+type = "string"
+[provides.operations."linear.update_issue".input_schema.properties.title]
+type = "string"
+[provides.operations."linear.update_issue".input_schema.properties.state_id]
+type = "string"
+
+[provides.operations."linear.update_issue".output_schema]
+required = ["issue"]
+type = "object"
+[provides.operations."linear.update_issue".output_schema.properties.issue]
+type = "object"
+
+[provides.operations."linear.update_issue".network_constraints]
+host_allow = ["api.linear.app"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."linear.update_issue".ai_hints]
+when_to_use = "Update issue title, status, assignee, or other fields."
+common_mistakes = []
+examples = ['{"issue_id": "LIN-123", "state_id": "done-state-id"}']
+related = ["linear.get_issue"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."linear.search_issues"]
+description = "Search issues with GraphQL filters"
+capability = "linear.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."linear.search_issues".input_schema]
+required = ["query"]
+type = "object"
+[provides.operations."linear.search_issues".input_schema.properties.query]
+type = "string"
+
+[provides.operations."linear.search_issues".output_schema]
+required = ["issues"]
+type = "object"
+[provides.operations."linear.search_issues".output_schema.properties.issues]
+type = "array"
+
+[provides.operations."linear.search_issues".network_constraints]
+host_allow = ["api.linear.app"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."linear.search_issues".ai_hints]
+when_to_use = "Search for issues matching a text query."
+common_mistakes = []
+examples = ['{"query": "login bug"}']
+related = ["linear.get_issue"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."linear.list_teams"]
+description = "List all teams in the workspace"
+capability = "linear.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."linear.list_teams".input_schema]
+required = []
+type = "object"
+
+[provides.operations."linear.list_teams".output_schema]
+required = ["teams"]
+type = "object"
+[provides.operations."linear.list_teams".output_schema.properties.teams]
+type = "array"
+
+[provides.operations."linear.list_teams".network_constraints]
+host_allow = ["api.linear.app"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."linear.list_teams".ai_hints]
+when_to_use = "List available teams in the workspace."
+common_mistakes = []
+examples = ['{}']
+related = ["linear.create_issue"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."linear.list_cycles"]
+description = "List cycles for a team"
+capability = "linear.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."linear.list_cycles".input_schema]
+required = ["team_id"]
+type = "object"
+[provides.operations."linear.list_cycles".input_schema.properties.team_id]
+type = "string"
+
+[provides.operations."linear.list_cycles".output_schema]
+required = ["cycles"]
+type = "object"
+[provides.operations."linear.list_cycles".output_schema.properties.cycles]
+type = "array"
+
+[provides.operations."linear.list_cycles".network_constraints]
+host_allow = ["api.linear.app"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."linear.list_cycles".ai_hints]
+when_to_use = "List sprints/cycles for a team."
+common_mistakes = []
+examples = ['{"team_id": "TEAM-123"}']
+related = ["linear.list_teams"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."linear.add_comment"]
+description = "Add a comment to an issue"
+capability = "linear.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."linear.add_comment".input_schema]
+required = ["issue_id", "body"]
+type = "object"
+[provides.operations."linear.add_comment".input_schema.properties.issue_id]
+type = "string"
+[provides.operations."linear.add_comment".input_schema.properties.body]
+type = "string"
+
+[provides.operations."linear.add_comment".output_schema]
+required = ["comment"]
+type = "object"
+[provides.operations."linear.add_comment".output_schema.properties.comment]
+type = "object"
+
+[provides.operations."linear.add_comment".network_constraints]
+host_allow = ["api.linear.app"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."linear.add_comment".ai_hints]
+when_to_use = "Comment on an issue."
+common_mistakes = []
+examples = ['{"issue_id": "LIN-123", "body": "Working on this now."}']
+related = ["linear.get_issue"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."linear.list_projects"]
+description = "List projects in the workspace"
+capability = "linear.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."linear.list_projects".input_schema]
+required = []
+type = "object"
+
+[provides.operations."linear.list_projects".output_schema]
+required = ["projects"]
+type = "object"
+[provides.operations."linear.list_projects".output_schema.properties.projects]
+type = "array"
+
+[provides.operations."linear.list_projects".network_constraints]
+host_allow = ["api.linear.app"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."linear.list_projects".ai_hints]
+when_to_use = "List projects."
+common_mistakes = []
+examples = ['{}']
+related = ["linear.list_teams"]
+
+# ── Events ──────────────────────────────────────────────────────
+
+[event_caps]
+streaming = true
+replay = false
+min_buffer_events = 100
+
+# ── Sandbox ─────────────────────────────────────────────────────
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+# ── Rate Limits ─────────────────────────────────────────────────
+
+[[rate_limits.pools]]
+id = "linear.read"
+requests = 250
+window_ms = 60000
+burst = 50
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "linear.write"
+requests = 150
+window_ms = 60000
+burst = 30
+scope = "instance"
+
+[rate_limits.operation_pools]
+"linear.create_issue" = ["linear.write"]
+"linear.get_issue" = ["linear.read"]
+"linear.update_issue" = ["linear.write"]
+"linear.search_issues" = ["linear.read"]
+"linear.list_teams" = ["linear.read"]
+"linear.list_cycles" = ["linear.read"]
+"linear.add_comment" = ["linear.write"]
+"linear.list_projects" = ["linear.read"]

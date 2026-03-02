@@ -1,0 +1,541 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:784fda6bb25642adb723604014e101d06981e3f3ffbcbbd327ff17b56d3ba25e"
+
+[connector]
+id = "fcp.slack"
+name = "Slack Connector"
+version = "0.1.0"
+description = "FCP connector for Slack (channels, messages, users, files, reactions)"
+archetypes = ["operational", "streaming", "bidirectional"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
+optional = ["media.download", "media.upload"]
+forbidden = ["system.exec", "network.listen"]
+
+# ── Operations ──────────────────────────────────────────────────
+
+[provides.operations."slack.post_message"]
+description = "Post a message to a Slack channel"
+capability = "slack.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."slack.post_message".input_schema]
+required = ["channel", "text"]
+type = "object"
+[provides.operations."slack.post_message".input_schema.properties.channel]
+type = "string"
+[provides.operations."slack.post_message".input_schema.properties.text]
+type = "string"
+
+[provides.operations."slack.post_message".output_schema]
+required = ["message"]
+type = "object"
+[provides.operations."slack.post_message".output_schema.properties.message]
+type = "object"
+
+[provides.operations."slack.post_message".network_constraints]
+host_allow = ["slack.com", "*.slack.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."slack.post_message".ai_hints]
+when_to_use = "Send a message to a Slack channel."
+common_mistakes = ["Using channel name instead of channel ID"]
+examples = ['{"channel": "C01234567", "text": "Hello from FCP!"}']
+related = ["slack.get_channel_history", "slack.reply_thread"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."slack.reply_thread"]
+description = "Reply to a message thread"
+capability = "slack.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."slack.reply_thread".input_schema]
+required = ["channel", "thread_ts", "text"]
+type = "object"
+[provides.operations."slack.reply_thread".input_schema.properties.channel]
+type = "string"
+[provides.operations."slack.reply_thread".input_schema.properties.thread_ts]
+type = "string"
+[provides.operations."slack.reply_thread".input_schema.properties.text]
+type = "string"
+
+[provides.operations."slack.reply_thread".output_schema]
+required = ["message"]
+type = "object"
+[provides.operations."slack.reply_thread".output_schema.properties.message]
+type = "object"
+
+[provides.operations."slack.reply_thread".network_constraints]
+host_allow = ["slack.com", "*.slack.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."slack.reply_thread".ai_hints]
+when_to_use = "Reply in a message thread."
+common_mistakes = ["Using message ts instead of thread ts"]
+examples = ['{"channel": "C01234567", "thread_ts": "1234567890.123456", "text": "Reply"}']
+related = ["slack.post_message", "slack.get_channel_history"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."slack.get_channel_history"]
+description = "Fetch recent messages from a channel"
+capability = "slack.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."slack.get_channel_history".input_schema]
+required = ["channel"]
+type = "object"
+[provides.operations."slack.get_channel_history".input_schema.properties.channel]
+type = "string"
+[provides.operations."slack.get_channel_history".input_schema.properties.limit]
+type = "integer"
+
+[provides.operations."slack.get_channel_history".output_schema]
+required = ["messages"]
+type = "object"
+[provides.operations."slack.get_channel_history".output_schema.properties.messages]
+type = "array"
+
+[provides.operations."slack.get_channel_history".network_constraints]
+host_allow = ["slack.com", "*.slack.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."slack.get_channel_history".ai_hints]
+when_to_use = "Read recent messages from a Slack channel."
+common_mistakes = ["Not handling pagination for large histories"]
+examples = ['{"channel": "C01234567", "limit": 100}']
+related = ["slack.post_message", "slack.search_messages"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."slack.search_messages"]
+description = "Search messages across the workspace"
+capability = "slack.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."slack.search_messages".input_schema]
+required = ["query"]
+type = "object"
+[provides.operations."slack.search_messages".input_schema.properties.query]
+type = "string"
+
+[provides.operations."slack.search_messages".output_schema]
+required = ["messages"]
+type = "object"
+[provides.operations."slack.search_messages".output_schema.properties.messages]
+type = "object"
+
+[provides.operations."slack.search_messages".network_constraints]
+host_allow = ["slack.com", "*.slack.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."slack.search_messages".ai_hints]
+when_to_use = "Search for messages matching a query."
+common_mistakes = []
+examples = ['{"query": "from:@user in:#general deployment"}']
+related = ["slack.get_channel_history"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."slack.list_channels"]
+description = "List channels in the workspace"
+capability = "slack.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."slack.list_channels".input_schema]
+required = []
+type = "object"
+[provides.operations."slack.list_channels".input_schema.properties.types]
+type = "string"
+
+[provides.operations."slack.list_channels".output_schema]
+required = ["channels"]
+type = "object"
+[provides.operations."slack.list_channels".output_schema.properties.channels]
+type = "array"
+
+[provides.operations."slack.list_channels".network_constraints]
+host_allow = ["slack.com", "*.slack.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."slack.list_channels".ai_hints]
+when_to_use = "List available channels in the workspace."
+common_mistakes = []
+examples = ['{"types": "public_channel,private_channel"}']
+related = ["slack.get_channel_history"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."slack.get_user_info"]
+description = "Get information about a Slack user"
+capability = "slack.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."slack.get_user_info".input_schema]
+required = ["user"]
+type = "object"
+[provides.operations."slack.get_user_info".input_schema.properties.user]
+type = "string"
+
+[provides.operations."slack.get_user_info".output_schema]
+required = ["user"]
+type = "object"
+[provides.operations."slack.get_user_info".output_schema.properties.user]
+type = "object"
+
+[provides.operations."slack.get_user_info".network_constraints]
+host_allow = ["slack.com", "*.slack.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."slack.get_user_info".ai_hints]
+when_to_use = "Look up details about a Slack user."
+common_mistakes = ["Using display name instead of user ID"]
+examples = ['{"user": "U01234567"}']
+related = ["slack.list_channels"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."slack.upload_file"]
+description = "Upload a file to a Slack channel"
+capability = "slack.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."slack.upload_file".input_schema]
+required = ["channels", "content"]
+type = "object"
+[provides.operations."slack.upload_file".input_schema.properties.channels]
+type = "string"
+[provides.operations."slack.upload_file".input_schema.properties.content]
+type = "string"
+[provides.operations."slack.upload_file".input_schema.properties.filename]
+type = "string"
+
+[provides.operations."slack.upload_file".output_schema]
+required = ["file"]
+type = "object"
+[provides.operations."slack.upload_file".output_schema.properties.file]
+type = "object"
+
+[provides.operations."slack.upload_file".network_constraints]
+host_allow = ["slack.com", "*.slack.com", "files.slack.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 1048576
+
+[provides.operations."slack.upload_file".ai_hints]
+when_to_use = "Upload a file to a Slack channel."
+common_mistakes = ["Using channel name instead of channel ID"]
+examples = ['{"channels": "C01234567", "content": "log output...", "filename": "output.txt"}']
+related = ["slack.post_message"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."slack.add_reaction"]
+description = "Add an emoji reaction to a message"
+capability = "slack.write"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."slack.add_reaction".input_schema]
+required = ["channel", "timestamp", "name"]
+type = "object"
+[provides.operations."slack.add_reaction".input_schema.properties.channel]
+type = "string"
+[provides.operations."slack.add_reaction".input_schema.properties.timestamp]
+type = "string"
+[provides.operations."slack.add_reaction".input_schema.properties.name]
+type = "string"
+
+[provides.operations."slack.add_reaction".output_schema]
+required = ["ok"]
+type = "object"
+[provides.operations."slack.add_reaction".output_schema.properties.ok]
+type = "boolean"
+
+[provides.operations."slack.add_reaction".network_constraints]
+host_allow = ["slack.com", "*.slack.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."slack.add_reaction".ai_hints]
+when_to_use = "React to a Slack message with an emoji."
+common_mistakes = ["Including colons in the emoji name"]
+examples = ['{"channel": "C01234567", "timestamp": "1234567890.123456", "name": "thumbsup"}']
+related = ["slack.post_message"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."slack.set_channel_topic"]
+description = "Set the topic for a channel"
+capability = "slack.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."slack.set_channel_topic".input_schema]
+required = ["channel", "topic"]
+type = "object"
+[provides.operations."slack.set_channel_topic".input_schema.properties.channel]
+type = "string"
+[provides.operations."slack.set_channel_topic".input_schema.properties.topic]
+type = "string"
+
+[provides.operations."slack.set_channel_topic".output_schema]
+required = ["topic"]
+type = "object"
+[provides.operations."slack.set_channel_topic".output_schema.properties.topic]
+type = "string"
+
+[provides.operations."slack.set_channel_topic".network_constraints]
+host_allow = ["slack.com", "*.slack.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."slack.set_channel_topic".ai_hints]
+when_to_use = "Update the topic of a Slack channel."
+common_mistakes = []
+examples = ['{"channel": "C01234567", "topic": "Sprint 42 — deploy Friday"}']
+related = ["slack.list_channels"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."slack.download_file"]
+description = "Download a shared file from Slack"
+capability = "slack.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."slack.download_file".input_schema]
+required = ["file_id"]
+type = "object"
+[provides.operations."slack.download_file".input_schema.properties.file_id]
+type = "string"
+
+[provides.operations."slack.download_file".output_schema]
+required = ["content"]
+type = "object"
+[provides.operations."slack.download_file".output_schema.properties.content]
+type = "string"
+
+[provides.operations."slack.download_file".network_constraints]
+host_allow = ["slack.com", "*.slack.com", "files.slack.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 20971520
+
+[provides.operations."slack.download_file".ai_hints]
+when_to_use = "Download a file shared in Slack."
+common_mistakes = []
+examples = ['{"file_id": "F01234567"}']
+related = ["slack.upload_file"]
+
+# ── Events ──────────────────────────────────────────────────────
+
+[event_caps]
+streaming = true
+replay = false
+min_buffer_events = 200
+
+# ── Sandbox ─────────────────────────────────────────────────────
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+# ── Rate Limits ─────────────────────────────────────────────────
+
+[[rate_limits.pools]]
+id = "slack.read"
+requests = 100
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "slack.write"
+requests = 50
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "slack.search"
+requests = 20
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "slack.file"
+requests = 20
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[rate_limits.operation_pools]
+"slack.post_message" = ["slack.write"]
+"slack.reply_thread" = ["slack.write"]
+"slack.get_channel_history" = ["slack.read"]
+"slack.search_messages" = ["slack.search"]
+"slack.list_channels" = ["slack.read"]
+"slack.get_user_info" = ["slack.read"]
+"slack.upload_file" = ["slack.file"]
+"slack.add_reaction" = ["slack.write"]
+"slack.set_channel_topic" = ["slack.write"]
+"slack.download_file" = ["slack.file"]

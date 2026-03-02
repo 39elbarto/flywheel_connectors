@@ -33,12 +33,7 @@ use anyhow::Result;
 use fcp_async_core::runtime::Builder;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
-mod client;
-mod connector;
-mod error;
-mod types;
-
-use connector::AnthropicConnector;
+use fcp_anthropic::connector::AnthropicConnector;
 
 fn main() -> Result<()> {
     // Initialize tracing

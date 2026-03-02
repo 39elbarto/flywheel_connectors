@@ -1,0 +1,661 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:2bc4eddddcd12d6a78b4df4a7346ce770ec9e695b0d31051ed2f362b6c932e10"
+
+[connector]
+id = "fcp.github"
+name = "GitHub Connector"
+version = "0.1.0"
+description = "FCP connector for GitHub (repos, issues, PRs, actions, releases)"
+archetypes = ["operational", "streaming", "knowledge"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
+optional = ["media.download"]
+forbidden = ["system.exec", "network.listen"]
+
+# ── Operations ──────────────────────────────────────────────────
+
+[provides.operations."github.create_issue"]
+description = "Create an issue in a repository"
+capability = "github.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."github.create_issue".input_schema]
+required = ["owner", "repo", "title"]
+type = "object"
+[provides.operations."github.create_issue".input_schema.properties.owner]
+type = "string"
+[provides.operations."github.create_issue".input_schema.properties.repo]
+type = "string"
+[provides.operations."github.create_issue".input_schema.properties.title]
+type = "string"
+[provides.operations."github.create_issue".input_schema.properties.body]
+type = "string"
+
+[provides.operations."github.create_issue".output_schema]
+required = ["issue"]
+type = "object"
+[provides.operations."github.create_issue".output_schema.properties.issue]
+type = "object"
+
+[provides.operations."github.create_issue".network_constraints]
+host_allow = ["api.github.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."github.create_issue".ai_hints]
+when_to_use = "Create a new issue in a GitHub repository."
+common_mistakes = ["Forgetting to specify both owner and repo"]
+examples = ['{"owner": "octocat", "repo": "hello-world", "title": "Bug report"}']
+related = ["github.get_issue", "github.search_issues"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."github.get_issue"]
+description = "Get a single issue by number"
+capability = "github.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."github.get_issue".input_schema]
+required = ["owner", "repo", "issue_number"]
+type = "object"
+[provides.operations."github.get_issue".input_schema.properties.owner]
+type = "string"
+[provides.operations."github.get_issue".input_schema.properties.repo]
+type = "string"
+[provides.operations."github.get_issue".input_schema.properties.issue_number]
+type = "integer"
+
+[provides.operations."github.get_issue".output_schema]
+required = ["issue"]
+type = "object"
+[provides.operations."github.get_issue".output_schema.properties.issue]
+type = "object"
+
+[provides.operations."github.get_issue".network_constraints]
+host_allow = ["api.github.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."github.get_issue".ai_hints]
+when_to_use = "Retrieve details about a specific issue."
+common_mistakes = []
+examples = ['{"owner": "octocat", "repo": "hello-world", "issue_number": 42}']
+related = ["github.create_issue", "github.search_issues"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."github.search_issues"]
+description = "Search issues and pull requests across repositories"
+capability = "github.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."github.search_issues".input_schema]
+required = ["query"]
+type = "object"
+[provides.operations."github.search_issues".input_schema.properties.query]
+type = "string"
+
+[provides.operations."github.search_issues".output_schema]
+required = ["items", "total_count"]
+type = "object"
+[provides.operations."github.search_issues".output_schema.properties.items]
+type = "array"
+[provides.operations."github.search_issues".output_schema.properties.total_count]
+type = "integer"
+
+[provides.operations."github.search_issues".network_constraints]
+host_allow = ["api.github.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."github.search_issues".ai_hints]
+when_to_use = "Search for issues or PRs matching a query."
+common_mistakes = ["Using non-GitHub search syntax"]
+examples = ['{"query": "is:open is:issue repo:octocat/hello-world"}']
+related = ["github.get_issue", "github.create_issue"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."github.create_pull_request"]
+description = "Create a pull request"
+capability = "github.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."github.create_pull_request".input_schema]
+required = ["owner", "repo", "title", "head", "base"]
+type = "object"
+[provides.operations."github.create_pull_request".input_schema.properties.owner]
+type = "string"
+[provides.operations."github.create_pull_request".input_schema.properties.repo]
+type = "string"
+[provides.operations."github.create_pull_request".input_schema.properties.title]
+type = "string"
+[provides.operations."github.create_pull_request".input_schema.properties.head]
+type = "string"
+[provides.operations."github.create_pull_request".input_schema.properties.base]
+type = "string"
+
+[provides.operations."github.create_pull_request".output_schema]
+required = ["pull_request"]
+type = "object"
+[provides.operations."github.create_pull_request".output_schema.properties.pull_request]
+type = "object"
+
+[provides.operations."github.create_pull_request".network_constraints]
+host_allow = ["api.github.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."github.create_pull_request".ai_hints]
+when_to_use = "Open a new pull request."
+common_mistakes = ["Mixing up head (source) and base (target) branches"]
+examples = ['{"owner": "octocat", "repo": "hello-world", "title": "Fix typo", "head": "fix-typo", "base": "main"}']
+related = ["github.get_pull_request", "github.merge_pull_request"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."github.get_pull_request"]
+description = "Get a single pull request by number"
+capability = "github.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."github.get_pull_request".input_schema]
+required = ["owner", "repo", "pull_number"]
+type = "object"
+[provides.operations."github.get_pull_request".input_schema.properties.owner]
+type = "string"
+[provides.operations."github.get_pull_request".input_schema.properties.repo]
+type = "string"
+[provides.operations."github.get_pull_request".input_schema.properties.pull_number]
+type = "integer"
+
+[provides.operations."github.get_pull_request".output_schema]
+required = ["pull_request"]
+type = "object"
+[provides.operations."github.get_pull_request".output_schema.properties.pull_request]
+type = "object"
+
+[provides.operations."github.get_pull_request".network_constraints]
+host_allow = ["api.github.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."github.get_pull_request".ai_hints]
+when_to_use = "Retrieve details about a specific pull request."
+common_mistakes = []
+examples = ['{"owner": "octocat", "repo": "hello-world", "pull_number": 1}']
+related = ["github.create_pull_request", "github.merge_pull_request"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."github.merge_pull_request"]
+description = "Merge a pull request"
+capability = "github.admin"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "interactive"
+idempotency = "none"
+
+[provides.operations."github.merge_pull_request".input_schema]
+required = ["owner", "repo", "pull_number"]
+type = "object"
+[provides.operations."github.merge_pull_request".input_schema.properties.owner]
+type = "string"
+[provides.operations."github.merge_pull_request".input_schema.properties.repo]
+type = "string"
+[provides.operations."github.merge_pull_request".input_schema.properties.pull_number]
+type = "integer"
+[provides.operations."github.merge_pull_request".input_schema.properties.merge_method]
+type = "string"
+
+[provides.operations."github.merge_pull_request".output_schema]
+required = ["merged"]
+type = "object"
+[provides.operations."github.merge_pull_request".output_schema.properties.merged]
+type = "boolean"
+
+[provides.operations."github.merge_pull_request".network_constraints]
+host_allow = ["api.github.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."github.merge_pull_request".ai_hints]
+when_to_use = "Merge an approved pull request into the base branch."
+common_mistakes = ["Merging without checking CI status or reviews"]
+examples = ['{"owner": "octocat", "repo": "hello-world", "pull_number": 1, "merge_method": "squash"}']
+related = ["github.get_pull_request", "github.create_pull_request"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."github.get_repo"]
+description = "Get repository metadata"
+capability = "github.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."github.get_repo".input_schema]
+required = ["owner", "repo"]
+type = "object"
+[provides.operations."github.get_repo".input_schema.properties.owner]
+type = "string"
+[provides.operations."github.get_repo".input_schema.properties.repo]
+type = "string"
+
+[provides.operations."github.get_repo".output_schema]
+required = ["repository"]
+type = "object"
+[provides.operations."github.get_repo".output_schema.properties.repository]
+type = "object"
+
+[provides.operations."github.get_repo".network_constraints]
+host_allow = ["api.github.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."github.get_repo".ai_hints]
+when_to_use = "Retrieve metadata about a repository."
+common_mistakes = []
+examples = ['{"owner": "octocat", "repo": "hello-world"}']
+related = ["github.search_repos"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."github.search_repos"]
+description = "Search repositories"
+capability = "github.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."github.search_repos".input_schema]
+required = ["query"]
+type = "object"
+[provides.operations."github.search_repos".input_schema.properties.query]
+type = "string"
+
+[provides.operations."github.search_repos".output_schema]
+required = ["items", "total_count"]
+type = "object"
+[provides.operations."github.search_repos".output_schema.properties.items]
+type = "array"
+[provides.operations."github.search_repos".output_schema.properties.total_count]
+type = "integer"
+
+[provides.operations."github.search_repos".network_constraints]
+host_allow = ["api.github.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."github.search_repos".ai_hints]
+when_to_use = "Search for repositories matching a query."
+common_mistakes = []
+examples = ['{"query": "language:rust stars:>1000"}']
+related = ["github.get_repo"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."github.list_workflows"]
+description = "List GitHub Actions workflows for a repository"
+capability = "github.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."github.list_workflows".input_schema]
+required = ["owner", "repo"]
+type = "object"
+[provides.operations."github.list_workflows".input_schema.properties.owner]
+type = "string"
+[provides.operations."github.list_workflows".input_schema.properties.repo]
+type = "string"
+
+[provides.operations."github.list_workflows".output_schema]
+required = ["workflows", "total_count"]
+type = "object"
+[provides.operations."github.list_workflows".output_schema.properties.workflows]
+type = "array"
+[provides.operations."github.list_workflows".output_schema.properties.total_count]
+type = "integer"
+
+[provides.operations."github.list_workflows".network_constraints]
+host_allow = ["api.github.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."github.list_workflows".ai_hints]
+when_to_use = "List CI/CD workflows in a repository."
+common_mistakes = []
+examples = ['{"owner": "octocat", "repo": "hello-world"}']
+related = ["github.trigger_workflow"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."github.trigger_workflow"]
+description = "Trigger a GitHub Actions workflow dispatch event"
+capability = "github.admin"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "interactive"
+idempotency = "none"
+
+[provides.operations."github.trigger_workflow".input_schema]
+required = ["owner", "repo", "workflow_id", "ref"]
+type = "object"
+[provides.operations."github.trigger_workflow".input_schema.properties.owner]
+type = "string"
+[provides.operations."github.trigger_workflow".input_schema.properties.repo]
+type = "string"
+[provides.operations."github.trigger_workflow".input_schema.properties.workflow_id]
+type = "string"
+[provides.operations."github.trigger_workflow".input_schema.properties.ref]
+type = "string"
+
+[provides.operations."github.trigger_workflow".output_schema]
+required = ["triggered"]
+type = "object"
+[provides.operations."github.trigger_workflow".output_schema.properties.triggered]
+type = "boolean"
+
+[provides.operations."github.trigger_workflow".network_constraints]
+host_allow = ["api.github.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."github.trigger_workflow".ai_hints]
+when_to_use = "Manually trigger a GitHub Actions workflow."
+common_mistakes = ["Using workflow file name instead of ID"]
+examples = ['{"owner": "octocat", "repo": "hello-world", "workflow_id": "ci.yml", "ref": "main"}']
+related = ["github.list_workflows"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."github.get_file_content"]
+description = "Get file or directory content from a repository"
+capability = "github.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."github.get_file_content".input_schema]
+required = ["owner", "repo", "path"]
+type = "object"
+[provides.operations."github.get_file_content".input_schema.properties.owner]
+type = "string"
+[provides.operations."github.get_file_content".input_schema.properties.repo]
+type = "string"
+[provides.operations."github.get_file_content".input_schema.properties.path]
+type = "string"
+
+[provides.operations."github.get_file_content".output_schema]
+required = ["content"]
+type = "object"
+[provides.operations."github.get_file_content".output_schema.properties.content]
+type = "object"
+
+[provides.operations."github.get_file_content".network_constraints]
+host_allow = ["api.github.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."github.get_file_content".ai_hints]
+when_to_use = "Read file content from a repository."
+common_mistakes = ["Not specifying a ref for a specific branch or commit"]
+examples = ['{"owner": "octocat", "repo": "hello-world", "path": "README.md"}']
+related = ["github.get_repo", "github.search_code"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."github.search_code"]
+description = "Search code across repositories"
+capability = "github.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."github.search_code".input_schema]
+required = ["query"]
+type = "object"
+[provides.operations."github.search_code".input_schema.properties.query]
+type = "string"
+
+[provides.operations."github.search_code".output_schema]
+required = ["items", "total_count"]
+type = "object"
+[provides.operations."github.search_code".output_schema.properties.items]
+type = "array"
+[provides.operations."github.search_code".output_schema.properties.total_count]
+type = "integer"
+
+[provides.operations."github.search_code".network_constraints]
+host_allow = ["api.github.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."github.search_code".ai_hints]
+when_to_use = "Search for code matching a query across GitHub."
+common_mistakes = ["Not scoping to a repo or org"]
+examples = ['{"query": "addClass repo:octocat/hello-world"}']
+related = ["github.get_file_content", "github.search_repos"]
+
+# ── Events ──────────────────────────────────────────────────────
+
+[event_caps]
+streaming = true
+replay = false
+min_buffer_events = 100
+
+# ── Sandbox ─────────────────────────────────────────────────────
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+# ── Rate Limits ─────────────────────────────────────────────────
+
+[[rate_limits.pools]]
+id = "github.read"
+requests = 900
+window_ms = 3600000
+burst = 30
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "github.write"
+requests = 300
+window_ms = 3600000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "github.admin"
+requests = 60
+window_ms = 3600000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "github.search"
+requests = 30
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[rate_limits.operation_pools]
+"github.create_issue" = ["github.write"]
+"github.get_issue" = ["github.read"]
+"github.search_issues" = ["github.search"]
+"github.create_pull_request" = ["github.write"]
+"github.get_pull_request" = ["github.read"]
+"github.merge_pull_request" = ["github.admin"]
+"github.get_repo" = ["github.read"]
+"github.search_repos" = ["github.search"]
+"github.list_workflows" = ["github.read"]
+"github.trigger_workflow" = ["github.admin"]
+"github.get_file_content" = ["github.read"]
+"github.search_code" = ["github.search"]

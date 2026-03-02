@@ -32,12 +32,7 @@ use std::io::{BufRead, Write};
 use anyhow::Result;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
-mod client;
-mod connector;
-mod error;
-mod types;
-
-use connector::OpenAIConnector;
+use fcp_openai::connector::OpenAIConnector;
 
 fn main() -> Result<()> {
     // Initialize tracing

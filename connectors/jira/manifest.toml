@@ -1,0 +1,1061 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:96fe436b2257a10bf0c5c25d234f9da9b62bfd17cd38818302a4882802897837"
+
+[connector]
+id = "fcp.jira"
+name = "Jira Connector"
+version = "0.1.0"
+description = "FCP connector for Atlassian Jira issue tracking (Cloud and Data Center)"
+archetypes = [
+    "operational",
+    "streaming",
+]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+]
+optional = ["media.download"]
+forbidden = [
+    "system.exec",
+    "network.listen",
+]
+
+# ---------------------------------------------------------------------------
+# Operations: Issue CRUD
+# ---------------------------------------------------------------------------
+
+[provides.operations."jira.create_issue"]
+description = "Create a new Jira issue with fields, project key, and issue type"
+capability = "jira.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."jira.create_issue".rate_limit]
+max = 60
+per_ms = 60000
+
+[provides.operations."jira.create_issue".input_schema]
+required = [
+    "project_key",
+    "issue_type",
+    "summary",
+]
+type = "object"
+
+[provides.operations."jira.create_issue".input_schema.properties.project_key]
+description = "Jira project key (e.g., 'PROJ')"
+pattern = "^[A-Z][A-Z0-9_]+$"
+type = "string"
+
+[provides.operations."jira.create_issue".input_schema.properties.issue_type]
+description = "Issue type name (e.g., 'Story', 'Bug', 'Task', 'Epic')"
+type = "string"
+
+[provides.operations."jira.create_issue".input_schema.properties.summary]
+description = "Issue summary/title"
+minLength = 1
+maxLength = 255
+type = "string"
+
+[provides.operations."jira.create_issue".input_schema.properties.description]
+description = "Issue description in Atlassian Document Format (ADF) or plain text"
+type = "string"
+
+[provides.operations."jira.create_issue".input_schema.properties.priority]
+description = "Priority name (e.g., 'Highest', 'High', 'Medium', 'Low', 'Lowest')"
+type = "string"
+
+[provides.operations."jira.create_issue".input_schema.properties.assignee]
+description = "Assignee account ID"
+type = "string"
+
+[provides.operations."jira.create_issue".input_schema.properties.labels]
+description = "Labels to apply"
+type = "array"
+[provides.operations."jira.create_issue".input_schema.properties.labels.items]
+type = "string"
+
+[provides.operations."jira.create_issue".input_schema.properties.components]
+description = "Component names to assign"
+type = "array"
+[provides.operations."jira.create_issue".input_schema.properties.components.items]
+type = "string"
+
+[provides.operations."jira.create_issue".input_schema.properties.custom_fields]
+description = "Map of custom field IDs to values (e.g., {\"customfield_10001\": \"value\"})"
+type = "object"
+
+[provides.operations."jira.create_issue".output_schema]
+required = [
+    "id",
+    "key",
+    "self",
+]
+type = "object"
+
+[provides.operations."jira.create_issue".output_schema.properties.id]
+description = "Issue internal ID"
+type = "string"
+
+[provides.operations."jira.create_issue".output_schema.properties.key]
+description = "Issue key (e.g., 'PROJ-123')"
+type = "string"
+
+[provides.operations."jira.create_issue".output_schema.properties.self]
+description = "API URL for the created issue"
+type = "string"
+
+[provides.operations."jira.create_issue".network_constraints]
+host_allow = ["*.atlassian.net"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."jira.create_issue".ai_hints]
+when_to_use = "Create a new issue in a Jira project. Requires project_key and issue_type at minimum."
+common_mistakes = [
+    "Using project name instead of project key.",
+    "Not matching custom field IDs to the project's field configuration.",
+    "Passing ADF JSON as a plain string instead of structured ADF.",
+]
+examples = ['{"project_key": "PROJ", "issue_type": "Story", "summary": "Implement login flow", "priority": "High"}']
+related = [
+    "jira.get_issue",
+    "jira.update_issue",
+    "jira.search_jql",
+]
+
+[provides.operations."jira.get_issue"]
+description = "Get a single Jira issue by key or ID with selected fields"
+capability = "jira.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."jira.get_issue".rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations."jira.get_issue".input_schema]
+required = ["issue_key"]
+type = "object"
+
+[provides.operations."jira.get_issue".input_schema.properties.issue_key]
+description = "Issue key (e.g., 'PROJ-123') or numeric ID"
+type = "string"
+
+[provides.operations."jira.get_issue".input_schema.properties.fields]
+description = "Comma-separated field names to return (default: all navigable fields)"
+type = "string"
+
+[provides.operations."jira.get_issue".input_schema.properties.expand]
+description = "Comma-separated expansions (e.g., 'changelog,renderedFields')"
+type = "string"
+
+[provides.operations."jira.get_issue".output_schema]
+required = [
+    "id",
+    "key",
+    "fields",
+]
+type = "object"
+
+[provides.operations."jira.get_issue".output_schema.properties.id]
+description = "Issue internal ID"
+type = "string"
+
+[provides.operations."jira.get_issue".output_schema.properties.key]
+description = "Issue key (e.g., 'PROJ-123')"
+type = "string"
+
+[provides.operations."jira.get_issue".output_schema.properties.fields]
+description = "Issue field values"
+type = "object"
+
+[provides.operations."jira.get_issue".output_schema.properties.changelog]
+description = "Change history (if expanded)"
+type = "object"
+
+[provides.operations."jira.get_issue".network_constraints]
+host_allow = ["*.atlassian.net"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."jira.get_issue".ai_hints]
+when_to_use = "Retrieve a specific Jira issue by its key (e.g., PROJ-123)."
+common_mistakes = [
+    "Using issue summary instead of issue key.",
+    "Not expanding changelog when history is needed.",
+]
+examples = ['{"issue_key": "PROJ-123", "fields": "summary,status,assignee"}']
+related = [
+    "jira.update_issue",
+    "jira.search_jql",
+    "jira.list_transitions",
+]
+
+[provides.operations."jira.update_issue"]
+description = "Update fields on an existing Jira issue (partial update)"
+capability = "jira.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."jira.update_issue".rate_limit]
+max = 60
+per_ms = 60000
+
+[provides.operations."jira.update_issue".input_schema]
+required = [
+    "issue_key",
+    "fields",
+]
+type = "object"
+
+[provides.operations."jira.update_issue".input_schema.properties.issue_key]
+description = "Issue key (e.g., 'PROJ-123') or numeric ID"
+type = "string"
+
+[provides.operations."jira.update_issue".input_schema.properties.fields]
+description = "Map of field names/IDs to new values"
+type = "object"
+
+[provides.operations."jira.update_issue".input_schema.properties.notify_users]
+description = "Whether to send email notifications for this update"
+type = "boolean"
+
+[provides.operations."jira.update_issue".output_schema]
+type = "object"
+
+[provides.operations."jira.update_issue".network_constraints]
+host_allow = ["*.atlassian.net"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."jira.update_issue".ai_hints]
+when_to_use = "Modify specific fields on an existing issue. Uses PATCH semantics — only specified fields are changed."
+common_mistakes = [
+    "Trying to change the issue type via field update (use move_issue instead).",
+    "Using field names instead of field IDs for custom fields.",
+    "Not checking allowed values for select-type fields.",
+]
+examples = ['{"issue_key": "PROJ-123", "fields": {"summary": "Updated title", "priority": {"name": "High"}}}']
+related = [
+    "jira.get_issue",
+    "jira.transition_issue",
+]
+
+[provides.operations."jira.delete_issue"]
+description = "Delete a Jira issue and optionally its subtasks (irreversible)"
+capability = "jira.delete"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."jira.delete_issue".rate_limit]
+max = 20
+per_ms = 60000
+
+[provides.operations."jira.delete_issue".input_schema]
+required = ["issue_key"]
+type = "object"
+
+[provides.operations."jira.delete_issue".input_schema.properties.issue_key]
+description = "Issue key (e.g., 'PROJ-123') or numeric ID"
+type = "string"
+
+[provides.operations."jira.delete_issue".input_schema.properties.delete_subtasks]
+description = "Also delete subtasks (default: false, fails if subtasks exist)"
+type = "boolean"
+
+[provides.operations."jira.delete_issue".output_schema]
+type = "object"
+
+[provides.operations."jira.delete_issue".network_constraints]
+host_allow = ["*.atlassian.net"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."jira.delete_issue".ai_hints]
+when_to_use = "Permanently delete a Jira issue. This cannot be undone."
+common_mistakes = [
+    "Deleting issues with subtasks without setting delete_subtasks=true.",
+    "Deleting issues that are linked as blockers for other issues.",
+]
+examples = ['{"issue_key": "PROJ-123", "delete_subtasks": true}']
+related = ["jira.get_issue"]
+
+# ---------------------------------------------------------------------------
+# Operations: JQL Search
+# ---------------------------------------------------------------------------
+
+[provides.operations."jira.search_jql"]
+description = "Search for issues using JQL (Jira Query Language) with pagination"
+capability = "jira.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."jira.search_jql".rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations."jira.search_jql".input_schema]
+required = ["jql"]
+type = "object"
+
+[provides.operations."jira.search_jql".input_schema.properties.jql]
+description = "JQL query string (e.g., 'project = PROJ AND status = Open ORDER BY created DESC')"
+type = "string"
+
+[provides.operations."jira.search_jql".input_schema.properties.fields]
+description = "Comma-separated field names to return per issue"
+type = "string"
+
+[provides.operations."jira.search_jql".input_schema.properties.max_results]
+description = "Maximum results per page (default: 50, max: 100)"
+minimum = 1
+maximum = 100
+type = "integer"
+
+[provides.operations."jira.search_jql".input_schema.properties.start_at]
+description = "Pagination offset (0-indexed)"
+minimum = 0
+type = "integer"
+
+[provides.operations."jira.search_jql".input_schema.properties.expand]
+description = "Comma-separated expansions"
+type = "string"
+
+[provides.operations."jira.search_jql".output_schema]
+required = [
+    "issues",
+    "total",
+    "max_results",
+    "start_at",
+]
+type = "object"
+
+[provides.operations."jira.search_jql".output_schema.properties.issues]
+description = "Matching issues"
+type = "array"
+[provides.operations."jira.search_jql".output_schema.properties.issues.items]
+type = "object"
+
+[provides.operations."jira.search_jql".output_schema.properties.total]
+description = "Total matching issues (may be approximate)"
+type = "integer"
+
+[provides.operations."jira.search_jql".output_schema.properties.max_results]
+type = "integer"
+
+[provides.operations."jira.search_jql".output_schema.properties.start_at]
+type = "integer"
+
+[provides.operations."jira.search_jql".network_constraints]
+host_allow = ["*.atlassian.net"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."jira.search_jql".ai_hints]
+when_to_use = "Search for issues using Jira Query Language. Supports complex filtering, ordering, and field selection."
+common_mistakes = [
+    "Using SQL syntax instead of JQL syntax.",
+    "Not quoting string values in JQL (e.g., status = 'In Progress' not status = In Progress).",
+    "Requesting too many fields which slows response.",
+    "Not handling pagination for large result sets.",
+]
+examples = [
+    '{"jql": "project = PROJ AND status = Open ORDER BY created DESC", "max_results": 25}',
+    '{"jql": "assignee = currentUser() AND sprint in openSprints()", "fields": "summary,status,priority"}',
+]
+related = [
+    "jira.get_issue",
+    "jira.create_issue",
+]
+
+# ---------------------------------------------------------------------------
+# Operations: Workflow Transitions
+# ---------------------------------------------------------------------------
+
+[provides.operations."jira.list_transitions"]
+description = "List available workflow transitions for an issue"
+capability = "jira.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."jira.list_transitions".rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations."jira.list_transitions".input_schema]
+required = ["issue_key"]
+type = "object"
+
+[provides.operations."jira.list_transitions".input_schema.properties.issue_key]
+description = "Issue key (e.g., 'PROJ-123')"
+type = "string"
+
+[provides.operations."jira.list_transitions".output_schema]
+required = ["transitions"]
+type = "object"
+
+[provides.operations."jira.list_transitions".output_schema.properties.transitions]
+description = "Available transitions from current status"
+type = "array"
+[provides.operations."jira.list_transitions".output_schema.properties.transitions.items]
+type = "object"
+
+[provides.operations."jira.list_transitions".network_constraints]
+host_allow = ["*.atlassian.net"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."jira.list_transitions".ai_hints]
+when_to_use = "Check which status transitions are available for an issue before transitioning."
+common_mistakes = ["Assuming transition IDs are stable across projects."]
+examples = ['{"issue_key": "PROJ-123"}']
+related = ["jira.transition_issue"]
+
+[provides.operations."jira.transition_issue"]
+description = "Execute a workflow transition on an issue (change status)"
+capability = "jira.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."jira.transition_issue".rate_limit]
+max = 60
+per_ms = 60000
+
+[provides.operations."jira.transition_issue".input_schema]
+required = [
+    "issue_key",
+    "transition_id",
+]
+type = "object"
+
+[provides.operations."jira.transition_issue".input_schema.properties.issue_key]
+description = "Issue key (e.g., 'PROJ-123')"
+type = "string"
+
+[provides.operations."jira.transition_issue".input_schema.properties.transition_id]
+description = "Transition ID from list_transitions response"
+type = "string"
+
+[provides.operations."jira.transition_issue".input_schema.properties.fields]
+description = "Fields required by the transition screen (e.g., resolution)"
+type = "object"
+
+[provides.operations."jira.transition_issue".input_schema.properties.comment]
+description = "Optional comment to add during transition"
+type = "string"
+
+[provides.operations."jira.transition_issue".output_schema]
+type = "object"
+
+[provides.operations."jira.transition_issue".network_constraints]
+host_allow = ["*.atlassian.net"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."jira.transition_issue".ai_hints]
+when_to_use = "Change an issue's workflow status. Always call list_transitions first to get valid transition IDs."
+common_mistakes = [
+    "Using a transition ID without checking list_transitions first.",
+    "Not providing required fields for transitions with screens.",
+    "Assuming transition names are the same as status names.",
+]
+examples = ['{"issue_key": "PROJ-123", "transition_id": "31", "comment": "Moving to review"}']
+related = [
+    "jira.list_transitions",
+    "jira.get_issue",
+]
+
+# ---------------------------------------------------------------------------
+# Operations: Sprint and Board Management
+# ---------------------------------------------------------------------------
+
+[provides.operations."jira.list_sprints"]
+description = "List sprints for a Scrum board with state filtering"
+capability = "jira.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."jira.list_sprints".rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations."jira.list_sprints".input_schema]
+required = ["board_id"]
+type = "object"
+
+[provides.operations."jira.list_sprints".input_schema.properties.board_id]
+description = "Agile board ID"
+type = "integer"
+
+[provides.operations."jira.list_sprints".input_schema.properties.state]
+description = "Filter by sprint state"
+enum = ["active", "closed", "future"]
+type = "string"
+
+[provides.operations."jira.list_sprints".input_schema.properties.start_at]
+description = "Pagination offset"
+minimum = 0
+type = "integer"
+
+[provides.operations."jira.list_sprints".input_schema.properties.max_results]
+description = "Max results per page (default: 50)"
+minimum = 1
+maximum = 50
+type = "integer"
+
+[provides.operations."jira.list_sprints".output_schema]
+required = ["values"]
+type = "object"
+
+[provides.operations."jira.list_sprints".output_schema.properties.values]
+description = "Sprint objects"
+type = "array"
+[provides.operations."jira.list_sprints".output_schema.properties.values.items]
+type = "object"
+
+[provides.operations."jira.list_sprints".output_schema.properties.is_last]
+type = "boolean"
+
+[provides.operations."jira.list_sprints".network_constraints]
+host_allow = ["*.atlassian.net"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."jira.list_sprints".ai_hints]
+when_to_use = "List sprints for a Scrum board. Filter by state to find active or future sprints."
+common_mistakes = ["Using project key instead of board ID."]
+examples = ['{"board_id": 42, "state": "active"}']
+related = [
+    "jira.move_to_sprint",
+    "jira.search_jql",
+]
+
+[provides.operations."jira.move_to_sprint"]
+description = "Move issues into a sprint"
+capability = "jira.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."jira.move_to_sprint".rate_limit]
+max = 30
+per_ms = 60000
+
+[provides.operations."jira.move_to_sprint".input_schema]
+required = [
+    "sprint_id",
+    "issues",
+]
+type = "object"
+
+[provides.operations."jira.move_to_sprint".input_schema.properties.sprint_id]
+description = "Target sprint ID"
+type = "integer"
+
+[provides.operations."jira.move_to_sprint".input_schema.properties.issues]
+description = "Issue keys to move into the sprint"
+type = "array"
+[provides.operations."jira.move_to_sprint".input_schema.properties.issues.items]
+type = "string"
+
+[provides.operations."jira.move_to_sprint".output_schema]
+type = "object"
+
+[provides.operations."jira.move_to_sprint".network_constraints]
+host_allow = ["*.atlassian.net"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."jira.move_to_sprint".ai_hints]
+when_to_use = "Add issues to a sprint backlog. Use list_sprints first to find the target sprint ID."
+common_mistakes = [
+    "Trying to move issues to a closed sprint.",
+    "Using sprint name instead of sprint ID.",
+]
+examples = ['{"sprint_id": 42, "issues": ["PROJ-100", "PROJ-101"]}']
+related = [
+    "jira.list_sprints",
+    "jira.search_jql",
+]
+
+# ---------------------------------------------------------------------------
+# Operations: Comments and Attachments
+# ---------------------------------------------------------------------------
+
+[provides.operations."jira.add_comment"]
+description = "Add a comment to an issue"
+capability = "jira.write"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."jira.add_comment".rate_limit]
+max = 60
+per_ms = 60000
+
+[provides.operations."jira.add_comment".input_schema]
+required = [
+    "issue_key",
+    "body",
+]
+type = "object"
+
+[provides.operations."jira.add_comment".input_schema.properties.issue_key]
+description = "Issue key (e.g., 'PROJ-123')"
+type = "string"
+
+[provides.operations."jira.add_comment".input_schema.properties.body]
+description = "Comment body in Atlassian Document Format (ADF) or plain text"
+type = "string"
+
+[provides.operations."jira.add_comment".input_schema.properties.visibility]
+description = "Restrict visibility to a group or role (e.g., {\"type\": \"role\", \"value\": \"Developers\"})"
+type = "object"
+
+[provides.operations."jira.add_comment".output_schema]
+required = [
+    "id",
+    "body",
+    "created",
+    "author",
+]
+type = "object"
+
+[provides.operations."jira.add_comment".output_schema.properties.id]
+description = "Comment ID"
+type = "string"
+
+[provides.operations."jira.add_comment".output_schema.properties.body]
+type = "object"
+
+[provides.operations."jira.add_comment".output_schema.properties.created]
+description = "ISO 8601 timestamp"
+type = "string"
+
+[provides.operations."jira.add_comment".output_schema.properties.author]
+type = "object"
+
+[provides.operations."jira.add_comment".network_constraints]
+host_allow = ["*.atlassian.net"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."jira.add_comment".ai_hints]
+when_to_use = "Add a comment to an existing issue. Comments can be restricted to specific groups or roles."
+common_mistakes = [
+    "Passing raw Markdown — Jira Cloud REST API v3 expects ADF, not Markdown.",
+    "Not handling ADF conversion for rich text comments.",
+]
+examples = ['{"issue_key": "PROJ-123", "body": "Build passed, merging now."}']
+related = [
+    "jira.list_comments",
+    "jira.get_issue",
+]
+
+[provides.operations."jira.list_comments"]
+description = "List comments on an issue with pagination"
+capability = "jira.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."jira.list_comments".rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations."jira.list_comments".input_schema]
+required = ["issue_key"]
+type = "object"
+
+[provides.operations."jira.list_comments".input_schema.properties.issue_key]
+description = "Issue key (e.g., 'PROJ-123')"
+type = "string"
+
+[provides.operations."jira.list_comments".input_schema.properties.start_at]
+description = "Pagination offset"
+minimum = 0
+type = "integer"
+
+[provides.operations."jira.list_comments".input_schema.properties.max_results]
+description = "Max results per page (default: 50)"
+minimum = 1
+maximum = 100
+type = "integer"
+
+[provides.operations."jira.list_comments".input_schema.properties.order_by]
+description = "Order by field"
+enum = ["created", "-created"]
+type = "string"
+
+[provides.operations."jira.list_comments".output_schema]
+required = [
+    "comments",
+    "total",
+]
+type = "object"
+
+[provides.operations."jira.list_comments".output_schema.properties.comments]
+description = "Comment objects"
+type = "array"
+[provides.operations."jira.list_comments".output_schema.properties.comments.items]
+type = "object"
+
+[provides.operations."jira.list_comments".output_schema.properties.total]
+type = "integer"
+
+[provides.operations."jira.list_comments".output_schema.properties.start_at]
+type = "integer"
+
+[provides.operations."jira.list_comments".output_schema.properties.max_results]
+type = "integer"
+
+[provides.operations."jira.list_comments".network_constraints]
+host_allow = ["*.atlassian.net"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."jira.list_comments".ai_hints]
+when_to_use = "Retrieve comments on an issue. Use order_by=-created for newest first."
+common_mistakes = []
+examples = ['{"issue_key": "PROJ-123", "max_results": 20, "order_by": "-created"}']
+related = [
+    "jira.add_comment",
+    "jira.get_issue",
+]
+
+[provides.operations."jira.add_attachment"]
+description = "Upload a file attachment to an issue"
+capability = "jira.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."jira.add_attachment".rate_limit]
+max = 30
+per_ms = 60000
+
+[provides.operations."jira.add_attachment".input_schema]
+required = [
+    "issue_key",
+    "filename",
+    "data",
+]
+type = "object"
+
+[provides.operations."jira.add_attachment".input_schema.properties.issue_key]
+description = "Issue key (e.g., 'PROJ-123')"
+type = "string"
+
+[provides.operations."jira.add_attachment".input_schema.properties.filename]
+description = "Name of the file to attach"
+type = "string"
+
+[provides.operations."jira.add_attachment".input_schema.properties.data]
+description = "Base64-encoded file data"
+type = "string"
+
+[provides.operations."jira.add_attachment".output_schema]
+required = ["attachments"]
+type = "object"
+
+[provides.operations."jira.add_attachment".output_schema.properties.attachments]
+description = "Created attachment metadata"
+type = "array"
+[provides.operations."jira.add_attachment".output_schema.properties.attachments.items]
+type = "object"
+
+[provides.operations."jira.add_attachment".network_constraints]
+host_allow = ["*.atlassian.net"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 30000
+total_timeout_ms = 120000
+max_response_bytes = 10485760
+
+[provides.operations."jira.add_attachment".ai_hints]
+when_to_use = "Attach a file to a Jira issue. Files must be base64-encoded."
+common_mistakes = [
+    "Exceeding Jira's attachment size limit (typically 10 MB for Cloud).",
+    "Not base64-encoding the file data.",
+]
+examples = ['{"issue_key": "PROJ-123", "filename": "screenshot.png", "data": "<base64>"}']
+related = [
+    "jira.get_issue",
+    "jira.add_comment",
+]
+
+# ---------------------------------------------------------------------------
+# Streaming / Event Capabilities
+# ---------------------------------------------------------------------------
+
+[event_caps]
+streaming = true
+replay = false
+min_buffer_events = 50
+
+# ---------------------------------------------------------------------------
+# Sandbox
+# ---------------------------------------------------------------------------
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+# ---------------------------------------------------------------------------
+# Rate Limit Pools
+# ---------------------------------------------------------------------------
+
+[[rate_limits.pools]]
+id = "jira.read"
+description = "Read operations against Jira REST API"
+requests = 100
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "jira.write"
+description = "Write/mutation operations against Jira REST API"
+requests = 60
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "jira.delete"
+description = "Destructive operations against Jira REST API"
+requests = 20
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "jira.attachment"
+description = "Attachment upload operations"
+requests = 30
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[rate_limits.operation_pools]
+"jira.create_issue" = ["jira.write"]
+"jira.get_issue" = ["jira.read"]
+"jira.update_issue" = ["jira.write"]
+"jira.delete_issue" = ["jira.delete"]
+"jira.search_jql" = ["jira.read"]
+"jira.list_transitions" = ["jira.read"]
+"jira.transition_issue" = ["jira.write"]
+"jira.list_sprints" = ["jira.read"]
+"jira.move_to_sprint" = ["jira.write"]
+"jira.add_comment" = ["jira.write"]
+"jira.list_comments" = ["jira.read"]
+"jira.add_attachment" = ["jira.attachment"]

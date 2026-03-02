@@ -1,0 +1,447 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:9378e22b2943b56d55d5cc5e179dcdb6cd77f14899ad3f4cd46d21322bb0399d"
+
+[connector]
+id = "fcp.gmail"
+name = "Gmail Connector"
+version = "0.1.0"
+description = "FCP connector for Gmail (messages, threads, labels, drafts, attachments)"
+archetypes = ["operational", "streaming", "knowledge"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:private"
+allowed_sources = ["z:owner", "z:private"]
+allowed_targets = ["z:private"]
+forbidden = ["z:public", "z:work"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
+optional = ["media.download", "media.upload"]
+forbidden = ["system.exec", "network.listen"]
+
+# ── Operations ──────────────────────────────────────────────────
+
+[provides.operations."gmail.send_message"]
+description = "Send an email message"
+capability = "gmail.send"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+
+[provides.operations."gmail.send_message".input_schema]
+required = ["to", "subject", "body"]
+type = "object"
+[provides.operations."gmail.send_message".input_schema.properties.to]
+type = "string"
+[provides.operations."gmail.send_message".input_schema.properties.subject]
+type = "string"
+[provides.operations."gmail.send_message".input_schema.properties.body]
+type = "string"
+
+[provides.operations."gmail.send_message".output_schema]
+required = ["message"]
+type = "object"
+[provides.operations."gmail.send_message".output_schema.properties.message]
+type = "object"
+
+[provides.operations."gmail.send_message".network_constraints]
+host_allow = ["gmail.googleapis.com", "www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."gmail.send_message".ai_hints]
+when_to_use = "Send an email. This sends a real email to the recipient."
+common_mistakes = ["Sending to wrong recipients", "Not encoding body as base64url"]
+examples = ['{"to": "user@example.com", "subject": "Hello", "body": "Message body"}']
+related = ["gmail.create_draft"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."gmail.get_message"]
+description = "Retrieve a single email message"
+capability = "gmail.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."gmail.get_message".input_schema]
+required = ["message_id"]
+type = "object"
+[provides.operations."gmail.get_message".input_schema.properties.message_id]
+type = "string"
+
+[provides.operations."gmail.get_message".output_schema]
+required = ["message"]
+type = "object"
+[provides.operations."gmail.get_message".output_schema.properties.message]
+type = "object"
+
+[provides.operations."gmail.get_message".network_constraints]
+host_allow = ["gmail.googleapis.com", "www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."gmail.get_message".ai_hints]
+when_to_use = "Read a specific email by ID."
+common_mistakes = []
+examples = ['{"message_id": "abc123"}']
+related = ["gmail.list_messages", "gmail.search_messages"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."gmail.list_messages"]
+description = "List messages in a mailbox"
+capability = "gmail.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."gmail.list_messages".input_schema]
+required = []
+type = "object"
+[provides.operations."gmail.list_messages".input_schema.properties.label_ids]
+type = "array"
+[provides.operations."gmail.list_messages".input_schema.properties.max_results]
+type = "integer"
+
+[provides.operations."gmail.list_messages".output_schema]
+required = ["messages"]
+type = "object"
+[provides.operations."gmail.list_messages".output_schema.properties.messages]
+type = "array"
+
+[provides.operations."gmail.list_messages".network_constraints]
+host_allow = ["gmail.googleapis.com", "www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."gmail.list_messages".ai_hints]
+when_to_use = "List recent emails, optionally filtered by label."
+common_mistakes = ["Not handling pagination"]
+examples = ['{"label_ids": ["INBOX"], "max_results": 20}']
+related = ["gmail.get_message", "gmail.search_messages"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."gmail.search_messages"]
+description = "Search messages with Gmail query syntax"
+capability = "gmail.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."gmail.search_messages".input_schema]
+required = ["query"]
+type = "object"
+[provides.operations."gmail.search_messages".input_schema.properties.query]
+type = "string"
+
+[provides.operations."gmail.search_messages".output_schema]
+required = ["messages"]
+type = "object"
+[provides.operations."gmail.search_messages".output_schema.properties.messages]
+type = "array"
+
+[provides.operations."gmail.search_messages".network_constraints]
+host_allow = ["gmail.googleapis.com", "www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."gmail.search_messages".ai_hints]
+when_to_use = "Search emails with Gmail query syntax."
+common_mistakes = []
+examples = ['{"query": "from:boss@company.com is:unread"}']
+related = ["gmail.get_message", "gmail.list_messages"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."gmail.create_draft"]
+description = "Create a draft email"
+capability = "gmail.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."gmail.create_draft".input_schema]
+required = ["to", "subject", "body"]
+type = "object"
+[provides.operations."gmail.create_draft".input_schema.properties.to]
+type = "string"
+[provides.operations."gmail.create_draft".input_schema.properties.subject]
+type = "string"
+[provides.operations."gmail.create_draft".input_schema.properties.body]
+type = "string"
+
+[provides.operations."gmail.create_draft".output_schema]
+required = ["draft"]
+type = "object"
+[provides.operations."gmail.create_draft".output_schema.properties.draft]
+type = "object"
+
+[provides.operations."gmail.create_draft".network_constraints]
+host_allow = ["gmail.googleapis.com", "www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."gmail.create_draft".ai_hints]
+when_to_use = "Create a draft email without sending it."
+common_mistakes = []
+examples = ['{"to": "user@example.com", "subject": "Draft", "body": "..."}']
+related = ["gmail.send_message"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."gmail.modify_labels"]
+description = "Add or remove labels from a message"
+capability = "gmail.write"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."gmail.modify_labels".input_schema]
+required = ["message_id"]
+type = "object"
+[provides.operations."gmail.modify_labels".input_schema.properties.message_id]
+type = "string"
+[provides.operations."gmail.modify_labels".input_schema.properties.add_labels]
+type = "array"
+[provides.operations."gmail.modify_labels".input_schema.properties.remove_labels]
+type = "array"
+
+[provides.operations."gmail.modify_labels".output_schema]
+required = ["message"]
+type = "object"
+[provides.operations."gmail.modify_labels".output_schema.properties.message]
+type = "object"
+
+[provides.operations."gmail.modify_labels".network_constraints]
+host_allow = ["gmail.googleapis.com", "www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."gmail.modify_labels".ai_hints]
+when_to_use = "Add or remove labels (like INBOX, STARRED, custom labels)."
+common_mistakes = []
+examples = ['{"message_id": "abc123", "add_labels": ["STARRED"], "remove_labels": ["UNREAD"]}']
+related = ["gmail.list_labels"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."gmail.list_labels"]
+description = "List all labels in the mailbox"
+capability = "gmail.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."gmail.list_labels".input_schema]
+required = []
+type = "object"
+
+[provides.operations."gmail.list_labels".output_schema]
+required = ["labels"]
+type = "object"
+[provides.operations."gmail.list_labels".output_schema.properties.labels]
+type = "array"
+
+[provides.operations."gmail.list_labels".network_constraints]
+host_allow = ["gmail.googleapis.com", "www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."gmail.list_labels".ai_hints]
+when_to_use = "List all available labels."
+common_mistakes = []
+examples = ['{}']
+related = ["gmail.modify_labels"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."gmail.trash_message"]
+description = "Move a message to trash"
+capability = "gmail.delete"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."gmail.trash_message".input_schema]
+required = ["message_id"]
+type = "object"
+[provides.operations."gmail.trash_message".input_schema.properties.message_id]
+type = "string"
+
+[provides.operations."gmail.trash_message".output_schema]
+required = ["message"]
+type = "object"
+[provides.operations."gmail.trash_message".output_schema.properties.message]
+type = "object"
+
+[provides.operations."gmail.trash_message".network_constraints]
+host_allow = ["gmail.googleapis.com", "www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."gmail.trash_message".ai_hints]
+when_to_use = "Move an email to trash."
+common_mistakes = []
+examples = ['{"message_id": "abc123"}']
+related = ["gmail.get_message"]
+
+# ── Events ──────────────────────────────────────────────────────
+
+[event_caps]
+streaming = true
+replay = false
+min_buffer_events = 50
+
+# ── Sandbox ─────────────────────────────────────────────────────
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+# ── Rate Limits ─────────────────────────────────────────────────
+
+[[rate_limits.pools]]
+id = "gmail.read"
+requests = 250
+window_ms = 1000
+burst = 25
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "gmail.write"
+requests = 250
+window_ms = 1000
+burst = 25
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "gmail.send"
+requests = 100
+window_ms = 1000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "gmail.delete"
+requests = 250
+window_ms = 1000
+burst = 25
+scope = "instance"
+
+[rate_limits.operation_pools]
+"gmail.send_message" = ["gmail.send"]
+"gmail.get_message" = ["gmail.read"]
+"gmail.list_messages" = ["gmail.read"]
+"gmail.search_messages" = ["gmail.read"]
+"gmail.create_draft" = ["gmail.write"]
+"gmail.modify_labels" = ["gmail.write"]
+"gmail.list_labels" = ["gmail.read"]
+"gmail.trash_message" = ["gmail.delete"]

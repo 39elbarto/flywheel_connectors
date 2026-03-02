@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[lib]
+name = "fcp_anthropic"
+path = "src/lib.rs"
+
 [[bin]]
 name = "fcp-anthropic"
 path = "src/main.rs"
@@ -36,5 +40,7 @@ uuid.workspace = true
 [dev-dependencies]
 wiremock.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+futures-util.workspace = true
 fcp-crypto = { path = "../../crates/fcp-crypto" }
+fcp-manifest = { path = "../../crates/fcp-manifest" }
 fcp-testkit = { path = "../../crates/fcp-testkit" }

@@ -1,0 +1,532 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:69191e3a337e8bcb15e3d89b492f6246e7bffaf7f5673bb71bcf1db220ca6339"
+
+[connector]
+id = "fcp.stripe"
+name = "Stripe Connector"
+version = "0.1.0"
+description = "FCP connector for Stripe (payments, customers, subscriptions, invoices, refunds)"
+archetypes = ["operational", "streaming"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:private"
+allowed_sources = ["z:owner", "z:private"]
+allowed_targets = ["z:private"]
+forbidden = ["z:public", "z:work"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
+optional = []
+forbidden = ["system.exec", "network.listen"]
+
+# ── Operations ──────────────────────────────────────────────────
+
+[provides.operations."stripe.create_customer"]
+description = "Create a new Stripe customer"
+capability = "stripe.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."stripe.create_customer".input_schema]
+required = ["email"]
+type = "object"
+[provides.operations."stripe.create_customer".input_schema.properties.email]
+type = "string"
+[provides.operations."stripe.create_customer".input_schema.properties.name]
+type = "string"
+
+[provides.operations."stripe.create_customer".output_schema]
+required = ["customer"]
+type = "object"
+[provides.operations."stripe.create_customer".output_schema.properties.customer]
+type = "object"
+
+[provides.operations."stripe.create_customer".network_constraints]
+host_allow = ["api.stripe.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."stripe.create_customer".ai_hints]
+when_to_use = "Create a new customer record in Stripe."
+common_mistakes = ["Not checking for duplicate customers by email"]
+examples = ['{"email": "user@example.com", "name": "Jane Doe"}']
+related = ["stripe.get_customer", "stripe.list_customers"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."stripe.get_customer"]
+description = "Retrieve a Stripe customer by ID"
+capability = "stripe.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."stripe.get_customer".input_schema]
+required = ["customer_id"]
+type = "object"
+[provides.operations."stripe.get_customer".input_schema.properties.customer_id]
+type = "string"
+
+[provides.operations."stripe.get_customer".output_schema]
+required = ["customer"]
+type = "object"
+[provides.operations."stripe.get_customer".output_schema.properties.customer]
+type = "object"
+
+[provides.operations."stripe.get_customer".network_constraints]
+host_allow = ["api.stripe.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."stripe.get_customer".ai_hints]
+when_to_use = "Look up a customer by their Stripe ID."
+common_mistakes = []
+examples = ['{"customer_id": "cus_abc123"}']
+related = ["stripe.create_customer", "stripe.list_customers"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."stripe.list_customers"]
+description = "List Stripe customers with optional filters"
+capability = "stripe.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."stripe.list_customers".input_schema]
+required = []
+type = "object"
+[provides.operations."stripe.list_customers".input_schema.properties.limit]
+type = "integer"
+[provides.operations."stripe.list_customers".input_schema.properties.email]
+type = "string"
+
+[provides.operations."stripe.list_customers".output_schema]
+required = ["data", "has_more"]
+type = "object"
+[provides.operations."stripe.list_customers".output_schema.properties.data]
+type = "array"
+[provides.operations."stripe.list_customers".output_schema.properties.has_more]
+type = "boolean"
+
+[provides.operations."stripe.list_customers".network_constraints]
+host_allow = ["api.stripe.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."stripe.list_customers".ai_hints]
+when_to_use = "List customers, optionally filtered by email."
+common_mistakes = ["Not handling pagination with starting_after"]
+examples = ['{"limit": 10, "email": "user@example.com"}']
+related = ["stripe.get_customer"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."stripe.create_payment_intent"]
+description = "Create a payment intent"
+capability = "stripe.payment"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+
+[provides.operations."stripe.create_payment_intent".input_schema]
+required = ["amount", "currency"]
+type = "object"
+[provides.operations."stripe.create_payment_intent".input_schema.properties.amount]
+type = "integer"
+[provides.operations."stripe.create_payment_intent".input_schema.properties.currency]
+type = "string"
+[provides.operations."stripe.create_payment_intent".input_schema.properties.customer]
+type = "string"
+
+[provides.operations."stripe.create_payment_intent".output_schema]
+required = ["payment_intent"]
+type = "object"
+[provides.operations."stripe.create_payment_intent".output_schema.properties.payment_intent]
+type = "object"
+
+[provides.operations."stripe.create_payment_intent".network_constraints]
+host_allow = ["api.stripe.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."stripe.create_payment_intent".ai_hints]
+when_to_use = "Initiate a payment. Amount is in smallest currency unit (e.g. cents)."
+common_mistakes = ["Using dollars instead of cents for amount", "Invalid ISO 4217 currency code"]
+examples = ['{"amount": 2000, "currency": "usd", "customer": "cus_abc123"}']
+related = ["stripe.get_payment_intent", "stripe.create_refund"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."stripe.get_payment_intent"]
+description = "Retrieve a payment intent by ID"
+capability = "stripe.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."stripe.get_payment_intent".input_schema]
+required = ["payment_intent_id"]
+type = "object"
+[provides.operations."stripe.get_payment_intent".input_schema.properties.payment_intent_id]
+type = "string"
+
+[provides.operations."stripe.get_payment_intent".output_schema]
+required = ["payment_intent"]
+type = "object"
+[provides.operations."stripe.get_payment_intent".output_schema.properties.payment_intent]
+type = "object"
+
+[provides.operations."stripe.get_payment_intent".network_constraints]
+host_allow = ["api.stripe.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."stripe.get_payment_intent".ai_hints]
+when_to_use = "Check status of a payment intent."
+common_mistakes = []
+examples = ['{"payment_intent_id": "pi_abc123"}']
+related = ["stripe.create_payment_intent"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."stripe.create_refund"]
+description = "Refund a payment"
+capability = "stripe.payment"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+
+[provides.operations."stripe.create_refund".input_schema]
+required = ["payment_intent"]
+type = "object"
+[provides.operations."stripe.create_refund".input_schema.properties.payment_intent]
+type = "string"
+[provides.operations."stripe.create_refund".input_schema.properties.amount]
+type = "integer"
+
+[provides.operations."stripe.create_refund".output_schema]
+required = ["refund"]
+type = "object"
+[provides.operations."stripe.create_refund".output_schema.properties.refund]
+type = "object"
+
+[provides.operations."stripe.create_refund".network_constraints]
+host_allow = ["api.stripe.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."stripe.create_refund".ai_hints]
+when_to_use = "Refund all or part of a payment. Omit amount for full refund."
+common_mistakes = ["Refunding more than the original charge amount"]
+examples = ['{"payment_intent": "pi_abc123", "amount": 500}']
+related = ["stripe.get_payment_intent"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."stripe.create_subscription"]
+description = "Create a subscription for a customer"
+capability = "stripe.payment"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+
+[provides.operations."stripe.create_subscription".input_schema]
+required = ["customer", "price"]
+type = "object"
+[provides.operations."stripe.create_subscription".input_schema.properties.customer]
+type = "string"
+[provides.operations."stripe.create_subscription".input_schema.properties.price]
+type = "string"
+
+[provides.operations."stripe.create_subscription".output_schema]
+required = ["subscription"]
+type = "object"
+[provides.operations."stripe.create_subscription".output_schema.properties.subscription]
+type = "object"
+
+[provides.operations."stripe.create_subscription".network_constraints]
+host_allow = ["api.stripe.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."stripe.create_subscription".ai_hints]
+when_to_use = "Start a recurring subscription for a customer."
+common_mistakes = ["Not attaching a payment method to the customer first"]
+examples = ['{"customer": "cus_abc123", "price": "price_abc123"}']
+related = ["stripe.cancel_subscription", "stripe.get_customer"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."stripe.cancel_subscription"]
+description = "Cancel an active subscription"
+capability = "stripe.payment"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+
+[provides.operations."stripe.cancel_subscription".input_schema]
+required = ["subscription_id"]
+type = "object"
+[provides.operations."stripe.cancel_subscription".input_schema.properties.subscription_id]
+type = "string"
+
+[provides.operations."stripe.cancel_subscription".output_schema]
+required = ["subscription"]
+type = "object"
+[provides.operations."stripe.cancel_subscription".output_schema.properties.subscription]
+type = "object"
+
+[provides.operations."stripe.cancel_subscription".network_constraints]
+host_allow = ["api.stripe.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."stripe.cancel_subscription".ai_hints]
+when_to_use = "Cancel a customer's subscription."
+common_mistakes = ["Not specifying whether to cancel immediately or at period end"]
+examples = ['{"subscription_id": "sub_abc123"}']
+related = ["stripe.create_subscription"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."stripe.list_invoices"]
+description = "List invoices for a customer"
+capability = "stripe.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."stripe.list_invoices".input_schema]
+required = []
+type = "object"
+[provides.operations."stripe.list_invoices".input_schema.properties.customer]
+type = "string"
+[provides.operations."stripe.list_invoices".input_schema.properties.limit]
+type = "integer"
+
+[provides.operations."stripe.list_invoices".output_schema]
+required = ["data", "has_more"]
+type = "object"
+[provides.operations."stripe.list_invoices".output_schema.properties.data]
+type = "array"
+[provides.operations."stripe.list_invoices".output_schema.properties.has_more]
+type = "boolean"
+
+[provides.operations."stripe.list_invoices".network_constraints]
+host_allow = ["api.stripe.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."stripe.list_invoices".ai_hints]
+when_to_use = "List invoices, optionally filtered by customer."
+common_mistakes = []
+examples = ['{"customer": "cus_abc123", "limit": 10}']
+related = ["stripe.get_customer"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."stripe.get_balance"]
+description = "Retrieve the current Stripe account balance"
+capability = "stripe.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."stripe.get_balance".input_schema]
+required = []
+type = "object"
+
+[provides.operations."stripe.get_balance".output_schema]
+required = ["balance"]
+type = "object"
+[provides.operations."stripe.get_balance".output_schema.properties.balance]
+type = "object"
+
+[provides.operations."stripe.get_balance".network_constraints]
+host_allow = ["api.stripe.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."stripe.get_balance".ai_hints]
+when_to_use = "Check the current account balance."
+common_mistakes = []
+examples = ['{}']
+related = ["stripe.list_invoices"]
+
+# ── Events ──────────────────────────────────────────────────────
+
+[event_caps]
+streaming = true
+replay = true
+min_buffer_events = 100
+
+# ── Sandbox ─────────────────────────────────────────────────────
+
+[sandbox]
+profile = "strict"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 60000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+# ── Rate Limits ─────────────────────────────────────────────────
+
+[[rate_limits.pools]]
+id = "stripe.read"
+requests = 100
+window_ms = 1000
+burst = 25
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "stripe.write"
+requests = 100
+window_ms = 1000
+burst = 25
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "stripe.payment"
+requests = 50
+window_ms = 1000
+burst = 10
+scope = "instance"
+
+[rate_limits.operation_pools]
+"stripe.create_customer" = ["stripe.write"]
+"stripe.get_customer" = ["stripe.read"]
+"stripe.list_customers" = ["stripe.read"]
+"stripe.create_payment_intent" = ["stripe.payment"]
+"stripe.get_payment_intent" = ["stripe.read"]
+"stripe.create_refund" = ["stripe.payment"]
+"stripe.create_subscription" = ["stripe.payment"]
+"stripe.cancel_subscription" = ["stripe.payment"]
+"stripe.list_invoices" = ["stripe.read"]
+"stripe.get_balance" = ["stripe.read"]

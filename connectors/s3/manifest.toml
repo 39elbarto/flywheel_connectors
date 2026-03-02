@@ -1,0 +1,449 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:11d8f5ca54c5492242330d70470763afc8036f960f0330dcc78cce3e4287fb77"
+
+[connector]
+id = "fcp.s3"
+name = "S3 Connector"
+version = "0.1.0"
+description = "FCP connector for AWS S3 compatible object storage (buckets, objects, presigned URLs)"
+archetypes = ["storage", "operational"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:private"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:private", "z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
+optional = ["media.download", "media.upload"]
+forbidden = ["system.exec", "network.listen"]
+
+# ── Operations ──────────────────────────────────────────────────
+
+[provides.operations."s3.put_object"]
+description = "Upload an object to an S3 bucket"
+capability = "s3.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."s3.put_object".input_schema]
+required = ["bucket", "key", "body"]
+type = "object"
+[provides.operations."s3.put_object".input_schema.properties.bucket]
+type = "string"
+[provides.operations."s3.put_object".input_schema.properties.key]
+type = "string"
+[provides.operations."s3.put_object".input_schema.properties.body]
+type = "string"
+
+[provides.operations."s3.put_object".output_schema]
+required = ["etag"]
+type = "object"
+[provides.operations."s3.put_object".output_schema.properties.etag]
+type = "string"
+
+[provides.operations."s3.put_object".network_constraints]
+host_allow = ["*.s3.amazonaws.com", "s3.amazonaws.com", "*.amazonaws.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 300000
+max_response_bytes = 1048576
+
+[provides.operations."s3.put_object".ai_hints]
+when_to_use = "Upload a file or data to an S3 bucket."
+common_mistakes = ["Not specifying Content-Type", "Key names with leading slashes"]
+examples = ['{"bucket": "my-bucket", "key": "data/file.json", "body": "{}"}']
+related = ["s3.get_object", "s3.delete_object"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."s3.get_object"]
+description = "Download an object from an S3 bucket"
+capability = "s3.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."s3.get_object".input_schema]
+required = ["bucket", "key"]
+type = "object"
+[provides.operations."s3.get_object".input_schema.properties.bucket]
+type = "string"
+[provides.operations."s3.get_object".input_schema.properties.key]
+type = "string"
+
+[provides.operations."s3.get_object".output_schema]
+required = ["body", "content_type"]
+type = "object"
+[provides.operations."s3.get_object".output_schema.properties.body]
+type = "string"
+[provides.operations."s3.get_object".output_schema.properties.content_type]
+type = "string"
+
+[provides.operations."s3.get_object".network_constraints]
+host_allow = ["*.s3.amazonaws.com", "s3.amazonaws.com", "*.amazonaws.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 300000
+max_response_bytes = 104857600
+
+[provides.operations."s3.get_object".ai_hints]
+when_to_use = "Download a file from an S3 bucket."
+common_mistakes = []
+examples = ['{"bucket": "my-bucket", "key": "data/file.json"}']
+related = ["s3.put_object", "s3.list_objects"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."s3.delete_object"]
+description = "Delete an object from an S3 bucket"
+capability = "s3.delete"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."s3.delete_object".input_schema]
+required = ["bucket", "key"]
+type = "object"
+[provides.operations."s3.delete_object".input_schema.properties.bucket]
+type = "string"
+[provides.operations."s3.delete_object".input_schema.properties.key]
+type = "string"
+
+[provides.operations."s3.delete_object".output_schema]
+required = ["deleted"]
+type = "object"
+[provides.operations."s3.delete_object".output_schema.properties.deleted]
+type = "boolean"
+
+[provides.operations."s3.delete_object".network_constraints]
+host_allow = ["*.s3.amazonaws.com", "s3.amazonaws.com", "*.amazonaws.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."s3.delete_object".ai_hints]
+when_to_use = "Delete a file from an S3 bucket. This is permanent."
+common_mistakes = ["Deleting the wrong key — verify before deleting"]
+examples = ['{"bucket": "my-bucket", "key": "data/old-file.json"}']
+related = ["s3.get_object", "s3.list_objects"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."s3.list_objects"]
+description = "List objects in a bucket with optional prefix"
+capability = "s3.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."s3.list_objects".input_schema]
+required = ["bucket"]
+type = "object"
+[provides.operations."s3.list_objects".input_schema.properties.bucket]
+type = "string"
+[provides.operations."s3.list_objects".input_schema.properties.prefix]
+type = "string"
+[provides.operations."s3.list_objects".input_schema.properties.max_keys]
+type = "integer"
+
+[provides.operations."s3.list_objects".output_schema]
+required = ["contents", "is_truncated"]
+type = "object"
+[provides.operations."s3.list_objects".output_schema.properties.contents]
+type = "array"
+[provides.operations."s3.list_objects".output_schema.properties.is_truncated]
+type = "boolean"
+
+[provides.operations."s3.list_objects".network_constraints]
+host_allow = ["*.s3.amazonaws.com", "s3.amazonaws.com", "*.amazonaws.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."s3.list_objects".ai_hints]
+when_to_use = "List objects in a bucket, optionally filtered by prefix."
+common_mistakes = ["Not handling pagination with continuation tokens"]
+examples = ['{"bucket": "my-bucket", "prefix": "data/", "max_keys": 100}']
+related = ["s3.get_object"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."s3.head_object"]
+description = "Get object metadata without downloading the body"
+capability = "s3.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."s3.head_object".input_schema]
+required = ["bucket", "key"]
+type = "object"
+[provides.operations."s3.head_object".input_schema.properties.bucket]
+type = "string"
+[provides.operations."s3.head_object".input_schema.properties.key]
+type = "string"
+
+[provides.operations."s3.head_object".output_schema]
+required = ["content_type", "content_length"]
+type = "object"
+[provides.operations."s3.head_object".output_schema.properties.content_type]
+type = "string"
+[provides.operations."s3.head_object".output_schema.properties.content_length]
+type = "integer"
+
+[provides.operations."s3.head_object".network_constraints]
+host_allow = ["*.s3.amazonaws.com", "s3.amazonaws.com", "*.amazonaws.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 65536
+
+[provides.operations."s3.head_object".ai_hints]
+when_to_use = "Check if an object exists and get metadata."
+common_mistakes = []
+examples = ['{"bucket": "my-bucket", "key": "data/file.json"}']
+related = ["s3.get_object"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."s3.copy_object"]
+description = "Copy an object within or between buckets"
+capability = "s3.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."s3.copy_object".input_schema]
+required = ["source_bucket", "source_key", "dest_bucket", "dest_key"]
+type = "object"
+[provides.operations."s3.copy_object".input_schema.properties.source_bucket]
+type = "string"
+[provides.operations."s3.copy_object".input_schema.properties.source_key]
+type = "string"
+[provides.operations."s3.copy_object".input_schema.properties.dest_bucket]
+type = "string"
+[provides.operations."s3.copy_object".input_schema.properties.dest_key]
+type = "string"
+
+[provides.operations."s3.copy_object".output_schema]
+required = ["etag"]
+type = "object"
+[provides.operations."s3.copy_object".output_schema.properties.etag]
+type = "string"
+
+[provides.operations."s3.copy_object".network_constraints]
+host_allow = ["*.s3.amazonaws.com", "s3.amazonaws.com", "*.amazonaws.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 300000
+max_response_bytes = 1048576
+
+[provides.operations."s3.copy_object".ai_hints]
+when_to_use = "Copy an object to a new location."
+common_mistakes = ["Not specifying the source correctly"]
+examples = ['{"source_bucket": "my-bucket", "source_key": "old.json", "dest_bucket": "my-bucket", "dest_key": "new.json"}']
+related = ["s3.put_object", "s3.get_object"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."s3.list_buckets"]
+description = "List all S3 buckets"
+capability = "s3.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."s3.list_buckets".input_schema]
+required = []
+type = "object"
+
+[provides.operations."s3.list_buckets".output_schema]
+required = ["buckets"]
+type = "object"
+[provides.operations."s3.list_buckets".output_schema.properties.buckets]
+type = "array"
+
+[provides.operations."s3.list_buckets".network_constraints]
+host_allow = ["s3.amazonaws.com", "*.amazonaws.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."s3.list_buckets".ai_hints]
+when_to_use = "List available S3 buckets."
+common_mistakes = []
+examples = ['{}']
+related = ["s3.list_objects"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."s3.generate_presigned_url"]
+description = "Generate a presigned URL for temporary access"
+capability = "s3.read"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."s3.generate_presigned_url".input_schema]
+required = ["bucket", "key", "expires_in"]
+type = "object"
+[provides.operations."s3.generate_presigned_url".input_schema.properties.bucket]
+type = "string"
+[provides.operations."s3.generate_presigned_url".input_schema.properties.key]
+type = "string"
+[provides.operations."s3.generate_presigned_url".input_schema.properties.expires_in]
+type = "integer"
+
+[provides.operations."s3.generate_presigned_url".output_schema]
+required = ["url"]
+type = "object"
+[provides.operations."s3.generate_presigned_url".output_schema.properties.url]
+type = "string"
+
+[provides.operations."s3.generate_presigned_url".network_constraints]
+host_allow = ["*.s3.amazonaws.com", "s3.amazonaws.com", "*.amazonaws.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 65536
+
+[provides.operations."s3.generate_presigned_url".ai_hints]
+when_to_use = "Create a time-limited URL for sharing or downloading."
+common_mistakes = ["Setting expiration too long (max 7 days for IAM users)"]
+examples = ['{"bucket": "my-bucket", "key": "report.pdf", "expires_in": 3600}']
+related = ["s3.get_object"]
+
+# ── Sandbox ─────────────────────────────────────────────────────
+
+[sandbox]
+profile = "strict"
+memory_mb = 512
+cpu_percent = 50
+wall_clock_timeout_ms = 600000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+# ── Rate Limits ─────────────────────────────────────────────────
+
+[[rate_limits.pools]]
+id = "s3.read"
+requests = 5500
+window_ms = 1000
+burst = 5500
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "s3.write"
+requests = 3500
+window_ms = 1000
+burst = 3500
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "s3.delete"
+requests = 3500
+window_ms = 1000
+burst = 3500
+scope = "instance"
+
+[rate_limits.operation_pools]
+"s3.put_object" = ["s3.write"]
+"s3.get_object" = ["s3.read"]
+"s3.delete_object" = ["s3.delete"]
+"s3.list_objects" = ["s3.read"]
+"s3.head_object" = ["s3.read"]
+"s3.copy_object" = ["s3.write"]
+"s3.list_buckets" = ["s3.read"]
+"s3.generate_presigned_url" = ["s3.read"]

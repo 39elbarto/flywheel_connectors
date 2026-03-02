@@ -1,0 +1,404 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:0d080ba5c607270694d7908542b62a4349ad7746fed27e31ef59423199f6c231"
+
+[connector]
+id = "fcp.google-calendar"
+name = "Google Calendar Connector"
+version = "0.1.0"
+description = "FCP connector for Google Calendar (events, calendars, free/busy)"
+archetypes = ["operational", "streaming"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
+optional = []
+forbidden = ["system.exec", "network.listen"]
+
+# ── Operations ──────────────────────────────────────────────────
+
+[provides.operations."gcal.create_event"]
+description = "Create a calendar event"
+capability = "gcal.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."gcal.create_event".input_schema]
+required = ["calendar_id", "summary", "start", "end"]
+type = "object"
+[provides.operations."gcal.create_event".input_schema.properties.calendar_id]
+type = "string"
+[provides.operations."gcal.create_event".input_schema.properties.summary]
+type = "string"
+[provides.operations."gcal.create_event".input_schema.properties.start]
+type = "object"
+[provides.operations."gcal.create_event".input_schema.properties.end]
+type = "object"
+
+[provides.operations."gcal.create_event".output_schema]
+required = ["event"]
+type = "object"
+[provides.operations."gcal.create_event".output_schema.properties.event]
+type = "object"
+
+[provides.operations."gcal.create_event".network_constraints]
+host_allow = ["www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."gcal.create_event".ai_hints]
+when_to_use = "Create a new calendar event."
+common_mistakes = ["Not specifying timezone in start/end", "Using wrong calendar_id"]
+examples = ['{"calendar_id": "primary", "summary": "Team standup", "start": {"dateTime": "2026-03-02T09:00:00-05:00"}, "end": {"dateTime": "2026-03-02T09:30:00-05:00"}}']
+related = ["gcal.get_event", "gcal.list_events"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."gcal.get_event"]
+description = "Get a single calendar event"
+capability = "gcal.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."gcal.get_event".input_schema]
+required = ["calendar_id", "event_id"]
+type = "object"
+[provides.operations."gcal.get_event".input_schema.properties.calendar_id]
+type = "string"
+[provides.operations."gcal.get_event".input_schema.properties.event_id]
+type = "string"
+
+[provides.operations."gcal.get_event".output_schema]
+required = ["event"]
+type = "object"
+[provides.operations."gcal.get_event".output_schema.properties.event]
+type = "object"
+
+[provides.operations."gcal.get_event".network_constraints]
+host_allow = ["www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."gcal.get_event".ai_hints]
+when_to_use = "Retrieve details of a specific event."
+common_mistakes = []
+examples = ['{"calendar_id": "primary", "event_id": "abc123"}']
+related = ["gcal.create_event", "gcal.update_event"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."gcal.update_event"]
+description = "Update a calendar event"
+capability = "gcal.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."gcal.update_event".input_schema]
+required = ["calendar_id", "event_id"]
+type = "object"
+[provides.operations."gcal.update_event".input_schema.properties.calendar_id]
+type = "string"
+[provides.operations."gcal.update_event".input_schema.properties.event_id]
+type = "string"
+[provides.operations."gcal.update_event".input_schema.properties.summary]
+type = "string"
+
+[provides.operations."gcal.update_event".output_schema]
+required = ["event"]
+type = "object"
+[provides.operations."gcal.update_event".output_schema.properties.event]
+type = "object"
+
+[provides.operations."gcal.update_event".network_constraints]
+host_allow = ["www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."gcal.update_event".ai_hints]
+when_to_use = "Update an existing calendar event."
+common_mistakes = []
+examples = ['{"calendar_id": "primary", "event_id": "abc123", "summary": "Updated standup"}']
+related = ["gcal.get_event"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."gcal.delete_event"]
+description = "Delete a calendar event"
+capability = "gcal.delete"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."gcal.delete_event".input_schema]
+required = ["calendar_id", "event_id"]
+type = "object"
+[provides.operations."gcal.delete_event".input_schema.properties.calendar_id]
+type = "string"
+[provides.operations."gcal.delete_event".input_schema.properties.event_id]
+type = "string"
+
+[provides.operations."gcal.delete_event".output_schema]
+required = ["deleted"]
+type = "object"
+[provides.operations."gcal.delete_event".output_schema.properties.deleted]
+type = "boolean"
+
+[provides.operations."gcal.delete_event".network_constraints]
+host_allow = ["www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."gcal.delete_event".ai_hints]
+when_to_use = "Delete a calendar event."
+common_mistakes = ["Deleting recurring events without specifying single instance"]
+examples = ['{"calendar_id": "primary", "event_id": "abc123"}']
+related = ["gcal.get_event"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."gcal.list_events"]
+description = "List events from a calendar"
+capability = "gcal.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."gcal.list_events".input_schema]
+required = ["calendar_id"]
+type = "object"
+[provides.operations."gcal.list_events".input_schema.properties.calendar_id]
+type = "string"
+[provides.operations."gcal.list_events".input_schema.properties.time_min]
+type = "string"
+[provides.operations."gcal.list_events".input_schema.properties.time_max]
+type = "string"
+
+[provides.operations."gcal.list_events".output_schema]
+required = ["items"]
+type = "object"
+[provides.operations."gcal.list_events".output_schema.properties.items]
+type = "array"
+
+[provides.operations."gcal.list_events".network_constraints]
+host_allow = ["www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."gcal.list_events".ai_hints]
+when_to_use = "List upcoming events from a calendar."
+common_mistakes = ["Not setting time_min to filter past events"]
+examples = ['{"calendar_id": "primary", "time_min": "2026-03-01T00:00:00Z"}']
+related = ["gcal.get_event", "gcal.create_event"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."gcal.list_calendars"]
+description = "List available calendars"
+capability = "gcal.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."gcal.list_calendars".input_schema]
+required = []
+type = "object"
+
+[provides.operations."gcal.list_calendars".output_schema]
+required = ["items"]
+type = "object"
+[provides.operations."gcal.list_calendars".output_schema.properties.items]
+type = "array"
+
+[provides.operations."gcal.list_calendars".network_constraints]
+host_allow = ["www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."gcal.list_calendars".ai_hints]
+when_to_use = "List calendars the user has access to."
+common_mistakes = []
+examples = ['{}']
+related = ["gcal.list_events"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."gcal.freebusy"]
+description = "Query free/busy information"
+capability = "gcal.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."gcal.freebusy".input_schema]
+required = ["time_min", "time_max", "items"]
+type = "object"
+[provides.operations."gcal.freebusy".input_schema.properties.time_min]
+type = "string"
+[provides.operations."gcal.freebusy".input_schema.properties.time_max]
+type = "string"
+[provides.operations."gcal.freebusy".input_schema.properties.items]
+type = "array"
+
+[provides.operations."gcal.freebusy".output_schema]
+required = ["calendars"]
+type = "object"
+[provides.operations."gcal.freebusy".output_schema.properties.calendars]
+type = "object"
+
+[provides.operations."gcal.freebusy".network_constraints]
+host_allow = ["www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."gcal.freebusy".ai_hints]
+when_to_use = "Check when people are free or busy."
+common_mistakes = []
+examples = ['{"time_min": "2026-03-01T00:00:00Z", "time_max": "2026-03-02T00:00:00Z", "items": [{"id": "primary"}]}']
+related = ["gcal.list_events"]
+
+# ── Events ──────────────────────────────────────────────────────
+
+[event_caps]
+streaming = true
+replay = false
+min_buffer_events = 50
+
+# ── Sandbox ─────────────────────────────────────────────────────
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+# ── Rate Limits ─────────────────────────────────────────────────
+
+[[rate_limits.pools]]
+id = "gcal.read"
+requests = 100
+window_ms = 1000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "gcal.write"
+requests = 60
+window_ms = 1000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "gcal.delete"
+requests = 60
+window_ms = 1000
+burst = 10
+scope = "instance"
+
+[rate_limits.operation_pools]
+"gcal.create_event" = ["gcal.write"]
+"gcal.get_event" = ["gcal.read"]
+"gcal.update_event" = ["gcal.write"]
+"gcal.delete_event" = ["gcal.delete"]
+"gcal.list_events" = ["gcal.read"]
+"gcal.list_calendars" = ["gcal.read"]
+"gcal.freebusy" = ["gcal.read"]

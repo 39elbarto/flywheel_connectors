@@ -1,0 +1,915 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:cad192754bafec58697eb1586b65802c7583067d9ad9661aa7d40e5c310ff4af"
+
+[connector]
+id = "fcp.twilio"
+name = "Twilio Connector"
+version = "0.1.0"
+description = "FCP connector for Twilio communications platform (SMS, voice, messaging, media)"
+archetypes = [
+    "operational",
+    "streaming",
+    "bidirectional",
+]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+]
+optional = ["media.download"]
+forbidden = [
+    "system.exec",
+    "network.listen",
+]
+
+# ---------------------------------------------------------------------------
+# Operations: Messaging (SMS/MMS)
+# ---------------------------------------------------------------------------
+
+[provides.operations."twilio.send_message"]
+description = "Send an SMS or MMS message via Twilio"
+capability = "twilio.message"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."twilio.send_message".rate_limit]
+max = 60
+per_ms = 60000
+
+[provides.operations."twilio.send_message".input_schema]
+required = [
+    "to",
+    "from",
+    "body",
+]
+type = "object"
+
+[provides.operations."twilio.send_message".input_schema.properties.to]
+description = "Destination phone number in E.164 format (e.g., '+15551234567')"
+pattern = "^\\+[1-9]\\d{1,14}$"
+type = "string"
+
+[provides.operations."twilio.send_message".input_schema.properties.from]
+description = "Twilio phone number or messaging service SID"
+type = "string"
+
+[provides.operations."twilio.send_message".input_schema.properties.body]
+description = "Message body (max 1600 characters for SMS)"
+maxLength = 1600
+type = "string"
+
+[provides.operations."twilio.send_message".input_schema.properties.media_url]
+description = "URLs of media to attach (MMS, max 10)"
+type = "array"
+[provides.operations."twilio.send_message".input_schema.properties.media_url.items]
+type = "string"
+
+[provides.operations."twilio.send_message".input_schema.properties.status_callback]
+description = "URL to receive delivery status webhooks"
+type = "string"
+
+[provides.operations."twilio.send_message".output_schema]
+required = [
+    "sid",
+    "status",
+    "to",
+    "from",
+    "date_created",
+]
+type = "object"
+
+[provides.operations."twilio.send_message".output_schema.properties.sid]
+description = "Message SID (unique identifier)"
+type = "string"
+
+[provides.operations."twilio.send_message".output_schema.properties.status]
+description = "Message status (queued, sending, sent, delivered, failed, etc.)"
+type = "string"
+
+[provides.operations."twilio.send_message".output_schema.properties.to]
+type = "string"
+
+[provides.operations."twilio.send_message".output_schema.properties.from]
+type = "string"
+
+[provides.operations."twilio.send_message".output_schema.properties.date_created]
+type = "string"
+
+[provides.operations."twilio.send_message".output_schema.properties.price]
+description = "Cost of the message (available after delivery)"
+type = "string"
+
+[provides.operations."twilio.send_message".network_constraints]
+host_allow = ["api.twilio.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."twilio.send_message".ai_hints]
+when_to_use = "Send an SMS or MMS. Requires a Twilio phone number or messaging service as the sender."
+common_mistakes = [
+    "Not using E.164 format for phone numbers.",
+    "Exceeding 1600 character SMS limit without segmentation awareness.",
+    "Using a non-Twilio number as the 'from' field.",
+    "Sending to unverified numbers on trial accounts.",
+]
+examples = ['{"to": "+15551234567", "from": "+15559876543", "body": "Hello from FCP!"}']
+related = [
+    "twilio.get_message",
+    "twilio.list_messages",
+]
+
+[provides.operations."twilio.get_message"]
+description = "Get details of a specific message by SID"
+capability = "twilio.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."twilio.get_message".rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations."twilio.get_message".input_schema]
+required = ["message_sid"]
+type = "object"
+
+[provides.operations."twilio.get_message".input_schema.properties.message_sid]
+description = "Message SID (e.g., 'SMxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx')"
+pattern = "^SM[a-f0-9]{32}$"
+type = "string"
+
+[provides.operations."twilio.get_message".output_schema]
+required = [
+    "sid",
+    "status",
+    "to",
+    "from",
+    "body",
+    "date_created",
+]
+type = "object"
+
+[provides.operations."twilio.get_message".output_schema.properties.sid]
+type = "string"
+[provides.operations."twilio.get_message".output_schema.properties.status]
+type = "string"
+[provides.operations."twilio.get_message".output_schema.properties.to]
+type = "string"
+[provides.operations."twilio.get_message".output_schema.properties.from]
+type = "string"
+[provides.operations."twilio.get_message".output_schema.properties.body]
+type = "string"
+[provides.operations."twilio.get_message".output_schema.properties.date_created]
+type = "string"
+[provides.operations."twilio.get_message".output_schema.properties.price]
+type = "string"
+[provides.operations."twilio.get_message".output_schema.properties.num_media]
+type = "string"
+
+[provides.operations."twilio.get_message".network_constraints]
+host_allow = ["api.twilio.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."twilio.get_message".ai_hints]
+when_to_use = "Retrieve message details including delivery status and cost."
+common_mistakes = ["Using a Call SID instead of a Message SID."]
+examples = ['{"message_sid": "SMxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}']
+related = [
+    "twilio.send_message",
+    "twilio.list_messages",
+]
+
+[provides.operations."twilio.list_messages"]
+description = "List messages with filtering by date, sender, recipient, and status"
+capability = "twilio.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."twilio.list_messages".rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations."twilio.list_messages".input_schema]
+type = "object"
+
+[provides.operations."twilio.list_messages".input_schema.properties.to]
+description = "Filter by recipient number (E.164)"
+type = "string"
+
+[provides.operations."twilio.list_messages".input_schema.properties.from]
+description = "Filter by sender number"
+type = "string"
+
+[provides.operations."twilio.list_messages".input_schema.properties.date_sent]
+description = "Filter by date sent (YYYY-MM-DD)"
+type = "string"
+
+[provides.operations."twilio.list_messages".input_schema.properties.page_size]
+description = "Results per page (default: 50, max: 1000)"
+minimum = 1
+maximum = 1000
+type = "integer"
+
+[provides.operations."twilio.list_messages".input_schema.properties.page]
+description = "Page number (0-indexed)"
+minimum = 0
+type = "integer"
+
+[provides.operations."twilio.list_messages".output_schema]
+required = ["messages"]
+type = "object"
+
+[provides.operations."twilio.list_messages".output_schema.properties.messages]
+description = "Message records"
+type = "array"
+[provides.operations."twilio.list_messages".output_schema.properties.messages.items]
+type = "object"
+
+[provides.operations."twilio.list_messages".output_schema.properties.next_page_uri]
+description = "URI for next page (null if last page)"
+type = "string"
+
+[provides.operations."twilio.list_messages".network_constraints]
+host_allow = ["api.twilio.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."twilio.list_messages".ai_hints]
+when_to_use = "List messages with optional filters. Supports pagination for large result sets."
+common_mistakes = [
+    "Not handling pagination for large message histories.",
+    "Using non-E.164 format for phone number filters.",
+]
+examples = [
+    '{"to": "+15551234567", "page_size": 20}',
+    '{"date_sent": "2026-03-01", "from": "+15559876543"}',
+]
+related = [
+    "twilio.get_message",
+    "twilio.send_message",
+]
+
+# ---------------------------------------------------------------------------
+# Operations: Voice
+# ---------------------------------------------------------------------------
+
+[provides.operations."twilio.create_call"]
+description = "Initiate an outbound voice call"
+capability = "twilio.voice"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+
+[provides.operations."twilio.create_call".rate_limit]
+max = 30
+per_ms = 60000
+
+[provides.operations."twilio.create_call".input_schema]
+required = [
+    "to",
+    "from",
+    "url",
+]
+type = "object"
+
+[provides.operations."twilio.create_call".input_schema.properties.to]
+description = "Destination phone number in E.164 format"
+pattern = "^\\+[1-9]\\d{1,14}$"
+type = "string"
+
+[provides.operations."twilio.create_call".input_schema.properties.from]
+description = "Twilio phone number for caller ID"
+type = "string"
+
+[provides.operations."twilio.create_call".input_schema.properties.url]
+description = "TwiML URL for call instructions"
+type = "string"
+
+[provides.operations."twilio.create_call".input_schema.properties.status_callback]
+description = "URL for call progress webhooks"
+type = "string"
+
+[provides.operations."twilio.create_call".input_schema.properties.timeout]
+description = "Ring timeout in seconds (default: 60)"
+minimum = 1
+maximum = 600
+type = "integer"
+
+[provides.operations."twilio.create_call".input_schema.properties.record]
+description = "Whether to record the call"
+type = "boolean"
+
+[provides.operations."twilio.create_call".output_schema]
+required = [
+    "sid",
+    "status",
+    "to",
+    "from",
+    "date_created",
+]
+type = "object"
+
+[provides.operations."twilio.create_call".output_schema.properties.sid]
+description = "Call SID"
+type = "string"
+[provides.operations."twilio.create_call".output_schema.properties.status]
+type = "string"
+[provides.operations."twilio.create_call".output_schema.properties.to]
+type = "string"
+[provides.operations."twilio.create_call".output_schema.properties.from]
+type = "string"
+[provides.operations."twilio.create_call".output_schema.properties.date_created]
+type = "string"
+
+[provides.operations."twilio.create_call".network_constraints]
+host_allow = ["api.twilio.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."twilio.create_call".ai_hints]
+when_to_use = "Initiate a voice call. Requires a TwiML URL that defines call flow. Use with extreme caution — this reaches real people."
+common_mistakes = [
+    "Not providing a valid TwiML URL.",
+    "Using a non-Twilio number as the 'from' field.",
+    "Setting record=true without user consent.",
+]
+examples = ['{"to": "+15551234567", "from": "+15559876543", "url": "https://example.com/twiml/greeting.xml"}']
+related = [
+    "twilio.get_call",
+    "twilio.list_recordings",
+]
+
+[provides.operations."twilio.get_call"]
+description = "Get details of a specific voice call"
+capability = "twilio.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."twilio.get_call".rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations."twilio.get_call".input_schema]
+required = ["call_sid"]
+type = "object"
+
+[provides.operations."twilio.get_call".input_schema.properties.call_sid]
+description = "Call SID (e.g., 'CAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx')"
+pattern = "^CA[a-f0-9]{32}$"
+type = "string"
+
+[provides.operations."twilio.get_call".output_schema]
+required = [
+    "sid",
+    "status",
+    "to",
+    "from",
+    "duration",
+    "date_created",
+]
+type = "object"
+
+[provides.operations."twilio.get_call".output_schema.properties.sid]
+type = "string"
+[provides.operations."twilio.get_call".output_schema.properties.status]
+type = "string"
+[provides.operations."twilio.get_call".output_schema.properties.to]
+type = "string"
+[provides.operations."twilio.get_call".output_schema.properties.from]
+type = "string"
+[provides.operations."twilio.get_call".output_schema.properties.duration]
+type = "string"
+[provides.operations."twilio.get_call".output_schema.properties.date_created]
+type = "string"
+[provides.operations."twilio.get_call".output_schema.properties.price]
+type = "string"
+
+[provides.operations."twilio.get_call".network_constraints]
+host_allow = ["api.twilio.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."twilio.get_call".ai_hints]
+when_to_use = "Retrieve call details including duration, status, and cost."
+common_mistakes = ["Using a Message SID instead of a Call SID."]
+examples = ['{"call_sid": "CAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}']
+related = [
+    "twilio.create_call",
+    "twilio.list_recordings",
+]
+
+# ---------------------------------------------------------------------------
+# Operations: Recordings and Media
+# ---------------------------------------------------------------------------
+
+[provides.operations."twilio.list_recordings"]
+description = "List call recordings with optional filtering"
+capability = "twilio.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."twilio.list_recordings".rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations."twilio.list_recordings".input_schema]
+type = "object"
+
+[provides.operations."twilio.list_recordings".input_schema.properties.call_sid]
+description = "Filter recordings by call SID"
+type = "string"
+
+[provides.operations."twilio.list_recordings".input_schema.properties.date_created]
+description = "Filter by date (YYYY-MM-DD)"
+type = "string"
+
+[provides.operations."twilio.list_recordings".input_schema.properties.page_size]
+description = "Results per page (default: 50)"
+minimum = 1
+maximum = 1000
+type = "integer"
+
+[provides.operations."twilio.list_recordings".output_schema]
+required = ["recordings"]
+type = "object"
+
+[provides.operations."twilio.list_recordings".output_schema.properties.recordings]
+description = "Recording metadata entries"
+type = "array"
+[provides.operations."twilio.list_recordings".output_schema.properties.recordings.items]
+type = "object"
+
+[provides.operations."twilio.list_recordings".network_constraints]
+host_allow = ["api.twilio.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."twilio.list_recordings".ai_hints]
+when_to_use = "List call recordings. Filter by call_sid to find recordings for a specific call."
+common_mistakes = []
+examples = ['{"call_sid": "CAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}']
+related = [
+    "twilio.download_recording",
+    "twilio.get_call",
+]
+
+[provides.operations."twilio.download_recording"]
+description = "Download a call recording audio file"
+capability = "twilio.read"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."twilio.download_recording".rate_limit]
+max = 20
+per_ms = 60000
+
+[provides.operations."twilio.download_recording".input_schema]
+required = ["recording_sid"]
+type = "object"
+
+[provides.operations."twilio.download_recording".input_schema.properties.recording_sid]
+description = "Recording SID (e.g., 'RExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx')"
+pattern = "^RE[a-f0-9]{32}$"
+type = "string"
+
+[provides.operations."twilio.download_recording".input_schema.properties.format]
+description = "Audio format"
+enum = ["mp3", "wav"]
+type = "string"
+
+[provides.operations."twilio.download_recording".output_schema]
+required = [
+    "data",
+    "content_type",
+]
+type = "object"
+
+[provides.operations."twilio.download_recording".output_schema.properties.data]
+description = "Base64-encoded audio data"
+type = "string"
+
+[provides.operations."twilio.download_recording".output_schema.properties.content_type]
+description = "MIME type of audio file"
+type = "string"
+
+[provides.operations."twilio.download_recording".network_constraints]
+host_allow = [
+    "api.twilio.com",
+    "media.twiliocdn.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 104857600
+
+[provides.operations."twilio.download_recording".ai_hints]
+when_to_use = "Download a call recording. Recordings can be large; use format=mp3 for smaller files."
+common_mistakes = [
+    "Not checking recording status before downloading (must be 'completed').",
+    "Not handling large file sizes for long recordings.",
+]
+examples = ['{"recording_sid": "RExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "format": "mp3"}']
+related = ["twilio.list_recordings"]
+
+[provides.operations."twilio.download_media"]
+description = "Download MMS media attached to a message"
+capability = "twilio.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."twilio.download_media".rate_limit]
+max = 30
+per_ms = 60000
+
+[provides.operations."twilio.download_media".input_schema]
+required = [
+    "message_sid",
+    "media_sid",
+]
+type = "object"
+
+[provides.operations."twilio.download_media".input_schema.properties.message_sid]
+description = "Message SID that contains the media"
+type = "string"
+
+[provides.operations."twilio.download_media".input_schema.properties.media_sid]
+description = "Media SID (e.g., 'MExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx')"
+type = "string"
+
+[provides.operations."twilio.download_media".output_schema]
+required = [
+    "data",
+    "content_type",
+]
+type = "object"
+
+[provides.operations."twilio.download_media".output_schema.properties.data]
+description = "Base64-encoded media data"
+type = "string"
+
+[provides.operations."twilio.download_media".output_schema.properties.content_type]
+description = "MIME type of the media"
+type = "string"
+
+[provides.operations."twilio.download_media".network_constraints]
+host_allow = [
+    "api.twilio.com",
+    "media.twiliocdn.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."twilio.download_media".ai_hints]
+when_to_use = "Download media (images, video) attached to an MMS message."
+common_mistakes = ["Not extracting media_sid from the message's media list first."]
+examples = ['{"message_sid": "SMxxx", "media_sid": "MExxx"}']
+related = [
+    "twilio.get_message",
+    "twilio.download_recording",
+]
+
+# ---------------------------------------------------------------------------
+# Operations: Account Info
+# ---------------------------------------------------------------------------
+
+[provides.operations."twilio.get_account"]
+description = "Get Twilio account details and balance"
+capability = "twilio.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."twilio.get_account".rate_limit]
+max = 30
+per_ms = 60000
+
+[provides.operations."twilio.get_account".input_schema]
+type = "object"
+
+[provides.operations."twilio.get_account".output_schema]
+required = [
+    "sid",
+    "friendly_name",
+    "status",
+    "type",
+]
+type = "object"
+
+[provides.operations."twilio.get_account".output_schema.properties.sid]
+type = "string"
+[provides.operations."twilio.get_account".output_schema.properties.friendly_name]
+type = "string"
+[provides.operations."twilio.get_account".output_schema.properties.status]
+type = "string"
+[provides.operations."twilio.get_account".output_schema.properties.type]
+type = "string"
+
+[provides.operations."twilio.get_account".network_constraints]
+host_allow = ["api.twilio.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."twilio.get_account".ai_hints]
+when_to_use = "Check account status, type, and balance."
+common_mistakes = []
+examples = ["{}"]
+related = [
+    "twilio.list_messages",
+    "twilio.list_recordings",
+]
+
+# ---------------------------------------------------------------------------
+# Operations: Phone Number Management
+# ---------------------------------------------------------------------------
+
+[provides.operations."twilio.list_phone_numbers"]
+description = "List Twilio phone numbers owned by the account"
+capability = "twilio.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."twilio.list_phone_numbers".rate_limit]
+max = 30
+per_ms = 60000
+
+[provides.operations."twilio.list_phone_numbers".input_schema]
+type = "object"
+
+[provides.operations."twilio.list_phone_numbers".input_schema.properties.phone_number]
+description = "Filter by phone number (partial match)"
+type = "string"
+
+[provides.operations."twilio.list_phone_numbers".input_schema.properties.page_size]
+description = "Results per page (default: 50)"
+minimum = 1
+maximum = 1000
+type = "integer"
+
+[provides.operations."twilio.list_phone_numbers".output_schema]
+required = ["incoming_phone_numbers"]
+type = "object"
+
+[provides.operations."twilio.list_phone_numbers".output_schema.properties.incoming_phone_numbers]
+description = "Phone number resources"
+type = "array"
+[provides.operations."twilio.list_phone_numbers".output_schema.properties.incoming_phone_numbers.items]
+type = "object"
+
+[provides.operations."twilio.list_phone_numbers".network_constraints]
+host_allow = ["api.twilio.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."twilio.list_phone_numbers".ai_hints]
+when_to_use = "List phone numbers on the account to find available sender numbers."
+common_mistakes = []
+examples = ["{}"]
+related = [
+    "twilio.send_message",
+    "twilio.create_call",
+]
+
+# ---------------------------------------------------------------------------
+# Streaming / Event Capabilities
+# ---------------------------------------------------------------------------
+
+[event_caps]
+streaming = true
+replay = false
+min_buffer_events = 50
+
+# ---------------------------------------------------------------------------
+# Sandbox
+# ---------------------------------------------------------------------------
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+# ---------------------------------------------------------------------------
+# Rate Limit Pools
+# ---------------------------------------------------------------------------
+
+[[rate_limits.pools]]
+id = "twilio.read"
+description = "Read operations against Twilio REST API"
+requests = 100
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "twilio.message"
+description = "Message send operations"
+requests = 60
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "twilio.voice"
+description = "Voice call operations"
+requests = 30
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "twilio.media"
+description = "Media and recording download operations"
+requests = 30
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[rate_limits.operation_pools]
+"twilio.send_message" = ["twilio.message"]
+"twilio.get_message" = ["twilio.read"]
+"twilio.list_messages" = ["twilio.read"]
+"twilio.create_call" = ["twilio.voice"]
+"twilio.get_call" = ["twilio.read"]
+"twilio.list_recordings" = ["twilio.read"]
+"twilio.download_recording" = ["twilio.media"]
+"twilio.download_media" = ["twilio.media"]
+"twilio.get_account" = ["twilio.read"]
+"twilio.list_phone_numbers" = ["twilio.read"]

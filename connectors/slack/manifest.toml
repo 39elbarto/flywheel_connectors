@@ -481,6 +481,31 @@ related = ["slack.upload_file"]
 
 # ── Events ──────────────────────────────────────────────────────
 
+[provides.events."slack.message.new"]
+description = "New Slack message event from Socket Mode"
+streaming = true
+replay = false
+
+[provides.events."slack.message.edited"]
+description = "Slack message edited event from Socket Mode"
+streaming = true
+replay = false
+
+[provides.events."slack.message.deleted"]
+description = "Slack message deleted event from Socket Mode"
+streaming = true
+replay = false
+
+[provides.events."slack.reaction.added"]
+description = "Slack reaction added event from Socket Mode"
+streaming = true
+replay = false
+
+[provides.events."slack.reaction.removed"]
+description = "Slack reaction removed event from Socket Mode"
+streaming = true
+replay = false
+
 [event_caps]
 streaming = true
 replay = false

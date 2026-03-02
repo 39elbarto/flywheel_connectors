@@ -221,6 +221,12 @@ pub struct AuthTestData {
     pub is_enterprise_install: bool,
 }
 
+/// apps.connections.open response data for Socket Mode.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SocketModeOpenData {
+    pub url: String,
+}
+
 /// Audit receipt for side-effecting operations.
 #[derive(Debug, Clone, Serialize)]
 pub struct OperationReceipt {

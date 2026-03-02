@@ -18,7 +18,12 @@ use chrono::{Duration, Utc};
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_testkit::AsyncTestContext;
+use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
+use std::time::Duration as StdDuration;
+use tokio::net::TcpListener;
+use tokio::sync::oneshot;
+use tokio_tungstenite::{accept_async, tungstenite::protocol::Message as WsMessage};
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{method, path},
@@ -1471,9 +1476,242 @@ async fn lifecycle_introspect_lists_all_operations() {
 #[fcp_async_core::runtime::test]
 async fn lifecycle_shutdown() {
     let _ctx = AsyncTestContext::for_scenario("slack.lifecycle.shutdown");
-    let connector = SlackConnector::new();
+    let mut connector = SlackConnector::new();
     let result = connector.handle_shutdown(json!({})).await.unwrap();
     assert_eq!(result["status"], "shutdown");
+}
+
+// ============================================================================
+// Socket Mode streaming tests
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn socket_mode_subscribe_emits_event_envelope_and_ack() {
+    let _ctx = AsyncTestContext::for_scenario("slack.socket_mode.event_and_ack");
+    let mock_server = MockServer::start().await;
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind websocket listener");
+    let ws_url = format!(
+        "ws://{}",
+        listener.local_addr().expect("listener local addr")
+    );
+
+    let (ack_tx, ack_rx) = oneshot::channel::<Option<String>>();
+    let ws_task = fcp_async_core::task::spawn(async move {
+        let (tcp_stream, _) = listener.accept().await.expect("accept websocket client");
+        let mut ws_stream = accept_async(tcp_stream).await.expect("accept websocket");
+
+        ws_stream
+            .send(WsMessage::Text(
+                json!({ "type": "hello" }).to_string().into(),
+            ))
+            .await
+            .expect("send hello frame");
+        ws_stream
+            .send(WsMessage::Text(
+                json!({
+                    "envelope_id": "envelope-1",
+                    "type": "events_api",
+                    "payload": {
+                        "event_id": "Ev01",
+                        "team_id": "T_TEAM_1",
+                        "event": {
+                            "type": "message",
+                            "user": "U_EVT_1",
+                            "channel": "C_EVT_1",
+                            "text": "hello from socket mode",
+                            "ts": "1700000000.000001"
+                        }
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .expect("send events_api frame");
+
+        let ack_payload = if let Some(Ok(WsMessage::Text(text))) = ws_stream.next().await {
+            Some(text.to_string())
+        } else {
+            None
+        };
+        let _ = ack_tx.send(ack_payload);
+
+        let _ = ws_stream.close(None).await;
+    });
+
+    Mock::given(method("POST"))
+        .and(path("/apps.connections.open"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "url": ws_url
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = SlackConnector::new();
+    let _key = setup_handshake(&mut connector, &["slack.read"]).await;
+    connector
+        .handle_configure(json!({
+            "token": "xoxb-test-token-xyz",
+            "app_token": "xapp-test-token-xyz",
+            "base_url": mock_server.uri()
+        }))
+        .await
+        .expect("configure");
+
+    let mut event_rx = connector.subscribe_events();
+    let subscribe_result = connector
+        .handle_subscribe(json!({
+            "topics": ["slack.message.new"]
+        }))
+        .await
+        .expect("subscribe should succeed");
+    assert_eq!(subscribe_result["connection_status"], "started");
+
+    let event = fcp_async_core::time::timeout(StdDuration::from_secs(3), event_rx.recv())
+        .await
+        .expect("timeout waiting for socket mode event")
+        .expect("broadcast receive")
+        .expect("event payload");
+
+    assert_eq!(event.topic, "slack.message.new");
+    assert_eq!(event.cursor, "Ev01");
+    assert_eq!(event.data.principal.kind, "slack_user");
+    assert_eq!(event.data.principal.id, "U_EVT_1");
+    assert_eq!(event.data.principal.trust, fcp_core::TrustLevel::Untrusted);
+    assert_eq!(event.data.zone_id, fcp_core::ZoneId::community());
+    assert_eq!(
+        event.data.payload["event"]["text"].as_str(),
+        Some("hello from socket mode")
+    );
+
+    let ack_json = fcp_async_core::time::timeout(StdDuration::from_secs(3), ack_rx)
+        .await
+        .expect("timeout waiting for socket ack")
+        .expect("ack channel should complete")
+        .expect("ack payload missing");
+    let ack_value: serde_json::Value =
+        serde_json::from_str(&ack_json).expect("ack should be valid json");
+    assert_eq!(ack_value["envelope_id"], "envelope-1");
+
+    connector
+        .handle_shutdown(json!({}))
+        .await
+        .expect("shutdown should succeed");
+
+    fcp_async_core::time::timeout(StdDuration::from_secs(3), ws_task)
+        .await
+        .expect("timeout waiting for ws task")
+        .expect("ws task join");
+}
+
+#[fcp_async_core::runtime::test]
+async fn socket_mode_subscribe_reuses_single_connection() {
+    let _ctx = AsyncTestContext::for_scenario("slack.socket_mode.singleton_connection");
+    let mock_server = MockServer::start().await;
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind websocket listener");
+    let ws_url = format!(
+        "ws://{}",
+        listener.local_addr().expect("listener local addr")
+    );
+
+    let (stop_ws_tx, mut stop_ws_rx) = fcp_async_core::channel::watch::channel(false);
+    let (connected_tx, connected_rx) = oneshot::channel::<()>();
+    let ws_task = fcp_async_core::task::spawn(async move {
+        let accepted = fcp_async_core::select! {
+            accept_result = listener.accept() => Some(accept_result.expect("accept websocket client")),
+            _ = stop_ws_rx.changed() => None,
+        };
+        let Some((tcp_stream, _)) = accepted else {
+            return;
+        };
+        let mut ws_stream = accept_async(tcp_stream).await.expect("accept websocket");
+        let _ = connected_tx.send(());
+
+        ws_stream
+            .send(WsMessage::Text(
+                json!({ "type": "hello" }).to_string().into(),
+            ))
+            .await
+            .expect("send hello frame");
+
+        fcp_async_core::select! {
+            _ = stop_ws_rx.changed() => {}
+            () = async {
+                while let Some(frame) = ws_stream.next().await {
+                    match frame {
+                        Ok(WsMessage::Close(_)) | Err(_) => break,
+                        _ => {}
+                    }
+                }
+            } => {}
+        }
+
+        let _ = ws_stream.close(None).await;
+    });
+
+    Mock::given(method("POST"))
+        .and(path("/apps.connections.open"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "url": ws_url
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = SlackConnector::new();
+    let _key = setup_handshake(&mut connector, &["slack.read"]).await;
+    connector
+        .handle_configure(json!({
+            "token": "xoxb-test-token-xyz",
+            "app_token": "xapp-test-token-xyz",
+            "base_url": mock_server.uri()
+        }))
+        .await
+        .expect("configure");
+
+    let first = connector
+        .handle_subscribe(json!({
+            "topics": ["slack.message.new"]
+        }))
+        .await
+        .expect("first subscribe should succeed");
+    assert_eq!(first["connection_status"], "started");
+    fcp_async_core::time::timeout(StdDuration::from_secs(3), connected_rx)
+        .await
+        .expect("timeout waiting for socket connection")
+        .expect("socket connection signal should complete");
+
+    let second = connector
+        .handle_subscribe(json!({
+            "topics": ["slack.message.new", "slack.reaction.added"]
+        }))
+        .await
+        .expect("second subscribe should succeed");
+    assert_eq!(second["connection_status"], "already_running");
+
+    let health = connector.handle_health().await.expect("health");
+    assert_eq!(health["streaming"]["socket_mode_running"], true);
+
+    connector
+        .handle_shutdown(json!({}))
+        .await
+        .expect("shutdown should succeed");
+
+    let _ = stop_ws_tx.send(true);
+    fcp_async_core::time::timeout(StdDuration::from_secs(3), ws_task)
+        .await
+        .expect("timeout waiting for ws task")
+        .expect("ws task join");
+
+    mock_server.verify().await;
 }
 
 // ============================================================================

@@ -11,7 +11,8 @@ use crate::{
     error::{SlackError, SlackResult},
     types::{
         AuthTestData, AuthTestInfo, ChannelListData, FileUploadData, HistoryData, Message,
-        PostMessageData, SearchData, SlackApiResponse, TopicSetData, UserInfoData,
+        PostMessageData, SearchData, SlackApiResponse, SocketModeOpenData, TopicSetData,
+        UserInfoData,
     },
 };
 
@@ -75,6 +76,42 @@ impl SlackClient {
     #[must_use]
     pub fn total_requests(&self) -> u64 {
         self.total_requests.load(Ordering::Relaxed)
+    }
+
+    /// Get the configured Slack API base URL.
+    #[must_use]
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    /// Open a Slack Socket Mode connection and return the websocket URL.
+    ///
+    /// This call requires an app-level token (`xapp-...`).
+    ///
+    /// # Errors
+    /// Returns [`SlackError`] if Slack rejects the token or the response is malformed.
+    #[instrument(skip(self))]
+    pub async fn open_socket_mode_connection(&self) -> SlackResult<String> {
+        let body = serde_json::json!({});
+        let resp: SlackApiResponse<SocketModeOpenData> =
+            self.post_json("apps.connections.open", &body).await?;
+        Self::check_response(&resp)?;
+
+        let data = resp.data.ok_or_else(|| SlackError::Api {
+            error: "apps.connections.open returned no url".into(),
+            code: None,
+            ok: false,
+        })?;
+
+        if data.url.trim().is_empty() {
+            return Err(SlackError::Api {
+                error: "apps.connections.open returned empty url".into(),
+                code: None,
+                ok: false,
+            });
+        }
+
+        Ok(data.url)
     }
 
     // ── Provisioning / Doctor ────────────────────────────────────

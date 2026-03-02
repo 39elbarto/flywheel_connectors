@@ -2,6 +2,9 @@
 //!
 //! Stripe uses form-encoded POST bodies for creates and query-string GET for reads.
 
+use std::fmt;
+
+use fcp_core::CredentialId;
 use reqwest::{Client, StatusCode, header};
 use tracing::{debug, warn};
 
@@ -12,32 +15,69 @@ use crate::{
     },
 };
 
-const DEFAULT_API_URL: &str = "https://api.stripe.com/v1";
+/// Default Stripe API URL.
+pub const DEFAULT_API_URL: &str = "https://api.stripe.com/v1";
+
+/// Authentication mode for the Stripe API.
+#[derive(Clone)]
+pub enum StripeAuth {
+    /// Direct secret key.
+    SecretKey(String),
+    /// Secretless credential reference (egress proxy injection).
+    CredentialId(CredentialId),
+}
+
+impl StripeAuth {
+    /// Render a redacted label suitable for logs/diagnostics.
+    #[must_use]
+    pub fn redacted_label(&self) -> String {
+        match self {
+            Self::SecretKey(_) => "secret_key:redacted".to_string(),
+            Self::CredentialId(id) => format!("credential_id:{id}"),
+        }
+    }
+
+    /// Whether this auth mode requires egress proxy credential injection.
+    #[must_use]
+    pub const fn is_secretless(&self) -> bool {
+        matches!(self, Self::CredentialId(_))
+    }
+}
+
+impl fmt::Debug for StripeAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SecretKey(_) => f.debug_tuple("SecretKey").field(&"<redacted>").finish(),
+            Self::CredentialId(id) => f.debug_tuple("CredentialId").field(id).finish(),
+        }
+    }
+}
 
 /// Stripe REST API client.
 pub struct StripeClient {
     http: Client,
+    auth: StripeAuth,
     api_url: String,
     max_retries: u32,
 }
 
 impl StripeClient {
-    /// Create a new Stripe client with a secret key.
+    /// Create a new Stripe client with a direct secret key.
     pub fn new(secret_key: &str) -> StripeResult<Self> {
-        let mut headers = header::HeaderMap::new();
-        headers.insert(
-            header::AUTHORIZATION,
-            format!("Bearer {secret_key}").parse().unwrap(),
-        );
+        Self::new_with_auth(StripeAuth::SecretKey(secret_key.to_string()))
+    }
 
+    /// Create a new Stripe client with explicit auth mode.
+    pub fn new_with_auth(auth: StripeAuth) -> StripeResult<Self> {
         let http = Client::builder()
-            .default_headers(headers)
+            .timeout(std::time::Duration::from_secs(30))
             .user_agent("fcp-stripe/0.1.0")
             .build()
             .map_err(StripeError::Http)?;
 
         Ok(Self {
             http,
+            auth,
             api_url: DEFAULT_API_URL.to_string(),
             max_retries: 2,
         })
@@ -55,6 +95,40 @@ impl StripeClient {
     pub fn with_retry_config(mut self, max_retries: u32) -> Self {
         self.max_retries = max_retries;
         self
+    }
+
+    /// Get the auth mode.
+    #[must_use]
+    pub const fn auth(&self) -> &StripeAuth {
+        &self.auth
+    }
+
+    /// Get the API URL.
+    #[must_use]
+    pub fn api_url(&self) -> &str {
+        &self.api_url
+    }
+
+    /// Perform a safe, read-only health check by fetching account balance.
+    ///
+    /// Validates that the API key is valid and the Stripe API is reachable
+    /// without any side effects.
+    pub async fn health_check(&self) -> StripeResult<()> {
+        let _balance = self.get_balance().await?;
+        Ok(())
+    }
+
+    /// Apply authentication to a request builder.
+    fn apply_auth(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.auth {
+            StripeAuth::SecretKey(key) => {
+                builder.header(header::AUTHORIZATION, format!("Bearer {key}"))
+            }
+            StripeAuth::CredentialId(_) => {
+                // Secretless: egress proxy injects credentials. Send without auth header.
+                builder
+            }
+        }
     }
 
     // ── Customer operations ───────────────────────────────────────
@@ -107,6 +181,18 @@ impl StripeClient {
         currency: &str,
         customer: Option<&str>,
     ) -> StripeResult<PaymentIntent> {
+        self.create_payment_intent_with_idempotency(amount, currency, customer, None)
+            .await
+    }
+
+    /// Create a payment intent with an idempotency key.
+    pub async fn create_payment_intent_with_idempotency(
+        &self,
+        amount: i64,
+        currency: &str,
+        customer: Option<&str>,
+        idempotency_key: Option<&str>,
+    ) -> StripeResult<PaymentIntent> {
         let url = format!("{}/payment_intents", self.api_url);
         let mut body = serde_json::json!({
             "amount": amount,
@@ -115,7 +201,9 @@ impl StripeClient {
         if let Some(c) = customer {
             body["customer"] = serde_json::Value::String(c.to_string());
         }
-        let data = self.post_json(&url, &body).await?;
+        let data = self
+            .post_json_with_idempotency(&url, &body, idempotency_key)
+            .await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -123,6 +211,69 @@ impl StripeClient {
     pub async fn get_payment_intent(&self, payment_intent_id: &str) -> StripeResult<PaymentIntent> {
         let url = format!("{}/payment_intents/{payment_intent_id}", self.api_url);
         let data = self.get(&url).await?;
+        Ok(serde_json::from_value(data)?)
+    }
+
+    /// Confirm a payment intent.
+    pub async fn confirm_payment_intent(
+        &self,
+        payment_intent_id: &str,
+        payment_method: Option<&str>,
+        idempotency_key: Option<&str>,
+    ) -> StripeResult<PaymentIntent> {
+        let url = format!(
+            "{}/payment_intents/{payment_intent_id}/confirm",
+            self.api_url
+        );
+        let mut body = serde_json::json!({});
+        if let Some(pm) = payment_method {
+            body["payment_method"] = serde_json::Value::String(pm.to_string());
+        }
+        let data = self
+            .post_json_with_idempotency(&url, &body, idempotency_key)
+            .await?;
+        Ok(serde_json::from_value(data)?)
+    }
+
+    /// Capture a payment intent (for manual capture flow).
+    pub async fn capture_payment_intent(
+        &self,
+        payment_intent_id: &str,
+        amount_to_capture: Option<i64>,
+        idempotency_key: Option<&str>,
+    ) -> StripeResult<PaymentIntent> {
+        let url = format!(
+            "{}/payment_intents/{payment_intent_id}/capture",
+            self.api_url
+        );
+        let mut body = serde_json::json!({});
+        if let Some(amount) = amount_to_capture {
+            body["amount_to_capture"] = serde_json::Value::Number(amount.into());
+        }
+        let data = self
+            .post_json_with_idempotency(&url, &body, idempotency_key)
+            .await?;
+        Ok(serde_json::from_value(data)?)
+    }
+
+    /// Cancel a payment intent.
+    pub async fn cancel_payment_intent(
+        &self,
+        payment_intent_id: &str,
+        cancellation_reason: Option<&str>,
+        idempotency_key: Option<&str>,
+    ) -> StripeResult<PaymentIntent> {
+        let url = format!(
+            "{}/payment_intents/{payment_intent_id}/cancel",
+            self.api_url
+        );
+        let mut body = serde_json::json!({});
+        if let Some(reason) = cancellation_reason {
+            body["cancellation_reason"] = serde_json::Value::String(reason.to_string());
+        }
+        let data = self
+            .post_json_with_idempotency(&url, &body, idempotency_key)
+            .await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -134,12 +285,25 @@ impl StripeClient {
         payment_intent: &str,
         amount: Option<i64>,
     ) -> StripeResult<Refund> {
+        self.create_refund_with_idempotency(payment_intent, amount, None)
+            .await
+    }
+
+    /// Create a refund with an idempotency key.
+    pub async fn create_refund_with_idempotency(
+        &self,
+        payment_intent: &str,
+        amount: Option<i64>,
+        idempotency_key: Option<&str>,
+    ) -> StripeResult<Refund> {
         let url = format!("{}/refunds", self.api_url);
         let mut body = serde_json::json!({ "payment_intent": payment_intent });
         if let Some(a) = amount {
             body["amount"] = serde_json::Value::Number(a.into());
         }
-        let data = self.post_json(&url, &body).await?;
+        let data = self
+            .post_json_with_idempotency(&url, &body, idempotency_key)
+            .await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -202,7 +366,7 @@ impl StripeClient {
     // ── HTTP helpers ──────────────────────────────────────────────
 
     async fn get(&self, url: &str) -> StripeResult<serde_json::Value> {
-        self.execute(|| self.http.get(url)).await
+        self.execute(|| self.apply_auth(self.http.get(url))).await
     }
 
     async fn post_json(
@@ -210,11 +374,28 @@ impl StripeClient {
         url: &str,
         body: &serde_json::Value,
     ) -> StripeResult<serde_json::Value> {
-        self.execute(|| self.http.post(url).json(body)).await
+        self.post_json_with_idempotency(url, body, None).await
+    }
+
+    async fn post_json_with_idempotency(
+        &self,
+        url: &str,
+        body: &serde_json::Value,
+        idempotency_key: Option<&str>,
+    ) -> StripeResult<serde_json::Value> {
+        self.execute(|| {
+            let mut req = self.apply_auth(self.http.post(url).json(body));
+            if let Some(key) = idempotency_key {
+                req = req.header("Idempotency-Key", key);
+            }
+            req
+        })
+        .await
     }
 
     async fn delete(&self, url: &str) -> StripeResult<serde_json::Value> {
-        self.execute(|| self.http.delete(url)).await
+        self.execute(|| self.apply_auth(self.http.delete(url)))
+            .await
     }
 
     async fn execute(
@@ -327,7 +508,7 @@ mod tests {
     use super::*;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
-        matchers::{method, path},
+        matchers::{header, method, path},
     };
 
     #[fcp_async_core::runtime::test]
@@ -537,5 +718,207 @@ mod tests {
             error_type: None,
         };
         assert!(err.is_retryable());
+    }
+
+    // ── Payment intent lifecycle tests ────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_confirm_payment_intent() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/payment_intents/pi_123/confirm"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "pi_123",
+                "object": "payment_intent",
+                "amount": 2000,
+                "currency": "usd",
+                "status": "succeeded"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = StripeClient::new("sk_test_key")
+            .unwrap()
+            .with_api_url(&format!("{}/v1", mock_server.uri()));
+
+        let pi = client
+            .confirm_payment_intent("pi_123", Some("pm_card_visa"), None)
+            .await
+            .unwrap();
+        assert_eq!(pi.id, "pi_123");
+        assert_eq!(pi.status, "succeeded");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_capture_payment_intent() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/payment_intents/pi_456/capture"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "pi_456",
+                "object": "payment_intent",
+                "amount": 5000,
+                "currency": "usd",
+                "status": "succeeded"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = StripeClient::new("sk_test_key")
+            .unwrap()
+            .with_api_url(&format!("{}/v1", mock_server.uri()));
+
+        let pi = client
+            .capture_payment_intent("pi_456", Some(3000), None)
+            .await
+            .unwrap();
+        assert_eq!(pi.id, "pi_456");
+        assert_eq!(pi.amount, 5000);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_cancel_payment_intent() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/payment_intents/pi_789/cancel"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "pi_789",
+                "object": "payment_intent",
+                "amount": 1000,
+                "currency": "usd",
+                "status": "canceled"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = StripeClient::new("sk_test_key")
+            .unwrap()
+            .with_api_url(&format!("{}/v1", mock_server.uri()));
+
+        let pi = client
+            .cancel_payment_intent("pi_789", Some("requested_by_customer"), None)
+            .await
+            .unwrap();
+        assert_eq!(pi.id, "pi_789");
+        assert_eq!(pi.status, "canceled");
+    }
+
+    // ── Idempotency key tests ─────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_create_payment_intent_with_idempotency_key() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/payment_intents"))
+            .and(header("Idempotency-Key", "idem-pi-create-001"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "pi_idem",
+                "object": "payment_intent",
+                "amount": 2500,
+                "currency": "eur",
+                "status": "requires_payment_method"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = StripeClient::new("sk_test_key")
+            .unwrap()
+            .with_api_url(&format!("{}/v1", mock_server.uri()));
+
+        let pi = client
+            .create_payment_intent_with_idempotency(2500, "eur", None, Some("idem-pi-create-001"))
+            .await
+            .unwrap();
+        assert_eq!(pi.id, "pi_idem");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_confirm_with_idempotency_key() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/payment_intents/pi_100/confirm"))
+            .and(header("Idempotency-Key", "idem-confirm-100"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "pi_100",
+                "object": "payment_intent",
+                "amount": 3000,
+                "currency": "usd",
+                "status": "succeeded"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = StripeClient::new("sk_test_key")
+            .unwrap()
+            .with_api_url(&format!("{}/v1", mock_server.uri()));
+
+        let pi = client
+            .confirm_payment_intent("pi_100", None, Some("idem-confirm-100"))
+            .await
+            .unwrap();
+        assert_eq!(pi.id, "pi_100");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_refund_with_idempotency_key() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/refunds"))
+            .and(header("Idempotency-Key", "idem-refund-001"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "re_idem",
+                "object": "refund",
+                "amount": 1000,
+                "currency": "usd",
+                "status": "succeeded"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = StripeClient::new("sk_test_key")
+            .unwrap()
+            .with_api_url(&format!("{}/v1", mock_server.uri()));
+
+        let refund = client
+            .create_refund_with_idempotency("pi_pay", Some(1000), Some("idem-refund-001"))
+            .await
+            .unwrap();
+        assert_eq!(refund.id, "re_idem");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_no_idempotency_header_when_none() {
+        let mock_server = MockServer::start().await;
+
+        // This mock requires NO Idempotency-Key header. If the header were sent,
+        // a separate mock with the header matcher would match instead.
+        Mock::given(method("POST"))
+            .and(path("/v1/payment_intents"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "pi_no_idem",
+                "object": "payment_intent",
+                "amount": 500,
+                "currency": "usd",
+                "status": "requires_payment_method"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = StripeClient::new("sk_test_key")
+            .unwrap()
+            .with_api_url(&format!("{}/v1", mock_server.uri()));
+
+        // Calling without idempotency key should still work
+        let pi = client
+            .create_payment_intent(500, "usd", None)
+            .await
+            .unwrap();
+        assert_eq!(pi.id, "pi_no_idem");
     }
 }

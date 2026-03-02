@@ -1,15 +1,26 @@
 //! FCP Slack Connector implementation.
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
+use std::time::Duration;
 
+use fcp_async_core::channel::{broadcast, watch};
+use fcp_async_core::sync::RwLock;
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
-    ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier, SessionId,
-    SimulateRequest, SimulateResponse,
+    ConnectorId, EventCaps, EventData, EventEnvelope, EventInfo, FcpError, FcpResult,
+    HandshakeRequest, HandshakeResponse, IdempotencyClass, Introspection, OperationId,
+    OperationInfo, Principal, RiskLevel, SafetyTier, SessionId, SimulateRequest, SimulateResponse,
+    TrustLevel, ZoneId,
 };
-use serde_json::json;
-use tracing::{info, instrument};
+use futures_util::{SinkExt, StreamExt};
+use serde::Deserialize;
+use serde_json::{Value, json};
+use tokio_tungstenite::{connect_async, tungstenite::protocol::Message as WsMessage};
+use tracing::{info, instrument, warn};
 
 use crate::{
     client::SlackClient,
@@ -17,24 +28,56 @@ use crate::{
     types::{DoctorCheck, DoctorReport, OperationReceipt},
 };
 
+const SOCKET_EVENT_BUFFER_CAPACITY: usize = 200;
+const SOCKET_RECONNECT_MIN_MS: u64 = 1_000;
+const SOCKET_RECONNECT_MAX_MS: u64 = 30_000;
+const SOCKET_DEFAULT_TOPICS: &[&str] = &[
+    "slack.message.new",
+    "slack.message.edited",
+    "slack.message.deleted",
+    "slack.reaction.added",
+    "slack.reaction.removed",
+];
+
 /// FCP Slack Connector.
 pub struct SlackConnector {
     base: Arc<BaseConnector>,
     client: Option<SlackClient>,
+    socket_mode_token: Option<String>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
+    socket_mode_running: Arc<RwLock<bool>>,
+    socket_mode_task: Option<fcp_async_core::task::JoinHandle<()>>,
+    socket_mode_shutdown_tx: Option<watch::Sender<bool>>,
+    event_tx: broadcast::Sender<FcpResult<EventEnvelope>>,
+    next_event_seq: Arc<AtomicU64>,
+    subscribed_topics: Arc<RwLock<Vec<String>>>,
 }
 
 impl SlackConnector {
     /// Create a new Slack connector.
     #[must_use]
     pub fn new() -> Self {
+        let (event_tx, _) = broadcast::channel(SOCKET_EVENT_BUFFER_CAPACITY);
         Self {
             base: Arc::new(BaseConnector::new(ConnectorId::from_static("slack"))),
             client: None,
+            socket_mode_token: None,
             verifier: None,
             session_id: None,
+            socket_mode_running: Arc::new(RwLock::new(false)),
+            socket_mode_task: None,
+            socket_mode_shutdown_tx: None,
+            event_tx,
+            next_event_seq: Arc::new(AtomicU64::new(1)),
+            subscribed_topics: Arc::new(RwLock::new(Vec::new())),
         }
+    }
+
+    /// Subscribe to emitted connector events.
+    #[must_use]
+    pub fn subscribe_events(&self) -> broadcast::Receiver<FcpResult<EventEnvelope>> {
+        self.event_tx.subscribe()
     }
 
     /// Handle configure method.
@@ -46,6 +89,8 @@ impl SlackConnector {
         &mut self,
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
+        self.stop_socket_mode().await;
+
         let token =
             params
                 .get("token")
@@ -56,6 +101,8 @@ impl SlackConnector {
                 })?;
 
         let base_url = params.get("base_url").and_then(|v| v.as_str());
+        let app_token = params.get("app_token").and_then(|v| v.as_str());
+        let socket_mode_token = app_token.unwrap_or(token).to_string();
 
         let mut client = SlackClient::new(token).map_err(|e| FcpError::Internal {
             message: format!("Failed to create HTTP client: {e}"),
@@ -66,10 +113,15 @@ impl SlackConnector {
         }
 
         self.client = Some(client);
+        self.socket_mode_token = Some(socket_mode_token);
+        *self.subscribed_topics.write().await = Vec::new();
         self.base.set_configured(true);
         info!("Slack connector configured");
 
-        Ok(json!({ "status": "configured" }))
+        Ok(json!({
+            "status": "configured",
+            "socket_mode_auth": if app_token.is_some() { "app_token" } else { "bot_token_fallback" }
+        }))
     }
 
     /// Handle handshake method.
@@ -112,9 +164,9 @@ impl SlackConnector {
             manifest_hash: "sha256:slack-connector-v1".into(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
-                streaming: false,
+                streaming: true,
                 replay: false,
-                min_buffer_events: 100,
+                min_buffer_events: SOCKET_EVENT_BUFFER_CAPACITY as u32,
                 requires_ack: false,
             }),
             auth_caps: None,
@@ -132,13 +184,21 @@ impl SlackConnector {
     /// Returns [`FcpError`] if the health status cannot be determined.
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
         let configured = self.client.is_some();
+        let socket_mode_running = *self.socket_mode_running.read().await;
+        let subscribed_topics = self.subscribed_topics.read().await.clone();
         let metrics = self.base.metrics();
         Ok(json!({
             "status": if configured { "healthy" } else { "not_configured" },
             "metrics": {
                 "requests_total": metrics.requests_total,
                 "requests_error": metrics.requests_error,
-            }
+                "events_emitted": metrics.events_emitted,
+            },
+            "streaming": {
+                "socket_mode_running": socket_mode_running,
+                "buffer_capacity": SOCKET_EVENT_BUFFER_CAPACITY,
+                "subscribed_topics": subscribed_topics,
+            },
         }))
     }
 
@@ -418,10 +478,22 @@ impl SlackConnector {
                     },
                 ),
             ],
-            events: vec![],
+            events: SOCKET_DEFAULT_TOPICS
+                .iter()
+                .map(|topic| EventInfo {
+                    topic: (*topic).to_string(),
+                    schema: json!({ "type": "object" }),
+                    requires_ack: false,
+                })
+                .collect(),
             resource_types: vec![],
             auth_caps: None,
-            event_caps: None,
+            event_caps: Some(EventCaps {
+                streaming: true,
+                replay: false,
+                min_buffer_events: SOCKET_EVENT_BUFFER_CAPACITY as u32,
+                requires_ack: false,
+            }),
         };
 
         serde_json::to_value(introspection).map_err(|e| FcpError::Internal {
@@ -444,6 +516,233 @@ impl SlackConnector {
         serde_json::to_value(response).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize response: {e}"),
         })
+    }
+
+    /// Handle subscribe method.
+    ///
+    /// # Errors
+    /// Returns [`FcpError`] if the connector is not configured or socket mode cannot start.
+    pub async fn handle_subscribe(
+        &mut self,
+        params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        if self.client.is_none() {
+            return Err(FcpError::NotConfigured);
+        }
+
+        let topics = parse_subscribe_topics(&params);
+        {
+            let mut subscribed = self.subscribed_topics.write().await;
+            (*subscribed).clone_from(&topics);
+        }
+
+        let started = self.ensure_socket_mode_running().await?;
+        Ok(json!({
+            "confirmed_topics": topics,
+            "replay_supported": false,
+            "buffer": {
+                "min_events": SOCKET_EVENT_BUFFER_CAPACITY,
+                "overflow": "stream.reset"
+            },
+            "connection_status": if started { "started" } else { "already_running" }
+        }))
+    }
+
+    async fn ensure_socket_mode_running(&mut self) -> FcpResult<bool> {
+        if let Some(task) = &self.socket_mode_task
+            && !task.is_finished()
+            && *self.socket_mode_running.read().await
+        {
+            return Ok(false);
+        }
+
+        self.stop_socket_mode().await;
+
+        let http_client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let socket_mode_token =
+            self.socket_mode_token
+                .clone()
+                .ok_or_else(|| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Socket Mode token not configured".into(),
+                })?;
+
+        let mut socket_client =
+            SlackClient::new(socket_mode_token).map_err(|e| FcpError::Internal {
+                message: format!("Failed to create Socket Mode HTTP client: {e}"),
+            })?;
+        socket_client = socket_client.with_base_url(http_client.base_url().to_string());
+
+        let event_tx = self.event_tx.clone();
+        let connector_id = self.base.id.clone();
+        let instance_id = self.base.instance_id.clone();
+        let base = self.base.clone();
+        let socket_mode_running = self.socket_mode_running.clone();
+        let next_event_seq = self.next_event_seq.clone();
+        let subscribed_topics = self.subscribed_topics.clone();
+
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        self.socket_mode_shutdown_tx = Some(shutdown_tx.clone());
+        *self.socket_mode_running.write().await = true;
+
+        let task = fcp_async_core::task::spawn(async move {
+            info!("Starting Slack Socket Mode event loop");
+            let mut reconnect_delay_ms = SOCKET_RECONNECT_MIN_MS;
+
+            loop {
+                if *shutdown_rx.borrow() {
+                    break;
+                }
+
+                let ws_url = match socket_client.open_socket_mode_connection().await {
+                    Ok(url) => url,
+                    Err(err) => {
+                        warn!("Socket Mode URL open failed: {err}");
+                        if fcp_async_core::shutdown::sleep_or_shutdown(
+                            Duration::from_millis(reconnect_delay_ms),
+                            &mut shutdown_rx,
+                        )
+                        .await
+                        .is_err()
+                        {
+                            break;
+                        }
+                        reconnect_delay_ms = (reconnect_delay_ms * 2).min(SOCKET_RECONNECT_MAX_MS);
+                        continue;
+                    }
+                };
+
+                match connect_async(&ws_url).await {
+                    Ok((stream, _response)) => {
+                        reconnect_delay_ms = SOCKET_RECONNECT_MIN_MS;
+                        let (mut ws_write, mut ws_read) = stream.split();
+
+                        loop {
+                            fcp_async_core::select! {
+                                changed = shutdown_rx.changed() => {
+                                    if changed.is_ok() && *shutdown_rx.borrow() {
+                                        let _ = ws_write.send(WsMessage::Close(None)).await;
+                                        break;
+                                    }
+                                    if changed.is_err() {
+                                        break;
+                                    }
+                                }
+                                inbound = ws_read.next() => {
+                                    let Some(frame_result) = inbound else {
+                                        break;
+                                    };
+
+                                    let frame = match frame_result {
+                                        Ok(frame) => frame,
+                                        Err(err) => {
+                                            warn!("Socket Mode websocket receive error: {err}");
+                                            break;
+                                        }
+                                    };
+
+                                    match frame {
+                                        WsMessage::Text(text) => {
+                                            let parsed_frame: SocketModeFrame = match serde_json::from_str(&text) {
+                                                Ok(frame) => frame,
+                                                Err(err) => {
+                                                    warn!("Socket Mode frame parse failed: {err}");
+                                                    continue;
+                                                }
+                                            };
+
+                                            if parsed_frame.frame_type == "hello" {
+                                                continue;
+                                            }
+
+                                            if let Some(envelope_id) = parsed_frame.envelope_id.as_deref() {
+                                                let ack = json!({ "envelope_id": envelope_id }).to_string();
+                                                if let Err(err) = ws_write.send(WsMessage::Text(ack.into())).await {
+                                                    warn!("Socket Mode ack send failed: {err}");
+                                                    break;
+                                                }
+                                            }
+
+                                            let payload = parsed_frame.payload.unwrap_or_else(|| json!({}));
+                                            let topic = socket_frame_topic(&parsed_frame.frame_type, &payload);
+                                            let allowed = {
+                                                let subscribed = subscribed_topics.read().await;
+                                                topic_allowed(&topic, subscribed.as_slice())
+                                            };
+                                            if !allowed {
+                                                continue;
+                                            }
+
+                                            let seq = next_event_seq.fetch_add(1, Ordering::Relaxed);
+                                            let event = socket_frame_to_event(
+                                                &parsed_frame.frame_type,
+                                                parsed_frame.envelope_id.as_deref(),
+                                                &payload,
+                                                &connector_id,
+                                                &instance_id,
+                                                seq,
+                                            );
+                                            base.record_event();
+                                            if event_tx.send(Ok(event)).is_err() {
+                                                warn!("Socket Mode event dropped: no active subscribers");
+                                            }
+                                        }
+                                        WsMessage::Ping(data) => {
+                                            if let Err(err) = ws_write.send(WsMessage::Pong(data)).await {
+                                                warn!("Socket Mode pong send failed: {err}");
+                                                break;
+                                            }
+                                        }
+                                        WsMessage::Close(_frame) => {
+                                            break;
+                                        }
+                                        WsMessage::Binary(_)
+                                        | WsMessage::Pong(_)
+                                        | WsMessage::Frame(_) => {
+                                            // ignore non-text control/data frames for socket-mode events
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        warn!("Socket Mode websocket connect failed: {err}");
+                    }
+                }
+
+                if fcp_async_core::shutdown::sleep_or_shutdown(
+                    Duration::from_millis(reconnect_delay_ms),
+                    &mut shutdown_rx,
+                )
+                .await
+                .is_err()
+                {
+                    break;
+                }
+                reconnect_delay_ms = (reconnect_delay_ms * 2).min(SOCKET_RECONNECT_MAX_MS);
+            }
+
+            *socket_mode_running.write().await = false;
+            info!("Slack Socket Mode event loop stopped");
+        });
+
+        self.socket_mode_task = Some(task);
+        Ok(true)
+    }
+
+    async fn stop_socket_mode(&mut self) {
+        if let Some(shutdown_tx) = self.socket_mode_shutdown_tx.take() {
+            let _ = shutdown_tx.send(true);
+        }
+
+        if let Some(task) = self.socket_mode_task.take() {
+            if let Err(err) = task.await {
+                warn!("Socket Mode task join failed: {err}");
+            }
+        }
+
+        *self.socket_mode_running.write().await = false;
     }
 
     /// Handle invoke method.
@@ -820,9 +1119,10 @@ impl SlackConnector {
     /// # Errors
     /// Returns [`FcpError`] if the shutdown process fails.
     pub async fn handle_shutdown(
-        &self,
+        &mut self,
         _params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
+        self.stop_socket_mode().await;
         info!("Slack connector shutting down");
         Ok(json!({ "status": "shutdown" }))
     }
@@ -835,6 +1135,186 @@ impl Default for SlackConnector {
 }
 
 // ── Helper functions ──────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+struct SocketModeFrame {
+    #[serde(rename = "type", default)]
+    frame_type: String,
+    #[serde(default)]
+    envelope_id: Option<String>,
+    #[serde(default)]
+    payload: Option<Value>,
+}
+
+fn parse_subscribe_topics(params: &serde_json::Value) -> Vec<String> {
+    let mut topics = params
+        .get("topics")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str())
+                .map(str::trim)
+                .filter(|topic| !topic.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if topics.is_empty() {
+        topics = SOCKET_DEFAULT_TOPICS
+            .iter()
+            .map(|topic| (*topic).to_string())
+            .collect();
+    }
+
+    let mut dedup = HashSet::new();
+    topics
+        .into_iter()
+        .filter(|topic| dedup.insert(topic.clone()))
+        .collect()
+}
+
+fn topic_allowed(topic: &str, patterns: &[String]) -> bool {
+    if patterns.is_empty() {
+        return true;
+    }
+
+    patterns.iter().any(|pattern| {
+        if pattern == "*" {
+            return true;
+        }
+        if let Some(prefix) = pattern.strip_suffix('*') {
+            return topic.starts_with(prefix);
+        }
+        pattern == topic
+    })
+}
+
+fn socket_frame_topic(frame_type: &str, payload: &Value) -> String {
+    if frame_type != "events_api" {
+        return match frame_type {
+            "interactive" => "slack.interactive".to_string(),
+            "slash_commands" => "slack.command".to_string(),
+            "disconnect" => "slack.disconnect".to_string(),
+            "hello" => "slack.hello".to_string(),
+            _ => format!("slack.socket.{frame_type}"),
+        };
+    }
+
+    let event_type = payload
+        .get("event")
+        .and_then(|event| event.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+
+    match event_type {
+        "message" => {
+            let subtype = payload
+                .get("event")
+                .and_then(|event| event.get("subtype"))
+                .and_then(Value::as_str);
+            match subtype {
+                Some("message_changed") => "slack.message.edited".to_string(),
+                Some("message_deleted") => "slack.message.deleted".to_string(),
+                _ => "slack.message.new".to_string(),
+            }
+        }
+        "reaction_added" => "slack.reaction.added".to_string(),
+        "reaction_removed" => "slack.reaction.removed".to_string(),
+        _ => format!("slack.event.{event_type}"),
+    }
+}
+
+fn socket_frame_to_event(
+    frame_type: &str,
+    envelope_id: Option<&str>,
+    payload: &Value,
+    connector_id: &ConnectorId,
+    instance_id: &fcp_core::InstanceId,
+    seq: u64,
+) -> EventEnvelope {
+    let topic = socket_frame_topic(frame_type, payload);
+    let principal = socket_payload_principal(payload);
+    let cursor = payload
+        .get("event_id")
+        .and_then(Value::as_str)
+        .or(envelope_id)
+        .map_or_else(|| seq.to_string(), str::to_owned);
+
+    let mut resource_uris = Vec::new();
+    if let Some(channel) = payload
+        .get("event")
+        .and_then(|event| event.get("channel"))
+        .and_then(Value::as_str)
+        .or_else(|| payload.get("channel").and_then(Value::as_str))
+    {
+        resource_uris.push(format!("slack:channel:{channel}"));
+    }
+    if let Some(team_id) = payload.get("team_id").and_then(Value::as_str) {
+        resource_uris.push(format!("slack:team:{team_id}"));
+    }
+
+    let event_data = EventData::new(
+        connector_id.clone(),
+        instance_id.clone(),
+        ZoneId::community(),
+        principal,
+        payload.clone(),
+    )
+    .with_resource_uris(resource_uris);
+
+    EventEnvelope::new(topic, event_data)
+        .with_seq(seq)
+        .with_cursor(cursor)
+}
+
+fn socket_payload_principal(payload: &Value) -> Principal {
+    if let Some(user_id) = payload
+        .get("event")
+        .and_then(|event| event.get("user"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            payload
+                .get("user")
+                .and_then(|user| user.get("id"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| payload.get("user_id").and_then(Value::as_str))
+    {
+        return Principal {
+            kind: "slack_user".into(),
+            id: user_id.to_string(),
+            trust: TrustLevel::Untrusted,
+            display: payload
+                .get("user")
+                .and_then(|user| user.get("name"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        };
+    }
+
+    if let Some(bot_id) = payload
+        .get("event")
+        .and_then(|event| event.get("bot_id"))
+        .and_then(Value::as_str)
+        .or_else(|| payload.get("bot_id").and_then(Value::as_str))
+    {
+        return Principal {
+            kind: "slack_bot".into(),
+            id: bot_id.to_string(),
+            trust: TrustLevel::Untrusted,
+            display: None,
+        };
+    }
+
+    Principal {
+        kind: "slack_actor".into(),
+        id: "unknown".into(),
+        trust: TrustLevel::Untrusted,
+        display: None,
+    }
+}
 
 fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a str> {
     input

@@ -4,18 +4,122 @@ use std::sync::Arc;
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
-    ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier, SessionId,
-    SimulateRequest, SimulateResponse,
+    ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
+    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
 
-use crate::{client::StripeClient, error::StripeError};
+use crate::{
+    client::{DEFAULT_API_URL, StripeAuth, StripeClient},
+    error::StripeError,
+};
+
+/// Parsed and validated Stripe connector configuration.
+#[derive(Debug, Clone)]
+struct StripeConfig {
+    auth: StripeAuth,
+    api_url: String,
+}
+
+impl StripeConfig {
+    fn from_params(params: &serde_json::Value) -> FcpResult<Self> {
+        let secret_key = params
+            .get("secret_key")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string);
+
+        let credential_id = match params.get("credential_id") {
+            Some(value) => {
+                let raw = value.as_str().ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "credential_id must be a string".into(),
+                })?;
+                Some(
+                    CredentialId::parse(raw).map_err(|_| FcpError::InvalidRequest {
+                        code: 1003,
+                        message: "credential_id must be a valid UUID".into(),
+                    })?,
+                )
+            }
+            None => None,
+        };
+
+        let auth = match (secret_key, credential_id) {
+            (Some(key), None) => StripeAuth::SecretKey(key),
+            (None, Some(cred_id)) => StripeAuth::CredentialId(cred_id),
+            (Some(_), Some(_)) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Provide exactly one of secret_key or credential_id".into(),
+                });
+            }
+            (None, None) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing secret_key or credential_id in configuration".into(),
+                });
+            }
+        };
+
+        let api_url = params
+            .get("api_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or(DEFAULT_API_URL)
+            .to_string();
+
+        Ok(Self { auth, api_url })
+    }
+}
+
+/// Doctor check result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DoctorResult {
+    status: DoctorStatus,
+    checks: Vec<DoctorCheck>,
+}
+
+/// Doctor status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum DoctorStatus {
+    Healthy,
+    Degraded,
+    Unhealthy,
+}
+
+/// Individual doctor check.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DoctorCheck {
+    name: String,
+    passed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+    critical: bool,
+}
+
+impl DoctorResult {
+    #[must_use]
+    fn from_checks(checks: Vec<DoctorCheck>) -> Self {
+        let status = if checks.iter().any(|c| c.critical && !c.passed) {
+            DoctorStatus::Unhealthy
+        } else if checks.iter().any(|c| !c.passed) {
+            DoctorStatus::Degraded
+        } else {
+            DoctorStatus::Healthy
+        };
+        Self { status, checks }
+    }
+}
 
 /// FCP Stripe Connector.
 pub struct StripeConnector {
     base: Arc<BaseConnector>,
+    config: Option<StripeConfig>,
     client: Option<StripeClient>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
@@ -27,6 +131,7 @@ impl StripeConnector {
     pub fn new() -> Self {
         Self {
             base: Arc::new(BaseConnector::new(ConnectorId::from_static("stripe"))),
+            config: None,
             client: None,
             verifier: None,
             session_id: None,
@@ -34,35 +139,166 @@ impl StripeConnector {
     }
 
     /// Handle configure method.
+    ///
+    /// Accepts either `secret_key` (direct) or `credential_id` (secretless via
+    /// egress proxy injection). Exactly one must be provided.
     #[instrument(skip(self, params))]
     pub async fn handle_configure(
         &mut self,
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
-        let secret_key =
-            params
-                .get("secret_key")
-                .and_then(|v| v.as_str())
-                .ok_or(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing secret_key in configuration".into(),
-                })?;
+        let config = StripeConfig::from_params(&params)?;
 
-        let api_url = params.get("api_url").and_then(|v| v.as_str());
+        let client =
+            StripeClient::new_with_auth(config.auth.clone()).map_err(|e| FcpError::Internal {
+                message: format!("Failed to create HTTP client: {e}"),
+            })?;
+        let client = client.with_api_url(&config.api_url);
 
-        let mut client = StripeClient::new(secret_key).map_err(|e| FcpError::Internal {
-            message: format!("Failed to create HTTP client: {e}"),
-        })?;
-
-        if let Some(url) = api_url {
-            client = client.with_api_url(url);
-        }
-
+        self.config = Some(config);
         self.client = Some(client);
         self.base.set_configured(true);
         info!("Stripe connector configured");
 
         Ok(json!({ "status": "configured" }))
+    }
+
+    /// Handle doctor diagnostics.
+    pub async fn handle_doctor(&self) -> FcpResult<serde_json::Value> {
+        let result = self.build_doctor_result();
+        serde_json::to_value(result).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize doctor result: {e}"),
+        })
+    }
+
+    fn build_doctor_result(&self) -> DoctorResult {
+        let mut checks = Vec::new();
+
+        // Check 1: Configuration loaded
+        let configured = self.config.is_some();
+        checks.push(DoctorCheck {
+            name: "configuration".into(),
+            passed: configured,
+            message: Some(if configured {
+                "Configuration loaded".into()
+            } else {
+                "Not configured - run configure first".into()
+            }),
+            critical: true,
+        });
+
+        let Some(config) = &self.config else {
+            return DoctorResult::from_checks(checks);
+        };
+
+        // Check 2: HTTP client initialized
+        checks.push(DoctorCheck {
+            name: "client_initialized".into(),
+            passed: self.client.is_some(),
+            message: Some(if self.client.is_some() {
+                "HTTP client initialized".into()
+            } else {
+                "HTTP client missing; re-run configure".into()
+            }),
+            critical: true,
+        });
+
+        // Check 3: API URL scheme
+        let scheme = if config.api_url.starts_with("https://") {
+            "https"
+        } else if config.api_url.starts_with("http://") {
+            "http"
+        } else {
+            "unknown"
+        };
+        checks.push(DoctorCheck {
+            name: "api_url".into(),
+            passed: true,
+            message: Some(format!("API URL ({scheme}): {}", config.api_url)),
+            critical: false,
+        });
+
+        // Check 4: Auth mode
+        checks.push(DoctorCheck {
+            name: "auth_mode".into(),
+            passed: true,
+            message: Some(format!("Auth: {}", config.auth.redacted_label())),
+            critical: false,
+        });
+
+        // Check 5: Network constraints - host must be api.stripe.com (or test override)
+        let allowed_hosts = ["api.stripe.com"];
+        let host_ok = config.api_url.starts_with("http://localhost")
+            || config.api_url.starts_with("http://127.0.0.1")
+            || allowed_hosts.iter().any(|h| config.api_url.contains(h));
+        checks.push(DoctorCheck {
+            name: "network_constraints".into(),
+            passed: host_ok,
+            message: Some(if host_ok {
+                "API URL matches allowed host (api.stripe.com)".into()
+            } else {
+                format!(
+                    "API URL {} does not match allowed hosts: {:?}",
+                    config.api_url, allowed_hosts
+                )
+            }),
+            critical: true,
+        });
+
+        // Check 6: Credential injection status
+        let secretless = config.auth.is_secretless();
+        checks.push(DoctorCheck {
+            name: "credential_injection".into(),
+            passed: !secretless,
+            message: Some(if secretless {
+                "Credential injection required via egress proxy".into()
+            } else {
+                "Direct secret key configured".into()
+            }),
+            critical: false,
+        });
+
+        DoctorResult::from_checks(checks)
+    }
+
+    /// Handle connector self-check.
+    ///
+    /// Performs a safe, read-only API call (get balance) to validate the secret key
+    /// is valid and the Stripe API is reachable.
+    pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
+        let Some(client) = &self.client else {
+            let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize self-check report: {e}"),
+            });
+        };
+
+        if let Some(config) = &self.config {
+            if config.auth.is_secretless() {
+                let report = SelfCheckReport::degraded(
+                    "credential_injection_required",
+                    "Configured with credential_id; egress proxy injection required for checks",
+                );
+                return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                    message: format!("Failed to serialize self-check report: {e}"),
+                });
+            }
+        }
+
+        let report = match client.health_check().await {
+            Ok(()) => SelfCheckReport::ok(),
+            Err(err) => {
+                if err.is_retryable() {
+                    SelfCheckReport::degraded("self_check_retryable", err.to_string())
+                } else {
+                    SelfCheckReport::failed("self_check_failed", err.to_string())
+                }
+            }
+        };
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {e}"),
+        })
     }
 
     /// Handle handshake method.
@@ -264,6 +500,87 @@ impl StripeConnector {
                     },
                 ),
                 op_info(
+                    "stripe.confirm_payment_intent",
+                    "Confirm a payment intent to proceed with payment",
+                    json!({
+                        "type": "object",
+                        "required": ["payment_intent_id"],
+                        "properties": {
+                            "payment_intent_id": { "type": "string" },
+                            "payment_method": { "type": "string" },
+                            "idempotency_key": { "type": "string" }
+                        }
+                    }),
+                    json!({ "type": "object", "properties": { "payment_intent": { "type": "object" }, "audit": { "type": "object" } } }),
+                    "stripe.payment",
+                    RiskLevel::High,
+                    SafetyTier::Dangerous,
+                    IdempotencyClass::BestEffort,
+                    AgentHint {
+                        when_to_use: "Confirm a payment intent after the customer has provided payment details.".into(),
+                        common_mistakes: vec!["Confirming without a valid payment method attached".into()],
+                        examples: vec![r#"{"payment_intent_id": "pi_abc123", "payment_method": "pm_card_visa"}"#.into()],
+                        related: vec![
+                            CapabilityId::from_static("stripe.create_payment_intent"),
+                            CapabilityId::from_static("stripe.capture_payment_intent"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "stripe.capture_payment_intent",
+                    "Capture a previously authorized payment intent",
+                    json!({
+                        "type": "object",
+                        "required": ["payment_intent_id"],
+                        "properties": {
+                            "payment_intent_id": { "type": "string" },
+                            "amount_to_capture": { "type": "integer" },
+                            "idempotency_key": { "type": "string" }
+                        }
+                    }),
+                    json!({ "type": "object", "properties": { "payment_intent": { "type": "object" }, "audit": { "type": "object" } } }),
+                    "stripe.payment",
+                    RiskLevel::High,
+                    SafetyTier::Dangerous,
+                    IdempotencyClass::None,
+                    AgentHint {
+                        when_to_use: "Capture funds from a payment intent that was created with capture_method=manual.".into(),
+                        common_mistakes: vec!["Capturing more than the authorized amount".into()],
+                        examples: vec![r#"{"payment_intent_id": "pi_abc123", "amount_to_capture": 1500}"#.into()],
+                        related: vec![
+                            CapabilityId::from_static("stripe.confirm_payment_intent"),
+                            CapabilityId::from_static("stripe.cancel_payment_intent"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "stripe.cancel_payment_intent",
+                    "Cancel a payment intent",
+                    json!({
+                        "type": "object",
+                        "required": ["payment_intent_id"],
+                        "properties": {
+                            "payment_intent_id": { "type": "string" },
+                            "cancellation_reason": { "type": "string", "enum": ["duplicate", "fraudulent", "requested_by_customer", "abandoned"] },
+                            "idempotency_key": { "type": "string" }
+                        }
+                    }),
+                    json!({ "type": "object", "properties": { "payment_intent": { "type": "object" }, "audit": { "type": "object" } } }),
+                    "stripe.payment",
+                    RiskLevel::High,
+                    SafetyTier::Dangerous,
+                    IdempotencyClass::None,
+                    AgentHint {
+                        when_to_use: "Cancel a payment intent that has not yet been captured.".into(),
+                        common_mistakes: vec!["Cancelling an already captured payment (use refund instead)".into()],
+                        examples: vec![r#"{"payment_intent_id": "pi_abc123", "cancellation_reason": "requested_by_customer"}"#.into()],
+                        related: vec![
+                            CapabilityId::from_static("stripe.create_refund"),
+                            CapabilityId::from_static("stripe.get_payment_intent"),
+                        ],
+                    },
+                ),
+                op_info(
                     "stripe.create_refund",
                     "Refund a payment",
                     json!({
@@ -426,6 +743,7 @@ impl StripeConnector {
                 })?;
 
         let input = params.get("input").cloned().unwrap_or(json!({}));
+        let derived_idempotency_key = derive_invoke_idempotency_key(operation, &params);
 
         let token_value = params
             .get("capability_token")
@@ -459,9 +777,27 @@ impl StripeConnector {
             "stripe.create_customer" => self.invoke_create_customer(input).await,
             "stripe.get_customer" => self.invoke_get_customer(input).await,
             "stripe.list_customers" => self.invoke_list_customers(input).await,
-            "stripe.create_payment_intent" => self.invoke_create_payment_intent(input).await,
+            "stripe.create_payment_intent" => {
+                self.invoke_create_payment_intent(input, derived_idempotency_key.as_deref())
+                    .await
+            }
             "stripe.get_payment_intent" => self.invoke_get_payment_intent(input).await,
-            "stripe.create_refund" => self.invoke_create_refund(input).await,
+            "stripe.confirm_payment_intent" => {
+                self.invoke_confirm_payment_intent(input, derived_idempotency_key.as_deref())
+                    .await
+            }
+            "stripe.capture_payment_intent" => {
+                self.invoke_capture_payment_intent(input, derived_idempotency_key.as_deref())
+                    .await
+            }
+            "stripe.cancel_payment_intent" => {
+                self.invoke_cancel_payment_intent(input, derived_idempotency_key.as_deref())
+                    .await
+            }
+            "stripe.create_refund" => {
+                self.invoke_create_refund(input, derived_idempotency_key.as_deref())
+                    .await
+            }
             "stripe.create_subscription" => self.invoke_create_subscription(input).await,
             "stripe.cancel_subscription" => self.invoke_cancel_subscription(input).await,
             "stripe.list_invoices" => self.invoke_list_invoices(input).await,
@@ -518,6 +854,7 @@ impl StripeConnector {
     async fn invoke_create_payment_intent(
         &self,
         input: serde_json::Value,
+        derived_idempotency_key: Option<&str>,
     ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let amount =
@@ -530,11 +867,29 @@ impl StripeConnector {
                 })?;
         let currency = require_str(&input, "currency")?;
         let customer = input.get("customer").and_then(|v| v.as_str());
+        let idempotency_key = input
+            .get("idempotency_key")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+            .or_else(|| derived_idempotency_key.map(str::to_owned));
         let pi = client
-            .create_payment_intent(amount, currency, customer)
+            .create_payment_intent_with_idempotency(
+                amount,
+                currency,
+                customer,
+                idempotency_key.as_deref(),
+            )
             .await
             .map_err(|e: StripeError| e.to_fcp_error())?;
-        Ok(json!({ "payment_intent": pi }))
+        Ok(json!({
+            "payment_intent": pi,
+            "audit": {
+                "operation": "stripe.create_payment_intent",
+                "side_effect": true,
+                "idempotency_key": idempotency_key,
+                "resource_id": pi.id,
+            }
+        }))
     }
 
     async fn invoke_get_payment_intent(
@@ -550,15 +905,116 @@ impl StripeConnector {
         Ok(json!({ "payment_intent": pi }))
     }
 
-    async fn invoke_create_refund(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+    async fn invoke_confirm_payment_intent(
+        &self,
+        input: serde_json::Value,
+        derived_idempotency_key: Option<&str>,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let pi_id = require_str(&input, "payment_intent_id")?;
+        let payment_method = input.get("payment_method").and_then(|v| v.as_str());
+        let idempotency_key = input
+            .get("idempotency_key")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+            .or_else(|| derived_idempotency_key.map(str::to_owned));
+        let pi = client
+            .confirm_payment_intent(pi_id, payment_method, idempotency_key.as_deref())
+            .await
+            .map_err(|e: StripeError| e.to_fcp_error())?;
+        Ok(json!({
+            "payment_intent": pi,
+            "audit": {
+                "operation": "stripe.confirm_payment_intent",
+                "side_effect": true,
+                "idempotency_key": idempotency_key,
+                "resource_id": pi.id,
+            }
+        }))
+    }
+
+    async fn invoke_capture_payment_intent(
+        &self,
+        input: serde_json::Value,
+        derived_idempotency_key: Option<&str>,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let pi_id = require_str(&input, "payment_intent_id")?;
+        let amount_to_capture = input.get("amount_to_capture").and_then(|v| v.as_i64());
+        let idempotency_key = input
+            .get("idempotency_key")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+            .or_else(|| derived_idempotency_key.map(str::to_owned));
+        let pi = client
+            .capture_payment_intent(pi_id, amount_to_capture, idempotency_key.as_deref())
+            .await
+            .map_err(|e: StripeError| e.to_fcp_error())?;
+        Ok(json!({
+            "payment_intent": pi,
+            "audit": {
+                "operation": "stripe.capture_payment_intent",
+                "side_effect": true,
+                "idempotency_key": idempotency_key,
+                "resource_id": pi.id,
+            }
+        }))
+    }
+
+    async fn invoke_cancel_payment_intent(
+        &self,
+        input: serde_json::Value,
+        derived_idempotency_key: Option<&str>,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let pi_id = require_str(&input, "payment_intent_id")?;
+        let cancellation_reason = input.get("cancellation_reason").and_then(|v| v.as_str());
+        let idempotency_key = input
+            .get("idempotency_key")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+            .or_else(|| derived_idempotency_key.map(str::to_owned));
+        let pi = client
+            .cancel_payment_intent(pi_id, cancellation_reason, idempotency_key.as_deref())
+            .await
+            .map_err(|e: StripeError| e.to_fcp_error())?;
+        Ok(json!({
+            "payment_intent": pi,
+            "audit": {
+                "operation": "stripe.cancel_payment_intent",
+                "side_effect": true,
+                "idempotency_key": idempotency_key,
+                "resource_id": pi.id,
+            }
+        }))
+    }
+
+    async fn invoke_create_refund(
+        &self,
+        input: serde_json::Value,
+        derived_idempotency_key: Option<&str>,
+    ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let payment_intent = require_str(&input, "payment_intent")?;
         let amount = input.get("amount").and_then(|v| v.as_i64());
+        let idempotency_key = input
+            .get("idempotency_key")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+            .or_else(|| derived_idempotency_key.map(str::to_owned));
         let refund = client
-            .create_refund(payment_intent, amount)
+            .create_refund_with_idempotency(payment_intent, amount, idempotency_key.as_deref())
             .await
             .map_err(|e: StripeError| e.to_fcp_error())?;
-        Ok(json!({ "refund": refund }))
+        Ok(json!({
+            "refund": refund,
+            "audit": {
+                "operation": "stripe.create_refund",
+                "side_effect": true,
+                "idempotency_key": idempotency_key,
+                "resource_id": refund.id,
+            }
+        }))
     }
 
     async fn invoke_create_subscription(
@@ -635,6 +1091,46 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a s
             code: 1003,
             message: format!("Missing required field: {field}"),
         })
+}
+
+fn derive_invoke_idempotency_key(operation: &str, params: &serde_json::Value) -> Option<String> {
+    if let Some(explicit) =
+        non_empty_trimmed(params.get("idempotency_key").and_then(|v| v.as_str()))
+    {
+        return Some(explicit.to_string());
+    }
+
+    let seed = non_empty_trimmed(params.get("operation_id").and_then(|v| v.as_str()))
+        .or_else(|| non_empty_trimmed(params.get("request_id").and_then(|v| v.as_str())))?;
+
+    let op = sanitize_idempotency_component(operation, "op");
+    let seed = sanitize_idempotency_component(seed, "seed");
+    Some(format!("fcp2:{op}:{seed}"))
+}
+
+fn non_empty_trimmed(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|v| !v.is_empty())
+}
+
+fn sanitize_idempotency_component(component: &str, fallback: &str) -> String {
+    let sanitized: String = component
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect();
+
+    let trimmed = sanitized.trim_matches('-');
+    let selected = if trimmed.is_empty() {
+        fallback
+    } else {
+        trimmed
+    };
+    selected.chars().take(64).collect()
 }
 
 #[allow(clippy::fn_params_excessive_bools)]
@@ -795,7 +1291,387 @@ mod tests {
         assert!(op_ids.contains(&"stripe.cancel_subscription"));
         assert!(op_ids.contains(&"stripe.list_invoices"));
         assert!(op_ids.contains(&"stripe.get_balance"));
-        assert_eq!(ops.len(), 10);
+        assert!(op_ids.contains(&"stripe.confirm_payment_intent"));
+        assert!(op_ids.contains(&"stripe.capture_payment_intent"));
+        assert!(op_ids.contains(&"stripe.cancel_payment_intent"));
+        assert_eq!(ops.len(), 13);
+    }
+
+    #[test]
+    fn test_derive_invoke_idempotency_key_prefers_explicit_key() {
+        let params = json!({
+            "operation_id": "op-123",
+            "idempotency_key": "idem-explicit"
+        });
+        let key = derive_invoke_idempotency_key("stripe.create_refund", &params);
+        assert_eq!(key.as_deref(), Some("idem-explicit"));
+    }
+
+    #[test]
+    fn test_derive_invoke_idempotency_key_from_operation_id() {
+        let params = json!({
+            "operation_id": "op 123/unsafe"
+        });
+        let key = derive_invoke_idempotency_key("stripe.create_refund", &params);
+        assert_eq!(
+            key.as_deref(),
+            Some("fcp2:stripe.create_refund:op-123-unsafe")
+        );
+    }
+
+    #[test]
+    fn test_derive_invoke_idempotency_key_from_request_id() {
+        let params = json!({
+            "request_id": "req:42"
+        });
+        let key = derive_invoke_idempotency_key("stripe.capture_payment_intent", &params);
+        assert_eq!(
+            key.as_deref(),
+            Some("fcp2:stripe.capture_payment_intent:req-42")
+        );
+    }
+
+    #[test]
+    fn test_derive_invoke_idempotency_key_none_without_seed() {
+        let params = json!({ "operation": "stripe.create_payment_intent" });
+        let key = derive_invoke_idempotency_key("stripe.create_payment_intent", &params);
+        assert!(key.is_none());
+    }
+
+    // ── Doctor tests ──────────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_not_configured() {
+        let connector = StripeConnector::new();
+        let result = connector.handle_doctor().await.unwrap();
+        assert_eq!(result["status"], "unhealthy");
+        let checks = result["checks"].as_array().unwrap();
+        let config_check = &checks[0];
+        assert_eq!(config_check["name"], "configuration");
+        assert!(!config_check["passed"].as_bool().unwrap());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_configured_secret_key() {
+        let mut connector = StripeConnector::new();
+        connector
+            .handle_configure(json!({ "secret_key": "sk_test_123" }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_doctor().await.unwrap();
+        assert_eq!(result["status"], "healthy");
+        let checks = result["checks"].as_array().unwrap();
+        let auth_check = checks.iter().find(|c| c["name"] == "auth_mode").unwrap();
+        assert!(
+            auth_check["message"]
+                .as_str()
+                .unwrap()
+                .contains("secret_key:redacted")
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_configured_credential_id() {
+        let mut connector = StripeConnector::new();
+        connector
+            .handle_configure(json!({
+                "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+            }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_doctor().await.unwrap();
+        let checks = result["checks"].as_array().unwrap();
+        let cred_check = checks
+            .iter()
+            .find(|c| c["name"] == "credential_injection")
+            .unwrap();
+        assert!(!cred_check["passed"].as_bool().unwrap());
+        assert!(!cred_check["critical"].as_bool().unwrap());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_bad_network_host() {
+        let mut connector = StripeConnector::new();
+        connector
+            .handle_configure(json!({
+                "secret_key": "sk_test",
+                "api_url": "https://evil.example.com/v1"
+            }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_doctor().await.unwrap();
+        assert_eq!(result["status"], "unhealthy");
+    }
+
+    // ── Self-check tests ────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_not_configured() {
+        use fcp_core::SelfCheckStatus;
+        let connector = StripeConnector::new();
+        let result = connector.handle_self_check().await.unwrap();
+        let report: SelfCheckReport = serde_json::from_value(result).unwrap();
+        assert_eq!(report.status, SelfCheckStatus::Degraded);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_credential_id_mode() {
+        use fcp_core::SelfCheckStatus;
+        let mut connector = StripeConnector::new();
+        connector
+            .handle_configure(json!({
+                "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+            }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_self_check().await.unwrap();
+        let report: SelfCheckReport = serde_json::from_value(result).unwrap();
+        assert_eq!(report.status, SelfCheckStatus::Degraded);
+        assert_eq!(
+            report.reason_code.as_deref(),
+            Some("credential_injection_required")
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_unreachable_api() {
+        use fcp_core::SelfCheckStatus;
+        let mut connector = StripeConnector::new();
+        connector
+            .handle_configure(json!({
+                "secret_key": "sk_test",
+                "api_url": "http://127.0.0.1:1/v1"
+            }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_self_check().await.unwrap();
+        let report: SelfCheckReport = serde_json::from_value(result).unwrap();
+        assert!(
+            report.status == SelfCheckStatus::Degraded || report.status == SelfCheckStatus::Failed
+        );
+    }
+
+    // ── Configure multi-auth tests ──────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_secret_key() {
+        let mut connector = StripeConnector::new();
+        let result = connector
+            .handle_configure(json!({ "secret_key": "sk_test_123" }))
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "configured");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_credential_id() {
+        let mut connector = StripeConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "configured");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_both_rejected() {
+        let mut connector = StripeConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "secret_key": "sk_test",
+                "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+            }))
+            .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("exactly one"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_none_rejected() {
+        let mut connector = StripeConnector::new();
+        let result = connector.handle_configure(json!({})).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("Missing"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    // ── Invoke dispatch tests for new operations ────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_confirm_missing_payment_intent_id() {
+        let mut connector = StripeConnector::new();
+        connector.client = Some(
+            StripeClient::new("sk_test")
+                .unwrap()
+                .with_api_url("http://localhost:9999/v1"),
+        );
+
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["stripe.confirm_payment_intent"]
+            }))
+            .await
+            .unwrap();
+
+        let token = generate_valid_token(&signing_key, "stripe.confirm_payment_intent");
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "stripe.confirm_payment_intent",
+                "input": {},
+                "capability_token": token
+            }))
+            .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("payment_intent_id"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_capture_missing_payment_intent_id() {
+        let mut connector = StripeConnector::new();
+        connector.client = Some(
+            StripeClient::new("sk_test")
+                .unwrap()
+                .with_api_url("http://localhost:9999/v1"),
+        );
+
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["stripe.capture_payment_intent"]
+            }))
+            .await
+            .unwrap();
+
+        let token = generate_valid_token(&signing_key, "stripe.capture_payment_intent");
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "stripe.capture_payment_intent",
+                "input": {},
+                "capability_token": token
+            }))
+            .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("payment_intent_id"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_cancel_missing_payment_intent_id() {
+        let mut connector = StripeConnector::new();
+        connector.client = Some(
+            StripeClient::new("sk_test")
+                .unwrap()
+                .with_api_url("http://localhost:9999/v1"),
+        );
+
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["stripe.cancel_payment_intent"]
+            }))
+            .await
+            .unwrap();
+
+        let token = generate_valid_token(&signing_key, "stripe.cancel_payment_intent");
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "stripe.cancel_payment_intent",
+                "input": {},
+                "capability_token": token
+            }))
+            .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("payment_intent_id"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    // ── Introspect schema detail tests ────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_new_ops_have_idempotency_class() {
+        let connector = StripeConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        for op_id in [
+            "stripe.confirm_payment_intent",
+            "stripe.capture_payment_intent",
+            "stripe.cancel_payment_intent",
+        ] {
+            let op = ops.iter().find(|o| o["id"] == op_id).unwrap();
+            assert_eq!(
+                op["idempotency"], "strict",
+                "{op_id} should have strict idempotency"
+            );
+            assert_eq!(op["risk_level"], "dangerous", "{op_id} should be dangerous");
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_mutation_ops_have_idempotency_class() {
+        let connector = StripeConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        let create_pi = ops
+            .iter()
+            .find(|o| o["id"] == "stripe.create_payment_intent")
+            .unwrap();
+        assert_eq!(create_pi["idempotency"], "strict");
+
+        let create_refund = ops
+            .iter()
+            .find(|o| o["id"] == "stripe.create_refund")
+            .unwrap();
+        assert_eq!(create_refund["idempotency"], "strict");
     }
 
     #[test]

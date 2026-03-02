@@ -1133,3 +1133,291 @@ async fn unknown_operation_rejected() {
 
     assert!(result.is_err());
 }
+
+// ============================================================================
+// Search sensitivity tests (u56.4)
+// ============================================================================
+
+/// Search results include provenance and taint metadata.
+#[fcp_async_core::runtime::test]
+async fn search_includes_sensitivity_metadata() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": "list",
+            "results": [page_json("pg-1", "Sensitive Doc")],
+            "has_more": false
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = NotionConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["notion.search"]).await;
+    let token = generate_valid_token(&signing_key, "notion.search");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "notion.search",
+            "input": { "query": "sensitive" },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    // Verify sensitivity metadata
+    assert_eq!(result["sensitivity"], "workspace_wide");
+    assert_eq!(result["provenance"]["source"], "notion.search");
+    assert_eq!(result["provenance"]["scope"], "workspace");
+
+    let taint = result["taint"].as_array().unwrap();
+    assert!(taint.iter().any(|t| t == "external_input"));
+    assert!(taint.iter().any(|t| t == "cross_workspace"));
+
+    assert_eq!(result["result_count"], 1);
+}
+
+/// Search with filter restricting to pages only.
+#[fcp_async_core::runtime::test]
+async fn search_with_filter() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": "list",
+            "results": [
+                page_json("pg-1", "Page Result"),
+            ],
+            "has_more": false
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = NotionConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["notion.search"]).await;
+    let token = generate_valid_token(&signing_key, "notion.search");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "notion.search",
+            "input": {
+                "query": "meeting",
+                "filter": { "value": "page", "property": "object" }
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["results"].as_array().unwrap().len(), 1);
+    assert_eq!(result["has_more"], false);
+}
+
+/// Search with empty results.
+#[fcp_async_core::runtime::test]
+async fn search_empty_results() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": "list",
+            "results": [],
+            "has_more": false
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = NotionConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["notion.search"]).await;
+    let token = generate_valid_token(&signing_key, "notion.search");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "notion.search",
+            "input": { "query": "nonexistent" },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["results"].as_array().unwrap().len(), 0);
+    assert_eq!(result["result_count"], 0);
+    assert_eq!(result["sensitivity"], "workspace_wide");
+}
+
+/// Search redacts person email addresses from results.
+#[fcp_async_core::runtime::test]
+async fn search_redacts_person_emails() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": "list",
+            "results": [{
+                "object": "page",
+                "id": "pg-pii",
+                "properties": {
+                    "Assignee": {
+                        "type": "people",
+                        "people": [{
+                            "object": "user",
+                            "id": "user-1",
+                            "name": "Alice",
+                            "person": { "email": "alice@example.com" }
+                        }]
+                    },
+                    "Title": {
+                        "type": "title",
+                        "title": [{ "text": { "content": "Secret Doc" } }]
+                    }
+                },
+                "created_by": {
+                    "object": "user",
+                    "id": "user-1",
+                    "name": "Alice",
+                    "person": { "email": "alice@example.com" }
+                },
+                "last_edited_by": {
+                    "object": "user",
+                    "id": "user-2",
+                    "name": "Bob",
+                    "person": { "email": "bob@example.com" }
+                }
+            }],
+            "has_more": false
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = NotionConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["notion.search"]).await;
+    let token = generate_valid_token(&signing_key, "notion.search");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "notion.search",
+            "input": {},
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    let results = result["results"].as_array().unwrap();
+    assert_eq!(results.len(), 1);
+
+    let page = &results[0];
+
+    // Person property emails should be redacted
+    let assignee_email = &page["properties"]["Assignee"]["people"][0]["person"]["email"];
+    assert_eq!(assignee_email, "[redacted]");
+
+    // created_by email should be redacted
+    let created_email = &page["created_by"]["person"]["email"];
+    assert_eq!(created_email, "[redacted]");
+
+    // last_edited_by email should be redacted
+    let edited_email = &page["last_edited_by"]["person"]["email"];
+    assert_eq!(edited_email, "[redacted]");
+
+    // Non-PII fields preserved
+    assert_eq!(page["id"], "pg-pii");
+    assert_eq!(page["created_by"]["name"], "Alice");
+}
+
+/// Search with `notion.read` capability is rejected — requires `notion.search`.
+#[fcp_async_core::runtime::test]
+async fn search_requires_search_capability() {
+    let mock_server = MockServer::start().await;
+
+    let mut connector = NotionConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["notion.read"]).await;
+    let token = generate_valid_token(&signing_key, "notion.read");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "notion.search",
+            "input": { "query": "test" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err(), "notion.read should not grant access to search");
+}
+
+/// Search with `created_by`/`last_edited_by` redaction on type variants.
+#[fcp_async_core::runtime::test]
+async fn search_redacts_created_by_last_edited_by_property_types() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": "list",
+            "results": [{
+                "object": "page",
+                "id": "pg-prop",
+                "properties": {
+                    "Creator": {
+                        "type": "created_by",
+                        "created_by": {
+                            "object": "user",
+                            "id": "user-3",
+                            "name": "Carol",
+                            "person": { "email": "carol@example.com" }
+                        }
+                    },
+                    "Editor": {
+                        "type": "last_edited_by",
+                        "last_edited_by": {
+                            "object": "user",
+                            "id": "user-4",
+                            "name": "Dave",
+                            "person": { "email": "dave@example.com" }
+                        }
+                    }
+                }
+            }],
+            "has_more": false
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = NotionConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["notion.search"]).await;
+    let token = generate_valid_token(&signing_key, "notion.search");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "notion.search",
+            "input": { "query": "prop test" },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    let page = &result["results"][0];
+
+    // created_by property type should have email redacted
+    assert_eq!(
+        page["properties"]["Creator"]["created_by"]["person"]["email"],
+        "[redacted]"
+    );
+    // last_edited_by property type should have email redacted
+    assert_eq!(
+        page["properties"]["Editor"]["last_edited_by"]["person"]["email"],
+        "[redacted]"
+    );
+    // Names preserved
+    assert_eq!(page["properties"]["Creator"]["created_by"]["name"], "Carol");
+    assert_eq!(page["properties"]["Editor"]["last_edited_by"]["name"], "Dave");
+}

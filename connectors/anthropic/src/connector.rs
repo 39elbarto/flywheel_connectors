@@ -559,6 +559,77 @@ impl AnthropicConnector {
                     },
                 },
                 OperationInfo {
+                    id: OperationId::from_static("anthropic.message.stream"),
+                    summary: "Stream a message response from Claude via SSE".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "model": {
+                                "type": "string",
+                                "enum": ["claude-opus-4-5-20251101", "claude-sonnet-4-20250514", "claude-3-5-haiku-20241022", "claude-3-5-sonnet-20241022"],
+                                "default": "claude-sonnet-4-20250514"
+                            },
+                            "messages": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "role": { "type": "string", "enum": ["user", "assistant"] },
+                                        "content": { "type": "string" }
+                                    },
+                                    "required": ["role", "content"]
+                                }
+                            },
+                            "system": { "type": "string" },
+                            "max_tokens": { "type": "integer", "default": 4096 },
+                            "temperature": { "type": "number", "minimum": 0, "maximum": 1 },
+                            "tools": { "type": "array", "description": "Optional tool definitions" },
+                            "tool_choice": { "type": "object", "description": "Optional tool selection policy" }
+                        },
+                        "required": ["messages"]
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string" },
+                            "content": { "type": "string" },
+                            "content_blocks": { "type": "array" },
+                            "model": { "type": "string" },
+                            "stop_reason": { "type": "string" },
+                            "streamed": { "type": "boolean" },
+                            "usage": {
+                                "type": "object",
+                                "properties": {
+                                    "input_tokens": { "type": "integer" },
+                                    "output_tokens": { "type": "integer" }
+                                }
+                            },
+                            "cost_usd": { "type": "number" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("anthropic.message.stream"),
+                    risk_level: RiskLevel::Medium,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Stream Claude responses token-by-token via SSE for lower latency.".into(),
+                        common_mistakes: vec![
+                            "Not handling SSE events incrementally.".into(),
+                            "Not providing messages array.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"messages": [{"role": "user", "content": "Write a poem"}]}"#.into(),
+                        ],
+                        related: vec![
+                            "anthropic.message".into(),
+                            "anthropic.chat".into(),
+                        ],
+                    },
+                },
+                OperationInfo {
                     id: OperationId::from_static("anthropic.get_usage"),
                     summary: "Get current usage and cost statistics".into(),
                     input_schema: json!({

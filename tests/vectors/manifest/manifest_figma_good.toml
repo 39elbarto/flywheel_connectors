@@ -1,0 +1,158 @@
+# Figma connector manifest — valid (good) test vector.
+# Covers: knowledge + operational + streaming archetypes, singleton_writer state,
+# multiple API and CDN hosts, image export constraints, webhook operations.
+
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+# Placeholder — recompute
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.figma"
+name = "Figma Connector"
+version = "0.1.0"
+description = "FCP connector for Figma design platform"
+archetypes = ["knowledge", "operational", "streaming"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
+optional = ["media.download"]
+forbidden = ["system.exec", "network.listen"]
+
+[provides.operations."figma.get_file"]
+description = "Get a Figma file document tree"
+capability = "figma.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."figma.get_file".input_schema]
+required = ["file_key"]
+type = "object"
+[provides.operations."figma.get_file".input_schema.properties.file_key]
+type = "string"
+
+[provides.operations."figma.get_file".output_schema]
+required = ["name", "document"]
+type = "object"
+[provides.operations."figma.get_file".output_schema.properties.name]
+type = "string"
+[provides.operations."figma.get_file".output_schema.properties.document]
+type = "object"
+
+[provides.operations."figma.get_file".network_constraints]
+host_allow = ["api.figma.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 52428800
+
+[provides.operations."figma.get_file".ai_hints]
+when_to_use = "Retrieve a Figma file's document tree."
+common_mistakes = []
+examples = ['{"file_key": "abc123DEF456"}']
+related = ["figma.export_images"]
+
+[provides.operations."figma.export_images"]
+description = "Export nodes as images"
+capability = "figma.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."figma.export_images".input_schema]
+required = ["file_key", "ids", "format"]
+type = "object"
+[provides.operations."figma.export_images".input_schema.properties.file_key]
+type = "string"
+[provides.operations."figma.export_images".input_schema.properties.ids]
+type = "string"
+[provides.operations."figma.export_images".input_schema.properties.format]
+type = "string"
+
+[provides.operations."figma.export_images".output_schema]
+required = ["images"]
+type = "object"
+[provides.operations."figma.export_images".output_schema.properties.images]
+type = "object"
+
+[provides.operations."figma.export_images".network_constraints]
+host_allow = ["api.figma.com", "figma-alpha-api.s3.us-west-2.amazonaws.com", "*.figma.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 104857600
+
+[provides.operations."figma.export_images".ai_hints]
+when_to_use = "Export design nodes as images."
+common_mistakes = []
+examples = ['{"file_key": "abc123DEF456", "ids": "1:2", "format": "png"}']
+related = ["figma.get_file"]
+
+[event_caps]
+streaming = true
+replay = false
+min_buffer_events = 25
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "figma.read"
+requests = 30
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "figma.export"
+requests = 20
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[rate_limits.operation_pools]
+"figma.get_file" = ["figma.read"]
+"figma.export_images" = ["figma.export"]

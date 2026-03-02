@@ -1,0 +1,153 @@
+# Stripe connector manifest — valid (good) test vector.
+# Covers: operational + streaming archetypes, singleton_writer state,
+# api.stripe.com host, z:private home zone, payment-tier ops.
+
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.stripe"
+name = "Stripe Connector"
+version = "0.1.0"
+description = "FCP connector for Stripe"
+archetypes = ["operational", "streaming"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:private"
+allowed_sources = ["z:owner", "z:private"]
+allowed_targets = ["z:private"]
+forbidden = ["z:public", "z:work"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
+optional = []
+forbidden = ["system.exec", "network.listen"]
+
+[provides.operations."stripe.create_payment_intent"]
+description = "Create a payment intent"
+capability = "stripe.payment"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+
+[provides.operations."stripe.create_payment_intent".input_schema]
+required = ["amount", "currency"]
+type = "object"
+[provides.operations."stripe.create_payment_intent".input_schema.properties.amount]
+type = "integer"
+[provides.operations."stripe.create_payment_intent".input_schema.properties.currency]
+type = "string"
+
+[provides.operations."stripe.create_payment_intent".output_schema]
+required = ["payment_intent"]
+type = "object"
+[provides.operations."stripe.create_payment_intent".output_schema.properties.payment_intent]
+type = "object"
+
+[provides.operations."stripe.create_payment_intent".network_constraints]
+host_allow = ["api.stripe.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."stripe.create_payment_intent".ai_hints]
+when_to_use = "Initiate a payment."
+common_mistakes = ["Using dollars instead of cents"]
+examples = ['{"amount": 2000, "currency": "usd"}']
+related = ["stripe.get_customer"]
+
+[provides.operations."stripe.get_customer"]
+description = "Retrieve a Stripe customer"
+capability = "stripe.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."stripe.get_customer".input_schema]
+required = ["customer_id"]
+type = "object"
+[provides.operations."stripe.get_customer".input_schema.properties.customer_id]
+type = "string"
+
+[provides.operations."stripe.get_customer".output_schema]
+required = ["customer"]
+type = "object"
+[provides.operations."stripe.get_customer".output_schema.properties.customer]
+type = "object"
+
+[provides.operations."stripe.get_customer".network_constraints]
+host_allow = ["api.stripe.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."stripe.get_customer".ai_hints]
+when_to_use = "Look up a customer."
+common_mistakes = []
+examples = ['{"customer_id": "cus_abc123"}']
+related = ["stripe.create_payment_intent"]
+
+[event_caps]
+streaming = true
+replay = true
+min_buffer_events = 100
+
+[sandbox]
+profile = "strict"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 60000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "stripe.read"
+requests = 100
+window_ms = 1000
+burst = 25
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "stripe.payment"
+requests = 50
+window_ms = 1000
+burst = 10
+scope = "instance"
+
+[rate_limits.operation_pools]
+"stripe.create_payment_intent" = ["stripe.payment"]
+"stripe.get_customer" = ["stripe.read"]

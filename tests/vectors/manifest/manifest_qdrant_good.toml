@@ -1,0 +1,152 @@
+# Qdrant connector manifest — valid (good) test vector.
+# Covers: knowledge + operational archetypes, stateless, point CRUD + search,
+# host pinned to *.cloud.qdrant.io, ports 443/6333/6334.
+
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.qdrant"
+name = "Qdrant Connector"
+version = "0.1.0"
+description = "FCP connector for Qdrant vector database"
+archetypes = ["knowledge", "operational"]
+format = "wasi"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public", "z:community"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni"]
+optional = []
+forbidden = ["system.exec", "network.listen", "media.upload", "media.download"]
+
+[provides.operations."qdrant.search"]
+description = "Search for similar points"
+capability = "qdrant.points.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."qdrant.search".input_schema]
+required = ["collection_name", "vector", "limit"]
+type = "object"
+[provides.operations."qdrant.search".input_schema.properties.collection_name]
+type = "string"
+[provides.operations."qdrant.search".input_schema.properties.vector]
+type = "array"
+[provides.operations."qdrant.search".input_schema.properties.limit]
+type = "integer"
+
+[provides.operations."qdrant.search".output_schema]
+required = ["result"]
+type = "object"
+[provides.operations."qdrant.search".output_schema.properties.result]
+type = "array"
+
+[provides.operations."qdrant.search".network_constraints]
+host_allow = ["*.cloud.qdrant.io"]
+port_allow = [443, 6333, 6334]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."qdrant.search".ai_hints]
+when_to_use = "Find similar points by vector."
+common_mistakes = []
+examples = ['{"collection_name": "docs", "vector": [0.1, 0.2], "limit": 10}']
+related = ["qdrant.upsert_points"]
+
+[provides.operations."qdrant.upsert_points"]
+description = "Upsert points"
+capability = "qdrant.points.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."qdrant.upsert_points".input_schema]
+required = ["collection_name", "points"]
+type = "object"
+[provides.operations."qdrant.upsert_points".input_schema.properties.collection_name]
+type = "string"
+[provides.operations."qdrant.upsert_points".input_schema.properties.points]
+type = "array"
+
+[provides.operations."qdrant.upsert_points".output_schema]
+required = ["status"]
+type = "object"
+[provides.operations."qdrant.upsert_points".output_schema.properties.status]
+type = "string"
+
+[provides.operations."qdrant.upsert_points".network_constraints]
+host_allow = ["*.cloud.qdrant.io"]
+port_allow = [443, 6333, 6334]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 1048576
+
+[provides.operations."qdrant.upsert_points".ai_hints]
+when_to_use = "Insert or update points."
+common_mistakes = []
+examples = ['{"collection_name": "docs", "points": [{"id": 1, "vector": [0.1], "payload": {}}]}']
+related = ["qdrant.search"]
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "qdrant.points.read"
+requests = 300
+window_ms = 60000
+burst = 50
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "qdrant.points.write"
+requests = 100
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[rate_limits.operation_pools]
+"qdrant.search" = ["qdrant.points.read"]
+"qdrant.upsert_points" = ["qdrant.points.write"]

@@ -1,0 +1,103 @@
+# DocuSign connector manifest — invalid (bad) test vector.
+# Violations:
+#   1. media.download appears in BOTH required AND forbidden (NORMATIVE duplicate)
+#   2. home zone "z:public" is in forbidden list (zone conflict)
+#   3. connect_timeout_ms = 0 (timeouts must be > 0)
+
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.docusign"
+name = "DocuSign Connector Bad"
+version = "0.1.0"
+description = "Invalid DocuSign manifest for rejection testing"
+archetypes = ["operational"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+# VIOLATION: home zone is in forbidden list
+home = "z:public"
+allowed_sources = ["z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+# VIOLATION: media.download in both required and forbidden (NORMATIVE duplicate)
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+    "media.download",
+]
+optional = []
+forbidden = [
+    "system.exec",
+    "media.download",
+]
+
+[provides.operations."docusign.get_envelope"]
+description = "Get envelope status"
+capability = "docusign.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."docusign.get_envelope".input_schema]
+required = ["account_id", "envelope_id"]
+type = "object"
+[provides.operations."docusign.get_envelope".input_schema.properties.account_id]
+type = "string"
+[provides.operations."docusign.get_envelope".input_schema.properties.envelope_id]
+type = "string"
+
+[provides.operations."docusign.get_envelope".output_schema]
+required = ["envelope"]
+type = "object"
+[provides.operations."docusign.get_envelope".output_schema.properties.envelope]
+type = "object"
+
+[provides.operations."docusign.get_envelope".network_constraints]
+host_allow = ["*.docusign.net"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+# VIOLATION: timeout must be > 0
+connect_timeout_ms = 0
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."docusign.get_envelope".ai_hints]
+when_to_use = "Get envelope status."
+common_mistakes = []
+examples = ['{"account_id": "abc-123", "envelope_id": "env-456"}']
+related = []
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true

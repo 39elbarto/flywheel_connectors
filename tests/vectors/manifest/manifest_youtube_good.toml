@@ -1,0 +1,140 @@
+# YouTube connector manifest — valid (good) test vector.
+# Covers: knowledge + operational archetypes, www.googleapis.com host.
+
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.youtube"
+name = "YouTube Connector"
+version = "0.1.0"
+description = "FCP connector for YouTube"
+archetypes = ["knowledge", "operational"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
+optional = ["media.download"]
+forbidden = ["system.exec", "network.listen"]
+
+[provides.operations."youtube.search"]
+description = "Search YouTube"
+capability = "youtube.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."youtube.search".input_schema]
+required = ["query"]
+type = "object"
+[provides.operations."youtube.search".input_schema.properties.query]
+type = "string"
+
+[provides.operations."youtube.search".output_schema]
+required = ["items", "total_results"]
+type = "object"
+[provides.operations."youtube.search".output_schema.properties.items]
+type = "array"
+[provides.operations."youtube.search".output_schema.properties.total_results]
+type = "integer"
+
+[provides.operations."youtube.search".network_constraints]
+host_allow = ["www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."youtube.search".ai_hints]
+when_to_use = "Search YouTube."
+common_mistakes = []
+examples = ['{"query": "rust tutorial"}']
+related = ["youtube.get_video"]
+
+[provides.operations."youtube.get_video"]
+description = "Get video details"
+capability = "youtube.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."youtube.get_video".input_schema]
+required = ["video_id"]
+type = "object"
+[provides.operations."youtube.get_video".input_schema.properties.video_id]
+type = "string"
+
+[provides.operations."youtube.get_video".output_schema]
+required = ["video"]
+type = "object"
+[provides.operations."youtube.get_video".output_schema.properties.video]
+type = "object"
+
+[provides.operations."youtube.get_video".network_constraints]
+host_allow = ["www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."youtube.get_video".ai_hints]
+when_to_use = "Get video details."
+common_mistakes = []
+examples = ['{"video_id": "dQw4w9WgXcQ"}']
+related = ["youtube.search"]
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "youtube.read"
+requests = 100
+window_ms = 1000
+burst = 10
+scope = "instance"
+
+[rate_limits.operation_pools]
+"youtube.search" = ["youtube.read"]
+"youtube.get_video" = ["youtube.read"]

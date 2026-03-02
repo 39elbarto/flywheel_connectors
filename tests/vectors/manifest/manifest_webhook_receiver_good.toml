@@ -1,0 +1,146 @@
+# Webhook Receiver connector manifest — valid (good) test vector.
+# Covers: operational+streaming archetype, inbound webhooks with network.listen,
+# host pinned to localhost.localdomain, event_caps with replay.
+
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.webhook-receiver"
+name = "Webhook Receiver Connector"
+version = "0.1.0"
+description = "FCP connector for receiving inbound webhooks"
+archetypes = ["operational", "streaming"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public", "z:community"]
+
+[capabilities]
+required = ["network.listen", "storage.state"]
+optional = ["network.dns", "network.egress", "network.tls.sni"]
+forbidden = ["system.exec", "media.upload", "media.download"]
+
+[provides.operations."webhook.endpoints.list"]
+description = "List registered webhook endpoints"
+capability = "webhook.endpoints.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."webhook.endpoints.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."webhook.endpoints.list".output_schema]
+required = ["endpoints"]
+type = "object"
+[provides.operations."webhook.endpoints.list".output_schema.properties.endpoints]
+type = "array"
+
+[provides.operations."webhook.endpoints.list".network_constraints]
+host_allow = ["localhost.localdomain"]
+port_allow = [8080, 8443]
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = false
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 1
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 10000
+max_response_bytes = 1048576
+
+[provides.operations."webhook.endpoints.list".ai_hints]
+when_to_use = "List configured webhook endpoints."
+common_mistakes = []
+examples = ['{}']
+related = ["webhook.endpoints.delete"]
+
+[provides.operations."webhook.endpoints.delete"]
+description = "Remove a webhook endpoint"
+capability = "webhook.endpoints.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."webhook.endpoints.delete".input_schema]
+required = ["endpoint_id"]
+type = "object"
+[provides.operations."webhook.endpoints.delete".input_schema.properties.endpoint_id]
+type = "string"
+
+[provides.operations."webhook.endpoints.delete".output_schema]
+type = "object"
+
+[provides.operations."webhook.endpoints.delete".network_constraints]
+host_allow = ["localhost.localdomain"]
+port_allow = [8080, 8443]
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = false
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 1
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 10000
+max_response_bytes = 1048576
+
+[provides.operations."webhook.endpoints.delete".ai_hints]
+when_to_use = "Remove a webhook endpoint."
+common_mistakes = []
+examples = ['{"endpoint_id": "ep_abc123"}']
+related = ["webhook.endpoints.list"]
+
+[event_caps]
+streaming = true
+replay = true
+min_buffer_events = 1000
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 3600000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "webhook.endpoints.read"
+requests = 100
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "webhook.endpoints.write"
+requests = 20
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[rate_limits.operation_pools]
+"webhook.endpoints.list" = ["webhook.endpoints.read"]
+"webhook.endpoints.delete" = ["webhook.endpoints.write"]

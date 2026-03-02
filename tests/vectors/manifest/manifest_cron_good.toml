@@ -1,0 +1,141 @@
+# Cron connector manifest — valid (good) test vector.
+# Covers: operational archetype, local scheduler, schedules + executions,
+# no external network (localhost.localdomain only).
+
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.cron"
+name = "Cron Connector"
+version = "0.1.0"
+description = "FCP connector for scheduling timed jobs"
+archetypes = ["operational"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public", "z:community"]
+
+[capabilities]
+required = ["storage.state"]
+optional = ["network.dns", "network.egress"]
+forbidden = ["system.exec", "network.listen", "media.upload", "media.download"]
+
+[provides.operations."cron.schedules.list"]
+description = "List cron schedules"
+capability = "cron.schedules.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."cron.schedules.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."cron.schedules.list".output_schema]
+required = ["schedules"]
+type = "object"
+[provides.operations."cron.schedules.list".output_schema.properties.schedules]
+type = "array"
+
+[provides.operations."cron.schedules.list".network_constraints]
+host_allow = ["localhost.localdomain"]
+port_allow = [8080]
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = false
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 1
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 10000
+max_response_bytes = 1048576
+
+[provides.operations."cron.schedules.list".ai_hints]
+when_to_use = "List cron schedules."
+common_mistakes = []
+examples = ['{}']
+related = ["cron.schedules.delete"]
+
+[provides.operations."cron.schedules.delete"]
+description = "Delete a cron schedule"
+capability = "cron.schedules.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."cron.schedules.delete".input_schema]
+required = ["schedule_id"]
+type = "object"
+[provides.operations."cron.schedules.delete".input_schema.properties.schedule_id]
+type = "string"
+
+[provides.operations."cron.schedules.delete".output_schema]
+type = "object"
+
+[provides.operations."cron.schedules.delete".network_constraints]
+host_allow = ["localhost.localdomain"]
+port_allow = [8080]
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = false
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 1
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 10000
+max_response_bytes = 1048576
+
+[provides.operations."cron.schedules.delete".ai_hints]
+when_to_use = "Delete a cron schedule."
+common_mistakes = []
+examples = ['{"schedule_id": "sched_abc123"}']
+related = ["cron.schedules.list"]
+
+[sandbox]
+profile = "strict"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "cron.schedules.read"
+requests = 100
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "cron.schedules.write"
+requests = 30
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[rate_limits.operation_pools]
+"cron.schedules.list" = ["cron.schedules.read"]
+"cron.schedules.delete" = ["cron.schedules.write"]

@@ -1,0 +1,154 @@
+# Gmail connector manifest — valid (good) test vector.
+# Covers: operational + streaming + knowledge archetypes, z:private home zone.
+
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.gmail"
+name = "Gmail Connector"
+version = "0.1.0"
+description = "FCP connector for Gmail"
+archetypes = ["operational", "streaming", "knowledge"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:private"
+allowed_sources = ["z:owner", "z:private"]
+allowed_targets = ["z:private"]
+forbidden = ["z:public", "z:work"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
+optional = ["media.download", "media.upload"]
+forbidden = ["system.exec", "network.listen"]
+
+[provides.operations."gmail.send_message"]
+description = "Send an email"
+capability = "gmail.send"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+
+[provides.operations."gmail.send_message".input_schema]
+required = ["to", "subject", "body"]
+type = "object"
+[provides.operations."gmail.send_message".input_schema.properties.to]
+type = "string"
+[provides.operations."gmail.send_message".input_schema.properties.subject]
+type = "string"
+[provides.operations."gmail.send_message".input_schema.properties.body]
+type = "string"
+
+[provides.operations."gmail.send_message".output_schema]
+required = ["message"]
+type = "object"
+[provides.operations."gmail.send_message".output_schema.properties.message]
+type = "object"
+
+[provides.operations."gmail.send_message".network_constraints]
+host_allow = ["gmail.googleapis.com", "www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."gmail.send_message".ai_hints]
+when_to_use = "Send an email."
+common_mistakes = []
+examples = ['{"to": "user@example.com", "subject": "Hello", "body": "Hi!"}']
+related = ["gmail.search_messages"]
+
+[provides.operations."gmail.search_messages"]
+description = "Search messages"
+capability = "gmail.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."gmail.search_messages".input_schema]
+required = ["query"]
+type = "object"
+[provides.operations."gmail.search_messages".input_schema.properties.query]
+type = "string"
+
+[provides.operations."gmail.search_messages".output_schema]
+required = ["messages"]
+type = "object"
+[provides.operations."gmail.search_messages".output_schema.properties.messages]
+type = "array"
+
+[provides.operations."gmail.search_messages".network_constraints]
+host_allow = ["gmail.googleapis.com", "www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."gmail.search_messages".ai_hints]
+when_to_use = "Search emails."
+common_mistakes = []
+examples = ['{"query": "is:unread"}']
+related = ["gmail.send_message"]
+
+[event_caps]
+streaming = true
+replay = false
+min_buffer_events = 50
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "gmail.read"
+requests = 250
+window_ms = 1000
+burst = 25
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "gmail.send"
+requests = 100
+window_ms = 1000
+burst = 10
+scope = "instance"
+
+[rate_limits.operation_pools]
+"gmail.send_message" = ["gmail.send"]
+"gmail.search_messages" = ["gmail.read"]

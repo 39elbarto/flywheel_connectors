@@ -1,0 +1,97 @@
+# Home Assistant connector manifest — invalid (bad) test vector.
+# Violations:
+#   1. system.exec appears in BOTH required AND forbidden (NORMATIVE duplicate)
+#   2. home zone "z:community" is in forbidden list (zone conflict)
+
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.homeassistant"
+name = "Home Assistant Connector Bad"
+version = "0.1.0"
+description = "Invalid Home Assistant manifest for rejection testing"
+archetypes = ["operational"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+# VIOLATION: home zone is in forbidden list
+home = "z:community"
+allowed_sources = ["z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:community"]
+
+[capabilities]
+# VIOLATION: system.exec in both required and forbidden (NORMATIVE duplicate)
+required = [
+    "network.dns",
+    "network.egress",
+    "system.exec",
+]
+optional = []
+forbidden = [
+    "system.exec",
+    "network.listen",
+]
+
+[provides.operations."homeassistant.get_state"]
+description = "Get entity state"
+capability = "homeassistant.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."homeassistant.get_state".input_schema]
+required = ["entity_id"]
+type = "object"
+[provides.operations."homeassistant.get_state".input_schema.properties.entity_id]
+type = "string"
+
+[provides.operations."homeassistant.get_state".output_schema]
+required = ["state"]
+type = "object"
+[provides.operations."homeassistant.get_state".output_schema.properties.state]
+type = "object"
+
+[provides.operations."homeassistant.get_state".network_constraints]
+host_allow = ["$ha_host"]
+port_allow = [443, 8123]
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = false
+require_sni = true
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 4
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 15000
+max_response_bytes = 1048576
+
+[provides.operations."homeassistant.get_state".ai_hints]
+when_to_use = "Get entity state."
+common_mistakes = []
+examples = ['{"entity_id": "light.living_room"}']
+related = []
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true

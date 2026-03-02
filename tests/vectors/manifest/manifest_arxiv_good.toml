@@ -1,0 +1,155 @@
+# arXiv connector manifest — valid (good) test vector.
+# Covers: knowledge + operational + streaming archetypes, singleton_writer state,
+# arXiv API host pinning (export.arxiv.org, arxiv.org), media.download for PDFs,
+# strict rate limits (~1 req/3s), citation graph via Semantic Scholar.
+
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+# Placeholder — recompute after full implementation
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.arxiv"
+name = "arXiv Connector"
+version = "0.1.0"
+description = "FCP connector for arXiv"
+archetypes = ["knowledge", "operational", "streaming"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores monitor cursors and bounded metadata cache."
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:work", "z:private"]
+forbidden = ["z:public", "z:community"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni", "storage.state", "media.download"]
+optional = []
+forbidden = ["system.exec", "network.listen", "media.upload"]
+
+[provides.operations."arxiv.search_papers"]
+description = "Search arXiv papers"
+capability = "arxiv.search"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."arxiv.search_papers".input_schema]
+required = ["query"]
+type = "object"
+[provides.operations."arxiv.search_papers".input_schema.properties.query]
+type = "string"
+
+[provides.operations."arxiv.search_papers".output_schema]
+required = ["papers", "total_results"]
+type = "object"
+[provides.operations."arxiv.search_papers".output_schema.properties.papers]
+type = "array"
+[provides.operations."arxiv.search_papers".output_schema.properties.total_results]
+type = "integer"
+
+[provides.operations."arxiv.search_papers".network_constraints]
+host_allow = ["export.arxiv.org", "arxiv.org"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."arxiv.search_papers".ai_hints]
+when_to_use = "Search arXiv for papers."
+common_mistakes = []
+examples = ['{"query": "ti:attention mechanism"}']
+related = ["arxiv.get_paper"]
+
+[provides.operations."arxiv.get_paper"]
+description = "Get paper metadata by arXiv ID"
+capability = "arxiv.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."arxiv.get_paper".input_schema]
+required = ["arxiv_id"]
+type = "object"
+[provides.operations."arxiv.get_paper".input_schema.properties.arxiv_id]
+type = "string"
+
+[provides.operations."arxiv.get_paper".output_schema]
+required = ["paper"]
+type = "object"
+[provides.operations."arxiv.get_paper".output_schema.properties.paper]
+type = "object"
+
+[provides.operations."arxiv.get_paper".network_constraints]
+host_allow = ["export.arxiv.org", "arxiv.org"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."arxiv.get_paper".ai_hints]
+when_to_use = "Get metadata for a specific paper."
+common_mistakes = []
+examples = ['{"arxiv_id": "1706.03762"}']
+related = ["arxiv.search_papers"]
+
+[event_caps]
+streaming = true
+replay = false
+min_buffer_events = 200
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "arxiv.search"
+requests = 20
+window_ms = 60000
+burst = 3
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "arxiv.read"
+requests = 20
+window_ms = 60000
+burst = 3
+scope = "instance"
+
+[rate_limits.operation_pools]
+"arxiv.search_papers" = ["arxiv.search"]
+"arxiv.get_paper" = ["arxiv.read"]

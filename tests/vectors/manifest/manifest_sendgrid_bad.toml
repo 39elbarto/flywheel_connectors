@@ -1,0 +1,87 @@
+# SendGrid connector manifest — invalid (bad) test vector.
+# Violations:
+#   1. network.egress appears in BOTH required AND forbidden (NORMATIVE duplicate)
+#   2. home zone "z:public" is in forbidden list (zone conflict)
+#   3. total_timeout_ms = 0 (timeouts must be > 0)
+
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.sendgrid"
+name = "SendGrid Connector Bad"
+version = "0.1.0"
+description = "Invalid SendGrid manifest for rejection testing"
+archetypes = ["operational"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:public"
+allowed_sources = ["z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
+optional = []
+forbidden = ["system.exec", "network.egress"]
+
+[provides.operations."sendgrid.contacts.list"]
+description = "List contacts"
+capability = "sendgrid.contacts.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."sendgrid.contacts.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."sendgrid.contacts.list".output_schema]
+required = ["result"]
+type = "object"
+[provides.operations."sendgrid.contacts.list".output_schema.properties.result]
+type = "array"
+
+[provides.operations."sendgrid.contacts.list".network_constraints]
+host_allow = ["api.sendgrid.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 0
+max_response_bytes = 1048576
+
+[provides.operations."sendgrid.contacts.list".ai_hints]
+when_to_use = "List contacts."
+common_mistakes = []
+examples = ['{}']
+related = []
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true

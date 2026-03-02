@@ -1,0 +1,144 @@
+# Snowflake connector manifest — valid (good) test vector.
+# Covers: knowledge+storage archetype, SQL queries + warehouses,
+# host pinned to *.snowflakecomputing.com.
+
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.snowflake"
+name = "Snowflake Connector"
+version = "0.1.0"
+description = "FCP connector for Snowflake data warehouse"
+archetypes = ["knowledge", "storage"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public", "z:community"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
+optional = []
+forbidden = ["system.exec", "network.listen", "media.upload", "media.download"]
+
+[provides.operations."snowflake.warehouses.list"]
+description = "List warehouses"
+capability = "snowflake.warehouses.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."snowflake.warehouses.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."snowflake.warehouses.list".output_schema]
+required = ["warehouses"]
+type = "object"
+[provides.operations."snowflake.warehouses.list".output_schema.properties.warehouses]
+type = "array"
+
+[provides.operations."snowflake.warehouses.list".network_constraints]
+host_allow = ["*.snowflakecomputing.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."snowflake.warehouses.list".ai_hints]
+when_to_use = "List Snowflake warehouses."
+common_mistakes = []
+examples = ['{}']
+related = ["snowflake.sql.execute"]
+
+[provides.operations."snowflake.sql.execute"]
+description = "Execute a SQL statement (DDL/DML)"
+capability = "snowflake.sql.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+
+[provides.operations."snowflake.sql.execute".input_schema]
+required = ["statement"]
+type = "object"
+[provides.operations."snowflake.sql.execute".input_schema.properties.statement]
+type = "string"
+
+[provides.operations."snowflake.sql.execute".output_schema]
+required = ["status"]
+type = "object"
+[provides.operations."snowflake.sql.execute".output_schema.properties.status]
+type = "string"
+
+[provides.operations."snowflake.sql.execute".network_constraints]
+host_allow = ["*.snowflakecomputing.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 300000
+max_response_bytes = 1048576
+
+[provides.operations."snowflake.sql.execute".ai_hints]
+when_to_use = "Execute DDL/DML statements."
+common_mistakes = []
+examples = ['{"statement": "CREATE TABLE test (id INT)"}']
+related = ["snowflake.warehouses.list"]
+
+[sandbox]
+profile = "strict"
+memory_mb = 512
+cpu_percent = 75
+wall_clock_timeout_ms = 600000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "snowflake.warehouses.read"
+requests = 60
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "snowflake.sql.write"
+requests = 20
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[rate_limits.operation_pools]
+"snowflake.warehouses.list" = ["snowflake.warehouses.read"]
+"snowflake.sql.execute" = ["snowflake.sql.write"]

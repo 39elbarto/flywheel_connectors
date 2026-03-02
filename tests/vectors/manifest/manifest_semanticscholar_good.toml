@@ -1,0 +1,148 @@
+# Semantic Scholar connector manifest — valid (good) test vector.
+# Covers: knowledge archetype, read-only academic API, paper search + author lookup,
+# host pinned to api.semanticscholar.org.
+
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.semanticscholar"
+name = "Semantic Scholar Connector"
+version = "0.1.0"
+description = "FCP connector for Semantic Scholar academic paper search"
+archetypes = ["knowledge"]
+format = "wasi"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public", "z:community"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni"]
+optional = []
+forbidden = ["system.exec", "network.listen", "media.upload", "media.download"]
+
+[provides.operations."semanticscholar.paper.search"]
+description = "Search for papers by keyword"
+capability = "semanticscholar.papers.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."semanticscholar.paper.search".input_schema]
+required = ["query"]
+type = "object"
+[provides.operations."semanticscholar.paper.search".input_schema.properties.query]
+type = "string"
+
+[provides.operations."semanticscholar.paper.search".output_schema]
+required = ["data"]
+type = "object"
+[provides.operations."semanticscholar.paper.search".output_schema.properties.data]
+type = "array"
+
+[provides.operations."semanticscholar.paper.search".network_constraints]
+host_allow = ["api.semanticscholar.org"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."semanticscholar.paper.search".ai_hints]
+when_to_use = "Search for academic papers."
+common_mistakes = []
+examples = ['{"query": "transformer attention"}']
+related = ["semanticscholar.author.get"]
+
+[provides.operations."semanticscholar.author.get"]
+description = "Get author details"
+capability = "semanticscholar.authors.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."semanticscholar.author.get".input_schema]
+required = ["author_id"]
+type = "object"
+[provides.operations."semanticscholar.author.get".input_schema.properties.author_id]
+type = "string"
+
+[provides.operations."semanticscholar.author.get".output_schema]
+required = ["authorId", "name"]
+type = "object"
+[provides.operations."semanticscholar.author.get".output_schema.properties.authorId]
+type = "string"
+[provides.operations."semanticscholar.author.get".output_schema.properties.name]
+type = "string"
+
+[provides.operations."semanticscholar.author.get".network_constraints]
+host_allow = ["api.semanticscholar.org"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."semanticscholar.author.get".ai_hints]
+when_to_use = "Get details for a specific author."
+common_mistakes = []
+examples = ['{"author_id": "1741101"}']
+related = ["semanticscholar.paper.search"]
+
+[sandbox]
+profile = "strict"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "semanticscholar.papers.read"
+requests = 100
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "semanticscholar.authors.read"
+requests = 100
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[rate_limits.operation_pools]
+"semanticscholar.paper.search" = ["semanticscholar.papers.read"]
+"semanticscholar.author.get" = ["semanticscholar.authors.read"]

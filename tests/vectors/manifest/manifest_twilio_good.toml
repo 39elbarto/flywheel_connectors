@@ -1,0 +1,165 @@
+# Twilio connector manifest — valid (good) test vector.
+# Covers: operational + streaming + bidirectional archetypes, singleton_writer state,
+# CDN host for media, voice call operations.
+
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.twilio"
+name = "Twilio Connector"
+version = "0.1.0"
+description = "FCP connector for Twilio communications platform"
+archetypes = ["operational", "streaming", "bidirectional"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
+optional = ["media.download"]
+forbidden = ["system.exec", "network.listen"]
+
+[provides.operations."twilio.send_message"]
+description = "Send an SMS or MMS message"
+capability = "twilio.message"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."twilio.send_message".rate_limit]
+max = 60
+per_ms = 60000
+
+[provides.operations."twilio.send_message".input_schema]
+required = ["to", "from", "body"]
+type = "object"
+[provides.operations."twilio.send_message".input_schema.properties.to]
+type = "string"
+[provides.operations."twilio.send_message".input_schema.properties.from]
+type = "string"
+[provides.operations."twilio.send_message".input_schema.properties.body]
+type = "string"
+
+[provides.operations."twilio.send_message".output_schema]
+required = ["sid", "status"]
+type = "object"
+[provides.operations."twilio.send_message".output_schema.properties.sid]
+type = "string"
+[provides.operations."twilio.send_message".output_schema.properties.status]
+type = "string"
+
+[provides.operations."twilio.send_message".network_constraints]
+host_allow = ["api.twilio.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."twilio.send_message".ai_hints]
+when_to_use = "Send SMS/MMS messages."
+common_mistakes = []
+examples = ['{"to": "+15551234567", "from": "+15559876543", "body": "Hello"}']
+related = ["twilio.get_message"]
+
+[provides.operations."twilio.get_message"]
+description = "Get message details"
+capability = "twilio.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."twilio.get_message".input_schema]
+required = ["message_sid"]
+type = "object"
+[provides.operations."twilio.get_message".input_schema.properties.message_sid]
+type = "string"
+
+[provides.operations."twilio.get_message".output_schema]
+required = ["sid", "status", "body"]
+type = "object"
+[provides.operations."twilio.get_message".output_schema.properties.sid]
+type = "string"
+[provides.operations."twilio.get_message".output_schema.properties.status]
+type = "string"
+[provides.operations."twilio.get_message".output_schema.properties.body]
+type = "string"
+
+[provides.operations."twilio.get_message".network_constraints]
+host_allow = ["api.twilio.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."twilio.get_message".ai_hints]
+when_to_use = "Get message details."
+common_mistakes = []
+examples = ['{"message_sid": "SMxxx"}']
+related = ["twilio.send_message"]
+
+[event_caps]
+streaming = true
+replay = false
+min_buffer_events = 50
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "twilio.read"
+requests = 100
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "twilio.message"
+requests = 60
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[rate_limits.operation_pools]
+"twilio.send_message" = ["twilio.message"]
+"twilio.get_message" = ["twilio.read"]

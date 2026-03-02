@@ -1,0 +1,88 @@
+# Twitter connector manifest — invalid (bad) test vector.
+# Violations:
+#   1. system.exec is both required and forbidden (capability set conflict)
+#   2. home zone "z:public" appears in forbidden list (zone conflict)
+
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.twitter"
+name = "Twitter/X Connector Bad"
+version = "0.1.0"
+description = "Invalid Twitter connector manifest"
+archetypes = ["operational", "streaming", "bidirectional"]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:public"
+allowed_sources = ["z:owner", "z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "system.exec"]
+optional = []
+forbidden = ["system.exec", "network.listen"]
+
+[provides.operations."twitter.tweet.search"]
+description = "Search recent tweets"
+capability = "twitter.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."twitter.tweet.search".input_schema]
+required = ["query"]
+type = "object"
+[provides.operations."twitter.tweet.search".input_schema.properties.query]
+type = "string"
+
+[provides.operations."twitter.tweet.search".output_schema]
+required = ["tweets"]
+type = "object"
+[provides.operations."twitter.tweet.search".output_schema.properties.tweets]
+type = "array"
+
+[provides.operations."twitter.tweet.search".network_constraints]
+host_allow = ["api.twitter.com", "stream.twitter.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."twitter.tweet.search".ai_hints]
+when_to_use = "Search tweets."
+common_mistakes = []
+examples = ['{"query": "from:TwitterDev"}']
+related = []
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = []
+deny_exec = true
+deny_ptrace = true

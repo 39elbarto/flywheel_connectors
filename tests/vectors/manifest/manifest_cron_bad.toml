@@ -1,0 +1,90 @@
+# Cron connector manifest — invalid (bad) test vector.
+# Violations:
+#   1. storage.state appears in BOTH required AND forbidden (NORMATIVE duplicate)
+#   2. home zone "z:public" is in forbidden list (zone conflict)
+#   3. total_timeout_ms = 0 (timeouts must be > 0)
+
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.cron"
+name = "Cron Connector Bad"
+version = "0.1.0"
+description = "Invalid cron manifest for rejection testing"
+archetypes = ["operational"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+# VIOLATION: home zone is in forbidden list
+home = "z:public"
+allowed_sources = ["z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+# VIOLATION: storage.state in both required and forbidden (NORMATIVE duplicate)
+required = ["storage.state"]
+optional = []
+forbidden = ["system.exec", "storage.state"]
+
+[provides.operations."cron.schedules.list"]
+description = "List schedules"
+capability = "cron.schedules.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."cron.schedules.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."cron.schedules.list".output_schema]
+required = ["schedules"]
+type = "object"
+[provides.operations."cron.schedules.list".output_schema.properties.schedules]
+type = "array"
+
+[provides.operations."cron.schedules.list".network_constraints]
+host_allow = ["localhost.localdomain"]
+port_allow = [8080]
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = false
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 1
+max_redirects = 0
+connect_timeout_ms = 5000
+# VIOLATION: timeout must be > 0
+total_timeout_ms = 0
+max_response_bytes = 1048576
+
+[provides.operations."cron.schedules.list".ai_hints]
+when_to_use = "List schedules."
+common_mistakes = []
+examples = ['{}']
+related = []
+
+[sandbox]
+profile = "strict"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true

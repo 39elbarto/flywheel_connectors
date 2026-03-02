@@ -1,0 +1,153 @@
+# Slack connector manifest — valid (good) test vector.
+# Covers: operational + streaming + bidirectional archetypes, singleton_writer state,
+# *.slack.com + files.slack.com hosts.
+
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.slack"
+name = "Slack Connector"
+version = "0.1.0"
+description = "FCP connector for Slack"
+archetypes = ["operational", "streaming", "bidirectional"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
+optional = ["media.download", "media.upload"]
+forbidden = ["system.exec", "network.listen"]
+
+[provides.operations."slack.post_message"]
+description = "Post a message to a Slack channel"
+capability = "slack.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."slack.post_message".input_schema]
+required = ["channel", "text"]
+type = "object"
+[provides.operations."slack.post_message".input_schema.properties.channel]
+type = "string"
+[provides.operations."slack.post_message".input_schema.properties.text]
+type = "string"
+
+[provides.operations."slack.post_message".output_schema]
+required = ["message"]
+type = "object"
+[provides.operations."slack.post_message".output_schema.properties.message]
+type = "object"
+
+[provides.operations."slack.post_message".network_constraints]
+host_allow = ["slack.com", "*.slack.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."slack.post_message".ai_hints]
+when_to_use = "Send a message to a channel."
+common_mistakes = []
+examples = ['{"channel": "C01234567", "text": "Hello!"}']
+related = ["slack.get_channel_history"]
+
+[provides.operations."slack.get_channel_history"]
+description = "Fetch recent messages from a channel"
+capability = "slack.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."slack.get_channel_history".input_schema]
+required = ["channel"]
+type = "object"
+[provides.operations."slack.get_channel_history".input_schema.properties.channel]
+type = "string"
+
+[provides.operations."slack.get_channel_history".output_schema]
+required = ["messages"]
+type = "object"
+[provides.operations."slack.get_channel_history".output_schema.properties.messages]
+type = "array"
+
+[provides.operations."slack.get_channel_history".network_constraints]
+host_allow = ["slack.com", "*.slack.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."slack.get_channel_history".ai_hints]
+when_to_use = "Read recent messages."
+common_mistakes = []
+examples = ['{"channel": "C01234567"}']
+related = ["slack.post_message"]
+
+[event_caps]
+streaming = true
+replay = false
+min_buffer_events = 200
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "slack.read"
+requests = 100
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "slack.write"
+requests = 50
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[rate_limits.operation_pools]
+"slack.post_message" = ["slack.write"]
+"slack.get_channel_history" = ["slack.read"]

@@ -1,0 +1,148 @@
+# Elasticsearch connector manifest — valid (good) test vector.
+# Covers: knowledge + operational archetypes, search + index_document,
+# host pinned to *.elastic-cloud.com / *.found.io.
+
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.elasticsearch"
+name = "Elasticsearch Connector"
+version = "0.1.0"
+description = "FCP connector for Elasticsearch"
+archetypes = ["knowledge", "operational"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public", "z:community"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
+optional = []
+forbidden = ["system.exec", "network.listen", "media.upload", "media.download"]
+
+[provides.operations."elasticsearch.search"]
+description = "Search documents"
+capability = "elasticsearch.search.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."elasticsearch.search".input_schema]
+required = ["index"]
+type = "object"
+[provides.operations."elasticsearch.search".input_schema.properties.index]
+type = "string"
+[provides.operations."elasticsearch.search".input_schema.properties.query]
+type = "object"
+
+[provides.operations."elasticsearch.search".output_schema]
+required = ["hits"]
+type = "object"
+[provides.operations."elasticsearch.search".output_schema.properties.hits]
+type = "object"
+
+[provides.operations."elasticsearch.search".network_constraints]
+host_allow = ["*.elastic-cloud.com", "*.found.io"]
+port_allow = [443, 9243]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 52428800
+
+[provides.operations."elasticsearch.search".ai_hints]
+when_to_use = "Search documents."
+common_mistakes = []
+examples = ['{"index": "logs-*", "query": {"match_all": {}}}']
+related = ["elasticsearch.indices.delete"]
+
+[provides.operations."elasticsearch.indices.delete"]
+description = "Delete an index"
+capability = "elasticsearch.indices.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."elasticsearch.indices.delete".input_schema]
+required = ["index"]
+type = "object"
+[provides.operations."elasticsearch.indices.delete".input_schema.properties.index]
+type = "string"
+
+[provides.operations."elasticsearch.indices.delete".output_schema]
+required = ["acknowledged"]
+type = "object"
+[provides.operations."elasticsearch.indices.delete".output_schema.properties.acknowledged]
+type = "boolean"
+
+[provides.operations."elasticsearch.indices.delete".network_constraints]
+host_allow = ["*.elastic-cloud.com", "*.found.io"]
+port_allow = [443, 9243]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."elasticsearch.indices.delete".ai_hints]
+when_to_use = "Delete an index."
+common_mistakes = []
+examples = ['{"index": "old-logs"}']
+related = ["elasticsearch.search"]
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "elasticsearch.search.read"
+requests = 500
+window_ms = 60000
+burst = 50
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "elasticsearch.indices.write"
+requests = 10
+window_ms = 60000
+burst = 2
+scope = "instance"
+
+[rate_limits.operation_pools]
+"elasticsearch.search" = ["elasticsearch.search.read"]
+"elasticsearch.indices.delete" = ["elasticsearch.indices.write"]

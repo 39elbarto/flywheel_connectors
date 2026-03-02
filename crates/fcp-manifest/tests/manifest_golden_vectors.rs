@@ -1274,7 +1274,10 @@ fn jira_good_manifest_vector_parses_and_maps_capabilities() {
     // Verify singleton_writer state model
     let state = parsed.connector.state.as_ref().expect("state section");
     let model = state.to_state_model().expect("valid state model");
-    assert!(matches!(model, fcp_manifest::ConnectorStateModel::SingletonWriter));
+    assert!(matches!(
+        model,
+        fcp_manifest::ConnectorStateModel::SingletonWriter
+    ));
 
     // Verify operations
     let create_op = parsed
@@ -1312,7 +1315,13 @@ fn jira_good_manifest_vector_parses_and_maps_capabilities() {
     assert_eq!(events.min_buffer_events, 50);
 
     // Verify required capabilities
-    assert!(parsed.capabilities.required.iter().any(|c| c.as_str() == "storage.state"));
+    assert!(
+        parsed
+            .capabilities
+            .required
+            .iter()
+            .any(|c| c.as_str() == "storage.state")
+    );
 }
 
 #[test]
@@ -1350,10 +1359,7 @@ fn jira_full_manifest_parses_with_all_operations() {
         "jira.add_attachment",
     ];
     for op_name in &expected_ops {
-        assert!(
-            ops.contains_key(*op_name),
-            "missing operation: {op_name}"
-        );
+        assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
     }
     assert_eq!(ops.len(), expected_ops.len());
 
@@ -1430,9 +1436,16 @@ fn figma_good_manifest_vector_parses_and_maps_capabilities() {
         .get("figma.export_images")
         .expect("figma.export_images operation");
     // Verify CDN hosts in export constraints
-    let nc = export.network_constraints.as_ref().expect("network_constraints");
+    let nc = export
+        .network_constraints
+        .as_ref()
+        .expect("network_constraints");
     assert!(nc.host_allow.iter().any(|h| h == "api.figma.com"));
-    assert!(nc.host_allow.iter().any(|h| h.contains("s3.us-west-2.amazonaws.com")));
+    assert!(
+        nc.host_allow
+            .iter()
+            .any(|h| h.contains("s3.us-west-2.amazonaws.com"))
+    );
     assert!(nc.host_allow.iter().any(|h| h == "*.figma.com"));
     // Export has 100MB response limit
     assert_eq!(nc.max_response_bytes, 104_857_600);
@@ -1473,10 +1486,7 @@ fn figma_full_manifest_parses_with_all_operations() {
         "figma.delete_webhook",
     ];
     for op_name in &expected_ops {
-        assert!(
-            ops.contains_key(*op_name),
-            "missing operation: {op_name}"
-        );
+        assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
     }
     assert_eq!(ops.len(), expected_ops.len());
 
@@ -1584,10 +1594,7 @@ fn twilio_full_manifest_parses_with_all_operations() {
         "twilio.list_phone_numbers",
     ];
     for op_name in &expected_ops {
-        assert!(
-            ops.contains_key(*op_name),
-            "missing operation: {op_name}"
-        );
+        assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
     }
     assert_eq!(ops.len(), expected_ops.len());
 
@@ -1597,7 +1604,9 @@ fn twilio_full_manifest_parses_with_all_operations() {
     println!("TWILIO_INTERFACE_HASH={hash}");
 
     // Verify media CDN host in download operations
-    let dl_rec = ops.get("twilio.download_recording").expect("download_recording");
+    let dl_rec = ops
+        .get("twilio.download_recording")
+        .expect("download_recording");
     let nc = dl_rec.network_constraints.as_ref().expect("nc");
     assert!(nc.host_allow.iter().any(|h| h == "media.twiliocdn.com"));
 
@@ -1933,7 +1942,10 @@ fn stripe_good_manifest_vector_parses_and_maps_capabilities() {
         .get("stripe.create_payment_intent")
         .expect("stripe.create_payment_intent");
     assert_eq!(pay_op.capability.as_str(), "stripe.payment");
-    assert!(matches!(pay_op.safety_tier, fcp_core::SafetyTier::Dangerous));
+    assert!(matches!(
+        pay_op.safety_tier,
+        fcp_core::SafetyTier::Dangerous
+    ));
 }
 
 #[test]
@@ -2408,7 +2420,8 @@ fn google_calendar_full_manifest_parses_with_all_operations() {
     let raw = std::fs::read_to_string(&path)
         .unwrap_or_else(|err| panic!("failed to read google-calendar manifest: {err}"));
     let with_hash = with_computed_hash(&raw);
-    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid full google-calendar manifest");
+    let parsed =
+        ConnectorManifest::parse_str(&with_hash).expect("valid full google-calendar manifest");
 
     assert_eq!(parsed.connector.id.as_str(), "fcp.google-calendar");
 
@@ -2536,6 +2549,135 @@ fn youtube_bad_manifest_vector_is_rejected() {
         Some(3),
     );
     let raw = read_vector_manifest("manifest_youtube_bad.toml");
+    let with_hash = with_computed_hash(&raw);
+    let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("capabilities") || msg.contains("zone") || msg.contains("forbidden"),
+        "expected validation failure, got: {msg}"
+    );
+}
+
+// =============================================================================
+// Twitter connector tests
+// =============================================================================
+
+#[test]
+fn twitter_good_manifest_vector_parses_and_maps_capabilities() {
+    let _log = TestLog::new(
+        "twitter_good_manifest_vector_parses_and_maps_capabilities",
+        "fcp-manifest",
+        Some("fcp.twitter"),
+        Some("0.1.0"),
+        Some(3),
+    );
+    let raw = read_vector_manifest("manifest_twitter_good.toml");
+    let with_hash = with_computed_hash(&raw);
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid twitter manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.twitter");
+    assert_eq!(parsed.connector.archetypes.len(), 3);
+    assert_eq!(parsed.connector.archetypes[0].as_str(), "operational");
+    assert_eq!(parsed.connector.archetypes[1].as_str(), "streaming");
+    assert_eq!(parsed.connector.archetypes[2].as_str(), "bidirectional");
+
+    let search_op = parsed
+        .provides
+        .operations
+        .get("twitter.tweet.search")
+        .expect("twitter.tweet.search");
+    assert_eq!(search_op.capability.as_str(), "twitter.read");
+    let search_nc = search_op
+        .network_constraints
+        .as_ref()
+        .expect("search network constraints");
+    assert!(search_nc.host_allow.iter().any(|h| h == "api.twitter.com"));
+    assert!(
+        search_nc
+            .host_allow
+            .iter()
+            .any(|h| h == "stream.twitter.com")
+    );
+
+    let stream_op = parsed
+        .provides
+        .operations
+        .get("twitter.stream.rules.list")
+        .expect("twitter.stream.rules.list");
+    assert_eq!(stream_op.capability.as_str(), "twitter.stream");
+}
+
+#[test]
+fn twitter_full_manifest_parses_with_all_operations() {
+    let _log = TestLog::new(
+        "twitter_full_manifest_parses_with_all_operations",
+        "fcp-manifest",
+        Some("fcp.twitter"),
+        Some("0.1.0"),
+        Some(4),
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("../../connectors/twitter/manifest.toml");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read twitter manifest: {err}"));
+    let with_hash = with_computed_hash(&raw);
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid full twitter manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.twitter");
+
+    let ops = &parsed.provides.operations;
+    let expected_ops = [
+        "twitter.stream.rules.add",
+        "twitter.stream.rules.delete",
+        "twitter.stream.rules.list",
+        "twitter.tweet.create",
+        "twitter.tweet.delete",
+        "twitter.tweet.get",
+        "twitter.tweet.reply",
+        "twitter.tweet.search",
+        "twitter.user.by_username",
+        "twitter.user.get",
+        "twitter.user.me",
+        "twitter.user.mentions",
+        "twitter.user.timeline",
+    ];
+    for op_name in &expected_ops {
+        assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
+    }
+    assert_eq!(ops.len(), expected_ops.len());
+
+    let unchecked = ConnectorManifest::parse_str_unchecked(&raw).expect("unchecked");
+    let hash = unchecked.compute_interface_hash().expect("hash");
+    println!("TWITTER_INTERFACE_HASH={hash}");
+
+    // Verify stream host is allowed in stream rules operation.
+    let stream_add = ops
+        .get("twitter.stream.rules.add")
+        .expect("twitter.stream.rules.add");
+    let stream_nc = stream_add.network_constraints.as_ref().expect("stream nc");
+    assert!(
+        stream_nc
+            .host_allow
+            .iter()
+            .any(|h| h == "stream.twitter.com")
+    );
+    assert!(stream_nc.host_allow.iter().any(|h| h == "api.x.com"));
+
+    // Verify 4 rate limit pools (read, write, delete, stream).
+    let pools = parsed.rate_limits.as_ref().expect("rate_limits");
+    assert_eq!(pools.pools.len(), 4);
+}
+
+#[test]
+fn twitter_bad_manifest_vector_is_rejected() {
+    let _log = TestLog::new(
+        "twitter_bad_manifest_vector_is_rejected",
+        "fcp-manifest",
+        Some("fcp.twitter"),
+        Some("0.1.0"),
+        Some(3),
+    );
+    let raw = read_vector_manifest("manifest_twitter_bad.toml");
     let with_hash = with_computed_hash(&raw);
     let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
     let msg = err.to_string();

@@ -1,0 +1,160 @@
+# Plaid connector manifest — valid (good) test vector.
+# Covers: knowledge + operational + streaming archetypes, singleton_writer state,
+# Plaid API host pinning (production/sandbox/development.plaid.com),
+# financial data operations (accounts, transactions sync, balances).
+
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.plaid"
+name = "Plaid Connector"
+version = "0.1.0"
+description = "FCP connector for Plaid financial data"
+archetypes = ["knowledge", "operational", "streaming"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores transactions_sync cursor and access tokens."
+
+[zones]
+home = "z:private"
+allowed_sources = ["z:owner", "z:private"]
+allowed_targets = ["z:private"]
+forbidden = ["z:public", "z:community", "z:work"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
+optional = []
+forbidden = ["system.exec", "network.listen", "media.upload", "media.download"]
+
+[provides.operations."plaid.accounts_get"]
+description = "Get all accounts for a linked item"
+capability = "plaid.accounts.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."plaid.accounts_get".input_schema]
+required = ["access_token"]
+type = "object"
+[provides.operations."plaid.accounts_get".input_schema.properties.access_token]
+type = "string"
+
+[provides.operations."plaid.accounts_get".output_schema]
+required = ["accounts", "item"]
+type = "object"
+[provides.operations."plaid.accounts_get".output_schema.properties.accounts]
+type = "array"
+[provides.operations."plaid.accounts_get".output_schema.properties.item]
+type = "object"
+
+[provides.operations."plaid.accounts_get".network_constraints]
+host_allow = ["production.plaid.com", "sandbox.plaid.com", "development.plaid.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."plaid.accounts_get".ai_hints]
+when_to_use = "List all accounts for a linked institution."
+common_mistakes = []
+examples = ['{"access_token": "access-sandbox-xxxx"}']
+related = ["plaid.transactions_sync"]
+
+[provides.operations."plaid.transactions_sync"]
+description = "Incrementally sync transactions using a cursor"
+capability = "plaid.transactions.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."plaid.transactions_sync".input_schema]
+required = ["access_token"]
+type = "object"
+[provides.operations."plaid.transactions_sync".input_schema.properties.access_token]
+type = "string"
+[provides.operations."plaid.transactions_sync".input_schema.properties.cursor]
+type = "string"
+
+[provides.operations."plaid.transactions_sync".output_schema]
+required = ["added", "modified", "removed", "next_cursor", "has_more"]
+type = "object"
+[provides.operations."plaid.transactions_sync".output_schema.properties.added]
+type = "array"
+[provides.operations."plaid.transactions_sync".output_schema.properties.has_more]
+type = "boolean"
+[provides.operations."plaid.transactions_sync".output_schema.properties.next_cursor]
+type = "string"
+
+[provides.operations."plaid.transactions_sync".network_constraints]
+host_allow = ["production.plaid.com", "sandbox.plaid.com", "development.plaid.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."plaid.transactions_sync".ai_hints]
+when_to_use = "Incrementally sync transactions."
+common_mistakes = []
+examples = ['{"access_token": "access-sandbox-xxxx", "cursor": ""}']
+related = ["plaid.accounts_get"]
+
+[event_caps]
+streaming = true
+replay = false
+min_buffer_events = 100
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "plaid.accounts.read"
+requests = 120
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "plaid.transactions.read"
+requests = 60
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[rate_limits.operation_pools]
+"plaid.accounts_get" = ["plaid.accounts.read"]
+"plaid.transactions_sync" = ["plaid.transactions.read"]

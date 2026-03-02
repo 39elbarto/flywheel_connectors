@@ -1,0 +1,194 @@
+# Salesforce connector manifest — valid (good) test vector.
+# Covers: knowledge + operational archetypes, singleton_writer state,
+# accounts + contacts + SOQL, host pinned to *.salesforce.com / *.force.com.
+
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.salesforce"
+name = "Salesforce Connector"
+version = "0.1.0"
+description = "FCP connector for Salesforce CRM platform"
+archetypes = ["knowledge", "operational"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public", "z:community"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
+optional = []
+forbidden = ["system.exec", "network.listen", "media.upload", "media.download"]
+
+[provides.operations."salesforce.accounts.list"]
+description = "Query accounts"
+capability = "salesforce.accounts.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."salesforce.accounts.list".input_schema]
+required = []
+type = "object"
+[provides.operations."salesforce.accounts.list".input_schema.properties.limit]
+type = "integer"
+[provides.operations."salesforce.accounts.list".input_schema.properties.fields]
+type = "array"
+
+[provides.operations."salesforce.accounts.list".output_schema]
+required = ["records"]
+type = "object"
+[provides.operations."salesforce.accounts.list".output_schema.properties.records]
+type = "array"
+
+[provides.operations."salesforce.accounts.list".network_constraints]
+host_allow = ["*.salesforce.com", "*.force.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."salesforce.accounts.list".ai_hints]
+when_to_use = "List Salesforce accounts."
+common_mistakes = []
+examples = ['{"limit": 50, "fields": ["Id", "Name"]}']
+related = ["salesforce.contacts.delete", "salesforce.soql.query"]
+
+[provides.operations."salesforce.contacts.delete"]
+description = "Delete a contact"
+capability = "salesforce.contacts.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+
+[provides.operations."salesforce.contacts.delete".input_schema]
+required = ["contact_id"]
+type = "object"
+[provides.operations."salesforce.contacts.delete".input_schema.properties.contact_id]
+type = "string"
+
+[provides.operations."salesforce.contacts.delete".output_schema]
+type = "object"
+
+[provides.operations."salesforce.contacts.delete".network_constraints]
+host_allow = ["*.salesforce.com", "*.force.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."salesforce.contacts.delete".ai_hints]
+when_to_use = "Delete a contact."
+common_mistakes = []
+examples = ['{"contact_id": "003xx000004TmiQ"}']
+related = ["salesforce.accounts.list"]
+
+[provides.operations."salesforce.soql.query"]
+description = "Execute a SOQL query"
+capability = "salesforce.soql.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."salesforce.soql.query".input_schema]
+required = ["query"]
+type = "object"
+[provides.operations."salesforce.soql.query".input_schema.properties.query]
+type = "string"
+
+[provides.operations."salesforce.soql.query".output_schema]
+required = ["records"]
+type = "object"
+[provides.operations."salesforce.soql.query".output_schema.properties.records]
+type = "array"
+
+[provides.operations."salesforce.soql.query".network_constraints]
+host_allow = ["*.salesforce.com", "*.force.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 52428800
+
+[provides.operations."salesforce.soql.query".ai_hints]
+when_to_use = "Run a SOQL query."
+common_mistakes = []
+examples = ['{"query": "SELECT Id FROM Account LIMIT 10"}']
+related = ["salesforce.accounts.list"]
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "salesforce.accounts.read"
+requests = 500
+window_ms = 60000
+burst = 50
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "salesforce.contacts.write"
+requests = 100
+window_ms = 60000
+burst = 15
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "salesforce.soql.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[rate_limits.operation_pools]
+"salesforce.accounts.list" = ["salesforce.accounts.read"]
+"salesforce.contacts.delete" = ["salesforce.contacts.write"]
+"salesforce.soql.query" = ["salesforce.soql.read"]

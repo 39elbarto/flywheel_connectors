@@ -1,0 +1,82 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.anthropic"
+name = "Anthropic Connector"
+version = "0.1.0"
+description = "Manifest vector for Anthropic connector capability mapping"
+archetypes = [
+    "operational",
+    "streaming",
+]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni"]
+optional = []
+forbidden = ["system.exec", "network.listen", "storage.state"]
+
+[provides.operations."anthropic.message"]
+description = "Structured Claude message operation"
+capability = "anthropic.message"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+input_schema = { type = "object", required = ["messages"] }
+output_schema = { type = "object", required = ["id", "content", "usage"] }
+network_constraints = { host_allow = ["api.anthropic.com"], port_allow = [443], require_sni = true }
+
+[provides.operations."anthropic.chat"]
+description = "Single-turn Claude chat operation"
+capability = "anthropic.chat"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+input_schema = { type = "object", required = ["message"] }
+output_schema = { type = "object", required = ["response", "usage"] }
+network_constraints = { host_allow = ["api.anthropic.com"], port_allow = [443], require_sni = true }
+
+[provides.operations."anthropic.get_usage"]
+description = "Read local connector usage totals"
+capability = "anthropic.get_usage"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object" }
+output_schema = { type = "object", required = ["total_input_tokens", "total_output_tokens", "total_cost_usd"] }
+
+[event_caps]
+streaming = true
+replay = false
+min_buffer_events = 10
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true

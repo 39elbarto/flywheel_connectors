@@ -1,0 +1,102 @@
+# DuckDB connector manifest — invalid (bad) test vector.
+# Violations:
+#   1. storage.state appears in BOTH required AND forbidden (NORMATIVE duplicate)
+#   2. home zone "z:public" is in forbidden list (zone conflict)
+#   3. total_timeout_ms = 0 (timeouts must be > 0)
+
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.duckdb"
+name = "DuckDB Connector Bad"
+version = "0.1.0"
+description = "Invalid DuckDB manifest for rejection testing"
+archetypes = ["knowledge", "storage"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:public"
+allowed_sources = ["z:owner", "z:private"]
+allowed_targets = ["z:private"]
+forbidden = ["z:public", "z:community", "z:work"]
+
+[capabilities]
+required = ["storage.state"]
+optional = []
+forbidden = ["system.exec", "network.listen", "network.dns", "network.egress", "storage.state"]
+
+[provides.operations."duckdb.query"]
+description = "Execute a read-only SQL query against DuckDB"
+capability = "duckdb.query.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."duckdb.query".input_schema]
+required = ["sql"]
+type = "object"
+[provides.operations."duckdb.query".input_schema.properties.sql]
+type = "string"
+description = "SQL query"
+
+[provides.operations."duckdb.query".output_schema]
+required = ["columns", "rows"]
+type = "object"
+[provides.operations."duckdb.query".output_schema.properties.columns]
+type = "array"
+[provides.operations."duckdb.query".output_schema.properties.rows]
+type = "array"
+
+[provides.operations."duckdb.query".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 0
+max_response_bytes = 52428800
+
+[provides.operations."duckdb.query".ai_hints]
+when_to_use = "Execute a read-only SQL query against DuckDB."
+common_mistakes = []
+examples = ['{"sql": "SELECT count(*) FROM t"}']
+related = ["duckdb.tables.list"]
+
+[sandbox]
+profile = "strict"
+memory_mb = 512
+cpu_percent = 50
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "duckdb.query.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[rate_limits.operation_pools]
+"duckdb.query" = ["duckdb.query.read"]

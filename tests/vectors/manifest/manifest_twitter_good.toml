@@ -1,0 +1,206 @@
+# Twitter connector manifest — valid (good) test vector.
+# Covers: operational + streaming + bidirectional archetypes, capability family mapping,
+# and API + streaming hosts in NetworkConstraints.
+
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.twitter"
+name = "Twitter/X Connector"
+version = "0.1.0"
+description = "FCP connector for Twitter/X API with REST operations and filtered stream support"
+archetypes = ["operational", "streaming", "bidirectional"]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni"]
+optional = []
+forbidden = ["system.exec", "network.listen", "storage.state"]
+
+[provides.operations."twitter.tweet.search"]
+description = "Search recent tweets"
+capability = "twitter.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."twitter.tweet.search".input_schema]
+required = ["query"]
+type = "object"
+[provides.operations."twitter.tweet.search".input_schema.properties.query]
+type = "string"
+[provides.operations."twitter.tweet.search".input_schema.properties.max_results]
+type = "integer"
+minimum = 10
+maximum = 100
+
+[provides.operations."twitter.tweet.search".output_schema]
+required = ["tweets"]
+type = "object"
+[provides.operations."twitter.tweet.search".output_schema.properties.tweets]
+type = "array"
+[provides.operations."twitter.tweet.search".output_schema.properties.meta]
+type = "object"
+
+[provides.operations."twitter.tweet.search".network_constraints]
+host_allow = ["api.twitter.com", "api.x.com", "stream.twitter.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."twitter.tweet.search".ai_hints]
+when_to_use = "Search for recent tweets."
+common_mistakes = ["Expecting older tweets than the recent-search window."]
+examples = ['{"query": "from:TwitterDev", "max_results": 20}']
+related = ["twitter.user.timeline", "twitter.tweet.get"]
+
+[provides.operations."twitter.tweet.create"]
+description = "Post a new tweet"
+capability = "twitter.write"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."twitter.tweet.create".input_schema]
+required = ["text"]
+type = "object"
+[provides.operations."twitter.tweet.create".input_schema.properties.text]
+type = "string"
+minLength = 1
+maxLength = 280
+
+[provides.operations."twitter.tweet.create".output_schema]
+required = ["tweet"]
+type = "object"
+[provides.operations."twitter.tweet.create".output_schema.properties.tweet]
+type = "object"
+
+[provides.operations."twitter.tweet.create".network_constraints]
+host_allow = ["api.twitter.com", "api.x.com", "stream.twitter.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."twitter.tweet.create".ai_hints]
+when_to_use = "Publish a new tweet."
+common_mistakes = ["Exceeding 280 character limit."]
+examples = ['{"text": "Hello from FCP!"}']
+related = ["twitter.tweet.reply", "twitter.tweet.delete"]
+
+[provides.operations."twitter.stream.rules.list"]
+description = "List filtered-stream rules"
+capability = "twitter.stream"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."twitter.stream.rules.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."twitter.stream.rules.list".output_schema]
+required = []
+type = "object"
+[provides.operations."twitter.stream.rules.list".output_schema.properties.rules]
+type = "array"
+
+[provides.operations."twitter.stream.rules.list".network_constraints]
+host_allow = ["api.twitter.com", "api.x.com", "stream.twitter.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."twitter.stream.rules.list".ai_hints]
+when_to_use = "Inspect active filtered stream rules."
+common_mistakes = []
+examples = ["{}"]
+related = ["twitter.stream.rules.add", "twitter.stream.rules.delete"]
+
+[event_caps]
+streaming = true
+replay = false
+min_buffer_events = 256
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = []
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "twitter.read"
+requests = 300
+window_ms = 900000
+burst = 50
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "twitter.write"
+requests = 200
+window_ms = 86400000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "twitter.stream"
+requests = 450
+window_ms = 900000
+burst = 50
+scope = "instance"
+
+[rate_limits.operation_pools]
+"twitter.tweet.search" = ["twitter.read"]
+"twitter.tweet.create" = ["twitter.write"]
+"twitter.stream.rules.list" = ["twitter.stream"]

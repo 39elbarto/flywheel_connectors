@@ -1,0 +1,88 @@
+# Stripe connector manifest — invalid (bad) test vector.
+# Violations:
+#   1. system.exec in both required and forbidden (NORMATIVE duplicate)
+#   2. home zone "z:public" is in forbidden list (zone conflict)
+
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.stripe"
+name = "Stripe Connector Bad"
+version = "0.1.0"
+description = "Invalid Stripe manifest"
+archetypes = ["operational"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:public"
+allowed_sources = ["z:private"]
+allowed_targets = ["z:private"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "system.exec"]
+optional = []
+forbidden = ["system.exec", "network.listen"]
+
+[provides.operations."stripe.get_customer"]
+description = "Get a customer"
+capability = "stripe.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."stripe.get_customer".input_schema]
+required = ["customer_id"]
+type = "object"
+[provides.operations."stripe.get_customer".input_schema.properties.customer_id]
+type = "string"
+
+[provides.operations."stripe.get_customer".output_schema]
+required = ["customer"]
+type = "object"
+[provides.operations."stripe.get_customer".output_schema.properties.customer]
+type = "object"
+
+[provides.operations."stripe.get_customer".network_constraints]
+host_allow = ["api.stripe.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."stripe.get_customer".ai_hints]
+when_to_use = "Get a customer."
+common_mistakes = []
+examples = ['{"customer_id": "cus_abc123"}']
+related = []
+
+[sandbox]
+profile = "strict"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 60000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true

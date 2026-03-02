@@ -1,0 +1,156 @@
+# Terraform connector manifest — valid (good) test vector.
+# Covers: operational archetype, singleton_writer state, safety-critical design
+# (plan=safe, apply=dangerous with plan_hash binding), infra zone, strict egress
+# (registry.terraform.io only), deny_exec=false for terraform binary.
+
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+# Placeholder — recompute after full implementation
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.terraform"
+name = "Terraform Connector"
+version = "0.1.0"
+description = "FCP connector for Terraform IaC"
+archetypes = ["operational"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores plan artifact hashes and drift checkpoints."
+
+[zones]
+home = "z:infra"
+allowed_sources = ["z:owner", "z:infra"]
+allowed_targets = ["z:infra"]
+forbidden = ["z:public", "z:community", "z:work"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
+optional = []
+forbidden = ["system.exec", "network.listen", "media.download", "media.upload"]
+
+[provides.operations."terraform.plan"]
+description = "Generate a Terraform execution plan (read-only)"
+capability = "terraform.plan"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."terraform.plan".input_schema]
+required = ["working_dir"]
+type = "object"
+[provides.operations."terraform.plan".input_schema.properties.working_dir]
+type = "string"
+
+[provides.operations."terraform.plan".output_schema]
+required = ["plan_hash", "summary", "resource_changes"]
+type = "object"
+[provides.operations."terraform.plan".output_schema.properties.plan_hash]
+type = "string"
+[provides.operations."terraform.plan".output_schema.properties.summary]
+type = "string"
+[provides.operations."terraform.plan".output_schema.properties.resource_changes]
+type = "array"
+
+[provides.operations."terraform.plan".network_constraints]
+host_allow = ["registry.terraform.io", "releases.hashicorp.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 30000
+total_timeout_ms = 600000
+max_response_bytes = 52428800
+
+[provides.operations."terraform.plan".ai_hints]
+when_to_use = "Preview infrastructure changes without applying."
+common_mistakes = []
+examples = ['{"working_dir": "/infra/production"}']
+related = ["terraform.apply"]
+
+[provides.operations."terraform.apply"]
+description = "Apply a plan to modify infrastructure (requires plan_hash binding)"
+capability = "terraform.apply"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "best_effort"
+
+[provides.operations."terraform.apply".input_schema]
+required = ["working_dir", "plan_hash"]
+type = "object"
+[provides.operations."terraform.apply".input_schema.properties.working_dir]
+type = "string"
+[provides.operations."terraform.apply".input_schema.properties.plan_hash]
+type = "string"
+
+[provides.operations."terraform.apply".output_schema]
+required = ["applied", "summary"]
+type = "object"
+[provides.operations."terraform.apply".output_schema.properties.applied]
+type = "boolean"
+[provides.operations."terraform.apply".output_schema.properties.summary]
+type = "string"
+
+[provides.operations."terraform.apply".network_constraints]
+host_allow = ["registry.terraform.io", "releases.hashicorp.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 30000
+total_timeout_ms = 1800000
+max_response_bytes = 52428800
+
+[provides.operations."terraform.apply".ai_hints]
+when_to_use = "Apply a reviewed plan. ALWAYS plan first."
+common_mistakes = []
+examples = ['{"working_dir": "/infra/production", "plan_hash": "blake3:abc123..."}']
+related = ["terraform.plan"]
+
+[sandbox]
+profile = "strict"
+memory_mb = 512
+cpu_percent = 75
+wall_clock_timeout_ms = 1800000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE", "$TERRAFORM_WORKDIR"]
+deny_exec = false
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "terraform.plan"
+requests = 100
+window_ms = 3600000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "terraform.apply"
+requests = 20
+window_ms = 3600000
+burst = 3
+scope = "instance"
+
+[rate_limits.operation_pools]
+"terraform.plan" = ["terraform.plan"]
+"terraform.apply" = ["terraform.apply"]

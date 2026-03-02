@@ -1,0 +1,157 @@
+# DocuSign connector manifest — valid (good) test vector.
+# Covers: operational + streaming archetypes, singleton_writer state,
+# SaaS host pinning (*.docusign.net, *.docusign.com), media.download capability,
+# dangerous safety tier for send/void operations, hourly rate limit windows.
+
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+# Placeholder — recompute after full implementation
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.docusign"
+name = "DocuSign Connector"
+version = "0.1.0"
+description = "FCP connector for DocuSign eSignature"
+archetypes = ["operational", "streaming"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores webhook idempotency keys and envelope status tracking cursors."
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public", "z:community"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni", "storage.state", "media.download"]
+optional = []
+forbidden = ["system.exec", "network.listen"]
+
+[provides.operations."docusign.get_envelope"]
+description = "Get envelope status and metadata"
+capability = "docusign.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."docusign.get_envelope".input_schema]
+required = ["account_id", "envelope_id"]
+type = "object"
+[provides.operations."docusign.get_envelope".input_schema.properties.account_id]
+type = "string"
+[provides.operations."docusign.get_envelope".input_schema.properties.envelope_id]
+type = "string"
+
+[provides.operations."docusign.get_envelope".output_schema]
+required = ["envelope"]
+type = "object"
+[provides.operations."docusign.get_envelope".output_schema.properties.envelope]
+type = "object"
+
+[provides.operations."docusign.get_envelope".network_constraints]
+host_allow = ["*.docusign.net", "*.docusign.com", "demo.docusign.net"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations."docusign.get_envelope".ai_hints]
+when_to_use = "Check the status of an envelope."
+common_mistakes = []
+examples = ['{"account_id": "abc-123", "envelope_id": "env-456"}']
+related = ["docusign.send_envelope"]
+
+[provides.operations."docusign.send_envelope"]
+description = "Send a draft envelope to recipients for signing"
+capability = "docusign.send"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "best_effort"
+
+[provides.operations."docusign.send_envelope".input_schema]
+required = ["account_id", "envelope_id"]
+type = "object"
+[provides.operations."docusign.send_envelope".input_schema.properties.account_id]
+type = "string"
+[provides.operations."docusign.send_envelope".input_schema.properties.envelope_id]
+type = "string"
+
+[provides.operations."docusign.send_envelope".output_schema]
+required = ["envelope_id"]
+type = "object"
+[provides.operations."docusign.send_envelope".output_schema.properties.envelope_id]
+type = "string"
+
+[provides.operations."docusign.send_envelope".network_constraints]
+host_allow = ["*.docusign.net", "*.docusign.com", "demo.docusign.net"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."docusign.send_envelope".ai_hints]
+when_to_use = "Send a draft envelope to recipients."
+common_mistakes = []
+examples = ['{"account_id": "abc-123", "envelope_id": "env-456"}']
+related = ["docusign.get_envelope"]
+
+[event_caps]
+streaming = true
+replay = false
+min_buffer_events = 50
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "docusign.read"
+requests = 1000
+window_ms = 3600000
+burst = 25
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "docusign.send"
+requests = 50
+window_ms = 3600000
+burst = 5
+scope = "instance"
+
+[rate_limits.operation_pools]
+"docusign.get_envelope" = ["docusign.read"]
+"docusign.send_envelope" = ["docusign.send"]

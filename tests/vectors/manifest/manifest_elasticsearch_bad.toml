@@ -1,0 +1,92 @@
+# Elasticsearch connector manifest — invalid (bad) test vector.
+# Violations:
+#   1. network.egress appears in BOTH required AND forbidden (NORMATIVE duplicate)
+#   2. home zone "z:public" is in forbidden list (zone conflict)
+#   3. total_timeout_ms = 0 (timeouts must be > 0)
+
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.elasticsearch"
+name = "Elasticsearch Connector Bad"
+version = "0.1.0"
+description = "Invalid Elasticsearch manifest for rejection testing"
+archetypes = ["knowledge"]
+format = "wasi"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+# VIOLATION: home zone is in forbidden list
+home = "z:public"
+allowed_sources = ["z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+# VIOLATION: network.egress in both required and forbidden (NORMATIVE duplicate)
+required = ["network.dns", "network.egress", "network.tls.sni"]
+optional = []
+forbidden = ["system.exec", "network.egress"]
+
+[provides.operations."elasticsearch.search"]
+description = "Search documents"
+capability = "elasticsearch.search.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."elasticsearch.search".input_schema]
+required = ["index"]
+type = "object"
+[provides.operations."elasticsearch.search".input_schema.properties.index]
+type = "string"
+
+[provides.operations."elasticsearch.search".output_schema]
+required = ["hits"]
+type = "object"
+[provides.operations."elasticsearch.search".output_schema.properties.hits]
+type = "object"
+
+[provides.operations."elasticsearch.search".network_constraints]
+host_allow = ["*.elastic-cloud.com"]
+port_allow = [443, 9243]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+# VIOLATION: timeout must be > 0
+total_timeout_ms = 0
+max_response_bytes = 52428800
+
+[provides.operations."elasticsearch.search".ai_hints]
+when_to_use = "Search documents."
+common_mistakes = []
+examples = ['{"index": "logs-*"}']
+related = []
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true

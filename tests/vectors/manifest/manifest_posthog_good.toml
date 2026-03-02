@@ -1,0 +1,97 @@
+# PostHog connector manifest — valid (good) test vector.
+# Covers: knowledge archetype, events + insights + feature flags, host pinned to app.posthog.com + us.posthog.com + eu.posthog.com.
+
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.posthog"
+name = "PostHog Connector"
+version = "0.1.0"
+description = "FCP connector for PostHog"
+archetypes = ["knowledge"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
+optional = []
+forbidden = ["system.exec", "network.listen", "media.upload", "media.download"]
+
+[provides.operations."posthog.events.query"]
+description = "Query PostHog events using HogQL"
+capability = "posthog.events.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."posthog.events.query".input_schema]
+required = ["query"]
+type = "object"
+[provides.operations."posthog.events.query".input_schema.properties.query]
+type = "string"
+description = "HogQL query"
+
+[provides.operations."posthog.events.query".output_schema]
+required = ["results"]
+type = "object"
+[provides.operations."posthog.events.query".output_schema.properties.results]
+type = "array"
+
+[provides.operations."posthog.events.query".network_constraints]
+host_allow = ["app.posthog.com", "us.posthog.com", "eu.posthog.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 52428800
+
+[provides.operations."posthog.events.query".ai_hints]
+when_to_use = "Query PostHog events using HogQL."
+common_mistakes = []
+examples = ['{"query": "SELECT event FROM events LIMIT 10"}']
+related = ["posthog.insights.list"]
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "posthog.events.read"
+requests = 100
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[rate_limits.operation_pools]
+"posthog.events.query" = ["posthog.events.read"]

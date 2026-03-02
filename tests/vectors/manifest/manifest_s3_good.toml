@@ -1,0 +1,154 @@
+# S3 connector manifest — valid (good) test vector.
+# Covers: storage + operational archetypes, singleton_writer state,
+# *.s3.amazonaws.com wildcard host, z:private home zone.
+
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.s3"
+name = "S3 Connector"
+version = "0.1.0"
+description = "FCP connector for S3"
+archetypes = ["storage", "operational"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:private"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:private", "z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
+optional = ["media.download", "media.upload"]
+forbidden = ["system.exec", "network.listen"]
+
+[provides.operations."s3.put_object"]
+description = "Upload an object"
+capability = "s3.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."s3.put_object".input_schema]
+required = ["bucket", "key", "body"]
+type = "object"
+[provides.operations."s3.put_object".input_schema.properties.bucket]
+type = "string"
+[provides.operations."s3.put_object".input_schema.properties.key]
+type = "string"
+[provides.operations."s3.put_object".input_schema.properties.body]
+type = "string"
+
+[provides.operations."s3.put_object".output_schema]
+required = ["etag"]
+type = "object"
+[provides.operations."s3.put_object".output_schema.properties.etag]
+type = "string"
+
+[provides.operations."s3.put_object".network_constraints]
+host_allow = ["*.s3.amazonaws.com", "s3.amazonaws.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 300000
+max_response_bytes = 1048576
+
+[provides.operations."s3.put_object".ai_hints]
+when_to_use = "Upload to S3."
+common_mistakes = []
+examples = ['{"bucket": "my-bucket", "key": "file.json", "body": "{}"}']
+related = ["s3.get_object"]
+
+[provides.operations."s3.get_object"]
+description = "Download an object"
+capability = "s3.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."s3.get_object".input_schema]
+required = ["bucket", "key"]
+type = "object"
+[provides.operations."s3.get_object".input_schema.properties.bucket]
+type = "string"
+[provides.operations."s3.get_object".input_schema.properties.key]
+type = "string"
+
+[provides.operations."s3.get_object".output_schema]
+required = ["body", "content_type"]
+type = "object"
+[provides.operations."s3.get_object".output_schema.properties.body]
+type = "string"
+[provides.operations."s3.get_object".output_schema.properties.content_type]
+type = "string"
+
+[provides.operations."s3.get_object".network_constraints]
+host_allow = ["*.s3.amazonaws.com", "s3.amazonaws.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 300000
+max_response_bytes = 104857600
+
+[provides.operations."s3.get_object".ai_hints]
+when_to_use = "Download from S3."
+common_mistakes = []
+examples = ['{"bucket": "my-bucket", "key": "file.json"}']
+related = ["s3.put_object"]
+
+[sandbox]
+profile = "strict"
+memory_mb = 512
+cpu_percent = 50
+wall_clock_timeout_ms = 600000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "s3.read"
+requests = 5500
+window_ms = 1000
+burst = 5500
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "s3.write"
+requests = 3500
+window_ms = 1000
+burst = 3500
+scope = "instance"
+
+[rate_limits.operation_pools]
+"s3.put_object" = ["s3.write"]
+"s3.get_object" = ["s3.read"]

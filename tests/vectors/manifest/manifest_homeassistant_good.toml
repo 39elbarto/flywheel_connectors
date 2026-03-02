@@ -1,0 +1,155 @@
+# Home Assistant connector manifest — valid (good) test vector.
+# Covers: knowledge + operational + streaming archetypes, singleton_writer state,
+# env var host ($ha_host), private-range access (self-hosted), WS + HTTPS ports,
+# control capability family, event_caps.
+
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+# Placeholder — recompute after full implementation
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.homeassistant"
+name = "Home Assistant Connector"
+version = "0.1.0"
+description = "FCP connector for Home Assistant"
+archetypes = ["knowledge", "operational", "streaming"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores WebSocket subscription IDs and event cursor timestamps."
+
+[zones]
+home = "z:infra"
+allowed_sources = ["z:owner", "z:private", "z:work", "z:infra"]
+allowed_targets = ["z:infra", "z:work"]
+forbidden = ["z:public", "z:community"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
+optional = ["network.tls.mtls"]
+forbidden = ["system.exec", "network.listen", "media.download"]
+
+[provides.operations."homeassistant.get_state"]
+description = "Get the current state of an entity"
+capability = "homeassistant.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."homeassistant.get_state".input_schema]
+required = ["entity_id"]
+type = "object"
+[provides.operations."homeassistant.get_state".input_schema.properties.entity_id]
+type = "string"
+
+[provides.operations."homeassistant.get_state".output_schema]
+required = ["state"]
+type = "object"
+[provides.operations."homeassistant.get_state".output_schema.properties.state]
+type = "object"
+
+[provides.operations."homeassistant.get_state".network_constraints]
+host_allow = ["$ha_host"]
+port_allow = [443, 8123]
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = false
+require_sni = true
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 4
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 15000
+max_response_bytes = 1048576
+
+[provides.operations."homeassistant.get_state".ai_hints]
+when_to_use = "Read the current state of an entity."
+common_mistakes = []
+examples = ['{"entity_id": "light.living_room"}']
+related = ["homeassistant.call_service"]
+
+[provides.operations."homeassistant.call_service"]
+description = "Call a Home Assistant service"
+capability = "homeassistant.control"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "interactive"
+idempotency = "best_effort"
+
+[provides.operations."homeassistant.call_service".input_schema]
+required = ["domain", "service"]
+type = "object"
+[provides.operations."homeassistant.call_service".input_schema.properties.domain]
+type = "string"
+[provides.operations."homeassistant.call_service".input_schema.properties.service]
+type = "string"
+
+[provides.operations."homeassistant.call_service".output_schema]
+required = ["result"]
+type = "object"
+[provides.operations."homeassistant.call_service".output_schema.properties.result]
+type = "array"
+
+[provides.operations."homeassistant.call_service".network_constraints]
+host_allow = ["$ha_host"]
+port_allow = [443, 8123]
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = false
+require_sni = true
+deny_ip_literals = false
+require_host_canonicalization = false
+dns_max_ips = 4
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."homeassistant.call_service".ai_hints]
+when_to_use = "Control devices via Home Assistant services."
+common_mistakes = []
+examples = ['{"domain": "light", "service": "turn_on"}']
+related = ["homeassistant.get_state"]
+
+[event_caps]
+streaming = true
+replay = false
+min_buffer_events = 200
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "homeassistant.read"
+requests = 600
+window_ms = 60000
+burst = 50
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "homeassistant.control"
+requests = 120
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[rate_limits.operation_pools]
+"homeassistant.get_state" = ["homeassistant.read"]
+"homeassistant.call_service" = ["homeassistant.control"]

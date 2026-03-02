@@ -1,0 +1,202 @@
+# Browser connector manifest — valid (good) test vector.
+# Covers: operational archetype, singleton_writer state, headless browser automation,
+# navigate (risky/policy), screenshot (safe), evaluate_js (dangerous/interactive).
+# host_allow uses wildcard domain patterns (runtime planner extends per-deployment).
+
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.browser"
+name = "Browser Connector"
+version = "0.1.0"
+description = "FCP connector for headless browser automation"
+archetypes = ["operational"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "Stores session cookies and browser profile state."
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:work", "z:private"]
+forbidden = ["z:public", "z:community"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni", "storage.state", "media.download"]
+optional = []
+forbidden = ["system.exec", "network.listen"]
+
+[provides.operations."browser.navigate"]
+description = "Navigate to a URL"
+capability = "browser.navigate"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."browser.navigate".input_schema]
+required = ["url"]
+type = "object"
+[provides.operations."browser.navigate".input_schema.properties.url]
+type = "string"
+
+[provides.operations."browser.navigate".output_schema]
+required = ["url", "status"]
+type = "object"
+[provides.operations."browser.navigate".output_schema.properties.url]
+type = "string"
+[provides.operations."browser.navigate".output_schema.properties.status]
+type = "integer"
+
+[provides.operations."browser.navigate".network_constraints]
+host_allow = ["*.github.com", "*.google.com", "*.wikipedia.org"]
+port_allow = [80, 443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 10
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 52428800
+
+[provides.operations."browser.navigate".ai_hints]
+when_to_use = "Navigate the browser to a URL."
+common_mistakes = []
+examples = ['{"url": "https://example.com"}']
+related = ["browser.screenshot", "browser.evaluate_js"]
+
+[provides.operations."browser.screenshot"]
+description = "Capture a screenshot"
+capability = "browser.capture"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."browser.screenshot".input_schema]
+required = []
+type = "object"
+[provides.operations."browser.screenshot".input_schema.properties.full_page]
+type = "boolean"
+
+[provides.operations."browser.screenshot".output_schema]
+required = ["image_data", "width", "height"]
+type = "object"
+[provides.operations."browser.screenshot".output_schema.properties.image_data]
+type = "string"
+[provides.operations."browser.screenshot".output_schema.properties.width]
+type = "integer"
+[provides.operations."browser.screenshot".output_schema.properties.height]
+type = "integer"
+
+[provides.operations."browser.screenshot".network_constraints]
+host_allow = ["*.github.com", "*.google.com", "*.wikipedia.org"]
+port_allow = [80, 443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 52428800
+
+[provides.operations."browser.screenshot".ai_hints]
+when_to_use = "Capture a screenshot of the current page."
+common_mistakes = []
+examples = ['{"full_page": true}']
+related = ["browser.navigate"]
+
+[provides.operations."browser.evaluate_js"]
+description = "Execute JavaScript in page context"
+capability = "browser.execute"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+
+[provides.operations."browser.evaluate_js".input_schema]
+required = ["expression"]
+type = "object"
+[provides.operations."browser.evaluate_js".input_schema.properties.expression]
+type = "string"
+
+[provides.operations."browser.evaluate_js".output_schema]
+required = ["result"]
+type = "object"
+[provides.operations."browser.evaluate_js".output_schema.properties.result]
+type = "string"
+
+[provides.operations."browser.evaluate_js".network_constraints]
+host_allow = ["*.github.com", "*.google.com", "*.wikipedia.org"]
+port_allow = [80, 443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."browser.evaluate_js".ai_hints]
+when_to_use = "Execute arbitrary JavaScript — dangerous, use only when APIs are insufficient."
+common_mistakes = []
+examples = ['{"expression": "document.title"}']
+related = ["browser.navigate"]
+
+[sandbox]
+profile = "moderate"
+memory_mb = 1024
+cpu_percent = 75
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = false
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "browser.navigate"
+requests = 30
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "browser.capture"
+requests = 60
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "browser.execute"
+requests = 30
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[rate_limits.operation_pools]
+"browser.navigate" = ["browser.navigate"]
+"browser.screenshot" = ["browser.capture"]
+"browser.evaluate_js" = ["browser.execute"]

@@ -548,6 +548,9 @@ fn airtable_operation_risk_levels_properly_gated() {
         "get_record",
         "get_base_schema",
         "download_attachment",
+        "list_tables",
+        "get_table",
+        "list_fields",
     ];
     for op_name in read_ops {
         let op = operations.get(op_name).unwrap_or_else(|| {
@@ -571,7 +574,7 @@ fn airtable_operation_risk_levels_properly_gated() {
     // Total operation count
     assert_eq!(
         operations.len(),
-        10,
-        "Airtable manifest should have 10 operations"
+        13,
+        "Airtable manifest should have 13 operations"
     );
 }

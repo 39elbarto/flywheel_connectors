@@ -1,0 +1,636 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:pending"
+
+[connector]
+id = "fcp.llm-router"
+name = "LLM Router Connector"
+version = "0.1.0"
+description = "Meta-connector for intelligent routing across multiple AI/LLM providers with cost, latency, and capability-based selection"
+archetypes = ["operational"]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+]
+optional = []
+forbidden = [
+    "system.exec",
+    "network.listen",
+    "storage.state",
+]
+
+# -----------------------------------------------------------------------------
+# Operations
+# -----------------------------------------------------------------------------
+
+[provides.operations."llm-router.route"]
+description = "Route a chat completion request to the optimal provider/model based on configured strategy"
+capability = "llm-router.route"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."llm-router.route".rate_limit]
+max = 120
+per_ms = 60000
+
+[provides.operations."llm-router.route".input_schema]
+required = ["messages"]
+type = "object"
+
+[provides.operations."llm-router.route".input_schema.properties.messages]
+description = "Conversation messages in unified format [{role, content}]"
+minItems = 1
+type = "array"
+
+[provides.operations."llm-router.route".input_schema.properties.messages.items]
+required = ["role", "content"]
+type = "object"
+
+[provides.operations."llm-router.route".input_schema.properties.messages.items.properties.role]
+type = "string"
+enum = ["system", "user", "assistant"]
+
+[provides.operations."llm-router.route".input_schema.properties.messages.items.properties.content]
+type = "string"
+
+[provides.operations."llm-router.route".input_schema.properties.strategy]
+description = "Routing strategy: cost (cheapest), latency (fastest), capability (best-fit), fallback (try in order)"
+type = "string"
+enum = ["cost", "latency", "capability", "fallback"]
+default = "cost"
+
+[provides.operations."llm-router.route".input_schema.properties.preferred_provider]
+description = "Preferred provider name (anthropic, openai, google-ai); used as hint, not guarantee"
+type = "string"
+enum = ["anthropic", "openai", "google-ai"]
+
+[provides.operations."llm-router.route".input_schema.properties.preferred_model]
+description = "Preferred model name; used as hint unless provider is unavailable"
+type = "string"
+
+[provides.operations."llm-router.route".input_schema.properties.max_tokens]
+description = "Maximum output tokens to generate"
+type = "integer"
+default = 4096
+minimum = 1
+maximum = 200000
+
+[provides.operations."llm-router.route".input_schema.properties.temperature]
+description = "Sampling temperature (0.0 to 2.0)"
+type = "number"
+minimum = 0
+maximum = 2
+
+[provides.operations."llm-router.route".input_schema.properties.tools]
+description = "Tool/function definitions (provider-normalized)"
+type = "array"
+
+[provides.operations."llm-router.route".input_schema.properties.budget_limit_usd]
+description = "Maximum cost for this request in USD; request is denied if estimated cost exceeds this"
+type = "number"
+minimum = 0
+
+[provides.operations."llm-router.route".input_schema.properties.required_capabilities]
+description = "Required model capabilities for routing (e.g. vision, tool_use, long_context)"
+type = "array"
+
+[provides.operations."llm-router.route".input_schema.properties.required_capabilities.items]
+type = "string"
+enum = ["vision", "tool_use", "long_context", "code", "math", "streaming"]
+
+[provides.operations."llm-router.route".output_schema]
+required = [
+    "response",
+    "provider",
+    "model",
+    "usage",
+    "cost_usd",
+    "routing_decision",
+    "provenance",
+]
+type = "object"
+
+[provides.operations."llm-router.route".output_schema.properties.response]
+description = "Generated response content"
+type = "string"
+
+[provides.operations."llm-router.route".output_schema.properties.provider]
+description = "Provider that handled the request"
+type = "string"
+
+[provides.operations."llm-router.route".output_schema.properties.model]
+description = "Model that generated the response"
+type = "string"
+
+[provides.operations."llm-router.route".output_schema.properties.usage]
+type = "object"
+
+[provides.operations."llm-router.route".output_schema.properties.usage.properties.input_tokens]
+type = "integer"
+
+[provides.operations."llm-router.route".output_schema.properties.usage.properties.output_tokens]
+type = "integer"
+
+[provides.operations."llm-router.route".output_schema.properties.cost_usd]
+description = "Actual cost of this request"
+type = "number"
+
+[provides.operations."llm-router.route".output_schema.properties.routing_decision]
+description = "Metadata about the routing decision"
+type = "object"
+
+[provides.operations."llm-router.route".output_schema.properties.routing_decision.properties.strategy_used]
+type = "string"
+
+[provides.operations."llm-router.route".output_schema.properties.routing_decision.properties.candidates_evaluated]
+type = "integer"
+
+[provides.operations."llm-router.route".output_schema.properties.routing_decision.properties.fallback_used]
+type = "boolean"
+
+[provides.operations."llm-router.route".output_schema.properties.routing_decision.properties.reason]
+description = "Human-readable explanation of why this provider/model was selected"
+type = "string"
+
+[provides.operations."llm-router.route".output_schema.properties.provenance]
+description = "Provenance and taint metadata for the AI-generated output"
+type = "object"
+
+[provides.operations."llm-router.route".output_schema.properties.provenance.properties.source]
+type = "string"
+
+[provides.operations."llm-router.route".output_schema.properties.provenance.properties.model]
+type = "string"
+
+[provides.operations."llm-router.route".output_schema.properties.provenance.properties.integrity]
+type = "string"
+
+[provides.operations."llm-router.route".output_schema.properties.provenance.properties.has_tool_calls]
+type = "boolean"
+
+[provides.operations."llm-router.route".output_schema.properties.provenance.properties.chunk_count]
+type = "integer"
+
+[provides.operations."llm-router.route".output_schema.properties.provenance.properties.taint]
+description = "Taint flags indicating data classification (e.g. AI_GENERATED)"
+type = "array"
+
+[provides.operations."llm-router.route".network_constraints]
+host_allow = [
+    "api.anthropic.com",
+    "api.openai.com",
+    "generativelanguage.googleapis.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 10485760
+
+[provides.operations."llm-router.route".ai_hints]
+when_to_use = "Route a chat request to the best available AI provider. Use when you want automatic model selection based on cost, latency, or capability."
+common_mistakes = [
+    "Setting budget_limit_usd too low for the selected strategy.",
+    "Specifying required_capabilities that no configured provider supports.",
+    "Using preferred_provider without a fallback strategy.",
+]
+examples = [
+    '{"messages": [{"role": "user", "content": "Summarize this text"}]}',
+    '{"messages": [{"role": "user", "content": "Write code"}], "strategy": "capability", "required_capabilities": ["code"]}',
+    '{"messages": [{"role": "user", "content": "Hello"}], "preferred_provider": "anthropic", "strategy": "fallback"}',
+]
+related = [
+    "llm-router.estimate_cost",
+    "llm-router.list_providers",
+    "llm-router.get_usage",
+]
+
+# -----------------------------------------------------------------------------
+
+[provides.operations."llm-router.estimate_cost"]
+description = "Estimate the cost of a request across available providers without executing it"
+capability = "llm-router.route"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."llm-router.estimate_cost".rate_limit]
+max = 300
+per_ms = 60000
+
+[provides.operations."llm-router.estimate_cost".input_schema]
+required = ["messages"]
+type = "object"
+
+[provides.operations."llm-router.estimate_cost".input_schema.properties.messages]
+description = "Messages to estimate cost for"
+minItems = 1
+type = "array"
+
+[provides.operations."llm-router.estimate_cost".input_schema.properties.messages.items]
+required = ["role", "content"]
+type = "object"
+
+[provides.operations."llm-router.estimate_cost".input_schema.properties.messages.items.properties.role]
+type = "string"
+
+[provides.operations."llm-router.estimate_cost".input_schema.properties.messages.items.properties.content]
+type = "string"
+
+[provides.operations."llm-router.estimate_cost".input_schema.properties.max_tokens]
+description = "Assumed output tokens for estimation"
+type = "integer"
+default = 4096
+
+[provides.operations."llm-router.estimate_cost".input_schema.properties.providers]
+description = "Specific providers to estimate for; omit for all configured"
+type = "array"
+
+[provides.operations."llm-router.estimate_cost".input_schema.properties.providers.items]
+type = "string"
+
+[provides.operations."llm-router.estimate_cost".output_schema]
+required = ["estimates"]
+type = "object"
+
+[provides.operations."llm-router.estimate_cost".output_schema.properties.estimates]
+description = "Per-provider cost estimates sorted by estimated cost ascending"
+type = "array"
+
+[provides.operations."llm-router.estimate_cost".output_schema.properties.estimates.items]
+type = "object"
+
+[provides.operations."llm-router.estimate_cost".output_schema.properties.estimates.items.properties.provider]
+type = "string"
+
+[provides.operations."llm-router.estimate_cost".output_schema.properties.estimates.items.properties.model]
+type = "string"
+
+[provides.operations."llm-router.estimate_cost".output_schema.properties.estimates.items.properties.estimated_cost_usd]
+type = "number"
+
+[provides.operations."llm-router.estimate_cost".output_schema.properties.estimates.items.properties.estimated_input_tokens]
+type = "integer"
+
+[provides.operations."llm-router.estimate_cost".output_schema.properties.estimates.items.properties.available]
+type = "boolean"
+
+[provides.operations."llm-router.estimate_cost".output_schema.properties.recommended]
+description = "Provider/model recommended by the default routing strategy"
+type = "object"
+
+[provides.operations."llm-router.estimate_cost".output_schema.properties.recommended.properties.provider]
+type = "string"
+
+[provides.operations."llm-router.estimate_cost".output_schema.properties.recommended.properties.model]
+type = "string"
+
+[provides.operations."llm-router.estimate_cost".output_schema.properties.recommended.properties.estimated_cost_usd]
+type = "number"
+
+[provides.operations."llm-router.estimate_cost".network_constraints]
+host_allow = []
+port_allow = []
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 10000
+max_response_bytes = 1048576
+
+[provides.operations."llm-router.estimate_cost".ai_hints]
+when_to_use = "Preview cost across providers before committing to a request. Useful for budget-sensitive workflows."
+common_mistakes = [
+    "Expecting exact costs — estimates are based on token counting heuristics, not provider billing.",
+]
+examples = [
+    '{"messages": [{"role": "user", "content": "Hello"}]}',
+    '{"messages": [{"role": "user", "content": "Long document..."}], "max_tokens": 8192, "providers": ["anthropic", "openai"]}',
+]
+related = [
+    "llm-router.route",
+    "llm-router.get_budget",
+]
+
+# -----------------------------------------------------------------------------
+
+[provides.operations."llm-router.list_providers"]
+description = "List configured providers with health status and available models"
+capability = "llm-router.admin"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."llm-router.list_providers".rate_limit]
+max = 60
+per_ms = 60000
+
+[provides.operations."llm-router.list_providers".input_schema]
+type = "object"
+
+[provides.operations."llm-router.list_providers".input_schema.properties.include_models]
+description = "Include per-provider model lists in response"
+type = "boolean"
+default = false
+
+[provides.operations."llm-router.list_providers".output_schema]
+required = ["providers"]
+type = "object"
+
+[provides.operations."llm-router.list_providers".output_schema.properties.providers]
+type = "array"
+
+[provides.operations."llm-router.list_providers".output_schema.properties.providers.items]
+type = "object"
+
+[provides.operations."llm-router.list_providers".output_schema.properties.providers.items.properties.name]
+type = "string"
+
+[provides.operations."llm-router.list_providers".output_schema.properties.providers.items.properties.status]
+description = "Provider health: healthy, degraded, unavailable"
+type = "string"
+enum = ["healthy", "degraded", "unavailable"]
+
+[provides.operations."llm-router.list_providers".output_schema.properties.providers.items.properties.models]
+description = "Available models (only if include_models=true)"
+type = "array"
+
+[provides.operations."llm-router.list_providers".output_schema.properties.providers.items.properties.capabilities]
+description = "Provider-level capabilities"
+type = "array"
+
+[provides.operations."llm-router.list_providers".output_schema.properties.providers.items.properties.latency_p50_ms]
+description = "Recent median latency in milliseconds"
+type = "integer"
+
+[provides.operations."llm-router.list_providers".network_constraints]
+host_allow = [
+    "api.anthropic.com",
+    "api.openai.com",
+    "generativelanguage.googleapis.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 5000
+total_timeout_ms = 15000
+max_response_bytes = 1048576
+
+[provides.operations."llm-router.list_providers".ai_hints]
+when_to_use = "Check available providers and their health status. Useful for operational monitoring."
+common_mistakes = []
+examples = [
+    "{}",
+    '{"include_models": true}',
+]
+related = [
+    "llm-router.route",
+    "llm-router.get_usage",
+]
+
+# -----------------------------------------------------------------------------
+
+[provides.operations."llm-router.get_usage"]
+description = "Return session-level usage and cost totals across all providers"
+capability = "llm-router.admin"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."llm-router.get_usage".input_schema]
+type = "object"
+
+[provides.operations."llm-router.get_usage".input_schema.properties.group_by]
+description = "Group usage by provider, model, or none"
+type = "string"
+enum = ["provider", "model", "none"]
+default = "none"
+
+[provides.operations."llm-router.get_usage".output_schema]
+required = [
+    "total_input_tokens",
+    "total_output_tokens",
+    "total_cost_usd",
+    "requests_total",
+    "requests_error",
+]
+type = "object"
+
+[provides.operations."llm-router.get_usage".output_schema.properties.total_input_tokens]
+type = "integer"
+
+[provides.operations."llm-router.get_usage".output_schema.properties.total_output_tokens]
+type = "integer"
+
+[provides.operations."llm-router.get_usage".output_schema.properties.total_cost_usd]
+type = "number"
+
+[provides.operations."llm-router.get_usage".output_schema.properties.requests_total]
+type = "integer"
+
+[provides.operations."llm-router.get_usage".output_schema.properties.requests_error]
+type = "integer"
+
+[provides.operations."llm-router.get_usage".output_schema.properties.breakdown]
+description = "Per-group breakdown (only when group_by is set)"
+type = "array"
+
+[provides.operations."llm-router.get_usage".output_schema.properties.breakdown.items]
+type = "object"
+
+[provides.operations."llm-router.get_usage".output_schema.properties.breakdown.items.properties.key]
+type = "string"
+
+[provides.operations."llm-router.get_usage".output_schema.properties.breakdown.items.properties.input_tokens]
+type = "integer"
+
+[provides.operations."llm-router.get_usage".output_schema.properties.breakdown.items.properties.output_tokens]
+type = "integer"
+
+[provides.operations."llm-router.get_usage".output_schema.properties.breakdown.items.properties.cost_usd]
+type = "number"
+
+[provides.operations."llm-router.get_usage".output_schema.properties.breakdown.items.properties.requests]
+type = "integer"
+
+[provides.operations."llm-router.get_usage".ai_hints]
+when_to_use = "Inspect session-level token and cost usage across all routed providers."
+common_mistakes = []
+examples = [
+    "{}",
+    '{"group_by": "provider"}',
+]
+related = [
+    "llm-router.get_budget",
+    "llm-router.route",
+]
+
+# -----------------------------------------------------------------------------
+
+[provides.operations."llm-router.get_budget"]
+description = "Check remaining budget allocation and spend limits"
+capability = "llm-router.admin"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."llm-router.get_budget".input_schema]
+type = "object"
+
+[provides.operations."llm-router.get_budget".output_schema]
+required = [
+    "budget_usd",
+    "spent_usd",
+    "remaining_usd",
+    "enforcement",
+]
+type = "object"
+
+[provides.operations."llm-router.get_budget".output_schema.properties.budget_usd]
+description = "Total configured budget"
+type = "number"
+
+[provides.operations."llm-router.get_budget".output_schema.properties.spent_usd]
+description = "Amount spent in current period"
+type = "number"
+
+[provides.operations."llm-router.get_budget".output_schema.properties.remaining_usd]
+description = "Remaining budget"
+type = "number"
+
+[provides.operations."llm-router.get_budget".output_schema.properties.enforcement]
+description = "Budget enforcement mode: hard (deny on exceed), soft (warn on exceed), none"
+type = "string"
+enum = ["hard", "soft", "none"]
+
+[provides.operations."llm-router.get_budget".output_schema.properties.period]
+description = "Budget period (daily, weekly, monthly, session)"
+type = "string"
+
+[provides.operations."llm-router.get_budget".output_schema.properties.alerts]
+description = "Active budget alerts"
+type = "array"
+
+[provides.operations."llm-router.get_budget".ai_hints]
+when_to_use = "Check remaining budget before making expensive requests."
+common_mistakes = []
+examples = ["{}"]
+related = [
+    "llm-router.get_usage",
+    "llm-router.estimate_cost",
+]
+
+# -----------------------------------------------------------------------------
+# Event Capabilities
+# -----------------------------------------------------------------------------
+
+[event_caps]
+streaming = false
+replay = false
+min_buffer_events = 0
+
+# -----------------------------------------------------------------------------
+# Sandbox
+# -----------------------------------------------------------------------------
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = [
+    "/usr",
+    "/lib",
+]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+# -----------------------------------------------------------------------------
+# Rate Limits
+# -----------------------------------------------------------------------------
+
+[[rate_limits.pools]]
+id = "llm-router.route"
+requests = 120
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "llm-router.admin"
+requests = 60
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "llm-router.estimate"
+requests = 300
+window_ms = 60000
+burst = 50
+scope = "instance"
+
+[rate_limits.operation_pools]
+"llm-router.route" = ["llm-router.route"]
+"llm-router.estimate_cost" = ["llm-router.estimate"]
+"llm-router.list_providers" = ["llm-router.admin"]
+"llm-router.get_usage" = ["llm-router.admin"]
+"llm-router.get_budget" = ["llm-router.admin"]

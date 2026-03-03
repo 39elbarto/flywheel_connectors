@@ -53,6 +53,7 @@ members = [
     "connectors/browser",
     "connectors/google-ai",
     "connectors/microsoft365",
+    "connectors/llm-router",
 ]
 
 # Default to the FCP2 platform core crates (connectors are explicitly targeted).

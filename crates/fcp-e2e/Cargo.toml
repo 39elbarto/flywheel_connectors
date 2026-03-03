@@ -33,6 +33,7 @@ figma = []
 airtable = []
 zendesk = []
 vectordb = []
+llm_router = []
 
 [dependencies]
 fcp-core = { workspace = true }
@@ -73,6 +74,7 @@ fcp-figma = { path = "../../connectors/figma" }
 fcp-airtable = { path = "../../connectors/airtable" }
 fcp-zendesk = { path = "../../connectors/zendesk" }
 fcp-vectordb = { path = "../../connectors/vectordb" }
+fcp-llm-router = { path = "../../connectors/llm-router", features = ["testing"] }
 pretty_assertions = { workspace = true }
 reqwest = { workspace = true }
 fcp-manifest = { workspace = true }

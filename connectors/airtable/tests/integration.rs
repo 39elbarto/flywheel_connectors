@@ -540,6 +540,190 @@ async fn invoke_get_record_through_connector() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn invoke_list_tables_through_connector() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/meta/bases/appABC/tables"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "tables": [
+                {
+                    "id": "tblTASK",
+                    "name": "Tasks",
+                    "fields": [{ "id": "fldA", "name": "Name", "type": "singleLineText" }],
+                    "views": [{ "id": "viwA", "name": "Grid", "type": "grid" }],
+                    "primaryFieldId": "fldA"
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let mut connector = AirtableConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+    setup_handshake(&mut connector, &signing_key, &["airtable.list_tables"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "airtable.list_tables");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "airtable.list_tables",
+            "input": { "base_id": "appABC123" },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["tables"][0]["id"], "tblTASK");
+    assert_eq!(result["tables"][0]["name"], "Tasks");
+    assert_eq!(result["tables"][0]["fieldCount"], 1);
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_get_table_rejects_ambiguous_table_name() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/meta/bases/appABC/tables"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "tables": [
+                {
+                    "id": "tbl1",
+                    "name": "Tasks",
+                    "fields": [{ "id": "fld1", "name": "Name", "type": "singleLineText" }],
+                    "views": []
+                },
+                {
+                    "id": "tbl2",
+                    "name": "Tasks",
+                    "fields": [{ "id": "fld2", "name": "Title", "type": "singleLineText" }],
+                    "views": []
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let mut connector = AirtableConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+    setup_handshake(&mut connector, &signing_key, &["airtable.get_table"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "airtable.get_table");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "airtable.get_table",
+            "input": { "base_id": "appABC123", "table_ref": "Tasks" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("Ambiguous table_ref"));
+        }
+        other => panic!("Expected InvalidRequest, got {other:?}"),
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_list_fields_resolves_ids_and_names() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/meta/bases/appABC/tables"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "tables": [
+                {
+                    "id": "tblTASK",
+                    "name": "Tasks",
+                    "fields": [
+                        { "id": "fldA", "name": "Name", "type": "singleLineText" },
+                        { "id": "fldB", "name": "Status", "type": "singleSelect" }
+                    ],
+                    "views": []
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let mut connector = AirtableConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+    setup_handshake(&mut connector, &signing_key, &["airtable.list_fields"]).await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let token = generate_valid_token(&signing_key, "airtable.list_fields");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "airtable.list_fields",
+            "input": {
+                "base_id": "appABC123",
+                "table_ref": "tblTASK",
+                "field_refs": ["fldA", "Status"]
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["fields"][0]["id"], "fldA");
+    assert_eq!(result["fields"][1]["name"], "Status");
+}
+
+#[fcp_async_core::runtime::test]
+async fn discovery_ops_reuse_schema_cache_within_ttl() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/meta/bases/appABC/tables"))
+        .expect(1)
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "tables": [
+                {
+                    "id": "tblTASK",
+                    "name": "Tasks",
+                    "fields": [
+                        { "id": "fldA", "name": "Name", "type": "singleLineText" }
+                    ],
+                    "views": []
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let mut connector = AirtableConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+    setup_handshake(
+        &mut connector,
+        &signing_key,
+        &["airtable.list_tables", "airtable.list_fields"],
+    )
+    .await;
+    setup_configure(&mut connector, &server.uri()).await;
+
+    let list_tables_token = generate_valid_token(&signing_key, "airtable.list_tables");
+    connector
+        .handle_invoke(json!({
+            "operation": "airtable.list_tables",
+            "input": { "base_id": "appABC123" },
+            "capability_token": list_tables_token
+        }))
+        .await
+        .unwrap();
+
+    let list_fields_token = generate_valid_token(&signing_key, "airtable.list_fields");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "airtable.list_fields",
+            "input": { "base_id": "appABC123", "table_ref": "tblTASK" },
+            "capability_token": list_fields_token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["fields"][0]["id"], "fldA");
+}
+
+#[fcp_async_core::runtime::test]
 async fn invoke_create_record_through_connector() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

@@ -1,6 +1,8 @@
 //! FCP Airtable Connector implementation.
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
@@ -15,8 +17,10 @@ use tracing::{info, instrument};
 use crate::{
     client::{AirtableAuth, AirtableClient, DEFAULT_BASE_URL},
     error::AirtableError,
-    types::SortSpec,
+    types::{BaseSchemaResponse, FieldSchema, SortSpec, TableSchema},
 };
+
+const SCHEMA_CACHE_TTL: Duration = Duration::from_secs(300);
 
 /// Validated configuration for the Airtable connector.
 struct AirtableConfig {
@@ -98,6 +102,12 @@ enum DoctorStatus {
     Unhealthy,
 }
 
+#[derive(Debug, Clone)]
+struct CachedSchema {
+    fetched_at: Instant,
+    schema: BaseSchemaResponse,
+}
+
 /// FCP Airtable Connector.
 pub struct AirtableConnector {
     base: Arc<BaseConnector>,
@@ -105,6 +115,7 @@ pub struct AirtableConnector {
     client: Option<AirtableClient>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
+    schema_cache: Arc<fcp_async_core::sync::Mutex<HashMap<String, CachedSchema>>>,
 }
 
 impl AirtableConnector {
@@ -117,6 +128,7 @@ impl AirtableConnector {
             client: None,
             verifier: None,
             session_id: None,
+            schema_cache: Arc::new(fcp_async_core::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -141,6 +153,7 @@ impl AirtableConnector {
 
         self.config = Some(config);
         self.client = Some(client);
+        self.schema_cache.lock().await.clear();
         self.base.set_configured(true);
 
         Ok(json!({ "status": "configured" }))
@@ -448,6 +461,115 @@ impl AirtableConnector {
                         related: vec![
                             CapabilityId::from_static("airtable.list_bases"),
                             CapabilityId::from_static("airtable.list_records"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "airtable.list_tables",
+                    "List tables in an Airtable base using stable table IDs",
+                    json!({
+                        "type": "object",
+                        "required": ["base_id"],
+                        "properties": {
+                            "base_id": { "type": "string", "description": "Airtable base ID (starts with 'app')" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": ["tables"],
+                        "properties": {
+                            "tables": { "type": "array", "description": "Tables with id, name, and summary metadata" }
+                        }
+                    }),
+                    "airtable.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Discover table IDs and names before record operations.".into(),
+                        common_mistakes: vec!["Using guessed table names without discovery.".into()],
+                        examples: vec![r#"{"base_id": "appXXXXXXXXXXXXXX"}"#.into()],
+                        related: vec![
+                            CapabilityId::from_static("airtable.get_base_schema"),
+                            CapabilityId::from_static("airtable.get_table"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "airtable.get_table",
+                    "Get one table definition by stable table ID or exact table name",
+                    json!({
+                        "type": "object",
+                        "required": ["base_id", "table_ref"],
+                        "properties": {
+                            "base_id": { "type": "string", "description": "Airtable base ID (starts with 'app')" },
+                            "table_ref": { "type": "string", "description": "Table ID (tbl...) or exact table name" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": ["table"],
+                        "properties": {
+                            "table": { "type": "object", "description": "Resolved table with fields and views" }
+                        }
+                    }),
+                    "airtable.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Fetch a specific table schema for downstream field-safe operations.".into(),
+                        common_mistakes: vec!["Using non-exact table names that match multiple tables.".into()],
+                        examples: vec![
+                            r#"{"base_id": "appXXXXXXXXXXXXXX", "table_ref": "tblXXXXXXXXXXXXXX"}"#.into(),
+                            r#"{"base_id": "appXXXXXXXXXXXXXX", "table_ref": "Tasks"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("airtable.list_tables"),
+                            CapabilityId::from_static("airtable.list_fields"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "airtable.list_fields",
+                    "List fields for a table with support for field ID or exact name references",
+                    json!({
+                        "type": "object",
+                        "required": ["base_id", "table_ref"],
+                        "properties": {
+                            "base_id": { "type": "string", "description": "Airtable base ID (starts with 'app')" },
+                            "table_ref": { "type": "string", "description": "Table ID (tbl...) or exact table name" },
+                            "field_refs": {
+                                "type": "array",
+                                "description": "Optional subset of field IDs/names to resolve with ambiguity checks",
+                                "items": { "type": "string" }
+                            }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": ["fields"],
+                        "properties": {
+                            "fields": { "type": "array", "description": "Resolved field definitions with id and name" }
+                        }
+                    }),
+                    "airtable.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Resolve stable field IDs before CRUD to stay robust to field renames.".into(),
+                        common_mistakes: vec![
+                            "Using only field names and ignoring stable field IDs.".into(),
+                            "Passing ambiguous duplicate field names.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"base_id": "appXXXXXXXXXXXXXX", "table_ref": "Tasks"}"#.into(),
+                            r#"{"base_id": "appXXXXXXXXXXXXXX", "table_ref": "tblXXXXXXXXXXXXXX", "field_refs": ["fldABC", "Status"]}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("airtable.get_table"),
+                            CapabilityId::from_static("airtable.get_base_schema"),
                         ],
                     },
                 ),
@@ -827,6 +949,9 @@ impl AirtableConnector {
         match operation {
             "airtable.list_bases" => self.invoke_list_bases(input).await,
             "airtable.get_base_schema" => self.invoke_get_base_schema(input).await,
+            "airtable.list_tables" => self.invoke_list_tables(input).await,
+            "airtable.get_table" => self.invoke_get_table(input).await,
+            "airtable.list_fields" => self.invoke_list_fields(input).await,
             "airtable.list_records" => self.invoke_list_records(input).await,
             "airtable.get_record" => self.invoke_get_record(input).await,
             "airtable.create_record" => self.invoke_create_record(input).await,
@@ -863,15 +988,60 @@ impl AirtableConnector {
         &self,
         input: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
-        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
-        let base_id = require_str(&input, "base_id")?;
-
-        let result = client
-            .get_base_schema(base_id)
-            .await
-            .map_err(|e: AirtableError| e.to_fcp_error())?;
+        let base_id = require_base_id(&input)?;
+        let result = self.get_base_schema_cached(base_id).await?;
 
         Ok(json!({ "tables": result.tables }))
+    }
+
+    async fn invoke_list_tables(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let base_id = require_base_id(&input)?;
+        let schema = self.get_base_schema_cached(base_id).await?;
+
+        let tables: Vec<serde_json::Value> = schema
+            .tables
+            .iter()
+            .map(|table| {
+                json!({
+                    "id": table.id,
+                    "name": table.name,
+                    "description": table.description,
+                    "primaryFieldId": table.primary_field_id,
+                    "fieldCount": table.fields.len(),
+                    "viewCount": table.views.len(),
+                })
+            })
+            .collect();
+
+        Ok(json!({ "tables": tables }))
+    }
+
+    async fn invoke_get_table(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let base_id = require_base_id(&input)?;
+        let table_ref = require_nonempty_str(&input, "table_ref")?;
+        let schema = self.get_base_schema_cached(base_id).await?;
+        let table = resolve_table(&schema.tables, table_ref)?;
+
+        Ok(json!({ "table": table }))
+    }
+
+    async fn invoke_list_fields(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let base_id = require_base_id(&input)?;
+        let table_ref = require_nonempty_str(&input, "table_ref")?;
+        let schema = self.get_base_schema_cached(base_id).await?;
+        let table = resolve_table(&schema.tables, table_ref)?;
+
+        let fields = if let Some(field_refs) = input.get("field_refs") {
+            let refs = field_refs.as_array().ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "field_refs must be an array of strings".into(),
+            })?;
+            resolve_fields(table, refs)?
+        } else {
+            table.fields.clone()
+        };
+
+        Ok(json!({ "fields": fields }))
     }
 
     async fn invoke_list_records(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
@@ -1064,6 +1234,31 @@ impl AirtableConnector {
         })
     }
 
+    async fn get_base_schema_cached(&self, base_id: &str) -> FcpResult<BaseSchemaResponse> {
+        let now = Instant::now();
+        if let Some(cached) = self.schema_cache.lock().await.get(base_id).cloned() {
+            if now.saturating_duration_since(cached.fetched_at) <= SCHEMA_CACHE_TTL {
+                return Ok(cached.schema);
+            }
+        }
+
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let schema = client
+            .get_base_schema(base_id)
+            .await
+            .map_err(|e: AirtableError| e.to_fcp_error())?;
+
+        self.schema_cache.lock().await.insert(
+            base_id.to_string(),
+            CachedSchema {
+                fetched_at: now,
+                schema: schema.clone(),
+            },
+        );
+
+        Ok(schema)
+    }
+
     /// Handle shutdown.
     ///
     /// # Errors
@@ -1093,6 +1288,93 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a s
             code: 1003,
             message: format!("Missing required field: {field}"),
         })
+}
+
+fn require_nonempty_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a str> {
+    let value = require_str(input, field)?;
+    if value.trim().is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must be a non-empty string"),
+        });
+    }
+    Ok(value)
+}
+
+fn require_base_id<'a>(input: &'a serde_json::Value) -> FcpResult<&'a str> {
+    let base_id = require_nonempty_str(input, "base_id")?;
+    let valid_format = base_id.starts_with("app")
+        && base_id.len() >= 6
+        && base_id.chars().all(|c| c.is_ascii_alphanumeric());
+    if !valid_format {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_id must match Airtable base format (e.g., appXXXXXXXXXXXXXX)".into(),
+        });
+    }
+    Ok(base_id)
+}
+
+fn resolve_table<'a>(tables: &'a [TableSchema], table_ref: &str) -> FcpResult<&'a TableSchema> {
+    if let Some(table) = tables.iter().find(|table| table.id == table_ref) {
+        return Ok(table);
+    }
+
+    let matches: Vec<&TableSchema> = tables
+        .iter()
+        .filter(|table| table.name == table_ref)
+        .collect();
+    match matches.len() {
+        1 => Ok(matches[0]),
+        0 => Err(FcpError::ResourceNotFound {
+            resource: format!("airtable.table:{table_ref}"),
+        }),
+        _ => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "Ambiguous table_ref '{table_ref}': multiple tables have this name; use stable table ID"
+            ),
+        }),
+    }
+}
+
+fn resolve_fields(table: &TableSchema, refs: &[serde_json::Value]) -> FcpResult<Vec<FieldSchema>> {
+    refs.iter()
+        .map(|field_ref| {
+            let selector = field_ref.as_str().ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "field_refs must contain only strings".into(),
+            })?;
+            if selector.trim().is_empty() {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "field_refs entries must be non-empty strings".into(),
+                });
+            }
+
+            if let Some(field) = table.fields.iter().find(|field| field.id == selector) {
+                return Ok(field.clone());
+            }
+
+            let matches: Vec<&FieldSchema> = table
+                .fields
+                .iter()
+                .filter(|field| field.name == selector)
+                .collect();
+            match matches.len() {
+                1 => Ok(matches[0].clone()),
+                0 => Err(FcpError::ResourceNotFound {
+                    resource: format!("airtable.field:{selector}"),
+                }),
+                _ => Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!(
+                        "Ambiguous field ref '{selector}': multiple fields share this name; use field ID"
+                    ),
+                }),
+            }
+        })
+        .collect()
 }
 
 #[allow(clippy::fn_params_excessive_bools)]
@@ -1254,6 +1536,9 @@ mod tests {
 
         assert!(op_ids.contains(&"airtable.list_bases"));
         assert!(op_ids.contains(&"airtable.get_base_schema"));
+        assert!(op_ids.contains(&"airtable.list_tables"));
+        assert!(op_ids.contains(&"airtable.get_table"));
+        assert!(op_ids.contains(&"airtable.list_fields"));
         assert!(op_ids.contains(&"airtable.list_records"));
         assert!(op_ids.contains(&"airtable.get_record"));
         assert!(op_ids.contains(&"airtable.create_record"));
@@ -1262,7 +1547,7 @@ mod tests {
         assert!(op_ids.contains(&"airtable.replace_record"));
         assert!(op_ids.contains(&"airtable.delete_record"));
         assert!(op_ids.contains(&"airtable.download_attachment"));
-        assert_eq!(ops.len(), 10);
+        assert_eq!(ops.len(), 13);
     }
 
     #[fcp_async_core::runtime::test]

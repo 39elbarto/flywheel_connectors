@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:4dfbb8acff98b7c148e34376d45de580ecfc16a9885ab362dafa5310274e113a"
+interface_hash = "blake3-256:fcp.interface.v2:fb9abca921750747090944398a3fd1a118989224e6aa8f9abfc88c2586535ab1"
 
 [connector]
 id = "fcp.airtable"
@@ -403,6 +403,204 @@ examples = ['{"base_id": "appXXXXXXXXXXXXXX"}']
 related = [
     "airtable.list_bases",
     "airtable.list_records",
+]
+
+[provides.operations.list_tables]
+description = "List tables in an Airtable base with stable IDs and summary metadata"
+capability = "airtable.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations.list_tables.rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations.list_tables.input_schema]
+required = ["base_id"]
+type = "object"
+
+[provides.operations.list_tables.input_schema.properties.base_id]
+description = "Airtable base ID (starts with 'app')"
+pattern = "^app[a-zA-Z0-9]+$"
+type = "string"
+
+[provides.operations.list_tables.output_schema]
+required = ["tables"]
+type = "object"
+
+[provides.operations.list_tables.output_schema.properties.tables]
+description = "List of tables with id, name, primaryFieldId, fieldCount, and viewCount"
+type = "array"
+
+[provides.operations.list_tables.network_constraints]
+host_allow = ["api.airtable.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations.list_tables.ai_hints]
+when_to_use = "Discover stable table IDs before reading or writing records."
+common_mistakes = ["Using guessed table names instead of discovering table IDs first."]
+examples = ['{"base_id": "appXXXXXXXXXXXXXX"}']
+related = [
+    "airtable.get_base_schema",
+    "airtable.get_table",
+]
+
+[provides.operations.get_table]
+description = "Get one Airtable table schema by stable table ID or exact table name"
+capability = "airtable.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations.get_table.rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations.get_table.input_schema]
+required = [
+    "base_id",
+    "table_ref",
+]
+type = "object"
+
+[provides.operations.get_table.input_schema.properties.base_id]
+description = "Airtable base ID (starts with 'app')"
+pattern = "^app[a-zA-Z0-9]+$"
+type = "string"
+
+[provides.operations.get_table.input_schema.properties.table_ref]
+description = "Table ID (tbl...) or exact table name"
+type = "string"
+
+[provides.operations.get_table.output_schema]
+required = ["table"]
+type = "object"
+
+[provides.operations.get_table.output_schema.properties.table]
+description = "Resolved table definition including fields and views"
+type = "object"
+
+[provides.operations.get_table.network_constraints]
+host_allow = ["api.airtable.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations.get_table.ai_hints]
+when_to_use = "Inspect one table schema before constructing field-safe record operations."
+common_mistakes = ["Using non-exact table names that collide with multiple tables."]
+examples = [
+    '{"base_id": "appXXXXXXXXXXXXXX", "table_ref": "tblXXXXXXXXXXXXXX"}',
+    '{"base_id": "appXXXXXXXXXXXXXX", "table_ref": "Tasks"}',
+]
+related = [
+    "airtable.list_tables",
+    "airtable.list_fields",
+]
+
+[provides.operations.list_fields]
+description = "List or resolve fields in one table using field IDs or exact field names"
+capability = "airtable.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations.list_fields.rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations.list_fields.input_schema]
+required = [
+    "base_id",
+    "table_ref",
+]
+type = "object"
+
+[provides.operations.list_fields.input_schema.properties.base_id]
+description = "Airtable base ID (starts with 'app')"
+pattern = "^app[a-zA-Z0-9]+$"
+type = "string"
+
+[provides.operations.list_fields.input_schema.properties.table_ref]
+description = "Table ID (tbl...) or exact table name"
+type = "string"
+
+[provides.operations.list_fields.input_schema.properties.field_refs]
+description = "Optional list of field IDs/names to resolve; rejects ambiguous names"
+type = "array"
+
+[provides.operations.list_fields.input_schema.properties.field_refs.items]
+type = "string"
+
+[provides.operations.list_fields.output_schema]
+required = ["fields"]
+type = "object"
+
+[provides.operations.list_fields.output_schema.properties.fields]
+description = "Resolved field definitions with stable id and human-readable name"
+type = "array"
+
+[provides.operations.list_fields.network_constraints]
+host_allow = ["api.airtable.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 2097152
+
+[provides.operations.list_fields.ai_hints]
+when_to_use = "Resolve stable field IDs before CRUD so workflows survive field renames."
+common_mistakes = [
+    "Using only field names and ignoring stable field IDs.",
+    "Passing ambiguous duplicate field names.",
+]
+examples = [
+    '{"base_id": "appXXXXXXXXXXXXXX", "table_ref": "Tasks"}',
+    '{"base_id": "appXXXXXXXXXXXXXX", "table_ref": "tblXXXXXXXXXXXXXX", "field_refs": ["fldABC", "Status"]}',
+]
+related = [
+    "airtable.get_table",
+    "airtable.get_base_schema",
 ]
 
 [provides.operations.get_record]
@@ -863,6 +1061,9 @@ create_record = ["airtable.write"]
 update_record = ["airtable.write"]
 create_records = ["airtable.write"]
 get_base_schema = ["airtable.read"]
+list_tables = ["airtable.read"]
+get_table = ["airtable.read"]
+list_fields = ["airtable.read"]
 replace_record = ["airtable.write"]
 list_records = ["airtable.read"]
 get_record = ["airtable.read"]

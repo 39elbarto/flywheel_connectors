@@ -3989,8 +3989,7 @@ fn kubernetes_full_manifest_parses_with_all_operations() {
     let raw = std::fs::read_to_string(&path)
         .unwrap_or_else(|err| panic!("failed to read kubernetes manifest: {err}"));
     let with_hash = with_computed_hash(&raw);
-    let parsed =
-        ConnectorManifest::parse_str(&with_hash).expect("valid full kubernetes manifest");
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid full kubernetes manifest");
 
     assert_eq!(parsed.connector.id.as_str(), "fcp.kubernetes");
 
@@ -4038,8 +4037,7 @@ fn airtable_full_manifest_parses_with_all_operations() {
     let raw = std::fs::read_to_string(&path)
         .unwrap_or_else(|err| panic!("failed to read airtable manifest: {err}"));
     let with_hash = with_computed_hash(&raw);
-    let parsed =
-        ConnectorManifest::parse_str(&with_hash).expect("valid full airtable manifest");
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid full airtable manifest");
 
     assert_eq!(parsed.connector.id.as_str(), "fcp.airtable");
 
@@ -4086,8 +4084,7 @@ fn spotify_full_manifest_parses_with_all_operations() {
     let raw = std::fs::read_to_string(&path)
         .unwrap_or_else(|err| panic!("failed to read spotify manifest: {err}"));
     let with_hash = with_computed_hash(&raw);
-    let parsed =
-        ConnectorManifest::parse_str(&with_hash).expect("valid full spotify manifest");
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid full spotify manifest");
 
     assert_eq!(parsed.connector.id.as_str(), "fcp.spotify");
 
@@ -4134,8 +4131,7 @@ fn hubspot_full_manifest_parses_with_all_operations() {
     let raw = std::fs::read_to_string(&path)
         .unwrap_or_else(|err| panic!("failed to read hubspot manifest: {err}"));
     let with_hash = with_computed_hash(&raw);
-    let parsed =
-        ConnectorManifest::parse_str(&with_hash).expect("valid full hubspot manifest");
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid full hubspot manifest");
 
     assert_eq!(parsed.connector.id.as_str(), "fcp.hubspot");
 
@@ -4223,8 +4219,7 @@ fn mongodb_full_manifest_parses_with_all_operations() {
     let raw = std::fs::read_to_string(&path)
         .unwrap_or_else(|err| panic!("failed to read mongodb manifest: {err}"));
     let with_hash = with_computed_hash(&raw);
-    let parsed =
-        ConnectorManifest::parse_str(&with_hash).expect("valid full mongodb manifest");
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid full mongodb manifest");
 
     assert_eq!(parsed.connector.id.as_str(), "fcp.mongodb");
 
@@ -4264,8 +4259,7 @@ fn gitlab_full_manifest_parses_with_all_operations() {
     let raw = std::fs::read_to_string(&path)
         .unwrap_or_else(|err| panic!("failed to read gitlab manifest: {err}"));
     let with_hash = with_computed_hash(&raw);
-    let parsed =
-        ConnectorManifest::parse_str(&with_hash).expect("valid full gitlab manifest");
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid full gitlab manifest");
 
     assert_eq!(parsed.connector.id.as_str(), "fcp.gitlab");
 
@@ -4304,8 +4298,7 @@ fn dropbox_full_manifest_parses_with_all_operations() {
     let raw = std::fs::read_to_string(&path)
         .unwrap_or_else(|err| panic!("failed to read dropbox manifest: {err}"));
     let with_hash = with_computed_hash(&raw);
-    let parsed =
-        ConnectorManifest::parse_str(&with_hash).expect("valid full dropbox manifest");
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid full dropbox manifest");
 
     assert_eq!(parsed.connector.id.as_str(), "fcp.dropbox");
 

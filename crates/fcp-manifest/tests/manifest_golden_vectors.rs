@@ -3919,3 +3919,408 @@ fn telegram_manifest_parses_as_valid_toml_with_expected_structure() {
     }
     assert_eq!(operations.len(), expected_ops.len());
 }
+
+// =============================================================================
+// Sentry connector tests
+// =============================================================================
+
+#[test]
+fn sentry_full_manifest_parses_with_all_operations() {
+    let _log = TestLog::new(
+        "sentry_full_manifest_parses_with_all_operations",
+        "fcp-manifest",
+        Some("fcp.sentry"),
+        Some("0.1.0"),
+        Some(4),
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("../../connectors/sentry/manifest.toml");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read sentry manifest: {err}"));
+    let with_hash = with_computed_hash(&raw);
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid full sentry manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.sentry");
+
+    let ops = &parsed.provides.operations;
+    let expected_ops = [
+        "sentry.create_alert_rule",
+        "sentry.delete_alert_rule",
+        "sentry.delete_issue",
+        "sentry.discover_query",
+        "sentry.get_event",
+        "sentry.get_issue",
+        "sentry.get_release",
+        "sentry.get_transaction",
+        "sentry.list_alert_rules",
+        "sentry.list_issue_events",
+        "sentry.list_issues",
+        "sentry.list_projects",
+        "sentry.list_release_deploys",
+        "sentry.list_releases",
+        "sentry.stream_webhook_events",
+        "sentry.update_alert_rule",
+        "sentry.update_issue",
+    ];
+    for op_name in &expected_ops {
+        assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
+    }
+    assert_eq!(ops.len(), expected_ops.len());
+
+    let pools = parsed.rate_limits.as_ref().expect("rate_limits");
+    assert_eq!(pools.pools.len(), 4);
+}
+
+// =============================================================================
+// Kubernetes connector tests
+// =============================================================================
+
+#[test]
+fn kubernetes_full_manifest_parses_with_all_operations() {
+    let _log = TestLog::new(
+        "kubernetes_full_manifest_parses_with_all_operations",
+        "fcp-manifest",
+        Some("fcp.kubernetes"),
+        Some("0.1.0"),
+        Some(2),
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("../../connectors/kubernetes/manifest.toml");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read kubernetes manifest: {err}"));
+    let with_hash = with_computed_hash(&raw);
+    let parsed =
+        ConnectorManifest::parse_str(&with_hash).expect("valid full kubernetes manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.kubernetes");
+
+    let ops = &parsed.provides.operations;
+    let expected_ops = [
+        "kubernetes.delete_pod",
+        "kubernetes.get_configmap",
+        "kubernetes.get_deployment",
+        "kubernetes.get_pod",
+        "kubernetes.get_pod_logs",
+        "kubernetes.get_secret",
+        "kubernetes.get_service",
+        "kubernetes.list_deployments",
+        "kubernetes.list_pods",
+        "kubernetes.rollout_restart",
+        "kubernetes.scale_deployment",
+        "kubernetes.stream_pod_logs",
+        "kubernetes.update_configmap",
+        "kubernetes.watch_events",
+    ];
+    for op_name in &expected_ops {
+        assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
+    }
+    assert_eq!(ops.len(), expected_ops.len());
+
+    let pools = parsed.rate_limits.as_ref().expect("rate_limits");
+    assert_eq!(pools.pools.len(), 4);
+}
+
+// =============================================================================
+// Airtable connector tests
+// =============================================================================
+
+#[test]
+fn airtable_full_manifest_parses_with_all_operations() {
+    let _log = TestLog::new(
+        "airtable_full_manifest_parses_with_all_operations",
+        "fcp-manifest",
+        Some("fcp.airtable"),
+        Some("0.1.0"),
+        Some(2),
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("../../connectors/airtable/manifest.toml");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read airtable manifest: {err}"));
+    let with_hash = with_computed_hash(&raw);
+    let parsed =
+        ConnectorManifest::parse_str(&with_hash).expect("valid full airtable manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.airtable");
+
+    let ops = &parsed.provides.operations;
+    let expected_ops = [
+        "create_record",
+        "create_records",
+        "delete_record",
+        "download_attachment",
+        "get_base_schema",
+        "get_record",
+        "get_table",
+        "list_bases",
+        "list_fields",
+        "list_records",
+        "list_tables",
+        "replace_record",
+        "update_record",
+    ];
+    for op_name in &expected_ops {
+        assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
+    }
+    assert_eq!(ops.len(), expected_ops.len());
+
+    let pools = parsed.rate_limits.as_ref().expect("rate_limits");
+    assert_eq!(pools.pools.len(), 3);
+}
+
+// =============================================================================
+// Spotify connector tests
+// =============================================================================
+
+#[test]
+fn spotify_full_manifest_parses_with_all_operations() {
+    let _log = TestLog::new(
+        "spotify_full_manifest_parses_with_all_operations",
+        "fcp-manifest",
+        Some("fcp.spotify"),
+        Some("0.1.0"),
+        Some(3),
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("../../connectors/spotify/manifest.toml");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read spotify manifest: {err}"));
+    let with_hash = with_computed_hash(&raw);
+    let parsed =
+        ConnectorManifest::parse_str(&with_hash).expect("valid full spotify manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.spotify");
+
+    let ops = &parsed.provides.operations;
+    let expected_ops = [
+        "spotify.album.get",
+        "spotify.artist.get",
+        "spotify.library.list_saved_tracks",
+        "spotify.library.remove_track",
+        "spotify.library.save_track",
+        "spotify.media.download_cover",
+        "spotify.playback.get_state",
+        "spotify.playback.pause",
+        "spotify.playback.play",
+        "spotify.player.stream",
+        "spotify.playlist.get",
+        "spotify.search",
+        "spotify.track.get",
+    ];
+    for op_name in &expected_ops {
+        assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
+    }
+    assert_eq!(ops.len(), expected_ops.len());
+
+    let pools = parsed.rate_limits.as_ref().expect("rate_limits");
+    assert_eq!(pools.pools.len(), 5);
+}
+
+// =============================================================================
+// HubSpot connector tests
+// =============================================================================
+
+#[test]
+fn hubspot_full_manifest_parses_with_all_operations() {
+    let _log = TestLog::new(
+        "hubspot_full_manifest_parses_with_all_operations",
+        "fcp-manifest",
+        Some("fcp.hubspot"),
+        Some("0.1.0"),
+        Some(3),
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("../../connectors/hubspot/manifest.toml");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read hubspot manifest: {err}"));
+    let with_hash = with_computed_hash(&raw);
+    let parsed =
+        ConnectorManifest::parse_str(&with_hash).expect("valid full hubspot manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.hubspot");
+
+    let ops = &parsed.provides.operations;
+    let expected_ops = [
+        "hubspot.analytics.report",
+        "hubspot.companies.list",
+        "hubspot.contacts.create",
+        "hubspot.contacts.delete",
+        "hubspot.contacts.get",
+        "hubspot.contacts.list",
+        "hubspot.contacts.update",
+        "hubspot.deals.create",
+        "hubspot.deals.list",
+        "hubspot.events.stream",
+        "hubspot.pipelines.list",
+    ];
+    for op_name in &expected_ops {
+        assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
+    }
+    assert_eq!(ops.len(), expected_ops.len());
+
+    let pools = parsed.rate_limits.as_ref().expect("rate_limits");
+    assert_eq!(pools.pools.len(), 8);
+}
+
+// =============================================================================
+// Reddit connector tests
+// =============================================================================
+
+#[test]
+fn reddit_full_manifest_parses_with_all_operations() {
+    let _log = TestLog::new(
+        "reddit_full_manifest_parses_with_all_operations",
+        "fcp-manifest",
+        Some("fcp.reddit"),
+        Some("0.1.0"),
+        Some(3),
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("../../connectors/reddit/manifest.toml");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read reddit manifest: {err}"));
+    let with_hash = with_computed_hash(&raw);
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid full reddit manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.reddit");
+
+    let ops = &parsed.provides.operations;
+    let expected_ops = [
+        "reddit.create_comment",
+        "reddit.create_post",
+        "reddit.download_media",
+        "reddit.get_post_thread",
+        "reddit.list_subreddit_new",
+        "reddit.mod_remove",
+        "reddit.search_posts",
+        "reddit.send_message",
+        "reddit.stream_subreddit_new",
+    ];
+    for op_name in &expected_ops {
+        assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
+    }
+    assert_eq!(ops.len(), expected_ops.len());
+
+    let pools = parsed.rate_limits.as_ref().expect("rate_limits");
+    assert_eq!(pools.pools.len(), 5);
+}
+
+// =============================================================================
+// MongoDB connector tests
+// =============================================================================
+
+#[test]
+fn mongodb_full_manifest_parses_with_all_operations() {
+    let _log = TestLog::new(
+        "mongodb_full_manifest_parses_with_all_operations",
+        "fcp-manifest",
+        Some("fcp.mongodb"),
+        Some("0.1.0"),
+        Some(2),
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("../../connectors/mongodb/manifest.toml");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read mongodb manifest: {err}"));
+    let with_hash = with_computed_hash(&raw);
+    let parsed =
+        ConnectorManifest::parse_str(&with_hash).expect("valid full mongodb manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.mongodb");
+
+    let ops = &parsed.provides.operations;
+    let expected_ops = [
+        "mongodb.aggregate",
+        "mongodb.collections.list",
+        "mongodb.databases.list",
+        "mongodb.documents.delete",
+        "mongodb.documents.find",
+        "mongodb.documents.insert",
+    ];
+    for op_name in &expected_ops {
+        assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
+    }
+    assert_eq!(ops.len(), expected_ops.len());
+
+    let pools = parsed.rate_limits.as_ref().expect("rate_limits");
+    assert_eq!(pools.pools.len(), 3);
+}
+
+// =============================================================================
+// GitLab connector tests
+// =============================================================================
+
+#[test]
+fn gitlab_full_manifest_parses_with_all_operations() {
+    let _log = TestLog::new(
+        "gitlab_full_manifest_parses_with_all_operations",
+        "fcp-manifest",
+        Some("fcp.gitlab"),
+        Some("0.1.0"),
+        Some(2),
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("../../connectors/gitlab/manifest.toml");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read gitlab manifest: {err}"));
+    let with_hash = with_computed_hash(&raw);
+    let parsed =
+        ConnectorManifest::parse_str(&with_hash).expect("valid full gitlab manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.gitlab");
+
+    let ops = &parsed.provides.operations;
+    let expected_ops = [
+        "gitlab.issues.create",
+        "gitlab.issues.list",
+        "gitlab.merge_requests.list",
+        "gitlab.pipelines.list",
+        "gitlab.projects.list",
+    ];
+    for op_name in &expected_ops {
+        assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
+    }
+    assert_eq!(ops.len(), expected_ops.len());
+
+    let pools = parsed.rate_limits.as_ref().expect("rate_limits");
+    assert_eq!(pools.pools.len(), 5);
+}
+
+// =============================================================================
+// Dropbox connector tests
+// =============================================================================
+
+#[test]
+fn dropbox_full_manifest_parses_with_all_operations() {
+    let _log = TestLog::new(
+        "dropbox_full_manifest_parses_with_all_operations",
+        "fcp-manifest",
+        Some("fcp.dropbox"),
+        Some("0.1.0"),
+        Some(2),
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("../../connectors/dropbox/manifest.toml");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read dropbox manifest: {err}"));
+    let with_hash = with_computed_hash(&raw);
+    let parsed =
+        ConnectorManifest::parse_str(&with_hash).expect("valid full dropbox manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.dropbox");
+
+    let ops = &parsed.provides.operations;
+    let expected_ops = [
+        "dropbox.files.delete",
+        "dropbox.files.get_metadata",
+        "dropbox.files.list",
+        "dropbox.sharing.list",
+    ];
+    for op_name in &expected_ops {
+        assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
+    }
+    assert_eq!(ops.len(), expected_ops.len());
+
+    let pools = parsed.rate_limits.as_ref().expect("rate_limits");
+    assert_eq!(pools.pools.len(), 3);
+}

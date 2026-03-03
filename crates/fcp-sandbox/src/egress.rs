@@ -293,7 +293,18 @@ pub fn is_hostname_canonical(hostname: &str) -> bool {
 
 /// Check if an IP address is contained in any of the given CIDR ranges.
 fn ip_in_any_cidr(ip: IpAddr, cidrs: &[IpNet]) -> bool {
-    cidrs.iter().any(|net| net.contains(&ip))
+    // Normalize IPv4-mapped IPv6 addresses to pure IPv4 to prevent bypasses
+    let check_ip = match ip {
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                IpAddr::V4(v4)
+            } else {
+                ip
+            }
+        }
+        _ => ip,
+    };
+    cidrs.iter().any(|net| net.contains(&check_ip))
 }
 
 /// Parse a list of CIDR strings into `IpNet` values.
@@ -939,6 +950,12 @@ mod tests {
     }
 
     #[test]
+    fn test_is_localhost_ipv4_mapped_ipv6() {
+        assert!(is_localhost("::ffff:127.0.0.1".parse().unwrap()));
+        assert!(is_localhost("::ffff:7f00:1".parse().unwrap()));
+    }
+
+    #[test]
     fn test_is_private_range() {
         // RFC1918 ranges
         assert!(is_private_range("10.0.0.1".parse().unwrap()));
@@ -951,6 +968,11 @@ mod tests {
         // Not private
         assert!(!is_private_range("8.8.8.8".parse().unwrap()));
         assert!(!is_private_range("172.32.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_is_private_range_ipv4_mapped_ipv6() {
+        assert!(is_private_range("::ffff:10.0.0.1".parse().unwrap()));
     }
 
     #[test]

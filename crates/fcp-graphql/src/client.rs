@@ -431,10 +431,9 @@ impl GraphqlClient {
 
         if let Some(state) = &self.dedup_state {
             let key = hash_bytes(&body_bytes);
-            let guard = state.inner.lock().await;
-            let existing = guard.get(&key).cloned();
-            drop(guard);
-            if let Some(shared) = existing {
+            let mut guard = state.inner.lock().await;
+            if let Some(shared) = guard.get(&key).cloned() {
+                drop(guard);
                 return shared.await;
             }
 
@@ -443,9 +442,9 @@ impl GraphqlClient {
             let future = async move { client.send_with_retry(payload, idempotent).await }
                 .boxed()
                 .shared();
-            let mut guard = state.inner.lock().await;
             guard.insert(key, future.clone());
             drop(guard);
+            
             let result = future.await;
             state.inner.lock().await.remove(&key);
             return result;

@@ -94,6 +94,7 @@ impl GitHubWebhook {
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
         Ok(WebhookEvent::new(delivery_id, event_type, "github")
+            .with_default_webhook_taint()
             .with_payload(payload)
             .with_headers(headers.clone()))
     }
@@ -171,6 +172,7 @@ impl StripeWebhook {
             .to_string();
 
         Ok(WebhookEvent::new(event_id, event_type, "stripe")
+            .with_default_webhook_taint()
             .with_payload(payload)
             .with_headers(headers.clone()))
     }
@@ -291,6 +293,7 @@ impl SlackWebhook {
             .to_string();
 
         Ok(WebhookEvent::new(event_id, event_type, "slack")
+            .with_default_webhook_taint()
             .with_payload(payload)
             .with_headers(headers.clone()))
     }
@@ -346,6 +349,7 @@ impl LinearWebhook {
             .to_string();
 
         Ok(WebhookEvent::new(event_id, event_type, "linear")
+            .with_default_webhook_taint()
             .with_payload(payload)
             .with_headers(headers.clone()))
     }
@@ -355,6 +359,7 @@ impl LinearWebhook {
 mod tests {
     use super::*;
     use crate::{EventRouter, EventSubscription};
+    use fcp_core::TaintFlag;
     use wiremock::matchers::{body_string_contains, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -375,6 +380,13 @@ mod tests {
         assert_eq!(event.id, "abc123");
         assert_eq!(event.event_type, "issues");
         assert_eq!(event.provider, "github");
+        assert!(
+            event
+                .metadata
+                .taint_flags
+                .contains(TaintFlag::WebhookInjected)
+        );
+        assert!(event.metadata.taint_flags.contains(TaintFlag::PublicInput));
     }
 
     #[test]
@@ -400,6 +412,13 @@ mod tests {
         assert_eq!(event.id, "wh_123");
         assert_eq!(event.event_type, "Issue");
         assert_eq!(event.provider, "linear");
+        assert!(
+            event
+                .metadata
+                .taint_flags
+                .contains(TaintFlag::WebhookInjected)
+        );
+        assert!(event.metadata.taint_flags.contains(TaintFlag::PublicInput));
     }
 
     // ── New tests ──

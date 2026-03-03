@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
+use fcp_core::{TaintFlag, TaintFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -64,6 +65,20 @@ impl WebhookEvent {
     pub fn with_headers(mut self, headers: HashMap<String, String>) -> Self {
         self.headers = headers;
         self
+    }
+
+    /// Add a taint flag to this event.
+    #[must_use]
+    pub fn with_taint_flag(mut self, flag: TaintFlag) -> Self {
+        self.metadata.taint_flags.insert(flag);
+        self
+    }
+
+    /// Apply default taint labels for externally injected webhook payloads.
+    #[must_use]
+    pub fn with_default_webhook_taint(self) -> Self {
+        self.with_taint_flag(TaintFlag::WebhookInjected)
+            .with_taint_flag(TaintFlag::PublicInput)
     }
 
     /// Get a header value.
@@ -138,6 +153,10 @@ pub struct EventMetadata {
 
     /// Source IP address.
     pub source_ip: Option<String>,
+
+    /// Accumulated taint flags for this event payload.
+    #[serde(default)]
+    pub taint_flags: TaintFlags,
 
     /// Custom metadata.
     #[serde(default)]
@@ -225,6 +244,7 @@ impl Default for EventSubscription {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fcp_core::TaintFlag;
 
     fn test_event() -> WebhookEvent {
         WebhookEvent::new("evt_123", "push", "github").with_payload(serde_json::json!({
@@ -338,7 +358,20 @@ mod tests {
         assert_eq!(meta.status, DeliveryStatus::Pending);
         assert!(meta.last_error.is_none());
         assert!(meta.source_ip.is_none());
+        assert!(meta.taint_flags.is_empty());
         assert!(meta.custom.is_empty());
+    }
+
+    #[test]
+    fn test_event_default_webhook_taint() {
+        let event = WebhookEvent::new("e1", "push", "github").with_default_webhook_taint();
+        assert!(
+            event
+                .metadata
+                .taint_flags
+                .contains(TaintFlag::WebhookInjected)
+        );
+        assert!(event.metadata.taint_flags.contains(TaintFlag::PublicInput));
     }
 
     #[test]

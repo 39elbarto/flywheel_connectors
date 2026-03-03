@@ -1657,198 +1657,207 @@ mod tests {
         }
     }
 
-    #[fcp_async_core::runtime::test]
+    #[test]
     #[allow(clippy::too_many_lines)]
-    async fn provisioning_interface_executes_host_mediated_setup_flow() {
-        let recipe = ProvisioningRecipe::new(
-            RecipeId::new("discord/setup"),
-            "1",
-            "Mock Discord setup for integration-style tests",
-        )
-        .with_step(ProvisioningStep::new(
-            StepId::new("oauth"),
-            ProvisioningStepType::Oauth {
-                flow: OAuthRecipe::AuthorizationCodePkce {
-                    authorization_url: "https://auth.example.test/oauth/authorize".to_string(),
-                    token_url: "https://auth.example.test/oauth/token".to_string(),
-                    scopes: vec!["bot".to_string()],
-                    auto_browser: false,
-                    callback_port: 3000,
-                },
-            },
-        ))
-        .with_step(ProvisioningStep::new(
-            StepId::new("webhook"),
-            ProvisioningStepType::Webhook {
-                registration: WebhookRecipe {
-                    registration_url: "https://api.example.test/webhooks".to_string(),
-                    events: vec!["message.create".to_string(), "guild.join".to_string()],
-                    verification: WebhookVerification::ChallengeResponse {
-                        challenge_param: "challenge".to_string(),
-                    },
-                    retry_policy: RetryConfig::default(),
-                },
-            },
-        ))
-        .with_step(ProvisioningStep::new(
-            StepId::new("prompt_secret"),
-            ProvisioningStepType::PromptSecret {
-                message: "Paste connector token".to_string(),
-            },
-        ))
-        .with_step(
-            ProvisioningStep::new(
-                StepId::new("store_secret"),
-                ProvisioningStepType::StoreSecret {
-                    key: "connector_token".to_string(),
-                    value_from: StepId::new("prompt_secret"),
-                    scope: "connector:fcp.discord".to_string(),
-                },
+    fn provisioning_interface_executes_host_mediated_setup_flow() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let recipe = ProvisioningRecipe::new(
+                RecipeId::new("discord/setup"),
+                "1",
+                "Mock Discord setup for integration-style tests",
             )
-            .depends_on(StepId::new("prompt_secret")),
-        );
-
-        let mut provisioner = MockProvisioner::new(recipe);
-        let setup = provisioner.describe_setup();
-        assert_eq!(setup.estimated_duration_ms, Some(500));
-        assert_eq!(setup.tool_descriptor["name"], "mock.provision");
-
-        let oauth_result = provisioner
-            .execute_step(StepId::new("oauth"))
-            .await
-            .unwrap();
-        assert!(matches!(
-            oauth_result,
-            ProvisioningStepResult::Completed { .. }
-        ));
-
-        let webhook_result = provisioner
-            .execute_step(StepId::new("webhook"))
-            .await
-            .unwrap();
-        assert!(matches!(
-            webhook_result,
-            ProvisioningStepResult::Completed { .. }
-        ));
-        assert_eq!(provisioner.webhook_registrations.len(), 1);
-        assert_eq!(
-            provisioner.webhook_registrations[0].0,
-            "https://api.example.test/webhooks"
-        );
-
-        let prompt_result = provisioner
-            .execute_step(StepId::new("prompt_secret"))
-            .await
-            .unwrap();
-        let ProvisioningStepResult::AwaitingHuman { prompt } = prompt_result else {
-            panic!("expected prompting for secret input")
-        };
-        assert_eq!(prompt.prompt_type, HumanPromptType::Secret);
-        assert_eq!(
-            provisioner.get_state().status,
-            ProvisioningStatus::AwaitingUser
-        );
-
-        provisioner.set_prompt_value("prompt_secret", "super-secret-token");
-        let store_result = provisioner
-            .execute_step(StepId::new("store_secret"))
-            .await
-            .unwrap();
-        assert!(matches!(
-            store_result,
-            ProvisioningStepResult::Completed { .. }
-        ));
-
-        let validation = provisioner.validate();
-        assert!(validation.valid);
-        assert_eq!(
-            provisioner.get_state().status,
-            ProvisioningStatus::Completed
-        );
-
-        let logs = serde_json::to_string(&provisioner.step_logs).unwrap();
-        assert!(logs.contains("\"recipe_id\":\"discord/setup\""));
-        assert!(logs.contains("\"step_name\":\"webhook\""));
-        assert!(!logs.contains("super-secret-token"));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn provisioning_interface_requires_approval_for_privileged_step() {
-        let recipe = ProvisioningRecipe::new(
-            RecipeId::new("discord/privileged"),
-            "1",
-            "Privileged setup with approval",
-        )
-        .with_step(
-            ProvisioningStep::new(
-                StepId::new("register_webhook"),
+            .with_step(ProvisioningStep::new(
+                StepId::new("oauth"),
+                ProvisioningStepType::Oauth {
+                    flow: OAuthRecipe::AuthorizationCodePkce {
+                        authorization_url: "https://auth.example.test/oauth/authorize".to_string(),
+                        token_url: "https://auth.example.test/oauth/token".to_string(),
+                        scopes: vec!["bot".to_string()],
+                        auto_browser: false,
+                        callback_port: 3000,
+                    },
+                },
+            ))
+            .with_step(ProvisioningStep::new(
+                StepId::new("webhook"),
                 ProvisioningStepType::Webhook {
                     registration: WebhookRecipe {
                         registration_url: "https://api.example.test/webhooks".to_string(),
-                        events: vec!["message.create".to_string()],
+                        events: vec!["message.create".to_string(), "guild.join".to_string()],
                         verification: WebhookVerification::ChallengeResponse {
                             challenge_param: "challenge".to_string(),
                         },
                         retry_policy: RetryConfig::default(),
                     },
                 },
-            )
-            .with_approval(),
-        );
+            ))
+            .with_step(ProvisioningStep::new(
+                StepId::new("prompt_secret"),
+                ProvisioningStepType::PromptSecret {
+                    message: "Paste connector token".to_string(),
+                },
+            ))
+            .with_step(
+                ProvisioningStep::new(
+                    StepId::new("store_secret"),
+                    ProvisioningStepType::StoreSecret {
+                        key: "connector_token".to_string(),
+                        value_from: StepId::new("prompt_secret"),
+                        scope: "connector:fcp.discord".to_string(),
+                    },
+                )
+                .depends_on(StepId::new("prompt_secret")),
+            );
 
-        let mut provisioner = MockProvisioner::new(recipe);
-        let first = provisioner
-            .execute_step(StepId::new("register_webhook"))
-            .await
-            .unwrap();
+            let mut provisioner = MockProvisioner::new(recipe);
+            let setup = provisioner.describe_setup();
+            assert_eq!(setup.estimated_duration_ms, Some(500));
+            assert_eq!(setup.tool_descriptor["name"], "mock.provision");
 
-        let ProvisioningStepResult::AwaitingHuman { prompt } = first else {
-            panic!("expected approval prompt")
-        };
-        assert_eq!(prompt.prompt_type, HumanPromptType::Approval);
-        assert_eq!(
-            provisioner.get_state().status,
-            ProvisioningStatus::AwaitingUser
-        );
+            let oauth_result = provisioner
+                .execute_step(StepId::new("oauth"))
+                .await
+                .unwrap();
+            assert!(matches!(
+                oauth_result,
+                ProvisioningStepResult::Completed { .. }
+            ));
 
-        provisioner.approve_step("register_webhook");
-        let second = provisioner
-            .execute_step(StepId::new("register_webhook"))
-            .await
-            .unwrap();
-        assert!(matches!(second, ProvisioningStepResult::Completed { .. }));
-        assert_eq!(
-            provisioner.get_state().status,
-            ProvisioningStatus::Completed
-        );
+            let webhook_result = provisioner
+                .execute_step(StepId::new("webhook"))
+                .await
+                .unwrap();
+            assert!(matches!(
+                webhook_result,
+                ProvisioningStepResult::Completed { .. }
+            ));
+            assert_eq!(provisioner.webhook_registrations.len(), 1);
+            assert_eq!(
+                provisioner.webhook_registrations[0].0,
+                "https://api.example.test/webhooks"
+            );
+
+            let prompt_result = provisioner
+                .execute_step(StepId::new("prompt_secret"))
+                .await
+                .unwrap();
+            let ProvisioningStepResult::AwaitingHuman { prompt } = prompt_result else {
+                panic!("expected prompting for secret input")
+            };
+            assert_eq!(prompt.prompt_type, HumanPromptType::Secret);
+            assert_eq!(
+                provisioner.get_state().status,
+                ProvisioningStatus::AwaitingUser
+            );
+
+            provisioner.set_prompt_value("prompt_secret", "super-secret-token");
+            let store_result = provisioner
+                .execute_step(StepId::new("store_secret"))
+                .await
+                .unwrap();
+            assert!(matches!(
+                store_result,
+                ProvisioningStepResult::Completed { .. }
+            ));
+
+            let validation = provisioner.validate();
+            assert!(validation.valid);
+            assert_eq!(
+                provisioner.get_state().status,
+                ProvisioningStatus::Completed
+            );
+
+            let logs = serde_json::to_string(&provisioner.step_logs).unwrap();
+            assert!(logs.contains("\"recipe_id\":\"discord/setup\""));
+            assert!(logs.contains("\"step_name\":\"webhook\""));
+            assert!(!logs.contains("super-secret-token"));
+        })
+        .expect("runtime should execute provisioning setup flow");
     }
 
-    #[fcp_async_core::runtime::test]
-    async fn provisioning_validation_fails_when_required_secret_is_missing() {
-        let recipe = ProvisioningRecipe::new(
-            RecipeId::new("discord/missing-secret"),
-            "1",
-            "Store secret without collecting it first",
-        )
-        .with_step(ProvisioningStep::new(
-            StepId::new("store_secret"),
-            ProvisioningStepType::StoreSecret {
-                key: "connector_token".to_string(),
-                value_from: StepId::new("prompt_secret"),
-                scope: "connector:fcp.discord".to_string(),
-            },
-        ));
+    #[test]
+    fn provisioning_interface_requires_approval_for_privileged_step() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let recipe = ProvisioningRecipe::new(
+                RecipeId::new("discord/privileged"),
+                "1",
+                "Privileged setup with approval",
+            )
+            .with_step(
+                ProvisioningStep::new(
+                    StepId::new("register_webhook"),
+                    ProvisioningStepType::Webhook {
+                        registration: WebhookRecipe {
+                            registration_url: "https://api.example.test/webhooks".to_string(),
+                            events: vec!["message.create".to_string()],
+                            verification: WebhookVerification::ChallengeResponse {
+                                challenge_param: "challenge".to_string(),
+                            },
+                            retry_policy: RetryConfig::default(),
+                        },
+                    },
+                )
+                .with_approval(),
+            );
 
-        let mut provisioner = MockProvisioner::new(recipe);
-        let error = provisioner
-            .execute_step(StepId::new("store_secret"))
-            .await
-            .expect_err("store secret should fail without prompted value");
-        assert!(matches!(error, FcpError::ResourceNotFound { .. }));
+            let mut provisioner = MockProvisioner::new(recipe);
+            let first = provisioner
+                .execute_step(StepId::new("register_webhook"))
+                .await
+                .unwrap();
 
-        let validation = provisioner.validate();
-        assert!(!validation.valid);
-        assert!(!validation.errors.is_empty());
-        assert_eq!(provisioner.get_state().status, ProvisioningStatus::Failed);
+            let ProvisioningStepResult::AwaitingHuman { prompt } = first else {
+                panic!("expected approval prompt")
+            };
+            assert_eq!(prompt.prompt_type, HumanPromptType::Approval);
+            assert_eq!(
+                provisioner.get_state().status,
+                ProvisioningStatus::AwaitingUser
+            );
+
+            provisioner.approve_step("register_webhook");
+            let second = provisioner
+                .execute_step(StepId::new("register_webhook"))
+                .await
+                .unwrap();
+            assert!(matches!(second, ProvisioningStepResult::Completed { .. }));
+            assert_eq!(
+                provisioner.get_state().status,
+                ProvisioningStatus::Completed
+            );
+        })
+        .expect("runtime should execute privileged approval flow");
+    }
+
+    #[test]
+    fn provisioning_validation_fails_when_required_secret_is_missing() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let recipe = ProvisioningRecipe::new(
+                RecipeId::new("discord/missing-secret"),
+                "1",
+                "Store secret without collecting it first",
+            )
+            .with_step(ProvisioningStep::new(
+                StepId::new("store_secret"),
+                ProvisioningStepType::StoreSecret {
+                    key: "connector_token".to_string(),
+                    value_from: StepId::new("prompt_secret"),
+                    scope: "connector:fcp.discord".to_string(),
+                },
+            ));
+
+            let mut provisioner = MockProvisioner::new(recipe);
+            let error = provisioner
+                .execute_step(StepId::new("store_secret"))
+                .await
+                .expect_err("store secret should fail without prompted value");
+            assert!(matches!(error, FcpError::ResourceNotFound { .. }));
+
+            let validation = provisioner.validate();
+            assert!(!validation.valid);
+            assert!(!validation.errors.is_empty());
+            assert_eq!(provisioner.get_state().status, ProvisioningStatus::Failed);
+        })
+        .expect("runtime should execute missing secret validation");
     }
 }

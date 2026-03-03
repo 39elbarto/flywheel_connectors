@@ -249,219 +249,249 @@ impl FcpConnector for MockConnector {
 // Standard Method Signature Tests
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[fcp_async_core::runtime::test]
-async fn test_invoke_method_signature_correct() {
-    let connector = MockConnector::new("test:mock:v1");
-    let req = test_invoke_request("test:mock:v1", "test.operation");
+#[test]
+fn test_invoke_method_signature_correct() {
+    let _ = fcp_async_core::runtime::block_on_sync(async {
+        let connector = MockConnector::new("test:mock:v1");
+        let req = test_invoke_request("test:mock:v1", "test.operation");
 
-    let result = connector.invoke(req).await;
+        let result = connector.invoke(req).await;
 
-    assert!(result.is_ok());
-    let response = result.unwrap();
-    assert_eq!(response.status, InvokeStatus::Ok);
-    assert!(response.result.is_some());
-    assert_eq!(connector.invoke_count(), 1);
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        assert_eq!(response.status, InvokeStatus::Ok);
+        assert!(response.result.is_some());
+        assert_eq!(connector.invoke_count(), 1);
+    });
 }
 
-#[fcp_async_core::runtime::test]
-async fn test_simulate_method_signature_correct() {
-    let connector = MockConnector::new("test:mock:v1");
-    let req = test_simulate_request("test:mock:v1", "test.operation");
+#[test]
+fn test_simulate_method_signature_correct() {
+    let _ = fcp_async_core::runtime::block_on_sync(async {
+        let connector = MockConnector::new("test:mock:v1");
+        let req = test_simulate_request("test:mock:v1", "test.operation");
 
-    let result = connector.simulate(req).await;
+        let result = connector.simulate(req).await;
 
-    assert!(result.is_ok());
-    let response = result.unwrap();
-    assert!(response.would_succeed);
-    assert_eq!(connector.simulate_count(), 1);
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        assert!(response.would_succeed);
+        assert_eq!(connector.simulate_count(), 1);
+    });
 }
 
-#[fcp_async_core::runtime::test]
-async fn test_subscribe_method_signature_correct() {
-    let connector = MockConnector::new("test:mock:v1");
-    let req = test_subscribe_request();
+#[test]
+fn test_subscribe_method_signature_correct() {
+    let _ = fcp_async_core::runtime::block_on_sync(async {
+        let connector = MockConnector::new("test:mock:v1");
+        let req = test_subscribe_request();
 
-    let result = connector.subscribe(req).await;
+        let result = connector.subscribe(req).await;
 
-    assert!(result.is_ok());
-    let response = result.unwrap();
-    assert!(!response.result.confirmed_topics.is_empty());
-    assert_eq!(connector.subscribe_count(), 1);
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        assert!(!response.result.confirmed_topics.is_empty());
+        assert_eq!(connector.subscribe_count(), 1);
+    });
 }
 
-#[fcp_async_core::runtime::test]
-async fn test_introspect_returns_correct_schema() {
-    let connector = MockConnector::new("test:mock:v1");
+#[test]
+fn test_introspect_returns_correct_schema() {
+    let _ = fcp_async_core::runtime::block_on_sync(async {
+        let connector = MockConnector::new("test:mock:v1");
 
-    let introspection = connector.introspect();
+        let introspection = connector.introspect();
 
-    // Introspection has operations, events, resource_types, auth_caps, event_caps
-    assert!(introspection.operations.is_empty());
-    assert!(introspection.events.is_empty());
+        // Introspection has operations, events, resource_types, auth_caps, event_caps
+        assert!(introspection.operations.is_empty());
+        assert!(introspection.events.is_empty());
+    });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Lifecycle Tests
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[fcp_async_core::runtime::test]
-async fn test_connector_lifecycle_configure_then_handshake() {
-    let mut connector = MockConnector::new("test:lifecycle:v1");
+#[test]
+fn test_connector_lifecycle_configure_then_handshake() {
+    let _ = fcp_async_core::runtime::block_on_sync(async {
+        let mut connector = MockConnector::new("test:lifecycle:v1");
 
-    // Initially not ready
-    assert!(connector.base.check_ready().is_err());
+        // Initially not ready
+        assert!(connector.base.check_ready().is_err());
 
-    // Configure
-    let config_result = connector.configure(json!({})).await;
-    assert!(config_result.is_ok());
+        // Configure
+        let config_result = connector.configure(json!({})).await;
+        assert!(config_result.is_ok());
 
-    // Still not ready (need handshake)
-    assert!(connector.base.check_ready().is_err());
+        // Still not ready (need handshake)
+        assert!(connector.base.check_ready().is_err());
 
-    // Handshake
-    let hs_result = connector.handshake(test_handshake_request()).await;
-    assert!(hs_result.is_ok());
+        // Handshake
+        let hs_result = connector.handshake(test_handshake_request()).await;
+        assert!(hs_result.is_ok());
 
-    // Now ready
-    assert!(connector.base.check_ready().is_ok());
+        // Now ready
+        assert!(connector.base.check_ready().is_ok());
+    });
 }
 
-#[fcp_async_core::runtime::test]
-async fn test_connector_health_check() {
-    let connector = MockConnector::new("test:health:v1");
+#[test]
+fn test_connector_health_check() {
+    let _ = fcp_async_core::runtime::block_on_sync(async {
+        let connector = MockConnector::new("test:health:v1");
 
-    let health = connector.health().await;
+        let health = connector.health().await;
 
-    assert!(health.is_ready());
+        assert!(health.is_ready());
+    });
 }
 
-#[fcp_async_core::runtime::test]
-async fn test_connector_health_check_unhealthy() {
-    let connector = MockConnector::new("test:health:v1").with_failure();
+#[test]
+fn test_connector_health_check_unhealthy() {
+    let _ = fcp_async_core::runtime::block_on_sync(async {
+        let connector = MockConnector::new("test:health:v1").with_failure();
 
-    let health = connector.health().await;
+        let health = connector.health().await;
 
-    assert!(!health.is_healthy());
+        assert!(!health.is_healthy());
+    });
 }
 
-#[fcp_async_core::runtime::test]
-async fn test_connector_metrics_tracking() {
-    let connector = MockConnector::new("test:metrics:v1");
+#[test]
+fn test_connector_metrics_tracking() {
+    let _ = fcp_async_core::runtime::block_on_sync(async {
+        let connector = MockConnector::new("test:metrics:v1");
 
-    // Initial metrics should be zero
-    let initial_metrics = connector.metrics();
-    assert_eq!(initial_metrics.requests_total, 0);
-    assert_eq!(initial_metrics.requests_success, 0);
+        // Initial metrics should be zero
+        let initial_metrics = connector.metrics();
+        assert_eq!(initial_metrics.requests_total, 0);
+        assert_eq!(initial_metrics.requests_success, 0);
 
-    // Invoke some requests
-    let req = test_invoke_request("test:metrics:v1", "test.op");
-    let _ = connector.invoke(req.clone()).await;
-    let _ = connector.invoke(req).await;
+        // Invoke some requests
+        let req = test_invoke_request("test:metrics:v1", "test.op");
+        let _ = connector.invoke(req.clone()).await;
+        let _ = connector.invoke(req).await;
 
-    // Check metrics updated
-    let metrics = connector.metrics();
-    assert_eq!(metrics.requests_total, 2);
-    assert_eq!(metrics.requests_success, 2);
+        // Check metrics updated
+        let metrics = connector.metrics();
+        assert_eq!(metrics.requests_total, 2);
+        assert_eq!(metrics.requests_success, 2);
+    });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Error Handling Tests
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[fcp_async_core::runtime::test]
-async fn test_invoke_error_handling() {
-    let connector = MockConnector::new("test:error:v1").with_failure();
-    let req = test_invoke_request("test:error:v1", "test.operation");
+#[test]
+fn test_invoke_error_handling() {
+    let _ = fcp_async_core::runtime::block_on_sync(async {
+        let connector = MockConnector::new("test:error:v1").with_failure();
+        let req = test_invoke_request("test:error:v1", "test.operation");
 
-    let result = connector.invoke(req).await;
+        let result = connector.invoke(req).await;
 
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(matches!(err, FcpError::Internal { .. }));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, FcpError::Internal { .. }));
+    });
 }
 
-#[fcp_async_core::runtime::test]
-async fn test_configure_error_handling() {
-    let mut connector = MockConnector::new("test:error:v1").with_failure();
+#[test]
+fn test_configure_error_handling() {
+    let _ = fcp_async_core::runtime::block_on_sync(async {
+        let mut connector = MockConnector::new("test:error:v1").with_failure();
 
-    let result = connector.configure(json!({})).await;
+        let result = connector.configure(json!({})).await;
 
-    assert!(result.is_err());
+        assert!(result.is_err());
+    });
 }
 
-#[fcp_async_core::runtime::test]
-async fn test_handshake_error_handling() {
-    let mut connector = MockConnector::new("test:error:v1").with_failure();
+#[test]
+fn test_handshake_error_handling() {
+    let _ = fcp_async_core::runtime::block_on_sync(async {
+        let mut connector = MockConnector::new("test:error:v1").with_failure();
 
-    let result = connector.handshake(test_handshake_request()).await;
+        let result = connector.handshake(test_handshake_request()).await;
 
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(matches!(err, FcpError::Unauthorized { .. }));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, FcpError::Unauthorized { .. }));
+    });
 }
 
-#[fcp_async_core::runtime::test]
-async fn test_subscribe_error_handling() {
-    let connector = MockConnector::new("test:error:v1").with_failure();
-    let req = test_subscribe_request();
+#[test]
+fn test_subscribe_error_handling() {
+    let _ = fcp_async_core::runtime::block_on_sync(async {
+        let connector = MockConnector::new("test:error:v1").with_failure();
+        let req = test_subscribe_request();
 
-    let result = connector.subscribe(req).await;
+        let result = connector.subscribe(req).await;
 
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(matches!(err, FcpError::StreamingNotSupported));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, FcpError::StreamingNotSupported));
+    });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Simulate with CostEstimate Tests
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[fcp_async_core::runtime::test]
-async fn test_simulate_with_cost_estimate() {
-    let connector = MockConnector::new("test:cost:v1");
-    let mut req = test_simulate_request("test:cost:v1", "test.operation");
-    req.estimate_cost = true;
+#[test]
+fn test_simulate_with_cost_estimate() {
+    let _ = fcp_async_core::runtime::block_on_sync(async {
+        let connector = MockConnector::new("test:cost:v1");
+        let mut req = test_simulate_request("test:cost:v1", "test.operation");
+        req.estimate_cost = true;
 
-    let result = connector.simulate(req).await;
+        let result = connector.simulate(req).await;
 
-    assert!(result.is_ok());
-    let response = result.unwrap();
-    assert!(response.would_succeed);
-    assert!(response.estimated_cost.is_some());
-    let cost = response.estimated_cost.unwrap();
-    assert_eq!(cost.api_credits, Some(10));
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        assert!(response.would_succeed);
+        assert!(response.estimated_cost.is_some());
+        let cost = response.estimated_cost.unwrap();
+        assert_eq!(cost.api_credits, Some(10));
+    });
 }
 
-#[fcp_async_core::runtime::test]
-async fn test_simulate_with_availability_check() {
-    let connector = MockConnector::new("test:avail:v1");
-    let mut req = test_simulate_request("test:avail:v1", "test.operation");
-    req.check_availability = true;
+#[test]
+fn test_simulate_with_availability_check() {
+    let _ = fcp_async_core::runtime::block_on_sync(async {
+        let connector = MockConnector::new("test:avail:v1");
+        let mut req = test_simulate_request("test:avail:v1", "test.operation");
+        req.check_availability = true;
 
-    let result = connector.simulate(req).await;
+        let result = connector.simulate(req).await;
 
-    assert!(result.is_ok());
-    let response = result.unwrap();
-    assert!(response.would_succeed);
-    assert!(response.availability.is_some());
-    let avail = response.availability.unwrap();
-    assert!(avail.available);
-    assert_eq!(avail.rate_limit_remaining, Some(100));
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        assert!(response.would_succeed);
+        assert!(response.availability.is_some());
+        let avail = response.availability.unwrap();
+        assert!(avail.available);
+        assert_eq!(avail.rate_limit_remaining, Some(100));
+    });
 }
 
-#[fcp_async_core::runtime::test]
-async fn test_simulate_denied_returns_reason() {
-    let connector = MockConnector::new("test:denied:v1").with_failure();
-    let req = test_simulate_request("test:denied:v1", "test.operation");
+#[test]
+fn test_simulate_denied_returns_reason() {
+    let _ = fcp_async_core::runtime::block_on_sync(async {
+        let connector = MockConnector::new("test:denied:v1").with_failure();
+        let req = test_simulate_request("test:denied:v1", "test.operation");
 
-    let result = connector.simulate(req).await;
+        let result = connector.simulate(req).await;
 
-    assert!(result.is_ok());
-    let response = result.unwrap();
-    assert!(!response.would_succeed);
-    assert!(response.failure_reason.is_some());
-    assert!(response.denial_code.is_some());
-    assert_eq!(response.denial_code.unwrap(), "FCP-3001");
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        assert!(!response.would_succeed);
+        assert!(response.failure_reason.is_some());
+        assert!(response.denial_code.is_some());
+        assert_eq!(response.denial_code.unwrap(), "FCP-3001");
+    });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -2453,257 +2453,271 @@ mod tests {
     // StreamingSupervisor tests
     // ─────────────────────────────────────────────────────────────────────────
 
-    #[fcp_async_core::runtime::test]
-    async fn streaming_supervisor_shutdown_signal() {
-        let config = SupervisorConfig::default();
-        let session = InMemoryStreamingSession::new();
-        let mut supervisor = StreamingSupervisor::new(config, session);
+    #[test]
+    fn streaming_supervisor_shutdown_signal() {
+        let _ = fcp_async_core::runtime::block_on_sync(async {
+            let config = SupervisorConfig::default();
+            let session = InMemoryStreamingSession::new();
+            let mut supervisor = StreamingSupervisor::new(config, session);
 
-        let (shutdown_tx, shutdown_rx) = fcp_async_core::channel::watch::channel(true);
-        let _ = shutdown_tx;
+            let (shutdown_tx, shutdown_rx) = fcp_async_core::channel::watch::channel(true);
+            let _ = shutdown_tx;
 
-        let outcome = supervisor
-            .run::<i32, _, _, _, _>(
-                shutdown_rx,
-                |_session| async { Err(boxed_err("should not connect")) },
-                |_event, _session| async { Ok(()) },
-            )
-            .await;
+            let outcome = supervisor
+                .run::<i32, _, _, _, _>(
+                    shutdown_rx,
+                    |_session| async { Err(boxed_err("should not connect")) },
+                    |_event, _session| async { Ok(()) },
+                )
+                .await;
 
-        assert!(matches!(outcome, SupervisorOutcome::Shutdown));
+            assert!(matches!(outcome, SupervisorOutcome::Shutdown));
+        });
     }
 
-    #[fcp_async_core::runtime::test]
-    async fn streaming_supervisor_restores_and_persists_on_shutdown() {
-        let config = SupervisorConfig::default();
-        let session = TestStreamingSession::default();
-        let mut supervisor = StreamingSupervisor::new(config, session);
+    #[test]
+    fn streaming_supervisor_restores_and_persists_on_shutdown() {
+        let _ = fcp_async_core::runtime::block_on_sync(async {
+            let config = SupervisorConfig::default();
+            let session = TestStreamingSession::default();
+            let mut supervisor = StreamingSupervisor::new(config, session);
 
-        let (shutdown_tx, shutdown_rx) = fcp_async_core::channel::watch::channel(true);
-        let _ = shutdown_tx;
+            let (shutdown_tx, shutdown_rx) = fcp_async_core::channel::watch::channel(true);
+            let _ = shutdown_tx;
 
-        let outcome = supervisor
-            .run::<i32, _, _, _, _>(
-                shutdown_rx,
-                |_session| async { Err(boxed_err("should not connect")) },
-                |_event, _session| async { Ok(()) },
-            )
-            .await;
+            let outcome = supervisor
+                .run::<i32, _, _, _, _>(
+                    shutdown_rx,
+                    |_session| async { Err(boxed_err("should not connect")) },
+                    |_event, _session| async { Ok(()) },
+                )
+                .await;
 
-        assert!(matches!(outcome, SupervisorOutcome::Shutdown));
-        assert_eq!(supervisor.session().restore_calls(), 1);
-        assert_eq!(supervisor.session().persist_calls(), 1);
+            assert!(matches!(outcome, SupervisorOutcome::Shutdown));
+            assert_eq!(supervisor.session().restore_calls(), 1);
+            assert_eq!(supervisor.session().persist_calls(), 1);
+        });
     }
 
-    #[fcp_async_core::runtime::test]
-    async fn streaming_supervisor_max_failures() {
-        let config = SupervisorConfig::default()
-            .with_max_consecutive_failures(2)
-            .with_base_backoff_ms(1);
-        let session = InMemoryStreamingSession::new();
-        let mut supervisor = StreamingSupervisor::new(config, session);
+    #[test]
+    fn streaming_supervisor_max_failures() {
+        let _ = fcp_async_core::runtime::block_on_sync(async {
+            let config = SupervisorConfig::default()
+                .with_max_consecutive_failures(2)
+                .with_base_backoff_ms(1);
+            let session = InMemoryStreamingSession::new();
+            let mut supervisor = StreamingSupervisor::new(config, session);
 
-        let (_shutdown_tx, shutdown_rx) = fcp_async_core::channel::watch::channel(false);
+            let (_shutdown_tx, shutdown_rx) = fcp_async_core::channel::watch::channel(false);
 
-        let outcome = supervisor
-            .run::<i32, _, _, _, _>(
-                shutdown_rx,
-                |_session| async { Err(boxed_err("connect failed")) },
-                |_event, _session| async { Ok(()) },
-            )
-            .await;
+            let outcome = supervisor
+                .run::<i32, _, _, _, _>(
+                    shutdown_rx,
+                    |_session| async { Err(boxed_err("connect failed")) },
+                    |_event, _session| async { Ok(()) },
+                )
+                .await;
 
-        assert!(matches!(
-            outcome,
-            SupervisorOutcome::MaxFailuresReached { failures: 2 }
-        ));
+            assert!(matches!(
+                outcome,
+                SupervisorOutcome::MaxFailuresReached { failures: 2 }
+            ));
+        });
     }
 
-    #[fcp_async_core::runtime::test]
-    async fn streaming_supervisor_persists_on_max_failures() {
-        let config = SupervisorConfig::default()
-            .with_max_consecutive_failures(1)
-            .with_base_backoff_ms(1);
-        let session = TestStreamingSession::default();
-        let mut supervisor = StreamingSupervisor::new(config, session);
+    #[test]
+    fn streaming_supervisor_persists_on_max_failures() {
+        let _ = fcp_async_core::runtime::block_on_sync(async {
+            let config = SupervisorConfig::default()
+                .with_max_consecutive_failures(1)
+                .with_base_backoff_ms(1);
+            let session = TestStreamingSession::default();
+            let mut supervisor = StreamingSupervisor::new(config, session);
 
-        let (_shutdown_tx, shutdown_rx) = fcp_async_core::channel::watch::channel(false);
+            let (_shutdown_tx, shutdown_rx) = fcp_async_core::channel::watch::channel(false);
 
-        let outcome = supervisor
-            .run::<i32, _, _, _, _>(
-                shutdown_rx,
-                |_session| async { Err(boxed_err("connect failed")) },
-                |_event, _session| async { Ok(()) },
-            )
-            .await;
+            let outcome = supervisor
+                .run::<i32, _, _, _, _>(
+                    shutdown_rx,
+                    |_session| async { Err(boxed_err("connect failed")) },
+                    |_event, _session| async { Ok(()) },
+                )
+                .await;
 
-        assert!(matches!(
-            outcome,
-            SupervisorOutcome::MaxFailuresReached { failures: 1 }
-        ));
-        assert_eq!(supervisor.session().restore_calls(), 1);
-        assert_eq!(supervisor.session().persist_calls(), 1);
+            assert!(matches!(
+                outcome,
+                SupervisorOutcome::MaxFailuresReached { failures: 1 }
+            ));
+            assert_eq!(supervisor.session().restore_calls(), 1);
+            assert_eq!(supervisor.session().persist_calls(), 1);
+        });
     }
 
-    #[fcp_async_core::runtime::test]
-    async fn streaming_supervisor_fatal_event_handler() {
-        let config = SupervisorConfig::default().with_base_backoff_ms(1);
-        let session = InMemoryStreamingSession::new();
-        let mut supervisor = StreamingSupervisor::new(config, session);
+    #[test]
+    fn streaming_supervisor_fatal_event_handler() {
+        let _ = fcp_async_core::runtime::block_on_sync(async {
+            let config = SupervisorConfig::default().with_base_backoff_ms(1);
+            let session = InMemoryStreamingSession::new();
+            let mut supervisor = StreamingSupervisor::new(config, session);
 
-        let (_shutdown_tx, shutdown_rx) = fcp_async_core::channel::watch::channel(false);
+            let (_shutdown_tx, shutdown_rx) = fcp_async_core::channel::watch::channel(false);
 
-        let outcome = supervisor
-            .run(
-                shutdown_rx,
-                |_session| async {
-                    let (tx, rx) = mpsc::channel(1);
-                    let _ = tx.send(42).await;
-                    let join_handle = fcp_async_core::task::spawn(async { Ok(()) });
-                    Ok(StreamingConnection {
-                        events: rx,
-                        join_handle,
-                    })
-                },
-                |_event, _session| async { Err(boxed_err("handler failed")) },
-            )
-            .await;
-
-        assert!(matches!(
-            outcome,
-            SupervisorOutcome::FatalError { message } if message == "handler failed"
-        ));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn streaming_supervisor_heartbeat_timeout_transitions_and_logs() {
-        let config = SupervisorConfig {
-            heartbeat_interval_ms: 10,
-            heartbeat_timeout_multiplier: 1.1,
-            max_consecutive_failures: 1,
-            base_backoff_ms: 1,
-            jitter_enabled: false,
-            ..Default::default()
-        };
-
-        let session = InMemoryStreamingSession::new();
-        let mut supervisor = StreamingSupervisor::new(config, session);
-        supervisor
-            .session_mut()
-            .record_heartbeat_sent(Instant::now());
-
-        let capture = LogCapture::default();
-        let _guard = capture.install_json(EnvFilter::new("warn"));
-
-        let (_shutdown_tx, shutdown_rx) = fcp_async_core::channel::watch::channel(false);
-
-        let outcome = supervisor
-            .run::<(), _, _, _, _>(
-                shutdown_rx,
-                |_session| async {
-                    let (tx, rx) = mpsc::channel(1);
-                    let join_handle = fcp_async_core::task::spawn(async move {
-                        let _tx = tx;
-                        std::future::pending::<Result<(), StreamingError>>().await
-                    });
-                    Ok(StreamingConnection {
-                        events: rx,
-                        join_handle,
-                    })
-                },
-                |_event, _session| async { Ok(()) },
-            )
-            .await;
-
-        assert!(matches!(
-            outcome,
-            SupervisorOutcome::MaxFailuresReached { failures: 1 }
-        ));
-        assert_eq!(supervisor.stats().missed_heartbeats, 1);
-        assert!(supervisor.health().is_unhealthy());
-
-        let logs = capture.jsonl();
-        let mut heartbeat_log = None;
-        for line in logs.lines() {
-            let value: serde_json::Value =
-                serde_json::from_str(line).expect("valid heartbeat log json");
-            if value.get("message").and_then(|message| message.as_str())
-                == Some("Streaming heartbeat timeout")
-            {
-                heartbeat_log = Some(value);
-                break;
-            }
-        }
-
-        let log = heartbeat_log.expect("missing heartbeat timeout log");
-        assert_eq!(log["heartbeat_seq"], 1);
-        assert_eq!(log["ack_seq"], 0);
-        assert_eq!(log["missed_heartbeats"], 1);
-        assert_eq!(log["reconnect_count"], 0);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn streaming_supervisor_resume_fallback_to_full_connect() {
-        let config = SupervisorConfig::default()
-            .with_base_backoff_ms(1)
-            .with_max_consecutive_failures(3);
-        let mut session = InMemoryStreamingSession::new();
-        session.set_resume_token("resume-token".to_string());
-
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let resume_attempts = Arc::new(AtomicUsize::new(0));
-        let full_attempts = Arc::new(AtomicUsize::new(0));
-
-        let (shutdown_tx, shutdown_rx) = fcp_async_core::channel::watch::channel(false);
-        let shutdown_tx = Arc::new(shutdown_tx);
-
-        let mut supervisor = StreamingSupervisor::new(config, session);
-
-        let attempts_cloned = Arc::clone(&attempts);
-        let resume_attempts_cloned = Arc::clone(&resume_attempts);
-        let full_attempts_cloned = Arc::clone(&full_attempts);
-        let shutdown_tx_cloned = Arc::clone(&shutdown_tx);
-
-        let outcome = supervisor
-            .run::<(), _, _, _, _>(
-                shutdown_rx,
-                move |session| {
-                    let attempts = Arc::clone(&attempts_cloned);
-                    let resume_attempts = Arc::clone(&resume_attempts_cloned);
-                    let full_attempts = Arc::clone(&full_attempts_cloned);
-                    let shutdown_tx = Arc::clone(&shutdown_tx_cloned);
-
-                    attempts.fetch_add(1, Ordering::SeqCst);
-
-                    let result = if session.resume_token().is_some() {
-                        resume_attempts.fetch_add(1, Ordering::SeqCst);
-                        session.clear_resume_token();
-                        Err(boxed_err("resume failed"))
-                    } else {
-                        full_attempts.fetch_add(1, Ordering::SeqCst);
-                        let _ = shutdown_tx.send(true);
-
+            let outcome = supervisor
+                .run(
+                    shutdown_rx,
+                    |_session| async {
                         let (tx, rx) = mpsc::channel(1);
-                        drop(tx);
+                        let _ = tx.send(42).await;
                         let join_handle = fcp_async_core::task::spawn(async { Ok(()) });
                         Ok(StreamingConnection {
                             events: rx,
                             join_handle,
                         })
-                    };
+                    },
+                    |_event, _session| async { Err(boxed_err("handler failed")) },
+                )
+                .await;
 
-                    std::future::ready(result)
-                },
-                |_event, _session| async { Ok(()) },
-            )
-            .await;
+            assert!(matches!(
+                outcome,
+                SupervisorOutcome::FatalError { message } if message == "handler failed"
+            ));
+        });
+    }
 
-        assert!(matches!(outcome, SupervisorOutcome::Shutdown));
-        assert_eq!(resume_attempts.load(Ordering::SeqCst), 1);
-        assert_eq!(full_attempts.load(Ordering::SeqCst), 1);
-        assert_eq!(attempts.load(Ordering::SeqCst), 2);
-        assert_eq!(supervisor.stats().connection_attempts, 2);
-        assert_eq!(supervisor.streaming_health_state().reconnect_count, 1);
+    #[test]
+    fn streaming_supervisor_heartbeat_timeout_transitions_and_logs() {
+        let _ = fcp_async_core::runtime::block_on_sync(async {
+            let config = SupervisorConfig {
+                heartbeat_interval_ms: 10,
+                heartbeat_timeout_multiplier: 1.1,
+                max_consecutive_failures: 1,
+                base_backoff_ms: 1,
+                jitter_enabled: false,
+                ..Default::default()
+            };
+
+            let session = InMemoryStreamingSession::new();
+            let mut supervisor = StreamingSupervisor::new(config, session);
+            supervisor
+                .session_mut()
+                .record_heartbeat_sent(Instant::now());
+
+            let capture = LogCapture::default();
+            let _guard = capture.install_json(EnvFilter::new("warn"));
+
+            let (_shutdown_tx, shutdown_rx) = fcp_async_core::channel::watch::channel(false);
+
+            let outcome = supervisor
+                .run::<(), _, _, _, _>(
+                    shutdown_rx,
+                    |_session| async {
+                        let (tx, rx) = mpsc::channel(1);
+                        let join_handle = fcp_async_core::task::spawn(async move {
+                            let _tx = tx;
+                            std::future::pending::<Result<(), StreamingError>>().await
+                        });
+                        Ok(StreamingConnection {
+                            events: rx,
+                            join_handle,
+                        })
+                    },
+                    |_event, _session| async { Ok(()) },
+                )
+                .await;
+
+            assert!(matches!(
+                outcome,
+                SupervisorOutcome::MaxFailuresReached { failures: 1 }
+            ));
+            assert_eq!(supervisor.stats().missed_heartbeats, 1);
+            assert!(supervisor.health().is_unhealthy());
+
+            let logs = capture.jsonl();
+            let mut heartbeat_log = None;
+            for line in logs.lines() {
+                let value: serde_json::Value =
+                    serde_json::from_str(line).expect("valid heartbeat log json");
+                if value.get("message").and_then(|message| message.as_str())
+                    == Some("Streaming heartbeat timeout")
+                {
+                    heartbeat_log = Some(value);
+                    break;
+                }
+            }
+
+            let log = heartbeat_log.expect("missing heartbeat timeout log");
+            assert_eq!(log["heartbeat_seq"], 1);
+            assert_eq!(log["ack_seq"], 0);
+            assert_eq!(log["missed_heartbeats"], 1);
+            assert_eq!(log["reconnect_count"], 0);
+        });
+    }
+
+    #[test]
+    fn streaming_supervisor_resume_fallback_to_full_connect() {
+        let _ = fcp_async_core::runtime::block_on_sync(async {
+            let config = SupervisorConfig::default()
+                .with_base_backoff_ms(1)
+                .with_max_consecutive_failures(3);
+            let mut session = InMemoryStreamingSession::new();
+            session.set_resume_token("resume-token".to_string());
+
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let resume_attempts = Arc::new(AtomicUsize::new(0));
+            let full_attempts = Arc::new(AtomicUsize::new(0));
+
+            let (shutdown_tx, shutdown_rx) = fcp_async_core::channel::watch::channel(false);
+            let shutdown_tx = Arc::new(shutdown_tx);
+
+            let mut supervisor = StreamingSupervisor::new(config, session);
+
+            let attempts_cloned = Arc::clone(&attempts);
+            let resume_attempts_cloned = Arc::clone(&resume_attempts);
+            let full_attempts_cloned = Arc::clone(&full_attempts);
+            let shutdown_tx_cloned = Arc::clone(&shutdown_tx);
+
+            let outcome = supervisor
+                .run::<(), _, _, _, _>(
+                    shutdown_rx,
+                    move |session| {
+                        let attempts = Arc::clone(&attempts_cloned);
+                        let resume_attempts = Arc::clone(&resume_attempts_cloned);
+                        let full_attempts = Arc::clone(&full_attempts_cloned);
+                        let shutdown_tx = Arc::clone(&shutdown_tx_cloned);
+
+                        attempts.fetch_add(1, Ordering::SeqCst);
+
+                        let result = if session.resume_token().is_some() {
+                            resume_attempts.fetch_add(1, Ordering::SeqCst);
+                            session.clear_resume_token();
+                            Err(boxed_err("resume failed"))
+                        } else {
+                            full_attempts.fetch_add(1, Ordering::SeqCst);
+                            let _ = shutdown_tx.send(true);
+
+                            let (tx, rx) = mpsc::channel(1);
+                            drop(tx);
+                            let join_handle = fcp_async_core::task::spawn(async { Ok(()) });
+                            Ok(StreamingConnection {
+                                events: rx,
+                                join_handle,
+                            })
+                        };
+
+                        std::future::ready(result)
+                    },
+                    |_event, _session| async { Ok(()) },
+                )
+                .await;
+
+            assert!(matches!(outcome, SupervisorOutcome::Shutdown));
+            assert_eq!(resume_attempts.load(Ordering::SeqCst), 1);
+            assert_eq!(full_attempts.load(Ordering::SeqCst), 1);
+            assert_eq!(attempts.load(Ordering::SeqCst), 2);
+            assert_eq!(supervisor.stats().connection_attempts, 2);
+            assert_eq!(supervisor.streaming_health_state().reconnect_count, 1);
+        });
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -2781,75 +2795,81 @@ mod tests {
         assert_eq!(stats.backoff_time_ms, 0);
     }
 
-    #[fcp_async_core::runtime::test]
-    async fn polling_supervisor_shutdown_signal() {
-        let config = SupervisorConfig::default();
-        let cursor = InMemoryPollingCursor::new();
-        let mut supervisor = PollingSupervisor::new(config, cursor);
+    #[test]
+    fn polling_supervisor_shutdown_signal() {
+        let _ = fcp_async_core::runtime::block_on_sync(async {
+            let config = SupervisorConfig::default();
+            let cursor = InMemoryPollingCursor::new();
+            let mut supervisor = PollingSupervisor::new(config, cursor);
 
-        let (shutdown_tx, shutdown_rx) = fcp_async_core::channel::watch::channel(true); // Start with shutdown
-        let _ = shutdown_tx; // Keep sender alive
+            let (shutdown_tx, shutdown_rx) = fcp_async_core::channel::watch::channel(true); // Start with shutdown
+            let _ = shutdown_tx; // Keep sender alive
 
-        let outcome = supervisor
-            .run(
-                shutdown_rx,
-                1000,
-                |_offset| async { PollResult::<i32>::empty() },
-                |_items, _cursor| Ok(()),
-            )
-            .await;
+            let outcome = supervisor
+                .run(
+                    shutdown_rx,
+                    1000,
+                    |_offset| async { PollResult::<i32>::empty() },
+                    |_items, _cursor| Ok(()),
+                )
+                .await;
 
-        assert!(matches!(outcome, SupervisorOutcome::Shutdown));
+            assert!(matches!(outcome, SupervisorOutcome::Shutdown));
+        });
     }
 
-    #[fcp_async_core::runtime::test]
-    async fn polling_supervisor_fatal_error_stops() {
-        let config = SupervisorConfig::default();
-        let cursor = InMemoryPollingCursor::new();
-        let mut supervisor = PollingSupervisor::new(config, cursor);
+    #[test]
+    fn polling_supervisor_fatal_error_stops() {
+        let _ = fcp_async_core::runtime::block_on_sync(async {
+            let config = SupervisorConfig::default();
+            let cursor = InMemoryPollingCursor::new();
+            let mut supervisor = PollingSupervisor::new(config, cursor);
 
-        let (_shutdown_tx, shutdown_rx) = fcp_async_core::channel::watch::channel(false);
+            let (_shutdown_tx, shutdown_rx) = fcp_async_core::channel::watch::channel(false);
 
-        let outcome = supervisor
-            .run(
-                shutdown_rx,
-                1000,
-                |_offset| async { PollResult::<i32>::fatal("auth failed") },
-                |_items, _cursor| Ok(()),
-            )
-            .await;
+            let outcome = supervisor
+                .run(
+                    shutdown_rx,
+                    1000,
+                    |_offset| async { PollResult::<i32>::fatal("auth failed") },
+                    |_items, _cursor| Ok(()),
+                )
+                .await;
 
-        assert!(matches!(
-            outcome,
-            SupervisorOutcome::FatalError { message } if message == "auth failed"
-        ));
-        assert_eq!(supervisor.stats().total_polls, 1);
-        assert_eq!(supervisor.stats().failed_polls, 0); // Fatal errors don't increment failed_polls
+            assert!(matches!(
+                outcome,
+                SupervisorOutcome::FatalError { message } if message == "auth failed"
+            ));
+            assert_eq!(supervisor.stats().total_polls, 1);
+            assert_eq!(supervisor.stats().failed_polls, 0); // Fatal errors don't increment failed_polls
+        });
     }
 
-    #[fcp_async_core::runtime::test]
-    async fn polling_supervisor_max_failures() {
-        let config = SupervisorConfig::default()
-            .with_max_consecutive_failures(2)
-            .with_base_backoff_ms(1); // Fast backoff for testing
-        let cursor = InMemoryPollingCursor::new();
-        let mut supervisor = PollingSupervisor::new(config, cursor);
+    #[test]
+    fn polling_supervisor_max_failures() {
+        let _ = fcp_async_core::runtime::block_on_sync(async {
+            let config = SupervisorConfig::default()
+                .with_max_consecutive_failures(2)
+                .with_base_backoff_ms(1); // Fast backoff for testing
+            let cursor = InMemoryPollingCursor::new();
+            let mut supervisor = PollingSupervisor::new(config, cursor);
 
-        let (_shutdown_tx, shutdown_rx) = fcp_async_core::channel::watch::channel(false);
+            let (_shutdown_tx, shutdown_rx) = fcp_async_core::channel::watch::channel(false);
 
-        let outcome = supervisor
-            .run(
-                shutdown_rx,
-                1,
-                |_offset| async { PollResult::<i32>::recoverable("timeout") },
-                |_items, _cursor| Ok(()),
-            )
-            .await;
+            let outcome = supervisor
+                .run(
+                    shutdown_rx,
+                    1,
+                    |_offset| async { PollResult::<i32>::recoverable("timeout") },
+                    |_items, _cursor| Ok(()),
+                )
+                .await;
 
-        assert!(matches!(
-            outcome,
-            SupervisorOutcome::MaxFailuresReached { failures: 2 }
-        ));
-        assert_eq!(supervisor.stats().failed_polls, 2);
+            assert!(matches!(
+                outcome,
+                SupervisorOutcome::MaxFailuresReached { failures: 2 }
+            ));
+            assert_eq!(supervisor.stats().failed_polls, 2);
+        });
     }
 }

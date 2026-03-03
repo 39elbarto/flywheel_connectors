@@ -706,103 +706,122 @@ mod tests {
 
     // -- RetryLoop tests (async) -----------------------------------------------
 
-    #[fcp_async_core::runtime::test]
-    async fn retry_loop_succeeds_first_attempt() {
-        let ctx = ExecutionContext::request_scoped(Duration::from_secs(5));
-        let policy = RetryPolicy::new().with_max_attempts(Some(3));
+    #[test]
+    fn retry_loop_succeeds_first_attempt() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let ctx = ExecutionContext::request_scoped(Duration::from_secs(5));
+            let policy = RetryPolicy::new().with_max_attempts(Some(3));
 
-        let result: Result<&str, TestError> = RetryLoop::execute(&ctx, &policy, |_attempt| async {
-            AttemptOutcome::Success("ok")
+            let result: Result<&str, TestError> =
+                RetryLoop::execute(&ctx, &policy, |_attempt| async {
+                    AttemptOutcome::Success("ok")
+                })
+                .await;
+
+            assert_eq!(result.unwrap(), "ok");
         })
-        .await;
-
-        assert_eq!(result.unwrap(), "ok");
+        .expect("runtime should execute first-attempt retry test");
     }
 
-    #[fcp_async_core::runtime::test]
-    async fn retry_loop_retries_then_succeeds() {
-        let ctx = ExecutionContext::request_scoped(Duration::from_secs(10));
-        let policy = RetryPolicy::new()
-            .with_max_attempts(Some(5))
-            .with_base_backoff_ms(10)
-            .with_jitter_enabled(false);
+    #[test]
+    fn retry_loop_retries_then_succeeds() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let ctx = ExecutionContext::request_scoped(Duration::from_secs(10));
+            let policy = RetryPolicy::new()
+                .with_max_attempts(Some(5))
+                .with_base_backoff_ms(10)
+                .with_jitter_enabled(false);
 
-        let result: Result<&str, TestError> =
-            RetryLoop::execute(&ctx, &policy, |attempt| async move {
-                if attempt < 2 {
+            let result: Result<&str, TestError> =
+                RetryLoop::execute(&ctx, &policy, |attempt| async move {
+                    if attempt < 2 {
+                        AttemptOutcome::Retryable {
+                            error: TestError::Transient("try again".into()),
+                            retry_after: None,
+                        }
+                    } else {
+                        AttemptOutcome::Success("finally")
+                    }
+                })
+                .await;
+
+            assert_eq!(result.unwrap(), "finally");
+        })
+        .expect("runtime should execute retry-then-success test");
+    }
+
+    #[test]
+    fn retry_loop_terminal_error_stops() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let ctx = ExecutionContext::request_scoped(Duration::from_secs(5));
+            let policy = RetryPolicy::new().with_max_attempts(Some(5));
+
+            let result: Result<&str, TestError> =
+                RetryLoop::execute(&ctx, &policy, |_attempt| async {
+                    AttemptOutcome::Terminal(TestError::Fatal("auth failed".into()))
+                })
+                .await;
+
+            assert!(result.is_err());
+            match result.unwrap_err() {
+                TestError::Fatal(msg) => assert_eq!(msg, "auth failed"),
+                other => panic!("expected Fatal, got {other:?}"),
+            }
+        })
+        .expect("runtime should execute terminal-error retry test");
+    }
+
+    #[test]
+    fn retry_loop_max_attempts_exhausted() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let ctx = ExecutionContext::request_scoped(Duration::from_secs(10));
+            let policy = RetryPolicy::new()
+                .with_max_attempts(Some(2))
+                .with_base_backoff_ms(10)
+                .with_jitter_enabled(false);
+
+            let result: Result<&str, TestError> =
+                RetryLoop::execute(&ctx, &policy, |_attempt| async {
                     AttemptOutcome::Retryable {
-                        error: TestError::Transient("try again".into()),
+                        error: TestError::Transient("still failing".into()),
                         retry_after: None,
                     }
-                } else {
-                    AttemptOutcome::Success("finally")
-                }
-            })
-            .await;
+                })
+                .await;
 
-        assert_eq!(result.unwrap(), "finally");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn retry_loop_terminal_error_stops() {
-        let ctx = ExecutionContext::request_scoped(Duration::from_secs(5));
-        let policy = RetryPolicy::new().with_max_attempts(Some(5));
-
-        let result: Result<&str, TestError> = RetryLoop::execute(&ctx, &policy, |_attempt| async {
-            AttemptOutcome::Terminal(TestError::Fatal("auth failed".into()))
+            assert!(result.is_err());
         })
-        .await;
-
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            TestError::Fatal(msg) => assert_eq!(msg, "auth failed"),
-            other => panic!("expected Fatal, got {other:?}"),
-        }
+        .expect("runtime should execute max-attempts retry test");
     }
 
-    #[fcp_async_core::runtime::test]
-    async fn retry_loop_max_attempts_exhausted() {
-        let ctx = ExecutionContext::request_scoped(Duration::from_secs(10));
-        let policy = RetryPolicy::new()
-            .with_max_attempts(Some(2))
-            .with_base_backoff_ms(10)
-            .with_jitter_enabled(false);
+    #[test]
+    fn retry_loop_respects_cancellation() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let ctx = ExecutionContext::request_scoped(Duration::from_secs(10));
+            let policy = RetryPolicy::new()
+                .with_max_attempts(Some(10))
+                .with_base_backoff_ms(10)
+                .with_jitter_enabled(false);
 
-        let result: Result<&str, TestError> = RetryLoop::execute(&ctx, &policy, |_attempt| async {
-            AttemptOutcome::Retryable {
-                error: TestError::Transient("still failing".into()),
-                retry_after: None,
+            // Cancel the context immediately
+            ctx.cancel();
+
+            let result: Result<&str, TestError> =
+                RetryLoop::execute(&ctx, &policy, |_attempt| async {
+                    AttemptOutcome::Retryable {
+                        error: TestError::Transient("won't get here".into()),
+                        retry_after: None,
+                    }
+                })
+                .await;
+
+            assert!(result.is_err());
+            match result.unwrap_err() {
+                TestError::Cancelled => {}
+                other => panic!("expected Cancelled, got {other:?}"),
             }
         })
-        .await;
-
-        assert!(result.is_err());
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn retry_loop_respects_cancellation() {
-        let ctx = ExecutionContext::request_scoped(Duration::from_secs(10));
-        let policy = RetryPolicy::new()
-            .with_max_attempts(Some(10))
-            .with_base_backoff_ms(10)
-            .with_jitter_enabled(false);
-
-        // Cancel the context immediately
-        ctx.cancel();
-
-        let result: Result<&str, TestError> = RetryLoop::execute(&ctx, &policy, |_attempt| async {
-            AttemptOutcome::Retryable {
-                error: TestError::Transient("won't get here".into()),
-                retry_after: None,
-            }
-        })
-        .await;
-
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            TestError::Cancelled => {}
-            other => panic!("expected Cancelled, got {other:?}"),
-        }
+        .expect("runtime should execute cancellation-aware retry test");
     }
 
     // -- Test error type for testing ------------------------------------------

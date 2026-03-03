@@ -353,38 +353,40 @@ fn test_base_connector_mixed_recording() {
 // FcpConnector Trait Tests
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[fcp_async_core::runtime::test]
-async fn test_minimal_connector_lifecycle() {
-    let mut connector = MinimalConnector::new();
+#[test]
+fn test_minimal_connector_lifecycle() {
+    let _ = fcp_async_core::runtime::block_on_sync(async {
+        let mut connector = MinimalConnector::new();
 
-    // Check ID
-    assert_eq!(connector.id().as_str(), "test:minimal:v1");
+        // Check ID
+        assert_eq!(connector.id().as_str(), "test:minimal:v1");
 
-    // Configure
-    let config_result = connector.configure(json!({})).await;
-    assert!(config_result.is_ok());
+        // Configure
+        let config_result = connector.configure(json!({})).await;
+        assert!(config_result.is_ok());
 
-    // Handshake
-    let hs_result = connector.handshake(test_handshake_request()).await;
-    assert!(hs_result.is_ok());
-    let response = hs_result.unwrap();
-    assert_eq!(response.status, "accepted");
+        // Handshake
+        let hs_result = connector.handshake(test_handshake_request()).await;
+        assert!(hs_result.is_ok());
+        let response = hs_result.unwrap();
+        assert_eq!(response.status, "accepted");
 
-    // Health check
-    let health = connector.health().await;
-    assert!(health.is_ready());
+        // Health check
+        let health = connector.health().await;
+        assert!(health.is_ready());
 
-    // Self-check (default)
-    let self_check = connector.self_check().await.expect("self-check");
-    assert_eq!(self_check.status, SelfCheckStatus::Unsupported);
-    assert_eq!(
-        self_check.reason_code.as_deref(),
-        Some("self_check_unsupported")
-    );
+        // Self-check (default)
+        let self_check = connector.self_check().await.expect("self-check");
+        assert_eq!(self_check.status, SelfCheckStatus::Unsupported);
+        assert_eq!(
+            self_check.reason_code.as_deref(),
+            Some("self_check_unsupported")
+        );
 
-    // Shutdown
-    let shutdown_result = connector.shutdown(test_shutdown_request()).await;
-    assert!(shutdown_result.is_ok());
+        // Shutdown
+        let shutdown_result = connector.shutdown(test_shutdown_request()).await;
+        assert!(shutdown_result.is_ok());
+    });
 }
 
 #[test]
@@ -395,129 +397,141 @@ fn test_self_check_report_from_error() {
     assert_eq!(report.reason_code.as_deref(), Some("FCP-5002"));
 }
 
-#[fcp_async_core::runtime::test]
-async fn test_connector_invoke() {
-    let connector = MinimalConnector::new();
+#[test]
+fn test_connector_invoke() {
+    let _ = fcp_async_core::runtime::block_on_sync(async {
+        let connector = MinimalConnector::new();
 
-    let req = InvokeRequest {
-        r#type: "invoke".to_string(),
-        id: RequestId::new("req-1"),
-        connector_id: ConnectorId::from_static("test:minimal:v1"),
-        operation: OperationId::from_static("test.op"),
-        zone_id: ZoneId::work(),
-        input: json!({"key": "value"}),
-        capability_token: test_capability_token(),
-        holder_proof: None,
-        context: None,
-        idempotency_key: None,
-        lease_seq: None,
-        deadline_ms: None,
-        correlation_id: None,
-        provenance: None,
-        approval_tokens: vec![],
-    };
+        let req = InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::new("req-1"),
+            connector_id: ConnectorId::from_static("test:minimal:v1"),
+            operation: OperationId::from_static("test.op"),
+            zone_id: ZoneId::work(),
+            input: json!({"key": "value"}),
+            capability_token: test_capability_token(),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: vec![],
+        };
 
-    let result = connector.invoke(req).await;
-    assert!(result.is_ok());
+        let result = connector.invoke(req).await;
+        assert!(result.is_ok());
 
-    let response = result.unwrap();
-    assert_eq!(response.status, InvokeStatus::Ok);
+        let response = result.unwrap();
+        assert_eq!(response.status, InvokeStatus::Ok);
+    });
 }
 
-#[fcp_async_core::runtime::test]
-async fn test_connector_simulate() {
-    let connector = MinimalConnector::new();
+#[test]
+fn test_connector_simulate() {
+    let _ = fcp_async_core::runtime::block_on_sync(async {
+        let connector = MinimalConnector::new();
 
-    let req = SimulateRequest {
-        r#type: "simulate".to_string(),
-        id: RequestId::new("sim-1"),
-        connector_id: ConnectorId::from_static("test:minimal:v1"),
-        operation: OperationId::from_static("test.op"),
-        zone_id: ZoneId::work(),
-        input: json!({}),
-        capability_token: test_capability_token(),
-        estimate_cost: false,
-        check_availability: false,
-        context: None,
-        correlation_id: None,
-    };
+        let req = SimulateRequest {
+            r#type: "simulate".to_string(),
+            id: RequestId::new("sim-1"),
+            connector_id: ConnectorId::from_static("test:minimal:v1"),
+            operation: OperationId::from_static("test.op"),
+            zone_id: ZoneId::work(),
+            input: json!({}),
+            capability_token: test_capability_token(),
+            estimate_cost: false,
+            check_availability: false,
+            context: None,
+            correlation_id: None,
+        };
 
-    let result = connector.simulate(req).await;
-    assert!(result.is_ok());
+        let result = connector.simulate(req).await;
+        assert!(result.is_ok());
 
-    let response = result.unwrap();
-    assert!(response.would_succeed);
+        let response = result.unwrap();
+        assert!(response.would_succeed);
+    });
 }
 
-#[fcp_async_core::runtime::test]
-async fn test_connector_introspect() {
-    let connector = MinimalConnector::new();
+#[test]
+fn test_connector_introspect() {
+    let _ = fcp_async_core::runtime::block_on_sync(async {
+        let connector = MinimalConnector::new();
 
-    let introspection = connector.introspect();
+        let introspection = connector.introspect();
 
-    assert!(introspection.operations.is_empty());
-    assert!(introspection.events.is_empty());
+        assert!(introspection.operations.is_empty());
+        assert!(introspection.events.is_empty());
+    });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Streaming Connector Tests
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[fcp_async_core::runtime::test]
-async fn test_streaming_connector_handshake_includes_event_caps() {
-    let mut connector = StreamingConnector::new();
+#[test]
+fn test_streaming_connector_handshake_includes_event_caps() {
+    let _ = fcp_async_core::runtime::block_on_sync(async {
+        let mut connector = StreamingConnector::new();
 
-    let result = connector.handshake(test_handshake_request()).await;
-    assert!(result.is_ok());
+        let result = connector.handshake(test_handshake_request()).await;
+        assert!(result.is_ok());
 
-    let response = result.unwrap();
-    assert!(response.event_caps.is_some());
+        let response = result.unwrap();
+        assert!(response.event_caps.is_some());
 
-    let caps = response.event_caps.unwrap();
-    assert!(caps.streaming);
-    assert!(caps.replay);
-    assert!(caps.requires_ack);
-    assert_eq!(caps.min_buffer_events, 100);
+        let caps = response.event_caps.unwrap();
+        assert!(caps.streaming);
+        assert!(caps.replay);
+        assert!(caps.requires_ack);
+        assert_eq!(caps.min_buffer_events, 100);
+    });
 }
 
-#[fcp_async_core::runtime::test]
-async fn test_streaming_connector_introspect_includes_events() {
-    let connector = StreamingConnector::new();
+#[test]
+fn test_streaming_connector_introspect_includes_events() {
+    let _ = fcp_async_core::runtime::block_on_sync(async {
+        let connector = StreamingConnector::new();
 
-    let introspection = connector.introspect();
+        let introspection = connector.introspect();
 
-    assert!(!introspection.events.is_empty());
-    // Check that events contain expected topics
-    let topics: Vec<&str> = introspection
-        .events
-        .iter()
-        .map(|e| e.topic.as_str())
-        .collect();
-    assert!(topics.contains(&"events.update"));
-    assert!(topics.contains(&"events.created"));
+        assert!(!introspection.events.is_empty());
+        // Check that events contain expected topics
+        let topics: Vec<&str> = introspection
+            .events
+            .iter()
+            .map(|e| e.topic.as_str())
+            .collect();
+        assert!(topics.contains(&"events.update"));
+        assert!(topics.contains(&"events.created"));
+    });
 }
 
-#[fcp_async_core::runtime::test]
-async fn test_streaming_connector_subscribe() {
-    let connector = StreamingConnector::new();
+#[test]
+fn test_streaming_connector_subscribe() {
+    let _ = fcp_async_core::runtime::block_on_sync(async {
+        let connector = StreamingConnector::new();
 
-    let req = SubscribeRequest {
-        r#type: "subscribe".to_string(),
-        id: RequestId::new("sub-1"),
-        topics: vec!["events.update".to_string()],
-        since: None,
-        max_events_per_sec: None,
-        batch_ms: None,
-        window_size: None,
-        capability_token: None,
-    };
+        let req = SubscribeRequest {
+            r#type: "subscribe".to_string(),
+            id: RequestId::new("sub-1"),
+            topics: vec!["events.update".to_string()],
+            since: None,
+            max_events_per_sec: None,
+            batch_ms: None,
+            window_size: None,
+            capability_token: None,
+        };
 
-    let result = connector.subscribe(req).await;
-    assert!(result.is_ok());
+        let result = connector.subscribe(req).await;
+        assert!(result.is_ok());
 
-    let response = result.unwrap();
-    assert!(response.result.replay_supported);
-    assert!(response.result.buffer.is_some());
+        let response = result.unwrap();
+        assert!(response.result.replay_supported);
+        assert!(response.result.buffer.is_some());
+    });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

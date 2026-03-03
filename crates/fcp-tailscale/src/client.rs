@@ -239,9 +239,14 @@ impl LocalApiClient {
             .build()
             .map_err(|e| TailscaleError::LocalApiRequest(e.to_string()))?;
 
+        let mut base_url_str = base_url.into();
+        if base_url_str.ends_with('/') {
+            base_url_str.pop();
+        }
+
         Ok(Self {
             client,
-            base_url: base_url.into(),
+            base_url: base_url_str,
         })
     }
 
@@ -560,5 +565,137 @@ mod tests {
         let disconnected = MockTailscaleClient::disconnected();
         // Disconnected returns error, not false
         assert!(disconnected.is_connected().await.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_mock_client_remove_peer() {
+        let client = MockTailscaleClient::new();
+
+        let peer =
+            MockTailscaleClient::mock_peer("node-1", "server1", "100.64.0.2".parse().unwrap(), &[]);
+        client.add_peer(peer).await;
+
+        let status = client.status().await.unwrap();
+        assert_eq!(status.peer.len(), 1);
+
+        client.remove_peer("node-1").await;
+        let status = client.status().await.unwrap();
+        assert!(status.peer.is_empty());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_mock_client_remove_nonexistent_peer() {
+        let client = MockTailscaleClient::new();
+        // Removing a non-existent peer should not panic
+        client.remove_peer("nonexistent").await;
+        let status = client.status().await.unwrap();
+        assert!(status.peer.is_empty());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_mock_client_whois_disconnected() {
+        let client = MockTailscaleClient::disconnected();
+        let result = client.whois("100.64.0.1".parse().unwrap()).await;
+        assert!(matches!(result, Err(TailscaleError::NotConnected)));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_mock_client_online_peers_disconnected() {
+        let client = MockTailscaleClient::disconnected();
+        let result = client.online_peers().await;
+        assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_mock_client_set_backend_state() {
+        let client = MockTailscaleClient::new();
+        assert!(client.is_connected().await.unwrap());
+
+        client.set_backend_state("Stopped").await;
+        // After setting to Stopped, client becomes disconnected
+        assert!(client.status().await.is_err());
+
+        client.set_backend_state("Running").await;
+        assert!(client.is_connected().await.unwrap());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_mock_client_set_self_node() {
+        let client = MockTailscaleClient::new();
+        let self_node = MockTailscaleClient::mock_self_node(
+            "my-node",
+            "my-host",
+            "100.64.0.1".parse().unwrap(),
+            &["tag:fcp-owner"],
+        );
+        client.set_self_node(self_node).await;
+
+        let status = client.status().await.unwrap();
+        assert_eq!(status.self_node.id, "my-node");
+        assert_eq!(status.self_node.host_name, "my-host");
+        assert_eq!(status.self_node.tags, vec!["tag:fcp-owner"]);
+    }
+
+    #[test]
+    fn test_peer_info_node_id() {
+        let peer =
+            MockTailscaleClient::mock_peer("node-42", "host", "100.64.0.2".parse().unwrap(), &[]);
+        assert_eq!(peer.node_id().as_str(), "node-42");
+    }
+
+    #[test]
+    fn test_peer_info_tailscale_tags() {
+        let peer = MockTailscaleClient::mock_peer(
+            "node-1",
+            "host",
+            "100.64.0.2".parse().unwrap(),
+            &["tag:fcp-work", "tag:server", "not-a-tag"],
+        );
+
+        let tags = peer.tailscale_tags();
+        // "not-a-tag" should be filtered out (no "tag:" prefix)
+        assert_eq!(tags.len(), 2);
+    }
+
+    #[test]
+    fn test_peer_info_no_tags() {
+        let peer =
+            MockTailscaleClient::mock_peer("node-1", "host", "100.64.0.2".parse().unwrap(), &[]);
+        assert!(peer.tailscale_tags().is_empty());
+        assert!(peer.fcp_tags().is_empty());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_tailscale_status_peers_method() {
+        let client = MockTailscaleClient::new();
+        let peer =
+            MockTailscaleClient::mock_peer("node-1", "host", "100.64.0.2".parse().unwrap(), &[]);
+        client.add_peer(peer).await;
+
+        let status = client.status().await.unwrap();
+        let peers = status.peers();
+        assert_eq!(peers.len(), 1);
+        assert!(peers.contains_key(&NodeId::new("node-1")));
+    }
+
+    #[test]
+    fn test_local_api_client_socket_returns_error() {
+        let result = LocalApiClient::new();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_local_api_client_with_http() {
+        let result = LocalApiClient::with_http("http://127.0.0.1:8080");
+        assert!(result.is_ok());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_mock_client_set_peer_online_nonexistent() {
+        let client = MockTailscaleClient::new();
+        // Setting online status for non-existent peer should not panic
+        client.set_peer_online("nonexistent", true).await;
+        let status = client.status().await.unwrap();
+        assert!(status.peer.is_empty());
     }
 }

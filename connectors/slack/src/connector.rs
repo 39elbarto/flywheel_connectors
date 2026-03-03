@@ -1710,9 +1710,7 @@ mod tests {
         let connector = SlackConnector::new();
         let result = connector.handle_introspect().await.unwrap();
         let ops = result["operations"].as_array().unwrap();
-        let ids: Vec<&str> = ops.iter().map(|o| o["id"].as_str().unwrap()).collect();
-
-        assert!(!ids.contains(&"slack.nonexistent"));
+        assert!(!ops.iter().map(|o| o["id"].as_str().unwrap()).any(|x| x == "slack.nonexistent"));
     }
 
     // ── Introspection metadata tests ─────────────────────────────
@@ -2331,6 +2329,6 @@ mod tests {
 
     #[test]
     fn test_default_creates_new_connector() {
-        let _connector: SlackConnector = Default::default();
+        let _connector: SlackConnector = SlackConnector::default();
     }
 }

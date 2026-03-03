@@ -2329,7 +2329,7 @@ fn logged_risk_levels_and_safety_tiers() -> Result<(), String> {
         "vectordb.update_vector_metadata",
     ] {
         let op = find(op_id).ok_or(format!("missing: {op_id}"))?;
-        log.check_eq(op.risk, RiskLevel::Low, &format!("{op_id} risk"))?;
+        log.check_eq(op.risk_level, RiskLevel::Low, &format!("{op_id} risk"))?;
         log.check_eq(op.safety_tier, SafetyTier::Safe, &format!("{op_id} safety"))?;
     }
 
@@ -2340,13 +2340,13 @@ fn logged_risk_levels_and_safety_tiers() -> Result<(), String> {
         "vectordb.delete_vectors",
     ] {
         let op = find(op_id).ok_or(format!("missing: {op_id}"))?;
-        log.check_eq(op.risk, RiskLevel::Medium, &format!("{op_id} risk"))?;
+        log.check_eq(op.risk_level, RiskLevel::Medium, &format!("{op_id} risk"))?;
     }
 
     // Delete collection: high risk, requires interactive approval
     let delete = find("vectordb.delete_collection")
         .ok_or("missing delete_collection")?;
-    log.check_eq(delete.risk, RiskLevel::High, "delete_collection risk")?;
+    log.check_eq(delete.risk_level, RiskLevel::High, "delete_collection risk")?;
     log.check_eq(
         delete.safety_tier,
         SafetyTier::Dangerous,

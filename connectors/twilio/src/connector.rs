@@ -1751,7 +1751,7 @@ mod tests {
 
     #[test]
     fn test_default_creates_new_connector() {
-        let _connector: TwilioConnector = Default::default();
+        let _connector: TwilioConnector = TwilioConnector::default();
     }
 
     #[fcp_async_core::runtime::test]

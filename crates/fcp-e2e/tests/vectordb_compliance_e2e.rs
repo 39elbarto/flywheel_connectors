@@ -6,8 +6,7 @@
 //! - Network guard allow/deny (manifest `host_allow` validation)
 //! - Operation risk level gating (risk level verification)
 //!
-//! VectorDbConnector does not yet implement handle_invoke; the adapter
-//! performs CapabilityVerifier-based token checking and returns stub data.
+//! Adapter delegates to the real connector invoke/introspection paths.
 //!
 //! All tests are deterministic -- no real API calls.
 //! Run: `cargo test --package fcp-e2e --features vectordb`
@@ -18,10 +17,9 @@
 use chrono::{Duration as ChronoDuration, Utc};
 use fcp_conformance::DynamicSuite;
 use fcp_core::{
-    AgentHint, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId, ConnectorMetrics,
-    FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass,
-    InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId,
-    OperationInfo, RequestId, RiskLevel, SafetyTier, ShutdownRequest, SimulateRequest,
+    CapabilityId, CapabilityToken, ConnectorId, ConnectorMetrics, FcpConnector, FcpError,
+    HandshakeRequest, HandshakeResponse, HealthSnapshot, InstanceId, Introspection, InvokeRequest,
+    InvokeResponse, InvokeStatus, OperationId, RequestId, ShutdownRequest, SimulateRequest,
     SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
@@ -38,7 +36,6 @@ use fcp_vectordb::VectorDbConnector;
 struct VectorDbConnectorAdapter {
     connector: VectorDbConnector,
     id: ConnectorId,
-    verifier: Option<CapabilityVerifier>,
 }
 
 impl VectorDbConnectorAdapter {
@@ -46,31 +43,7 @@ impl VectorDbConnectorAdapter {
         Self {
             connector: VectorDbConnector::new(),
             id: ConnectorId::from_static("vectordb"),
-            verifier: None,
         }
-    }
-}
-
-/// Map an operation ID to its required capability from the manifest.
-fn required_capability(operation: &str) -> Option<CapabilityId> {
-    match operation {
-        "vectordb.list_collections" | "vectordb.describe_collection" => {
-            Some(CapabilityId::from_static("vectordb.collections.read"))
-        }
-        "vectordb.create_collection" => {
-            Some(CapabilityId::from_static("vectordb.collections.write"))
-        }
-        "vectordb.delete_collection" => {
-            Some(CapabilityId::from_static("vectordb.collections.delete"))
-        }
-        "vectordb.query_vectors" | "vectordb.fetch_vectors" => {
-            Some(CapabilityId::from_static("vectordb.vectors.read"))
-        }
-        "vectordb.upsert_vectors" | "vectordb.update_vector_metadata" => {
-            Some(CapabilityId::from_static("vectordb.vectors.write"))
-        }
-        "vectordb.delete_vectors" => Some(CapabilityId::from_static("vectordb.vectors.delete")),
-        _ => None,
     }
 }
 
@@ -85,13 +58,6 @@ impl FcpConnector for VectorDbConnectorAdapter {
     }
 
     async fn handshake(&mut self, req: HandshakeRequest) -> fcp_core::FcpResult<HandshakeResponse> {
-        // Set up verifier for capability token checking in invoke
-        self.verifier = Some(CapabilityVerifier::new(
-            req.host_public_key,
-            req.zone.clone(),
-            InstanceId::new(),
-        ));
-
         let request = serde_json::to_value(&req).map_err(|err| FcpError::Internal {
             message: format!("failed to serialize handshake request: {err}"),
         })?;
@@ -123,67 +89,19 @@ impl FcpConnector for VectorDbConnectorAdapter {
     }
 
     fn introspect(&self) -> Introspection {
-        Introspection {
-            operations: vec![OperationInfo {
-                id: OperationId::from_static("vectordb.list_collections"),
-                summary: "List all vector collections/indexes".to_string(),
-                description: None,
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "namespace": { "type": "string" }
-                    }
-                }),
-                output_schema: json!({
-                    "type": "object",
-                    "required": ["collections"],
-                    "properties": {
-                        "collections": { "type": "array" }
-                    }
-                }),
-                capability: CapabilityId::from_static("vectordb.collections.read"),
-                risk_level: RiskLevel::Low,
-                safety_tier: SafetyTier::Safe,
-                idempotency: IdempotencyClass::None,
-                ai_hints: AgentHint {
-                    when_to_use: "List available collections.".to_string(),
-                    common_mistakes: Vec::new(),
-                    examples: Vec::new(),
-                    related: Vec::new(),
-                },
-                rate_limit: None,
-                requires_approval: None,
-            }],
-            events: Vec::new(),
-            resource_types: Vec::new(),
-            auth_caps: None,
-            event_caps: None,
-        }
+        self.connector.handle_introspect()
     }
 
     async fn invoke(&self, req: InvokeRequest) -> fcp_core::FcpResult<InvokeResponse> {
-        let request_id = req.id;
-        let operation = req.operation.as_str();
-
-        // VectorDbConnector does not yet implement handle_invoke.
-        // The adapter verifies the capability token and returns stub data.
-        let Some(verifier) = &self.verifier else {
-            return Err(FcpError::Internal {
-                message: "handshake not completed".into(),
-            });
-        };
-
-        let Some(cap) = required_capability(operation) else {
-            return Err(FcpError::OperationNotGranted {
-                operation: operation.into(),
-            });
-        };
-
-        // Verify capability token grants the required operation
-        verifier.verify(&req.capability_token, &cap, &req.operation, &[])?;
-
-        // Token verified — return stub data
-        Ok(InvokeResponse::ok(request_id, json!({ "collections": [] })))
+        let payload = self
+            .connector
+            .handle_invoke(json!({
+                "operation": req.operation.as_str(),
+                "input": req.input,
+                "capability_token": req.capability_token
+            }))
+            .await?;
+        Ok(InvokeResponse::ok(req.id, payload))
     }
 
     async fn simulate(&self, _req: SimulateRequest) -> fcp_core::FcpResult<SimulateResponse> {

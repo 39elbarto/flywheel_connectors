@@ -429,13 +429,19 @@ fn stripe_manifest_network_guard_allows_and_denies() {
         "stripe.create_customer",
         "stripe.get_customer",
         "stripe.list_customers",
+        "stripe.update_customer",
+        "stripe.delete_customer",
         "stripe.create_payment_intent",
         "stripe.get_payment_intent",
         "stripe.create_refund",
         "stripe.create_subscription",
+        "stripe.get_subscription",
+        "stripe.list_subscriptions",
         "stripe.cancel_subscription",
         "stripe.list_invoices",
+        "stripe.get_invoice",
         "stripe.get_balance",
+        "stripe.ingest_webhook_event",
     ];
 
     let expected_hosts = vec!["api.stripe.com".to_string()];

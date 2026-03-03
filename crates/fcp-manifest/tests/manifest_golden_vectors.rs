@@ -1974,13 +1974,19 @@ fn stripe_full_manifest_parses_with_all_operations() {
         "stripe.create_customer",
         "stripe.get_customer",
         "stripe.list_customers",
+        "stripe.update_customer",
+        "stripe.delete_customer",
         "stripe.create_payment_intent",
         "stripe.get_payment_intent",
         "stripe.create_refund",
         "stripe.create_subscription",
+        "stripe.get_subscription",
+        "stripe.list_subscriptions",
         "stripe.cancel_subscription",
         "stripe.list_invoices",
+        "stripe.get_invoice",
         "stripe.get_balance",
+        "stripe.ingest_webhook_event",
     ];
     for op_name in &expected_ops {
         assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
@@ -1991,9 +1997,9 @@ fn stripe_full_manifest_parses_with_all_operations() {
     let hash = unchecked.compute_interface_hash().expect("hash");
     println!("STRIPE_INTERFACE_HASH={hash}");
 
-    // Verify 3 rate limit pools
+    // Verify 4 rate limit pools
     let pools = parsed.rate_limits.as_ref().expect("rate_limits");
-    assert_eq!(pools.pools.len(), 3);
+    assert_eq!(pools.pools.len(), 4);
 }
 
 #[test]
@@ -2090,9 +2096,9 @@ fn notion_full_manifest_parses_with_all_operations() {
     let hash = unchecked.compute_interface_hash().expect("hash");
     println!("NOTION_INTERFACE_HASH={hash}");
 
-    // Verify 3 rate limit pools
+    // Verify 4 rate limit pools (read, write, delete, search)
     let pools = parsed.rate_limits.as_ref().expect("rate_limits");
-    assert_eq!(pools.pools.len(), 3);
+    assert_eq!(pools.pools.len(), 4);
 }
 
 #[test]
@@ -3395,4 +3401,294 @@ test_op = ["api"]
         decls.tool_pool_map.get("test_op").unwrap(),
         &vec!["api".to_string()]
     );
+}
+
+// =============================================================================
+// OpenAI connector tests
+// =============================================================================
+
+#[test]
+fn openai_full_manifest_parses_with_all_operations() {
+    let _log = TestLog::new(
+        "openai_full_manifest_parses_with_all_operations",
+        "fcp-manifest",
+        Some("fcp.openai"),
+        Some("0.1.0"),
+        Some(4),
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("../../connectors/openai/manifest.toml");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read openai manifest: {err}"));
+    let with_hash = with_computed_hash(&raw);
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid full openai manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.openai");
+
+    let ops = &parsed.provides.operations;
+    let expected_ops = [
+        "chat",
+        "simple_chat",
+        "get_usage",
+        "embeddings",
+        "images_generate",
+        "audio_transcribe",
+        "audio_tts",
+        "finetune_create",
+        "finetune_list",
+        "finetune_get",
+        "finetune_cancel",
+        "finetune_events",
+        "assistants_create",
+        "assistants_list",
+        "assistants_get",
+        "assistants_delete",
+        "threads_create",
+        "threads_get",
+        "threads_messages_create",
+        "threads_messages_list",
+        "threads_runs_create",
+        "threads_runs_get",
+        "threads_runs_cancel",
+    ];
+    for op_name in &expected_ops {
+        assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
+    }
+    assert_eq!(ops.len(), expected_ops.len());
+
+    let unchecked = ConnectorManifest::parse_str_unchecked(&raw).expect("unchecked");
+    let hash = unchecked.compute_interface_hash().expect("hash");
+    println!("OPENAI_INTERFACE_HASH={hash}");
+
+    // Verify 9 rate limit pools
+    let pools = parsed.rate_limits.as_ref().expect("rate_limits");
+    assert_eq!(pools.pools.len(), 9);
+
+    // Verify operation pool mappings exist for all pooled operations
+    let op_pools = &pools.operation_pools;
+    assert!(op_pools.contains_key("openai.assistants.create"));
+    assert!(op_pools.contains_key("openai.threads.runs.create"));
+    assert!(op_pools.contains_key("openai.finetune.create"));
+}
+
+// =============================================================================
+// LLM Router connector tests
+// =============================================================================
+
+#[test]
+fn llm_router_full_manifest_parses_with_all_operations() {
+    let _log = TestLog::new(
+        "llm_router_full_manifest_parses_with_all_operations",
+        "fcp-manifest",
+        Some("fcp.llm-router"),
+        Some("0.1.0"),
+        Some(4),
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("../../connectors/llm-router/manifest.toml");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read llm-router manifest: {err}"));
+    let with_hash = with_computed_hash(&raw);
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid full llm-router manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.llm-router");
+
+    let ops = &parsed.provides.operations;
+    let expected_ops = [
+        "llm-router.route",
+        "llm-router.estimate_cost",
+        "llm-router.list_providers",
+        "llm-router.get_usage",
+        "llm-router.get_budget",
+    ];
+    for op_name in &expected_ops {
+        assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
+    }
+    assert_eq!(ops.len(), expected_ops.len());
+
+    let unchecked = ConnectorManifest::parse_str_unchecked(&raw).expect("unchecked");
+    let hash = unchecked.compute_interface_hash().expect("hash");
+    println!("LLM_ROUTER_INTERFACE_HASH={hash}");
+
+    // Verify 3 rate limit pools
+    let pools = parsed.rate_limits.as_ref().expect("rate_limits");
+    assert_eq!(pools.pools.len(), 3);
+
+    // Verify operation pool mappings
+    let op_pools = &pools.operation_pools;
+    assert!(op_pools.contains_key("llm-router.route"));
+    assert!(op_pools.contains_key("llm-router.estimate_cost"));
+    assert!(op_pools.contains_key("llm-router.get_budget"));
+}
+
+// =============================================================================
+// Anthropic connector tests
+// =============================================================================
+
+#[test]
+fn anthropic_full_manifest_parses_with_all_operations() {
+    let _log = TestLog::new(
+        "anthropic_full_manifest_parses_with_all_operations",
+        "fcp-manifest",
+        Some("fcp.anthropic"),
+        Some("0.1.0"),
+        Some(4),
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("../../connectors/anthropic/manifest.toml");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read anthropic manifest: {err}"));
+    let with_hash = with_computed_hash(&raw);
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid full anthropic manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.anthropic");
+
+    let ops = &parsed.provides.operations;
+    let expected_ops = [
+        "anthropic.chat",
+        "anthropic.get_usage",
+        "anthropic.message",
+        "anthropic.message.stream",
+    ];
+    for op_name in &expected_ops {
+        assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
+    }
+    assert_eq!(ops.len(), expected_ops.len());
+
+    let unchecked = ConnectorManifest::parse_str_unchecked(&raw).expect("unchecked");
+    let hash = unchecked.compute_interface_hash().expect("hash");
+    println!("ANTHROPIC_INTERFACE_HASH={hash}");
+}
+
+// =============================================================================
+// Browser connector tests
+// =============================================================================
+
+#[test]
+fn browser_full_manifest_parses_with_all_operations() {
+    let _log = TestLog::new(
+        "browser_full_manifest_parses_with_all_operations",
+        "fcp-manifest",
+        Some("fcp.browser"),
+        Some("0.1.0"),
+        Some(4),
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("../../connectors/browser/manifest.toml");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read browser manifest: {err}"));
+    let with_hash = with_computed_hash(&raw);
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid full browser manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.browser");
+
+    let ops = &parsed.provides.operations;
+    let expected_ops = [
+        "browser.click",
+        "browser.clear_proxy",
+        "browser.evaluate_js",
+        "browser.extract_links",
+        "browser.extract_text",
+        "browser.fill_form",
+        "browser.get_cookies",
+        "browser.navigate",
+        "browser.render_pdf",
+        "browser.screenshot",
+        "browser.session.describe",
+        "browser.session.restore",
+        "browser.session.save",
+        "browser.set_cookies",
+        "browser.set_proxy",
+        "browser.wait_for_selector",
+    ];
+    for op_name in &expected_ops {
+        assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
+    }
+    assert_eq!(ops.len(), expected_ops.len());
+
+    let unchecked = ConnectorManifest::parse_str_unchecked(&raw).expect("unchecked");
+    let hash = unchecked.compute_interface_hash().expect("hash");
+    println!("BROWSER_INTERFACE_HASH={hash}");
+
+    let pools = parsed.rate_limits.as_ref().expect("rate_limits");
+    assert_eq!(pools.pools.len(), 8);
+
+    let op_pools = &pools.operation_pools;
+    assert!(op_pools.contains_key("browser.navigate"));
+    assert!(op_pools.contains_key("browser.click"));
+    assert!(op_pools.contains_key("browser.screenshot"));
+}
+
+// =============================================================================
+// Microsoft365 connector tests
+// =============================================================================
+
+#[test]
+fn microsoft365_full_manifest_parses_with_all_operations() {
+    let _log = TestLog::new(
+        "microsoft365_full_manifest_parses_with_all_operations",
+        "fcp-manifest",
+        Some("fcp.microsoft365"),
+        Some("0.1.0"),
+        Some(4),
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("../../connectors/microsoft365/manifest.toml");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read microsoft365 manifest: {err}"));
+    let with_hash = with_computed_hash(&raw);
+    let parsed =
+        ConnectorManifest::parse_str(&with_hash).expect("valid full microsoft365 manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.microsoft365");
+
+    let ops = &parsed.provides.operations;
+    let expected_ops = [
+        "m365.calendar.create_event",
+        "m365.calendar.delete_event",
+        "m365.calendar.get_event",
+        "m365.calendar.get_freebusy",
+        "m365.calendar.list_events",
+        "m365.calendar.update_event",
+        "m365.delta.sync",
+        "m365.files.create_share_link",
+        "m365.files.delete_item",
+        "m365.files.download_file",
+        "m365.files.get_item",
+        "m365.files.list_items",
+        "m365.files.search",
+        "m365.files.upload_file",
+        "m365.mail.add_attachment",
+        "m365.mail.create_draft",
+        "m365.mail.forward_message",
+        "m365.mail.get_message",
+        "m365.mail.list_attachments",
+        "m365.mail.list_messages",
+        "m365.mail.list_threads",
+        "m365.mail.reply_message",
+        "m365.mail.search_messages",
+        "m365.mail.send_message",
+        "m365.subscriptions.create",
+        "m365.subscriptions.delete",
+        "m365.subscriptions.renew",
+        "m365.tasks.create_task",
+        "m365.tasks.list_task_lists",
+        "m365.tasks.list_tasks",
+    ];
+    for op_name in &expected_ops {
+        assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
+    }
+    assert_eq!(ops.len(), expected_ops.len());
+
+    let unchecked = ConnectorManifest::parse_str_unchecked(&raw).expect("unchecked");
+    let hash = unchecked.compute_interface_hash().expect("hash");
+    println!("MICROSOFT365_INTERFACE_HASH={hash}");
+
+    let pools = parsed.rate_limits.as_ref().expect("rate_limits");
+    assert_eq!(pools.pools.len(), 11);
+
+    let op_pools = &pools.operation_pools;
+    assert!(op_pools.contains_key("m365.mail.search_messages"));
+    assert!(op_pools.contains_key("m365.calendar.create_event"));
+    assert!(op_pools.contains_key("m365.files.upload_file"));
 }

@@ -53,14 +53,24 @@ impl FcpConnector for LlmRouterConnectorAdapter {
     }
 
     async fn configure(&mut self, config: serde_json::Value) -> fcp_core::FcpResult<()> {
-        self.connector.lock().await.handle_configure(config).await.map(|_| ())
+        self.connector
+            .lock()
+            .await
+            .handle_configure(config)
+            .await
+            .map(|_| ())
     }
 
     async fn handshake(&mut self, req: HandshakeRequest) -> fcp_core::FcpResult<HandshakeResponse> {
         let request = serde_json::to_value(req).map_err(|err| FcpError::Internal {
             message: format!("failed to serialize handshake request: {err}"),
         })?;
-        let response = self.connector.lock().await.handle_handshake(request).await?;
+        let response = self
+            .connector
+            .lock()
+            .await
+            .handle_handshake(request)
+            .await?;
         serde_json::from_value(response).map_err(|err| FcpError::Internal {
             message: format!("failed to deserialize handshake response: {err}"),
         })
@@ -88,7 +98,12 @@ impl FcpConnector for LlmRouterConnectorAdapter {
     }
 
     async fn shutdown(&mut self, _req: ShutdownRequest) -> fcp_core::FcpResult<()> {
-        self.connector.lock().await.handle_shutdown(json!({})).await.map(|_| ())
+        self.connector
+            .lock()
+            .await
+            .handle_shutdown(json!({}))
+            .await
+            .map(|_| ())
     }
 
     fn introspect(&self) -> Introspection {
@@ -96,7 +111,8 @@ impl FcpConnector for LlmRouterConnectorAdapter {
             operations: vec![
                 OperationInfo {
                     id: OperationId::from_static("llm-router.route"),
-                    summary: "Route a chat completion request to the optimal provider/model".to_string(),
+                    summary: "Route a chat completion request to the optimal provider/model"
+                        .to_string(),
                     description: None,
                     input_schema: json!({
                         "type": "object",
@@ -129,14 +145,13 @@ impl FcpConnector for LlmRouterConnectorAdapter {
                     safety_tier: SafetyTier::Safe,
                     idempotency: IdempotencyClass::None,
                     ai_hints: AgentHint {
-                        when_to_use: "Route a chat request to the best available AI provider.".to_string(),
+                        when_to_use: "Route a chat request to the best available AI provider."
+                            .to_string(),
                         common_mistakes: Vec::new(),
                         examples: vec![
                             r#"{"messages": [{"role": "user", "content": "Hello"}]}"#.to_string(),
                         ],
-                        related: vec![
-                            "llm-router.estimate_cost".parse().unwrap(),
-                        ],
+                        related: vec!["llm-router.estimate_cost".parse().unwrap()],
                     },
                     rate_limit: None,
                     requires_approval: None,
@@ -412,7 +427,10 @@ async fn llm_router_default_deny_compliance_suite_passes() {
         .await
         .expect("compliance suite run");
 
-    assert!(report.passed, "default deny compliance should pass: {report:#?}");
+    assert!(
+        report.passed,
+        "default deny compliance should pass: {report:#?}"
+    );
 }
 
 // ============================================================================

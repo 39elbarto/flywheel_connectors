@@ -59,7 +59,12 @@ impl LeakyBucket {
     /// Create from requests per window.
     #[must_use]
     pub fn from_window(requests_per_window: u32, window: Duration) -> Self {
-        let leak_rate = f64::from(requests_per_window) / window.as_secs_f64();
+        let secs = window.as_secs_f64();
+        let leak_rate = if secs > 0.0 {
+            f64::from(requests_per_window) / secs
+        } else {
+            f64::MAX
+        };
         Self::new(requests_per_window, leak_rate)
     }
 
@@ -81,14 +86,25 @@ impl LeakyBucket {
 
     /// Calculate time until bucket has room.
     fn time_until_room(&self) -> Duration {
+        if self.capacity == 0 {
+            return Duration::MAX;
+        }
+
         let level = *self.level.lock();
         let capacity = f64::from(self.capacity);
 
         if level <= capacity - 1.0 {
             Duration::ZERO
+        } else if self.leak_rate <= 0.0 {
+            Duration::MAX
         } else {
             let overflow = level - (capacity - 1.0);
-            Duration::from_secs_f64(overflow / self.leak_rate)
+            let secs = overflow / self.leak_rate;
+            if secs.is_finite() && secs >= 0.0 {
+                Duration::from_secs_f64(secs)
+            } else {
+                Duration::MAX
+            }
         }
     }
 }
@@ -124,10 +140,11 @@ impl RateLimiter for LeakyBucket {
 
             let wait_time = self.wait_time().await;
             let total_waited = start.elapsed();
+            let projected = total_waited.checked_add(wait_time).unwrap_or(Duration::MAX);
 
-            if total_waited + wait_time > max_wait {
+            if projected > max_wait {
                 return Err(RateLimitError::WaitExceeded {
-                    wait_time: total_waited + wait_time,
+                    wait_time: projected,
                     max_wait,
                 });
             }
@@ -199,7 +216,11 @@ impl SmoothPacer {
     /// Create from requests per second.
     #[must_use]
     pub fn from_rate(requests_per_second: f64) -> Self {
-        Self::new(Duration::from_secs_f64(1.0 / requests_per_second))
+        if requests_per_second <= 0.0 {
+            Self::new(Duration::MAX)
+        } else {
+            Self::new(Duration::from_secs_f64(1.0 / requests_per_second))
+        }
     }
 }
 
@@ -230,10 +251,11 @@ impl RateLimiter for SmoothPacer {
 
             let wait_time = self.wait_time().await;
             let total_waited = start.elapsed();
+            let projected = total_waited.checked_add(wait_time).unwrap_or(Duration::MAX);
 
-            if total_waited + wait_time > max_wait {
+            if projected > max_wait {
                 return Err(RateLimitError::WaitExceeded {
-                    wait_time: total_waited + wait_time,
+                    wait_time: projected,
                     max_wait,
                 });
             }
@@ -253,7 +275,10 @@ impl RateLimiter for SmoothPacer {
         if let Some(last) = snapshot {
             let elapsed = Instant::now().saturating_duration_since(last);
             if elapsed < self.min_interval {
-                return self.min_interval.checked_sub(elapsed).unwrap_or(Duration::ZERO);
+                return self
+                    .min_interval
+                    .checked_sub(elapsed)
+                    .unwrap_or(Duration::ZERO);
             }
         }
         Duration::ZERO
@@ -269,15 +294,13 @@ impl RateLimiter for SmoothPacer {
         let (remaining, reset_after) = snapshot.map_or((1, Duration::ZERO), |last| {
             let elapsed = Instant::now().saturating_duration_since(last);
             if elapsed < self.min_interval {
-                let wait = self.min_interval.checked_sub(elapsed).unwrap_or(Duration::ZERO);
-                (1, wait)
+                let wait = self
+                    .min_interval
+                    .checked_sub(elapsed)
+                    .unwrap_or(Duration::ZERO);
+                (0, wait)
             } else {
-                (
-                    0,
-                    self.min_interval
-                        .checked_sub(elapsed)
-                        .unwrap_or(Duration::ZERO),
-                )
+                (1, Duration::ZERO)
             }
         });
 

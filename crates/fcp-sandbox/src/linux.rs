@@ -255,6 +255,22 @@ impl LinuxSandbox {
     fn build_seccomp_filter(&self, policy: &CompiledPolicy) -> Vec<SockFilter> {
         let mut filter = Vec::new();
 
+        // 1. Validate Architecture
+        // Load architecture into accumulator
+        // BPF_LD | BPF_W | BPF_ABS, offset 4 = arch
+        filter.push(SockFilter::stmt(0x20, 4));
+
+        #[cfg(target_arch = "x86_64")]
+        let expected_arch = 0xC000003E; // AUDIT_ARCH_X86_64
+        #[cfg(target_arch = "aarch64")]
+        let expected_arch = 0xC00000B7; // AUDIT_ARCH_AARCH64
+
+        // JEQ expected_arch, 1, 0
+        // If equal, jump 1 (skip KILL); if not equal, jump 0 (execute KILL)
+        filter.push(SockFilter::jump(0x15, expected_arch, 1, 0));
+        filter.push(SockFilter::stmt(0x06, SECCOMP_RET_KILL_PROCESS));
+
+        // 2. Validate Syscall Number
         // Load syscall number into accumulator
         // BPF_LD | BPF_W | BPF_ABS, offset 0 = syscall number
         filter.push(SockFilter::stmt(0x20, 0));
@@ -992,8 +1008,13 @@ mod tests {
         // Filter should not be empty
         assert!(!filter.is_empty());
 
-        // First instruction should load syscall number
+        // First instruction should load arch (offset 4)
         assert_eq!(filter[0].code, 0x20);
+        assert_eq!(filter[0].k, 4);
+
+        // Fourth instruction should load syscall number (offset 0)
+        assert_eq!(filter[3].code, 0x20);
+        assert_eq!(filter[3].k, 0);
 
         // Last instruction should be the default deny
         let last = filter.last().unwrap();

@@ -853,39 +853,44 @@ fn extract_custom_section(wasm_bytes: &[u8], section_name: &str) -> Option<Vec<u
     while pos < wasm_bytes.len() {
         // Section ID (1 byte)
         let section_id = wasm_bytes[pos];
-        pos += 1;
+        pos = pos.checked_add(1)?;
 
         // Section size (LEB128)
         let (section_size, bytes_read) = read_leb128(&wasm_bytes[pos..])?;
-        pos += bytes_read;
+        pos = pos.checked_add(bytes_read)?;
 
         if section_id == 0 {
             // Custom section - read name
             let section_start = pos;
             let (name_len, name_bytes_read) = read_leb128(&wasm_bytes[pos..])?;
-            pos += name_bytes_read;
+            pos = pos.checked_add(name_bytes_read)?;
 
-            if pos + name_len > wasm_bytes.len() {
+            if pos.checked_add(name_len)? > wasm_bytes.len() {
                 return None;
             }
 
             let name = std::str::from_utf8(&wasm_bytes[pos..pos + name_len]).ok()?;
-            pos += name_len;
+            pos = pos.checked_add(name_len)?;
+
+            let header_size = pos.checked_sub(section_start)?;
+            if section_size < header_size {
+                return None; // Invalid section size
+            }
 
             if name == section_name {
                 // Found it - return the payload
-                let payload_len = section_size - (pos - section_start);
-                if pos + payload_len > wasm_bytes.len() {
+                let payload_len = section_size - header_size;
+                if pos.checked_add(payload_len)? > wasm_bytes.len() {
                     return None;
                 }
                 return Some(wasm_bytes[pos..pos + payload_len].to_vec());
             }
 
             // Skip to next section
-            pos = section_start + section_size;
+            pos = section_start.checked_add(section_size)?;
         } else {
             // Skip non-custom section
-            pos += section_size;
+            pos = pos.checked_add(section_size)?;
         }
     }
 
@@ -894,27 +899,27 @@ fn extract_custom_section(wasm_bytes: &[u8], section_name: &str) -> Option<Vec<u
 
 /// Read a LEB128-encoded unsigned integer.
 fn read_leb128(bytes: &[u8]) -> Option<(usize, usize)> {
-    let mut result: usize = 0;
+    let mut result = 0;
     let mut shift = 0;
-    let mut pos = 0;
+    let mut bytes_read = 0;
 
-    loop {
-        if pos >= bytes.len() || shift >= 64 {
+    for &byte in bytes {
+        bytes_read += 1;
+        let value = (byte & 0x7f) as usize;
+        
+        // Prevent panic: shift must be less than the target architecture's usize bits
+        if shift >= usize::BITS {
             return None;
         }
-
-        let byte = bytes[pos];
-        pos += 1;
-
-        let val = (byte & 0x7F) as usize;
-        let shifted = val.checked_shl(u32::try_from(shift).ok()?)?;
-        result |= shifted;
-        shift += 7;
-
+        
+        result |= value << shift;
         if byte & 0x80 == 0 {
-            return Some((result, pos));
+            return Some((result, bytes_read));
         }
+        shift += 7;
     }
+
+    None
 }
 
 // ============================================================================

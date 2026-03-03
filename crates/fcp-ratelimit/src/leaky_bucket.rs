@@ -69,7 +69,7 @@ impl LeakyBucket {
         let mut last_leak = self.last_leak.lock();
         let mut level = self.level.lock();
 
-        let elapsed = now.duration_since(*last_leak);
+        let elapsed = now.saturating_duration_since(*last_leak);
         let leaked = elapsed.as_secs_f64() * self.leak_rate;
 
         if leaked > 0.0 {
@@ -211,7 +211,7 @@ impl RateLimiter for SmoothPacer {
 
         let last_time_val = *last;
         if let Some(last_time) = last_time_val {
-            if now.duration_since(last_time) < self.min_interval {
+            if now.saturating_duration_since(last_time) < self.min_interval {
                 return false;
             }
         }
@@ -243,20 +243,17 @@ impl RateLimiter for SmoothPacer {
     }
 
     fn remaining(&self) -> u32 {
-        self.last_request.lock().map_or(1, |last| {
-            u32::from(Instant::now().duration_since(last) >= self.min_interval)
+        (*self.last_request.lock()).map_or(1, |last| {
+            u32::from(Instant::now().saturating_duration_since(last) >= self.min_interval)
         })
     }
 
     async fn wait_time(&self) -> Duration {
-        let last_time_val = *self.last_request.lock();
-        if let Some(last) = last_time_val {
-            let elapsed = Instant::now().duration_since(last);
+        let snapshot = *self.last_request.lock();
+        if let Some(last) = snapshot {
+            let elapsed = Instant::now().saturating_duration_since(last);
             if elapsed < self.min_interval {
-                return self
-                    .min_interval
-                    .checked_sub(elapsed)
-                    .unwrap_or(Duration::ZERO);
+                return self.min_interval.checked_sub(elapsed).unwrap_or(Duration::ZERO);
             }
         }
         Duration::ZERO
@@ -267,11 +264,13 @@ impl RateLimiter for SmoothPacer {
     }
 
     fn state(&self) -> RateLimitState {
-        let last_time_val = *self.last_request.lock();
-        let (remaining, reset_after) = last_time_val.map_or((1, Duration::ZERO), |last| {
-            let elapsed = Instant::now().duration_since(last);
-            if elapsed >= self.min_interval {
-                (1, Duration::ZERO)
+        let snapshot = *self.last_request.lock();
+
+        let (remaining, reset_after) = snapshot.map_or((1, Duration::ZERO), |last| {
+            let elapsed = Instant::now().saturating_duration_since(last);
+            if elapsed < self.min_interval {
+                let wait = self.min_interval.checked_sub(elapsed).unwrap_or(Duration::ZERO);
+                (1, wait)
             } else {
                 (
                     0,

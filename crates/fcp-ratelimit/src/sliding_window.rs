@@ -43,7 +43,7 @@ impl SlidingWindow {
         let mut timestamps = self.timestamps.lock();
 
         while let Some(front) = timestamps.front() {
-            if now.duration_since(*front) > self.window {
+            if now.saturating_duration_since(*front) > self.window {
                 timestamps.pop_front();
             } else {
                 break;
@@ -113,7 +113,7 @@ impl RateLimiter for SlidingWindow {
 
         // Wait until the oldest request expires
         if let Some(oldest) = timestamps.front() {
-            let elapsed = Instant::now().duration_since(*oldest);
+            let elapsed = Instant::now().saturating_duration_since(*oldest);
             if elapsed < self.window {
                 return self.window.checked_sub(elapsed).unwrap_or(Duration::ZERO);
             }
@@ -135,7 +135,7 @@ impl RateLimiter for SlidingWindow {
         let remaining = self.limit.saturating_sub(len);
 
         let reset_after = timestamps.front().map_or(self.window, |oldest| {
-            let elapsed = Instant::now().duration_since(*oldest);
+            let elapsed = Instant::now().saturating_duration_since(*oldest);
             self.window.checked_sub(elapsed).unwrap_or(Duration::ZERO)
         });
         drop(timestamps);
@@ -193,7 +193,7 @@ impl RateLimiter for FixedWindow {
         let now = Instant::now();
 
         // Check window expiry
-        if now.duration_since(state.window_start) >= self.window {
+        if now.saturating_duration_since(state.window_start) >= self.window {
             state.count = 0;
             state.window_start = now;
         }
@@ -232,7 +232,7 @@ impl RateLimiter for FixedWindow {
         let mut state = self.state.lock();
         let now = Instant::now();
 
-        if now.duration_since(state.window_start) >= self.window {
+        if now.saturating_duration_since(state.window_start) >= self.window {
             state.count = 0;
             state.window_start = now;
         }
@@ -245,7 +245,7 @@ impl RateLimiter for FixedWindow {
         let now = Instant::now();
 
         // Check reset inside wait_time to ensure consistency
-        if now.duration_since(state.window_start) >= self.window {
+        if now.saturating_duration_since(state.window_start) >= self.window {
             state.count = 0;
             state.window_start = now;
         }
@@ -254,7 +254,7 @@ impl RateLimiter for FixedWindow {
             return Duration::ZERO;
         }
 
-        let elapsed = now.duration_since(state.window_start);
+        let elapsed = now.saturating_duration_since(state.window_start);
         drop(state);
         self.window.checked_sub(elapsed).unwrap_or(Duration::ZERO)
     }
@@ -269,13 +269,13 @@ impl RateLimiter for FixedWindow {
         let mut state = self.state.lock();
         let now = Instant::now();
 
-        if now.duration_since(state.window_start) >= self.window {
+        if now.saturating_duration_since(state.window_start) >= self.window {
             state.count = 0;
             state.window_start = now;
         }
 
         let remaining = self.limit.saturating_sub(state.count);
-        let elapsed = now.duration_since(state.window_start);
+        let elapsed = now.saturating_duration_since(state.window_start);
         drop(state);
         let reset_after = self.window.checked_sub(elapsed).unwrap_or(Duration::ZERO);
 

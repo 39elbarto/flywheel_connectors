@@ -1280,7 +1280,7 @@ mod duration_millis {
     where
         S: Serializer,
     {
-        duration.as_millis().serialize(serializer)
+        u64::try_from(duration.as_millis()).unwrap_or(u64::MAX).serialize(serializer)
     }
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
@@ -1651,9 +1651,6 @@ mod tests {
         let required_cap = CapabilityId::new("cap.critical").unwrap();
 
         let result = verifier.verify(&token, &required_cap, &op, &[]);
-
-        // Should fail because token has "cap.benign", but we needed "cap.critical"
-        // even though the operation "op.test" matched the list!
         assert!(matches!(result, Err(FcpError::OperationNotGranted { .. })));
     }
 
@@ -1749,7 +1746,6 @@ mod tests {
         };
 
         assert!(!constraints.is_credential_allowed(&denied_cred));
-
         let result = constraints.validate_credential(&denied_cred);
         assert!(result.is_err());
 

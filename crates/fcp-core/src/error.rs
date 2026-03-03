@@ -167,7 +167,7 @@ mod optional_duration_millis {
         S: Serializer,
     {
         match duration {
-            Some(d) => serializer.serialize_some(&d.as_millis()),
+            Some(d) => serializer.serialize_some(&u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
             None => serializer.serialize_none(),
         }
     }

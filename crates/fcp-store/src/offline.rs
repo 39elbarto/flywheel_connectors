@@ -215,7 +215,7 @@ impl OfflineCapability {
             return 0;
         }
         let available = self.available_count() as u64;
-        let total = self.objects.len() as u64;
+        let total = self.object_count() as u64;
         (available * 10000 / total) as u32
     }
 
@@ -367,7 +367,7 @@ impl AccessPatternTracker {
         };
 
         let now = Instant::now();
-        let age = now.duration_since(entry.last_access);
+        let age = now.saturating_duration_since(entry.last_access);
 
         // Recency factor: exponential decay based on time since last access
         let recency = if age < self.window {

@@ -906,7 +906,9 @@ fn read_leb128(bytes: &[u8]) -> Option<(usize, usize)> {
         let byte = bytes[pos];
         pos += 1;
 
-        result |= ((byte & 0x7F) as usize) << shift;
+        let val = (byte & 0x7F) as usize;
+        let shifted = val.checked_shl(shift as u32)?;
+        result |= shifted;
         shift += 7;
 
         if byte & 0x80 == 0 {

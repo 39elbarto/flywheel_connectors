@@ -136,7 +136,7 @@ impl RateLimiter {
 
     fn refill_locked(&self, last: &mut std::time::Instant, tokens: &mut u32) {
         let now = std::time::Instant::now();
-        let elapsed = now.duration_since(*last);
+        let elapsed = now.saturating_duration_since(*last);
 
         let nanos_per_token = 60_000_000_000u64 / u64::from(self.max_tokens);
         if nanos_per_token == 0 {

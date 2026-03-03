@@ -123,7 +123,7 @@ impl TokenBucket {
     fn refill(&self) {
         let mut last_refill = self.last_refill.lock();
         let now = Instant::now();
-        let elapsed = now.duration_since(*last_refill);
+        let elapsed = now.saturating_duration_since(*last_refill);
 
         if elapsed >= self.refill_interval {
             // Calculate how many refill periods have passed
@@ -205,7 +205,7 @@ impl TokenBucket {
     /// Calculate time until next token is available.
     fn time_until_token(&self) -> Duration {
         let last_refill = *self.last_refill.lock();
-        let elapsed = Instant::now().duration_since(last_refill);
+        let elapsed = Instant::now().saturating_duration_since(last_refill);
 
         self.refill_interval
             .checked_sub(elapsed)

@@ -11,14 +11,16 @@
 
 #![allow(clippy::too_many_lines)]
 
-use chrono::{Duration, Utc};
+use chrono::{Duration, SecondsFormat, Utc};
 use fcp_core::{
     CapabilityId, CapabilityToken, FcpError, HandshakeRequest, IdempotencyClass, InstanceId,
     RiskLevel, SafetyTier, ZoneId,
 };
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
+use fcp_testkit::LogCapture;
 use serde_json::json;
+use std::time::Instant;
 
 use fcp_vectordb::VectorDbConnector;
 use fcp_vectordb::config::{DoctorStatus, VectorDbConfig, VectorDbProvider};
@@ -474,11 +476,7 @@ async fn schema_query_vectors_default_top_k() {
 #[fcp_async_core::runtime::test]
 async fn schema_upsert_vectors_single() {
     let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.write"]).await;
-    let token = generate_token(
-        &key,
-        "vectordb.vectors.write",
-        &["vectordb.upsert_vectors"],
-    );
+    let token = generate_token(&key, "vectordb.vectors.write", &["vectordb.upsert_vectors"]);
 
     let result = invoke(
         &c,
@@ -494,11 +492,7 @@ async fn schema_upsert_vectors_single() {
 #[fcp_async_core::runtime::test]
 async fn schema_upsert_vectors_empty_batch() {
     let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.write"]).await;
-    let token = generate_token(
-        &key,
-        "vectordb.vectors.write",
-        &["vectordb.upsert_vectors"],
-    );
+    let token = generate_token(&key, "vectordb.vectors.write", &["vectordb.upsert_vectors"]);
 
     let result = invoke(
         &c,
@@ -513,11 +507,7 @@ async fn schema_upsert_vectors_empty_batch() {
 #[fcp_async_core::runtime::test]
 async fn schema_upsert_vectors_exceeds_max_batch() {
     let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.write"]).await;
-    let token = generate_token(
-        &key,
-        "vectordb.vectors.write",
-        &["vectordb.upsert_vectors"],
-    );
+    let token = generate_token(&key, "vectordb.vectors.write", &["vectordb.upsert_vectors"]);
 
     let vectors: Vec<serde_json::Value> = (0..1001)
         .map(|i| json!({"id": format!("v{i}"), "values": [0.1]}))
@@ -536,11 +526,7 @@ async fn schema_upsert_vectors_exceeds_max_batch() {
 #[fcp_async_core::runtime::test]
 async fn schema_upsert_vectors_max_batch_ok() {
     let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.write"]).await;
-    let token = generate_token(
-        &key,
-        "vectordb.vectors.write",
-        &["vectordb.upsert_vectors"],
-    );
+    let token = generate_token(&key, "vectordb.vectors.write", &["vectordb.upsert_vectors"]);
 
     let vectors: Vec<serde_json::Value> = (0..1000)
         .map(|i| json!({"id": format!("v{i}"), "values": [0.1]}))
@@ -560,11 +546,7 @@ async fn schema_upsert_vectors_max_batch_ok() {
 #[fcp_async_core::runtime::test]
 async fn schema_upsert_vectors_id_empty() {
     let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.write"]).await;
-    let token = generate_token(
-        &key,
-        "vectordb.vectors.write",
-        &["vectordb.upsert_vectors"],
-    );
+    let token = generate_token(&key, "vectordb.vectors.write", &["vectordb.upsert_vectors"]);
 
     let result = invoke(
         &c,
@@ -579,11 +561,7 @@ async fn schema_upsert_vectors_id_empty() {
 #[fcp_async_core::runtime::test]
 async fn schema_upsert_vectors_id_max_length() {
     let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.write"]).await;
-    let token = generate_token(
-        &key,
-        "vectordb.vectors.write",
-        &["vectordb.upsert_vectors"],
-    );
+    let token = generate_token(&key, "vectordb.vectors.write", &["vectordb.upsert_vectors"]);
 
     let id_512 = "a".repeat(512);
     let result = invoke(
@@ -599,11 +577,7 @@ async fn schema_upsert_vectors_id_max_length() {
 #[fcp_async_core::runtime::test]
 async fn schema_upsert_vectors_id_exceeds_max_length() {
     let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.write"]).await;
-    let token = generate_token(
-        &key,
-        "vectordb.vectors.write",
-        &["vectordb.upsert_vectors"],
-    );
+    let token = generate_token(&key, "vectordb.vectors.write", &["vectordb.upsert_vectors"]);
 
     let id_513 = "a".repeat(513);
     let result = invoke(
@@ -619,11 +593,7 @@ async fn schema_upsert_vectors_id_exceeds_max_length() {
 #[fcp_async_core::runtime::test]
 async fn schema_upsert_vectors_missing_id() {
     let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.write"]).await;
-    let token = generate_token(
-        &key,
-        "vectordb.vectors.write",
-        &["vectordb.upsert_vectors"],
-    );
+    let token = generate_token(&key, "vectordb.vectors.write", &["vectordb.upsert_vectors"]);
 
     let result = invoke(
         &c,
@@ -638,11 +608,7 @@ async fn schema_upsert_vectors_missing_id() {
 #[fcp_async_core::runtime::test]
 async fn schema_upsert_vectors_missing_values() {
     let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.write"]).await;
-    let token = generate_token(
-        &key,
-        "vectordb.vectors.write",
-        &["vectordb.upsert_vectors"],
-    );
+    let token = generate_token(&key, "vectordb.vectors.write", &["vectordb.upsert_vectors"]);
 
     let result = invoke(
         &c,
@@ -657,11 +623,7 @@ async fn schema_upsert_vectors_missing_values() {
 #[fcp_async_core::runtime::test]
 async fn schema_upsert_vectors_empty_values() {
     let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.write"]).await;
-    let token = generate_token(
-        &key,
-        "vectordb.vectors.write",
-        &["vectordb.upsert_vectors"],
-    );
+    let token = generate_token(&key, "vectordb.vectors.write", &["vectordb.upsert_vectors"]);
 
     let result = invoke(
         &c,
@@ -676,11 +638,7 @@ async fn schema_upsert_vectors_empty_values() {
 #[fcp_async_core::runtime::test]
 async fn schema_upsert_vectors_non_numeric_values() {
     let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.write"]).await;
-    let token = generate_token(
-        &key,
-        "vectordb.vectors.write",
-        &["vectordb.upsert_vectors"],
-    );
+    let token = generate_token(&key, "vectordb.vectors.write", &["vectordb.upsert_vectors"]);
 
     let result = invoke(
         &c,
@@ -695,11 +653,7 @@ async fn schema_upsert_vectors_non_numeric_values() {
 #[fcp_async_core::runtime::test]
 async fn schema_upsert_vectors_metadata_must_be_object() {
     let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.write"]).await;
-    let token = generate_token(
-        &key,
-        "vectordb.vectors.write",
-        &["vectordb.upsert_vectors"],
-    );
+    let token = generate_token(&key, "vectordb.vectors.write", &["vectordb.upsert_vectors"]);
 
     let result = invoke(
         &c,
@@ -714,11 +668,7 @@ async fn schema_upsert_vectors_metadata_must_be_object() {
 #[fcp_async_core::runtime::test]
 async fn schema_upsert_vectors_sparse_values_must_be_object() {
     let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.write"]).await;
-    let token = generate_token(
-        &key,
-        "vectordb.vectors.write",
-        &["vectordb.upsert_vectors"],
-    );
+    let token = generate_token(&key, "vectordb.vectors.write", &["vectordb.upsert_vectors"]);
 
     let result = invoke(
         &c,
@@ -733,11 +683,7 @@ async fn schema_upsert_vectors_sparse_values_must_be_object() {
 #[fcp_async_core::runtime::test]
 async fn schema_upsert_vectors_element_must_be_object() {
     let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.write"]).await;
-    let token = generate_token(
-        &key,
-        "vectordb.vectors.write",
-        &["vectordb.upsert_vectors"],
-    );
+    let token = generate_token(&key, "vectordb.vectors.write", &["vectordb.upsert_vectors"]);
 
     let result = invoke(
         &c,
@@ -752,11 +698,7 @@ async fn schema_upsert_vectors_element_must_be_object() {
 #[fcp_async_core::runtime::test]
 async fn schema_upsert_vectors_with_metadata() {
     let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.write"]).await;
-    let token = generate_token(
-        &key,
-        "vectordb.vectors.write",
-        &["vectordb.upsert_vectors"],
-    );
+    let token = generate_token(&key, "vectordb.vectors.write", &["vectordb.upsert_vectors"]);
 
     let result = invoke(
         &c,
@@ -1057,11 +999,7 @@ async fn error_missing_operation() {
 async fn error_unknown_operation() {
     let (c, key) =
         setup_connector("qdrant", "localhost:6333", &["vectordb.collections.read"]).await;
-    let token = generate_token(
-        &key,
-        "vectordb.collections.read",
-        &["vectordb.nonexistent"],
-    );
+    let token = generate_token(&key, "vectordb.collections.read", &["vectordb.nonexistent"]);
 
     let result = invoke(&c, "vectordb.nonexistent", json!({}), &token).await;
     assert!(matches!(result, Err(FcpError::OperationNotGranted { .. })));
@@ -1089,8 +1027,7 @@ async fn error_input_not_object() {
 
 #[fcp_async_core::runtime::test]
 async fn error_missing_capability_token() {
-    let (c, _) =
-        setup_connector("qdrant", "localhost:6333", &["vectordb.collections.read"]).await;
+    let (c, _) = setup_connector("qdrant", "localhost:6333", &["vectordb.collections.read"]).await;
 
     let result = c
         .handle_invoke(json!({
@@ -1875,4 +1812,791 @@ async fn metrics_track_failed_invoke() {
         .as_u64()
         .unwrap_or(0);
     assert_eq!(errors_after, errors_before + 1);
+}
+
+// ============================================================================
+// Structured JSON Logging Infrastructure (per 1n78.35)
+// ============================================================================
+
+struct TestLog {
+    test_name: &'static str,
+    module: &'static str,
+    correlation_id: String,
+    start: Instant,
+    assertions_passed: u32,
+    assertions_failed: u32,
+    capture: LogCapture,
+}
+
+impl TestLog {
+    fn new(test_name: &'static str) -> Self {
+        Self {
+            test_name,
+            module: "fcp-vectordb-integration",
+            correlation_id: uuid::Uuid::new_v4().to_string(),
+            start: Instant::now(),
+            assertions_passed: 0,
+            assertions_failed: 0,
+            capture: LogCapture::new(),
+        }
+    }
+
+    fn check(&mut self, condition: bool, message: &str) -> Result<(), String> {
+        if !condition {
+            self.assertions_failed = self.assertions_failed.saturating_add(1);
+            return Err(message.to_string());
+        }
+        self.assertions_passed = self.assertions_passed.saturating_add(1);
+        Ok(())
+    }
+
+    fn check_eq<T: std::fmt::Debug + PartialEq>(
+        &mut self,
+        left: T,
+        right: T,
+        context: &str,
+    ) -> Result<(), String> {
+        if left != right {
+            self.assertions_failed = self.assertions_failed.saturating_add(1);
+            return Err(format!("{context}: left={left:?} right={right:?}"));
+        }
+        self.assertions_passed = self.assertions_passed.saturating_add(1);
+        Ok(())
+    }
+
+    fn emit(&mut self, phase: &str, result: &str, context: serde_json::Value) {
+        let duration_ms = u64::try_from(self.start.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let entry = json!({
+            "timestamp": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            "log_version": "v1",
+            "level": "info",
+            "test_name": self.test_name,
+            "module": self.module,
+            "phase": phase,
+            "correlation_id": self.correlation_id,
+            "result": result,
+            "duration_ms": duration_ms,
+            "assertions": {
+                "passed": self.assertions_passed,
+                "failed": self.assertions_failed
+            },
+            "context": context
+        });
+
+        let serialized = serde_json::to_string(&entry).unwrap_or_else(|err| {
+            self.assertions_failed = self.assertions_failed.saturating_add(1);
+            format!("{{\"error\":\"log_serialization_failed\",\"detail\":\"{err}\"}}")
+        });
+        println!("{serialized}");
+        let _ = self.capture.push_value(&entry);
+        if !std::thread::panicking() {
+            self.capture.assert_valid();
+        }
+    }
+}
+
+impl Drop for TestLog {
+    fn drop(&mut self) {
+        let result = if std::thread::panicking() {
+            if self.assertions_failed == 0 {
+                self.assertions_failed = 1;
+            }
+            "fail"
+        } else {
+            "pass"
+        };
+        self.emit(
+            "verify",
+            result,
+            json!({ "connector_id": "vectordb" }),
+        );
+    }
+}
+
+// ============================================================================
+// Logged: Schema Completeness
+// ============================================================================
+
+#[test]
+fn logged_schema_completeness_all_ops_have_schemas() -> Result<(), String> {
+    let mut log = TestLog::new("vectordb_schema_completeness");
+    let connector = VectorDbConnector::new();
+    let introspection = connector.handle_introspect();
+
+    log.check_eq(introspection.operations.len(), 9usize, "operation count")?;
+
+    for op in &introspection.operations {
+        log.check(
+            op.input_schema.is_object(),
+            &format!("{}: input_schema must be object", op.id),
+        )?;
+        log.check_eq(
+            op.input_schema["type"].as_str(),
+            Some("object"),
+            &format!("{}: input_schema type", op.id),
+        )?;
+        log.check(
+            op.output_schema.is_object(),
+            &format!("{}: output_schema must be object", op.id),
+        )?;
+        log.check_eq(
+            op.output_schema["type"].as_str(),
+            Some("object"),
+            &format!("{}: output_schema type", op.id),
+        )?;
+        log.check(
+            !op.summary.is_empty(),
+            &format!("{}: summary must not be empty", op.id),
+        )?;
+        log.check(
+            !op.capability.as_str().is_empty(),
+            &format!("{}: capability must not be empty", op.id),
+        )?;
+    }
+
+    log.emit("verify", "pass", json!({
+        "operations_checked": introspection.operations.len(),
+        "checks": ["input_schema", "output_schema", "summary", "capabilities"]
+    }));
+    Ok(())
+}
+
+#[test]
+fn logged_schema_unknown_op_returns_none() -> Result<(), String> {
+    let mut log = TestLog::new("vectordb_schema_unknown_op");
+    let connector = VectorDbConnector::new();
+    let introspection = connector.handle_introspect();
+
+    let unknown = introspection
+        .operations
+        .iter()
+        .find(|op| op.id.as_str() == "vectordb.nonexistent");
+    log.check(unknown.is_none(), "unknown op should not appear in introspection")?;
+    Ok(())
+}
+
+// ============================================================================
+// Logged: Error Taxonomy Mapping
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn logged_error_taxonomy_not_configured() -> Result<(), String> {
+    let mut log = TestLog::new("vectordb_error_taxonomy_not_configured");
+    let connector = VectorDbConnector::new();
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "vectordb.list_collections",
+            "input": {},
+            "capability_token": {"raw": []}
+        }))
+        .await;
+
+    log.check(
+        matches!(&result, Err(FcpError::NotConfigured)),
+        "unconfigured connector must return NotConfigured",
+    )?;
+    log.emit("verify", "pass", json!({
+        "error_variant": "NotConfigured"
+    }));
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test]
+async fn logged_error_taxonomy_invalid_request_codes() -> Result<(), String> {
+    let mut log = TestLog::new("vectordb_error_taxonomy_invalid_request");
+    let (c, key) =
+        setup_connector("qdrant", "localhost:6333", &["vectordb.collections.write"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.collections.write",
+        &["vectordb.create_collection"],
+    );
+
+    // Missing required field 'dimension'
+    let result = invoke(
+        &c,
+        "vectordb.create_collection",
+        json!({"collection": "test"}),
+        &token,
+    )
+    .await;
+
+    if let Err(FcpError::InvalidRequest { code, message }) = &result {
+        log.check_eq(*code, 1003u16, "InvalidRequest code must be 1003")?;
+        log.check(!message.is_empty(), "error message must not be empty")?;
+    } else {
+        log.check(false, &format!("expected InvalidRequest, got {result:?}"))?;
+    }
+
+    // Invalid collection name
+    let result2 = invoke(
+        &c,
+        "vectordb.create_collection",
+        json!({"collection": "INVALID", "dimension": 768}),
+        &token,
+    )
+    .await;
+
+    if let Err(FcpError::InvalidRequest { code, .. }) = &result2 {
+        log.check_eq(*code, 1003u16, "InvalidRequest code must be 1003 for name validation")?;
+    } else {
+        log.check(false, &format!("expected InvalidRequest, got {result2:?}"))?;
+    }
+
+    log.emit("verify", "pass", json!({
+        "error_variant": "InvalidRequest",
+        "expected_code": 1003,
+        "scenarios_tested": 2
+    }));
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test]
+async fn logged_error_taxonomy_operation_not_granted() -> Result<(), String> {
+    let mut log = TestLog::new("vectordb_error_taxonomy_operation_not_granted");
+    let (c, key) =
+        setup_connector("qdrant", "localhost:6333", &["vectordb.collections.read"]).await;
+    let token = generate_token(&key, "vectordb.collections.read", &["vectordb.nonexistent"]);
+
+    let result = invoke(&c, "vectordb.nonexistent", json!({}), &token).await;
+
+    log.check(
+        matches!(&result, Err(FcpError::OperationNotGranted { .. })),
+        "unknown operation must return OperationNotGranted",
+    )?;
+    log.emit("verify", "pass", json!({
+        "error_variant": "OperationNotGranted"
+    }));
+    Ok(())
+}
+
+// ============================================================================
+// Logged: Capability Gating Matrix
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn logged_capability_gating_per_operation() -> Result<(), String> {
+    let mut log = TestLog::new("vectordb_capability_gating_matrix");
+
+    let cap_map: &[(&str, &str, serde_json::Value)] = &[
+        (
+            "vectordb.collections.read",
+            "vectordb.list_collections",
+            json!({}),
+        ),
+        (
+            "vectordb.collections.read",
+            "vectordb.describe_collection",
+            json!({"collection": "test"}),
+        ),
+        (
+            "vectordb.collections.write",
+            "vectordb.create_collection",
+            json!({"collection": "test", "dimension": 768}),
+        ),
+        (
+            "vectordb.collections.delete",
+            "vectordb.delete_collection",
+            json!({"collection": "test", "confirm": true}),
+        ),
+        (
+            "vectordb.vectors.read",
+            "vectordb.query_vectors",
+            json!({"collection": "test", "vector": [1.0, 2.0, 3.0]}),
+        ),
+        (
+            "vectordb.vectors.read",
+            "vectordb.fetch_vectors",
+            json!({"collection": "test", "ids": ["v1"]}),
+        ),
+        (
+            "vectordb.vectors.write",
+            "vectordb.upsert_vectors",
+            json!({"collection": "test", "vectors": [{"id": "v1", "values": [1.0]}]}),
+        ),
+        (
+            "vectordb.vectors.delete",
+            "vectordb.delete_vectors",
+            json!({"collection": "test", "ids": ["v1"]}),
+        ),
+        (
+            "vectordb.vectors.write",
+            "vectordb.update_vector_metadata",
+            json!({"collection": "test", "id": "v1", "metadata": {"key": "val"}}),
+        ),
+    ];
+
+    let mut ops_verified = 0u32;
+    for (cap, op, input) in cap_map {
+        let (c, key) = setup_connector("qdrant", "localhost:6333", &[cap]).await;
+        let token = generate_token(&key, cap, &[op]);
+
+        let result = invoke(&c, op, input.clone(), &token).await;
+        log.check(
+            result.is_ok(),
+            &format!("{op} with correct cap {cap} should succeed: {result:?}"),
+        )?;
+        ops_verified += 1;
+    }
+
+    log.check_eq(ops_verified, 9u32, "all 9 operations must be verified")?;
+    log.emit("verify", "pass", json!({
+        "operations_verified": ops_verified,
+        "check": "correct_capability_grants_access"
+    }));
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test]
+async fn logged_capability_wrong_cap_denies_access() -> Result<(), String> {
+    let mut log = TestLog::new("vectordb_capability_wrong_cap_denied");
+
+    // Try write op with read capability
+    let (c, key) =
+        setup_connector("qdrant", "localhost:6333", &["vectordb.collections.read"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.collections.read",
+        &["vectordb.create_collection"],
+    );
+
+    let result = invoke(
+        &c,
+        "vectordb.create_collection",
+        json!({"collection": "test", "dimension": 768}),
+        &token,
+    )
+    .await;
+
+    log.check(result.is_err(), "wrong capability must deny access")?;
+
+    // Try delete op with write capability
+    let (c2, key2) =
+        setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.write"]).await;
+    let token2 = generate_token(
+        &key2,
+        "vectordb.vectors.write",
+        &["vectordb.delete_vectors"],
+    );
+
+    let result2 = invoke(
+        &c2,
+        "vectordb.delete_vectors",
+        json!({"collection": "test", "ids": ["v1"]}),
+        &token2,
+    )
+    .await;
+
+    log.check(result2.is_err(), "write cap must not grant delete access")?;
+    log.emit("verify", "pass", json!({
+        "scenarios_tested": 2,
+        "check": "wrong_capability_denies_access"
+    }));
+    Ok(())
+}
+
+// ============================================================================
+// Logged: Redaction Chain
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn logged_redaction_chain_no_credential_leakage() -> Result<(), String> {
+    let mut log = TestLog::new("vectordb_redaction_chain");
+    let cred = "aabbccdd-1122-3344-5566-778899aabbcc";
+    let mut connector = VectorDbConnector::new();
+
+    // Step 1: Configure successfully
+    connector
+        .handle_configure(json!({
+            "provider": "pinecone",
+            "endpoint": "my-index.svc.us-east-1.pinecone.io",
+            "credential_id": cred
+        }))
+        .await
+        .map_err(|err| format!("configure failed: {err}"))?;
+
+    // Step 2: Check health output
+    let health = connector.handle_health();
+    let health_str = serde_json::to_string(&health).unwrap_or_default();
+    log.check(
+        !health_str.contains(cred),
+        "health output must not leak full credential id",
+    )?;
+
+    // Step 3: Check doctor output
+    let doctor = connector.handle_doctor().await
+        .map_err(|err| format!("doctor failed: {err}"))?;
+    let doctor_str = serde_json::to_string(&doctor).unwrap_or_default();
+    log.check(
+        !doctor_str.contains(cred),
+        "doctor output must not leak full credential id",
+    )?;
+
+    // Step 4: Check redacted form (first 8 chars only)
+    log.check(
+        doctor_str.contains("aabbccdd"),
+        "doctor should show truncated credential prefix",
+    )?;
+
+    // Step 5: Configure with bad endpoint to trigger error path
+    let mut connector2 = VectorDbConnector::new();
+    let result = connector2
+        .handle_configure(json!({
+            "provider": "pinecone",
+            "endpoint": "",
+            "credential_id": cred
+        }))
+        .await;
+
+    if let Err(err) = &result {
+        let err_str = format!("{err}");
+        log.check(
+            !err_str.contains(cred),
+            "error message must not leak full credential id",
+        )?;
+    }
+
+    log.emit("verify", "pass", json!({
+        "credential_tested": "aabbccdd-...redacted...",
+        "paths_checked": ["health", "doctor", "configure_error"]
+    }));
+    Ok(())
+}
+
+// ============================================================================
+// Logged: Retry & Idempotency Rules
+// ============================================================================
+
+#[test]
+fn logged_retry_idempotency_classification() -> Result<(), String> {
+    let mut log = TestLog::new("vectordb_retry_idempotency_rules");
+    let connector = VectorDbConnector::new();
+    let introspection = connector.handle_introspect();
+
+    let find = |id: &str| introspection.operations.iter().find(|op| op.id.as_str() == id);
+
+    // Read operations: idempotent (class None = safe to retry, always same result)
+    let read_ops = [
+        "vectordb.list_collections",
+        "vectordb.describe_collection",
+        "vectordb.query_vectors",
+        "vectordb.fetch_vectors",
+    ];
+    for op_id in &read_ops {
+        let op = find(op_id).ok_or(format!("missing operation: {op_id}"))?;
+        log.check_eq(op.idempotency, IdempotencyClass::None, op_id)?;
+    }
+
+    // Write/delete operations: best effort idempotency
+    let write_ops = [
+        "vectordb.create_collection",
+        "vectordb.delete_collection",
+        "vectordb.upsert_vectors",
+        "vectordb.delete_vectors",
+        "vectordb.update_vector_metadata",
+    ];
+    for op_id in &write_ops {
+        let op = find(op_id).ok_or(format!("missing operation: {op_id}"))?;
+        log.check_eq(op.idempotency, IdempotencyClass::BestEffort, op_id)?;
+    }
+
+    log.emit("verify", "pass", json!({
+        "read_ops_none": read_ops.len(),
+        "write_ops_best_effort": write_ops.len()
+    }));
+    Ok(())
+}
+
+// ============================================================================
+// Logged: Risk Level & Safety Tier Validation
+// ============================================================================
+
+#[test]
+fn logged_risk_levels_and_safety_tiers() -> Result<(), String> {
+    let mut log = TestLog::new("vectordb_risk_levels");
+    let connector = VectorDbConnector::new();
+    let introspection = connector.handle_introspect();
+
+    let find = |id: &str| introspection.operations.iter().find(|op| op.id.as_str() == id);
+
+    // Read ops: low risk, safe tier
+    for op_id in &[
+        "vectordb.list_collections",
+        "vectordb.describe_collection",
+        "vectordb.query_vectors",
+        "vectordb.fetch_vectors",
+        "vectordb.update_vector_metadata",
+    ] {
+        let op = find(op_id).ok_or(format!("missing: {op_id}"))?;
+        log.check_eq(op.risk, RiskLevel::Low, &format!("{op_id} risk"))?;
+        log.check_eq(op.safety_tier, SafetyTier::Safe, &format!("{op_id} safety"))?;
+    }
+
+    // Write ops: medium risk
+    for op_id in &[
+        "vectordb.create_collection",
+        "vectordb.upsert_vectors",
+        "vectordb.delete_vectors",
+    ] {
+        let op = find(op_id).ok_or(format!("missing: {op_id}"))?;
+        log.check_eq(op.risk, RiskLevel::Medium, &format!("{op_id} risk"))?;
+    }
+
+    // Delete collection: high risk, requires interactive approval
+    let delete = find("vectordb.delete_collection")
+        .ok_or("missing delete_collection")?;
+    log.check_eq(delete.risk, RiskLevel::High, "delete_collection risk")?;
+    log.check_eq(
+        delete.safety_tier,
+        SafetyTier::Dangerous,
+        "delete_collection safety_tier",
+    )?;
+
+    log.emit("verify", "pass", json!({
+        "low_risk_ops": 5,
+        "medium_risk_ops": 3,
+        "high_risk_ops": 1
+    }));
+    Ok(())
+}
+
+// ============================================================================
+// Logged: Payload Bounds Enforcement
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn logged_payload_bounds_enforcement() -> Result<(), String> {
+    let mut log = TestLog::new("vectordb_payload_bounds");
+    let (c, key) = setup_connector(
+        "qdrant",
+        "localhost:6333",
+        &[
+            "vectordb.collections.write",
+            "vectordb.vectors.read",
+            "vectordb.vectors.write",
+        ],
+    )
+    .await;
+
+    // Dimension bounds: 0 rejected
+    let token_w = generate_token(
+        &key,
+        "vectordb.collections.write",
+        &["vectordb.create_collection"],
+    );
+    let result = invoke(
+        &c,
+        "vectordb.create_collection",
+        json!({"collection": "test", "dimension": 0}),
+        &token_w,
+    )
+    .await;
+    log.check(result.is_err(), "dimension 0 must be rejected")?;
+
+    // Dimension bounds: 10001 rejected
+    let result = invoke(
+        &c,
+        "vectordb.create_collection",
+        json!({"collection": "test", "dimension": 10001}),
+        &token_w,
+    )
+    .await;
+    log.check(result.is_err(), "dimension 10001 must be rejected")?;
+
+    // top_k bounds: 0 rejected
+    let token_r = generate_token(&key, "vectordb.vectors.read", &["vectordb.query_vectors"]);
+    let result = invoke(
+        &c,
+        "vectordb.query_vectors",
+        json!({"collection": "test", "vector": [1.0], "top_k": 0}),
+        &token_r,
+    )
+    .await;
+    log.check(result.is_err(), "top_k 0 must be rejected")?;
+
+    // Upsert empty batch rejected
+    let token_uw = generate_token(
+        &key,
+        "vectordb.vectors.write",
+        &["vectordb.upsert_vectors"],
+    );
+    let result = invoke(
+        &c,
+        "vectordb.upsert_vectors",
+        json!({"collection": "test", "vectors": []}),
+        &token_uw,
+    )
+    .await;
+    log.check(result.is_err(), "empty vector batch must be rejected")?;
+
+    // Fetch empty IDs rejected
+    let token_f = generate_token(&key, "vectordb.vectors.read", &["vectordb.fetch_vectors"]);
+    let result = invoke(
+        &c,
+        "vectordb.fetch_vectors",
+        json!({"collection": "test", "ids": []}),
+        &token_f,
+    )
+    .await;
+    log.check(result.is_err(), "empty IDs list must be rejected")?;
+
+    log.emit("verify", "pass", json!({
+        "bounds_tested": ["dimension_min", "dimension_max", "top_k_min", "upsert_empty", "fetch_empty"],
+        "all_rejected": true
+    }));
+    Ok(())
+}
+
+// ============================================================================
+// Logged: Config Timeout Validation
+// ============================================================================
+
+#[test]
+fn logged_config_timeout_validation() -> Result<(), String> {
+    let mut log = TestLog::new("vectordb_config_timeouts");
+    let credential_id = fcp_core::CredentialId::parse("11223344-5566-7788-99aa-bbccddeeff00")
+        .map_err(|err| format!("credential parse: {err}"))?;
+
+    // Valid config
+    let valid = VectorDbConfig {
+        provider: VectorDbProvider::Qdrant,
+        endpoint: "localhost:6333".into(),
+        credential_id: credential_id.clone(),
+        use_tls: false,
+        namespace: None,
+        connect_timeout_ms: 10_000,
+        request_timeout_ms: 60_000,
+    };
+    log.check(valid.validate().is_ok(), "valid config should pass")?;
+
+    // Connect timeout too low
+    let too_low = VectorDbConfig {
+        connect_timeout_ms: 0,
+        ..valid.clone()
+    };
+    log.check(too_low.validate().is_err(), "connect_timeout_ms=0 must fail")?;
+
+    // Request timeout too high
+    let too_high = VectorDbConfig {
+        request_timeout_ms: 700_000,
+        ..valid.clone()
+    };
+    log.check(too_high.validate().is_err(), "request_timeout_ms=700000 must fail")?;
+
+    // Connect timeout at upper bound
+    let upper = VectorDbConfig {
+        connect_timeout_ms: 300_000,
+        ..valid.clone()
+    };
+    log.check(upper.validate().is_ok(), "connect_timeout_ms=300000 should pass")?;
+
+    // Request timeout at upper bound
+    let req_upper = VectorDbConfig {
+        request_timeout_ms: 600_000,
+        ..valid
+    };
+    log.check(req_upper.validate().is_ok(), "request_timeout_ms=600000 should pass")?;
+
+    log.emit("verify", "pass", json!({
+        "scenarios": ["valid", "connect_too_low", "request_too_high", "connect_upper", "request_upper"]
+    }));
+    Ok(())
+}
+
+// ============================================================================
+// Logged: Introspection Determinism
+// ============================================================================
+
+#[test]
+fn logged_introspection_deterministic() -> Result<(), String> {
+    let mut log = TestLog::new("vectordb_introspect_deterministic");
+    let c1 = VectorDbConnector::new();
+    let c2 = VectorDbConnector::new();
+
+    let i1 = c1.handle_introspect();
+    let i2 = c2.handle_introspect();
+
+    let s1 = serde_json::to_string(&i1.operations).unwrap_or_default();
+    let s2 = serde_json::to_string(&i2.operations).unwrap_or_default();
+
+    log.check_eq(s1, s2, "introspection must be deterministic across instances")?;
+    log.emit("verify", "pass", json!({
+        "check": "deterministic_serialization"
+    }));
+    Ok(())
+}
+
+// ============================================================================
+// Logged: Full Lifecycle Smoke Test
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn logged_lifecycle_configure_handshake_invoke() -> Result<(), String> {
+    let mut log = TestLog::new("vectordb_lifecycle_smoke");
+    let mut connector = VectorDbConnector::new();
+
+    // Step 1: Not configured
+    log.check(!connector.is_configured(), "must start unconfigured")?;
+    log.check(connector.provider().is_none(), "provider must be None")?;
+
+    // Step 2: Configure
+    let signing_key = Ed25519SigningKey::generate();
+    connector
+        .handle_configure(json!({
+            "provider": "qdrant",
+            "endpoint": "localhost:6333",
+            "credential_id": "11223344-5566-7788-99aa-bbccddeeff00",
+            "use_tls": false
+        }))
+        .await
+        .map_err(|err| format!("configure failed: {err}"))?;
+
+    log.check(connector.is_configured(), "must be configured after configure")?;
+    log.check_eq(
+        connector.provider(),
+        Some(VectorDbProvider::Qdrant),
+        "provider must be qdrant",
+    )?;
+
+    // Step 3: Health check
+    let health = connector.handle_health();
+    log.check_eq(health["status"].as_str(), Some("healthy"), "health status")?;
+
+    // Step 4: Handshake
+    let hs = handshake_request(
+        signing_key.verifying_key().to_bytes(),
+        &["vectordb.collections.read"],
+    );
+    let hs_result = connector
+        .handle_handshake(serde_json::to_value(hs).map_err(|e| format!("serialize: {e}"))?)
+        .await
+        .map_err(|err| format!("handshake failed: {err}"))?;
+
+    log.check_eq(hs_result["status"].as_str(), Some("accepted"), "handshake accepted")?;
+
+    // Step 5: Invoke
+    let token = generate_token(
+        &signing_key,
+        "vectordb.collections.read",
+        &["vectordb.list_collections"],
+    );
+    let result = invoke(&connector, "vectordb.list_collections", json!({}), &token)
+        .await
+        .map_err(|err| format!("invoke failed: {err}"))?;
+
+    log.check(
+        result.get("collections").is_some_and(|v| v.is_array()),
+        "collections must be an array",
+    )?;
+
+    // Step 6: Metrics after invoke
+    let health_after = connector.handle_health();
+    let total = health_after["metrics"]["requests_total"].as_u64().unwrap_or(0);
+    log.check(total >= 1, "requests_total must be >= 1 after invoke")?;
+
+    log.emit("verify", "pass", json!({
+        "steps": ["unconfigured", "configure", "health", "handshake", "invoke", "metrics"]
+    }));
+    Ok(())
 }

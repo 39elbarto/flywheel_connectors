@@ -6,15 +6,18 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 LEDGER_PATH="${REPO_ROOT}/.config/asupersync/tokio_exception_ledger.json"
 REPORT_PATH="${REPO_ROOT}/artifacts/asupersync/guardrails/tokio_guard_report.json"
 
+CI_MODE=false
+
 usage() {
   cat <<'EOF'
 Usage: scripts/ci/asupersync_tokio_guard.sh [options]
 
-Validates ASUPERSYNC Tokio-prohibition guardrails for flywheel_connectors-235t.5.
+Validates ASUPERSYNC Tokio-prohibition guardrails for flywheel_connectors-1ud0u.
 
 Options:
   --ledger <path>   Exception ledger JSON path
   --report <path>   Output report JSON path
+  --ci              CI mode: non-zero exit on any failure, machine-readable output
   -h, --help        Show this help
 EOF
 }
@@ -35,6 +38,10 @@ while [[ $# -gt 0 ]]; do
     --report)
       REPORT_PATH="$2"
       shift 2
+      ;;
+    --ci)
+      CI_MODE=true
+      shift
       ;;
     -h|--help)
       usage
@@ -143,15 +150,16 @@ while IFS= read -r invariant; do
   mapfile -t scope_paths < <(jq -r '.scope[]' <<< "${invariant}")
   scan_paths=()
   for rel_path in "${scope_paths[@]}"; do
-    if [[ -e "${REPO_ROOT}/${rel_path}" ]]; then
-      scan_paths+=("${REPO_ROOT}/${rel_path}")
+    target="${REPO_ROOT}/${rel_path}"
+    if [[ -e "${target}" ]]; then
+      scan_paths+=("${target}")
     fi
   done
 
   if [[ ${#scan_paths[@]} -eq 0 ]]; then
     count=0
   else
-    count="$(rg -n --no-heading -e "${pattern}" "${scan_paths[@]}" 2>/dev/null | wc -l | tr -d '[:space:]')"
+    count="$( (rg -n --no-heading -e "${pattern}" "${scan_paths[@]}" 2>/dev/null || true) | wc -l | tr -d '[:space:]')"
   fi
 
   expired="$(jq -r --argjson now "${NOW_EPOCH}" '((.expires_on | fromdateiso8601) < $now)' <<< "${invariant}")"
@@ -237,12 +245,38 @@ jq -r '
 ' "${REPORT_PATH}"
 
 if [[ "${PASSED}" != "true" ]]; then
-  echo "Guardrail failure details:" >&2
-  jq '
-    {
-      missing_dependency_exceptions,
-      expired_dependency_exceptions,
-      failed_source_invariants: [.source_invariants[] | select(.status != "pass")]
-    }' "${REPORT_PATH}" >&2
+  echo "" >&2
+  echo "====== ASUPERSYNC TOKIO GUARD FAILURE ======" >&2
+  echo "" >&2
+
+  if (( MISSING_DEP_COUNT > 0 )); then
+    echo "MISSING DEPENDENCY EXCEPTIONS (${MISSING_DEP_COUNT}):" >&2
+    echo "  These crates use forbidden Tokio dependencies without a ledger exception." >&2
+    echo "  Fix: Add an exception to ${LEDGER_PATH} or remove the dependency." >&2
+    jq -r '.[] | "  - \(.crate) depends on \(.dependency) (\(.kind))"' "${MISSING_DEP_EXCEPTIONS_JSON}" >&2
+    echo "" >&2
+  fi
+
+  if (( EXPIRED_DEP_COUNT > 0 )); then
+    echo "EXPIRED DEPENDENCY EXCEPTIONS (${EXPIRED_DEP_COUNT}):" >&2
+    echo "  These exceptions have passed their deadline. The dependency must be removed." >&2
+    echo "  Fix: Complete the migration for the crate or extend the deadline with justification." >&2
+    jq -r '.[] | "  - \(.crate)/\(.dependency) expired \(.expires_on) (owner: \(.owner_bead))"' "${EXPIRED_DEP_EXCEPTIONS_JSON}" >&2
+    echo "" >&2
+  fi
+
+  if (( FAILED_INVARIANT_COUNT > 0 )); then
+    echo "FAILED SOURCE INVARIANTS (${FAILED_INVARIANT_COUNT}):" >&2
+    echo "  These pattern counts exceed the allowed maximum. New Tokio usage was introduced." >&2
+    echo "  Fix: Remove the new tokio references or update the max_count in the ledger with justification." >&2
+    jq -r '[.source_invariants[] | select(.status != "pass")] | .[] | "  - \(.id): count=\(.count) max=\(.max_count) (over_limit=\(.over_limit), expired=\(.expired))"' "${REPORT_PATH}" >&2
+    echo "" >&2
+  fi
+
+  echo "Report: ${REPORT_PATH}" >&2
+  echo "Ledger: ${LEDGER_PATH}" >&2
+  echo "Bead: flywheel_connectors-1ud0u.4" >&2
+  echo "" >&2
+  echo "============================================" >&2
   exit 1
 fi

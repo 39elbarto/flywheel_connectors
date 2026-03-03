@@ -1350,7 +1350,10 @@ async fn search_requires_search_capability() {
         }))
         .await;
 
-    assert!(result.is_err(), "notion.read should not grant access to search");
+    assert!(
+        result.is_err(),
+        "notion.read should not grant access to search"
+    );
 }
 
 /// Search with `created_by`/`last_edited_by` redaction on type variants.
@@ -1419,5 +1422,8 @@ async fn search_redacts_created_by_last_edited_by_property_types() {
     );
     // Names preserved
     assert_eq!(page["properties"]["Creator"]["created_by"]["name"], "Carol");
-    assert_eq!(page["properties"]["Editor"]["last_edited_by"]["name"], "Dave");
+    assert_eq!(
+        page["properties"]["Editor"]["last_edited_by"]["name"],
+        "Dave"
+    );
 }

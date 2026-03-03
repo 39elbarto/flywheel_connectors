@@ -1265,9 +1265,13 @@ fn redact_search_result(mut item: serde_json::Value) -> serde_json::Value {
 
 /// Redact email addresses from person-type property values.
 fn redact_person_fields(prop: &mut serde_json::Value) {
-    let prop_type = prop.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    let prop_type = prop
+        .get("type")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_owned();
 
-    match prop_type {
+    match prop_type.as_str() {
         "people" => {
             if let Some(people) = prop.get_mut("people") {
                 if let Some(arr) = people.as_array_mut() {
@@ -1278,7 +1282,7 @@ fn redact_person_fields(prop: &mut serde_json::Value) {
             }
         }
         "created_by" | "last_edited_by" => {
-            if let Some(user) = prop.get_mut(prop_type) {
+            if let Some(user) = prop.get_mut(&prop_type) {
                 redact_user_email(user);
             }
         }
@@ -1706,7 +1710,6 @@ mod tests {
             "notion.get_page",
             "notion.get_database",
             "notion.query_database",
-            "notion.search",
             "notion.get_block",
             "notion.get_block_children",
             "notion.list_comments",
@@ -1715,6 +1718,21 @@ mod tests {
             assert_eq!(op["risk_level"], "low", "{read_op} should be low risk");
             assert_eq!(op["safety_tier"], "safe", "{read_op} should be safe");
         }
+
+        // Verify search is medium risk (sensitive cross-workspace operation)
+        let search_op = ops.iter().find(|o| o["id"] == "notion.search").unwrap();
+        assert_eq!(
+            search_op["risk_level"], "medium",
+            "search should be medium risk"
+        );
+        assert_eq!(
+            search_op["safety_tier"], "safe",
+            "search is safe (read-only)"
+        );
+        assert_eq!(
+            search_op["capability"], "notion.search",
+            "search uses dedicated cap"
+        );
 
         // Verify write ops are risky
         for write_op in &[
@@ -1925,10 +1943,7 @@ mod tests {
             item["properties"]["Assignee"]["people"][0]["person"]["email"],
             "[redacted]"
         );
-        assert_eq!(
-            item["properties"]["Assignee"]["people"][0]["name"],
-            "Alice"
-        );
+        assert_eq!(item["properties"]["Assignee"]["people"][0]["name"], "Alice");
     }
 
     #[test]
@@ -1968,7 +1983,7 @@ mod tests {
             "url": "https://notion.so/Important"
         });
 
-        let redacted = super::redact_search_result(item.clone());
+        let redacted = super::redact_search_result(item);
 
         assert_eq!(redacted["id"], "pg-3");
         assert_eq!(redacted["url"], "https://notion.so/Important");
@@ -1989,7 +2004,7 @@ mod tests {
         });
 
         // Should not panic or modify anything
-        let redacted = super::redact_search_result(item.clone());
+        let redacted = super::redact_search_result(item);
         assert_eq!(redacted["id"], "db-1");
     }
 

@@ -1652,4 +1652,685 @@ mod tests {
         assert!(missing.contains(&"chat:write".to_string()));
         assert!(missing.contains(&"users:read".to_string()));
     }
+
+    // ── Schema completeness tests ────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_all_ops_have_input_and_output_schemas() {
+        let connector = SlackConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            assert!(
+                op.get("input_schema").is_some(),
+                "{id} missing input_schema"
+            );
+            assert!(
+                op.get("output_schema").is_some(),
+                "{id} missing output_schema"
+            );
+            assert_eq!(
+                op["input_schema"]["type"].as_str().unwrap(),
+                "object",
+                "{id} input_schema should be object type"
+            );
+            assert_eq!(
+                op["output_schema"]["type"].as_str().unwrap(),
+                "object",
+                "{id} output_schema should be object type"
+            );
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_is_deterministic() {
+        let connector = SlackConnector::new();
+        let r1 = connector.handle_introspect().await.unwrap();
+        let r2 = connector.handle_introspect().await.unwrap();
+        assert_eq!(r1, r2);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_no_duplicate_operation_ids() {
+        let connector = SlackConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let ids: Vec<&str> = ops.iter().map(|o| o["id"].as_str().unwrap()).collect();
+
+        let mut seen = std::collections::HashSet::new();
+        for id in &ids {
+            assert!(seen.insert(*id), "Duplicate operation ID: {id}");
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_unknown_operation_returns_none() {
+        let connector = SlackConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let ids: Vec<&str> = ops.iter().map(|o| o["id"].as_str().unwrap()).collect();
+
+        assert!(!ids.contains(&"slack.nonexistent"));
+    }
+
+    // ── Introspection metadata tests ─────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_all_ops_have_required_metadata() {
+        let connector = SlackConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            assert!(op.get("summary").is_some(), "{id} missing summary");
+            assert!(!op["summary"].as_str().unwrap().is_empty(), "{id} empty summary");
+            assert!(op.get("capability").is_some(), "{id} missing capability");
+            assert!(op.get("risk_level").is_some(), "{id} missing risk_level");
+            assert!(op.get("safety_tier").is_some(), "{id} missing safety_tier");
+            assert!(op.get("idempotency").is_some(), "{id} missing idempotency");
+            assert!(op.get("ai_hints").is_some(), "{id} missing ai_hints");
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_valid_risk_levels() {
+        let connector = SlackConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let valid = ["low", "medium", "high", "critical"];
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            let risk = op["risk_level"].as_str().unwrap();
+            assert!(
+                valid.contains(&risk),
+                "{id} has invalid risk_level: {risk}"
+            );
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_valid_safety_tiers() {
+        let connector = SlackConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let valid = ["safe", "risky", "dangerous"];
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            let tier = op["safety_tier"].as_str().unwrap();
+            assert!(
+                valid.contains(&tier),
+                "{id} has invalid safety_tier: {tier}"
+            );
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_ai_hints_have_when_to_use() {
+        let connector = SlackConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            let hints = &op["ai_hints"];
+            assert!(
+                hints.get("when_to_use").is_some(),
+                "{id} ai_hints missing when_to_use"
+            );
+            assert!(
+                !hints["when_to_use"].as_str().unwrap().is_empty(),
+                "{id} ai_hints has empty when_to_use"
+            );
+        }
+    }
+
+    // ── Capability mapping tests ─────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_all_capabilities_start_with_slack() {
+        let connector = SlackConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            let cap = op["capability"].as_str().unwrap();
+            assert!(
+                cap.starts_with("slack."),
+                "{id} capability '{cap}' should start with 'slack.'"
+            );
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_read_ops_use_read_capability() {
+        let connector = SlackConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let read_ops = [
+            "slack.get_channel_history",
+            "slack.search_messages",
+            "slack.list_channels",
+            "slack.get_user_info",
+            "slack.download_file",
+        ];
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            if read_ops.contains(&id) {
+                assert_eq!(
+                    op["capability"].as_str().unwrap(),
+                    "slack.read",
+                    "{id} should use slack.read capability"
+                );
+            }
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_write_ops_use_write_capability() {
+        let connector = SlackConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let write_ops = [
+            "slack.post_message",
+            "slack.reply_thread",
+            "slack.upload_file",
+            "slack.add_reaction",
+            "slack.set_channel_topic",
+        ];
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            if write_ops.contains(&id) {
+                assert_eq!(
+                    op["capability"].as_str().unwrap(),
+                    "slack.write",
+                    "{id} should use slack.write capability"
+                );
+            }
+        }
+    }
+
+    // ── Safety tier tests ────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_read_ops_are_safe() {
+        let connector = SlackConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let read_ops = [
+            "slack.get_channel_history",
+            "slack.search_messages",
+            "slack.list_channels",
+            "slack.get_user_info",
+            "slack.download_file",
+        ];
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            if read_ops.contains(&id) {
+                assert_eq!(
+                    op["safety_tier"].as_str().unwrap(),
+                    "safe",
+                    "{id} should be safe"
+                );
+            }
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_write_ops_are_risky_except_reaction() {
+        let connector = SlackConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let risky_ops = [
+            "slack.post_message",
+            "slack.reply_thread",
+            "slack.upload_file",
+            "slack.set_channel_topic",
+        ];
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            if risky_ops.contains(&id) {
+                assert_eq!(
+                    op["safety_tier"].as_str().unwrap(),
+                    "risky",
+                    "{id} should be risky"
+                );
+            }
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_add_reaction_is_safe() {
+        let connector = SlackConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let reaction = ops.iter().find(|o| o["id"] == "slack.add_reaction").unwrap();
+        assert_eq!(reaction["safety_tier"].as_str().unwrap(), "safe");
+    }
+
+    // ── Risk level tests ─────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_read_ops_are_low_risk() {
+        let connector = SlackConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let read_ops = [
+            "slack.get_channel_history",
+            "slack.search_messages",
+            "slack.list_channels",
+            "slack.get_user_info",
+            "slack.download_file",
+        ];
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            if read_ops.contains(&id) {
+                assert_eq!(
+                    op["risk_level"].as_str().unwrap(),
+                    "low",
+                    "{id} should be low risk"
+                );
+            }
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_write_ops_are_medium_risk() {
+        let connector = SlackConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let medium_ops = [
+            "slack.post_message",
+            "slack.reply_thread",
+            "slack.upload_file",
+            "slack.set_channel_topic",
+        ];
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            if medium_ops.contains(&id) {
+                assert_eq!(
+                    op["risk_level"].as_str().unwrap(),
+                    "medium",
+                    "{id} should be medium risk"
+                );
+            }
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_add_reaction_is_low_risk() {
+        let connector = SlackConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let reaction = ops.iter().find(|o| o["id"] == "slack.add_reaction").unwrap();
+        assert_eq!(reaction["risk_level"].as_str().unwrap(), "low");
+    }
+
+    // ── Idempotency tests ────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_read_ops_have_strict_idempotency() {
+        let connector = SlackConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let read_ops = [
+            "slack.get_channel_history",
+            "slack.search_messages",
+            "slack.list_channels",
+            "slack.get_user_info",
+            "slack.download_file",
+        ];
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            if read_ops.contains(&id) {
+                assert_eq!(
+                    op["idempotency"].as_str().unwrap(),
+                    "strict",
+                    "{id} should have strict idempotency"
+                );
+            }
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_post_and_reply_have_none_idempotency() {
+        let connector = SlackConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            if id == "slack.post_message" || id == "slack.reply_thread" || id == "slack.upload_file"
+            {
+                assert_eq!(
+                    op["idempotency"].as_str().unwrap(),
+                    "none",
+                    "{id} should have none idempotency"
+                );
+            }
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_reaction_and_topic_have_best_effort_idempotency() {
+        let connector = SlackConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            if id == "slack.add_reaction" || id == "slack.set_channel_topic" {
+                assert_eq!(
+                    op["idempotency"].as_str().unwrap(),
+                    "best_effort",
+                    "{id} should have best_effort idempotency"
+                );
+            }
+        }
+    }
+
+    // ── Required fields in schemas ───────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_required_fields_in_schemas() {
+        let connector = SlackConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        let checks: &[(&str, &[&str])] = &[
+            ("slack.post_message", &["channel", "text"]),
+            ("slack.reply_thread", &["channel", "text", "thread_ts"]),
+            ("slack.get_channel_history", &["channel"]),
+            ("slack.search_messages", &["query"]),
+            ("slack.get_user_info", &["user"]),
+            ("slack.upload_file", &["channels", "content"]),
+            ("slack.download_file", &["file_id"]),
+            ("slack.add_reaction", &["channel", "timestamp", "name"]),
+            ("slack.set_channel_topic", &["channel", "topic"]),
+        ];
+
+        for (op_id, expected) in checks {
+            let op = ops.iter().find(|o| o["id"] == *op_id).unwrap();
+            let required = op["input_schema"]["required"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+
+            for field in *expected {
+                assert!(
+                    required.contains(field),
+                    "{op_id} should require '{field}'"
+                );
+            }
+        }
+    }
+
+    // ── Event/streaming tests ────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_has_events() {
+        let connector = SlackConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let events = result["events"].as_array().unwrap();
+
+        assert_eq!(events.len(), 5);
+        let topics: Vec<&str> = events.iter().map(|e| e["topic"].as_str().unwrap()).collect();
+        assert!(topics.contains(&"slack.message.new"));
+        assert!(topics.contains(&"slack.message.edited"));
+        assert!(topics.contains(&"slack.message.deleted"));
+        assert!(topics.contains(&"slack.reaction.added"));
+        assert!(topics.contains(&"slack.reaction.removed"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_event_caps() {
+        let connector = SlackConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+
+        let event_caps = &result["event_caps"];
+        assert!(event_caps["streaming"].as_bool().unwrap());
+        assert!(!event_caps["replay"].as_bool().unwrap());
+        assert_eq!(
+            event_caps["min_buffer_events"].as_u64().unwrap(),
+            SOCKET_EVENT_BUFFER_CAPACITY as u64
+        );
+    }
+
+    // ── Helper function tests ────────────────────────────────────
+
+    #[test]
+    fn test_topic_allowed_empty_patterns_allows_all() {
+        assert!(topic_allowed("anything", &[]));
+    }
+
+    #[test]
+    fn test_topic_allowed_exact_match() {
+        let patterns = vec!["slack.message.new".to_string()];
+        assert!(topic_allowed("slack.message.new", &patterns));
+        assert!(!topic_allowed("slack.message.edited", &patterns));
+    }
+
+    #[test]
+    fn test_topic_allowed_wildcard() {
+        let patterns = vec!["*".to_string()];
+        assert!(topic_allowed("anything", &patterns));
+    }
+
+    #[test]
+    fn test_topic_allowed_prefix_wildcard() {
+        let patterns = vec!["slack.message.*".to_string()];
+        assert!(topic_allowed("slack.message.new", &patterns));
+        assert!(topic_allowed("slack.message.edited", &patterns));
+        assert!(!topic_allowed("slack.reaction.added", &patterns));
+    }
+
+    #[test]
+    fn test_parse_subscribe_topics_defaults() {
+        let params = json!({});
+        let topics = parse_subscribe_topics(&params);
+        assert_eq!(topics.len(), 5);
+        assert!(topics.contains(&"slack.message.new".to_string()));
+    }
+
+    #[test]
+    fn test_parse_subscribe_topics_custom() {
+        let params = json!({ "topics": ["slack.message.new", "slack.reaction.added"] });
+        let topics = parse_subscribe_topics(&params);
+        assert_eq!(topics.len(), 2);
+        assert!(topics.contains(&"slack.message.new".to_string()));
+        assert!(topics.contains(&"slack.reaction.added".to_string()));
+    }
+
+    #[test]
+    fn test_parse_subscribe_topics_deduplicates() {
+        let params = json!({ "topics": ["slack.message.new", "slack.message.new", "slack.message.new"] });
+        let topics = parse_subscribe_topics(&params);
+        assert_eq!(topics.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_subscribe_topics_skips_empty() {
+        let params = json!({ "topics": ["slack.message.new", "", "  "] });
+        let topics = parse_subscribe_topics(&params);
+        assert_eq!(topics.len(), 1);
+    }
+
+    // ── Socket frame topic mapping tests ─────────────────────────
+
+    #[test]
+    fn test_socket_frame_topic_events_api_message_new() {
+        let payload = json!({ "event": { "type": "message" } });
+        assert_eq!(socket_frame_topic("events_api", &payload), "slack.message.new");
+    }
+
+    #[test]
+    fn test_socket_frame_topic_events_api_message_edited() {
+        let payload = json!({ "event": { "type": "message", "subtype": "message_changed" } });
+        assert_eq!(
+            socket_frame_topic("events_api", &payload),
+            "slack.message.edited"
+        );
+    }
+
+    #[test]
+    fn test_socket_frame_topic_events_api_message_deleted() {
+        let payload = json!({ "event": { "type": "message", "subtype": "message_deleted" } });
+        assert_eq!(
+            socket_frame_topic("events_api", &payload),
+            "slack.message.deleted"
+        );
+    }
+
+    #[test]
+    fn test_socket_frame_topic_reaction_added() {
+        let payload = json!({ "event": { "type": "reaction_added" } });
+        assert_eq!(
+            socket_frame_topic("events_api", &payload),
+            "slack.reaction.added"
+        );
+    }
+
+    #[test]
+    fn test_socket_frame_topic_reaction_removed() {
+        let payload = json!({ "event": { "type": "reaction_removed" } });
+        assert_eq!(
+            socket_frame_topic("events_api", &payload),
+            "slack.reaction.removed"
+        );
+    }
+
+    #[test]
+    fn test_socket_frame_topic_unknown_event() {
+        let payload = json!({ "event": { "type": "app_mention" } });
+        assert_eq!(
+            socket_frame_topic("events_api", &payload),
+            "slack.event.app_mention"
+        );
+    }
+
+    #[test]
+    fn test_socket_frame_topic_non_events_api() {
+        assert_eq!(
+            socket_frame_topic("interactive", &json!({})),
+            "slack.interactive"
+        );
+        assert_eq!(
+            socket_frame_topic("slash_commands", &json!({})),
+            "slack.command"
+        );
+        assert_eq!(
+            socket_frame_topic("disconnect", &json!({})),
+            "slack.disconnect"
+        );
+        assert_eq!(socket_frame_topic("hello", &json!({})), "slack.hello");
+        assert_eq!(
+            socket_frame_topic("custom_type", &json!({})),
+            "slack.socket.custom_type"
+        );
+    }
+
+    // ── Principal extraction tests ───────────────────────────────
+
+    #[test]
+    fn test_socket_payload_principal_user_in_event() {
+        let payload = json!({ "event": { "user": "U12345" } });
+        let principal = socket_payload_principal(&payload);
+        assert_eq!(principal.kind, "slack_user");
+        assert_eq!(principal.id, "U12345");
+    }
+
+    #[test]
+    fn test_socket_payload_principal_user_id_field() {
+        let payload = json!({ "user_id": "U99999" });
+        let principal = socket_payload_principal(&payload);
+        assert_eq!(principal.kind, "slack_user");
+        assert_eq!(principal.id, "U99999");
+    }
+
+    #[test]
+    fn test_socket_payload_principal_bot_in_event() {
+        let payload = json!({ "event": { "bot_id": "B12345" } });
+        let principal = socket_payload_principal(&payload);
+        assert_eq!(principal.kind, "slack_bot");
+        assert_eq!(principal.id, "B12345");
+    }
+
+    #[test]
+    fn test_socket_payload_principal_unknown() {
+        let payload = json!({ "some_field": "value" });
+        let principal = socket_payload_principal(&payload);
+        assert_eq!(principal.kind, "slack_actor");
+        assert_eq!(principal.id, "unknown");
+    }
+
+    // ── Shutdown test ────────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_shutdown() {
+        let mut connector = SlackConnector::new();
+        let result = connector.handle_shutdown(json!({})).await.unwrap();
+        assert_eq!(result["status"], "shutdown");
+    }
+
+    // ── Configure test ───────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_missing_token() {
+        let mut connector = SlackConnector::new();
+        let result = connector.handle_configure(json!({})).await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            FcpError::InvalidRequest { .. }
+        ));
+    }
+
+    // ── Require_str helper ───────────────────────────────────────
+
+    #[test]
+    fn test_require_str_present() {
+        let input = json!({ "channel": "C123" });
+        assert_eq!(require_str(&input, "channel").unwrap(), "C123");
+    }
+
+    #[test]
+    fn test_require_str_missing() {
+        let input = json!({});
+        let result = require_str(&input, "channel");
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            FcpError::InvalidRequest { .. }
+        ));
+    }
+
+    #[test]
+    fn test_require_str_not_string() {
+        let input = json!({ "channel": 42 });
+        let result = require_str(&input, "channel");
+        assert!(result.is_err());
+    }
+
+    // ── Default trait ────────────────────────────────────────────
+
+    #[test]
+    fn test_default_creates_new_connector() {
+        let _connector: SlackConnector = Default::default();
+    }
 }

@@ -320,4 +320,120 @@ mod tests {
         assert!(is_heartbeat_chunk(&Bytes::from("\r\n")));
         assert!(!is_heartbeat_chunk(&Bytes::from("data")));
     }
+
+    #[test]
+    fn test_parse_stream_line_empty_returns_none() {
+        let event = parse_stream_line("").unwrap();
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn test_parse_stream_line_with_matching_rules() {
+        let payload = serde_json::json!({
+            "data": {
+                "id": "456",
+                "text": "matching tweet"
+            },
+            "matching_rules": [
+                { "id": "rule1", "tag": "rust-tweets" },
+                { "id": "rule2" }
+            ]
+        })
+        .to_string();
+
+        let event = parse_stream_line(&payload).unwrap();
+        let tweet = match event {
+            Some(StreamEvent::Tweet(tweet)) => tweet,
+            other => panic!("expected tweet event, got {other:?}"),
+        };
+
+        assert_eq!(tweet.data.id, "456");
+        let rules = tweet.matching_rules.unwrap();
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].id, "rule1");
+        assert_eq!(rules[0].tag.as_deref(), Some("rust-tweets"));
+        assert!(rules[1].tag.is_none());
+    }
+
+    #[test]
+    fn test_parse_stream_line_with_includes() {
+        let payload = serde_json::json!({
+            "data": {
+                "id": "789",
+                "text": "tweet with user expansion",
+                "author_id": "u42"
+            },
+            "includes": {
+                "users": [
+                    {
+                        "id": "u42",
+                        "name": "Test Author",
+                        "username": "testauthor"
+                    }
+                ]
+            }
+        })
+        .to_string();
+
+        let event = parse_stream_line(&payload).unwrap();
+        let tweet = match event {
+            Some(StreamEvent::Tweet(tweet)) => tweet,
+            other => panic!("expected tweet event, got {other:?}"),
+        };
+
+        let includes = tweet.includes.unwrap();
+        assert_eq!(includes.users.len(), 1);
+        assert_eq!(includes.users[0].username, "testauthor");
+    }
+
+    #[test]
+    fn test_extract_stream_error_with_errors_array() {
+        // Top-level "errors" key triggers error detection; detail/title are nested
+        // in array elements so top-level fallback yields "Unknown stream error"
+        let payload = serde_json::json!({
+            "errors": [
+                {
+                    "title": "ConnectionException",
+                    "detail": "Stream disconnected"
+                }
+            ]
+        })
+        .to_string();
+
+        let event = parse_stream_line(&payload).unwrap();
+        assert!(matches!(event, Some(StreamEvent::Error(msg)) if msg == "Unknown stream error"));
+    }
+
+    #[test]
+    fn test_extract_stream_error_title_only() {
+        let payload = serde_json::json!({
+            "title": "Unauthorized"
+        })
+        .to_string();
+
+        let event = parse_stream_line(&payload).unwrap();
+        assert!(matches!(event, Some(StreamEvent::Error(msg)) if msg == "Unauthorized"));
+    }
+
+    #[test]
+    fn test_heartbeat_chunk_single_byte() {
+        assert!(!is_heartbeat_chunk(&Bytes::from("\n")));
+        assert!(!is_heartbeat_chunk(&Bytes::from("\r")));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn test_stream_event_clone() {
+        let tweet_event = StreamEvent::Tweet(StreamTweet {
+            data: crate::types::Tweet {
+                id: "100".into(),
+                text: "cloneable".into(),
+                ..Default::default()
+            },
+            includes: None,
+            matching_rules: None,
+        });
+        let cloned = tweet_event.clone();
+        assert!(matches!(cloned, StreamEvent::Tweet(t) if t.data.id == "100"));
+    }
 }

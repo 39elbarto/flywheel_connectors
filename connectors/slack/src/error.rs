@@ -140,3 +140,269 @@ impl SlackError {
 
 /// Result type for Slack operations.
 pub type SlackResult<T> = Result<T, SlackError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fcp_core::FcpError;
+
+    #[test]
+    fn test_not_authed_maps_to_unauthorized() {
+        let err = SlackError::Api {
+            error: "not_authed".into(),
+            code: None,
+            ok: false,
+        };
+        let fcp = err.to_fcp_error();
+        assert!(matches!(fcp, FcpError::Unauthorized { code: 2001, .. }));
+    }
+
+    #[test]
+    fn test_invalid_auth_maps_to_unauthorized() {
+        let err = SlackError::Api {
+            error: "invalid_auth".into(),
+            code: None,
+            ok: false,
+        };
+        let fcp = err.to_fcp_error();
+        assert!(matches!(fcp, FcpError::Unauthorized { code: 2001, .. }));
+    }
+
+    #[test]
+    fn test_token_revoked_maps_to_unauthorized() {
+        let err = SlackError::Api {
+            error: "token_revoked".into(),
+            code: None,
+            ok: false,
+        };
+        let fcp = err.to_fcp_error();
+        assert!(matches!(fcp, FcpError::Unauthorized { code: 2001, .. }));
+    }
+
+    #[test]
+    fn test_ratelimited_api_maps_to_rate_limited() {
+        let err = SlackError::Api {
+            error: "ratelimited".into(),
+            code: None,
+            ok: false,
+        };
+        let fcp = err.to_fcp_error();
+        assert!(matches!(
+            fcp,
+            FcpError::RateLimited {
+                retry_after_ms: 60_000,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_missing_scope_maps_to_capability_denied() {
+        let err = SlackError::Api {
+            error: "missing_scope".into(),
+            code: None,
+            ok: false,
+        };
+        let fcp = err.to_fcp_error();
+        assert!(matches!(fcp, FcpError::CapabilityDenied { .. }));
+    }
+
+    #[test]
+    fn test_permission_errors_map_to_capability_denied() {
+        for error_str in &[
+            "not_in_channel",
+            "restricted_action",
+            "ekm_access_denied",
+            "access_denied",
+        ] {
+            let err = SlackError::Api {
+                error: (*error_str).into(),
+                code: None,
+                ok: false,
+            };
+            let fcp = err.to_fcp_error();
+            assert!(
+                matches!(fcp, FcpError::CapabilityDenied { .. }),
+                "{error_str} should map to CapabilityDenied"
+            );
+        }
+    }
+
+    #[test]
+    fn test_channel_not_found_api_maps_to_resource_not_found() {
+        let err = SlackError::Api {
+            error: "channel_not_found".into(),
+            code: None,
+            ok: false,
+        };
+        let fcp = err.to_fcp_error();
+        assert!(matches!(fcp, FcpError::ResourceNotFound { resource } if resource == "channel"));
+    }
+
+    #[test]
+    fn test_user_not_found_api_maps_to_resource_not_found() {
+        let err = SlackError::Api {
+            error: "user_not_found".into(),
+            code: None,
+            ok: false,
+        };
+        let fcp = err.to_fcp_error();
+        assert!(matches!(fcp, FcpError::ResourceNotFound { resource } if resource == "user"));
+    }
+
+    #[test]
+    fn test_unknown_api_error_maps_to_external() {
+        let err = SlackError::Api {
+            error: "some_unknown_error".into(),
+            code: Some("42".into()),
+            ok: false,
+        };
+        let fcp = err.to_fcp_error();
+        assert!(matches!(
+            fcp,
+            FcpError::External {
+                retryable: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rate_limited_variant_maps_with_correct_ms() {
+        let err = SlackError::RateLimited {
+            retry_after_secs: 30,
+        };
+        let fcp = err.to_fcp_error();
+        assert!(matches!(
+            fcp,
+            FcpError::RateLimited {
+                retry_after_ms: 30_000,
+                violation: None
+            }
+        ));
+    }
+
+    #[test]
+    fn test_unauthorized_variant_maps_to_fcp_unauthorized() {
+        let err = SlackError::Unauthorized;
+        let fcp = err.to_fcp_error();
+        assert!(matches!(fcp, FcpError::Unauthorized { code: 2001, .. }));
+    }
+
+    #[test]
+    fn test_channel_not_found_variant_maps_to_resource_not_found() {
+        let err = SlackError::ChannelNotFound {
+            channel: "C12345".into(),
+        };
+        let fcp = err.to_fcp_error();
+        assert!(
+            matches!(fcp, FcpError::ResourceNotFound { resource } if resource.contains("C12345"))
+        );
+    }
+
+    #[test]
+    fn test_user_not_found_variant_maps_to_resource_not_found() {
+        let err = SlackError::UserNotFound {
+            user: "U98765".into(),
+        };
+        let fcp = err.to_fcp_error();
+        assert!(
+            matches!(fcp, FcpError::ResourceNotFound { resource } if resource.contains("U98765"))
+        );
+    }
+
+    #[test]
+    fn test_json_error_maps_to_internal() {
+        let json_err: serde_json::Error =
+            serde_json::from_str::<serde_json::Value>("invalid").unwrap_err();
+        let err = SlackError::Json(json_err);
+        let fcp = err.to_fcp_error();
+        assert!(
+            matches!(fcp, FcpError::Internal { message } if message.contains("JSON error"))
+        );
+    }
+
+    #[test]
+    fn test_retryable_checks() {
+        // Retryable
+        assert!(SlackError::RateLimited { retry_after_secs: 1 }.is_retryable());
+        for error_str in &[
+            "internal_error",
+            "request_timeout",
+            "service_unavailable",
+            "fatal_error",
+        ] {
+            assert!(
+                SlackError::Api {
+                    error: (*error_str).into(),
+                    code: None,
+                    ok: false,
+                }
+                .is_retryable(),
+                "{error_str} should be retryable"
+            );
+        }
+
+        // Not retryable
+        assert!(!SlackError::Unauthorized.is_retryable());
+        assert!(!SlackError::ChannelNotFound {
+            channel: "x".into()
+        }
+        .is_retryable());
+        assert!(!SlackError::UserNotFound { user: "x".into() }.is_retryable());
+        assert!(!SlackError::Api {
+            error: "not_authed".into(),
+            code: None,
+            ok: false,
+        }
+        .is_retryable());
+        assert!(!SlackError::Api {
+            error: "channel_not_found".into(),
+            code: None,
+            ok: false,
+        }
+        .is_retryable());
+    }
+
+    #[test]
+    fn test_retry_after_extraction() {
+        assert_eq!(
+            SlackError::RateLimited {
+                retry_after_secs: 60
+            }
+            .retry_after()
+            .map(|d| d.as_secs()),
+            Some(60)
+        );
+        assert!(SlackError::Unauthorized.retry_after().is_none());
+        assert!(SlackError::ChannelNotFound {
+            channel: "x".into()
+        }
+        .retry_after()
+        .is_none());
+        assert!(SlackError::Api {
+            error: "internal_error".into(),
+            code: None,
+            ok: false,
+        }
+        .retry_after()
+        .is_none());
+    }
+
+    #[test]
+    fn test_transient_api_errors_are_retryable_external() {
+        for error_str in &["internal_error", "service_unavailable"] {
+            let err = SlackError::Api {
+                error: (*error_str).into(),
+                code: None,
+                ok: false,
+            };
+            assert!(err.is_retryable(), "{error_str} should be retryable");
+            let fcp = err.to_fcp_error();
+            assert!(
+                matches!(fcp, FcpError::External { retryable: true, .. }),
+                "{error_str} should map to retryable External"
+            );
+        }
+    }
+}

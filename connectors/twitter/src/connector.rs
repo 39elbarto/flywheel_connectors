@@ -1618,6 +1618,238 @@ mod tests {
     use super::*;
     use fcp_core::SelfCheckStatus;
 
+    // ───────────────────────── Schema completeness tests ─────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_all_operations_have_input_and_output_schemas() {
+        let connector = TwitterConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            assert!(
+                op.get("input_schema").is_some(),
+                "operation {id} missing input_schema"
+            );
+            assert!(
+                op.get("output_schema").is_some(),
+                "operation {id} missing output_schema"
+            );
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_all_schemas_are_object_type() {
+        let connector = TwitterConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            assert_eq!(
+                op["input_schema"]["type"], "object",
+                "operation {id} input_schema should be object type"
+            );
+            assert_eq!(
+                op["output_schema"]["type"], "object",
+                "operation {id} output_schema should be object type"
+            );
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_unknown_operation_not_in_introspect() {
+        let connector = TwitterConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let op_ids: Vec<&str> = ops.iter().map(|o| o["id"].as_str().unwrap()).collect();
+
+        assert!(!op_ids.contains(&"twitter.nonexistent"));
+        assert!(!op_ids.contains(&"twitter.foo.bar"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_is_deterministic() {
+        let connector = TwitterConnector::new();
+        let r1 = connector.handle_introspect().await.unwrap();
+        let r2 = connector.handle_introspect().await.unwrap();
+
+        let ops1: Vec<&str> = r1["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["id"].as_str().unwrap())
+            .collect();
+        let ops2: Vec<&str> = r2["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["id"].as_str().unwrap())
+            .collect();
+
+        assert_eq!(ops1, ops2, "introspect should return ops in same order");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_operations_count() {
+        let connector = TwitterConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        // 21 operations total: 9 read + 8 write + 3 stream + 1 DM read
+        assert_eq!(ops.len(), 21);
+    }
+
+    // ───────────────────────── Introspection metadata tests ─────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_all_operations_have_valid_risk_levels() {
+        let connector = TwitterConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let valid_levels = ["low", "medium", "high", "critical"];
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            let level = op["risk_level"].as_str().unwrap();
+            assert!(
+                valid_levels.contains(&level),
+                "operation {id} has invalid risk_level: {level}"
+            );
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_all_operations_have_valid_safety_tiers() {
+        let connector = TwitterConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let valid_tiers = ["safe", "risky", "dangerous"];
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            let tier = op["safety_tier"].as_str().unwrap();
+            assert!(
+                valid_tiers.contains(&tier),
+                "operation {id} has invalid safety_tier: {tier}"
+            );
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_all_operations_have_capability() {
+        let connector = TwitterConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            let cap = op["capability"].as_str().unwrap();
+            assert!(!cap.is_empty(), "operation {id} has empty capability");
+            assert!(
+                cap.starts_with("twitter."),
+                "operation {id} capability should start with twitter.: {cap}"
+            );
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_all_operations_have_summary() {
+        let connector = TwitterConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            let summary = op["summary"].as_str().unwrap();
+            assert!(!summary.is_empty(), "operation {id} has empty summary");
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_all_operations_have_agent_hints() {
+        let connector = TwitterConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            let hints = op
+                .get("ai_hints")
+                .unwrap_or_else(|| panic!("operation {id} missing ai_hints"));
+            assert!(
+                hints.get("when_to_use").is_some(),
+                "operation {id} ai_hints missing when_to_use"
+            );
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_event_caps() {
+        let connector = TwitterConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+
+        let event_caps = &result["event_caps"];
+        assert_eq!(event_caps["streaming"], true);
+        assert_eq!(event_caps["replay"], false);
+        assert_eq!(event_caps["min_buffer_events"], 100);
+        assert_eq!(event_caps["requires_ack"], false);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_required_fields_in_schemas() {
+        let connector = TwitterConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        // Operations that require specific fields
+        let ops_with_required: &[(&str, &[&str])] = &[
+            ("twitter.user.get", &["user_id"]),
+            ("twitter.user.by_username", &["username"]),
+            ("twitter.tweet.get", &["tweet_id"]),
+            ("twitter.tweet.get_many", &["tweet_ids"]),
+            ("twitter.tweet.search", &["query"]),
+            ("twitter.user.timeline", &["user_id"]),
+            ("twitter.trends.place", &["woeid"]),
+            ("twitter.tweet.create", &["text"]),
+            ("twitter.tweet.reply", &["text", "reply_to"]),
+            ("twitter.tweet.delete", &["tweet_id"]),
+            ("twitter.tweet.retweet", &["tweet_id"]),
+            ("twitter.tweet.unretweet", &["tweet_id"]),
+            ("twitter.tweet.like", &["tweet_id"]),
+            ("twitter.tweet.unlike", &["tweet_id"]),
+            ("twitter.stream.rules.add", &["rules"]),
+            ("twitter.stream.rules.delete", &["rule_ids"]),
+            ("twitter.dm.events", &["conversation_id"]),
+            ("twitter.dm.send", &["text"]),
+        ];
+
+        for (op_id, expected_required) in ops_with_required {
+            let op = ops
+                .iter()
+                .find(|o| o["id"].as_str() == Some(op_id))
+                .unwrap_or_else(|| panic!("missing operation {op_id}"));
+            let schema = &op["input_schema"];
+            if let Some(required) = schema.get("required") {
+                let required: Vec<&str> = required
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str().unwrap())
+                    .collect();
+                for field in *expected_required {
+                    assert!(
+                        required.contains(field),
+                        "operation {op_id} schema missing required field: {field}"
+                    );
+                }
+            } else {
+                panic!("operation {op_id} input_schema missing 'required' array");
+            }
+        }
+    }
+
     // ───────────────────────── Doctor tests ─────────────────────────
 
     #[fcp_async_core::runtime::test]

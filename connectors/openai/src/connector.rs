@@ -3570,4 +3570,896 @@ mod tests {
         assert_eq!(result["total_completion_tokens"], 0);
         assert_eq!(result["requests_total"], 1);
     }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  normalize_base_url
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn normalize_base_url_empty_string() {
+        let result = normalize_base_url("");
+        assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+    }
+
+    #[test]
+    fn normalize_base_url_whitespace_only() {
+        let result = normalize_base_url("   ");
+        assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+    }
+
+    #[test]
+    fn normalize_base_url_invalid_scheme() {
+        let result = normalize_base_url("ftp://api.openai.com");
+        assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+        if let Err(FcpError::InvalidRequest { message, .. }) = result {
+            assert!(message.contains("http or https"));
+        }
+    }
+
+    #[test]
+    fn normalize_base_url_invalid_url() {
+        let result = normalize_base_url("not a url");
+        assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+    }
+
+    #[test]
+    fn normalize_base_url_strips_trailing_slash() {
+        let result = normalize_base_url("https://api.openai.com/v1/").unwrap();
+        assert_eq!(result, "https://api.openai.com/v1");
+    }
+
+    #[test]
+    fn normalize_base_url_no_trailing_slash_unchanged() {
+        let result = normalize_base_url("https://api.openai.com/v1").unwrap();
+        assert_eq!(result, "https://api.openai.com/v1");
+    }
+
+    #[test]
+    fn normalize_base_url_http_allowed() {
+        let result = normalize_base_url("http://localhost:8080").unwrap();
+        assert_eq!(result, "http://localhost:8080");
+    }
+
+    #[test]
+    fn normalize_base_url_trims_whitespace() {
+        let result = normalize_base_url("  https://api.openai.com  ").unwrap();
+        assert_eq!(result, "https://api.openai.com");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  parse_deployment_profile
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn parse_deployment_profile_none() {
+        let result = parse_deployment_profile(None).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_deployment_profile_string_name() {
+        let val = json!("production");
+        let result = parse_deployment_profile(Some(&val)).unwrap().unwrap();
+        assert_eq!(result.name.as_deref(), Some("production"));
+        assert!(result.base_url.is_none());
+        assert!(result.organization.is_none());
+        assert!(result.default_model.is_none());
+    }
+
+    #[test]
+    fn parse_deployment_profile_object() {
+        let val = json!({
+            "name": "staging",
+            "base_url": "https://staging.openai.com",
+            "organization": "org-test",
+            "default_model": "gpt-4o-mini"
+        });
+        let result = parse_deployment_profile(Some(&val)).unwrap().unwrap();
+        assert_eq!(result.name.as_deref(), Some("staging"));
+        assert_eq!(
+            result.base_url.as_deref(),
+            Some("https://staging.openai.com")
+        );
+        assert_eq!(result.organization.as_deref(), Some("org-test"));
+        assert_eq!(result.default_model, Some(Model::Gpt4oMini));
+    }
+
+    #[test]
+    fn parse_deployment_profile_object_minimal() {
+        let val = json!({});
+        let result = parse_deployment_profile(Some(&val)).unwrap().unwrap();
+        assert!(result.name.is_none());
+        assert!(result.base_url.is_none());
+    }
+
+    #[test]
+    fn parse_deployment_profile_invalid_type_number() {
+        let val = json!(42);
+        let result = parse_deployment_profile(Some(&val));
+        assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+    }
+
+    #[test]
+    fn parse_deployment_profile_invalid_type_array() {
+        let val = json!([1, 2, 3]);
+        let result = parse_deployment_profile(Some(&val));
+        assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+    }
+
+    #[test]
+    fn parse_deployment_profile_object_unknown_field() {
+        let val = json!({
+            "name": "test",
+            "unknown_field": true
+        });
+        let result = parse_deployment_profile(Some(&val));
+        assert!(
+            result.is_err(),
+            "deny_unknown_fields should reject unknown fields"
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  OpenAIConfig::from_params
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn config_from_params_api_key_only() {
+        let params = json!({ "api_key": "sk-test123" });
+        let config = OpenAIConfig::from_params(&params).unwrap();
+        assert!(matches!(config.auth, OpenAIAuth::ApiKey(ref k) if k == "sk-test123"));
+        assert_eq!(config.default_model, Model::default());
+        assert!(config.organization.is_none());
+        assert!(config.deployment_profile.is_none());
+    }
+
+    #[test]
+    fn config_from_params_credential_id_only() {
+        let params = json!({
+            "credential_id": "11223344-5566-7788-99aa-bbccddeeff00"
+        });
+        let config = OpenAIConfig::from_params(&params).unwrap();
+        assert!(matches!(config.auth, OpenAIAuth::CredentialId(_)));
+    }
+
+    #[test]
+    fn config_from_params_both_auth_fails() {
+        let params = json!({
+            "api_key": "sk-test",
+            "credential_id": "11223344-5566-7788-99aa-bbccddeeff00"
+        });
+        let result = OpenAIConfig::from_params(&params);
+        assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+        if let Err(FcpError::InvalidRequest { message, .. }) = result {
+            assert!(message.contains("exactly one"));
+        }
+    }
+
+    #[test]
+    fn config_from_params_no_auth_fails() {
+        let params = json!({});
+        let result = OpenAIConfig::from_params(&params);
+        assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+        if let Err(FcpError::InvalidRequest { message, .. }) = result {
+            assert!(message.contains("Missing"));
+        }
+    }
+
+    #[test]
+    fn config_from_params_empty_api_key_fails() {
+        let params = json!({ "api_key": "" });
+        let result = OpenAIConfig::from_params(&params);
+        assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+    }
+
+    #[test]
+    fn config_from_params_whitespace_api_key_fails() {
+        let params = json!({ "api_key": "   " });
+        let result = OpenAIConfig::from_params(&params);
+        assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+    }
+
+    #[test]
+    fn config_from_params_invalid_credential_id_fails() {
+        let params = json!({ "credential_id": "not-a-uuid" });
+        let result = OpenAIConfig::from_params(&params);
+        assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+    }
+
+    #[test]
+    fn config_from_params_credential_id_must_be_string() {
+        let params = json!({ "credential_id": 12345 });
+        let result = OpenAIConfig::from_params(&params);
+        assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+    }
+
+    #[test]
+    fn config_from_params_with_custom_base_url() {
+        let params = json!({
+            "api_key": "sk-test",
+            "base_url": "https://custom.api.com/v1"
+        });
+        let config = OpenAIConfig::from_params(&params).unwrap();
+        assert_eq!(config.base_url, "https://custom.api.com/v1");
+    }
+
+    #[test]
+    fn config_from_params_base_url_from_profile() {
+        let params = json!({
+            "api_key": "sk-test",
+            "deployment_profile": {
+                "base_url": "https://profile.api.com"
+            }
+        });
+        let config = OpenAIConfig::from_params(&params).unwrap();
+        assert_eq!(config.base_url, "https://profile.api.com");
+    }
+
+    #[test]
+    fn config_from_params_base_url_overrides_profile() {
+        let params = json!({
+            "api_key": "sk-test",
+            "base_url": "https://explicit.api.com",
+            "deployment_profile": {
+                "base_url": "https://profile.api.com"
+            }
+        });
+        let config = OpenAIConfig::from_params(&params).unwrap();
+        assert_eq!(config.base_url, "https://explicit.api.com");
+    }
+
+    #[test]
+    fn config_from_params_with_organization() {
+        let params = json!({
+            "api_key": "sk-test",
+            "organization": "org-abc"
+        });
+        let config = OpenAIConfig::from_params(&params).unwrap();
+        assert_eq!(config.organization.as_deref(), Some("org-abc"));
+    }
+
+    #[test]
+    fn config_from_params_organization_from_profile() {
+        let params = json!({
+            "api_key": "sk-test",
+            "deployment_profile": {
+                "organization": "org-from-profile"
+            }
+        });
+        let config = OpenAIConfig::from_params(&params).unwrap();
+        assert_eq!(config.organization.as_deref(), Some("org-from-profile"));
+    }
+
+    #[test]
+    fn config_from_params_with_custom_model() {
+        let params = json!({
+            "api_key": "sk-test",
+            "default_model": "gpt-4-turbo"
+        });
+        let config = OpenAIConfig::from_params(&params).unwrap();
+        assert_eq!(config.default_model, Model::Gpt4Turbo);
+    }
+
+    #[test]
+    fn config_from_params_model_from_profile() {
+        let params = json!({
+            "api_key": "sk-test",
+            "deployment_profile": {
+                "default_model": "gpt-4o-mini"
+            }
+        });
+        let config = OpenAIConfig::from_params(&params).unwrap();
+        assert_eq!(config.default_model, Model::Gpt4oMini);
+    }
+
+    #[test]
+    fn config_from_params_invalid_model() {
+        let params = json!({
+            "api_key": "sk-test",
+            "default_model": "not-a-model"
+        });
+        let result = OpenAIConfig::from_params(&params);
+        assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+    }
+
+    #[test]
+    fn config_deployment_profile_name_some() {
+        let config = OpenAIConfig {
+            auth: OpenAIAuth::ApiKey("test".into()),
+            base_url: "https://api.openai.com".into(),
+            organization: None,
+            default_model: Model::default(),
+            deployment_profile: Some(DeploymentProfile {
+                name: Some("production".into()),
+                base_url: None,
+                organization: None,
+                default_model: None,
+            }),
+        };
+        assert_eq!(config.deployment_profile_name(), Some("production"));
+    }
+
+    #[test]
+    fn config_deployment_profile_name_none() {
+        let config = OpenAIConfig {
+            auth: OpenAIAuth::ApiKey("test".into()),
+            base_url: "https://api.openai.com".into(),
+            organization: None,
+            default_model: Model::default(),
+            deployment_profile: None,
+        };
+        assert!(config.deployment_profile_name().is_none());
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  DoctorResult / DoctorStatus
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn doctor_result_all_pass_is_healthy() {
+        let checks = vec![
+            DoctorCheck {
+                name: "a".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: true,
+                message: None,
+                critical: false,
+            },
+        ];
+        let result = DoctorResult::from_checks(checks);
+        assert_eq!(result.status, DoctorStatus::Healthy);
+    }
+
+    #[test]
+    fn doctor_result_non_critical_fail_is_degraded() {
+        let checks = vec![
+            DoctorCheck {
+                name: "a".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: Some("non-critical failed".into()),
+                critical: false,
+            },
+        ];
+        let result = DoctorResult::from_checks(checks);
+        assert_eq!(result.status, DoctorStatus::Degraded);
+    }
+
+    #[test]
+    fn doctor_result_critical_fail_is_unhealthy() {
+        let checks = vec![
+            DoctorCheck {
+                name: "a".into(),
+                passed: false,
+                message: Some("critical failed".into()),
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: true,
+                message: None,
+                critical: false,
+            },
+        ];
+        let result = DoctorResult::from_checks(checks);
+        assert_eq!(result.status, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_result_empty_checks_is_healthy() {
+        let result = DoctorResult::from_checks(vec![]);
+        assert_eq!(result.status, DoctorStatus::Healthy);
+    }
+
+    #[test]
+    fn doctor_status_serde_roundtrip() {
+        for status in [
+            DoctorStatus::Healthy,
+            DoctorStatus::Degraded,
+            DoctorStatus::Unhealthy,
+        ] {
+            let json = serde_json::to_value(status).unwrap();
+            let back: DoctorStatus = serde_json::from_value(json).unwrap();
+            assert_eq!(back, status);
+        }
+    }
+
+    #[test]
+    fn doctor_status_serializes_lowercase() {
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Healthy).unwrap(),
+            json!("healthy")
+        );
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Degraded).unwrap(),
+            json!("degraded")
+        );
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Unhealthy).unwrap(),
+            json!("unhealthy")
+        );
+    }
+
+    #[test]
+    fn doctor_check_serde_roundtrip() {
+        let check = DoctorCheck {
+            name: "test_check".into(),
+            passed: true,
+            message: Some("all good".into()),
+            critical: false,
+        };
+        let json = serde_json::to_value(&check).unwrap();
+        assert_eq!(json["name"], "test_check");
+        assert_eq!(json["passed"], true);
+        assert_eq!(json["message"], "all good");
+        assert_eq!(json["critical"], false);
+
+        let back: DoctorCheck = serde_json::from_value(json).unwrap();
+        assert_eq!(back.name, "test_check");
+        assert!(back.passed);
+    }
+
+    #[test]
+    fn doctor_check_none_message_skipped_in_json() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: true,
+            message: None,
+            critical: true,
+        };
+        let json = serde_json::to_value(&check).unwrap();
+        assert!(json.get("message").is_none());
+    }
+
+    #[test]
+    fn doctor_result_serde_roundtrip() {
+        let result = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "config".into(),
+            passed: true,
+            message: Some("ok".into()),
+            critical: true,
+        }]);
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["status"], "healthy");
+        assert_eq!(json["checks"].as_array().unwrap().len(), 1);
+
+        let back: DoctorResult = serde_json::from_value(json).unwrap();
+        assert_eq!(back.status, DoctorStatus::Healthy);
+        assert_eq!(back.checks.len(), 1);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  Introspection: schema completeness
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[fcp_async_core::runtime::test]
+    async fn introspection_has_22_operations() {
+        let connector = OpenAIConnector::new();
+        let value = connector.handle_introspect().await.unwrap();
+        let ops = value["operations"].as_array().unwrap();
+        assert_eq!(ops.len(), 23, "Expected 23 operations");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn introspection_all_ops_have_schemas() {
+        let connector = OpenAIConnector::new();
+        let value = connector.handle_introspect().await.unwrap();
+        let ops = value["operations"].as_array().unwrap();
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            assert!(
+                op.get("input_schema").is_some(),
+                "op {id} missing input_schema"
+            );
+            assert!(
+                op.get("output_schema").is_some(),
+                "op {id} missing output_schema"
+            );
+            assert_eq!(
+                op["input_schema"]["type"], "object",
+                "op {id} input_schema type must be object"
+            );
+            assert_eq!(
+                op["output_schema"]["type"], "object",
+                "op {id} output_schema type must be object"
+            );
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn introspection_all_ops_have_required_fields() {
+        let connector = OpenAIConnector::new();
+        let value = connector.handle_introspect().await.unwrap();
+        let ops = value["operations"].as_array().unwrap();
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            assert!(op.get("summary").is_some(), "op {id} missing summary");
+            assert!(
+                !op["summary"].as_str().unwrap().is_empty(),
+                "op {id} has empty summary"
+            );
+            assert!(op.get("capability").is_some(), "op {id} missing capability");
+            assert!(op.get("risk_level").is_some(), "op {id} missing risk_level");
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn introspection_expected_operation_ids() {
+        let connector = OpenAIConnector::new();
+        let value = connector.handle_introspect().await.unwrap();
+        let ops = value["operations"].as_array().unwrap();
+        let ids: Vec<&str> = ops.iter().map(|o| o["id"].as_str().unwrap()).collect();
+
+        let expected = [
+            "openai.chat",
+            "openai.simple_chat",
+            "openai.get_usage",
+            "openai.embeddings",
+            "openai.images.generate",
+            "openai.audio.transcribe",
+            "openai.audio.tts",
+            "openai.finetune.create",
+            "openai.finetune.list",
+            "openai.finetune.get",
+            "openai.finetune.cancel",
+            "openai.finetune.events",
+            "openai.assistants.create",
+            "openai.assistants.list",
+            "openai.assistants.get",
+            "openai.assistants.delete",
+            "openai.threads.create",
+            "openai.threads.get",
+            "openai.threads.messages.create",
+            "openai.threads.messages.list",
+            "openai.threads.runs.create",
+            "openai.threads.runs.get",
+            "openai.threads.runs.cancel",
+        ];
+
+        for expected_id in &expected {
+            assert!(
+                ids.contains(expected_id),
+                "missing expected operation: {expected_id}"
+            );
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn introspection_low_risk_ops_are_safe() {
+        let connector = OpenAIConnector::new();
+        let value = connector.handle_introspect().await.unwrap();
+        let ops = value["operations"].as_array().unwrap();
+
+        let low_risk_ids = [
+            "openai.get_usage",
+            "openai.embeddings",
+            "openai.finetune.list",
+            "openai.finetune.get",
+            "openai.finetune.events",
+            "openai.assistants.list",
+            "openai.assistants.get",
+            "openai.threads.create",
+            "openai.threads.get",
+            "openai.threads.messages.create",
+            "openai.threads.messages.list",
+            "openai.threads.runs.get",
+        ];
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            if low_risk_ids.contains(&id) {
+                assert_eq!(op["risk_level"], "low", "op {id} should be low risk");
+                assert_eq!(op["safety_tier"], "safe", "op {id} should be safe tier");
+            }
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn introspection_high_risk_ops_require_approval() {
+        let connector = OpenAIConnector::new();
+        let value = connector.handle_introspect().await.unwrap();
+        let ops = value["operations"].as_array().unwrap();
+
+        let high_risk_ids = [
+            "openai.finetune.create",
+            "openai.finetune.cancel",
+            "openai.assistants.delete",
+        ];
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            if high_risk_ids.contains(&id) {
+                assert_eq!(op["risk_level"], "high", "op {id} should be high risk");
+                assert!(
+                    op.get("requires_approval").is_some() && !op["requires_approval"].is_null(),
+                    "op {id} should require approval"
+                );
+            }
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn introspection_medium_risk_ops() {
+        let connector = OpenAIConnector::new();
+        let value = connector.handle_introspect().await.unwrap();
+        let ops = value["operations"].as_array().unwrap();
+
+        let medium_risk_ids = [
+            "openai.chat",
+            "openai.simple_chat",
+            "openai.images.generate",
+            "openai.audio.transcribe",
+            "openai.audio.tts",
+            "openai.assistants.create",
+            "openai.threads.runs.create",
+            "openai.threads.runs.cancel",
+        ];
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            if medium_risk_ids.contains(&id) {
+                assert_eq!(op["risk_level"], "medium", "op {id} should be medium risk");
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  Connector lifecycle
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn connector_default_impl() {
+        let connector = OpenAIConnector::default();
+        assert!(connector.config.is_none());
+        assert!(connector.client.is_none());
+        assert_eq!(connector.total_requests(), 0);
+        assert_eq!(connector.total_errors(), 0);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn health_when_configured() {
+        let mut connector = OpenAIConnector::new();
+        connector
+            .handle_configure(json!({ "api_key": "sk-test" }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_health().await.unwrap();
+        assert_eq!(result["status"], "healthy");
+        assert!(
+            result["auth"]
+                .as_str()
+                .unwrap()
+                .contains("api_key:redacted")
+        );
+        assert!(result.get("metrics").is_some());
+        assert_eq!(result["metrics"]["requests_total"], 0);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn health_includes_deployment_profile() {
+        let mut connector = OpenAIConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_key": "sk-test",
+                "deployment_profile": {
+                    "name": "staging"
+                }
+            }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_health().await.unwrap();
+        assert_eq!(result["deployment_profile"], "staging");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn self_check_not_configured() {
+        let connector = OpenAIConnector::new();
+        let result = connector.handle_self_check().await.unwrap();
+        assert_eq!(result["status"], "degraded");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn self_check_credential_id_reports_degraded() {
+        let mut connector = OpenAIConnector::new();
+        connector
+            .handle_configure(json!({
+                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00"
+            }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_self_check().await.unwrap();
+        assert_eq!(result["status"], "degraded");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn shutdown_returns_status() {
+        let connector = OpenAIConnector::new();
+        let result = connector.handle_shutdown(json!({})).await.unwrap();
+        assert_eq!(result["status"], "shutdown");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_returns_allowed() {
+        let connector = OpenAIConnector::new();
+
+        let signing_key = Ed25519SigningKey::generate();
+        let token = generate_valid_token(&signing_key, "openai.chat");
+
+        let result = connector
+            .handle_simulate(json!({
+                "type": "simulate",
+                "id": "sim-123",
+                "connector_id": "openai",
+                "operation": "openai.chat",
+                "zone_id": "z:work",
+                "input": {},
+                "capability_token": token
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result["would_succeed"], true);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_with_api_key() {
+        let mut connector = OpenAIConnector::new();
+        let result = connector
+            .handle_configure(json!({ "api_key": "sk-test-key" }))
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "configured");
+        assert!(connector.config.is_some());
+        assert!(connector.client.is_some());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_with_deployment_profile_string() {
+        let mut connector = OpenAIConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "api_key": "sk-test",
+                "deployment_profile": "production"
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "configured");
+        assert_eq!(
+            connector.config.as_ref().unwrap().deployment_profile_name(),
+            Some("production")
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_unknown_operation() {
+        let mut connector = OpenAIConnector::new();
+        connector
+            .handle_configure(json!({ "api_key": "sk-test" }))
+            .await
+            .unwrap();
+
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["openai.nonexistent"]
+            }))
+            .await
+            .unwrap();
+
+        let token = generate_valid_token(&signing_key, "openai.nonexistent");
+
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "openai.nonexistent",
+                "input": {},
+                "capability_token": token
+            }))
+            .await;
+
+        assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_missing_operation_field() {
+        let mut connector = OpenAIConnector::new();
+        connector
+            .handle_configure(json!({ "api_key": "sk-test" }))
+            .await
+            .unwrap();
+
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["openai.chat"]
+            }))
+            .await
+            .unwrap();
+
+        let result = connector
+            .handle_invoke(json!({
+                "input": {},
+                "capability_token": {"raw": []}
+            }))
+            .await;
+
+        assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_missing_capability_token() {
+        let mut connector = OpenAIConnector::new();
+        connector
+            .handle_configure(json!({ "api_key": "sk-test" }))
+            .await
+            .unwrap();
+
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "openai.chat",
+                "input": {}
+            }))
+            .await;
+
+        assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  DeploymentProfileObject -> DeploymentProfile conversion
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn deployment_profile_object_to_profile() {
+        let obj = DeploymentProfileObject {
+            name: Some("test".into()),
+            base_url: Some("https://api.test.com".into()),
+            organization: Some("org-x".into()),
+            default_model: Some(Model::Gpt4),
+        };
+        let profile: DeploymentProfile = obj.into();
+        assert_eq!(profile.name.as_deref(), Some("test"));
+        assert_eq!(profile.base_url.as_deref(), Some("https://api.test.com"));
+        assert_eq!(profile.organization.as_deref(), Some("org-x"));
+        assert_eq!(profile.default_model, Some(Model::Gpt4));
+    }
+
+    #[test]
+    fn deployment_profile_object_all_none() {
+        let obj = DeploymentProfileObject {
+            name: None,
+            base_url: None,
+            organization: None,
+            default_model: None,
+        };
+        let profile: DeploymentProfile = obj.into();
+        assert!(profile.name.is_none());
+        assert!(profile.base_url.is_none());
+        assert!(profile.organization.is_none());
+        assert!(profile.default_model.is_none());
+    }
 }

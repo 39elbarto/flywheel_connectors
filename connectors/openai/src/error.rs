@@ -180,3 +180,354 @@ impl ConnectorErrorMapping for OpenAIError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- is_retryable ----
+
+    #[test]
+    fn rate_limited_is_retryable() {
+        let err = OpenAIError::RateLimited {
+            retry_after_ms: 30_000,
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn overloaded_is_retryable() {
+        let err = OpenAIError::Overloaded {
+            retry_after_ms: 60_000,
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn invalid_api_key_not_retryable() {
+        let err = OpenAIError::InvalidApiKey;
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn context_length_exceeded_not_retryable() {
+        let err = OpenAIError::ContextLengthExceeded {
+            message: "too long".into(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn content_filtered_not_retryable() {
+        let err = OpenAIError::ContentFiltered {
+            message: "blocked".into(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn api_error_not_retryable() {
+        let err = OpenAIError::Api {
+            error_type: "server_error".into(),
+            message: "internal".into(),
+            status_code: Some(500),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn json_error_not_retryable() {
+        let inner = serde_json::from_str::<serde_json::Value>("bad json").unwrap_err();
+        let err = OpenAIError::Json(inner);
+        assert!(!err.is_retryable());
+    }
+
+    // ---- retry_after ----
+
+    #[test]
+    fn rate_limited_has_retry_after() {
+        let err = OpenAIError::RateLimited {
+            retry_after_ms: 5000,
+        };
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn overloaded_has_retry_after() {
+        let err = OpenAIError::Overloaded {
+            retry_after_ms: 60_000,
+        };
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn non_retryable_errors_have_no_retry_after() {
+        assert_eq!(OpenAIError::InvalidApiKey.retry_after(), None);
+
+        let err = OpenAIError::Api {
+            error_type: "x".into(),
+            message: "y".into(),
+            status_code: Some(500),
+        };
+        assert_eq!(err.retry_after(), None);
+
+        let err = OpenAIError::ContextLengthExceeded {
+            message: "too long".into(),
+        };
+        assert_eq!(err.retry_after(), None);
+
+        let err = OpenAIError::ContentFiltered {
+            message: "blocked".into(),
+        };
+        assert_eq!(err.retry_after(), None);
+    }
+
+    // ---- to_fcp_error / fcp_error_impl ----
+
+    #[test]
+    fn invalid_api_key_maps_to_unauthorized() {
+        let err = OpenAIError::InvalidApiKey;
+        match err.to_fcp_error() {
+            FcpError::Unauthorized { code, message } => {
+                assert_eq!(code, 2001);
+                assert!(message.contains("OpenAI"));
+            }
+            other => panic!("Expected Unauthorized, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rate_limited_maps_to_rate_limited() {
+        let err = OpenAIError::RateLimited {
+            retry_after_ms: 30_000,
+        };
+        match err.to_fcp_error() {
+            FcpError::RateLimited {
+                retry_after_ms,
+                violation,
+            } => {
+                assert_eq!(retry_after_ms, 30_000);
+                assert!(violation.is_none());
+            }
+            other => panic!("Expected RateLimited, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn context_length_exceeded_maps_to_invalid_request() {
+        let err = OpenAIError::ContextLengthExceeded {
+            message: "exceeded maximum context length".into(),
+        };
+        match err.to_fcp_error() {
+            FcpError::InvalidRequest { code, message } => {
+                assert_eq!(code, 2002);
+                assert!(message.contains("context length"));
+            }
+            other => panic!("Expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn content_filtered_maps_to_invalid_request() {
+        let err = OpenAIError::ContentFiltered {
+            message: "content policy violation".into(),
+        };
+        match err.to_fcp_error() {
+            FcpError::InvalidRequest { code, message } => {
+                assert_eq!(code, 2003);
+                assert!(message.contains("content policy"));
+            }
+            other => panic!("Expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_error_maps_to_external() {
+        let err = OpenAIError::Api {
+            error_type: "server_error".into(),
+            message: "internal server error".into(),
+            status_code: Some(500),
+        };
+        match err.to_fcp_error() {
+            FcpError::External {
+                service,
+                message,
+                status_code,
+                retryable,
+                ..
+            } => {
+                assert_eq!(service, "openai");
+                assert!(message.contains("internal server error"));
+                assert_eq!(status_code, Some(500));
+                assert!(!retryable);
+            }
+            other => panic!("Expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_error_without_status_code() {
+        let err = OpenAIError::Api {
+            error_type: "unknown".into(),
+            message: "something went wrong".into(),
+            status_code: None,
+        };
+        match err.to_fcp_error() {
+            FcpError::External { status_code, .. } => {
+                assert!(status_code.is_none());
+            }
+            other => panic!("Expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn json_error_maps_to_malformed_frame() {
+        let inner = serde_json::from_str::<serde_json::Value>("invalid").unwrap_err();
+        let err = OpenAIError::Json(inner);
+        match err.to_fcp_error() {
+            FcpError::MalformedFrame { code, message } => {
+                assert_eq!(code, 2004);
+                assert!(message.contains("JSON parsing error"));
+            }
+            other => panic!("Expected MalformedFrame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn overloaded_maps_to_external_retryable() {
+        let err = OpenAIError::Overloaded {
+            retry_after_ms: 60_000,
+        };
+        match err.to_fcp_error() {
+            FcpError::External {
+                service,
+                status_code,
+                retryable,
+                retry_after,
+                ..
+            } => {
+                assert_eq!(service, "openai");
+                assert_eq!(status_code, Some(503));
+                assert!(retryable);
+                assert_eq!(retry_after, Some(Duration::from_secs(60)));
+            }
+            other => panic!("Expected External, got {other:?}"),
+        }
+    }
+
+    // ---- ConnectorErrorMapping::from_async_error ----
+
+    #[test]
+    fn from_async_error_timeout() {
+        let err = OpenAIError::from_async_error(AsyncError::Timeout { timeout_ms: 5000 });
+        match &err {
+            OpenAIError::Api {
+                error_type,
+                message,
+                status_code,
+            } => {
+                assert_eq!(error_type, "deadline_timeout");
+                assert!(message.contains("5000ms"));
+                assert_eq!(*status_code, Some(408));
+            }
+            other => panic!("Expected Api, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_async_error_cancelled() {
+        let err = OpenAIError::from_async_error(AsyncError::Cancelled);
+        match &err {
+            OpenAIError::Api {
+                error_type,
+                status_code,
+                ..
+            } => {
+                assert_eq!(error_type, "request_cancelled");
+                assert!(status_code.is_none());
+            }
+            other => panic!("Expected Api, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_async_error_other() {
+        let err = OpenAIError::from_async_error(AsyncError::Runtime {
+            message: "something broke".into(),
+        });
+        match &err {
+            OpenAIError::Api {
+                error_type,
+                status_code,
+                ..
+            } => {
+                assert_eq!(error_type, "runtime_context");
+                assert!(status_code.is_none());
+            }
+            other => panic!("Expected Api, got {other:?}"),
+        }
+    }
+
+    // ---- ConnectorErrorMapping trait consistency ----
+
+    #[test]
+    fn trait_is_retryable_matches_inherent() {
+        let retryable = OpenAIError::RateLimited {
+            retry_after_ms: 1000,
+        };
+        assert_eq!(
+            retryable.is_retryable(),
+            ConnectorErrorMapping::is_retryable(&retryable)
+        );
+
+        let not_retryable = OpenAIError::InvalidApiKey;
+        assert_eq!(
+            not_retryable.is_retryable(),
+            ConnectorErrorMapping::is_retryable(&not_retryable)
+        );
+    }
+
+    #[test]
+    fn trait_retry_after_matches_inherent() {
+        let err = OpenAIError::Overloaded {
+            retry_after_ms: 10_000,
+        };
+        assert_eq!(err.retry_after(), ConnectorErrorMapping::retry_after(&err));
+    }
+
+    // ---- Display ----
+
+    #[test]
+    fn error_display_messages() {
+        assert_eq!(OpenAIError::InvalidApiKey.to_string(), "Invalid API key");
+
+        let rate_limited = OpenAIError::RateLimited {
+            retry_after_ms: 30_000,
+        };
+        assert!(rate_limited.to_string().contains("30000ms"));
+
+        let overloaded = OpenAIError::Overloaded {
+            retry_after_ms: 60_000,
+        };
+        assert!(overloaded.to_string().contains("60000ms"));
+
+        let ctx = OpenAIError::ContextLengthExceeded {
+            message: "too long".into(),
+        };
+        assert!(ctx.to_string().contains("too long"));
+
+        let filtered = OpenAIError::ContentFiltered {
+            message: "policy".into(),
+        };
+        assert!(filtered.to_string().contains("policy"));
+
+        let api = OpenAIError::Api {
+            error_type: "server_error".into(),
+            message: "oops".into(),
+            status_code: Some(500),
+        };
+        let display = api.to_string();
+        assert!(display.contains("server_error"));
+        assert!(display.contains("oops"));
+    }
+}

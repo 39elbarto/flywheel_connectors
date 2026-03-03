@@ -219,4 +219,179 @@ mod tests {
             } if service == "twitter" && message == "server error"
         ));
     }
+
+    #[test]
+    fn test_stream_error_maps_to_connector_unavailable() {
+        let err = TwitterError::Stream("connection dropped".into());
+        let fcp = err.to_fcp_error();
+        assert!(matches!(
+            fcp,
+            FcpError::ConnectorUnavailable { code: 5001, message }
+                if message.contains("stream error")
+        ));
+    }
+
+    #[test]
+    fn test_config_error_maps_to_connector_unavailable() {
+        let err = TwitterError::Config("missing bearer token".into());
+        let fcp = err.to_fcp_error();
+        assert!(matches!(
+            fcp,
+            FcpError::ConnectorUnavailable { code: 5001, message }
+                if message.contains("Configuration error")
+        ));
+    }
+
+    #[test]
+    fn test_not_configured_maps_to_fcp_not_configured() {
+        let err = TwitterError::NotConfigured;
+        let fcp = err.to_fcp_error();
+        assert!(matches!(fcp, FcpError::NotConfigured));
+    }
+
+    #[test]
+    fn test_oauth_error_maps_to_unauthorized() {
+        let err = TwitterError::OAuth("invalid signature".into());
+        let fcp = err.to_fcp_error();
+        assert!(matches!(
+            fcp,
+            FcpError::Unauthorized { code: 2001, message }
+                if message.contains("OAuth error")
+        ));
+    }
+
+    #[test]
+    fn test_rate_limited_error_maps_with_correct_ms() {
+        let err = TwitterError::RateLimited { retry_after: 30 };
+        let fcp = err.to_fcp_error();
+        assert!(matches!(
+            fcp,
+            FcpError::RateLimited {
+                retry_after_ms: 30_000,
+                violation: None
+            }
+        ));
+    }
+
+    #[test]
+    fn test_retryable_checks() {
+        // Retryable
+        assert!(TwitterError::RateLimited { retry_after: 1 }.is_retryable());
+        assert!(TwitterError::Stream("test".into()).is_retryable());
+        assert!(
+            TwitterError::Api {
+                status: 500,
+                message: String::new(),
+                error_code: None,
+                retry_after: None,
+            }
+            .is_retryable()
+        );
+        assert!(
+            TwitterError::Api {
+                status: 429,
+                message: String::new(),
+                error_code: None,
+                retry_after: None,
+            }
+            .is_retryable()
+        );
+        assert!(
+            TwitterError::Api {
+                status: 503,
+                message: String::new(),
+                error_code: None,
+                retry_after: None,
+            }
+            .is_retryable()
+        );
+
+        // Not retryable
+        assert!(!TwitterError::NotConfigured.is_retryable());
+        assert!(!TwitterError::Config("x".into()).is_retryable());
+        assert!(!TwitterError::OAuth("x".into()).is_retryable());
+        assert!(
+            !TwitterError::Api {
+                status: 401,
+                message: String::new(),
+                error_code: None,
+                retry_after: None,
+            }
+            .is_retryable()
+        );
+        assert!(
+            !TwitterError::Api {
+                status: 403,
+                message: String::new(),
+                error_code: None,
+                retry_after: None,
+            }
+            .is_retryable()
+        );
+        assert!(
+            !TwitterError::Api {
+                status: 404,
+                message: String::new(),
+                error_code: None,
+                retry_after: None,
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn test_retry_after_extraction() {
+        // Has retry_after
+        assert_eq!(
+            TwitterError::RateLimited { retry_after: 60 }
+                .retry_after()
+                .map(|d| d.as_secs()),
+            Some(60)
+        );
+        assert_eq!(
+            TwitterError::Api {
+                status: 429,
+                message: String::new(),
+                error_code: None,
+                retry_after: Some(30),
+            }
+            .retry_after()
+            .map(|d| d.as_secs()),
+            Some(30)
+        );
+
+        // No retry_after
+        assert!(TwitterError::NotConfigured.retry_after().is_none());
+        assert!(TwitterError::OAuth("x".into()).retry_after().is_none());
+        assert!(TwitterError::Stream("x".into()).retry_after().is_none());
+        assert!(TwitterError::Config("x".into()).retry_after().is_none());
+    }
+
+    #[test]
+    fn test_api_error_without_retry_after() {
+        let err = TwitterError::Api {
+            status: 429,
+            message: "rate limited".into(),
+            error_code: None,
+            retry_after: None,
+        };
+        let fcp = err.to_fcp_error();
+        // Default 60 seconds when no retry_after is specified
+        assert!(matches!(
+            fcp,
+            FcpError::RateLimited {
+                retry_after_ms: 60_000,
+                violation: None
+            }
+        ));
+    }
+
+    #[test]
+    fn test_json_error_maps_to_internal() {
+        let json_err: serde_json::Error =
+            serde_json::from_str::<serde_json::Value>("invalid").unwrap_err();
+        let err = TwitterError::Json(json_err);
+        let fcp = err.to_fcp_error();
+        assert!(matches!(fcp, FcpError::Internal { message } if message.contains("JSON error")));
+    }
 }

@@ -1258,3 +1258,1273 @@ pub struct ApiErrorDetails {
     /// Error code
     pub code: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ---- Model ----
+
+    #[test]
+    fn model_as_str_all_variants() {
+        assert_eq!(Model::Gpt4o.as_str(), "gpt-4o");
+        assert_eq!(Model::Gpt4oMini.as_str(), "gpt-4o-mini");
+        assert_eq!(Model::Gpt4Turbo.as_str(), "gpt-4-turbo");
+        assert_eq!(Model::Gpt4.as_str(), "gpt-4");
+        assert_eq!(Model::Gpt35Turbo.as_str(), "gpt-3.5-turbo");
+    }
+
+    #[test]
+    fn model_default_is_gpt4o() {
+        assert_eq!(Model::default(), Model::Gpt4o);
+    }
+
+    #[test]
+    fn model_pricing_gpt4o() {
+        assert_eq!(Model::Gpt4o.input_price_per_million(), 2.50);
+        assert_eq!(Model::Gpt4o.output_price_per_million(), 10.0);
+    }
+
+    #[test]
+    fn model_pricing_gpt4o_mini() {
+        assert_eq!(Model::Gpt4oMini.input_price_per_million(), 0.15);
+        assert_eq!(Model::Gpt4oMini.output_price_per_million(), 0.60);
+    }
+
+    #[test]
+    fn model_pricing_gpt4() {
+        assert_eq!(Model::Gpt4.input_price_per_million(), 30.0);
+        assert_eq!(Model::Gpt4.output_price_per_million(), 60.0);
+    }
+
+    #[test]
+    fn model_serde_roundtrip() {
+        let model = Model::Gpt4o;
+        let json = serde_json::to_value(model).unwrap();
+        assert_eq!(json, "gpt-4o");
+        let back: Model = serde_json::from_value(json).unwrap();
+        assert_eq!(back, Model::Gpt4o);
+    }
+
+    #[test]
+    fn model_serde_all_variants() {
+        for (model, expected) in [
+            (Model::Gpt4o, "gpt-4o"),
+            (Model::Gpt4oMini, "gpt-4o-mini"),
+            (Model::Gpt4Turbo, "gpt-4-turbo"),
+            (Model::Gpt4, "gpt-4"),
+            (Model::Gpt35Turbo, "gpt-3.5-turbo"),
+        ] {
+            let json = serde_json::to_value(model).unwrap();
+            assert_eq!(json.as_str().unwrap(), expected);
+            let back: Model = serde_json::from_value(json).unwrap();
+            assert_eq!(back, model);
+        }
+    }
+
+    // ---- Role ----
+
+    #[test]
+    fn role_serde_all_variants() {
+        for (role, expected) in [
+            (Role::System, "system"),
+            (Role::User, "user"),
+            (Role::Assistant, "assistant"),
+            (Role::Tool, "tool"),
+        ] {
+            let json = serde_json::to_value(role).unwrap();
+            assert_eq!(json.as_str().unwrap(), expected);
+            let back: Role = serde_json::from_value(json).unwrap();
+            assert_eq!(back, role);
+        }
+    }
+
+    // ---- Message constructors ----
+
+    #[test]
+    fn message_user_constructor() {
+        let msg = Message::user("Hello");
+        assert_eq!(msg.role, Role::User);
+        match &msg.content {
+            MessageContent::Text(t) => assert_eq!(t, "Hello"),
+            MessageContent::Parts(_) => panic!("Expected Text content"),
+        }
+        assert!(msg.name.is_none());
+        assert!(msg.tool_calls.is_none());
+        assert!(msg.tool_call_id.is_none());
+    }
+
+    #[test]
+    fn message_assistant_constructor() {
+        let msg = Message::assistant("Response");
+        assert_eq!(msg.role, Role::Assistant);
+        match &msg.content {
+            MessageContent::Text(t) => assert_eq!(t, "Response"),
+            MessageContent::Parts(_) => panic!("Expected Text content"),
+        }
+    }
+
+    #[test]
+    fn message_system_constructor() {
+        let msg = Message::system("You are helpful");
+        assert_eq!(msg.role, Role::System);
+        match &msg.content {
+            MessageContent::Text(t) => assert_eq!(t, "You are helpful"),
+            MessageContent::Parts(_) => panic!("Expected Text content"),
+        }
+    }
+
+    // ---- MessageContent ----
+
+    #[test]
+    fn message_content_from_str() {
+        let content: MessageContent = "test".into();
+        match content {
+            MessageContent::Text(t) => assert_eq!(t, "test"),
+            MessageContent::Parts(_) => panic!("Expected Text"),
+        }
+    }
+
+    #[test]
+    fn message_content_from_string() {
+        let content: MessageContent = String::from("test").into();
+        match content {
+            MessageContent::Text(t) => assert_eq!(t, "test"),
+            MessageContent::Parts(_) => panic!("Expected Text"),
+        }
+    }
+
+    #[test]
+    fn message_content_text_serde() {
+        let content = MessageContent::Text("hello".into());
+        let json = serde_json::to_value(&content).unwrap();
+        assert_eq!(json, "hello");
+    }
+
+    #[test]
+    fn message_content_parts_serde() {
+        let content = MessageContent::Parts(vec![
+            ContentPart::Text {
+                text: "Look at this:".into(),
+            },
+            ContentPart::ImageUrl {
+                image_url: ImageUrl {
+                    url: "https://example.com/img.png".into(),
+                    detail: Some(ImageDetail::High),
+                },
+            },
+        ]);
+        let json = serde_json::to_value(&content).unwrap();
+        let parts = json.as_array().unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[1]["type"], "image_url");
+        assert_eq!(parts[1]["image_url"]["detail"], "high");
+    }
+
+    // ---- ContentPart ----
+
+    #[test]
+    fn content_part_text_serde() {
+        let part = ContentPart::Text { text: "hi".into() };
+        let json = serde_json::to_value(&part).unwrap();
+        assert_eq!(json["type"], "text");
+        assert_eq!(json["text"], "hi");
+        let back: ContentPart = serde_json::from_value(json).unwrap();
+        match back {
+            ContentPart::Text { text } => assert_eq!(text, "hi"),
+            ContentPart::ImageUrl { .. } => panic!("Expected Text"),
+        }
+    }
+
+    #[test]
+    fn content_part_image_url_serde() {
+        let part = ContentPart::ImageUrl {
+            image_url: ImageUrl {
+                url: "data:image/png;base64,abc".into(),
+                detail: None,
+            },
+        };
+        let json = serde_json::to_value(&part).unwrap();
+        assert_eq!(json["type"], "image_url");
+        assert_eq!(json["image_url"]["url"], "data:image/png;base64,abc");
+    }
+
+    // ---- ImageDetail ----
+
+    #[test]
+    fn image_detail_serde() {
+        for (detail, expected) in [
+            (ImageDetail::Auto, "auto"),
+            (ImageDetail::Low, "low"),
+            (ImageDetail::High, "high"),
+        ] {
+            let json = serde_json::to_value(detail).unwrap();
+            assert_eq!(json.as_str().unwrap(), expected);
+        }
+    }
+
+    // ---- FinishReason ----
+
+    #[test]
+    fn finish_reason_serde_all_variants() {
+        for (reason, expected) in [
+            (FinishReason::Stop, "stop"),
+            (FinishReason::Length, "length"),
+            (FinishReason::ToolCalls, "tool_calls"),
+            (FinishReason::ContentFilter, "content_filter"),
+        ] {
+            let json = serde_json::to_value(reason).unwrap();
+            assert_eq!(json.as_str().unwrap(), expected);
+            let back: FinishReason = serde_json::from_value(json).unwrap();
+            assert_eq!(back, reason);
+        }
+    }
+
+    // ---- Usage ----
+
+    #[test]
+    fn usage_default() {
+        let usage = Usage::default();
+        assert_eq!(usage.prompt_tokens, 0);
+        assert_eq!(usage.completion_tokens, 0);
+        assert_eq!(usage.total_tokens, 0);
+        assert!(usage.prompt_tokens_details.is_none());
+    }
+
+    #[test]
+    fn usage_calculate_cost_basic() {
+        let usage = Usage {
+            prompt_tokens: 1_000_000,
+            completion_tokens: 1_000_000,
+            total_tokens: 2_000_000,
+            prompt_tokens_details: None,
+        };
+        let cost = usage.calculate_cost(Model::Gpt4o);
+        // 1M input * $2.50/M + 1M output * $10/M = $12.50
+        assert!((cost - 12.50).abs() < 0.001);
+    }
+
+    #[test]
+    fn usage_calculate_cost_with_cached_tokens() {
+        let usage = Usage {
+            prompt_tokens: 1_000_000,
+            completion_tokens: 0,
+            total_tokens: 1_000_000,
+            prompt_tokens_details: Some(PromptTokensDetails {
+                cached_tokens: 500_000,
+            }),
+        };
+        let cost = usage.calculate_cost(Model::Gpt4o);
+        // 500K uncached * $2.50/M + 500K cached * $1.25/M = $1.25 + $0.625 = $1.875
+        assert!((cost - 1.875).abs() < 0.001);
+    }
+
+    #[test]
+    fn usage_calculate_cost_zero() {
+        let usage = Usage::default();
+        let cost = usage.calculate_cost(Model::Gpt4oMini);
+        assert_eq!(cost, 0.0);
+    }
+
+    #[test]
+    fn usage_calculate_cost_gpt35_turbo() {
+        let usage = Usage {
+            prompt_tokens: 1_000,
+            completion_tokens: 500,
+            total_tokens: 1_500,
+            prompt_tokens_details: None,
+        };
+        let cost = usage.calculate_cost(Model::Gpt35Turbo);
+        // 1K * $0.50/M + 500 * $1.50/M = $0.0005 + $0.00075 = $0.00125
+        assert!((cost - 0.00125).abs() < 0.000001);
+    }
+
+    #[test]
+    fn usage_deserialize_with_details() {
+        let json = json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+            "total_tokens": 150,
+            "prompt_tokens_details": { "cached_tokens": 30 }
+        });
+        let usage: Usage = serde_json::from_value(json).unwrap();
+        assert_eq!(usage.prompt_tokens, 100);
+        assert_eq!(usage.completion_tokens, 50);
+        let details = usage.prompt_tokens_details.unwrap();
+        assert_eq!(details.cached_tokens, 30);
+    }
+
+    #[test]
+    fn usage_deserialize_minimal() {
+        let json = json!({
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15
+        });
+        let usage: Usage = serde_json::from_value(json).unwrap();
+        assert_eq!(usage.total_tokens, 15);
+        assert!(usage.prompt_tokens_details.is_none());
+    }
+
+    // ---- EmbeddingModel ----
+
+    #[test]
+    fn embedding_model_as_str() {
+        assert_eq!(
+            EmbeddingModel::TextEmbedding3Small.as_str(),
+            "text-embedding-3-small"
+        );
+        assert_eq!(
+            EmbeddingModel::TextEmbedding3Large.as_str(),
+            "text-embedding-3-large"
+        );
+        assert_eq!(
+            EmbeddingModel::TextEmbeddingAda002.as_str(),
+            "text-embedding-ada-002"
+        );
+    }
+
+    #[test]
+    fn embedding_model_default() {
+        assert_eq!(
+            EmbeddingModel::default(),
+            EmbeddingModel::TextEmbedding3Small
+        );
+    }
+
+    #[test]
+    fn embedding_model_dimensions() {
+        assert_eq!(
+            EmbeddingModel::TextEmbedding3Small.default_dimensions(),
+            1536
+        );
+        assert_eq!(
+            EmbeddingModel::TextEmbedding3Large.default_dimensions(),
+            3072
+        );
+        assert_eq!(
+            EmbeddingModel::TextEmbeddingAda002.default_dimensions(),
+            1536
+        );
+    }
+
+    #[test]
+    fn embedding_model_pricing() {
+        assert_eq!(
+            EmbeddingModel::TextEmbedding3Small.price_per_million(),
+            0.02
+        );
+        assert_eq!(
+            EmbeddingModel::TextEmbedding3Large.price_per_million(),
+            0.13
+        );
+        assert_eq!(
+            EmbeddingModel::TextEmbeddingAda002.price_per_million(),
+            0.10
+        );
+    }
+
+    #[test]
+    fn embedding_model_max_input_tokens() {
+        assert_eq!(EmbeddingModel::TextEmbedding3Small.max_input_tokens(), 8191);
+        assert_eq!(EmbeddingModel::TextEmbedding3Large.max_input_tokens(), 8191);
+    }
+
+    #[test]
+    fn embedding_model_serde() {
+        let model = EmbeddingModel::TextEmbedding3Large;
+        let json = serde_json::to_value(model).unwrap();
+        assert_eq!(json, "text-embedding-3-large");
+        let back: EmbeddingModel = serde_json::from_value(json).unwrap();
+        assert_eq!(back, EmbeddingModel::TextEmbedding3Large);
+    }
+
+    // ---- EmbeddingUsage ----
+
+    #[test]
+    fn embedding_usage_calculate_cost() {
+        let usage = EmbeddingUsage {
+            prompt_tokens: 1000,
+            total_tokens: 1000,
+        };
+        let cost = usage.calculate_cost(EmbeddingModel::TextEmbedding3Small);
+        // 1000 / 1M * $0.02 = $0.00002
+        assert!((cost - 0.00002).abs() < 0.0000001);
+    }
+
+    // ---- EmbeddingInput ----
+
+    #[test]
+    fn embedding_input_single_serde() {
+        let input = EmbeddingInput::Single("hello".into());
+        let json = serde_json::to_value(&input).unwrap();
+        assert_eq!(json, "hello");
+    }
+
+    #[test]
+    fn embedding_input_batch_serde() {
+        let input = EmbeddingInput::Batch(vec!["a".into(), "b".into()]);
+        let json = serde_json::to_value(&input).unwrap();
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+    }
+
+    // ---- ImageModel ----
+
+    #[test]
+    fn image_model_as_str() {
+        assert_eq!(ImageModel::DallE3.as_str(), "dall-e-3");
+        assert_eq!(ImageModel::DallE2.as_str(), "dall-e-2");
+    }
+
+    #[test]
+    fn image_model_default() {
+        assert_eq!(ImageModel::default(), ImageModel::DallE3);
+    }
+
+    #[test]
+    fn image_model_serde() {
+        let model = ImageModel::DallE2;
+        let json = serde_json::to_value(model).unwrap();
+        assert_eq!(json, "dall-e-2");
+        let back: ImageModel = serde_json::from_value(json).unwrap();
+        assert_eq!(back, ImageModel::DallE2);
+    }
+
+    // ---- ImageSize ----
+
+    #[test]
+    fn image_size_default() {
+        assert_eq!(ImageSize::default(), ImageSize::Size1024);
+    }
+
+    #[test]
+    fn image_size_serde_all() {
+        for (size, expected) in [
+            (ImageSize::Size256, "256x256"),
+            (ImageSize::Size512, "512x512"),
+            (ImageSize::Size1024, "1024x1024"),
+            (ImageSize::SizeLandscape, "1792x1024"),
+            (ImageSize::SizePortrait, "1024x1792"),
+        ] {
+            let json = serde_json::to_value(size).unwrap();
+            assert_eq!(json.as_str().unwrap(), expected);
+            let back: ImageSize = serde_json::from_value(json).unwrap();
+            assert_eq!(back, size);
+        }
+    }
+
+    // ---- ImageQuality ----
+
+    #[test]
+    fn image_quality_default() {
+        assert_eq!(ImageQuality::default(), ImageQuality::Standard);
+    }
+
+    #[test]
+    fn image_quality_serde() {
+        let json = serde_json::to_value(ImageQuality::Hd).unwrap();
+        assert_eq!(json, "hd");
+        let back: ImageQuality = serde_json::from_value(json).unwrap();
+        assert_eq!(back, ImageQuality::Hd);
+    }
+
+    // ---- WhisperModel ----
+
+    #[test]
+    fn whisper_model_as_str() {
+        assert_eq!(WhisperModel::Whisper1.as_str(), "whisper-1");
+    }
+
+    #[test]
+    fn whisper_model_default() {
+        assert_eq!(WhisperModel::default(), WhisperModel::Whisper1);
+    }
+
+    #[test]
+    fn whisper_model_pricing() {
+        assert_eq!(WhisperModel::Whisper1.price_per_minute(), 0.006);
+    }
+
+    #[test]
+    fn whisper_model_serde() {
+        let json = serde_json::to_value(WhisperModel::Whisper1).unwrap();
+        assert_eq!(json, "whisper-1");
+        let back: WhisperModel = serde_json::from_value(json).unwrap();
+        assert_eq!(back, WhisperModel::Whisper1);
+    }
+
+    // ---- TtsModel ----
+
+    #[test]
+    fn tts_model_as_str() {
+        assert_eq!(TtsModel::Tts1.as_str(), "tts-1");
+        assert_eq!(TtsModel::Tts1Hd.as_str(), "tts-1-hd");
+    }
+
+    #[test]
+    fn tts_model_default() {
+        assert_eq!(TtsModel::default(), TtsModel::Tts1);
+    }
+
+    #[test]
+    fn tts_model_pricing() {
+        assert_eq!(TtsModel::Tts1.price_per_million_chars(), 15.0);
+        assert_eq!(TtsModel::Tts1Hd.price_per_million_chars(), 30.0);
+    }
+
+    #[test]
+    fn tts_model_serde() {
+        let json = serde_json::to_value(TtsModel::Tts1Hd).unwrap();
+        assert_eq!(json, "tts-1-hd");
+        let back: TtsModel = serde_json::from_value(json).unwrap();
+        assert_eq!(back, TtsModel::Tts1Hd);
+    }
+
+    // ---- TtsVoice ----
+
+    #[test]
+    fn tts_voice_as_str_all() {
+        assert_eq!(TtsVoice::Alloy.as_str(), "alloy");
+        assert_eq!(TtsVoice::Echo.as_str(), "echo");
+        assert_eq!(TtsVoice::Fable.as_str(), "fable");
+        assert_eq!(TtsVoice::Onyx.as_str(), "onyx");
+        assert_eq!(TtsVoice::Nova.as_str(), "nova");
+        assert_eq!(TtsVoice::Shimmer.as_str(), "shimmer");
+    }
+
+    #[test]
+    fn tts_voice_default() {
+        assert_eq!(TtsVoice::default(), TtsVoice::Alloy);
+    }
+
+    #[test]
+    fn tts_voice_serde() {
+        let json = serde_json::to_value(TtsVoice::Nova).unwrap();
+        assert_eq!(json, "nova");
+        let back: TtsVoice = serde_json::from_value(json).unwrap();
+        assert_eq!(back, TtsVoice::Nova);
+    }
+
+    // ---- TtsResponseFormat ----
+
+    #[test]
+    fn tts_response_format_as_str_all() {
+        assert_eq!(TtsResponseFormat::Mp3.as_str(), "mp3");
+        assert_eq!(TtsResponseFormat::Opus.as_str(), "opus");
+        assert_eq!(TtsResponseFormat::Aac.as_str(), "aac");
+        assert_eq!(TtsResponseFormat::Flac.as_str(), "flac");
+    }
+
+    #[test]
+    fn tts_response_format_mime_types() {
+        assert_eq!(TtsResponseFormat::Mp3.mime_type(), "audio/mpeg");
+        assert_eq!(TtsResponseFormat::Opus.mime_type(), "audio/opus");
+        assert_eq!(TtsResponseFormat::Aac.mime_type(), "audio/aac");
+        assert_eq!(TtsResponseFormat::Flac.mime_type(), "audio/flac");
+    }
+
+    #[test]
+    fn tts_response_format_default() {
+        assert_eq!(TtsResponseFormat::default(), TtsResponseFormat::Mp3);
+    }
+
+    #[test]
+    fn tts_response_format_serde() {
+        let json = serde_json::to_value(TtsResponseFormat::Opus).unwrap();
+        assert_eq!(json, "opus");
+        let back: TtsResponseFormat = serde_json::from_value(json).unwrap();
+        assert_eq!(back, TtsResponseFormat::Opus);
+    }
+
+    // ---- FineTuneStatus ----
+
+    #[test]
+    fn fine_tune_status_serde_all() {
+        for (status, expected) in [
+            (FineTuneStatus::ValidatingFiles, "validating_files"),
+            (FineTuneStatus::Queued, "queued"),
+            (FineTuneStatus::Running, "running"),
+            (FineTuneStatus::Succeeded, "succeeded"),
+            (FineTuneStatus::Failed, "failed"),
+            (FineTuneStatus::Cancelled, "cancelled"),
+        ] {
+            let json = serde_json::to_value(status).unwrap();
+            assert_eq!(json.as_str().unwrap(), expected);
+            let back: FineTuneStatus = serde_json::from_value(json).unwrap();
+            assert_eq!(back, status);
+        }
+    }
+
+    // ---- RunStatus ----
+
+    #[test]
+    fn run_status_serde_all() {
+        for (status, expected) in [
+            (RunStatus::Queued, "queued"),
+            (RunStatus::InProgress, "in_progress"),
+            (RunStatus::RequiresAction, "requires_action"),
+            (RunStatus::Cancelling, "cancelling"),
+            (RunStatus::Cancelled, "cancelled"),
+            (RunStatus::Failed, "failed"),
+            (RunStatus::Completed, "completed"),
+            (RunStatus::Incomplete, "incomplete"),
+            (RunStatus::Expired, "expired"),
+        ] {
+            let json = serde_json::to_value(status).unwrap();
+            assert_eq!(json.as_str().unwrap(), expected);
+            let back: RunStatus = serde_json::from_value(json).unwrap();
+            assert_eq!(back, status);
+        }
+    }
+
+    // ---- ChatCompletionResponse deserialize ----
+
+    #[test]
+    fn chat_completion_response_deserialize() {
+        let json = json!({
+            "id": "chatcmpl-123",
+            "object": "chat.completion",
+            "created": 1677652288,
+            "model": "gpt-4o",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "Hello!"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        });
+        let resp: ChatCompletionResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.id, "chatcmpl-123");
+        assert_eq!(resp.model, "gpt-4o");
+        assert_eq!(resp.choices.len(), 1);
+        assert_eq!(resp.choices[0].message.content.as_deref(), Some("Hello!"));
+        assert_eq!(resp.choices[0].finish_reason, Some(FinishReason::Stop));
+        let usage = resp.usage.unwrap();
+        assert_eq!(usage.prompt_tokens, 10);
+    }
+
+    #[test]
+    fn chat_completion_response_with_tool_calls() {
+        let json = json!({
+            "id": "chatcmpl-456",
+            "object": "chat.completion",
+            "created": 1677652288,
+            "model": "gpt-4o",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_abc",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": "{\"location\":\"NYC\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {
+                "prompt_tokens": 20,
+                "completion_tokens": 10,
+                "total_tokens": 30
+            }
+        });
+        let resp: ChatCompletionResponse = serde_json::from_value(json).unwrap();
+        assert!(resp.choices[0].message.content.is_none());
+        let tc = resp.choices[0].message.tool_calls.as_ref().unwrap();
+        assert_eq!(tc.len(), 1);
+        assert_eq!(tc[0].function.name, "get_weather");
+        assert_eq!(resp.choices[0].finish_reason, Some(FinishReason::ToolCalls));
+    }
+
+    // ---- ChatCompletionChunk deserialize ----
+
+    #[test]
+    fn chat_completion_chunk_deserialize() {
+        let json = json!({
+            "id": "chatcmpl-stream-1",
+            "object": "chat.completion.chunk",
+            "created": 1677652288,
+            "model": "gpt-4o",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "content": "Hello"
+                },
+                "finish_reason": null
+            }]
+        });
+        let chunk: ChatCompletionChunk = serde_json::from_value(json).unwrap();
+        assert_eq!(chunk.id, "chatcmpl-stream-1");
+        assert_eq!(chunk.choices[0].delta.content.as_deref(), Some("Hello"));
+        assert!(chunk.choices[0].finish_reason.is_none());
+    }
+
+    // ---- Tool / ToolChoice serde ----
+
+    #[test]
+    fn tool_serde_roundtrip() {
+        let tool = Tool {
+            tool_type: "function".into(),
+            function: FunctionDefinition {
+                name: "get_weather".into(),
+                description: Some("Get weather info".into()),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "location": { "type": "string" }
+                    }
+                })),
+            },
+        };
+        let json = serde_json::to_value(&tool).unwrap();
+        assert_eq!(json["type"], "function");
+        assert_eq!(json["function"]["name"], "get_weather");
+        let back: Tool = serde_json::from_value(json).unwrap();
+        assert_eq!(back.function.name, "get_weather");
+    }
+
+    #[test]
+    fn tool_choice_string_serde() {
+        let choice = ToolChoice::String("auto".into());
+        let json = serde_json::to_value(&choice).unwrap();
+        assert_eq!(json, "auto");
+    }
+
+    #[test]
+    fn tool_choice_specific_serde() {
+        let choice = ToolChoice::Specific {
+            choice_type: "function".into(),
+            function: ToolChoiceFunction {
+                name: "get_weather".into(),
+            },
+        };
+        let json = serde_json::to_value(&choice).unwrap();
+        assert_eq!(json["type"], "function");
+        assert_eq!(json["function"]["name"], "get_weather");
+    }
+
+    // ---- ImageGenerationResponse deserialize ----
+
+    #[test]
+    fn image_generation_response_deserialize() {
+        let json = json!({
+            "created": 1700000000,
+            "data": [{
+                "b64_json": "iVBOR...",
+                "revised_prompt": "A revised description"
+            }]
+        });
+        let resp: ImageGenerationResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.created, 1700000000);
+        assert_eq!(resp.data.len(), 1);
+        assert_eq!(resp.data[0].b64_json.as_deref(), Some("iVBOR..."));
+        assert!(resp.data[0].revised_prompt.is_some());
+    }
+
+    #[test]
+    fn image_data_url_variant() {
+        let json = json!({
+            "url": "https://example.com/image.png"
+        });
+        let data: ImageData = serde_json::from_value(json).unwrap();
+        assert!(data.b64_json.is_none());
+        assert_eq!(data.url.as_deref(), Some("https://example.com/image.png"));
+    }
+
+    // ---- TranscriptionResponse ----
+
+    #[test]
+    fn transcription_response_deserialize() {
+        let json = json!({ "text": "Hello, world!" });
+        let resp: TranscriptionResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.text, "Hello, world!");
+    }
+
+    // ---- FineTuneJob deserialize ----
+
+    #[test]
+    fn fine_tune_job_deserialize() {
+        let json = json!({
+            "id": "ftjob-123",
+            "object": "fine_tuning.job",
+            "model": "gpt-4o-mini-2024-07-18",
+            "status": "running",
+            "training_file": "file-abc",
+            "validation_file": null,
+            "fine_tuned_model": null,
+            "created_at": 1700000000,
+            "finished_at": null,
+            "hyperparameters": { "n_epochs": 3 },
+            "trained_tokens": null,
+            "error": null
+        });
+        let job: FineTuneJob = serde_json::from_value(json).unwrap();
+        assert_eq!(job.id, "ftjob-123");
+        assert_eq!(job.status, FineTuneStatus::Running);
+        assert!(job.fine_tuned_model.is_none());
+        assert!(job.finished_at.is_none());
+    }
+
+    #[test]
+    fn fine_tune_job_succeeded_with_model() {
+        let json = json!({
+            "id": "ftjob-456",
+            "object": "fine_tuning.job",
+            "model": "gpt-4o-mini-2024-07-18",
+            "status": "succeeded",
+            "training_file": "file-abc",
+            "validation_file": "file-def",
+            "fine_tuned_model": "ft:gpt-4o-mini:my-org:custom:abc123",
+            "created_at": 1700000000,
+            "finished_at": 1700003600,
+            "trained_tokens": 50000,
+            "error": null
+        });
+        let job: FineTuneJob = serde_json::from_value(json).unwrap();
+        assert_eq!(job.status, FineTuneStatus::Succeeded);
+        assert_eq!(
+            job.fine_tuned_model.as_deref(),
+            Some("ft:gpt-4o-mini:my-org:custom:abc123")
+        );
+        assert_eq!(job.trained_tokens, Some(50000));
+    }
+
+    #[test]
+    fn fine_tune_job_with_error() {
+        let json = json!({
+            "id": "ftjob-789",
+            "object": "fine_tuning.job",
+            "model": "gpt-4o-mini-2024-07-18",
+            "status": "failed",
+            "training_file": "file-bad",
+            "created_at": 1700000000,
+            "error": {
+                "code": "invalid_training_file",
+                "message": "Training file format is invalid"
+            }
+        });
+        let job: FineTuneJob = serde_json::from_value(json).unwrap();
+        assert_eq!(job.status, FineTuneStatus::Failed);
+        let error = job.error.unwrap();
+        assert_eq!(error.code.as_deref(), Some("invalid_training_file"));
+    }
+
+    // ---- Assistant deserialize ----
+
+    #[test]
+    fn assistant_deserialize() {
+        let json = json!({
+            "id": "asst_123",
+            "object": "assistant",
+            "created_at": 1700000000,
+            "name": "Math Tutor",
+            "model": "gpt-4o",
+            "instructions": "You help with math.",
+            "tools": [{"type": "code_interpreter"}],
+            "metadata": {}
+        });
+        let asst: Assistant = serde_json::from_value(json).unwrap();
+        assert_eq!(asst.id, "asst_123");
+        assert_eq!(asst.name.as_deref(), Some("Math Tutor"));
+        assert_eq!(asst.tools.len(), 1);
+        assert_eq!(asst.tools[0].tool_type, "code_interpreter");
+    }
+
+    // ---- Thread deserialize ----
+
+    #[test]
+    fn thread_deserialize() {
+        let json = json!({
+            "id": "thread_abc",
+            "object": "thread",
+            "created_at": 1700000000,
+            "metadata": {}
+        });
+        let thread: Thread = serde_json::from_value(json).unwrap();
+        assert_eq!(thread.id, "thread_abc");
+        assert_eq!(thread.object, "thread");
+    }
+
+    // ---- ThreadMessage deserialize ----
+
+    #[test]
+    fn thread_message_deserialize() {
+        let json = json!({
+            "id": "msg_123",
+            "object": "thread.message",
+            "created_at": 1700000000,
+            "thread_id": "thread_abc",
+            "role": "user",
+            "content": [{
+                "type": "text",
+                "text": { "value": "Hello!", "annotations": [] }
+            }],
+            "assistant_id": null,
+            "run_id": null,
+            "metadata": {}
+        });
+        let msg: ThreadMessage = serde_json::from_value(json).unwrap();
+        assert_eq!(msg.id, "msg_123");
+        assert_eq!(msg.thread_id, "thread_abc");
+        assert_eq!(msg.role, "user");
+        assert_eq!(msg.content.len(), 1);
+        assert_eq!(msg.content[0].content_type, "text");
+        assert_eq!(msg.content[0].text.as_ref().unwrap().value, "Hello!");
+    }
+
+    // ---- Run deserialize ----
+
+    #[test]
+    fn run_deserialize() {
+        let json = json!({
+            "id": "run_abc",
+            "object": "thread.run",
+            "created_at": 1700000000,
+            "thread_id": "thread_abc",
+            "assistant_id": "asst_123",
+            "status": "completed",
+            "model": "gpt-4o",
+            "instructions": null,
+            "tools": [],
+            "started_at": 1700000001,
+            "completed_at": 1700000010,
+            "failed_at": null,
+            "cancelled_at": null,
+            "last_error": null,
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 50,
+                "total_tokens": 150
+            },
+            "metadata": {}
+        });
+        let run: Run = serde_json::from_value(json).unwrap();
+        assert_eq!(run.id, "run_abc");
+        assert_eq!(run.status, RunStatus::Completed);
+        assert_eq!(run.started_at, Some(1700000001));
+        let usage = run.usage.unwrap();
+        assert_eq!(usage.prompt_tokens, 100);
+    }
+
+    #[test]
+    fn run_with_error() {
+        let json = json!({
+            "id": "run_fail",
+            "object": "thread.run",
+            "created_at": 1700000000,
+            "thread_id": "thread_abc",
+            "assistant_id": "asst_123",
+            "status": "failed",
+            "model": "gpt-4o",
+            "tools": [],
+            "last_error": {
+                "code": "rate_limit_exceeded",
+                "message": "Too many requests"
+            }
+        });
+        let run: Run = serde_json::from_value(json).unwrap();
+        assert_eq!(run.status, RunStatus::Failed);
+        let error = run.last_error.unwrap();
+        assert_eq!(error.code, "rate_limit_exceeded");
+    }
+
+    // ---- ApiError deserialize ----
+
+    #[test]
+    fn api_error_deserialize() {
+        let json = json!({
+            "error": {
+                "message": "Incorrect API key",
+                "type": "invalid_request_error",
+                "param": null,
+                "code": "invalid_api_key"
+            }
+        });
+        let err: ApiError = serde_json::from_value(json).unwrap();
+        assert_eq!(err.error.error_type, "invalid_request_error");
+        assert_eq!(err.error.code.as_deref(), Some("invalid_api_key"));
+        assert!(err.error.param.is_none());
+    }
+
+    #[test]
+    fn api_error_with_param() {
+        let json = json!({
+            "error": {
+                "message": "Invalid value for temperature",
+                "type": "invalid_request_error",
+                "param": "temperature",
+                "code": null
+            }
+        });
+        let err: ApiError = serde_json::from_value(json).unwrap();
+        assert_eq!(err.error.param.as_deref(), Some("temperature"));
+        assert!(err.error.code.is_none());
+    }
+
+    // ---- Message serde roundtrip ----
+
+    #[test]
+    fn message_serde_roundtrip() {
+        let msg = Message::user("Hello world");
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["role"], "user");
+        assert_eq!(json["content"], "Hello world");
+        // tool_calls and tool_call_id should be skipped
+        assert!(json.get("tool_calls").is_none());
+        assert!(json.get("tool_call_id").is_none());
+    }
+
+    // ---- ResponseFormat serde ----
+
+    #[test]
+    fn response_format_serde() {
+        let fmt = ResponseFormat {
+            format_type: "json_object".into(),
+        };
+        let json = serde_json::to_value(&fmt).unwrap();
+        assert_eq!(json["type"], "json_object");
+        let back: ResponseFormat = serde_json::from_value(json).unwrap();
+        assert_eq!(back.format_type, "json_object");
+    }
+
+    // ---- ToolCall serde ----
+
+    #[test]
+    fn tool_call_serde() {
+        let tc = ToolCall {
+            id: "call_1".into(),
+            tool_type: "function".into(),
+            function: FunctionCall {
+                name: "search".into(),
+                arguments: r#"{"q":"rust"}"#.into(),
+            },
+        };
+        let json = serde_json::to_value(&tc).unwrap();
+        assert_eq!(json["id"], "call_1");
+        assert_eq!(json["type"], "function");
+        assert_eq!(json["function"]["name"], "search");
+        let back: ToolCall = serde_json::from_value(json).unwrap();
+        assert_eq!(back.function.arguments, r#"{"q":"rust"}"#);
+    }
+
+    // ---- FineTuneHyperparameters serde ----
+
+    #[test]
+    fn fine_tune_hyperparameters_auto() {
+        let hp = FineTuneHyperparameters {
+            n_epochs: Some(json!("auto")),
+            batch_size: None,
+            learning_rate_multiplier: None,
+        };
+        let json = serde_json::to_value(&hp).unwrap();
+        assert_eq!(json["n_epochs"], "auto");
+        assert!(json.get("batch_size").is_none());
+    }
+
+    #[test]
+    fn fine_tune_hyperparameters_numeric() {
+        let hp = FineTuneHyperparameters {
+            n_epochs: Some(json!(3)),
+            batch_size: Some(json!(16)),
+            learning_rate_multiplier: Some(json!(0.1)),
+        };
+        let json = serde_json::to_value(&hp).unwrap();
+        assert_eq!(json["n_epochs"], 3);
+        assert_eq!(json["batch_size"], 16);
+    }
+
+    // ---- EmbeddingResponse deserialize ----
+
+    #[test]
+    fn embedding_response_deserialize() {
+        let json = json!({
+            "object": "list",
+            "data": [{
+                "object": "embedding",
+                "index": 0,
+                "embedding": [0.1, 0.2, 0.3]
+            }],
+            "model": "text-embedding-3-small",
+            "usage": {
+                "prompt_tokens": 5,
+                "total_tokens": 5
+            }
+        });
+        let resp: EmbeddingResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.object, "list");
+        assert_eq!(resp.data.len(), 1);
+        assert_eq!(resp.data[0].embedding.len(), 3);
+        assert_eq!(resp.usage.prompt_tokens, 5);
+    }
+
+    // ---- AssistantTool serde ----
+
+    #[test]
+    fn assistant_tool_code_interpreter() {
+        let tool = AssistantTool {
+            tool_type: "code_interpreter".into(),
+            function: None,
+        };
+        let json = serde_json::to_value(&tool).unwrap();
+        assert_eq!(json["type"], "code_interpreter");
+        assert!(json.get("function").is_none());
+    }
+
+    #[test]
+    fn assistant_tool_function() {
+        let tool = AssistantTool {
+            tool_type: "function".into(),
+            function: Some(json!({
+                "name": "my_func",
+                "parameters": {}
+            })),
+        };
+        let json = serde_json::to_value(&tool).unwrap();
+        assert_eq!(json["type"], "function");
+        assert_eq!(json["function"]["name"], "my_func");
+    }
+
+    // ---- FineTuneListResponse deserialize ----
+
+    #[test]
+    fn fine_tune_list_response_deserialize() {
+        let json = json!({
+            "data": [{
+                "id": "ftjob-1",
+                "object": "fine_tuning.job",
+                "model": "gpt-4o-mini-2024-07-18",
+                "status": "succeeded",
+                "training_file": "file-abc",
+                "created_at": 1700000000
+            }],
+            "has_more": false
+        });
+        let resp: FineTuneListResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.data.len(), 1);
+        assert!(!resp.has_more);
+    }
+
+    // ---- FineTuneEvent deserialize ----
+
+    #[test]
+    fn fine_tune_event_deserialize() {
+        let json = json!({
+            "id": "fte-1",
+            "object": "fine_tuning.job.event",
+            "created_at": 1700000000,
+            "level": "info",
+            "message": "Training started"
+        });
+        let evt: FineTuneEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(evt.id, "fte-1");
+        assert_eq!(evt.level, "info");
+        assert_eq!(evt.message, "Training started");
+    }
+
+    // ---- TtsRequest serde ----
+
+    #[test]
+    fn tts_request_serialize() {
+        let req = TtsRequest {
+            model: "tts-1".into(),
+            input: "Hello world".into(),
+            voice: "alloy".into(),
+            response_format: Some("mp3".into()),
+            speed: Some(1.5),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["model"], "tts-1");
+        assert_eq!(json["voice"], "alloy");
+        assert_eq!(json["speed"], 1.5);
+    }
+
+    #[test]
+    fn tts_request_serialize_minimal() {
+        let req = TtsRequest {
+            model: "tts-1-hd".into(),
+            input: "Hi".into(),
+            voice: "nova".into(),
+            response_format: None,
+            speed: None,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(json.get("response_format").is_none());
+        assert!(json.get("speed").is_none());
+    }
+
+    // ---- RunListResponse deserialize ----
+
+    #[test]
+    fn run_list_response_deserialize() {
+        let json = json!({
+            "data": [{
+                "id": "run_1",
+                "object": "thread.run",
+                "created_at": 1700000000,
+                "thread_id": "thread_abc",
+                "assistant_id": "asst_123",
+                "status": "queued",
+                "model": "gpt-4o",
+                "tools": []
+            }],
+            "has_more": true
+        });
+        let resp: RunListResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.data.len(), 1);
+        assert!(resp.has_more);
+        assert_eq!(resp.data[0].status, RunStatus::Queued);
+    }
+
+    // ---- AssistantListResponse deserialize ----
+
+    #[test]
+    fn assistant_list_response_deserialize() {
+        let json = json!({
+            "data": [{
+                "id": "asst_1",
+                "object": "assistant",
+                "created_at": 1700000000,
+                "model": "gpt-4o",
+                "tools": []
+            }],
+            "has_more": false
+        });
+        let resp: AssistantListResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.data.len(), 1);
+        assert!(!resp.has_more);
+    }
+
+    // ---- ThreadMessageListResponse deserialize ----
+
+    #[test]
+    fn thread_message_list_response_deserialize() {
+        let json = json!({
+            "data": [{
+                "id": "msg_1",
+                "object": "thread.message",
+                "created_at": 1700000000,
+                "thread_id": "thread_abc",
+                "role": "user",
+                "content": [{ "type": "text", "text": { "value": "Hi", "annotations": [] } }]
+            }],
+            "has_more": false
+        });
+        let resp: ThreadMessageListResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.data.len(), 1);
+        assert!(!resp.has_more);
+    }
+}

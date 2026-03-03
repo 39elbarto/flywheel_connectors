@@ -1369,6 +1369,401 @@ mod tests {
         assert_eq!(result["reason_code"], "credential_injection_required");
     }
 
+    // ── Schema completeness tests ────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_all_ops_have_input_and_output_schemas() {
+        let connector = TwilioConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            assert!(
+                op.get("input_schema").is_some(),
+                "{id} missing input_schema"
+            );
+            assert!(
+                op.get("output_schema").is_some(),
+                "{id} missing output_schema"
+            );
+            assert_eq!(
+                op["input_schema"]["type"].as_str().unwrap(),
+                "object",
+                "{id} input_schema should be object type"
+            );
+            assert_eq!(
+                op["output_schema"]["type"].as_str().unwrap(),
+                "object",
+                "{id} output_schema should be object type"
+            );
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_is_deterministic() {
+        let connector = TwilioConnector::new();
+        let r1 = connector.handle_introspect().await.unwrap();
+        let r2 = connector.handle_introspect().await.unwrap();
+        assert_eq!(r1, r2);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_no_duplicate_operation_ids() {
+        let connector = TwilioConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let ids: Vec<&str> = ops.iter().map(|o| o["id"].as_str().unwrap()).collect();
+        let mut seen = std::collections::HashSet::new();
+        for id in &ids {
+            assert!(seen.insert(*id), "Duplicate operation ID: {id}");
+        }
+    }
+
+    // ── Introspection metadata tests ─────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_all_ops_have_required_metadata() {
+        let connector = TwilioConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            assert!(op.get("summary").is_some(), "{id} missing summary");
+            assert!(!op["summary"].as_str().unwrap().is_empty(), "{id} empty summary");
+            assert!(op.get("capability").is_some(), "{id} missing capability");
+            assert!(op.get("risk_level").is_some(), "{id} missing risk_level");
+            assert!(op.get("safety_tier").is_some(), "{id} missing safety_tier");
+            assert!(op.get("idempotency").is_some(), "{id} missing idempotency");
+            assert!(op.get("ai_hints").is_some(), "{id} missing ai_hints");
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_valid_risk_levels() {
+        let connector = TwilioConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let valid = ["low", "medium", "high", "critical"];
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            let risk = op["risk_level"].as_str().unwrap();
+            assert!(valid.contains(&risk), "{id} has invalid risk_level: {risk}");
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_valid_safety_tiers() {
+        let connector = TwilioConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let valid = ["safe", "risky", "dangerous"];
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            let tier = op["safety_tier"].as_str().unwrap();
+            assert!(valid.contains(&tier), "{id} has invalid safety_tier: {tier}");
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_ai_hints_have_when_to_use() {
+        let connector = TwilioConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            let hints = &op["ai_hints"];
+            assert!(
+                hints.get("when_to_use").is_some(),
+                "{id} ai_hints missing when_to_use"
+            );
+            assert!(
+                !hints["when_to_use"].as_str().unwrap().is_empty(),
+                "{id} ai_hints has empty when_to_use"
+            );
+        }
+    }
+
+    // ── Capability mapping tests ─────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_all_capabilities_start_with_twilio() {
+        let connector = TwilioConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            let cap = op["capability"].as_str().unwrap();
+            assert!(
+                cap.starts_with("twilio."),
+                "{id} capability '{cap}' should start with 'twilio.'"
+            );
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_read_ops_use_read_capability() {
+        let connector = TwilioConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let read_ops = [
+            "twilio.get_message",
+            "twilio.list_messages",
+            "twilio.get_call",
+            "twilio.list_recordings",
+            "twilio.download_recording",
+            "twilio.download_media",
+            "twilio.get_account",
+            "twilio.list_phone_numbers",
+        ];
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            if read_ops.contains(&id) {
+                assert_eq!(
+                    op["capability"].as_str().unwrap(),
+                    "twilio.read",
+                    "{id} should use twilio.read capability"
+                );
+            }
+        }
+    }
+
+    // ── Safety tier tests ────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_read_ops_are_safe() {
+        let connector = TwilioConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let safe_ops = [
+            "twilio.get_message",
+            "twilio.list_messages",
+            "twilio.get_call",
+            "twilio.list_recordings",
+            "twilio.download_media",
+            "twilio.get_account",
+            "twilio.list_phone_numbers",
+        ];
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            if safe_ops.contains(&id) {
+                assert_eq!(
+                    op["safety_tier"].as_str().unwrap(),
+                    "safe",
+                    "{id} should be safe"
+                );
+            }
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_send_message_is_risky() {
+        let connector = TwilioConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let op = ops.iter().find(|o| o["id"] == "twilio.send_message").unwrap();
+        assert_eq!(op["safety_tier"].as_str().unwrap(), "risky");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_create_call_is_dangerous() {
+        let connector = TwilioConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let op = ops.iter().find(|o| o["id"] == "twilio.create_call").unwrap();
+        assert_eq!(op["safety_tier"].as_str().unwrap(), "dangerous");
+    }
+
+    // ── Risk level tests ─────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_send_message_is_high_risk() {
+        let connector = TwilioConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let op = ops.iter().find(|o| o["id"] == "twilio.send_message").unwrap();
+        assert_eq!(op["risk_level"].as_str().unwrap(), "high");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_create_call_is_high_risk() {
+        let connector = TwilioConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let op = ops.iter().find(|o| o["id"] == "twilio.create_call").unwrap();
+        assert_eq!(op["risk_level"].as_str().unwrap(), "high");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_read_ops_are_low_risk() {
+        let connector = TwilioConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let low_risk_ops = [
+            "twilio.get_message",
+            "twilio.list_messages",
+            "twilio.get_call",
+            "twilio.list_recordings",
+            "twilio.download_media",
+            "twilio.get_account",
+            "twilio.list_phone_numbers",
+        ];
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            if low_risk_ops.contains(&id) {
+                assert_eq!(
+                    op["risk_level"].as_str().unwrap(),
+                    "low",
+                    "{id} should be low risk"
+                );
+            }
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_download_recording_is_medium_risk() {
+        let connector = TwilioConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let op = ops
+            .iter()
+            .find(|o| o["id"] == "twilio.download_recording")
+            .unwrap();
+        assert_eq!(op["risk_level"].as_str().unwrap(), "medium");
+    }
+
+    // ── Idempotency tests ────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_read_ops_have_strict_idempotency() {
+        let connector = TwilioConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let strict_ops = [
+            "twilio.get_message",
+            "twilio.list_messages",
+            "twilio.get_call",
+            "twilio.list_recordings",
+            "twilio.download_recording",
+            "twilio.download_media",
+            "twilio.get_account",
+            "twilio.list_phone_numbers",
+        ];
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            if strict_ops.contains(&id) {
+                assert_eq!(
+                    op["idempotency"].as_str().unwrap(),
+                    "strict",
+                    "{id} should have strict idempotency"
+                );
+            }
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_write_ops_have_none_idempotency() {
+        let connector = TwilioConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        for id_str in &["twilio.send_message", "twilio.create_call"] {
+            let op = ops.iter().find(|o| o["id"] == *id_str).unwrap();
+            assert_eq!(
+                op["idempotency"].as_str().unwrap(),
+                "none",
+                "{id_str} should have none idempotency"
+            );
+        }
+    }
+
+    // ── Required fields in schemas ───────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_required_fields_in_schemas() {
+        let connector = TwilioConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        let checks: &[(&str, &[&str])] = &[
+            ("twilio.send_message", &["to", "from", "body"]),
+            ("twilio.get_message", &["message_sid"]),
+            ("twilio.create_call", &["to", "from", "url"]),
+            ("twilio.get_call", &["call_sid"]),
+            ("twilio.download_recording", &["recording_sid"]),
+            ("twilio.download_media", &["message_sid", "media_sid"]),
+        ];
+
+        for (op_id, expected) in checks {
+            let op = ops.iter().find(|o| o["id"] == *op_id).unwrap();
+            let required = op["input_schema"]["required"]
+                .as_array()
+                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
+                .unwrap_or_default();
+
+            for field in *expected {
+                assert!(
+                    required.contains(field),
+                    "{op_id} should require '{field}'"
+                );
+            }
+        }
+    }
+
+    // ── Helper and lifecycle tests ───────────────────────────────
+
+    #[test]
+    fn test_require_str_present() {
+        let input = json!({ "to": "+15551234567" });
+        assert_eq!(require_str(&input, "to").unwrap(), "+15551234567");
+    }
+
+    #[test]
+    fn test_require_str_missing() {
+        let input = json!({});
+        let result = require_str(&input, "to");
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn test_require_str_not_string() {
+        let input = json!({ "to": 42 });
+        let result = require_str(&input, "to");
+        assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_shutdown() {
+        let connector = TwilioConnector::new();
+        let result = connector.handle_shutdown(json!({})).await.unwrap();
+        assert_eq!(result["status"], "shutdown");
+    }
+
+    #[test]
+    fn test_default_creates_new_connector() {
+        let _connector: TwilioConnector = Default::default();
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_missing_account_sid() {
+        let mut connector = TwilioConnector::new();
+        let result = connector
+            .handle_configure(json!({ "auth_token": "test" }))
+            .await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), FcpError::InvalidRequest { .. }));
+    }
+
     #[test]
     fn manifest_interface_hash_is_deterministic() {
         let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("manifest.toml");

@@ -2462,6 +2462,8 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn simulate_returns_allowed() {
         let connector = GmailConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+        let token = generate_valid_token(&signing_key, "gmail.get_message");
         let result = connector
             .handle_simulate(json!({
                 "type": "simulate",
@@ -2470,7 +2472,7 @@ mod tests {
                 "operation": "gmail.get_message",
                 "zone_id": "z:work",
                 "input": {"message_id": "msg-1"},
-                "capability_token": {"raw": vec![0u8; 0]}
+                "capability_token": token
             }))
             .await
             .unwrap();
@@ -2522,10 +2524,12 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn invoke_missing_operation_field() {
         let connector = GmailConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+        let token = generate_valid_token(&signing_key, "gmail.get_message");
         let result = connector
             .handle_invoke(json!({
                 "input": {},
-                "capability_token": {"raw": vec![0u8; 0]}
+                "capability_token": token
             }))
             .await;
 
@@ -2566,11 +2570,14 @@ mod tests {
                 .with_base_url("http://localhost:9999"),
         );
 
+        let signing_key = Ed25519SigningKey::generate();
+        let token = generate_valid_token(&signing_key, "gmail.get_message");
+
         let result = connector
             .handle_invoke(json!({
                 "operation": "gmail.get_message",
                 "input": {"message_id": "m1"},
-                "capability_token": {"raw": vec![0u8; 0]}
+                "capability_token": token
             }))
             .await;
 

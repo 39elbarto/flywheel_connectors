@@ -1510,4 +1510,453 @@ mod tests {
             result["status"]
         );
     }
+
+    // ── Schema completeness tests ────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_all_ops_have_input_and_output_schemas() {
+        let connector = GoogleCalendarConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap_or("<missing>");
+            assert!(
+                op.get("input_schema").is_some(),
+                "{id} missing input_schema"
+            );
+            assert!(
+                op.get("output_schema").is_some(),
+                "{id} missing output_schema"
+            );
+            assert_eq!(
+                op["input_schema"]["type"].as_str(),
+                Some("object"),
+                "{id} input_schema type should be object"
+            );
+            assert_eq!(
+                op["output_schema"]["type"].as_str(),
+                Some("object"),
+                "{id} output_schema type should be object"
+            );
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_is_deterministic() {
+        let c1 = GoogleCalendarConnector::new();
+        let c2 = GoogleCalendarConnector::new();
+        let r1 = c1.handle_introspect().await.unwrap();
+        let r2 = c2.handle_introspect().await.unwrap();
+
+        let ids1: Vec<&str> = r1["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["id"].as_str().unwrap())
+            .collect();
+        let ids2: Vec<&str> = r2["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids1, ids2, "introspect should be deterministic");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_no_duplicate_operation_ids() {
+        let connector = GoogleCalendarConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        let mut seen = std::collections::HashSet::new();
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            assert!(seen.insert(id), "duplicate operation ID: {id}");
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_unknown_operation_rejected() {
+        let connector = GoogleCalendarConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        assert!(
+            !ops.iter()
+                .any(|o| o["id"].as_str() == Some("gcal.nonexistent")),
+            "unknown operation should not exist"
+        );
+    }
+
+    // ── Introspection metadata tests ─────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_all_ops_have_required_metadata() {
+        let connector = GoogleCalendarConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap_or("<missing>");
+            assert!(op.get("summary").is_some(), "{id} missing summary");
+            assert!(
+                !op["summary"].as_str().unwrap_or("").is_empty(),
+                "{id} has empty summary"
+            );
+            assert!(op.get("risk_level").is_some(), "{id} missing risk_level");
+            assert!(op.get("safety_tier").is_some(), "{id} missing safety_tier");
+            assert!(op.get("capability").is_some(), "{id} missing capability");
+            assert!(op.get("ai_hints").is_some(), "{id} missing ai_hints");
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_valid_risk_levels() {
+        let connector = GoogleCalendarConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        let valid = ["low", "medium", "high", "critical"];
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            let risk = op["risk_level"].as_str().unwrap();
+            assert!(valid.contains(&risk), "{id} has invalid risk_level: {risk}");
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_valid_safety_tiers() {
+        let connector = GoogleCalendarConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        let valid = ["safe", "risky", "dangerous"];
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            let tier = op["safety_tier"].as_str().unwrap();
+            assert!(
+                valid.contains(&tier),
+                "{id} has invalid safety_tier: {tier}"
+            );
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_ai_hints_have_when_to_use() {
+        let connector = GoogleCalendarConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            let hint = &op["ai_hints"];
+            let when = hint["when_to_use"].as_str().unwrap_or("");
+            assert!(!when.is_empty(), "{id} has empty ai_hints.when_to_use");
+        }
+    }
+
+    // ── Capability mapping tests ─────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_all_capabilities_start_with_gcal() {
+        let connector = GoogleCalendarConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            let cap = op["capability"].as_str().unwrap();
+            assert!(
+                cap.starts_with("gcal."),
+                "{id} capability should start with gcal.: {cap}"
+            );
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_read_ops_use_read_capabilities() {
+        let connector = GoogleCalendarConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        let read_ops = [
+            "gcal.list_calendars",
+            "gcal.get_calendar",
+            "gcal.get_event",
+            "gcal.list_events",
+            "gcal.freebusy",
+            "gcal.list_event_instances",
+            "gcal.sync_events",
+        ];
+
+        for op_id in &read_ops {
+            let op = ops
+                .iter()
+                .find(|o| o["id"].as_str() == Some(op_id))
+                .unwrap_or_else(|| panic!("missing {op_id}"));
+            let cap = op["capability"].as_str().unwrap();
+            assert!(
+                cap.contains(".read"),
+                "{op_id} should have read capability, got {cap}"
+            );
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_write_ops_use_write_capabilities() {
+        let connector = GoogleCalendarConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        let write_ops = ["gcal.create_event", "gcal.update_event", "gcal.quick_add"];
+
+        for op_id in &write_ops {
+            let op = ops
+                .iter()
+                .find(|o| o["id"].as_str() == Some(op_id))
+                .unwrap_or_else(|| panic!("missing {op_id}"));
+            let cap = op["capability"].as_str().unwrap();
+            assert!(
+                cap.contains(".write"),
+                "{op_id} should have write capability, got {cap}"
+            );
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_delete_op_uses_delete_capability() {
+        let connector = GoogleCalendarConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        let op = ops
+            .iter()
+            .find(|o| o["id"].as_str() == Some("gcal.delete_event"))
+            .expect("delete_event op");
+        let cap = op["capability"].as_str().unwrap();
+        assert!(
+            cap.contains(".delete") || cap.contains(".write"),
+            "delete_event should have delete/write capability, got {cap}"
+        );
+    }
+
+    // ── Safety tier verification ─────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_read_ops_are_safe() {
+        let connector = GoogleCalendarConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        let safe_ops = [
+            "gcal.list_calendars",
+            "gcal.get_calendar",
+            "gcal.get_event",
+            "gcal.list_events",
+            "gcal.freebusy",
+            "gcal.list_event_instances",
+            "gcal.sync_events",
+        ];
+
+        for op_id in &safe_ops {
+            let op = ops
+                .iter()
+                .find(|o| o["id"].as_str() == Some(op_id))
+                .unwrap_or_else(|| panic!("missing {op_id}"));
+            assert_eq!(
+                op["safety_tier"].as_str(),
+                Some("safe"),
+                "{op_id} should be safe"
+            );
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_write_ops_are_risky() {
+        let connector = GoogleCalendarConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        let risky_ops = [
+            "gcal.create_event",
+            "gcal.update_event",
+            "gcal.delete_event",
+            "gcal.quick_add",
+        ];
+
+        for op_id in &risky_ops {
+            let op = ops
+                .iter()
+                .find(|o| o["id"].as_str() == Some(op_id))
+                .unwrap_or_else(|| panic!("missing {op_id}"));
+            assert_eq!(
+                op["safety_tier"].as_str(),
+                Some("risky"),
+                "{op_id} should be risky"
+            );
+        }
+    }
+
+    // ── Required field validation ────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_required_fields_in_schemas() {
+        let connector = GoogleCalendarConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        let expected: &[(&str, &[&str])] = &[
+            ("gcal.get_event", &["calendar_id", "event_id"]),
+            ("gcal.list_events", &["calendar_id"]),
+            (
+                "gcal.create_event",
+                &["calendar_id", "summary", "start", "end"],
+            ),
+            ("gcal.update_event", &["calendar_id", "event_id"]),
+            ("gcal.delete_event", &["calendar_id", "event_id"]),
+            ("gcal.quick_add", &["calendar_id", "text"]),
+            ("gcal.freebusy", &["time_min", "time_max", "items"]),
+            ("gcal.list_event_instances", &["calendar_id", "event_id"]),
+            ("gcal.get_calendar", &["calendar_id"]),
+            ("gcal.sync_events", &["calendar_id"]),
+        ];
+
+        for (op_id, required_fields) in expected {
+            let op = ops
+                .iter()
+                .find(|o| o["id"].as_str() == Some(op_id))
+                .unwrap_or_else(|| panic!("missing {op_id}"));
+            let schema = &op["input_schema"];
+            let req = schema["required"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{op_id} missing required array"));
+            for field in *required_fields {
+                assert!(
+                    req.iter().any(|r| r.as_str() == Some(field)),
+                    "{op_id} missing required field '{field}'"
+                );
+            }
+        }
+    }
+
+    // ── Idempotency class tests ──────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_read_ops_have_strict_idempotency() {
+        let connector = GoogleCalendarConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        let strict_ops = [
+            "gcal.list_calendars",
+            "gcal.get_calendar",
+            "gcal.get_event",
+            "gcal.list_events",
+            "gcal.freebusy",
+            "gcal.list_event_instances",
+            "gcal.sync_events",
+        ];
+
+        for op_id in &strict_ops {
+            let op = ops
+                .iter()
+                .find(|o| o["id"].as_str() == Some(op_id))
+                .unwrap_or_else(|| panic!("missing {op_id}"));
+            assert_eq!(
+                op["idempotency"].as_str(),
+                Some("strict"),
+                "{op_id} should have strict idempotency"
+            );
+        }
+    }
+
+    // ── Event capabilities tests ─────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_event_caps() {
+        let connector = GoogleCalendarConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let event_caps = &result["event_caps"];
+        assert!(
+            event_caps.get("streaming").is_some() || event_caps.is_null(),
+            "event_caps should be present or absent entirely"
+        );
+    }
+
+    // ── Shutdown test ────────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_shutdown() {
+        let connector = GoogleCalendarConnector::new();
+        let result = connector.handle_shutdown(json!({})).await.unwrap();
+        assert_eq!(result["status"].as_str(), Some("shutdown"));
+    }
+
+    // ── Risk level classification tests ──────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_delete_is_high_risk() {
+        let connector = GoogleCalendarConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        let op = ops
+            .iter()
+            .find(|o| o["id"].as_str() == Some("gcal.delete_event"))
+            .expect("delete_event op");
+        assert_eq!(
+            op["risk_level"].as_str(),
+            Some("high"),
+            "delete_event should be high risk"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_create_update_are_medium_risk() {
+        let connector = GoogleCalendarConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        for op_id in &["gcal.create_event", "gcal.update_event", "gcal.quick_add"] {
+            let op = ops
+                .iter()
+                .find(|o| o["id"].as_str() == Some(op_id))
+                .unwrap_or_else(|| panic!("missing {op_id}"));
+            assert_eq!(
+                op["risk_level"].as_str(),
+                Some("medium"),
+                "{op_id} should be medium risk"
+            );
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_read_ops_are_low_risk() {
+        let connector = GoogleCalendarConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        let low_risk_ops = [
+            "gcal.list_calendars",
+            "gcal.get_calendar",
+            "gcal.get_event",
+            "gcal.list_events",
+            "gcal.freebusy",
+            "gcal.list_event_instances",
+            "gcal.sync_events",
+        ];
+
+        for op_id in &low_risk_ops {
+            let op = ops
+                .iter()
+                .find(|o| o["id"].as_str() == Some(op_id))
+                .unwrap_or_else(|| panic!("missing {op_id}"));
+            assert_eq!(
+                op["risk_level"].as_str(),
+                Some("low"),
+                "{op_id} should be low risk"
+            );
+        }
+    }
 }

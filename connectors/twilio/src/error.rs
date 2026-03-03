@@ -105,3 +105,200 @@ impl TwilioError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fcp_core::FcpError;
+
+    #[test]
+    fn test_api_401_maps_to_unauthorized() {
+        let err = TwilioError::Api {
+            message: "bad creds".into(),
+            status_code: Some(401),
+            error_code: None,
+        };
+        let fcp = err.to_fcp_error();
+        assert!(matches!(fcp, FcpError::Unauthorized { code: 2001, .. }));
+    }
+
+    #[test]
+    fn test_api_403_maps_to_unauthorized() {
+        let err = TwilioError::Api {
+            message: "forbidden".into(),
+            status_code: Some(403),
+            error_code: None,
+        };
+        let fcp = err.to_fcp_error();
+        assert!(matches!(fcp, FcpError::Unauthorized { code: 2001, .. }));
+    }
+
+    #[test]
+    fn test_api_429_maps_to_rate_limited() {
+        let err = TwilioError::Api {
+            message: "rate limited".into(),
+            status_code: Some(429),
+            error_code: None,
+        };
+        let fcp = err.to_fcp_error();
+        assert!(matches!(
+            fcp,
+            FcpError::RateLimited {
+                retry_after_ms: 60_000,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_api_500_maps_to_retryable_external() {
+        let err = TwilioError::Api {
+            message: "server error".into(),
+            status_code: Some(500),
+            error_code: None,
+        };
+        let fcp = err.to_fcp_error();
+        assert!(matches!(
+            fcp,
+            FcpError::External {
+                retryable: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_api_502_503_are_retryable() {
+        for code in [502, 503] {
+            let err = TwilioError::Api {
+                message: format!("error {code}"),
+                status_code: Some(code),
+                error_code: None,
+            };
+            assert!(err.is_retryable(), "API {code} should be retryable");
+            let fcp = err.to_fcp_error();
+            assert!(
+                matches!(fcp, FcpError::External { retryable: true, .. }),
+                "API {code} should map to retryable External"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rate_limited_variant_maps_correctly() {
+        let err = TwilioError::RateLimited {
+            retry_after_ms: 5000,
+        };
+        let fcp = err.to_fcp_error();
+        assert!(matches!(
+            fcp,
+            FcpError::RateLimited {
+                retry_after_ms: 5000,
+                violation: None
+            }
+        ));
+    }
+
+    #[test]
+    fn test_unauthorized_variant_maps_to_fcp_unauthorized() {
+        let err = TwilioError::Unauthorized;
+        let fcp = err.to_fcp_error();
+        assert!(matches!(fcp, FcpError::Unauthorized { code: 2001, .. }));
+    }
+
+    #[test]
+    fn test_not_found_maps_to_resource_not_found() {
+        let err = TwilioError::NotFound {
+            resource: "message:SM123".into(),
+        };
+        let fcp = err.to_fcp_error();
+        assert!(
+            matches!(fcp, FcpError::ResourceNotFound { resource } if resource.contains("SM123"))
+        );
+    }
+
+    #[test]
+    fn test_json_error_maps_to_internal() {
+        let json_err: serde_json::Error =
+            serde_json::from_str::<serde_json::Value>("invalid").unwrap_err();
+        let err = TwilioError::Json(json_err);
+        let fcp = err.to_fcp_error();
+        assert!(
+            matches!(fcp, FcpError::Internal { message } if message.contains("JSON error"))
+        );
+    }
+
+    #[test]
+    fn test_retryable_checks() {
+        // Retryable
+        assert!(TwilioError::RateLimited { retry_after_ms: 1 }.is_retryable());
+        assert!(TwilioError::Api {
+            message: String::new(),
+            status_code: Some(429),
+            error_code: None,
+        }
+        .is_retryable());
+        assert!(TwilioError::Api {
+            message: String::new(),
+            status_code: Some(500),
+            error_code: None,
+        }
+        .is_retryable());
+        assert!(TwilioError::Api {
+            message: String::new(),
+            status_code: Some(503),
+            error_code: None,
+        }
+        .is_retryable());
+
+        // Not retryable
+        assert!(!TwilioError::Unauthorized.is_retryable());
+        assert!(!TwilioError::NotFound {
+            resource: "x".into()
+        }
+        .is_retryable());
+        assert!(!TwilioError::Api {
+            message: String::new(),
+            status_code: Some(401),
+            error_code: None,
+        }
+        .is_retryable());
+        assert!(!TwilioError::Api {
+            message: String::new(),
+            status_code: Some(404),
+            error_code: None,
+        }
+        .is_retryable());
+    }
+
+    #[test]
+    fn test_retry_after_extraction() {
+        assert_eq!(
+            TwilioError::RateLimited {
+                retry_after_ms: 3000
+            }
+            .retry_after()
+            .map(|d| d.as_millis()),
+            Some(3000)
+        );
+        assert!(TwilioError::Unauthorized.retry_after().is_none());
+        assert!(TwilioError::Api {
+            message: String::new(),
+            status_code: Some(429),
+            error_code: None,
+        }
+        .retry_after()
+        .is_none());
+    }
+
+    #[test]
+    fn test_api_no_status_maps_to_external() {
+        let err = TwilioError::Api {
+            message: "unknown".into(),
+            status_code: None,
+            error_code: Some("20003".into()),
+        };
+        let fcp = err.to_fcp_error();
+        assert!(matches!(fcp, FcpError::External { .. }));
+    }
+}

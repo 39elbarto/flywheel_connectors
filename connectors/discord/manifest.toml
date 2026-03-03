@@ -20,9 +20,9 @@ archetypes = [
 format = "native"
 
 [connector.state]
-model = "stateless"
+model = "singleton_writer"
 state_schema_version = "1"
-migration_hint = "init"
+migration_hint = "Persists gateway session_id/sequence resume state in zone_dir and enforces singleton-writer gateway lease fencing."
 
 [zones]
 home = "z:work"
@@ -39,12 +39,12 @@ required = [
     "network.dns",
     "network.egress",
     "network.tls.sni",
+    "storage.state",
 ]
 optional = []
 forbidden = [
     "system.exec",
     "network.listen",
-    "storage.state",
 ]
 
 # -----------------------------------------------------------------------------

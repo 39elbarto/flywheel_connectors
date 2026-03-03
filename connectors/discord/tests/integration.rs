@@ -15,6 +15,7 @@ use chrono::{Duration, Utc};
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
 use serde_json::json;
+use uuid::Uuid;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{header, method, path},
@@ -52,6 +53,14 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> fcp_core:
     fcp_core::CapabilityToken { raw: cose }
 }
 
+fn unique_zone_dir(label: &str) -> String {
+    std::env::temp_dir()
+        .join("fcp-discord-tests")
+        .join(format!("{label}-{}", Uuid::new_v4()))
+        .to_string_lossy()
+        .into_owned()
+}
+
 async fn mock_current_user_ok(mock_server: &MockServer, token: &str) {
     Mock::given(method("GET"))
         .and(path("/users/@me"))
@@ -80,11 +89,13 @@ async fn setup_configure(connector: &mut DiscordConnector, base_url: &str) {
 async fn setup_handshake(connector: &mut DiscordConnector, caps: &[&str]) -> Ed25519SigningKey {
     let signing_key = Ed25519SigningKey::generate();
     let verifying_key = signing_key.verifying_key();
+    let zone_dir = unique_zone_dir("integration-handshake");
 
     connector
         .handle_handshake(json!({
             "protocol_version": "1.0.0",
             "zone": "z:work",
+            "zone_dir": zone_dir,
             "host_public_key": verifying_key.to_bytes(),
             "nonce": vec![0u8; 32],
             "capabilities_requested": caps

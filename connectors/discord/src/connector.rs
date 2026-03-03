@@ -2,8 +2,12 @@
 //!
 //! Implements handler methods for FCP protocol with Discord-specific operations.
 
-use std::sync::Arc;
-use std::time::Instant;
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
 use fcp_async_core::channel::{broadcast, watch};
 use fcp_core::{
@@ -22,13 +26,14 @@ use fcp_sdk::{
     validate_input_with_limits, validate_output_with_limits,
 };
 use reqwest::Url;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::{
     api::DiscordApiClient,
     config::DiscordConfig,
-    gateway::{GatewayConnection, GatewayEvent},
+    gateway::{DISCORD_GATEWAY_STATE_FILE, GatewayConnection, GatewayEvent},
     types::Embed,
 };
 
@@ -40,7 +45,9 @@ pub struct DiscordConnector {
     gateway: Option<Arc<GatewayConnection>>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
+    zone_dir: Option<PathBuf>,
     bot_user_id: Option<String>,
+    gateway_lease: Option<DiscordGatewayLease>,
 
     // Event broadcast
     event_tx: broadcast::Sender<FcpResult<EventEnvelope>>,
@@ -48,6 +55,7 @@ pub struct DiscordConnector {
     // Gateway task
     gateway_task: Option<fcp_async_core::task::JoinHandle<()>>,
     gateway_shutdown_tx: Option<watch::Sender<bool>>,
+    gateway_lease_task: Option<fcp_async_core::task::JoinHandle<()>>,
 
     // Metrics
     start_time: Instant,
@@ -57,6 +65,9 @@ const INTENT_GUILDS: u64 = 1 << 0;
 const INTENT_GUILD_MESSAGES: u64 = 1 << 9;
 const INTENT_DIRECT_MESSAGES: u64 = 1 << 12;
 const INTENT_MESSAGE_CONTENT: u64 = 1 << 15;
+const DISCORD_GATEWAY_LEASE_FILE: &str = "discord_gateway_lease.json";
+const DISCORD_GATEWAY_LEASE_TTL_SECONDS: u64 = 120;
+const DISCORD_GATEWAY_LEASE_RENEW_INTERVAL_SECONDS: u64 = 30;
 
 const REQUIRED_GATEWAY_INTENTS: [(&str, u64); 4] = [
     ("GUILDS", INTENT_GUILDS),
@@ -64,6 +75,174 @@ const REQUIRED_GATEWAY_INTENTS: [(&str, u64); 4] = [
     ("DIRECT_MESSAGES", INTENT_DIRECT_MESSAGES),
     ("MESSAGE_CONTENT", INTENT_MESSAGE_CONTENT),
 ];
+
+fn current_unix_timestamp_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
+}
+
+fn write_json_file_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let tmp_path = path.with_extension(format!("tmp-{}", std::process::id()));
+    let payload = serde_json::to_vec(value).map_err(io::Error::other)?;
+    fs::write(&tmp_path, payload)?;
+    fs::rename(&tmp_path, path)?;
+    Ok(())
+}
+
+fn read_json_file_if_exists<T>(path: &Path) -> io::Result<Option<T>>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    match fs::read(path) {
+        Ok(bytes) => {
+            let value = serde_json::from_slice::<T>(&bytes).map_err(io::Error::other)?;
+            Ok(Some(value))
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DiscordGatewayLeaseRecord {
+    holder_instance_id: String,
+    lease_seq: u64,
+    updated_at: u64,
+    expires_at: u64,
+}
+
+#[derive(Debug, Clone)]
+struct DiscordGatewayLease {
+    path: PathBuf,
+    holder_instance_id: String,
+    lease_seq: u64,
+    ttl_seconds: u64,
+}
+
+impl DiscordGatewayLease {
+    fn acquire(path: PathBuf, holder_instance_id: String, ttl_seconds: u64) -> FcpResult<Self> {
+        let ttl_seconds = ttl_seconds.max(DISCORD_GATEWAY_LEASE_RENEW_INTERVAL_SECONDS);
+        let now = current_unix_timestamp_secs();
+        let previous =
+            read_json_file_if_exists::<DiscordGatewayLeaseRecord>(&path).map_err(|err| {
+                FcpError::Internal {
+                    message: format!(
+                        "Failed to read Discord gateway lease file '{}': {err}",
+                        path.display()
+                    ),
+                }
+            })?;
+
+        if let Some(record) = previous.as_ref()
+            && record.expires_at > now
+            && record.holder_instance_id != holder_instance_id
+        {
+            return Err(FcpError::Conflict {
+                message: format!(
+                    "discord gateway lease held by '{}' (lease_seq={}) until {}",
+                    record.holder_instance_id, record.lease_seq, record.expires_at
+                ),
+            });
+        }
+
+        let lease_seq = previous
+            .map(|record| record.lease_seq.saturating_add(1))
+            .unwrap_or(1);
+
+        let record = DiscordGatewayLeaseRecord {
+            holder_instance_id: holder_instance_id.clone(),
+            lease_seq,
+            updated_at: now,
+            expires_at: now.saturating_add(ttl_seconds),
+        };
+        write_json_file_atomic(&path, &record).map_err(|err| FcpError::Internal {
+            message: format!(
+                "Failed to persist Discord gateway lease file '{}': {err}",
+                path.display()
+            ),
+        })?;
+
+        Ok(Self {
+            path,
+            holder_instance_id,
+            lease_seq,
+            ttl_seconds,
+        })
+    }
+
+    fn renew(&self) -> FcpResult<()> {
+        let Some(mut record) = read_json_file_if_exists::<DiscordGatewayLeaseRecord>(&self.path)
+            .map_err(|err| FcpError::Internal {
+                message: format!(
+                    "Failed to read Discord gateway lease file '{}': {err}",
+                    self.path.display()
+                ),
+            })?
+        else {
+            return Err(FcpError::Conflict {
+                message: "discord gateway lease file is missing".into(),
+            });
+        };
+
+        if record.holder_instance_id != self.holder_instance_id
+            || record.lease_seq != self.lease_seq
+        {
+            return Err(FcpError::Conflict {
+                message: format!(
+                    "discord gateway lease fencing violation (expected holder='{}' lease_seq={}, found holder='{}' lease_seq={})",
+                    self.holder_instance_id,
+                    self.lease_seq,
+                    record.holder_instance_id,
+                    record.lease_seq
+                ),
+            });
+        }
+
+        let now = current_unix_timestamp_secs();
+        record.updated_at = now;
+        record.expires_at = now.saturating_add(self.ttl_seconds);
+        write_json_file_atomic(&self.path, &record).map_err(|err| FcpError::Internal {
+            message: format!(
+                "Failed to renew Discord gateway lease file '{}': {err}",
+                self.path.display()
+            ),
+        })?;
+        Ok(())
+    }
+
+    fn release(&self) -> FcpResult<()> {
+        let existing =
+            read_json_file_if_exists::<DiscordGatewayLeaseRecord>(&self.path).map_err(|err| {
+                FcpError::Internal {
+                    message: format!(
+                        "Failed to read Discord gateway lease file '{}': {err}",
+                        self.path.display()
+                    ),
+                }
+            })?;
+
+        if let Some(record) = existing
+            && record.holder_instance_id == self.holder_instance_id
+            && record.lease_seq == self.lease_seq
+            && let Err(err) = fs::remove_file(&self.path)
+            && err.kind() != io::ErrorKind::NotFound
+        {
+            return Err(FcpError::Internal {
+                message: format!(
+                    "Failed to release Discord gateway lease file '{}': {err}",
+                    self.path.display()
+                ),
+            });
+        }
+
+        Ok(())
+    }
+}
 
 impl DiscordConnector {
     /// Create a new Discord connector.
@@ -78,10 +257,13 @@ impl DiscordConnector {
             gateway: None,
             verifier: None,
             session_id: None,
+            zone_dir: None,
             bot_user_id: None,
+            gateway_lease: None,
             event_tx,
             gateway_task: None,
             gateway_shutdown_tx: None,
+            gateway_lease_task: None,
             start_time: Instant::now(),
         }
     }
@@ -172,6 +354,19 @@ impl DiscordConnector {
                 code: 1003,
                 message: format!("Invalid handshake request: {e}"),
             })?;
+
+        let zone_dir = req.zone_dir.clone().ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "zone_dir is required for Discord gateway resume-state and singleton-writer lease persistence".into(),
+        })?;
+        let zone_dir = PathBuf::from(zone_dir);
+        fs::create_dir_all(&zone_dir).map_err(|err| FcpError::Internal {
+            message: format!(
+                "Failed to prepare Discord zone_dir '{}': {err}",
+                zone_dir.display()
+            ),
+        })?;
+        self.zone_dir = Some(zone_dir);
 
         // Verify bot is configured
         if self.api_client.is_none() {
@@ -1503,8 +1698,18 @@ impl DiscordConnector {
             let _ = shutdown_tx.send(true);
         }
 
+        if let Some(task) = self.gateway_lease_task.take() {
+            task.abort();
+        }
+
         if let Some(task) = self.gateway_task.take() {
             task.abort();
+        }
+
+        if let Some(lease) = self.gateway_lease.take()
+            && let Err(err) = lease.release()
+        {
+            warn!(error = %err, "Failed to release Discord gateway lease");
         }
 
         Ok(json!({ "status": "shutdown" }))
@@ -1519,15 +1724,42 @@ impl DiscordConnector {
         }
         self.gateway_task = None;
         self.gateway_shutdown_tx = None;
+        if let Some(task) = self.gateway_lease_task.take() {
+            task.abort();
+        }
+        if let Some(lease) = self.gateway_lease.take()
+            && let Err(err) = lease.release()
+        {
+            warn!(
+                error = %err,
+                "Failed to release previous Discord gateway lease before reconnect"
+            );
+        }
 
         let gateway = self.gateway.clone().ok_or(FcpError::NotConfigured)?;
+        let zone_dir = self.zone_dir.clone().ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message:
+                "Handshake zone_dir is required before Discord gateway streaming can start".into(),
+        })?;
+        let state_path = zone_dir.join(DISCORD_GATEWAY_STATE_FILE);
+        let lease_path = zone_dir.join(DISCORD_GATEWAY_LEASE_FILE);
+        let lease = DiscordGatewayLease::acquire(
+            lease_path,
+            self.base.instance_id.to_string(),
+            DISCORD_GATEWAY_LEASE_TTL_SECONDS,
+        )?;
+        self.gateway_lease = Some(lease.clone());
+
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         self.gateway_shutdown_tx = Some(shutdown_tx.clone());
+        let mut lease_shutdown_rx = shutdown_rx.clone();
 
         let event_tx = self.event_tx.clone();
         let connector_id = self.base.id.clone();
         let instance_id = self.base.instance_id.clone();
         let base = self.base.clone();
+        let lease_shutdown_tx = shutdown_tx.clone();
 
         let mut supervisor = StreamingSupervisor::new(
             SupervisorConfig {
@@ -1537,15 +1769,43 @@ impl DiscordConnector {
             InMemoryStreamingSession::new(),
         );
 
+        let lease_renew_task = fcp_async_core::task::spawn(async move {
+            let mut renew_timer = fcp_async_core::time::interval(Duration::from_secs(
+                DISCORD_GATEWAY_LEASE_RENEW_INTERVAL_SECONDS,
+            ));
+            renew_timer.tick().await;
+            loop {
+                fcp_async_core::select! {
+                    _ = renew_timer.tick() => {
+                        if let Err(err) = lease.renew() {
+                            warn!(
+                                error = %err,
+                                "Discord gateway lease renewal failed; stopping gateway"
+                            );
+                            let _ = lease_shutdown_tx.send(true);
+                            break;
+                        }
+                    }
+                    changed = lease_shutdown_rx.changed() => {
+                        if changed.is_err() || *lease_shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        self.gateway_lease_task = Some(lease_renew_task);
+
         let task = fcp_async_core::task::spawn(async move {
             let outcome = supervisor
                 .run(
                     shutdown_rx,
                     |session| {
                         let gateway = Arc::clone(&gateway);
+                        let state_path = state_path.clone();
                         async move {
                             let stream = gateway
-                                .connect_once()
+                                .connect_once_with_state_path(Some(state_path.clone()))
                                 .await
                                 .map_err(|e| -> StreamingError { Box::new(e) })?;
                             let join_handle = fcp_async_core::task::spawn(async move {
@@ -1586,6 +1846,7 @@ impl DiscordConnector {
                 )
                 .await;
 
+            let _ = shutdown_tx.send(true);
             tracing::info!(?outcome, "Discord gateway supervisor stopped");
         });
 
@@ -1834,6 +2095,7 @@ mod tests {
     use fcp_core::{CapabilityToken as CapabilityArtifact, ConnectorId, InstanceId};
     use fcp_crypto::cose::CapabilityTokenBuilder as CapabilityBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
+    use uuid::Uuid;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{header, method, path},
@@ -1881,6 +2143,14 @@ mod tests {
                 | INTENT_MESSAGE_CONTENT,
             ..Default::default()
         }
+    }
+
+    fn unique_zone_dir(label: &str) -> String {
+        std::env::temp_dir()
+            .join("fcp-discord-tests")
+            .join(format!("{label}-{}", Uuid::new_v4()))
+            .to_string_lossy()
+            .into_owned()
     }
 
     #[fcp_async_core::runtime::test]
@@ -1952,6 +2222,60 @@ mod tests {
         assert_eq!(result["provisioning"]["token_ok"], true);
         assert_eq!(result["provisioning"]["intents_ok"], true);
         assert_eq!(result["provisioning"]["network_ok"], true);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_handshake_requires_zone_dir_for_gateway_state() {
+        let mock_server = MockServer::start().await;
+        mock_current_user_ok(&mock_server, "test_token").await;
+
+        let mut connector = DiscordConnector::new();
+        connector
+            .handle_configure(json!({
+                "bot_credential": "test_token",
+                "api_url": mock_server.uri(),
+                "intents": INTENT_GUILDS
+                    | INTENT_GUILD_MESSAGES
+                    | INTENT_DIRECT_MESSAGES
+                    | INTENT_MESSAGE_CONTENT
+            }))
+            .await
+            .expect("configure should succeed");
+
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let result = connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["discord.read"]
+            }))
+            .await;
+
+        assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+    }
+
+    #[test]
+    fn test_gateway_lease_fences_second_holder() {
+        let zone_dir = PathBuf::from(unique_zone_dir("lease-fence"));
+        std::fs::create_dir_all(&zone_dir).unwrap();
+        let lease_path = zone_dir.join(DISCORD_GATEWAY_LEASE_FILE);
+
+        let first = DiscordGatewayLease::acquire(
+            lease_path.clone(),
+            "holder-a".to_string(),
+            DISCORD_GATEWAY_LEASE_TTL_SECONDS,
+        )
+        .unwrap();
+        let second = DiscordGatewayLease::acquire(
+            lease_path,
+            "holder-b".to_string(),
+            DISCORD_GATEWAY_LEASE_TTL_SECONDS,
+        );
+        assert!(matches!(second, Err(FcpError::Conflict { .. })));
+        first.release().unwrap();
     }
 
     #[fcp_async_core::runtime::test]

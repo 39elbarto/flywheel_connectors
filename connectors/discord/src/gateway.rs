@@ -4,12 +4,17 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use std::time::Duration;
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use fcp_async_core::channel::mpsc;
 use fcp_async_core::net::TcpStream;
 use fcp_async_core::sync::Mutex;
 use futures_util::{SinkExt, StreamExt};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async, tungstenite::protocol::Message as WsMessage,
@@ -55,6 +60,7 @@ pub enum GatewayOpcode {
 }
 
 const GATEWAY_EVENT_BUFFER_CAPACITY: usize = 256;
+pub const DISCORD_GATEWAY_STATE_FILE: &str = "discord_gateway_state.json";
 
 #[cfg(test)]
 mod tests {
@@ -105,6 +111,16 @@ mod tests {
             intents: 513,
             ..Default::default()
         }
+    }
+
+    fn unique_state_path(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        std::env::temp_dir().join(format!(
+            "fcp-discord-gateway-{label}-{}-{nanos}.json",
+            std::process::id()
+        ))
     }
 
     #[test]
@@ -229,7 +245,7 @@ mod tests {
         let (event_tx, mut event_rx) = mpsc::channel(8);
         let mut state = GatewayState::default();
 
-        run_gateway_loop_inner(client_ws, test_config(ws_url), &event_tx, &mut state)
+        run_gateway_loop_inner(client_ws, test_config(ws_url), &event_tx, &mut state, None)
             .await
             .expect("gateway loop success");
 
@@ -292,7 +308,7 @@ mod tests {
             sequence: Some(7),
         };
 
-        run_gateway_loop_inner(client_ws, test_config(ws_url), &event_tx, &mut state)
+        run_gateway_loop_inner(client_ws, test_config(ws_url), &event_tx, &mut state, None)
             .await
             .expect("gateway loop success");
 
@@ -341,7 +357,7 @@ mod tests {
         let (event_tx, mut event_rx) = mpsc::channel(8);
         let mut state = GatewayState::default();
 
-        run_gateway_loop_inner(client_ws, test_config(ws_url), &event_tx, &mut state)
+        run_gateway_loop_inner(client_ws, test_config(ws_url), &event_tx, &mut state, None)
             .await
             .expect("gateway loop success");
 
@@ -386,7 +402,7 @@ mod tests {
             sequence: None,
         };
 
-        run_gateway_loop_inner(client_ws, test_config(ws_url), &event_tx, &mut state)
+        run_gateway_loop_inner(client_ws, test_config(ws_url), &event_tx, &mut state, None)
             .await
             .expect("gateway loop success");
 
@@ -440,6 +456,183 @@ mod tests {
 
         let _ = stream.join_handle.await.expect("gateway loop task join");
         server.await.expect("server task should complete");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn gateway_connection_persists_resume_state_to_disk() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let ws_url = format!("ws://{addr}");
+        let state_path = unique_state_path("persist");
+
+        let server = fcp_async_core::task::spawn(async move {
+            let (socket, _) = listener.accept().await.expect("accept client");
+            let mut ws = accept_async(socket).await.expect("accept websocket");
+            ws.send(hello_payload(1_000)).await.expect("send hello");
+            let _ = ws
+                .next()
+                .await
+                .expect("identify frame")
+                .expect("identify frame ok");
+
+            ws.send(dispatch_payload(
+                "READY",
+                1,
+                &json!({
+                    "v": 10,
+                    "user": { "id": "321", "username": "persist-bot" },
+                    "session_id": "sess-persist",
+                    "resume_gateway_url": "wss://gateway.discord.gg"
+                }),
+            ))
+            .await
+            .expect("send ready");
+            ws.send(dispatch_payload(
+                "MESSAGE_CREATE",
+                2,
+                &json!({ "id": "msg-persist" }),
+            ))
+            .await
+            .expect("send message");
+            ws.close(None).await.expect("close websocket");
+        });
+
+        let config = test_config(ws_url);
+        let api_client = Arc::new(DiscordApiClient::new(&config).expect("create api client"));
+        let connection = GatewayConnection::new(config, api_client);
+        let mut stream = connection
+            .connect_once_with_state_path(Some(state_path.clone()))
+            .await
+            .expect("connect with state path");
+
+        let _ = stream.events.recv().await.expect("ready event");
+        let _ = stream.events.recv().await.expect("message event");
+        stream.join_handle.await.expect("join").expect("loop success");
+        server.await.expect("server task");
+
+        let persisted = read_json_file_if_exists::<GatewayStateRecord>(&state_path)
+            .expect("state file read")
+            .expect("state file exists");
+        assert_eq!(persisted.session_id.as_deref(), Some("sess-persist"));
+        assert_eq!(persisted.sequence, Some(2));
+        let _ = fs::remove_file(state_path);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn gateway_connection_loads_persisted_state_and_resumes() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let ws_url = format!("ws://{addr}");
+        let state_path = unique_state_path("resume");
+        write_json_file_atomic(
+            &state_path,
+            &GatewayStateRecord {
+                session_id: Some("sess-resume-file".into()),
+                resume_url: Some(ws_url.clone()),
+                sequence: Some(7),
+                updated_at: current_unix_timestamp_secs(),
+            },
+        )
+        .expect("write persisted state");
+
+        let server = fcp_async_core::task::spawn(async move {
+            let (socket, _) = listener.accept().await.expect("accept client");
+            let mut ws = accept_async(socket).await.expect("accept websocket");
+            ws.send(hello_payload(1_000)).await.expect("send hello");
+
+            let resume = parse_payload(
+                ws.next()
+                    .await
+                    .expect("client resume frame")
+                    .expect("resume frame ok"),
+            );
+            assert_eq!(resume.op, GatewayOpcode::Resume as i32);
+            let payload = resume.d.expect("resume payload");
+            assert_eq!(payload["session_id"], "sess-resume-file");
+            assert_eq!(payload["seq"], 7);
+
+            ws.send(dispatch_payload("RESUMED", 8, &json!({})))
+                .await
+                .expect("send resumed");
+            ws.close(None).await.expect("close websocket");
+        });
+
+        let config = test_config(ws_url);
+        let api_client = Arc::new(DiscordApiClient::new(&config).expect("create api client"));
+        let connection = GatewayConnection::new(config, api_client);
+        let mut stream = connection
+            .connect_once_with_state_path(Some(state_path.clone()))
+            .await
+            .expect("connect with persisted state");
+
+        match stream.events.recv().await.expect("resumed event") {
+            GatewayEvent::Resumed => {}
+            other => panic!("expected Resumed event, got {other:?}"),
+        }
+        stream.join_handle.await.expect("join").expect("loop success");
+        server.await.expect("server task");
+
+        let persisted = read_json_file_if_exists::<GatewayStateRecord>(&state_path)
+            .expect("state file read")
+            .expect("state file exists");
+        assert_eq!(persisted.sequence, Some(8));
+        let _ = fs::remove_file(state_path);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn gateway_connection_fails_closed_on_incomplete_persisted_state() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let ws_url = format!("ws://{addr}");
+        let state_path = unique_state_path("fail-closed");
+        write_json_file_atomic(
+            &state_path,
+            &GatewayStateRecord {
+                session_id: Some("sess-incomplete".into()),
+                resume_url: Some("wss://stale.gateway.discord.gg".into()),
+                sequence: None,
+                updated_at: current_unix_timestamp_secs(),
+            },
+        )
+        .expect("write persisted state");
+
+        let server = fcp_async_core::task::spawn(async move {
+            let (socket, _) = listener.accept().await.expect("accept client");
+            let mut ws = accept_async(socket).await.expect("accept websocket");
+            ws.send(hello_payload(1_000)).await.expect("send hello");
+
+            let first_payload = parse_payload(
+                ws.next()
+                    .await
+                    .expect("client frame")
+                    .expect("client frame ok"),
+            );
+            assert_eq!(first_payload.op, GatewayOpcode::Identify as i32);
+            ws.close(None).await.expect("close websocket");
+        });
+
+        let config = test_config(ws_url);
+        let api_client = Arc::new(DiscordApiClient::new(&config).expect("create api client"));
+        let connection = GatewayConnection::new(config, api_client);
+        let stream = connection
+            .connect_once_with_state_path(Some(state_path.clone()))
+            .await
+            .expect("connect should succeed with identify fallback");
+        stream.join_handle.await.expect("join").expect("loop success");
+        server.await.expect("server task");
+
+        let persisted = read_json_file_if_exists::<GatewayStateRecord>(&state_path)
+            .expect("state file read")
+            .expect("state file exists");
+        assert_eq!(persisted.session_id, None);
+        assert_eq!(persisted.sequence, None);
+        let _ = fs::remove_file(state_path);
     }
 }
 
@@ -517,6 +710,15 @@ impl GatewayConnection {
     /// If we have a previous session, will attempt to resume.
     #[instrument(skip(self))]
     pub async fn connect_once(&self) -> DiscordResult<GatewayStream> {
+        self.connect_once_with_state_path(None).await
+    }
+
+    /// Connect to the gateway once with optional persisted gateway state.
+    #[instrument(skip(self))]
+    pub async fn connect_once_with_state_path(
+        &self,
+        state_path: Option<PathBuf>,
+    ) -> DiscordResult<GatewayStream> {
         if self
             .active_connection
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -533,10 +735,18 @@ impl GatewayConnection {
         let api_client = self.api_client.clone();
         let state_store = Arc::clone(&self.state);
 
-        let state_snapshot = {
+        let mut state_snapshot = {
             let state = state_store.lock().await;
             state.clone()
         };
+
+        if let Some(path) = state_path.as_deref()
+            && let Some(persisted) = load_persisted_gateway_state(path)?
+            && (!state_snapshot.is_resume_ready()
+                || state_snapshot.sequence.unwrap_or_default() < persisted.sequence.unwrap_or_default())
+        {
+            state_snapshot = persisted;
+        }
 
         // Determine gateway URL
         let gateway_url = if let Some(ref url) = state_snapshot.resume_url {
@@ -571,7 +781,15 @@ impl GatewayConnection {
         let active_connection = Arc::clone(&self.active_connection);
         let join_handle = fcp_async_core::task::spawn(async move {
             let result =
-                run_gateway_loop(ws_stream, config, event_tx, state_snapshot, state_store).await;
+                run_gateway_loop(
+                    ws_stream,
+                    config,
+                    event_tx,
+                    state_snapshot,
+                    state_store,
+                    state_path,
+                )
+                .await;
             active_connection.store(false, Ordering::Release);
             result
         });
@@ -588,6 +806,120 @@ struct GatewayState {
     session_id: Option<String>,
     resume_url: Option<String>,
     sequence: Option<u64>,
+}
+
+impl GatewayState {
+    const fn is_resume_ready(&self) -> bool {
+        self.session_id.is_some() && self.sequence.is_some()
+    }
+
+    fn clear_resume(&mut self) {
+        self.session_id = None;
+        self.resume_url = None;
+        self.sequence = None;
+    }
+
+    fn from_record(record: GatewayStateRecord) -> Self {
+        Self {
+            session_id: record.session_id,
+            resume_url: record.resume_url,
+            sequence: record.sequence,
+        }
+    }
+
+    fn to_record(&self) -> GatewayStateRecord {
+        GatewayStateRecord {
+            session_id: self.session_id.clone(),
+            resume_url: self.resume_url.clone(),
+            sequence: self.sequence,
+            updated_at: current_unix_timestamp_secs(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct GatewayStateRecord {
+    session_id: Option<String>,
+    resume_url: Option<String>,
+    sequence: Option<u64>,
+    updated_at: u64,
+}
+
+fn current_unix_timestamp_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
+}
+
+fn write_json_file_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let tmp_path = path.with_extension(format!("tmp-{}", std::process::id()));
+    let payload = serde_json::to_vec(value).map_err(io::Error::other)?;
+    fs::write(&tmp_path, payload)?;
+    fs::rename(&tmp_path, path)?;
+    Ok(())
+}
+
+fn read_json_file_if_exists<T>(path: &Path) -> io::Result<Option<T>>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    match fs::read(path) {
+        Ok(bytes) => {
+            let value = serde_json::from_slice::<T>(&bytes).map_err(io::Error::other)?;
+            Ok(Some(value))
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+fn persist_gateway_state(path: &Path, state: &GatewayState) -> DiscordResult<()> {
+    let record = state.to_record();
+    write_json_file_atomic(path, &record).map_err(|err| {
+        DiscordError::Gateway(format!(
+            "Failed to persist gateway state file '{}': {err}",
+            path.display()
+        ))
+    })?;
+    Ok(())
+}
+
+fn persist_gateway_state_if_configured(
+    state_path: Option<&Path>,
+    state: &GatewayState,
+) -> DiscordResult<()> {
+    if let Some(path) = state_path {
+        persist_gateway_state(path, state)?;
+    }
+    Ok(())
+}
+
+fn load_persisted_gateway_state(path: &Path) -> DiscordResult<Option<GatewayState>> {
+    let Some(record) = read_json_file_if_exists::<GatewayStateRecord>(path).map_err(|err| {
+        DiscordError::Gateway(format!(
+            "Failed to read gateway state file '{}': {err}",
+            path.display()
+        ))
+    })?
+    else {
+        return Ok(None);
+    };
+
+    let mut state = GatewayState::from_record(record);
+    if state.session_id.is_some() ^ state.sequence.is_some() {
+        warn!(
+            path = %path.display(),
+            "Incomplete persisted gateway resume state detected; clearing state and re-identifying"
+        );
+        state.clear_resume();
+        persist_gateway_state(path, &state)?;
+    }
+
+    Ok(Some(state))
 }
 
 fn dispatch_event(
@@ -644,10 +976,16 @@ async fn run_gateway_loop(
     event_tx: mpsc::Sender<GatewayEvent>,
     mut state: GatewayState,
     state_store: Arc<Mutex<GatewayState>>,
+    state_path: Option<PathBuf>,
 ) -> DiscordResult<()> {
-    let result = run_gateway_loop_inner(ws_stream, config, &event_tx, &mut state).await;
+    let result =
+        run_gateway_loop_inner(ws_stream, config, &event_tx, &mut state, state_path.as_deref())
+            .await;
+    let persisted_state = state.clone();
     let mut store = state_store.lock().await;
     *store = state;
+    drop(store);
+    persist_gateway_state_if_configured(state_path.as_deref(), &persisted_state)?;
     result
 }
 
@@ -656,6 +994,7 @@ async fn run_gateway_loop_inner(
     config: DiscordConfig,
     event_tx: &mpsc::Sender<GatewayEvent>,
     state: &mut GatewayState,
+    state_path: Option<&Path>,
 ) -> DiscordResult<()> {
     let (mut write, mut read) = ws_stream.split();
 
@@ -693,9 +1032,8 @@ async fn run_gateway_loop_inner(
 
     if state.session_id.is_some() ^ state.sequence.is_some() {
         warn!("Incomplete resume state detected; clearing state and re-identifying");
-        state.session_id = None;
-        state.resume_url = None;
-        state.sequence = None;
+        state.clear_resume();
+        persist_gateway_state_if_configured(state_path, state)?;
     }
 
     // Send Resume if we have a session, otherwise Identify
@@ -809,6 +1147,7 @@ async fn run_gateway_loop_inner(
                         // Update sequence
                         if let Some(s) = payload.s {
                             state.sequence = Some(s);
+                            persist_gateway_state_if_configured(state_path, state)?;
                         }
 
                         match GatewayOpcode::try_from(payload.op) {
@@ -816,6 +1155,7 @@ async fn run_gateway_loop_inner(
                                 let event_name = payload.t.clone().unwrap_or_default();
                                 let data = payload.d.clone().unwrap_or_default();
                                 let event = dispatch_event(event_name, data, state)?;
+                                persist_gateway_state_if_configured(state_path, state)?;
 
                                 if event_tx.send(event).await.is_err() {
                                     info!("Event receiver dropped, closing gateway");
@@ -835,9 +1175,8 @@ async fn run_gateway_loop_inner(
                                 warn!(resumable, "Session invalidated");
                                 if !resumable {
                                     // Clear session state - must re-identify
-                                    state.session_id = None;
-                                    state.resume_url = None;
-                                    state.sequence = None;
+                                    state.clear_resume();
+                                    persist_gateway_state_if_configured(state_path, state)?;
                                 }
                                 return Ok(());
                             }

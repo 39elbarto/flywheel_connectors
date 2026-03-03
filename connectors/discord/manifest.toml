@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:pending"
+interface_hash = "blake3-256:fcp.interface.v2:e86a7f98ef2d1c08b20bed0feefd475f3f04027016a08ec6cb5aaa3929f8d114"
 
 [connector]
 id = "fcp.discord"
@@ -20,7 +20,7 @@ archetypes = [
 format = "native"
 
 [connector.state]
-model = "none"
+model = "stateless"
 state_schema_version = "1"
 migration_hint = "init"
 
@@ -450,6 +450,210 @@ examples = ['{"channel_id": "123456789012345678"}']
 related = ["discord.send_message"]
 
 # -----------------------------------------------------------------------------
+
+[provides.operations.add_reaction]
+description = "Add a reaction emoji to a Discord message"
+capability = "discord.react"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations.add_reaction.rate_limit]
+max = 50
+per_ms = 60000
+
+[provides.operations.add_reaction.input_schema]
+required = ["channel_id", "message_id", "emoji"]
+type = "object"
+
+[provides.operations.add_reaction.input_schema.properties.channel_id]
+description = "Discord channel ID"
+type = "string"
+pattern = "^[0-9]+$"
+
+[provides.operations.add_reaction.input_schema.properties.message_id]
+description = "Message ID to react to"
+type = "string"
+pattern = "^[0-9]+$"
+
+[provides.operations.add_reaction.input_schema.properties.emoji]
+description = "Emoji to add (Unicode character or custom format name:id)"
+type = "string"
+
+[provides.operations.add_reaction.output_schema]
+required = ["added"]
+type = "object"
+
+[provides.operations.add_reaction.output_schema.properties.added]
+type = "boolean"
+
+[provides.operations.add_reaction.network_constraints]
+host_allow = ["discord.com", "*.discord.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations.add_reaction.ai_hints]
+when_to_use = "Add an emoji reaction to an existing message."
+common_mistakes = [
+    "Using emoji name instead of Unicode character for standard emoji.",
+]
+examples = ['{"channel_id": "123456789", "message_id": "987654321", "emoji": "👍"}']
+related = ["discord.send_message"]
+
+# -----------------------------------------------------------------------------
+
+[provides.operations.list_channels]
+description = "List all channels in a Discord server (guild)"
+capability = "discord.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations.list_channels.rate_limit]
+max = 100
+per_ms = 60000
+
+[provides.operations.list_channels.input_schema]
+required = ["guild_id"]
+type = "object"
+
+[provides.operations.list_channels.input_schema.properties.guild_id]
+description = "Discord guild/server ID"
+type = "string"
+pattern = "^[0-9]+$"
+
+[provides.operations.list_channels.output_schema]
+required = ["channels"]
+type = "object"
+
+[provides.operations.list_channels.output_schema.properties.channels]
+description = "Array of channel objects"
+type = "array"
+
+[provides.operations.list_channels.output_schema.properties.channels.items]
+type = "object"
+
+[provides.operations.list_channels.network_constraints]
+host_allow = ["discord.com", "*.discord.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations.list_channels.ai_hints]
+when_to_use = "List all channels in a guild/server."
+common_mistakes = [
+    "Using server name instead of guild ID.",
+]
+examples = ['{"guild_id": "123456789012345678"}']
+related = ["discord.get_guild", "discord.get_channel"]
+
+# -----------------------------------------------------------------------------
+
+[provides.operations.create_thread]
+description = "Create a thread from an existing Discord message"
+capability = "discord.threads"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations.create_thread.rate_limit]
+max = 30
+per_ms = 60000
+
+[provides.operations.create_thread.input_schema]
+required = ["channel_id", "message_id", "name"]
+type = "object"
+
+[provides.operations.create_thread.input_schema.properties.channel_id]
+description = "Channel ID containing the message"
+type = "string"
+pattern = "^[0-9]+$"
+
+[provides.operations.create_thread.input_schema.properties.message_id]
+description = "Message ID to create thread from"
+type = "string"
+pattern = "^[0-9]+$"
+
+[provides.operations.create_thread.input_schema.properties.name]
+description = "Thread name (1-100 characters)"
+type = "string"
+minLength = 1
+maxLength = 100
+
+[provides.operations.create_thread.input_schema.properties.auto_archive_duration]
+description = "Minutes before auto-archiving (60, 1440, 4320, 10080)"
+type = "integer"
+enum = [60, 1440, 4320, 10080]
+
+[provides.operations.create_thread.output_schema]
+required = ["id"]
+type = "object"
+
+[provides.operations.create_thread.output_schema.properties.id]
+type = "string"
+
+[provides.operations.create_thread.output_schema.properties.name]
+type = "string"
+
+[provides.operations.create_thread.output_schema.properties.type]
+description = "Channel type (11=public thread, 12=private thread)"
+type = "integer"
+
+[provides.operations.create_thread.network_constraints]
+host_allow = ["discord.com", "*.discord.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations.create_thread.ai_hints]
+when_to_use = "Create a new thread from an existing message."
+common_mistakes = [
+    "Thread names exceeding 100 characters.",
+]
+examples = ['{"channel_id": "123", "message_id": "456", "name": "Discussion"}']
+related = ["discord.send_message"]
+
+# -----------------------------------------------------------------------------
 # Events
 # -----------------------------------------------------------------------------
 
@@ -586,6 +790,20 @@ scope = "instance"
 
 [[rate_limits.pools]]
 id = "discord.delete"
+requests = 30
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "discord.react"
+requests = 50
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "discord.threads"
 requests = 30
 window_ms = 60000
 burst = 5

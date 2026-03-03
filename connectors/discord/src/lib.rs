@@ -46,3 +46,6 @@ mod types;
 pub use config::DiscordConfig;
 pub use connector::DiscordConnector;
 pub use error::DiscordError;
+
+// Re-export for integration tests
+pub use api::DiscordApiClient;

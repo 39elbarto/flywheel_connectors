@@ -82,6 +82,12 @@ impl DiscordApiClient {
         self.request("PATCH", endpoint, Some(body)).await
     }
 
+    /// Make a PUT request with no response body (e.g., reactions returning 204).
+    #[instrument(skip(self))]
+    pub async fn put_no_response(&self, endpoint: &str) -> DiscordResult<()> {
+        self.request_no_response("PUT", endpoint).await
+    }
+
     /// Make a DELETE request.
     #[instrument(skip(self))]
     pub async fn delete(&self, endpoint: &str) -> DiscordResult<()> {
@@ -105,6 +111,7 @@ impl DiscordApiClient {
                 );
 
                 let req = match method {
+                    "PUT" => self.client.put(url),
                     "DELETE" => self.client.delete(url),
                     "POST" => self.client.post(url),
                     _ => self.client.get(url),
@@ -360,6 +367,63 @@ impl DiscordApiClient {
             )
             .await?;
         Ok(())
+    }
+
+    /// Add a reaction to a message.
+    /// Uses PUT `/channels/{channel_id}/messages/{message_id}/reactions/{emoji}/@me`
+    /// Returns 204 No Content on success.
+    ///
+    /// `emoji` should be a URL-encoded emoji: Unicode emoji (e.g. `%F0%9F%91%8D`)
+    /// or custom emoji in the format `name:id` (e.g. `custom_emoji:123456`).
+    pub async fn add_reaction(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> DiscordResult<()> {
+        // Discord expects emoji to be URL-encoded in the path.
+        // For custom emoji (name:id format), encode the colon.
+        // For Unicode emoji, percent-encode the bytes.
+        let encoded: String = emoji
+            .bytes()
+            .flat_map(|b| {
+                if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' {
+                    vec![b as char]
+                } else {
+                    format!("%{b:02X}").chars().collect()
+                }
+            })
+            .collect();
+        self.put_no_response(&format!(
+            "/channels/{channel_id}/messages/{message_id}/reactions/{encoded}/@me"
+        ))
+        .await
+    }
+
+    /// Create a thread from a message.
+    /// Uses POST `/channels/{channel_id}/messages/{message_id}/threads`
+    pub async fn create_thread_from_message(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        name: &str,
+        auto_archive_duration: Option<u32>,
+    ) -> DiscordResult<Channel> {
+        #[derive(Serialize)]
+        struct CreateThreadRequest<'a> {
+            name: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            auto_archive_duration: Option<u32>,
+        }
+
+        self.post(
+            &format!("/channels/{channel_id}/messages/{message_id}/threads"),
+            &CreateThreadRequest {
+                name,
+                auto_archive_duration,
+            },
+        )
+        .await
     }
 
     // ─────────────────────────────────────────────────────────────────────────

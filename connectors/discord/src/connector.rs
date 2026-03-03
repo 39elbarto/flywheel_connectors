@@ -21,6 +21,7 @@ use fcp_sdk::{
     },
     validate_input_with_limits, validate_output_with_limits,
 };
+use reqwest::Url;
 use serde_json::json;
 use tracing::info;
 
@@ -51,6 +52,18 @@ pub struct DiscordConnector {
     // Metrics
     start_time: Instant,
 }
+
+const INTENT_GUILDS: u64 = 1 << 0;
+const INTENT_GUILD_MESSAGES: u64 = 1 << 9;
+const INTENT_DIRECT_MESSAGES: u64 = 1 << 12;
+const INTENT_MESSAGE_CONTENT: u64 = 1 << 15;
+
+const REQUIRED_GATEWAY_INTENTS: [(&str, u64); 4] = [
+    ("GUILDS", INTENT_GUILDS),
+    ("GUILD_MESSAGES", INTENT_GUILD_MESSAGES),
+    ("DIRECT_MESSAGES", INTENT_DIRECT_MESSAGES),
+    ("MESSAGE_CONTENT", INTENT_MESSAGE_CONTENT),
+];
 
 impl DiscordConnector {
     /// Create a new Discord connector.
@@ -91,6 +104,19 @@ impl DiscordConnector {
             });
         }
 
+        let missing_intents = missing_required_intents(config.intents);
+        if !missing_intents.is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1004,
+                message: format!(
+                    "Missing required gateway intents for declared Discord event topics: {}",
+                    missing_intents.join(", ")
+                ),
+            });
+        }
+
+        validate_network_constraints_hosts(&config)?;
+
         // Create API client
         let api_client = DiscordApiClient::new(&config).map_err(|e| FcpError::Internal {
             message: format!("Failed to create API client: {e}"),
@@ -127,7 +153,12 @@ impl DiscordConnector {
             "bot_user": {
                 "id": user.id,
                 "username": user.username
-            }
+            },
+            "provisioning": {
+                "token_ok": true,
+                "intents_ok": true,
+                "network_ok": true
+            },
         }))
     }
 
@@ -219,6 +250,13 @@ impl DiscordConnector {
 
     /// Handle connector self-check.
     pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
+        let Some(config) = &self.config else {
+            let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize self-check report: {e}"),
+            });
+        };
+
         let Some(api_client) = &self.api_client else {
             let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
             return serde_json::to_value(report).map_err(|e| FcpError::Internal {
@@ -226,22 +264,73 @@ impl DiscordConnector {
             });
         };
 
+        let missing_intents = missing_required_intents(config.intents);
+        let intents_ok = missing_intents.is_empty();
+        let network = network_readiness(config);
+
         let report = match api_client.get_current_user().await {
             Ok(user) => {
-                let mut report = SelfCheckReport::ok();
-                report.details = Some(json!({
-                    "user_id": user.id,
-                    "username": user.username,
-                    "bot": user.bot,
-                }));
-                report
+                if !intents_ok {
+                    let mut report = SelfCheckReport::failed(
+                        "provisioning_intents_missing",
+                        format!(
+                            "Missing required gateway intents: {}",
+                            missing_intents.join(", ")
+                        ),
+                    );
+                    report.details = Some(json!({
+                        "token_ok": true,
+                        "intents_ok": false,
+                        "missing_intents": missing_intents,
+                        "network_ok": network.network_ok,
+                        "network": network.details_json(),
+                        "user_id": user.id,
+                        "username": user.username,
+                    }));
+                    report
+                } else if !network.network_ok {
+                    let mut report = SelfCheckReport::failed(
+                        "provisioning_network_constraints_invalid",
+                        "Configured Discord endpoints are outside connector NetworkConstraints",
+                    );
+                    report.details = Some(json!({
+                        "token_ok": true,
+                        "intents_ok": true,
+                        "network_ok": false,
+                        "network": network.details_json(),
+                        "user_id": user.id,
+                        "username": user.username,
+                    }));
+                    report
+                } else {
+                    let mut report = SelfCheckReport::ok();
+                    report.details = Some(json!({
+                        "token_ok": true,
+                        "intents_ok": true,
+                        "missing_intents": [],
+                        "network_ok": true,
+                        "network": network.details_json(),
+                        "user_id": user.id,
+                        "username": user.username,
+                        "bot": user.bot,
+                    }));
+                    report
+                }
             }
             Err(err) => {
-                if err.is_retryable() {
-                    SelfCheckReport::degraded("self_check_retryable", err.to_string())
+                let mut report = if err.is_retryable() {
+                    SelfCheckReport::degraded("provisioning_token_retryable", err.to_string())
                 } else {
-                    SelfCheckReport::failed("self_check_failed", err.to_string())
-                }
+                    SelfCheckReport::failed("provisioning_token_invalid", err.to_string())
+                };
+                report.details = Some(json!({
+                    "token_ok": false,
+                    "intents_ok": intents_ok,
+                    "missing_intents": missing_intents,
+                    "network_ok": network.network_ok,
+                    "network": network.details_json(),
+                }));
+                report
             }
         };
 
@@ -379,6 +468,70 @@ impl DiscordConnector {
         })
     }
 
+    fn add_reaction_input_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "channel_id": { "type": "string", "description": "Channel ID" },
+                "message_id": { "type": "string", "description": "Message ID to react to" },
+                "emoji": { "type": "string", "description": "Emoji to add (Unicode or custom format name:id)" }
+            },
+            "required": ["channel_id", "message_id", "emoji"]
+        })
+    }
+
+    fn add_reaction_output_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "added": { "type": "boolean" }
+            }
+        })
+    }
+
+    fn list_channels_input_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "guild_id": { "type": "string", "description": "Guild/server ID" }
+            },
+            "required": ["guild_id"]
+        })
+    }
+
+    fn list_channels_output_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "channels": { "type": "array", "items": { "type": "object" } }
+            }
+        })
+    }
+
+    fn create_thread_input_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "channel_id": { "type": "string", "description": "Channel ID containing the message" },
+                "message_id": { "type": "string", "description": "Message ID to create thread from" },
+                "name": { "type": "string", "description": "Thread name (1-100 characters)", "minLength": 1, "maxLength": 100 },
+                "auto_archive_duration": { "type": "integer", "description": "Minutes before auto-archiving (60, 1440, 4320, 10080)", "enum": [60, 1440, 4320, 10080] }
+            },
+            "required": ["channel_id", "message_id", "name"]
+        })
+    }
+
+    fn create_thread_output_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string" },
+                "name": { "type": "string" },
+                "type": { "type": "integer" }
+            }
+        })
+    }
+
     fn message_event_schema() -> serde_json::Value {
         json!({
             "type": "object",
@@ -399,6 +552,9 @@ impl DiscordConnector {
             "discord.get_channel" => Some(Self::get_channel_input_schema()),
             "discord.get_guild" => Some(Self::get_guild_input_schema()),
             "discord.trigger_typing" => Some(Self::trigger_typing_input_schema()),
+            "discord.add_reaction" => Some(Self::add_reaction_input_schema()),
+            "discord.list_channels" => Some(Self::list_channels_input_schema()),
+            "discord.create_thread" => Some(Self::create_thread_input_schema()),
             _ => None,
         }
     }
@@ -411,6 +567,9 @@ impl DiscordConnector {
             "discord.get_channel" => Some(Self::get_channel_output_schema()),
             "discord.get_guild" => Some(Self::get_guild_output_schema()),
             "discord.trigger_typing" => Some(Self::trigger_typing_output_schema()),
+            "discord.add_reaction" => Some(Self::add_reaction_output_schema()),
+            "discord.list_channels" => Some(Self::list_channels_output_schema()),
+            "discord.create_thread" => Some(Self::create_thread_output_schema()),
             _ => None,
         }
     }
@@ -538,6 +697,71 @@ impl DiscordConnector {
                         common_mistakes: vec![],
                         examples: vec![r#"{"channel_id": "123456789012345678"}"#.into()],
                         related: vec![],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("discord.add_reaction"),
+                    summary: "Add a reaction emoji to a Discord message".into(),
+                    input_schema: Self::add_reaction_input_schema(),
+                    output_schema: Self::add_reaction_output_schema(),
+                    capability: CapabilityId::from_static("discord.react"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Add an emoji reaction to an existing message.".into(),
+                        common_mistakes: vec![
+                            "Using emoji name instead of Unicode character for standard emoji"
+                                .into(),
+                        ],
+                        examples: vec![
+                            r#"{"channel_id": "123", "message_id": "456", "emoji": "👍"}"#.into(),
+                        ],
+                        related: vec![CapabilityId::from_static("discord.send")],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("discord.list_channels"),
+                    summary: "List all channels in a Discord server".into(),
+                    input_schema: Self::list_channels_input_schema(),
+                    output_schema: Self::list_channels_output_schema(),
+                    capability: CapabilityId::from_static("discord.read"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "List all channels in a guild/server.".into(),
+                        common_mistakes: vec!["Using server name instead of guild ID".into()],
+                        examples: vec![r#"{"guild_id": "123456789012345678"}"#.into()],
+                        related: vec![CapabilityId::from_static("discord.read")],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("discord.create_thread"),
+                    summary: "Create a thread from a Discord message".into(),
+                    input_schema: Self::create_thread_input_schema(),
+                    output_schema: Self::create_thread_output_schema(),
+                    capability: CapabilityId::from_static("discord.threads"),
+                    risk_level: RiskLevel::Medium,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Risky,
+                    idempotency: IdempotencyClass::None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Create a new thread from an existing message.".into(),
+                        common_mistakes: vec!["Thread names exceeding 100 characters".into()],
+                        examples: vec![
+                            r#"{"channel_id": "123", "message_id": "456", "name": "Discussion"}"#
+                                .into(),
+                        ],
+                        related: vec![CapabilityId::from_static("discord.send")],
                     },
                 },
             ],
@@ -764,6 +988,9 @@ impl DiscordConnector {
             "discord.get_channel" => self.invoke_get_channel(input).await,
             "discord.get_guild" => self.invoke_get_guild(input).await,
             "discord.trigger_typing" => self.invoke_trigger_typing(input).await,
+            "discord.add_reaction" => self.invoke_add_reaction(input).await,
+            "discord.list_channels" => self.invoke_list_channels(input).await,
+            "discord.create_thread" => self.invoke_create_thread(input).await,
             _ => Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
             }),
@@ -1129,6 +1356,121 @@ impl DiscordConnector {
         Ok(response)
     }
 
+    async fn invoke_add_reaction(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let channel_id = input
+            .get("channel_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing channel_id".into(),
+            })?;
+
+        let message_id = input
+            .get("message_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing message_id".into(),
+            })?;
+
+        let emoji = input.get("emoji").and_then(|v| v.as_str()).ok_or_else(|| {
+            FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing emoji".into(),
+            }
+        })?;
+
+        let api = self.require_api()?;
+
+        api.add_reaction(channel_id, message_id, emoji)
+            .await
+            .map_err(|e| e.to_fcp_error())?;
+
+        let response = json!({ "added": true });
+        if let Some(schema) = Self::output_schema_for("discord.add_reaction") {
+            validate_output_with_limits(&schema, &response, &Limits::default())?;
+        }
+        Ok(response)
+    }
+
+    async fn invoke_list_channels(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let guild_id = input
+            .get("guild_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing guild_id".into(),
+            })?;
+
+        let api = self.require_api()?;
+
+        let channels = api
+            .get_guild_channels(guild_id)
+            .await
+            .map_err(|e| e.to_fcp_error())?;
+
+        let response = json!({ "channels": channels });
+        if let Some(schema) = Self::output_schema_for("discord.list_channels") {
+            validate_output_with_limits(&schema, &response, &Limits::default())?;
+        }
+        Ok(response)
+    }
+
+    async fn invoke_create_thread(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let channel_id = input
+            .get("channel_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing channel_id".into(),
+            })?;
+
+        let message_id = input
+            .get("message_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing message_id".into(),
+            })?;
+
+        let name =
+            input
+                .get("name")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing thread name".into(),
+                })?;
+
+        if name.is_empty() || name.len() > 100 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Thread name must be 1-100 characters".into(),
+            });
+        }
+
+        let auto_archive_duration = input
+            .get("auto_archive_duration")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+
+        let api = self.require_api()?;
+
+        let thread = api
+            .create_thread_from_message(channel_id, message_id, name, auto_archive_duration)
+            .await
+            .map_err(|e| e.to_fcp_error())?;
+
+        let response = serde_json::to_value(thread).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize thread: {e}"),
+        })?;
+
+        if let Some(schema) = Self::output_schema_for("discord.create_thread") {
+            validate_output_with_limits(&schema, &response, &Limits::default())?;
+        }
+        Ok(response)
+    }
+
     /// Handle subscribe method.
     pub async fn handle_subscribe(
         &self,
@@ -1260,6 +1602,93 @@ impl Default for DiscordConnector {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn missing_required_intents(intents: u64) -> Vec<&'static str> {
+    REQUIRED_GATEWAY_INTENTS
+        .iter()
+        .filter_map(|(name, bit)| ((intents & bit) == 0).then_some(*name))
+        .collect()
+}
+
+#[derive(Debug)]
+struct NetworkReadiness {
+    api_host: Option<String>,
+    api_allowed: bool,
+    gateway_host: Option<String>,
+    gateway_allowed: bool,
+    network_ok: bool,
+}
+
+impl NetworkReadiness {
+    fn details_json(&self) -> serde_json::Value {
+        json!({
+            "api_host": self.api_host,
+            "api_host_allowed": self.api_allowed,
+            "gateway_host": self.gateway_host,
+            "gateway_host_allowed": self.gateway_allowed,
+        })
+    }
+}
+
+fn network_readiness(config: &DiscordConfig) -> NetworkReadiness {
+    let api_host = extract_host(&config.api_url);
+    let api_allowed = api_host
+        .as_deref()
+        .is_some_and(host_allowed_by_network_constraints);
+
+    let gateway_host = config.gateway_url.as_deref().and_then(extract_host);
+    let gateway_allowed = gateway_host
+        .as_deref()
+        .is_none_or(host_allowed_by_network_constraints);
+
+    NetworkReadiness {
+        api_host,
+        api_allowed,
+        gateway_host,
+        gateway_allowed,
+        network_ok: api_allowed && gateway_allowed,
+    }
+}
+
+fn validate_network_constraints_hosts(config: &DiscordConfig) -> FcpResult<()> {
+    let readiness = network_readiness(config);
+    if readiness.network_ok {
+        return Ok(());
+    }
+
+    Err(FcpError::InvalidRequest {
+        code: 1004,
+        message: format!(
+            "Configured Discord endpoints violate NetworkConstraints (api_host={:?}, gateway_host={:?})",
+            readiness.api_host, readiness.gateway_host
+        ),
+    })
+}
+
+fn extract_host(url: &str) -> Option<String> {
+    Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(|host| host.to_ascii_lowercase()))
+}
+
+fn host_allowed_by_network_constraints(host: &str) -> bool {
+    if host == "discord.com"
+        || host.ends_with(".discord.com")
+        || host == "discord.gg"
+        || host.ends_with(".discord.gg")
+    {
+        return true;
+    }
+
+    // Allow localhost hosts for deterministic mock-server tests.
+    if (cfg!(test) || cfg!(feature = "testing"))
+        && (host == "localhost" || host == "127.0.0.1" || host == "::1")
+    {
+        return true;
+    }
+
+    false
 }
 
 /// Convert a Discord gateway event to an FCP `EventEnvelope`.
@@ -1405,6 +1834,10 @@ mod tests {
     use fcp_core::{CapabilityToken as CapabilityArtifact, ConnectorId, InstanceId};
     use fcp_crypto::cose::CapabilityTokenBuilder as CapabilityBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{header, method, path},
+    };
 
     fn generate_capability(
         signing_key: &Ed25519SigningKey,
@@ -1422,6 +1855,160 @@ mod tests {
             .sign(signing_key)
             .unwrap();
         CapabilityArtifact { raw: cose }
+    }
+
+    async fn mock_current_user_ok(mock_server: &MockServer, token: &str) {
+        Mock::given(method("GET"))
+            .and(path("/users/@me"))
+            .and(header("Authorization", format!("Bot {token}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "123456789",
+                "username": "TestBot",
+                "discriminator": "0",
+                "bot": true
+            })))
+            .mount(mock_server)
+            .await;
+    }
+
+    fn base_config(api_url: String) -> DiscordConfig {
+        DiscordConfig {
+            bot_credential: "test_token".into(),
+            api_url,
+            intents: INTENT_GUILDS
+                | INTENT_GUILD_MESSAGES
+                | INTENT_DIRECT_MESSAGES
+                | INTENT_MESSAGE_CONTENT,
+            ..Default::default()
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_missing_required_intents() {
+        let mut connector = DiscordConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "bot_credential": "test_token",
+                "api_url": "https://discord.com/api/v10",
+                "intents": INTENT_GUILDS | INTENT_GUILD_MESSAGES
+            }))
+            .await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { code, message } => {
+                assert_eq!(code, 1004);
+                assert!(message.contains("Missing required gateway intents"));
+                assert!(message.contains("DIRECT_MESSAGES"));
+                assert!(message.contains("MESSAGE_CONTENT"));
+            }
+            other => panic!("Expected InvalidRequest, got: {other:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_non_discord_api_host() {
+        let mut connector = DiscordConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "bot_credential": "test_token",
+                "api_url": "https://example.com/api/v10",
+                "intents": INTENT_GUILDS
+                    | INTENT_GUILD_MESSAGES
+                    | INTENT_DIRECT_MESSAGES
+                    | INTENT_MESSAGE_CONTENT
+            }))
+            .await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { code, message } => {
+                assert_eq!(code, 1004);
+                assert!(message.contains("NetworkConstraints"));
+            }
+            other => panic!("Expected InvalidRequest, got: {other:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_returns_provisioning_readiness() {
+        let mock_server = MockServer::start().await;
+        mock_current_user_ok(&mock_server, "test_token").await;
+
+        let mut connector = DiscordConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "bot_credential": "test_token",
+                "api_url": mock_server.uri(),
+                "intents": INTENT_GUILDS
+                    | INTENT_GUILD_MESSAGES
+                    | INTENT_DIRECT_MESSAGES
+                    | INTENT_MESSAGE_CONTENT
+            }))
+            .await
+            .expect("configure should succeed");
+
+        assert_eq!(result["status"], "configured");
+        assert_eq!(result["provisioning"]["token_ok"], true);
+        assert_eq!(result["provisioning"]["intents_ok"], true);
+        assert_eq!(result["provisioning"]["network_ok"], true);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_reports_missing_intents() {
+        let mock_server = MockServer::start().await;
+        mock_current_user_ok(&mock_server, "test_token").await;
+
+        let api_config = base_config(mock_server.uri());
+        let api_client = Arc::new(DiscordApiClient::new(&api_config).unwrap());
+
+        let mut connector = DiscordConnector::new();
+        connector.api_client = Some(api_client);
+        connector.config = Some(DiscordConfig {
+            intents: INTENT_GUILDS | INTENT_GUILD_MESSAGES,
+            ..api_config
+        });
+
+        let value = connector.handle_self_check().await.unwrap();
+        assert_eq!(value["status"], "failed");
+        assert_eq!(value["reason_code"], "provisioning_intents_missing");
+        assert_eq!(value["details"]["token_ok"], true);
+        assert_eq!(value["details"]["intents_ok"], false);
+        assert_eq!(value["details"]["network_ok"], true);
+        assert!(
+            !value["details"]["missing_intents"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_reports_network_constraints_violation() {
+        let mock_server = MockServer::start().await;
+        mock_current_user_ok(&mock_server, "test_token").await;
+
+        let api_config = base_config(mock_server.uri());
+        let api_client = Arc::new(DiscordApiClient::new(&api_config).unwrap());
+
+        let mut connector = DiscordConnector::new();
+        connector.api_client = Some(api_client);
+        connector.config = Some(DiscordConfig {
+            api_url: "https://example.com/api/v10".into(),
+            ..api_config
+        });
+
+        let value = connector.handle_self_check().await.unwrap();
+        assert_eq!(value["status"], "failed");
+        assert_eq!(
+            value["reason_code"],
+            "provisioning_network_constraints_invalid"
+        );
+        assert_eq!(value["details"]["token_ok"], true);
+        assert_eq!(value["details"]["intents_ok"], true);
+        assert_eq!(value["details"]["network_ok"], false);
+        assert_eq!(value["details"]["network"]["api_host"], "example.com");
+        assert_eq!(value["details"]["network"]["api_host_allowed"], false);
     }
 
     #[fcp_async_core::runtime::test]
@@ -1618,5 +2205,354 @@ mod tests {
         assert_eq!(envelope.data.zone_id, ZoneId::community());
         assert_eq!(envelope.data.principal.id, "user-1");
         assert_eq!(envelope.data.principal.display.as_deref(), Some("alice"));
+    }
+
+    // ─── Schema completeness tests ─────────────────────────────────────
+
+    const ALL_OPERATIONS: &[&str] = &[
+        "discord.send_message",
+        "discord.edit_message",
+        "discord.delete_message",
+        "discord.get_channel",
+        "discord.get_guild",
+        "discord.trigger_typing",
+        "discord.add_reaction",
+        "discord.list_channels",
+        "discord.create_thread",
+    ];
+
+    #[test]
+    fn test_all_operations_have_input_schema() {
+        for op in ALL_OPERATIONS {
+            assert!(
+                DiscordConnector::input_schema_for(op).is_some(),
+                "Missing input schema for {op}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_all_operations_have_output_schema() {
+        for op in ALL_OPERATIONS {
+            assert!(
+                DiscordConnector::output_schema_for(op).is_some(),
+                "Missing output schema for {op}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_unknown_operation_returns_none_schema() {
+        assert!(DiscordConnector::input_schema_for("discord.nonexistent").is_none());
+        assert!(DiscordConnector::output_schema_for("discord.nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_input_schemas_are_object_type() {
+        for op in ALL_OPERATIONS {
+            let schema = DiscordConnector::input_schema_for(op).unwrap();
+            assert_eq!(
+                schema["type"], "object",
+                "Input schema for {op} must be type=object"
+            );
+        }
+    }
+
+    #[test]
+    fn test_schemas_deterministic_across_calls() {
+        for op in ALL_OPERATIONS {
+            let a = DiscordConnector::input_schema_for(op).unwrap();
+            let b = DiscordConnector::input_schema_for(op).unwrap();
+            assert_eq!(a, b, "Input schema for {op} not deterministic");
+
+            let a = DiscordConnector::output_schema_for(op).unwrap();
+            let b = DiscordConnector::output_schema_for(op).unwrap();
+            assert_eq!(a, b, "Output schema for {op} not deterministic");
+        }
+    }
+
+    // ─── Introspection metadata tests ──────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_all_ops_have_capability() {
+        let connector = DiscordConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        assert_eq!(ops.len(), 9, "Expected 9 operations");
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            assert!(
+                op["capability"].as_str().is_some(),
+                "Operation {id} missing capability"
+            );
+            assert!(
+                op["risk_level"].as_str().is_some(),
+                "Operation {id} missing risk_level"
+            );
+            assert!(
+                op["safety_tier"].as_str().is_some(),
+                "Operation {id} missing safety_tier"
+            );
+            assert!(
+                op["idempotency"].as_str().is_some(),
+                "Operation {id} missing idempotency"
+            );
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_risk_levels_are_valid() {
+        let connector = DiscordConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        let valid_risk = ["low", "medium", "high", "critical"];
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            let risk = op["risk_level"].as_str().unwrap();
+            assert!(
+                valid_risk.contains(&risk),
+                "Operation {id} has invalid risk_level: {risk}"
+            );
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_read_ops_are_safe() {
+        let connector = DiscordConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            match id {
+                "discord.get_channel" | "discord.get_guild" | "discord.list_channels" => {
+                    assert_eq!(op["safety_tier"], "safe", "Read op {id} should be safe");
+                    assert_eq!(op["risk_level"], "low", "Read op {id} should be low risk");
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_write_ops_not_safe() {
+        let connector = DiscordConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            if id == "discord.send_message"
+                || id == "discord.edit_message"
+                || id == "discord.delete_message"
+                || id == "discord.create_thread"
+            {
+                let tier = op["safety_tier"].as_str().unwrap();
+                assert!(
+                    tier == "risky" || tier == "dangerous",
+                    "Write op {id} should be risky or dangerous, got {tier}"
+                );
+            }
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_deterministic() {
+        let connector = DiscordConnector::new();
+        let a = connector.handle_introspect().await.unwrap();
+        let b = connector.handle_introspect().await.unwrap();
+        assert_eq!(a, b, "Introspection should be deterministic");
+    }
+
+    // ─── Schema validation (required fields) ───────────────────────────
+
+    #[test]
+    fn test_send_message_requires_channel_id() {
+        let schema = DiscordConnector::input_schema_for("discord.send_message").unwrap();
+        let required = schema["required"].as_array().unwrap();
+        assert!(
+            required.iter().any(|v| v.as_str() == Some("channel_id")),
+            "send_message must require channel_id"
+        );
+    }
+
+    #[test]
+    fn test_add_reaction_requires_all_fields() {
+        let schema = DiscordConnector::input_schema_for("discord.add_reaction").unwrap();
+        let required = schema["required"].as_array().unwrap();
+        let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(required_strs.contains(&"channel_id"));
+        assert!(required_strs.contains(&"message_id"));
+        assert!(required_strs.contains(&"emoji"));
+    }
+
+    #[test]
+    fn test_create_thread_requires_name() {
+        let schema = DiscordConnector::input_schema_for("discord.create_thread").unwrap();
+        let required = schema["required"].as_array().unwrap();
+        let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(required_strs.contains(&"channel_id"));
+        assert!(required_strs.contains(&"message_id"));
+        assert!(required_strs.contains(&"name"));
+    }
+
+    // ─── Thread name validation ────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_create_thread_name_boundary_100_chars() {
+        let connector = DiscordConnector::new();
+
+        // Exactly 100 characters should pass validation (but fail at config check)
+        let name_100 = "a".repeat(100);
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "discord.create_thread",
+                "input": {
+                    "channel_id": "111",
+                    "message_id": "msg_001",
+                    "name": name_100
+                },
+                "capability_token": null
+            }))
+            .await;
+
+        // Should fail at capability check, not at name validation
+        let err = result.unwrap_err();
+        assert!(
+            !matches!(err, FcpError::InvalidRequest { ref message, .. } if message.contains("Thread name")),
+            "100-char name should NOT trigger thread name validation, got: {err:?}"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_create_thread_name_101_chars_rejected() {
+        let connector = DiscordConnector::new();
+
+        let name_101 = "a".repeat(101);
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "discord.create_thread",
+                "input": {
+                    "channel_id": "111",
+                    "message_id": "msg_001",
+                    "name": name_101
+                },
+                "capability_token": null
+            }))
+            .await;
+
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, FcpError::InvalidRequest { .. }),
+            "101-char name should be rejected, got: {err:?}"
+        );
+    }
+
+    // ─── Capability gating reason codes ────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_capability_token_null_gives_invalid_request() {
+        let connector = DiscordConnector::new();
+
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "discord.get_channel",
+                "input": { "channel_id": "111" },
+                "capability_token": null
+            }))
+            .await;
+
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, FcpError::InvalidRequest { code: 1003, .. }),
+            "null capability_token should give code 1003, got: {err:?}"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_operation_not_granted_includes_operation_id() {
+        let mut connector = DiscordConnector::new();
+
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        connector.verifier = Some(CapabilityVerifier::new(
+            verifying_key.to_bytes(),
+            ZoneId::work(),
+            connector.base.instance_id.clone(),
+        ));
+
+        // Token grants discord.get_channel, try discord.delete_message
+        let capability = generate_capability(
+            &signing_key,
+            "discord.get_channel",
+            &["discord.get_channel"],
+        );
+
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "discord.delete_message",
+                "input": {
+                    "channel_id": "111",
+                    "message_id": "msg_001"
+                },
+                "capability_token": capability
+            }))
+            .await;
+
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, FcpError::OperationNotGranted { .. }),
+            "Mismatched capability should yield OperationNotGranted, got: {err:?}"
+        );
+    }
+
+    // ─── Manifest interface hash determinism ───────────────────────────
+
+    #[test]
+    fn test_manifest_parses_and_hash_is_stable() {
+        let manifest_str = include_str!("../manifest.toml");
+        // Strip sections the manifest parser doesn't support
+        let filtered: String = manifest_str
+            .lines()
+            .scan(false, |in_unsupported, line| {
+                if line.starts_with("[provides.events") || line.starts_with("[provides.streaming") {
+                    *in_unsupported = true;
+                    Some("")
+                } else if *in_unsupported && line.starts_with('[') {
+                    *in_unsupported = false;
+                    Some(line)
+                } else if *in_unsupported {
+                    Some("")
+                } else {
+                    Some(line)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let manifest_a = fcp_manifest::ConnectorManifest::parse_str_unchecked(&filtered)
+            .expect("manifest should parse");
+        let manifest_b = fcp_manifest::ConnectorManifest::parse_str_unchecked(&filtered)
+            .expect("manifest should parse");
+
+        let hash_a = manifest_a
+            .compute_interface_hash()
+            .expect("hash computation should succeed");
+        let hash_b = manifest_b
+            .compute_interface_hash()
+            .expect("hash computation should succeed");
+        assert_eq!(
+            hash_a, hash_b,
+            "Interface hash must be deterministic across parses"
+        );
+        // Hash display should produce a non-trivial string
+        let hash_str = hash_a.to_string();
+        assert!(
+            hash_str.contains("blake3-256"),
+            "Hash should contain algorithm prefix"
+        );
     }
 }

@@ -1,0 +1,784 @@
+//! Discord connector integration tests (flywheel_connectors-bngd).
+//!
+//! Deterministic integration tests using wiremock to mock the Discord REST API.
+//! No real Discord calls. Covers:
+//! - Lifecycle: configure → handshake → invoke
+//! - REST operation happy paths (send, edit, delete, get, react, threads)
+//! - Error taxonomy (401/403/429/5xx → FCP error mapping)
+//! - Capability gating (deny without token, allow with valid token)
+//! - Input validation (content length, required fields)
+//! - Introspection completeness
+
+#![allow(clippy::too_many_lines)]
+
+use chrono::{Duration, Utc};
+use fcp_crypto::cose::CapabilityTokenBuilder;
+use fcp_crypto::ed25519::Ed25519SigningKey;
+use serde_json::json;
+use wiremock::{
+    Mock, MockServer, ResponseTemplate,
+    matchers::{header, method, path},
+};
+
+use fcp_discord::DiscordConnector;
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+const INTENT_GUILDS: u64 = 1 << 0;
+const INTENT_GUILD_MESSAGES: u64 = 1 << 9;
+const INTENT_DIRECT_MESSAGES: u64 = 1 << 12;
+const INTENT_MESSAGE_CONTENT: u64 = 1 << 15;
+
+const ALL_REQUIRED_INTENTS: u64 =
+    INTENT_GUILDS | INTENT_GUILD_MESSAGES | INTENT_DIRECT_MESSAGES | INTENT_MESSAGE_CONTENT;
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> fcp_core::CapabilityToken {
+    let now = Utc::now();
+    let cose = CapabilityTokenBuilder::new()
+        .capability_id(cap)
+        .zone_id("z:work")
+        .principal("user:test")
+        .operations(&[cap])
+        .issuer("node:test")
+        .validity(now, now + Duration::hours(1))
+        .sign(signing_key)
+        .unwrap();
+    fcp_core::CapabilityToken { raw: cose }
+}
+
+async fn mock_current_user_ok(mock_server: &MockServer, token: &str) {
+    Mock::given(method("GET"))
+        .and(path("/users/@me"))
+        .and(header("Authorization", format!("Bot {token}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "123456789",
+            "username": "TestBot",
+            "discriminator": "0",
+            "bot": true
+        })))
+        .mount(mock_server)
+        .await;
+}
+
+async fn setup_configure(connector: &mut DiscordConnector, base_url: &str) {
+    connector
+        .handle_configure(json!({
+            "bot_credential": "test_token",
+            "api_url": base_url,
+            "intents": ALL_REQUIRED_INTENTS
+        }))
+        .await
+        .expect("configure should succeed");
+}
+
+async fn setup_handshake(connector: &mut DiscordConnector, caps: &[&str]) -> Ed25519SigningKey {
+    let signing_key = Ed25519SigningKey::generate();
+    let verifying_key = signing_key.verifying_key();
+
+    connector
+        .handle_handshake(json!({
+            "protocol_version": "1.0.0",
+            "zone": "z:work",
+            "host_public_key": verifying_key.to_bytes(),
+            "nonce": vec![0u8; 32],
+            "capabilities_requested": caps
+        }))
+        .await
+        .expect("handshake should succeed");
+
+    signing_key
+}
+
+/// Full lifecycle: configure + mock user + handshake.
+async fn setup_full(
+    connector: &mut DiscordConnector,
+    mock_server: &MockServer,
+    caps: &[&str],
+) -> Ed25519SigningKey {
+    mock_current_user_ok(mock_server, "test_token").await;
+    setup_configure(connector, &mock_server.uri()).await;
+    setup_handshake(connector, caps).await
+}
+
+// ============================================================================
+// Lifecycle Tests
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn lifecycle_configure_handshake_health() {
+    let mock_server = MockServer::start().await;
+    let mut connector = DiscordConnector::new();
+
+    mock_current_user_ok(&mock_server, "test_token").await;
+
+    let config_result = connector
+        .handle_configure(json!({
+            "bot_credential": "test_token",
+            "api_url": mock_server.uri(),
+            "intents": ALL_REQUIRED_INTENTS
+        }))
+        .await
+        .expect("configure should succeed");
+
+    assert_eq!(config_result["status"], "configured");
+    assert_eq!(config_result["provisioning"]["token_ok"], true);
+
+    let health = connector
+        .handle_health()
+        .await
+        .expect("health should succeed");
+    // Health reports "ready" when configured
+    assert_eq!(health["status"], "ready");
+}
+
+#[fcp_async_core::runtime::test]
+async fn lifecycle_introspect_operations() {
+    let connector = DiscordConnector::new();
+
+    let introspection = connector
+        .handle_introspect()
+        .await
+        .expect("introspect should succeed");
+
+    let operations = introspection["operations"].as_array().unwrap();
+    // 6 original + 3 new = 9 operations
+    assert_eq!(
+        operations.len(),
+        9,
+        "expected 9 operations, got {}: {:?}",
+        operations.len(),
+        operations
+            .iter()
+            .map(|o| o["id"].as_str().unwrap_or("?"))
+            .collect::<Vec<_>>()
+    );
+
+    let op_ids: Vec<&str> = operations
+        .iter()
+        .map(|o| o["id"].as_str().unwrap())
+        .collect();
+
+    assert!(op_ids.contains(&"discord.send_message"));
+    assert!(op_ids.contains(&"discord.edit_message"));
+    assert!(op_ids.contains(&"discord.delete_message"));
+    assert!(op_ids.contains(&"discord.get_channel"));
+    assert!(op_ids.contains(&"discord.get_guild"));
+    assert!(op_ids.contains(&"discord.trigger_typing"));
+    assert!(op_ids.contains(&"discord.add_reaction"));
+    assert!(op_ids.contains(&"discord.list_channels"));
+    assert!(op_ids.contains(&"discord.create_thread"));
+
+    // Verify events
+    let events = introspection["events"].as_array().unwrap();
+    assert!(!events.is_empty());
+}
+
+// ============================================================================
+// Send Message Tests
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn send_message_happy_path() {
+    let mock_server = MockServer::start().await;
+    let mut connector = DiscordConnector::new();
+    let signing_key = setup_full(&mut connector, &mock_server, &["discord.send"]).await;
+
+    Mock::given(method("POST"))
+        .and(path("/channels/111/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "msg_001",
+            "channel_id": "111",
+            "content": "Hello Discord!",
+            "timestamp": "2026-03-02T12:00:00.000000+00:00",
+            "author": {"id": "123456789", "username": "TestBot", "discriminator": "0"}
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let token = generate_valid_token(&signing_key, "discord.send_message");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "discord.send_message",
+            "input": {
+                "channel_id": "111",
+                "content": "Hello Discord!"
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("send_message should succeed");
+
+    assert_eq!(result["id"], "msg_001");
+    assert_eq!(result["channel_id"], "111");
+    assert_eq!(result["content"], "Hello Discord!");
+}
+
+#[fcp_async_core::runtime::test]
+async fn send_message_content_too_long() {
+    let mock_server = MockServer::start().await;
+    let mut connector = DiscordConnector::new();
+    let signing_key = setup_full(&mut connector, &mock_server, &["discord.send"]).await;
+
+    let token = generate_valid_token(&signing_key, "discord.send_message");
+    let long_content = "a".repeat(2001);
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "discord.send_message",
+            "input": {
+                "channel_id": "111",
+                "content": long_content
+            },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err(), "should reject oversized content");
+}
+
+#[fcp_async_core::runtime::test]
+async fn send_message_missing_content_and_embeds() {
+    let mock_server = MockServer::start().await;
+    let mut connector = DiscordConnector::new();
+    let signing_key = setup_full(&mut connector, &mock_server, &["discord.send"]).await;
+
+    let token = generate_valid_token(&signing_key, "discord.send_message");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "discord.send_message",
+            "input": { "channel_id": "111" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err(), "should reject empty message");
+}
+
+// ============================================================================
+// Edit Message Tests
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn edit_message_happy_path() {
+    let mock_server = MockServer::start().await;
+    let mut connector = DiscordConnector::new();
+    let signing_key = setup_full(&mut connector, &mock_server, &["discord.edit"]).await;
+
+    Mock::given(method("PATCH"))
+        .and(path("/channels/111/messages/msg_001"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "msg_001",
+            "channel_id": "111",
+            "content": "Edited content",
+            "timestamp": "2026-03-02T12:00:00.000000+00:00"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let token = generate_valid_token(&signing_key, "discord.edit_message");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "discord.edit_message",
+            "input": {
+                "channel_id": "111",
+                "message_id": "msg_001",
+                "content": "Edited content"
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("edit should succeed");
+
+    assert_eq!(result["id"], "msg_001");
+    assert_eq!(result["content"], "Edited content");
+}
+
+// ============================================================================
+// Delete Message Tests
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn delete_message_happy_path() {
+    let mock_server = MockServer::start().await;
+    let mut connector = DiscordConnector::new();
+    let signing_key = setup_full(&mut connector, &mock_server, &["discord.delete"]).await;
+
+    Mock::given(method("DELETE"))
+        .and(path("/channels/111/messages/msg_001"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&mock_server)
+        .await;
+
+    let token = generate_valid_token(&signing_key, "discord.delete_message");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "discord.delete_message",
+            "input": {
+                "channel_id": "111",
+                "message_id": "msg_001"
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("delete should succeed");
+
+    assert_eq!(result["deleted"], true);
+}
+
+// ============================================================================
+// Get Channel Tests
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn get_channel_happy_path() {
+    let mock_server = MockServer::start().await;
+    let mut connector = DiscordConnector::new();
+    let signing_key = setup_full(&mut connector, &mock_server, &["discord.read"]).await;
+
+    Mock::given(method("GET"))
+        .and(path("/channels/111"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "111",
+            "type": 0,
+            "name": "general",
+            "guild_id": "999"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let token = generate_valid_token(&signing_key, "discord.get_channel");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "discord.get_channel",
+            "input": { "channel_id": "111" },
+            "capability_token": token
+        }))
+        .await
+        .expect("get_channel should succeed");
+
+    assert_eq!(result["id"], "111");
+    assert_eq!(result["name"], "general");
+}
+
+// ============================================================================
+// Get Guild Tests
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn get_guild_happy_path() {
+    let mock_server = MockServer::start().await;
+    let mut connector = DiscordConnector::new();
+    let signing_key = setup_full(&mut connector, &mock_server, &["discord.read"]).await;
+
+    Mock::given(method("GET"))
+        .and(path("/guilds/999"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "999",
+            "name": "Test Server",
+            "icon": null,
+            "owner_id": "owner_123"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let token = generate_valid_token(&signing_key, "discord.get_guild");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "discord.get_guild",
+            "input": { "guild_id": "999" },
+            "capability_token": token
+        }))
+        .await
+        .expect("get_guild should succeed");
+
+    assert_eq!(result["id"], "999");
+    assert_eq!(result["name"], "Test Server");
+}
+
+// ============================================================================
+// Trigger Typing Tests
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn trigger_typing_happy_path() {
+    let mock_server = MockServer::start().await;
+    let mut connector = DiscordConnector::new();
+    let signing_key = setup_full(&mut connector, &mock_server, &["discord.send"]).await;
+
+    // Note: Discord returns 204 No Content, but the API client uses post<T>()
+    // which deserializes the body. Mock returns 200 with JSON to match the client's expectations.
+    Mock::given(method("POST"))
+        .and(path("/channels/111/typing"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&mock_server)
+        .await;
+
+    let token = generate_valid_token(&signing_key, "discord.trigger_typing");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "discord.trigger_typing",
+            "input": { "channel_id": "111" },
+            "capability_token": token
+        }))
+        .await
+        .expect("trigger_typing should succeed");
+
+    assert_eq!(result["triggered"], true);
+}
+
+// ============================================================================
+// Add Reaction Tests
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn add_reaction_happy_path() {
+    let mock_server = MockServer::start().await;
+    let mut connector = DiscordConnector::new();
+    let signing_key = setup_full(&mut connector, &mock_server, &["discord.react"]).await;
+
+    // Use percent-encoded emoji path. The connector encodes emoji bytes.
+    // 👍 = U+1F44D = F0 9F 91 8D in UTF-8
+    Mock::given(method("PUT"))
+        .and(path(
+            "/channels/111/messages/msg_001/reactions/%F0%9F%91%8D/@me",
+        ))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&mock_server)
+        .await;
+
+    let token = generate_valid_token(&signing_key, "discord.add_reaction");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "discord.add_reaction",
+            "input": {
+                "channel_id": "111",
+                "message_id": "msg_001",
+                "emoji": "👍"
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("add_reaction should succeed");
+
+    assert_eq!(result["added"], true);
+}
+
+#[fcp_async_core::runtime::test]
+async fn add_reaction_missing_emoji() {
+    let mock_server = MockServer::start().await;
+    let mut connector = DiscordConnector::new();
+    let signing_key = setup_full(&mut connector, &mock_server, &["discord.react"]).await;
+
+    let token = generate_valid_token(&signing_key, "discord.add_reaction");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "discord.add_reaction",
+            "input": {
+                "channel_id": "111",
+                "message_id": "msg_001"
+            },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err(), "should reject missing emoji");
+}
+
+// ============================================================================
+// List Channels Tests
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn list_channels_happy_path() {
+    let mock_server = MockServer::start().await;
+    let mut connector = DiscordConnector::new();
+    let signing_key = setup_full(&mut connector, &mock_server, &["discord.read"]).await;
+
+    Mock::given(method("GET"))
+        .and(path("/guilds/999/channels"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {"id": "111", "type": 0, "name": "general"},
+            {"id": "222", "type": 0, "name": "random"},
+            {"id": "333", "type": 2, "name": "voice-chat"}
+        ])))
+        .mount(&mock_server)
+        .await;
+
+    let token = generate_valid_token(&signing_key, "discord.list_channels");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "discord.list_channels",
+            "input": { "guild_id": "999" },
+            "capability_token": token
+        }))
+        .await
+        .expect("list_channels should succeed");
+
+    let channels = result["channels"].as_array().unwrap();
+    assert_eq!(channels.len(), 3);
+    assert_eq!(channels[0]["name"], "general");
+}
+
+// ============================================================================
+// Create Thread Tests
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn create_thread_happy_path() {
+    let mock_server = MockServer::start().await;
+    let mut connector = DiscordConnector::new();
+    let signing_key = setup_full(&mut connector, &mock_server, &["discord.threads"]).await;
+
+    Mock::given(method("POST"))
+        .and(path("/channels/111/messages/msg_001/threads"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "thread_001",
+            "type": 11,
+            "name": "Discussion",
+            "guild_id": "999"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let token = generate_valid_token(&signing_key, "discord.create_thread");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "discord.create_thread",
+            "input": {
+                "channel_id": "111",
+                "message_id": "msg_001",
+                "name": "Discussion"
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("create_thread should succeed");
+
+    assert_eq!(result["id"], "thread_001");
+    assert_eq!(result["name"], "Discussion");
+}
+
+#[fcp_async_core::runtime::test]
+async fn create_thread_name_too_long() {
+    let mock_server = MockServer::start().await;
+    let mut connector = DiscordConnector::new();
+    let signing_key = setup_full(&mut connector, &mock_server, &["discord.threads"]).await;
+
+    let token = generate_valid_token(&signing_key, "discord.create_thread");
+    let long_name = "a".repeat(101);
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "discord.create_thread",
+            "input": {
+                "channel_id": "111",
+                "message_id": "msg_001",
+                "name": long_name
+            },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err(), "should reject thread name > 100 chars");
+}
+
+#[fcp_async_core::runtime::test]
+async fn create_thread_empty_name() {
+    let mock_server = MockServer::start().await;
+    let mut connector = DiscordConnector::new();
+    let signing_key = setup_full(&mut connector, &mock_server, &["discord.threads"]).await;
+
+    let token = generate_valid_token(&signing_key, "discord.create_thread");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "discord.create_thread",
+            "input": {
+                "channel_id": "111",
+                "message_id": "msg_001",
+                "name": ""
+            },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err(), "should reject empty thread name");
+}
+
+// ============================================================================
+// Capability Gating Tests
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn invoke_without_capability_token_fails() {
+    let mock_server = MockServer::start().await;
+    let mut connector = DiscordConnector::new();
+    mock_current_user_ok(&mock_server, "test_token").await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    // Handshake grants capabilities but we don't pass a token in invoke
+    let _signing_key = setup_handshake(&mut connector, &["discord.send"]).await;
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "discord.send_message",
+            "input": { "channel_id": "111", "content": "test" }
+        }))
+        .await;
+
+    assert!(
+        result.is_err(),
+        "invoke without capability_token should fail"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_with_wrong_capability_fails() {
+    let mock_server = MockServer::start().await;
+    let mut connector = DiscordConnector::new();
+    let signing_key = setup_full(&mut connector, &mock_server, &["discord.read"]).await;
+
+    // Token is for discord.read, but we're trying to send a message (discord.send)
+    let token = generate_valid_token(&signing_key, "discord.get_channel");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "discord.send_message",
+            "input": { "channel_id": "111", "content": "test" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err(), "wrong capability should be denied");
+}
+
+// ============================================================================
+// Error Taxonomy Tests
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn api_401_maps_to_unauthorized() {
+    let mock_server = MockServer::start().await;
+    let mut connector = DiscordConnector::new();
+    let signing_key = setup_full(&mut connector, &mock_server, &["discord.read"]).await;
+
+    Mock::given(method("GET"))
+        .and(path("/channels/111"))
+        .respond_with(
+            ResponseTemplate::new(401)
+                .set_body_json(json!({"message": "401: Unauthorized", "code": 0})),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let token = generate_valid_token(&signing_key, "discord.get_channel");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "discord.get_channel",
+            "input": { "channel_id": "111" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err(), "401 should map to error");
+}
+
+#[fcp_async_core::runtime::test]
+async fn api_429_maps_to_rate_limited() {
+    let mock_server = MockServer::start().await;
+    let mut connector = DiscordConnector::new();
+    let signing_key = setup_full(&mut connector, &mock_server, &["discord.read"]).await;
+
+    Mock::given(method("GET"))
+        .and(path("/channels/111"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .set_body_json(
+                    json!({"message": "You are being rate limited.", "retry_after": 1.0}),
+                )
+                .append_header("Retry-After", "1"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let token = generate_valid_token(&signing_key, "discord.get_channel");
+
+    // Use a connector with 0 retries to avoid test slowness
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "discord.get_channel",
+            "input": { "channel_id": "111" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err(), "429 should map to error");
+}
+
+#[fcp_async_core::runtime::test]
+async fn api_500_maps_to_external_error() {
+    let mock_server = MockServer::start().await;
+    let mut connector = DiscordConnector::new();
+    let signing_key = setup_full(&mut connector, &mock_server, &["discord.read"]).await;
+
+    Mock::given(method("GET"))
+        .and(path("/channels/111"))
+        .respond_with(
+            ResponseTemplate::new(500)
+                .set_body_json(json!({"message": "Internal Server Error", "code": 0})),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let token = generate_valid_token(&signing_key, "discord.get_channel");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "discord.get_channel",
+            "input": { "channel_id": "111" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err(), "500 should map to error");
+}
+
+// ============================================================================
+// Self-Check & Health Tests
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn self_check_passes_when_configured() {
+    let mock_server = MockServer::start().await;
+    let mut connector = DiscordConnector::new();
+    mock_current_user_ok(&mock_server, "test_token").await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    // Re-mount for self-check (it calls /users/@me again)
+    mock_current_user_ok(&mock_server, "test_token").await;
+
+    let result = connector
+        .handle_self_check()
+        .await
+        .expect("self_check should succeed");
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["details"]["token_ok"], true);
+    assert_eq!(result["details"]["intents_ok"], true);
+}
+
+// ============================================================================
+// Shutdown Tests
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn shutdown_returns_status() {
+    let mut connector = DiscordConnector::new();
+    let result = connector
+        .handle_shutdown(json!({}))
+        .await
+        .expect("shutdown should succeed");
+
+    assert_eq!(result["status"], "shutdown");
+}

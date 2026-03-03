@@ -1,6 +1,9 @@
 //! Discord Gateway (WebSocket) client.
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 
 use fcp_async_core::channel::mpsc;
@@ -51,10 +54,58 @@ pub enum GatewayOpcode {
     HeartbeatAck = 11,
 }
 
+const GATEWAY_EVENT_BUFFER_CAPACITY: usize = 256;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fcp_async_core::time::sleep;
     use serde_json::json;
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::accept_async;
+
+    fn parse_payload(msg: WsMessage) -> GatewayPayload {
+        match msg {
+            WsMessage::Text(text) => serde_json::from_str(&text).expect("valid gateway payload"),
+            other => panic!("expected text payload, got {other:?}"),
+        }
+    }
+
+    fn hello_payload(interval_ms: u64) -> WsMessage {
+        WsMessage::Text(
+            json!({
+                "op": GatewayOpcode::Hello as i32,
+                "d": { "heartbeat_interval": interval_ms },
+                "s": null,
+                "t": null,
+            })
+            .to_string()
+            .into(),
+        )
+    }
+
+    fn dispatch_payload(event_name: &str, sequence: u64, data: &serde_json::Value) -> WsMessage {
+        WsMessage::Text(
+            json!({
+                "op": GatewayOpcode::Dispatch as i32,
+                "d": data,
+                "s": sequence,
+                "t": event_name,
+            })
+            .to_string()
+            .into(),
+        )
+    }
+
+    fn test_config(gateway_url: String) -> DiscordConfig {
+        DiscordConfig {
+            bot_credential: "test_token".into(),
+            api_url: "https://discord.com/api/v10".into(),
+            gateway_url: Some(gateway_url),
+            intents: 513,
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn gateway_opcode_try_from_known_values() {
@@ -127,6 +178,269 @@ mod tests {
             _ => panic!("expected Unknown event"),
         }
     }
+
+    #[fcp_async_core::runtime::test]
+    async fn gateway_loop_identifies_emits_events_and_updates_state() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let ws_url = format!("ws://{addr}");
+
+        let server = fcp_async_core::task::spawn(async move {
+            let (socket, _) = listener.accept().await.expect("accept client");
+            let mut ws = accept_async(socket).await.expect("accept websocket");
+
+            ws.send(hello_payload(1_000)).await.expect("send hello");
+
+            let identify = parse_payload(
+                ws.next()
+                    .await
+                    .expect("client identify frame")
+                    .expect("identify frame ok"),
+            );
+            assert_eq!(identify.op, GatewayOpcode::Identify as i32);
+
+            ws.send(dispatch_payload(
+                "READY",
+                1,
+                &json!({
+                    "v": 10,
+                    "user": { "id": "123", "username": "bot" },
+                    "session_id": "sess-identify",
+                    "resume_gateway_url": "wss://gateway.discord.gg"
+                }),
+            ))
+            .await
+            .expect("send ready");
+
+            ws.send(dispatch_payload(
+                "MESSAGE_CREATE",
+                2,
+                &json!({ "id": "msg-1", "content": "hello" }),
+            ))
+            .await
+            .expect("send message create");
+
+            ws.close(None).await.expect("close websocket");
+        });
+
+        let (client_ws, _) = connect_async(&ws_url).await.expect("connect websocket");
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let mut state = GatewayState::default();
+
+        run_gateway_loop_inner(client_ws, test_config(ws_url), &event_tx, &mut state)
+            .await
+            .expect("gateway loop success");
+
+        match event_rx.recv().await.expect("ready event") {
+            GatewayEvent::Ready(ready) => assert_eq!(ready.session_id, "sess-identify"),
+            other => panic!("expected Ready event, got {other:?}"),
+        }
+
+        match event_rx.recv().await.expect("message create event") {
+            GatewayEvent::MessageCreate(message) => assert_eq!(message["id"], "msg-1"),
+            other => panic!("expected MessageCreate event, got {other:?}"),
+        }
+
+        assert_eq!(state.session_id.as_deref(), Some("sess-identify"));
+        assert_eq!(
+            state.resume_url.as_deref(),
+            Some("wss://gateway.discord.gg")
+        );
+        assert_eq!(state.sequence, Some(2));
+
+        server.await.expect("server task should complete");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn gateway_loop_uses_resume_when_session_state_is_complete() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let ws_url = format!("ws://{addr}");
+
+        let server = fcp_async_core::task::spawn(async move {
+            let (socket, _) = listener.accept().await.expect("accept client");
+            let mut ws = accept_async(socket).await.expect("accept websocket");
+
+            ws.send(hello_payload(1_000)).await.expect("send hello");
+
+            let resume = parse_payload(
+                ws.next()
+                    .await
+                    .expect("client resume frame")
+                    .expect("resume frame ok"),
+            );
+            assert_eq!(resume.op, GatewayOpcode::Resume as i32);
+            let payload = resume.d.expect("resume payload");
+            assert_eq!(payload["session_id"], "sess-resume");
+            assert_eq!(payload["seq"], 7);
+
+            ws.send(dispatch_payload("RESUMED", 8, &json!({})))
+                .await
+                .expect("send resumed");
+            ws.close(None).await.expect("close websocket");
+        });
+
+        let (client_ws, _) = connect_async(&ws_url).await.expect("connect websocket");
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let mut state = GatewayState {
+            session_id: Some("sess-resume".into()),
+            resume_url: Some("wss://gateway.discord.gg".into()),
+            sequence: Some(7),
+        };
+
+        run_gateway_loop_inner(client_ws, test_config(ws_url), &event_tx, &mut state)
+            .await
+            .expect("gateway loop success");
+
+        match event_rx.recv().await.expect("resumed event") {
+            GatewayEvent::Resumed => {}
+            other => panic!("expected Resumed event, got {other:?}"),
+        }
+        assert_eq!(state.sequence, Some(8));
+
+        server.await.expect("server task should complete");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn gateway_loop_ignores_malformed_dispatch_frames() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let ws_url = format!("ws://{addr}");
+
+        let server = fcp_async_core::task::spawn(async move {
+            let (socket, _) = listener.accept().await.expect("accept client");
+            let mut ws = accept_async(socket).await.expect("accept websocket");
+
+            ws.send(hello_payload(1_000)).await.expect("send hello");
+            let _ = ws
+                .next()
+                .await
+                .expect("identify frame")
+                .expect("identify frame ok");
+
+            ws.send(WsMessage::Text("{ this is not json".into()))
+                .await
+                .expect("send malformed frame");
+            ws.send(dispatch_payload(
+                "MESSAGE_DELETE",
+                9,
+                &json!({ "id": "msg-delete-1" }),
+            ))
+            .await
+            .expect("send valid dispatch");
+            ws.close(None).await.expect("close websocket");
+        });
+
+        let (client_ws, _) = connect_async(&ws_url).await.expect("connect websocket");
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let mut state = GatewayState::default();
+
+        run_gateway_loop_inner(client_ws, test_config(ws_url), &event_tx, &mut state)
+            .await
+            .expect("gateway loop success");
+
+        match event_rx.recv().await.expect("message delete event") {
+            GatewayEvent::MessageDelete(payload) => assert_eq!(payload["id"], "msg-delete-1"),
+            other => panic!("expected MessageDelete event, got {other:?}"),
+        }
+        assert_eq!(state.sequence, Some(9));
+
+        server.await.expect("server task should complete");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn gateway_loop_clears_incomplete_resume_state_and_identifies() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let ws_url = format!("ws://{addr}");
+
+        let server = fcp_async_core::task::spawn(async move {
+            let (socket, _) = listener.accept().await.expect("accept client");
+            let mut ws = accept_async(socket).await.expect("accept websocket");
+
+            ws.send(hello_payload(1_000)).await.expect("send hello");
+
+            let first_payload = parse_payload(
+                ws.next()
+                    .await
+                    .expect("client frame")
+                    .expect("client frame ok"),
+            );
+            assert_eq!(first_payload.op, GatewayOpcode::Identify as i32);
+            ws.close(None).await.expect("close websocket");
+        });
+
+        let (client_ws, _) = connect_async(&ws_url).await.expect("connect websocket");
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let mut state = GatewayState {
+            session_id: Some("sess-incomplete".into()),
+            resume_url: Some("wss://stale.gateway.discord.gg".into()),
+            sequence: None,
+        };
+
+        run_gateway_loop_inner(client_ws, test_config(ws_url), &event_tx, &mut state)
+            .await
+            .expect("gateway loop success");
+
+        assert_eq!(state.session_id, None);
+        assert_eq!(state.resume_url, None);
+        assert_eq!(state.sequence, None);
+
+        server.await.expect("server task should complete");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn gateway_connection_enforces_single_active_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let ws_url = format!("ws://{addr}");
+
+        let server = fcp_async_core::task::spawn(async move {
+            let (socket, _) = listener.accept().await.expect("accept client");
+            let mut ws = accept_async(socket).await.expect("accept websocket");
+
+            ws.send(hello_payload(1_000)).await.expect("send hello");
+            let _ = ws
+                .next()
+                .await
+                .expect("identify frame")
+                .expect("identify frame ok");
+
+            sleep(Duration::from_millis(50)).await;
+            ws.close(None).await.expect("close websocket");
+        });
+
+        let config = test_config(ws_url);
+        let api_client = Arc::new(DiscordApiClient::new(&config).expect("create api client"));
+        let connection = GatewayConnection::new(config, api_client);
+
+        let stream = connection
+            .connect_once()
+            .await
+            .expect("first connection should succeed");
+
+        let second_attempt = connection.connect_once().await;
+        assert!(second_attempt.is_err());
+        match second_attempt.unwrap_err() {
+            DiscordError::Gateway(message) => {
+                assert!(message.contains("already active"));
+            }
+            other => panic!("expected gateway error, got {other:?}"),
+        }
+
+        let _ = stream.join_handle.await.expect("gateway loop task join");
+        server.await.expect("server task should complete");
+    }
 }
 
 impl TryFrom<i32> for GatewayOpcode {
@@ -185,6 +499,7 @@ pub struct GatewayConnection {
     config: DiscordConfig,
     api_client: Arc<DiscordApiClient>,
     state: Arc<Mutex<GatewayState>>,
+    active_connection: Arc<AtomicBool>,
 }
 
 impl GatewayConnection {
@@ -194,6 +509,7 @@ impl GatewayConnection {
             config,
             api_client,
             state: Arc::new(Mutex::new(GatewayState::default())),
+            active_connection: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -201,7 +517,17 @@ impl GatewayConnection {
     /// If we have a previous session, will attempt to resume.
     #[instrument(skip(self))]
     pub async fn connect_once(&self) -> DiscordResult<GatewayStream> {
-        let (event_tx, event_rx) = mpsc::channel(256);
+        if self
+            .active_connection
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(DiscordError::Gateway(
+                "Gateway connection already active".into(),
+            ));
+        }
+
+        let (event_tx, event_rx) = mpsc::channel(GATEWAY_EVENT_BUFFER_CAPACITY);
 
         let config = self.config.clone();
         let api_client = self.api_client.clone();
@@ -218,7 +544,13 @@ impl GatewayConnection {
         } else if let Some(url) = &config.gateway_url {
             url.clone()
         } else {
-            api_client.get_gateway().await?
+            match api_client.get_gateway().await {
+                Ok(url) => url,
+                Err(e) => {
+                    self.active_connection.store(false, Ordering::Release);
+                    return Err(e);
+                }
+            }
         };
 
         let ws_url = format!("{gateway_url}/?v=10&encoding=json");
@@ -228,12 +560,20 @@ impl GatewayConnection {
             "Connecting to Discord gateway"
         );
 
-        let (ws_stream, _) = connect_async(&ws_url)
-            .await
-            .map_err(|e| DiscordError::Gateway(format!("Failed to connect WS: {e}")))?;
+        let (ws_stream, _) = match connect_async(&ws_url).await {
+            Ok(pair) => pair,
+            Err(e) => {
+                self.active_connection.store(false, Ordering::Release);
+                return Err(DiscordError::Gateway(format!("Failed to connect WS: {e}")));
+            }
+        };
 
+        let active_connection = Arc::clone(&self.active_connection);
         let join_handle = fcp_async_core::task::spawn(async move {
-            run_gateway_loop(ws_stream, config, event_tx, state_snapshot, state_store).await
+            let result =
+                run_gateway_loop(ws_stream, config, event_tx, state_snapshot, state_store).await;
+            active_connection.store(false, Ordering::Release);
+            result
         });
 
         Ok(GatewayStream {
@@ -291,6 +631,12 @@ pub struct GatewayStream {
     pub join_handle: fcp_async_core::task::JoinHandle<DiscordResult<()>>,
 }
 
+impl std::fmt::Debug for GatewayStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GatewayStream").finish_non_exhaustive()
+    }
+}
+
 /// Run the gateway event loop.
 async fn run_gateway_loop(
     ws_stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
@@ -344,6 +690,13 @@ async fn run_gateway_loop_inner(
 
     let heartbeat_interval = Duration::from_millis(hello.heartbeat_interval);
     debug!(interval_ms = hello.heartbeat_interval, "Received Hello");
+
+    if state.session_id.is_some() ^ state.sequence.is_some() {
+        warn!("Incomplete resume state detected; clearing state and re-identifying");
+        state.session_id = None;
+        state.resume_url = None;
+        state.sequence = None;
+    }
 
     // Send Resume if we have a session, otherwise Identify
     if let (Some(sess_id), Some(seq)) = (&state.session_id, state.sequence) {

@@ -83,7 +83,7 @@ mod meshnode {
     use fcp_mesh::admission::ObjectAdmissionClass;
     use fcp_mesh::{
         ControlPlaneEnvelope, InMemoryControlPlaneHandler, MeshNode, MeshNodeConfig, MeshSession,
-        RetentionClass, SymbolRequestError,
+        RetentionClass, SymbolRequestError, TraceReplayEngine,
     };
     use fcp_protocol::session::{
         MeshSessionId, SessionCryptoSuite, SessionKeys, SessionReplayPolicy, TransportLimits,
@@ -97,9 +97,14 @@ mod meshnode {
         ObjectAdmissionPolicy, ObjectSymbolMeta, ObjectTransmissionInfo, QuarantineStore,
         QuarantinedObject, StoredSymbol, SymbolMeta, SymbolStore, SymbolStoreError,
     };
+    use fcp_telemetry::trace_capture::{
+        CapturedTrace, RedactionPolicy, TraceCaptureConfig, TraceEvent, TraceExportFormat,
+    };
     use raptorq::ObjectTransmissionInformation;
     use semver::Version;
+    use std::path::PathBuf;
     use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn test_header(zone_id: &ZoneId) -> ObjectHeader {
         ObjectHeader {
@@ -141,6 +146,63 @@ mod meshnode {
             symbol_store,
             quarantine_store,
         )
+    }
+
+    fn build_mesh_node_with_trace(
+        name: &str,
+        sender_instance_id: u64,
+        local_node_id: u64,
+    ) -> MeshNode {
+        let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+        let symbol_store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig {
+            local_node_id,
+            ..MemorySymbolStoreConfig::default()
+        }));
+        let quarantine_store = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
+        let trace_config = TraceCaptureConfig::new()
+            .enabled()
+            .with_max_events(2048)
+            .with_sample_rate(1.0);
+
+        MeshNode::new(
+            MeshNodeConfig::new(name)
+                .with_sender_instance_id(sender_instance_id)
+                .with_trace_capture_config(trace_config),
+            object_store,
+            symbol_store,
+            quarantine_store,
+        )
+    }
+
+    fn build_mesh_node_with_trace_config(
+        name: &str,
+        sender_instance_id: u64,
+        local_node_id: u64,
+        trace_config: TraceCaptureConfig,
+    ) -> MeshNode {
+        let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+        let symbol_store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig {
+            local_node_id,
+            ..MemorySymbolStoreConfig::default()
+        }));
+        let quarantine_store = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
+
+        MeshNode::new(
+            MeshNodeConfig::new(name)
+                .with_sender_instance_id(sender_instance_id)
+                .with_trace_capture_config(trace_config),
+            object_store,
+            symbol_store,
+            quarantine_store,
+        )
+    }
+
+    fn trace_temp_path(prefix: &str, ext: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{}-{nanos}.{ext}", std::process::id()))
     }
 
     async fn seed_symbols(store: &Arc<dyn SymbolStore>, meta: &ObjectSymbolMeta, source_node: u64) {
@@ -1342,6 +1404,365 @@ mod meshnode {
             }),
         );
     }
+
+    #[fcp_async_core::runtime::test]
+    async fn meshnode_trace_capture_completeness_small_mesh() {
+        const TEST_NAME: &str = "meshnode_trace_capture_completeness_small_mesh";
+        const CATEGORY: &str = "meshnode";
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([77u8; 8]);
+        let object_id = test_object_id("meshnode-trace-complete");
+        let mut node = build_mesh_node_with_trace("node-trace", 88, 42);
+        let peer = NodeId::new("peer-trace");
+        let symbol_store = node.symbol_store().clone();
+
+        let session = MeshSession::new(
+            MeshSessionId::new(),
+            peer.clone(),
+            SessionCryptoSuite::Suite1,
+            SessionKeys {
+                k_mac_i2r: [31u8; 32],
+                k_mac_r2i: [32u8; 32],
+                k_ctx: [33u8; 32],
+            },
+            TransportLimits::default(),
+            true,
+            0,
+            SessionReplayPolicy::default(),
+        );
+        node.register_session(session, 1_000);
+
+        node.update_local_state(
+            create_test_profile("node-trace", 8_192, 8),
+            HashSet::new(),
+            vec![HeldLease {
+                subject_id: object_id,
+                purpose: LeasePurpose::SingletonWriter,
+                expires_at: 2_000,
+            }],
+        );
+
+        node.announce_object(&zone_id, &object_id, ObjectAdmissionClass::Admitted, 1_100);
+
+        let routes = vec![TransportPath::new(
+            TransportPathKind::Direct,
+            peer.clone(),
+            "direct",
+            None,
+        )];
+        let _selected =
+            node.select_transport_paths(&ZoneTransportPolicy::default(), &routes, &object_id, 0, 1);
+
+        let oti = ObjectTransmissionInformation::new(512, 128, 1, 1, 1);
+        let meta = ObjectSymbolMeta {
+            object_id,
+            zone_id: zone_id.clone(),
+            oti: ObjectTransmissionInfo::from(oti),
+            source_symbols: 4,
+            first_symbol_at: 0,
+        };
+        seed_symbols(&symbol_store, &meta, 42).await;
+
+        let request = SymbolRequest::new(
+            test_header(&zone_id),
+            object_id,
+            zone_id.clone(),
+            zone_key_id,
+            1,
+            2,
+            1,
+        );
+        let response = node
+            .handle_symbol_request(request, &peer, true, 1_200)
+            .await
+            .expect("symbol request succeeds");
+        assert!(!response.symbol_esis.is_empty());
+
+        let snapshot = node.trace_snapshot().expect("trace capture enabled");
+        let has_session = snapshot
+            .events
+            .iter()
+            .any(|event| matches!(event, TraceEvent::Session(_)));
+        let has_lease = snapshot
+            .events
+            .iter()
+            .any(|event| matches!(event, TraceEvent::Lease(_)));
+        let has_gossip = snapshot
+            .events
+            .iter()
+            .any(|event| matches!(event, TraceEvent::Gossip(_)));
+        let has_routing = snapshot
+            .events
+            .iter()
+            .any(|event| matches!(event, TraceEvent::Routing(_)));
+        let has_admission = snapshot
+            .events
+            .iter()
+            .any(|event| matches!(event, TraceEvent::Admission(_)));
+
+        assert!(has_session, "trace should include session events");
+        assert!(has_lease, "trace should include lease events");
+        assert!(has_gossip, "trace should include gossip events");
+        assert!(has_routing, "trace should include routing events");
+        assert!(has_admission, "trace should include admission events");
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "trace_id": snapshot.id,
+                "event_count": snapshot.events.len(),
+                "event_types": {
+                    "session": has_session,
+                    "lease": has_lease,
+                    "gossip": has_gossip,
+                    "routing": has_routing,
+                    "admission": has_admission
+                }
+            }),
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn meshnode_trace_export_roundtrip_integration_flow() {
+        const TEST_NAME: &str = "meshnode_trace_export_roundtrip_integration_flow";
+        const CATEGORY: &str = "meshnode";
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let zone_id = ZoneId::work();
+        let object_id = test_object_id("meshnode-trace-export");
+        let mut node = build_mesh_node_with_trace("node-export", 91, 7);
+
+        node.announce_object(&zone_id, &object_id, ObjectAdmissionClass::Admitted, 5_000);
+
+        let json_path = trace_temp_path("fcp-mesh-trace", "json");
+        let cbor_path = trace_temp_path("fcp-mesh-trace", "cbor");
+
+        node.export_trace_to_path(&json_path, false, TraceExportFormat::Json)
+            .expect("export json trace");
+        node.export_trace_to_path(&cbor_path, true, TraceExportFormat::Cbor)
+            .expect("export cbor trace");
+
+        let json_bytes = std::fs::read(&json_path).expect("read json trace");
+        let cbor_bytes = std::fs::read(&cbor_path).expect("read cbor trace");
+
+        let json_trace = CapturedTrace::from_json(std::str::from_utf8(&json_bytes).expect("utf8"))
+            .expect("parse json trace");
+        let cbor_trace = CapturedTrace::from_cbor(&cbor_bytes).expect("parse cbor trace");
+
+        assert!(!json_trace.events.is_empty());
+        assert!(!cbor_trace.events.is_empty());
+        assert_eq!(json_trace.events.len(), cbor_trace.events.len());
+        assert!(
+            cbor_trace.redacted,
+            "redacted export should mark trace redacted"
+        );
+
+        let _ = std::fs::remove_file(&json_path);
+        let _ = std::fs::remove_file(&cbor_path);
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "json_events": json_trace.events.len(),
+                "cbor_events": cbor_trace.events.len(),
+                "redacted": cbor_trace.redacted,
+                "json_path": json_path.display().to_string(),
+                "cbor_path": cbor_path.display().to_string()
+            }),
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn meshnode_trace_capture_replay_multinode_staged_logs() {
+        const TEST_NAME: &str = "meshnode_trace_capture_replay_multinode_staged_logs";
+        const CATEGORY: &str = "meshnode";
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([79u8; 8]);
+        let object_id = test_object_id("meshnode-trace-replay-multinode");
+        let peer = NodeId::new("node-b");
+
+        let trace_config = TraceCaptureConfig::new()
+            .enabled()
+            .with_max_events(4096)
+            .with_sample_rate(1.0)
+            .with_redaction(RedactionPolicy::default().with_field("session_id"));
+        let mut node_a = build_mesh_node_with_trace_config("node-a-trace", 94, 31, trace_config);
+        let node_b = build_mesh_node("node-b", 95, 32);
+
+        let oti = ObjectTransmissionInformation::new(512, 128, 1, 1, 1);
+        let meta = ObjectSymbolMeta {
+            object_id,
+            zone_id: zone_id.clone(),
+            oti: ObjectTransmissionInfo::from(oti),
+            source_symbols: 4,
+            first_symbol_at: 0,
+        };
+        let symbol_store_a = node_a.symbol_store().clone();
+        seed_symbols(&symbol_store_a, &meta, 31).await;
+
+        let denied_request = SymbolRequest::new(
+            test_header(&zone_id),
+            object_id,
+            zone_id.clone(),
+            zone_key_id,
+            1,
+            DEFAULT_MAX_SYMBOLS_UNAUTHENTICATED + 1,
+            1,
+        );
+        let denied = node_a
+            .handle_symbol_request(denied_request, &peer, false, 10_000)
+            .await
+            .expect_err("unauthenticated oversized request should reject");
+        assert!(matches!(
+            denied,
+            SymbolRequestError::BoundsExceeded { .. } | SymbolRequestError::AdmissionRejected(_)
+        ));
+
+        let session = MeshSession::new(
+            MeshSessionId::new(),
+            peer.clone(),
+            SessionCryptoSuite::Suite1,
+            SessionKeys {
+                k_mac_i2r: [41u8; 32],
+                k_mac_r2i: [42u8; 32],
+                k_ctx: [43u8; 32],
+            },
+            TransportLimits::default(),
+            true,
+            0,
+            SessionReplayPolicy::default(),
+        );
+        node_a.register_session(session, 10_100);
+
+        let missing = vec![0, 1, 2, 3];
+        let allowed_request = SymbolRequest::new(
+            test_header(&zone_id),
+            object_id,
+            zone_id.clone(),
+            zone_key_id,
+            1,
+            DEFAULT_MAX_SYMBOLS_UNAUTHENTICATED + 1,
+            1,
+        )
+        .with_missing_hint(missing);
+        let allowed = node_a
+            .handle_symbol_request(allowed_request, &peer, false, 10_200)
+            .await
+            .expect("authenticated session should allow larger request");
+        assert!(!allowed.symbol_esis.is_empty());
+
+        let receiver_store = node_b.symbol_store().clone();
+        if let Err(SymbolStoreError::ObjectNotFound(_)) =
+            receiver_store.get_object_meta(&object_id).await
+        {
+            receiver_store
+                .put_object_meta(meta.clone())
+                .await
+                .expect("put object meta");
+        }
+        for esi in &allowed.symbol_esis {
+            let symbol = symbol_store_a
+                .get_symbol(&object_id, *esi)
+                .await
+                .expect("source symbol present");
+            receiver_store
+                .put_symbol(symbol)
+                .await
+                .expect("store symbol");
+        }
+
+        let captured = node_a.trace_snapshot().expect("trace capture enabled");
+        let admit_count = captured
+            .events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    TraceEvent::Admission(outcome) if outcome.decision == "admit"
+                )
+            })
+            .count();
+        let reject_count = captured
+            .events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    TraceEvent::Admission(outcome) if outcome.decision == "reject"
+                )
+            })
+            .count();
+        emit_test_stage(
+            TEST_NAME,
+            CATEGORY,
+            "capture",
+            serde_json::json!({
+                "captured_events": captured.events.len(),
+                "admit_decisions": admit_count,
+                "reject_decisions": reject_count,
+                "symbols_delivered": allowed.symbol_esis.len(),
+            }),
+        );
+
+        let replay_report = TraceReplayEngine::replay(&captured).expect("replay succeeds");
+        emit_test_stage(
+            TEST_NAME,
+            CATEGORY,
+            "replay",
+            serde_json::json!({
+                "input_events": replay_report.input_events,
+                "replayed_events": replay_report.replayed_events,
+                "mismatched_events": replay_report.summary.mismatched_events,
+                "mismatched_decisions": replay_report.summary.mismatched_decisions,
+            }),
+        );
+
+        let redacted = node_a
+            .trace_redacted_snapshot()
+            .expect("redacted trace capture enabled");
+        let redacted_session = redacted.events.iter().find_map(|event| match event {
+            TraceEvent::Session(session) => Some(session.session_id.as_str()),
+            _ => None,
+        });
+        assert_eq!(
+            redacted_session,
+            Some("[REDACTED]"),
+            "session_id should be redacted in redacted snapshots"
+        );
+        emit_test_stage(
+            TEST_NAME,
+            CATEGORY,
+            "compare",
+            serde_json::json!({
+                "redacted": redacted.redacted,
+                "session_id_redacted": redacted_session == Some("[REDACTED]"),
+                "replay_diffs": replay_report.diffs.len(),
+            }),
+        );
+
+        assert_eq!(replay_report.summary.mismatched_events, 0);
+        assert_eq!(replay_report.summary.mismatched_decisions, 0);
+        assert!(admit_count >= 1, "expected at least one admit decision");
+        assert!(reject_count >= 1, "expected at least one reject decision");
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "capture_events": captured.events.len(),
+                "replay_mismatches": replay_report.summary.mismatched_decisions,
+                "admit_count": admit_count,
+                "reject_count": reject_count,
+                "receiver_symbols": receiver_store.symbol_count(&object_id).await,
+            }),
+        );
+    }
 }
 
 // ============================================================================
@@ -1664,6 +2085,43 @@ fn emit_test_start(test_name: &'static str, category: &'static str) {
         },
         context: Some(serde_json::json!({ "category": category, "status": "started" })),
         details: Some(serde_json::json!({})),
+        error_code: None,
+    }
+    .emit();
+}
+
+fn emit_test_stage(
+    test_name: &'static str,
+    category: &'static str,
+    stage: &'static str,
+    details: serde_json::Value,
+) {
+    let correlation_id = test_correlation_id(test_name, category);
+    let duration_ms = {
+        let starts = test_start_times()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        starts.get(&correlation_id).map_or(0, |start| {
+            u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+        })
+    };
+
+    TestEvent {
+        timestamp: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        log_version: "v2",
+        level: "info",
+        module: "fcp-mesh",
+        phase: stage,
+        correlation_id,
+        test_name,
+        result: "pass",
+        duration_ms,
+        assertions: TestAssertions {
+            passed: 0,
+            failed: 0,
+        },
+        context: Some(serde_json::json!({ "category": category, "stage": stage })),
+        details: Some(details),
         error_code: None,
     }
     .emit();

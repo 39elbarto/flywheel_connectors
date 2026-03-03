@@ -12,6 +12,7 @@
 //! - `fcp net` - Egress policy debugging (`NetworkConstraints`)
 //! - `fcp policy` - Policy simulation and preflight checks
 //! - `fcp repair` - Coverage status and repair planning
+//! - `fcp trace` - Deterministic mesh trace replay
 
 #![deny(unsafe_code)]
 
@@ -29,6 +30,7 @@ mod new;
 mod package;
 mod policy;
 mod repair;
+mod trace;
 
 use std::io::{IsTerminal, Read, Write};
 use std::process::Stdio;
@@ -143,6 +145,9 @@ enum Commands {
 
     /// Coverage status and repair planning.
     Repair(repair::RepairArgs),
+
+    /// Trace replay and debugging tools.
+    Trace(trace::TraceArgs),
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -325,6 +330,12 @@ fn main() -> Result<()> {
                 anyhow::bail!("--input-stdin is currently supported only for `fcp doctor`");
             }
             repair::run(args)
+        }
+        Commands::Trace(args) => {
+            if cli.input_stdin {
+                anyhow::bail!("--input-stdin is currently supported only for `fcp doctor`");
+            }
+            trace::run(args)
         }
     }
 }

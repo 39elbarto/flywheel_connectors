@@ -1233,6 +1233,26 @@ impl MeshNode {
         Ok(())
     }
 
+    /// Ingest a trace event into the node capture buffer for deterministic replay.
+    ///
+    /// This method is intended for offline replay/debug flows where a captured trace
+    /// is fed back through a `MeshNode` to validate deterministic behavior.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MeshNodeError::TraceNotEnabled` if trace capture is disabled or
+    /// `MeshNodeError::TraceExport` when the capture buffer rejects the event.
+    pub fn ingest_trace_event_for_replay(
+        &mut self,
+        event: TraceEvent,
+    ) -> Result<(), MeshNodeError> {
+        let Some(capture) = self.trace_capture.as_mut() else {
+            return Err(MeshNodeError::TraceNotEnabled);
+        };
+        capture.record(event)?;
+        Ok(())
+    }
+
     /// Rank candidate transport paths according to zone policy.
     #[must_use]
     pub fn rank_transport_paths(

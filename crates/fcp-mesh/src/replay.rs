@@ -1,0 +1,465 @@
+//! Trace replay engine for deterministic offline debugging.
+//!
+//! Replays a captured mesh trace by feeding events into a `MeshNode` trace buffer and
+//! comparing expected decisions in the source trace against replayed decisions.
+
+use std::collections::BTreeMap;
+use std::path::Path;
+use std::sync::Arc;
+
+use fcp_store::{
+    MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore, MemorySymbolStoreConfig,
+    ObjectAdmissionPolicy, QuarantineStore,
+};
+use fcp_telemetry::trace_capture::{CapturedTrace, TraceCaptureConfig, TraceError, TraceEvent};
+use serde::{Deserialize, Serialize};
+
+use crate::{MeshNode, MeshNodeConfig, MeshNodeError};
+
+/// Input format for replay trace files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceReplayInputFormat {
+    /// Auto-detect from content.
+    Auto,
+    /// Parse as JSON.
+    Json,
+    /// Parse as CBOR.
+    Cbor,
+}
+
+/// A mismatch between expected and replayed decisions/events.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceReplayDiff {
+    /// Event index in replay order.
+    pub index: usize,
+    /// Event type label (`routing`, `admission`, ...).
+    pub event_type: String,
+    /// Expected decision from source trace (if the event type carries one).
+    pub expected_decision: Option<String>,
+    /// Actual decision from replayed trace (if the event type carries one).
+    pub actual_decision: Option<String>,
+    /// Human-readable mismatch description.
+    pub detail: String,
+}
+
+/// Replay summary counters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceReplaySummary {
+    /// Total events in input trace.
+    pub total_events: usize,
+    /// Event counts grouped by type.
+    pub event_type_counts: BTreeMap<String, u64>,
+    /// Decision counts from input trace.
+    pub expected_decision_counts: BTreeMap<String, u64>,
+    /// Decision counts from replay output.
+    pub actual_decision_counts: BTreeMap<String, u64>,
+    /// Count of events that exactly matched.
+    pub matched_events: usize,
+    /// Count of events that mismatched.
+    pub mismatched_events: usize,
+    /// Count of decisions that exactly matched.
+    pub matched_decisions: usize,
+    /// Count of decisions that mismatched.
+    pub mismatched_decisions: usize,
+}
+
+/// Full replay report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceReplayReport {
+    /// Trace capture ID from source file.
+    pub source_trace_id: String,
+    /// Optional capture node from source file.
+    pub source_capturing_node: Option<String>,
+    /// Number of events in the source file.
+    pub input_events: usize,
+    /// Number of events captured after replay.
+    pub replayed_events: usize,
+    /// Summary counters.
+    pub summary: TraceReplaySummary,
+    /// Expected/actual diffs.
+    pub diffs: Vec<TraceReplayDiff>,
+}
+
+/// Replay engine for mesh traces.
+pub struct TraceReplayEngine;
+
+impl TraceReplayEngine {
+    /// Load a trace from a file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TraceReplayError`] when file IO or parsing fails.
+    pub fn load_trace_from_path<P: AsRef<Path>>(
+        path: P,
+        format: TraceReplayInputFormat,
+    ) -> Result<CapturedTrace, TraceReplayError> {
+        let path_ref = path.as_ref();
+        let bytes = std::fs::read(path_ref).map_err(|err| TraceReplayError::Io {
+            path: path_ref.display().to_string(),
+            message: err.to_string(),
+        })?;
+        decode_trace_bytes(&bytes, format)
+    }
+
+    /// Replay a trace file and generate a deterministic report.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TraceReplayError`] when loading or replay fails.
+    pub fn replay_path<P: AsRef<Path>>(
+        path: P,
+        format: TraceReplayInputFormat,
+    ) -> Result<TraceReplayReport, TraceReplayError> {
+        let trace = Self::load_trace_from_path(path, format)?;
+        Self::replay(&trace)
+    }
+
+    /// Replay a parsed trace and compare expected vs actual decisions.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TraceReplayError`] when replay infrastructure cannot ingest events.
+    pub fn replay(trace: &CapturedTrace) -> Result<TraceReplayReport, TraceReplayError> {
+        let replay_node = trace
+            .capturing_node
+            .as_deref()
+            .unwrap_or("trace-replay-node");
+        let trace_config = TraceCaptureConfig::new()
+            .enabled()
+            .with_sample_rate(1.0)
+            .with_max_events(trace.events.len().saturating_add(16));
+
+        let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+        let symbol_store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig::default()));
+        let quarantine_store = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
+
+        let mut node = MeshNode::new(
+            MeshNodeConfig::new(replay_node).with_trace_capture_config(trace_config),
+            object_store,
+            symbol_store,
+            quarantine_store,
+        );
+
+        for event in &trace.events {
+            node.ingest_trace_event_for_replay(event.clone())?;
+        }
+
+        let replayed_trace = node
+            .trace_snapshot()
+            .ok_or(TraceReplayError::TraceCaptureUnavailable)?;
+
+        let (diffs, summary) = compare_traces(trace, &replayed_trace);
+
+        Ok(TraceReplayReport {
+            source_trace_id: trace.id.clone(),
+            source_capturing_node: trace.capturing_node.clone(),
+            input_events: trace.events.len(),
+            replayed_events: replayed_trace.events.len(),
+            summary,
+            diffs,
+        })
+    }
+}
+
+/// Replay/trace loading error.
+#[derive(Debug, thiserror::Error)]
+pub enum TraceReplayError {
+    /// File read/write error.
+    #[error("trace IO error at {path}: {message}")]
+    Io {
+        /// Source file path.
+        path: String,
+        /// Human-readable message.
+        message: String,
+    },
+
+    /// Parsing error.
+    #[error("failed to parse trace as {format}: {message}")]
+    Parse {
+        /// Attempted format.
+        format: &'static str,
+        /// Human-readable message.
+        message: String,
+    },
+
+    /// Mesh replay infrastructure failed.
+    #[error("mesh replay failed: {0}")]
+    Mesh(#[from] MeshNodeError),
+
+    /// Trace capture was disabled/unavailable in replay node.
+    #[error("trace capture unavailable during replay")]
+    TraceCaptureUnavailable,
+}
+
+fn decode_trace_bytes(
+    bytes: &[u8],
+    format: TraceReplayInputFormat,
+) -> Result<CapturedTrace, TraceReplayError> {
+    match format {
+        TraceReplayInputFormat::Json => parse_json_trace(bytes),
+        TraceReplayInputFormat::Cbor => parse_cbor_trace(bytes),
+        TraceReplayInputFormat::Auto => {
+            if looks_like_json(bytes) {
+                parse_json_trace(bytes).or_else(|_| parse_cbor_trace(bytes))
+            } else {
+                parse_cbor_trace(bytes).or_else(|_| parse_json_trace(bytes))
+            }
+        }
+    }
+}
+
+fn parse_json_trace(bytes: &[u8]) -> Result<CapturedTrace, TraceReplayError> {
+    let text = std::str::from_utf8(bytes).map_err(|err| TraceReplayError::Parse {
+        format: "json",
+        message: err.to_string(),
+    })?;
+    CapturedTrace::from_json(text).map_err(|err| TraceReplayError::Parse {
+        format: "json",
+        message: err.to_string(),
+    })
+}
+
+fn parse_cbor_trace(bytes: &[u8]) -> Result<CapturedTrace, TraceReplayError> {
+    CapturedTrace::from_cbor(bytes).map_err(|err| TraceReplayError::Parse {
+        format: "cbor",
+        message: err.to_string(),
+    })
+}
+
+fn looks_like_json(bytes: &[u8]) -> bool {
+    let trimmed = bytes.iter().copied().skip_while(u8::is_ascii_whitespace);
+    matches!(trimmed.take(1).next(), Some(b'{' | b'['))
+}
+
+fn compare_traces(
+    expected: &CapturedTrace,
+    actual: &CapturedTrace,
+) -> (Vec<TraceReplayDiff>, TraceReplaySummary) {
+    let mut event_type_counts = BTreeMap::new();
+    let mut expected_decision_counts = BTreeMap::new();
+    let mut actual_decision_counts = BTreeMap::new();
+
+    for event in &expected.events {
+        *event_type_counts
+            .entry(event_type_label(event).to_string())
+            .or_insert(0) += 1;
+        if let Some(decision) = decision_label(event) {
+            *expected_decision_counts
+                .entry(decision.to_string())
+                .or_insert(0) += 1;
+        }
+    }
+    for event in &actual.events {
+        if let Some(decision) = decision_label(event) {
+            *actual_decision_counts
+                .entry(decision.to_string())
+                .or_insert(0) += 1;
+        }
+    }
+
+    let max_len = expected.events.len().max(actual.events.len());
+    let mut diffs = Vec::new();
+    let mut matched_events = 0usize;
+    let mut matched_decisions = 0usize;
+    let mut mismatched_decisions = 0usize;
+
+    for index in 0..max_len {
+        let expected_event = expected.events.get(index);
+        let actual_event = actual.events.get(index);
+        match (expected_event, actual_event) {
+            (Some(exp), Some(act)) => {
+                let event_type = event_type_label(exp).to_string();
+                if exp == act {
+                    matched_events = matched_events.saturating_add(1);
+                } else {
+                    diffs.push(TraceReplayDiff {
+                        index,
+                        event_type: event_type.clone(),
+                        expected_decision: decision_label(exp).map(ToString::to_string),
+                        actual_decision: decision_label(act).map(ToString::to_string),
+                        detail: "event payload mismatch".to_string(),
+                    });
+                }
+
+                if decision_label(exp) == decision_label(act) {
+                    if decision_label(exp).is_some() {
+                        matched_decisions = matched_decisions.saturating_add(1);
+                    }
+                } else {
+                    mismatched_decisions = mismatched_decisions.saturating_add(1);
+                    diffs.push(TraceReplayDiff {
+                        index,
+                        event_type,
+                        expected_decision: decision_label(exp).map(ToString::to_string),
+                        actual_decision: decision_label(act).map(ToString::to_string),
+                        detail: "decision mismatch".to_string(),
+                    });
+                }
+            }
+            (Some(exp), None) => {
+                diffs.push(TraceReplayDiff {
+                    index,
+                    event_type: event_type_label(exp).to_string(),
+                    expected_decision: decision_label(exp).map(ToString::to_string),
+                    actual_decision: None,
+                    detail: "missing replay event".to_string(),
+                });
+                if decision_label(exp).is_some() {
+                    mismatched_decisions = mismatched_decisions.saturating_add(1);
+                }
+            }
+            (None, Some(act)) => {
+                diffs.push(TraceReplayDiff {
+                    index,
+                    event_type: event_type_label(act).to_string(),
+                    expected_decision: None,
+                    actual_decision: decision_label(act).map(ToString::to_string),
+                    detail: "unexpected replay event".to_string(),
+                });
+                if decision_label(act).is_some() {
+                    mismatched_decisions = mismatched_decisions.saturating_add(1);
+                }
+            }
+            (None, None) => {}
+        }
+    }
+
+    let mismatched_events = max_len.saturating_sub(matched_events);
+    let summary = TraceReplaySummary {
+        total_events: expected.events.len(),
+        event_type_counts,
+        expected_decision_counts,
+        actual_decision_counts,
+        matched_events,
+        mismatched_events,
+        matched_decisions,
+        mismatched_decisions,
+    };
+
+    (dedupe_diffs(diffs), summary)
+}
+
+fn dedupe_diffs(diffs: Vec<TraceReplayDiff>) -> Vec<TraceReplayDiff> {
+    let mut out = Vec::new();
+    for diff in diffs {
+        if out
+            .iter()
+            .any(|existing: &TraceReplayDiff| existing == &diff)
+        {
+            continue;
+        }
+        out.push(diff);
+    }
+    out
+}
+
+fn event_type_label(event: &TraceEvent) -> &'static str {
+    match event {
+        TraceEvent::Routing(_) => "routing",
+        TraceEvent::Admission(_) => "admission",
+        TraceEvent::Gossip(_) => "gossip",
+        TraceEvent::Lease(_) => "lease",
+        TraceEvent::Session(_) => "session",
+        TraceEvent::Policy(_) => "policy",
+    }
+}
+
+fn decision_label(event: &TraceEvent) -> Option<&str> {
+    match event {
+        TraceEvent::Routing(event) => Some(event.decision.as_str()),
+        TraceEvent::Admission(event) => Some(event.decision.as_str()),
+        TraceEvent::Policy(event) => Some(event.decision.as_str()),
+        TraceEvent::Gossip(_) | TraceEvent::Lease(_) | TraceEvent::Session(_) => None,
+    }
+}
+
+impl From<TraceError> for TraceReplayError {
+    fn from(value: TraceError) -> Self {
+        Self::Parse {
+            format: "trace",
+            message: value.to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use fcp_telemetry::trace_capture::{AdmissionOutcome, PolicyDecision, RoutingDecision};
+
+    fn sample_trace() -> CapturedTrace {
+        let mut trace = CapturedTrace::new("trace-replay-test");
+        trace.capturing_node = Some("node-test".to_string());
+        trace.push(TraceEvent::Routing(RoutingDecision {
+            timestamp: 1000,
+            trace_id: "trace-a".to_string(),
+            source_node: "node-1".to_string(),
+            target_node: Some("node-2".to_string()),
+            object_id: "obj-1".to_string(),
+            path_type: "direct".to_string(),
+            decision: "routed".to_string(),
+            reason: None,
+        }));
+        trace.push(TraceEvent::Admission(AdmissionOutcome {
+            timestamp: 1001,
+            trace_id: "trace-a".to_string(),
+            peer_node: "node-2".to_string(),
+            request_type: "invoke".to_string(),
+            decision: "admit".to_string(),
+            reason_code: None,
+            budget_remaining: Some(42),
+            authenticated: true,
+        }));
+        trace.push(TraceEvent::Policy(PolicyDecision {
+            timestamp: 1002,
+            trace_id: "trace-a".to_string(),
+            zone_id: "z:work".to_string(),
+            operation: "op.send".to_string(),
+            connector_id: "fcp.telegram".to_string(),
+            decision: "allow".to_string(),
+            reason_code: "CAP_OK".to_string(),
+            evidence: vec!["obj-1".to_string()],
+        }));
+        trace
+    }
+
+    #[test]
+    fn replay_produces_deterministic_match_report() {
+        let trace = sample_trace();
+        let report = TraceReplayEngine::replay(&trace).expect("replay should succeed");
+
+        assert_eq!(report.input_events, 3);
+        assert_eq!(report.replayed_events, 3);
+        assert_eq!(report.summary.mismatched_events, 0);
+        assert_eq!(report.summary.mismatched_decisions, 0);
+        assert!(report.diffs.is_empty());
+        assert_eq!(report.summary.event_type_counts["routing"], 1);
+        assert_eq!(report.summary.event_type_counts["admission"], 1);
+        assert_eq!(report.summary.event_type_counts["policy"], 1);
+        assert_eq!(report.summary.expected_decision_counts["allow"], 1);
+        assert_eq!(report.summary.expected_decision_counts["admit"], 1);
+        assert_eq!(report.summary.expected_decision_counts["routed"], 1);
+    }
+
+    #[test]
+    fn decode_auto_accepts_json_trace() {
+        let trace = sample_trace();
+        let json = trace.to_json().expect("serialize json");
+        let parsed =
+            decode_trace_bytes(json.as_bytes(), TraceReplayInputFormat::Auto).expect("auto decode");
+        assert_eq!(parsed.id, trace.id);
+        assert_eq!(parsed.events.len(), trace.events.len());
+    }
+
+    #[test]
+    fn decode_auto_accepts_cbor_trace() {
+        let trace = sample_trace();
+        let cbor = trace.to_cbor().expect("serialize cbor");
+        let parsed =
+            decode_trace_bytes(&cbor, TraceReplayInputFormat::Auto).expect("auto decode cbor");
+        assert_eq!(parsed.id, trace.id);
+        assert_eq!(parsed.events.len(), trace.events.len());
+    }
+}

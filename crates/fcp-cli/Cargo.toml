@@ -40,6 +40,7 @@ ciborium = { workspace = true }
 fcp-core = { path = "../fcp-core" }
 fcp-crypto = { path = "../fcp-crypto" }
 fcp-manifest = { path = "../fcp-manifest" }
+fcp-mesh = { path = "../fcp-mesh" }
 fcp-raptorq = { path = "../fcp-raptorq" }
 fcp-registry = { path = "../fcp-registry" }
 fcp-sandbox = { path = "../fcp-sandbox" }

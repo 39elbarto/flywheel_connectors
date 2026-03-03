@@ -611,4 +611,180 @@ mod tests {
 
         assert_eq!(decrypted, plaintext);
     }
+
+    // ── Batch 2: SunnyMoose test expansion ──
+
+    #[test]
+    fn different_esi_same_frame_different_ciphertext() {
+        let zone_key = AeadKey::generate();
+        let mut first = test_context();
+        first.esi = 0;
+        let mut second = test_context();
+        second.esi = 1;
+        let plaintext = b"same data for different ESIs";
+
+        let (encrypted_first, _) = encrypt_symbol(
+            &zone_key,
+            ZoneKeyAlgorithm::ChaCha20Poly1305,
+            &first,
+            plaintext,
+        )
+        .unwrap();
+        let (encrypted_second, _) = encrypt_symbol(
+            &zone_key,
+            ZoneKeyAlgorithm::ChaCha20Poly1305,
+            &second,
+            plaintext,
+        )
+        .unwrap();
+        assert_ne!(
+            encrypted_first, encrypted_second,
+            "different ESIs should yield different ciphertext"
+        );
+    }
+
+    #[test]
+    fn different_epoch_fails_decrypt() {
+        // epoch_id is bound via AAD, so encrypting with one epoch and
+        // decrypting with another must fail authentication
+        let zone_key = AeadKey::generate();
+        let mut ctx_enc = test_context();
+        ctx_enc.epoch_id = 1;
+        let mut ctx_dec = test_context();
+        ctx_dec.epoch_id = 2;
+        let plaintext = b"epoch transition test";
+
+        let (ciphertext, auth_tag) = encrypt_symbol(
+            &zone_key,
+            ZoneKeyAlgorithm::ChaCha20Poly1305,
+            &ctx_enc,
+            plaintext,
+        )
+        .unwrap();
+        let result = decrypt_symbol(
+            &zone_key,
+            ZoneKeyAlgorithm::ChaCha20Poly1305,
+            &ctx_dec,
+            &ciphertext,
+            &auth_tag,
+        );
+        assert!(matches!(result, Err(SymbolEnvelopeError::DecryptFailed)));
+    }
+
+    #[test]
+    fn wrong_zone_key_id_context_fails() {
+        let zone_key = AeadKey::generate();
+        let ctx = test_context();
+        let plaintext = b"zone key id check";
+
+        let (ciphertext, auth_tag) = encrypt_symbol(
+            &zone_key,
+            ZoneKeyAlgorithm::ChaCha20Poly1305,
+            &ctx,
+            plaintext,
+        )
+        .unwrap();
+
+        let mut wrong_ctx = test_context();
+        wrong_ctx.zone_key_id = ZoneKeyId::from_bytes([0xFF; 8]);
+        let result = decrypt_symbol(
+            &zone_key,
+            ZoneKeyAlgorithm::ChaCha20Poly1305,
+            &wrong_ctx,
+            &ciphertext,
+            &auth_tag,
+        );
+        assert!(matches!(result, Err(SymbolEnvelopeError::DecryptFailed)));
+    }
+
+    #[test]
+    fn subkey_unique_per_node() {
+        let zone_key = AeadKey::from_bytes([0xCC; 32]);
+        let zone_key_id = ZoneKeyId::from_bytes([0x10; 8]);
+        let subkey_a =
+            derive_sender_subkey(&zone_key, &zone_key_id, &TailscaleNodeId::new("node-x"), 1);
+        let subkey_b =
+            derive_sender_subkey(&zone_key, &zone_key_id, &TailscaleNodeId::new("node-y"), 1);
+        assert_ne!(subkey_a.as_bytes(), subkey_b.as_bytes());
+    }
+
+    #[test]
+    fn xchacha20_wrong_key_fails() {
+        let zone_key = AeadKey::generate();
+        let wrong_key = AeadKey::generate();
+        let ctx = test_context();
+        let plaintext = b"xchacha wrong key";
+
+        let (ciphertext, auth_tag) = encrypt_symbol(
+            &zone_key,
+            ZoneKeyAlgorithm::XChaCha20Poly1305,
+            &ctx,
+            plaintext,
+        )
+        .unwrap();
+
+        let result = decrypt_symbol(
+            &wrong_key,
+            ZoneKeyAlgorithm::XChaCha20Poly1305,
+            &ctx,
+            &ciphertext,
+            &auth_tag,
+        );
+        assert!(matches!(result, Err(SymbolEnvelopeError::DecryptFailed)));
+    }
+
+    #[test]
+    fn algorithm_default_is_chacha20() {
+        let algo = ZoneKeyAlgorithm::default();
+        assert_eq!(algo, ZoneKeyAlgorithm::ChaCha20Poly1305);
+    }
+
+    #[test]
+    fn error_display_messages() {
+        assert_eq!(
+            SymbolEnvelopeError::EncryptFailed.to_string(),
+            "AEAD encryption failed"
+        );
+        assert_eq!(
+            SymbolEnvelopeError::DecryptFailed.to_string(),
+            "AEAD decryption failed (authentication or key mismatch)"
+        );
+        let ct_err = SymbolEnvelopeError::CiphertextTooShort { len: 5, min: 16 };
+        assert_eq!(
+            ct_err.to_string(),
+            "ciphertext too short (len 5, need at least 16 for tag)"
+        );
+    }
+
+    #[test]
+    fn aad_includes_all_context_fields() {
+        // Verify AAD binds all relevant fields by checking that changing any
+        // context field produces a different AAD
+        let base = test_context();
+        let base_aad = build_symbol_aad(&base);
+
+        // Change object_id
+        let mut c = test_context();
+        c.object_id = ObjectId::from_bytes([0xFF; 32]);
+        assert_ne!(build_symbol_aad(&c), base_aad, "object_id should be bound");
+
+        // Change k
+        let mut c = test_context();
+        c.k = 999;
+        assert_ne!(build_symbol_aad(&c), base_aad, "k should be bound");
+
+        // Change zone_id_hash
+        let mut c = test_context();
+        c.zone_id_hash = ZoneIdHash::from_bytes([0xFF; 32]);
+        assert_ne!(
+            build_symbol_aad(&c),
+            base_aad,
+            "zone_id_hash should be bound"
+        );
+
+        // Change epoch_id
+        let mut c = test_context();
+        c.epoch_id = 9999;
+        assert_ne!(build_symbol_aad(&c), base_aad, "epoch_id should be bound");
+    }
 }

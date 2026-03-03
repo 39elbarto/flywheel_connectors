@@ -415,4 +415,224 @@ mod tests {
         assert_eq!(roundtrip.provider, event.provider);
         assert_eq!(roundtrip.payload, event.payload);
     }
+
+    // ── Batch 2: SunnyMoose test expansion ──
+
+    #[test]
+    fn test_event_with_single_taint_flag() {
+        let event =
+            WebhookEvent::new("e1", "push", "github").with_taint_flag(TaintFlag::WebhookInjected);
+        assert!(
+            event
+                .metadata
+                .taint_flags
+                .contains(TaintFlag::WebhookInjected)
+        );
+        assert!(!event.metadata.taint_flags.contains(TaintFlag::PublicInput));
+    }
+
+    #[test]
+    fn test_event_with_multiple_taint_flags_additive() {
+        let event = WebhookEvent::new("e1", "push", "github")
+            .with_taint_flag(TaintFlag::WebhookInjected)
+            .with_taint_flag(TaintFlag::PublicInput)
+            .with_taint_flag(TaintFlag::WebhookInjected); // duplicate
+        assert!(
+            event
+                .metadata
+                .taint_flags
+                .contains(TaintFlag::WebhookInjected)
+        );
+        assert!(event.metadata.taint_flags.contains(TaintFlag::PublicInput));
+    }
+
+    #[test]
+    fn test_event_get_empty_path() {
+        let event = test_event();
+        // Empty path splits to [""], which tries to get key "" from root
+        assert!(event.get("").is_none());
+    }
+
+    #[test]
+    fn test_event_get_deeply_nested() {
+        let event = WebhookEvent::new("e1", "push", "github").with_payload(serde_json::json!({
+            "a": {"b": {"c": {"d": {"e": "deep"}}}}
+        }));
+        assert_eq!(event.get_str("a.b.c.d.e"), Some("deep"));
+        assert!(event.get("a.b.c.d.e.f").is_none());
+    }
+
+    #[test]
+    fn test_event_get_null_value() {
+        let event = WebhookEvent::new("e1", "push", "github")
+            .with_payload(serde_json::json!({"key": null}));
+        let val = event.get("key");
+        assert!(val.is_some());
+        assert!(val.unwrap().is_null());
+        assert_eq!(event.get_str("key"), None);
+        assert_eq!(event.get_i64("key"), None);
+    }
+
+    #[test]
+    fn test_event_get_array_value() {
+        let event = WebhookEvent::new("e1", "push", "github")
+            .with_payload(serde_json::json!({"items": [1, 2, 3]}));
+        let val = event.get("items");
+        assert!(val.is_some());
+        assert!(val.unwrap().is_array());
+        // Array index access via path doesn't work (uses string key, not numeric)
+        assert!(event.get("items.0").is_none());
+    }
+
+    #[test]
+    fn test_event_get_i64_float_truncation() {
+        let event =
+            WebhookEvent::new("e1", "push", "github").with_payload(serde_json::json!({"f": 3.5}));
+        // serde_json as_i64 returns None for floats
+        assert_eq!(event.get_i64("f"), None);
+    }
+
+    #[test]
+    fn test_event_matches_type_empty_string() {
+        let event = WebhookEvent::new("e1", "", "github");
+        assert!(event.matches_type(""));
+        assert!(event.matches_type("*"));
+        assert!(!event.matches_type("push"));
+    }
+
+    #[test]
+    fn test_event_matches_type_wildcard_only() {
+        let event = WebhookEvent::new("e1", "issue.opened", "github");
+        assert!(event.matches_type("*"));
+        assert!(event.matches_type("issue.*"));
+        assert!(event.matches_type("issue.opened"));
+        assert!(!event.matches_type("issue.closed"));
+        assert!(event.matches_type("issue.o*"));
+        assert!(!event.matches_type("pull*"));
+    }
+
+    #[test]
+    fn test_subscription_with_empty_event_types() {
+        let sub = EventSubscription::for_types(vec![]);
+        let event = test_event();
+        // No patterns to match → false
+        assert!(!sub.matches(&event));
+    }
+
+    #[test]
+    fn test_subscription_multiple_patterns() {
+        let sub = EventSubscription::for_types(vec![
+            "push".to_string(),
+            "pull_request".to_string(),
+            "issue.*".to_string(),
+        ]);
+        assert!(sub.matches(&WebhookEvent::new("e1", "push", "github")));
+        assert!(sub.matches(&WebhookEvent::new("e2", "pull_request", "github")));
+        assert!(sub.matches(&WebhookEvent::new("e3", "issue.opened", "github")));
+        assert!(!sub.matches(&WebhookEvent::new("e4", "release", "github")));
+    }
+
+    #[test]
+    fn test_subscription_provider_filter_mismatch() {
+        let sub = EventSubscription::for_types(vec!["push".to_string()]).with_provider("gitlab");
+        let event = WebhookEvent::new("e1", "push", "github");
+        assert!(!sub.matches(&event));
+    }
+
+    #[test]
+    fn test_event_metadata_serde_roundtrip() {
+        let meta = EventMetadata {
+            attempt: 3,
+            status: DeliveryStatus::Failed,
+            last_error: Some("connection refused".to_string()),
+            source_ip: Some("1.2.3.4".to_string()),
+            custom: {
+                let mut m = HashMap::new();
+                m.insert("key".to_string(), serde_json::json!("val"));
+                m
+            },
+            ..EventMetadata::default()
+        };
+
+        let json = serde_json::to_string(&meta).unwrap();
+        let roundtrip: EventMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip.attempt, 3);
+        assert_eq!(roundtrip.status, DeliveryStatus::Failed);
+        assert_eq!(roundtrip.last_error.as_deref(), Some("connection refused"));
+        assert_eq!(roundtrip.source_ip.as_deref(), Some("1.2.3.4"));
+        assert_eq!(roundtrip.custom.get("key").unwrap(), "val");
+    }
+
+    #[test]
+    fn test_event_with_payload_overwrites() {
+        let event = WebhookEvent::new("e1", "push", "github")
+            .with_payload(serde_json::json!({"a": 1}))
+            .with_payload(serde_json::json!({"b": 2}));
+        assert!(event.get("a").is_none());
+        assert_eq!(event.get_i64("b"), Some(2));
+    }
+
+    #[test]
+    fn test_event_with_headers_overwrites() {
+        let mut h1 = HashMap::new();
+        h1.insert("key1".to_string(), "val1".to_string());
+        let mut h2 = HashMap::new();
+        h2.insert("key2".to_string(), "val2".to_string());
+
+        let event = WebhookEvent::new("e1", "push", "github")
+            .with_headers(h1)
+            .with_headers(h2);
+        assert!(event.header("key1").is_none());
+        assert_eq!(event.header("key2"), Some("val2"));
+    }
+
+    #[test]
+    fn test_delivery_status_default_is_pending() {
+        assert_eq!(DeliveryStatus::default(), DeliveryStatus::Pending);
+    }
+
+    #[test]
+    fn test_delivery_status_equality() {
+        assert_eq!(DeliveryStatus::Delivered, DeliveryStatus::Delivered);
+        assert_ne!(DeliveryStatus::Pending, DeliveryStatus::Failed);
+    }
+
+    #[test]
+    fn test_event_serde_with_taint_flags() {
+        let event = WebhookEvent::new("e1", "push", "github").with_default_webhook_taint();
+        let json = serde_json::to_string(&event).unwrap();
+        let roundtrip: WebhookEvent = serde_json::from_str(&json).unwrap();
+        assert!(
+            roundtrip
+                .metadata
+                .taint_flags
+                .contains(TaintFlag::WebhookInjected)
+        );
+        assert!(
+            roundtrip
+                .metadata
+                .taint_flags
+                .contains(TaintFlag::PublicInput)
+        );
+    }
+
+    #[test]
+    fn test_subscription_wildcard_star_matches_all_types() {
+        let sub = EventSubscription::for_types(vec!["*".to_string()]);
+        assert!(sub.matches(&WebhookEvent::new("e1", "push", "github")));
+        assert!(sub.matches(&WebhookEvent::new("e2", "anything", "stripe")));
+        assert!(sub.matches(&WebhookEvent::new("e3", "", "slack")));
+    }
+
+    #[test]
+    fn test_event_get_boolean() {
+        let event = WebhookEvent::new("e1", "push", "github")
+            .with_payload(serde_json::json!({"active": true, "count": 5}));
+        // get_str returns None for non-string types
+        assert_eq!(event.get_str("active"), None);
+        // get_i64 returns None for booleans
+        assert_eq!(event.get_i64("active"), None);
+        // but get returns the Value
+        assert_eq!(event.get("active").unwrap(), &serde_json::json!(true));
+    }
 }

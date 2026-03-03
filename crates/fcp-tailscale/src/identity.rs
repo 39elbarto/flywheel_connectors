@@ -520,4 +520,134 @@ mod tests {
         assert!(fcp_tags.iter().any(|t| t.as_str() == "tag:fcp-work"));
         assert!(fcp_tags.iter().any(|t| t.as_str() == "tag:fcp-private"));
     }
+
+    #[test]
+    fn test_node_id_clone_and_eq() {
+        let id = NodeId::new("node-abc");
+        let cloned = id.clone();
+        assert_eq!(id, cloned);
+    }
+
+    #[test]
+    fn test_node_id_hash_consistent() {
+        use std::collections::HashSet;
+        let id1 = NodeId::new("node-abc");
+        let id2 = NodeId::new("node-abc");
+        let mut set = HashSet::new();
+        set.insert(id1);
+        set.insert(id2);
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn test_attestation_with_empty_tags() {
+        let (owner_key, node_keys) = create_test_keys();
+        let node_id = NodeId::new("test-node");
+        let tags: Vec<TailscaleTag> = vec![];
+
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &tags, 24).unwrap();
+
+        attestation
+            .verify(&owner_key.verifying_key(), &node_id, &node_keys, &tags)
+            .unwrap();
+    }
+
+    #[test]
+    fn test_attestation_remaining_validity_positive() {
+        let (owner_key, node_keys) = create_test_keys();
+        let node_id = NodeId::new("test-node");
+        let tags = vec![TailscaleTag::new("tag:fcp-work").unwrap()];
+
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &tags, 24).unwrap();
+
+        let remaining = attestation.remaining_validity();
+        assert!(remaining.num_hours() >= 23);
+    }
+
+    #[test]
+    fn test_mesh_identity_no_attestation_verify_fails() {
+        let (owner_key, node_keys) = create_test_keys();
+        let node_id = NodeId::new("test-node");
+
+        let identity = MeshIdentity::new(
+            node_id,
+            "test-host".to_string(),
+            vec![],
+            vec![],
+            owner_key.verifying_key(),
+            node_keys,
+        );
+
+        // No attestation attached → verify should fail
+        let result = identity.verify_attestation();
+        assert!(result.is_err());
+        assert!(!identity.is_attestation_valid());
+    }
+
+    #[test]
+    fn test_mesh_identity_fcp_tags_with_no_tags() {
+        let (owner_key, node_keys) = create_test_keys();
+        let node_id = NodeId::new("test-node");
+
+        let identity = MeshIdentity::new(
+            node_id,
+            "host".to_string(),
+            vec![],
+            vec![],
+            owner_key.verifying_key(),
+            node_keys,
+        );
+
+        assert!(identity.fcp_tags().is_empty());
+    }
+
+    #[test]
+    fn test_mesh_identity_fcp_tags_with_only_non_fcp_tags() {
+        let (owner_key, node_keys) = create_test_keys();
+        let node_id = NodeId::new("test-node");
+
+        let identity = MeshIdentity::new(
+            node_id,
+            "host".to_string(),
+            vec![],
+            vec![
+                TailscaleTag::new("tag:server").unwrap(),
+                TailscaleTag::new("tag:web").unwrap(),
+            ],
+            owner_key.verifying_key(),
+            node_keys,
+        );
+
+        assert!(identity.fcp_tags().is_empty());
+    }
+
+    #[test]
+    fn test_attestation_wrong_keys() {
+        let (owner_key, node_keys) = create_test_keys();
+        let (_, wrong_keys) = create_test_keys();
+        let node_id = NodeId::new("test-node");
+        let tags = vec![TailscaleTag::new("tag:fcp-work").unwrap()];
+
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &tags, 24).unwrap();
+
+        // Verify with wrong keys should fail (different key IDs in payload)
+        let result = attestation.verify(&owner_key.verifying_key(), &node_id, &wrong_keys, &tags);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_node_keys_all_kids_different() {
+        let (_, node_keys) = create_test_keys();
+        let signing = node_keys.signing_kid();
+        let encryption = node_keys.encryption_kid();
+        let issuance = node_keys.issuance_kid();
+
+        // All three key IDs should be distinct
+        assert_ne!(signing, encryption);
+        assert_ne!(signing, issuance);
+        assert_ne!(encryption, issuance);
+    }
 }

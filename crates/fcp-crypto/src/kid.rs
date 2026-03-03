@@ -194,4 +194,64 @@ mod tests {
 
         assert_eq!(kid.as_bytes(), expected);
     }
+
+    #[test]
+    fn kid_display_is_hex() {
+        let kid = KeyId::from_bytes([0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF]);
+        assert_eq!(kid.to_string(), "0123456789abcdef");
+    }
+
+    #[test]
+    fn kid_debug_format() {
+        let kid = KeyId::from_bytes([0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF]);
+        assert_eq!(format!("{kid:?}"), "KeyId(0123456789abcdef)");
+    }
+
+    #[test]
+    fn kid_from_hex_invalid_hex() {
+        let err = KeyId::from_hex("not-hex").unwrap_err();
+        assert!(matches!(err, CryptoError::InvalidKeyId(_)));
+    }
+
+    #[test]
+    fn kid_from_hex_wrong_length() {
+        // Valid hex but wrong length (4 bytes instead of 8)
+        let err = KeyId::from_hex("01234567").unwrap_err();
+        assert!(matches!(
+            err,
+            CryptoError::InvalidKeyLength {
+                expected: 8,
+                actual: 4
+            }
+        ));
+    }
+
+    #[test]
+    fn kid_as_slice() {
+        let bytes = [1, 2, 3, 4, 5, 6, 7, 8];
+        let kid = KeyId::from_bytes(bytes);
+        assert_eq!(kid.as_slice(), &bytes);
+    }
+
+    #[test]
+    fn kid_default_is_zeroed() {
+        let kid = KeyId::default();
+        assert_eq!(kid.as_bytes(), &[0u8; KID_SIZE]);
+    }
+
+    #[test]
+    fn kid_serde_roundtrip() {
+        let kid = KeyId::from_bytes([1, 2, 3, 4, 5, 6, 7, 8]);
+        let json = serde_json::to_string(&kid).unwrap();
+        let decoded: KeyId = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, kid);
+    }
+
+    #[test]
+    fn kid_derive_empty_key() {
+        let kid = KeyId::derive_from_public_key(b"");
+        assert_eq!(kid.as_bytes().len(), KID_SIZE);
+        // Should still be deterministic
+        assert_eq!(kid, KeyId::derive_from_public_key(b""));
+    }
 }

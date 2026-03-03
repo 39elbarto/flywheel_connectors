@@ -170,4 +170,62 @@ mod tests {
         let e: WebhookError = hex_err.into();
         assert!(matches!(e, WebhookError::HexError(_)));
     }
+
+    // ── Batch 2: SunnyMoose test expansion ──
+
+    #[test]
+    fn timestamp_validation_with_none_timestamp() {
+        let e = WebhookError::TimestampValidation {
+            reason: "missing".into(),
+            timestamp: None,
+            current_time: 1000,
+            tolerance: Duration::from_secs(300),
+        };
+        assert_eq!(e.to_string(), "Timestamp validation failed: missing");
+    }
+
+    #[test]
+    fn error_debug_includes_variant_name() {
+        let e = WebhookError::InvalidSignature;
+        let debug = format!("{e:?}");
+        assert!(debug.contains("InvalidSignature"));
+
+        let e = WebhookError::ReplayDetected {
+            event_id: "evt_1".into(),
+        };
+        let debug = format!("{e:?}");
+        assert!(debug.contains("ReplayDetected"));
+        assert!(debug.contains("evt_1"));
+    }
+
+    #[test]
+    fn error_is_std_error() {
+        let e: Box<dyn std::error::Error> = Box::new(WebhookError::InvalidSignature);
+        assert!(!e.to_string().is_empty());
+    }
+
+    #[test]
+    fn payload_too_large_zero_limit() {
+        let e = WebhookError::PayloadTooLarge { size: 1, limit: 0 };
+        assert_eq!(
+            e.to_string(),
+            "Payload too large: 1 bytes exceeds limit of 0"
+        );
+    }
+
+    #[test]
+    fn json_error_display_includes_detail() {
+        let json_err: Result<serde_json::Value, _> = serde_json::from_str("{invalid}");
+        let e: WebhookError = json_err.unwrap_err().into();
+        let display = e.to_string();
+        assert!(display.starts_with("JSON parsing error:"));
+    }
+
+    #[test]
+    fn hex_error_display_includes_detail() {
+        let hex_err = hex::decode("zz").unwrap_err();
+        let e: WebhookError = hex_err.into();
+        let display = e.to_string();
+        assert!(display.starts_with("Hex decoding error:"));
+    }
 }

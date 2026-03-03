@@ -64,3 +64,91 @@ pub enum TailscaleError {
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_display_invalid_tag() {
+        let err = TailscaleError::InvalidTag("bad-tag".to_string());
+        assert_eq!(err.to_string(), "invalid FCP tag format: bad-tag");
+    }
+
+    #[test]
+    fn error_display_invalid_zone_id() {
+        let err = TailscaleError::InvalidZoneId("not-a-zone".to_string());
+        assert_eq!(err.to_string(), "invalid zone ID format: not-a-zone");
+    }
+
+    #[test]
+    fn error_display_not_fcp_tag() {
+        let err = TailscaleError::NotFcpTag("tag:server".to_string());
+        assert_eq!(
+            err.to_string(),
+            "tag 'tag:server' does not have FCP prefix 'tag:fcp-'"
+        );
+    }
+
+    #[test]
+    fn error_display_local_api_request() {
+        let err = TailscaleError::LocalApiRequest("connection refused".to_string());
+        assert_eq!(
+            err.to_string(),
+            "`LocalAPI` request failed: connection refused"
+        );
+    }
+
+    #[test]
+    fn error_display_local_api_error() {
+        let err = TailscaleError::LocalApiError("500: internal error".to_string());
+        assert_eq!(err.to_string(), "`LocalAPI` error: 500: internal error");
+    }
+
+    #[test]
+    fn error_display_parse_error() {
+        let err = TailscaleError::ParseError("invalid json".to_string());
+        assert_eq!(
+            err.to_string(),
+            "failed to parse `LocalAPI` response: invalid json"
+        );
+    }
+
+    #[test]
+    fn error_display_not_connected() {
+        let err = TailscaleError::NotConnected;
+        assert_eq!(err.to_string(), "node is not connected to tailnet");
+    }
+
+    #[test]
+    fn error_display_peer_not_found() {
+        let err = TailscaleError::PeerNotFound("100.64.0.99".to_string());
+        assert_eq!(err.to_string(), "peer not found: 100.64.0.99");
+    }
+
+    #[test]
+    fn error_display_invalid_attestation() {
+        let err = TailscaleError::InvalidAttestation;
+        assert_eq!(err.to_string(), "invalid attestation signature");
+    }
+
+    #[test]
+    fn error_display_attestation_expired() {
+        let err = TailscaleError::AttestationExpired;
+        assert_eq!(err.to_string(), "attestation has expired");
+    }
+
+    #[test]
+    fn error_from_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
+        let err: TailscaleError = io_err.into();
+        assert!(err.to_string().contains("no such file"));
+    }
+
+    #[test]
+    fn error_from_json() {
+        let json_err = serde_json::from_str::<String>("not-json").unwrap_err();
+        let err: TailscaleError = json_err.into();
+        assert!(err.to_string().starts_with("JSON error:"));
+    }
+}

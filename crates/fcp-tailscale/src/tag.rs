@@ -436,4 +436,111 @@ mod tests {
 
         assert_eq!(rules.len(), 5);
     }
+
+    #[test]
+    fn test_tag_display_matches_as_str() {
+        let tag = TailscaleTag::new("tag:fcp-work").unwrap();
+        assert_eq!(tag.to_string(), tag.as_str());
+        assert_eq!(tag.to_string(), "tag:fcp-work");
+    }
+
+    #[test]
+    fn test_tag_new_rejects_empty_string() {
+        let result = TailscaleTag::new("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_tag_new_accepts_tag_prefix_only() {
+        // "tag:" with nothing after is technically valid per the constructor
+        let tag = TailscaleTag::new("tag:").unwrap();
+        assert_eq!(tag.as_str(), "tag:");
+        assert!(!tag.is_fcp_tag());
+    }
+
+    #[test]
+    fn test_tag_fcp_suffix_empty_suffix() {
+        // "tag:fcp-" has an empty suffix
+        let tag = TailscaleTag::new("tag:fcp-").unwrap();
+        assert!(tag.is_fcp_tag());
+        assert_eq!(tag.fcp_suffix(), Some(""));
+    }
+
+    #[test]
+    fn test_validate_zone_id_returns_ok_for_valid() {
+        let result = ZoneTagMapping::validate_zone_id("z:work");
+        assert_eq!(result.unwrap(), "z:work");
+    }
+
+    #[test]
+    fn test_validate_zone_id_returns_err_for_invalid() {
+        let result = ZoneTagMapping::validate_zone_id("invalid");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_zone_acl_rule_serde_roundtrip() {
+        let generator = ZoneAclGenerator::default();
+        let rule = generator.zone_access_rule("z:work").unwrap();
+        let json = serde_json::to_string(&rule).unwrap();
+        let decoded: ZoneAclRule = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.action, rule.action);
+        assert_eq!(decoded.src, rule.src);
+        assert_eq!(decoded.dst, rule.dst);
+    }
+
+    #[test]
+    fn test_zone_acl_rule_invalid_zone() {
+        let generator = ZoneAclGenerator::default();
+        let result = generator.zone_access_rule("invalid");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_all_standard_zones_are_valid() {
+        for zone in ZoneTagMapping::standard_zones() {
+            assert!(
+                ZoneTagMapping::is_valid_zone_id(zone),
+                "standard zone {zone} should be valid"
+            );
+        }
+    }
+
+    #[test]
+    fn test_zone_default_ports() {
+        let generator = ZoneAclGenerator::default();
+        assert_eq!(generator.symbol_port, 4200);
+        assert_eq!(generator.control_port, 4201);
+    }
+
+    #[test]
+    fn test_tag_clone_and_eq() {
+        let tag = TailscaleTag::new("tag:fcp-work").unwrap();
+        let cloned = tag.clone();
+        assert_eq!(tag, cloned);
+    }
+
+    #[test]
+    fn test_tag_hash_consistent() {
+        use std::collections::HashSet;
+        let tag1 = TailscaleTag::new("tag:fcp-work").unwrap();
+        let tag2 = TailscaleTag::new("tag:fcp-work").unwrap();
+        let mut set = HashSet::new();
+        set.insert(tag1);
+        set.insert(tag2);
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn test_is_valid_zone_id_with_digits() {
+        assert!(ZoneTagMapping::is_valid_zone_id("z:zone1"));
+        assert!(ZoneTagMapping::is_valid_zone_id("z:1zone"));
+        assert!(ZoneTagMapping::is_valid_zone_id("z:123"));
+    }
+
+    #[test]
+    fn test_is_valid_zone_id_consecutive_hyphens() {
+        // Current implementation allows consecutive hyphens
+        assert!(ZoneTagMapping::is_valid_zone_id("z:my--zone"));
+    }
 }

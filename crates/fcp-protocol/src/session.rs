@@ -1783,4 +1783,209 @@ mod tests {
             ));
         });
     }
+
+    // ── Batch 2: SunnyMoose test expansion ──
+
+    #[test]
+    fn suite_from_id_roundtrip() {
+        assert_eq!(
+            SessionCryptoSuite::try_from_id(1).expect("valid"),
+            SessionCryptoSuite::Suite1
+        );
+        assert_eq!(
+            SessionCryptoSuite::try_from_id(2).expect("valid"),
+            SessionCryptoSuite::Suite2
+        );
+        assert!(SessionCryptoSuite::try_from_id(0).is_err());
+        assert!(SessionCryptoSuite::try_from_id(3).is_err());
+        assert!(SessionCryptoSuite::try_from_id(255).is_err());
+    }
+
+    #[test]
+    fn suite_as_str() {
+        assert_eq!(SessionCryptoSuite::Suite1.as_str(), "suite1-hmacsha256");
+        assert_eq!(SessionCryptoSuite::Suite2.as_str(), "suite2-blake3");
+    }
+
+    #[test]
+    fn mesh_session_id_new_is_random() {
+        let a = MeshSessionId::new();
+        let b = MeshSessionId::new();
+        assert_ne!(a.as_bytes(), b.as_bytes());
+        assert_eq!(a.as_bytes().len(), SESSION_ID_SIZE);
+    }
+
+    #[test]
+    fn session_nonce_new_is_random() {
+        let a = SessionNonce::new();
+        let b = SessionNonce::new();
+        assert_ne!(a.as_bytes(), b.as_bytes());
+        assert_eq!(a.as_bytes().len(), SESSION_NONCE_SIZE);
+    }
+
+    #[test]
+    fn session_cookie_try_from_slice() {
+        let bytes = [0xCC; SESSION_COOKIE_SIZE];
+        let cookie = SessionCookie::try_from_slice(&bytes).expect("valid");
+        assert_eq!(cookie.as_bytes(), &bytes);
+        // Wrong length should fail
+        assert!(SessionCookie::try_from_slice(&[0; 10]).is_err());
+    }
+
+    #[test]
+    fn replay_window_highest_seq_advances() {
+        let mut window = ReplayWindow::new(128);
+        assert_eq!(window.highest_seq(), 0);
+        assert!(window.check_and_update(5));
+        assert_eq!(window.highest_seq(), 5);
+        assert!(window.check_and_update(10));
+        assert_eq!(window.highest_seq(), 10);
+        // Going backwards within window doesn't change highest
+        assert!(window.check_and_update(8));
+        assert_eq!(window.highest_seq(), 10);
+    }
+
+    #[test]
+    fn replay_window_boundary_at_window_edge() {
+        let mut window = ReplayWindow::new(128);
+        // Accept seq 200, then try seq at the boundary
+        assert!(window.check_and_update(200));
+        // seq 73 is 200 - 127 = still just inside window
+        assert!(window.check_and_update(73));
+        // seq 72 is outside the window
+        assert!(!window.check_and_update(72));
+    }
+
+    #[test]
+    fn datagram_decode_too_short() {
+        let short = vec![0u8; 10];
+        let err = FcpsDatagram::decode(&short, DEFAULT_MAX_DATAGRAM_BYTES).expect_err("too short");
+        assert!(matches!(err, SessionError::DatagramTooShort { .. }));
+    }
+
+    #[test]
+    fn datagram_decode_too_large() {
+        let datagram = FcpsDatagram {
+            session_id: MeshSessionId([0xAA; 16]),
+            seq: 1,
+            mac: [0xBB; SESSION_MAC_SIZE],
+            frame_bytes: vec![0xCC; 2000],
+        };
+        let encoded = datagram.encode();
+        let err = FcpsDatagram::decode(&encoded, 100).expect_err("too large");
+        assert!(matches!(err, SessionError::DatagramTooLarge { .. }));
+    }
+
+    #[test]
+    fn session_keys_different_per_direction() {
+        let sk = X25519SecretKey::generate();
+        let pk = X25519SecretKey::generate().public_key();
+        let shared_secret = sk.diffie_hellman(&pk);
+        let session_id = MeshSessionId([0xAA; 16]);
+        let initiator = TailscaleNodeId::new("node-init");
+        let responder = TailscaleNodeId::new("node-resp");
+        let hello_nonce = SessionNonce([0x11; 16]);
+        let ack_nonce = SessionNonce([0x22; 16]);
+        let keys = derive_session_keys(
+            &shared_secret,
+            &session_id,
+            &initiator,
+            &responder,
+            &hello_nonce,
+            &ack_nonce,
+        )
+        .expect("derive keys");
+        // i2r and r2i keys must differ
+        assert_ne!(keys.k_mac_i2r, keys.k_mac_r2i);
+        // k_ctx must be independent
+        assert_ne!(keys.k_ctx, keys.k_mac_i2r);
+        assert_ne!(keys.k_ctx, keys.k_mac_r2i);
+    }
+
+    #[test]
+    fn session_keys_deterministic() {
+        let sk = X25519SecretKey::from_bytes([0xBB; 32]);
+        let pk = X25519SecretKey::from_bytes([0xCC; 32]).public_key();
+        let shared_secret = sk.diffie_hellman(&pk);
+        let session_id = MeshSessionId([0xDD; 16]);
+        let initiator = TailscaleNodeId::new("node-a");
+        let responder = TailscaleNodeId::new("node-b");
+        let hello_nonce = SessionNonce([0x33; 16]);
+        let ack_nonce = SessionNonce([0x44; 16]);
+        let keys_a = derive_session_keys(
+            &shared_secret,
+            &session_id,
+            &initiator,
+            &responder,
+            &hello_nonce,
+            &ack_nonce,
+        )
+        .expect("derive keys a");
+        let keys_b = derive_session_keys(
+            &shared_secret,
+            &session_id,
+            &initiator,
+            &responder,
+            &hello_nonce,
+            &ack_nonce,
+        )
+        .expect("derive keys b");
+        assert_eq!(keys_a.k_mac_i2r, keys_b.k_mac_i2r);
+        assert_eq!(keys_a.k_mac_r2i, keys_b.k_mac_r2i);
+        assert_eq!(keys_a.k_ctx, keys_b.k_ctx);
+    }
+
+    #[test]
+    fn session_direction_as_u8() {
+        assert_eq!(SessionDirection::InitiatorToResponder.as_u8(), 0x00);
+        assert_eq!(SessionDirection::ResponderToInitiator.as_u8(), 0x01);
+    }
+
+    #[test]
+    fn time_policy_default_values() {
+        let policy = TimePolicy::default();
+        assert_eq!(policy.max_skew_secs, 120);
+    }
+
+    #[test]
+    fn session_replay_policy_default() {
+        let policy = SessionReplayPolicy::default();
+        assert!(policy.max_reorder_window > 0);
+    }
+
+    #[test]
+    fn error_display_messages() {
+        assert_eq!(
+            SessionError::InvalidSuiteId(99).to_string(),
+            "invalid session crypto suite id 99"
+        );
+        assert_eq!(
+            SessionError::NoMutualSuite.to_string(),
+            "no mutually supported session crypto suite"
+        );
+        assert_eq!(
+            SessionError::InvalidCookie.to_string(),
+            "invalid stateless cookie"
+        );
+        assert_eq!(
+            SessionError::DatagramTooShort { len: 5 }.to_string(),
+            "FCPS datagram too short (len 5)"
+        );
+        assert_eq!(
+            SessionError::DatagramTooLarge {
+                len: 2000,
+                max: 1200
+            }
+            .to_string(),
+            "FCPS datagram too large (len 2000 > max 1200)"
+        );
+        assert_eq!(
+            SessionError::TimestampSkew {
+                delta: 500,
+                max: 120
+            }
+            .to_string(),
+            "timestamp skew too large (delta 500 > max 120)"
+        );
+    }
 }

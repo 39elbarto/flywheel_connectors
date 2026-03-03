@@ -568,4 +568,144 @@ mod tests {
         let decrypted = chacha20_decrypt(&key, &nonce, &ciphertext, &aad).unwrap();
         assert_eq!(decrypted, plaintext);
     }
+
+    #[test]
+    fn aead_key_try_from_slice_valid() {
+        let bytes = [0xAA; AEAD_KEY_SIZE];
+        let key = AeadKey::try_from_slice(&bytes).unwrap();
+        assert_eq!(key.as_bytes(), &bytes);
+    }
+
+    #[test]
+    fn aead_key_try_from_slice_too_short() {
+        let err = AeadKey::try_from_slice(&[0; 16]).unwrap_err();
+        assert!(matches!(
+            err,
+            CryptoError::InvalidKeyLength {
+                expected: 32,
+                actual: 16
+            }
+        ));
+    }
+
+    #[test]
+    fn aead_key_try_from_slice_too_long() {
+        let err = AeadKey::try_from_slice(&[0; 33]).unwrap_err();
+        assert!(matches!(
+            err,
+            CryptoError::InvalidKeyLength {
+                expected: 32,
+                actual: 33
+            }
+        ));
+    }
+
+    #[test]
+    fn aead_key_try_from_slice_empty() {
+        let err = AeadKey::try_from_slice(&[]).unwrap_err();
+        assert!(matches!(
+            err,
+            CryptoError::InvalidKeyLength {
+                expected: 32,
+                actual: 0
+            }
+        ));
+    }
+
+    #[test]
+    fn aead_key_debug_redacted() {
+        let key = AeadKey::generate();
+        let debug = format!("{key:?}");
+        assert_eq!(debug, "AeadKey { .. }");
+        // Must NOT contain key material
+        assert!(!debug.contains("0x"));
+    }
+
+    #[test]
+    fn chacha20_nonce_try_from_slice_valid() {
+        let bytes = [0xBB; CHACHA20_NONCE_SIZE];
+        let nonce = ChaCha20Nonce::try_from_slice(&bytes).unwrap();
+        assert_eq!(nonce.as_bytes(), &bytes);
+    }
+
+    #[test]
+    fn chacha20_nonce_try_from_slice_wrong_length() {
+        let err = ChaCha20Nonce::try_from_slice(&[0; 8]).unwrap_err();
+        assert!(matches!(
+            err,
+            CryptoError::InvalidNonceLength {
+                expected: 12,
+                actual: 8
+            }
+        ));
+    }
+
+    #[test]
+    fn xchacha20_nonce_try_from_slice_valid() {
+        let bytes = [0xCC; XCHACHA20_NONCE_SIZE];
+        let nonce = XChaCha20Nonce::try_from_slice(&bytes).unwrap();
+        assert_eq!(nonce.as_bytes(), &bytes);
+    }
+
+    #[test]
+    fn xchacha20_nonce_try_from_slice_wrong_length() {
+        let err = XChaCha20Nonce::try_from_slice(&[0; 12]).unwrap_err();
+        assert!(matches!(
+            err,
+            CryptoError::InvalidNonceLength {
+                expected: 24,
+                actual: 12
+            }
+        ));
+    }
+
+    #[test]
+    fn nonce_from_counter_directional_different_directions() {
+        let n1 = ChaCha20Nonce::from_counter_directional(1, 0);
+        let n2 = ChaCha20Nonce::from_counter_directional(1, 1);
+        assert_ne!(n1, n2);
+        // Direction byte is at index 0
+        assert_eq!(n1.as_bytes()[0], 0);
+        assert_eq!(n2.as_bytes()[0], 1);
+    }
+
+    #[test]
+    fn nonce_from_counter_directional_different_counters() {
+        let n1 = ChaCha20Nonce::from_counter_directional(0, 0);
+        let n2 = ChaCha20Nonce::from_counter_directional(1, 0);
+        assert_ne!(n1, n2);
+    }
+
+    #[test]
+    fn xchacha20_decrypt_with_prepended_nonce_too_short() {
+        let key = AeadKey::generate();
+        let cipher = XChaCha20Poly1305Cipher::new(&key);
+        // Less than XCHACHA20_NONCE_SIZE + AEAD_TAG_SIZE = 40 bytes
+        let short = [0u8; 39];
+        let result = cipher.decrypt_with_prepended_nonce(&short, b"");
+        assert!(matches!(result, Err(CryptoError::AeadDecryptFailed)));
+    }
+
+    #[test]
+    fn xchacha20_decrypt_with_prepended_nonce_tampered() {
+        let key = AeadKey::generate();
+        let cipher = XChaCha20Poly1305Cipher::new(&key);
+        let mut encrypted = cipher.encrypt_with_random_nonce(b"data", b"aad").unwrap();
+        // Tamper with last byte (part of the tag)
+        let last = encrypted.len() - 1;
+        encrypted[last] ^= 0xFF;
+        let result = cipher.decrypt_with_prepended_nonce(&encrypted, b"aad");
+        assert!(matches!(result, Err(CryptoError::AeadDecryptFailed)));
+    }
+
+    #[test]
+    fn large_plaintext_roundtrip() {
+        let key = AeadKey::generate();
+        let nonce = ChaCha20Nonce::from_counter(100);
+        let plaintext = vec![0xAB; 64 * 1024]; // 64 KB
+
+        let ciphertext = chacha20_encrypt(&key, &nonce, &plaintext, b"").unwrap();
+        let decrypted = chacha20_decrypt(&key, &nonce, &ciphertext, b"").unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
 }

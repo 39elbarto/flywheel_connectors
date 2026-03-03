@@ -311,4 +311,138 @@ mod tests {
         // First 8 bytes of BLAKE3("fcp.core.CapabilityObject/1.0.0")
         assert_eq!(hex::encode(hash), "28cb6f0e02d0c489");
     }
+
+    #[test]
+    fn schema_hash_is_8_bytes() {
+        let hash = schema_hash("test");
+        assert_eq!(hash.len(), SCHEMA_HASH_SIZE);
+    }
+
+    #[test]
+    fn schema_hash_empty_string() {
+        let hash = schema_hash("");
+        assert_eq!(hash.len(), SCHEMA_HASH_SIZE);
+        // Should still produce deterministic output
+        assert_eq!(hash, schema_hash(""));
+    }
+
+    #[test]
+    fn canonical_signing_bytes_deterministic() {
+        let bytes1 = canonical_signing_bytes("schema", b"cbor");
+        let bytes2 = canonical_signing_bytes("schema", b"cbor");
+        assert_eq!(bytes1, bytes2);
+    }
+
+    #[test]
+    fn canonical_signing_bytes_different_schemas() {
+        let bytes1 = canonical_signing_bytes("schema1", b"cbor");
+        let bytes2 = canonical_signing_bytes("schema2", b"cbor");
+        assert_ne!(bytes1, bytes2);
+    }
+
+    #[test]
+    fn canonical_signing_bytes_different_cbor() {
+        let bytes1 = canonical_signing_bytes("schema", b"cbor1");
+        let bytes2 = canonical_signing_bytes("schema", b"cbor2");
+        assert_ne!(bytes1, bytes2);
+    }
+
+    #[test]
+    fn canonical_signing_bytes_empty_cbor() {
+        let bytes = canonical_signing_bytes("schema", b"");
+        assert_eq!(bytes.len(), SIGNING_DOMAIN.len() + SCHEMA_HASH_SIZE);
+    }
+
+    #[test]
+    fn sort_signatures_empty() {
+        let ids: Vec<&[u8]> = vec![];
+        let sorted = sort_signatures_by_node_id(&ids);
+        assert!(sorted.is_empty());
+    }
+
+    #[test]
+    fn sort_signatures_single() {
+        let ids: Vec<&[u8]> = vec![b"only"];
+        let sorted = sort_signatures_by_node_id(&ids);
+        assert_eq!(sorted, vec![0]);
+    }
+
+    #[test]
+    fn verify_signature_order_empty() {
+        let ids: Vec<&[u8]> = vec![];
+        assert!(verify_signature_order(&ids).is_ok());
+    }
+
+    #[test]
+    fn verify_signature_order_single() {
+        let ids: Vec<&[u8]> = vec![b"only"];
+        assert!(verify_signature_order(&ids).is_ok());
+    }
+
+    #[test]
+    fn verify_node_signature_order_valid() {
+        let sigs = vec![
+            NodeSignature::new(b"alice".to_vec(), vec![1]),
+            NodeSignature::new(b"bob".to_vec(), vec![2]),
+        ];
+        assert!(verify_node_signature_order(&sigs).is_ok());
+    }
+
+    #[test]
+    fn verify_node_signature_order_invalid() {
+        let sigs = vec![
+            NodeSignature::new(b"bob".to_vec(), vec![1]),
+            NodeSignature::new(b"alice".to_vec(), vec![2]),
+        ];
+        assert!(verify_node_signature_order(&sigs).is_err());
+    }
+
+    #[test]
+    fn verify_node_signature_order_duplicate() {
+        let sigs = vec![
+            NodeSignature::new(b"alice".to_vec(), vec![1]),
+            NodeSignature::new(b"alice".to_vec(), vec![2]),
+        ];
+        assert!(verify_node_signature_order(&sigs).is_err());
+    }
+
+    #[test]
+    fn deterministic_cbor_hashmap_order_independent() {
+        use std::collections::HashMap;
+
+        let mut map_a = HashMap::new();
+        map_a.insert("x", 1);
+        map_a.insert("y", 2);
+
+        let mut map_b = HashMap::new();
+        map_b.insert("y", 2);
+        map_b.insert("x", 1);
+
+        let cbor_a = to_deterministic_cbor(&map_a).unwrap();
+        let cbor_b = to_deterministic_cbor(&map_b).unwrap();
+        assert_eq!(cbor_a, cbor_b);
+    }
+
+    #[test]
+    fn deterministic_cbor_nested_map() {
+        use std::collections::HashMap;
+        let mut inner = HashMap::new();
+        inner.insert("b", 2);
+        inner.insert("a", 1);
+
+        let mut outer = HashMap::new();
+        outer.insert("inner", inner);
+
+        let cbor1 = to_deterministic_cbor(&outer).unwrap();
+        let cbor2 = to_deterministic_cbor(&outer).unwrap();
+        assert_eq!(cbor1, cbor2);
+    }
+
+    #[test]
+    fn node_signature_clone() {
+        let sig = NodeSignature::new(b"node".to_vec(), vec![1, 2, 3]);
+        let cloned = sig.clone();
+        assert_eq!(cloned.node_id, sig.node_id);
+        assert_eq!(cloned.signature, sig.signature);
+    }
 }

@@ -286,4 +286,97 @@ mod tests {
             "a7f91ced0533c12cd59706f2dc38c2a8c39c007ae89ab6492698778c8684c483"
         );
     }
+
+    #[test]
+    fn mac_key_debug_redacted() {
+        let key = MacKey::generate();
+        let debug = format!("{key:?}");
+        assert_eq!(debug, "MacKey { .. }");
+    }
+
+    #[test]
+    fn mac_key_try_from_slice_valid() {
+        let bytes = [0xAA; MAC_KEY_SIZE];
+        let key = MacKey::try_from_slice(&bytes).unwrap();
+        assert_eq!(key.as_bytes(), &bytes);
+    }
+
+    #[test]
+    fn mac_key_try_from_slice_too_short() {
+        let err = MacKey::try_from_slice(&[0; 16]).unwrap_err();
+        assert!(matches!(
+            err,
+            CryptoError::InvalidKeyLength {
+                expected: 32,
+                actual: 16
+            }
+        ));
+    }
+
+    #[test]
+    fn mac_key_try_from_slice_empty() {
+        let err = MacKey::try_from_slice(&[]).unwrap_err();
+        assert!(matches!(
+            err,
+            CryptoError::InvalidKeyLength {
+                expected: 32,
+                actual: 0
+            }
+        ));
+    }
+
+    #[test]
+    fn mac_verify_wrong_tag() {
+        let key = MacKey::generate();
+        let mac = Blake3Mac::new(&key);
+        let wrong_tag = [0xFF; MAC_SIZE];
+        let result = mac.verify(b"message", &wrong_tag);
+        assert!(matches!(
+            result,
+            Err(CryptoError::SignatureVerificationFailed)
+        ));
+    }
+
+    #[test]
+    fn mac_verify_full_wrong_tag() {
+        let key = MacKey::generate();
+        let mac = Blake3Mac::new(&key);
+        let wrong_tag = [0xFF; BLAKE3_MAC_SIZE];
+        let result = mac.verify_full(b"message", &wrong_tag);
+        assert!(matches!(
+            result,
+            Err(CryptoError::SignatureVerificationFailed)
+        ));
+    }
+
+    #[test]
+    fn mac_verify_full_roundtrip() {
+        let key = MacKey::generate();
+        let mac = Blake3Mac::new(&key);
+        let tag = mac.compute_full(b"message");
+        assert!(mac.verify_full(b"message", &tag).is_ok());
+    }
+
+    #[test]
+    fn incremental_mac_matches_full() {
+        let key = MacKey::generate();
+        let message = b"hello world";
+
+        let full_tag = blake3_mac_full(&key, message);
+
+        let mut inc = IncrementalMac::new(&key);
+        inc.update(b"hello");
+        inc.update(b" ");
+        inc.update(b"world");
+        let inc_tag = inc.finalize_full();
+
+        assert_eq!(full_tag, inc_tag);
+    }
+
+    #[test]
+    fn mac_empty_message() {
+        let key = MacKey::generate();
+        let tag = blake3_mac(&key, b"");
+        assert!(blake3_mac_verify(&key, b"", &tag).is_ok());
+    }
 }

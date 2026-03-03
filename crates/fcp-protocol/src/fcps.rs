@@ -475,7 +475,12 @@ impl DecodeStatus {
         let mut buf = Vec::new();
         buf.extend_from_slice(b"FCP2-DECODE-STATUS-V1");
         buf.extend_from_slice(self.object_id.as_bytes());
-        buf.extend_from_slice(self.zone_id.as_bytes());
+        
+        let zone_bytes = self.zone_id.as_bytes();
+        let zone_len = u32::try_from(zone_bytes.len()).unwrap_or(u32::MAX);
+        buf.extend_from_slice(&zone_len.to_le_bytes());
+        buf.extend_from_slice(zone_bytes);
+
         buf.extend_from_slice(self.zone_key_id.as_bytes());
         buf.extend_from_slice(&self.epoch_id.to_le_bytes());
         buf.extend_from_slice(&self.received_unique.to_le_bytes());
@@ -612,7 +617,12 @@ impl SymbolAck {
         let mut buf = Vec::new();
         buf.extend_from_slice(b"FCP2-SYMBOL-ACK-V1");
         buf.extend_from_slice(self.object_id.as_bytes());
-        buf.extend_from_slice(self.zone_id.as_bytes());
+
+        let zone_bytes = self.zone_id.as_bytes();
+        let zone_len = u32::try_from(zone_bytes.len()).unwrap_or(u32::MAX);
+        buf.extend_from_slice(&zone_len.to_le_bytes());
+        buf.extend_from_slice(zone_bytes);
+
         buf.extend_from_slice(self.zone_key_id.as_bytes());
         buf.extend_from_slice(&self.epoch_id.to_le_bytes());
         buf.push(self.reason as u8);
@@ -719,7 +729,12 @@ impl SymbolRequest {
         let mut buf = Vec::new();
         buf.extend_from_slice(b"FCP2-SYMBOL-REQ-V1");
         buf.extend_from_slice(self.object_id.as_bytes());
-        buf.extend_from_slice(self.zone_id.as_bytes());
+
+        let zone_bytes = self.zone_id.as_bytes();
+        let zone_len = u32::try_from(zone_bytes.len()).unwrap_or(u32::MAX);
+        buf.extend_from_slice(&zone_len.to_le_bytes());
+        buf.extend_from_slice(zone_bytes);
+
         buf.extend_from_slice(self.zone_key_id.as_bytes());
         buf.extend_from_slice(&self.epoch_id.to_le_bytes());
         buf.extend_from_slice(&self.max_symbols.to_le_bytes());
@@ -856,9 +871,18 @@ impl SignedFcpsFrame {
     ) -> Vec<u8> {
         let mut transcript = Vec::new();
         transcript.extend_from_slice(Self::SIGNATURE_DOMAIN);
-        transcript.extend_from_slice(source_id.as_str().as_bytes());
+        
+        let source_bytes = source_id.as_str().as_bytes();
+        let source_len = u32::try_from(source_bytes.len()).unwrap_or(u32::MAX);
+        transcript.extend_from_slice(&source_len.to_le_bytes());
+        transcript.extend_from_slice(source_bytes);
+
         transcript.extend_from_slice(&timestamp.to_le_bytes());
+
+        let frame_len = u32::try_from(frame_bytes.len()).unwrap_or(u32::MAX);
+        transcript.extend_from_slice(&frame_len.to_le_bytes());
         transcript.extend_from_slice(frame_bytes);
+        
         transcript
     }
 
@@ -1645,5 +1669,374 @@ mod tests {
         )
         .with_missing_hint(vec![1, 2, 3]);
         assert!(request_with_hint.has_proof_of_need());
+    }
+
+    // ── Batch 2: SunnyMoose test expansion ──
+
+    #[test]
+    fn header_decode_too_short() {
+        let short = [0u8; 50];
+        let err = FcpsFrameHeader::decode(&short).expect_err("too short");
+        assert!(matches!(err, FrameError::TooShort { len: 50, min: 114 }));
+    }
+
+    #[test]
+    fn header_encode_exact_size() {
+        let header = test_header();
+        let encoded = header.encode();
+        assert_eq!(encoded.len(), FCPS_HEADER_LEN);
+        assert_eq!(FCPS_HEADER_LEN, 114);
+    }
+
+    #[test]
+    fn symbol_record_wire_size_matches_overhead_plus_data() {
+        let record = test_symbol(0, 128);
+        assert_eq!(record.wire_size(), SYMBOL_RECORD_OVERHEAD + 128);
+        assert_eq!(SYMBOL_RECORD_OVERHEAD, 22);
+    }
+
+    #[test]
+    fn symbol_record_decode_too_short() {
+        let short = [0u8; 10];
+        let err = SymbolRecord::decode(&short, 64).expect_err("too short");
+        assert!(matches!(err, FrameError::TooShort { .. }));
+    }
+
+    #[test]
+    fn frame_zero_symbols() {
+        let header = FcpsFrameHeader {
+            version: FCPS_VERSION,
+            flags: FrameFlags::default(),
+            symbol_count: 0,
+            total_payload_len: 0,
+            object_id: ObjectId::from_bytes([0x11; 32]),
+            symbol_size: 64,
+            zone_key_id: ZoneKeyId::from_bytes([0x22; 8]),
+            zone_id_hash: ZoneIdHash::from_bytes([0x33; 32]),
+            epoch_id: 1,
+            sender_instance_id: 1,
+            frame_seq: 1,
+        };
+        let frame = FcpsFrame {
+            header,
+            symbols: vec![],
+        };
+        let encoded = frame.encode();
+        assert_eq!(encoded.len(), FCPS_HEADER_LEN);
+        let decoded = FcpsFrame::decode(&encoded, 2000).expect("decode");
+        assert_eq!(decoded.symbols.len(), 0);
+    }
+
+    #[test]
+    fn frame_single_symbol() {
+        let header = FcpsFrameHeader {
+            version: FCPS_VERSION,
+            flags: FrameFlags::default(),
+            symbol_count: 1,
+            total_payload_len: u32::try_from(SYMBOL_RECORD_OVERHEAD + 64).expect("payload fits"),
+            object_id: ObjectId::from_bytes([0x11; 32]),
+            symbol_size: 64,
+            zone_key_id: ZoneKeyId::from_bytes([0x22; 8]),
+            zone_id_hash: ZoneIdHash::from_bytes([0x33; 32]),
+            epoch_id: 1,
+            sender_instance_id: 1,
+            frame_seq: 1,
+        };
+        let frame = FcpsFrame {
+            header,
+            symbols: vec![test_symbol(0, 64)],
+        };
+        let encoded = frame.encode();
+        let decoded = FcpsFrame::decode(&encoded, 2000).expect("decode");
+        assert_eq!(decoded.symbols.len(), 1);
+        assert_eq!(decoded.symbols[0].esi, 0);
+    }
+
+    #[test]
+    fn frame_flags_individual_bits() {
+        let cases = [
+            (FrameFlags::REQUIRES_ACK, 0b0000_0000_0001),
+            (FrameFlags::COMPRESSED, 0b0000_0000_0010),
+            (FrameFlags::ENCRYPTED, 0b0000_0000_0100),
+            (FrameFlags::RESPONSE, 0b0000_0000_1000),
+            (FrameFlags::ERROR, 0b0000_0001_0000),
+            (FrameFlags::STREAMING, 0b0000_0010_0000),
+            (FrameFlags::STREAM_END, 0b0000_0100_0000),
+            (FrameFlags::HAS_CAP_TOKEN, 0b0000_1000_0000),
+            (FrameFlags::ZONE_CROSSING, 0b0001_0000_0000),
+            (FrameFlags::PRIORITY, 0b0010_0000_0000),
+            (FrameFlags::RAPTORQ, 0b0100_0000_0000),
+            (FrameFlags::CONTROL_PLANE, 0b1000_0000_0000),
+        ];
+        for (flag, expected_bits) in cases {
+            assert_eq!(flag.bits(), expected_bits, "flag {flag:?}");
+        }
+    }
+
+    #[test]
+    fn frame_flags_streaming_combinations() {
+        // STREAMING without STREAM_END = mid-stream
+        let mid = FrameFlags::STREAMING;
+        assert!(mid.contains(FrameFlags::STREAMING));
+        assert!(!mid.contains(FrameFlags::STREAM_END));
+        // STREAMING | STREAM_END = final frame
+        let fin = FrameFlags::STREAMING | FrameFlags::STREAM_END;
+        assert!(fin.contains(FrameFlags::STREAMING));
+        assert!(fin.contains(FrameFlags::STREAM_END));
+    }
+
+    #[test]
+    fn header_rejects_zero_symbol_size() {
+        let mut header = test_header();
+        header.symbol_size = 0;
+        let mut encoded = header.encode();
+        // Overwrite symbol_size bytes at offset 48-49 with 0
+        encoded[48..50].copy_from_slice(&0u16.to_le_bytes());
+        let err = FcpsFrameHeader::decode(&encoded).expect_err("zero symbol size");
+        assert!(matches!(err, FrameError::InvalidSymbolSize));
+    }
+
+    #[test]
+    fn validate_frame_lengths_correct_frame() {
+        let header = test_header();
+        let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
+        let frame = FcpsFrame { header, symbols };
+        let encoded = frame.encode();
+        validate_frame_lengths(&encoded, &frame.header).expect("valid");
+    }
+
+    #[test]
+    fn validate_frame_lengths_wrong_symbol_count() {
+        let mut header = test_header();
+        header.symbol_count = 99; // Claim 99 symbols but only have 2
+        let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
+        let frame = FcpsFrame {
+            header: test_header(),
+            symbols,
+        };
+        let encoded = frame.encode();
+        let err = validate_frame_lengths(&encoded, &header).expect_err("mismatch");
+        assert!(matches!(err, FrameError::LengthMismatch { .. }));
+    }
+
+    #[test]
+    fn error_display_messages() {
+        assert_eq!(
+            FrameError::TooShort { len: 5, min: 114 }.to_string(),
+            "frame too short (len 5, min 114)"
+        );
+        assert_eq!(
+            FrameError::ExceedsMtu {
+                len: 2000,
+                max: 1500
+            }
+            .to_string(),
+            "frame exceeds MTU (len 2000, max 1500)"
+        );
+        assert_eq!(
+            FrameError::InvalidMagic {
+                got: [0x58, 0x58, 0x58, 0x58]
+            }
+            .to_string(),
+            "invalid magic bytes (expected FCPS, got [88, 88, 88, 88])"
+        );
+        assert_eq!(
+            FrameError::UnsupportedVersion { version: 42 }.to_string(),
+            "unsupported version 42"
+        );
+        assert_eq!(
+            FrameError::SymbolCountOverflow.to_string(),
+            "symbol count overflow"
+        );
+        assert_eq!(
+            FrameError::InvalidSymbolSize.to_string(),
+            "invalid symbol size (must be > 0)"
+        );
+        assert_eq!(
+            FrameError::FrameSizeMismatch.to_string(),
+            "frame size mismatch (header + payload != frame len)"
+        );
+    }
+
+    #[test]
+    fn decode_status_transcript_deterministic() {
+        use fcp_cbor::SchemaId;
+        use fcp_core::Provenance;
+        use semver::Version;
+
+        let zone_id: ZoneId = "z:det-test".parse().expect("zone parse");
+        let header = ObjectHeader {
+            schema: SchemaId::new("fcp.test", "TestObject", Version::new(1, 0, 0)),
+            zone_id: zone_id.clone(),
+            created_at: 0,
+            provenance: Provenance::new(zone_id.clone()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        };
+
+        let status = DecodeStatus {
+            header,
+            object_id: ObjectId::from_bytes([0x11; 32]),
+            zone_id,
+            zone_key_id: ZoneKeyId::from_bytes([0x22; 8]),
+            epoch_id: 1000,
+            received_unique: 50,
+            needed: 100,
+            complete: false,
+            missing_hint: Some(vec![1, 2, 3]),
+            signature: Ed25519Signature::from_bytes(&[0u8; 64]),
+        };
+        let a = status.transcript_bytes();
+        let b = status.transcript_bytes();
+        assert_eq!(a, b);
+        assert!(a.starts_with(b"FCP2-DECODE-STATUS-V1"));
+    }
+
+    #[test]
+    fn decode_status_no_hint_transcript_differs() {
+        use fcp_cbor::SchemaId;
+        use fcp_core::Provenance;
+        use semver::Version;
+
+        let zone_id: ZoneId = "z:no-hint".parse().expect("zone parse");
+        let header = ObjectHeader {
+            schema: SchemaId::new("fcp.test", "TestObject", Version::new(1, 0, 0)),
+            zone_id: zone_id.clone(),
+            created_at: 0,
+            provenance: Provenance::new(zone_id.clone()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        };
+
+        let with_hint = DecodeStatus {
+            header: header.clone(),
+            object_id: ObjectId::from_bytes([0x11; 32]),
+            zone_id: zone_id.clone(),
+            zone_key_id: ZoneKeyId::from_bytes([0x22; 8]),
+            epoch_id: 1,
+            received_unique: 10,
+            needed: 20,
+            complete: false,
+            missing_hint: Some(vec![5]),
+            signature: Ed25519Signature::from_bytes(&[0u8; 64]),
+        };
+        let without_hint = DecodeStatus {
+            header,
+            object_id: ObjectId::from_bytes([0x11; 32]),
+            zone_id,
+            zone_key_id: ZoneKeyId::from_bytes([0x22; 8]),
+            epoch_id: 1,
+            received_unique: 10,
+            needed: 20,
+            complete: false,
+            missing_hint: None,
+            signature: Ed25519Signature::from_bytes(&[0u8; 64]),
+        };
+        assert_ne!(
+            with_hint.transcript_bytes(),
+            without_hint.transcript_bytes()
+        );
+    }
+
+    #[test]
+    fn symbol_ack_all_reasons() {
+        let reasons = [
+            SymbolAckReason::Complete,
+            SymbolAckReason::Cancelled,
+            SymbolAckReason::Duplicate,
+            SymbolAckReason::BudgetExceeded,
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for reason in reasons {
+            assert!(seen.insert(reason as u8), "duplicate u8 for {reason:?}");
+        }
+    }
+
+    #[test]
+    fn symbol_ack_reason_serde_roundtrip() {
+        let reasons = [
+            SymbolAckReason::Complete,
+            SymbolAckReason::Cancelled,
+            SymbolAckReason::Duplicate,
+            SymbolAckReason::BudgetExceeded,
+        ];
+        for reason in reasons {
+            let json = serde_json::to_string(&reason).expect("serialize");
+            let back: SymbolAckReason = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(back, reason);
+        }
+    }
+
+    #[test]
+    fn symbol_request_validate_bounds_authenticated_exceeds() {
+        use fcp_cbor::SchemaId;
+        use fcp_core::Provenance;
+        use semver::Version;
+
+        let zone_id: ZoneId = "z:auth-exceed".parse().expect("zone parse");
+        let header = ObjectHeader {
+            schema: SchemaId::new("fcp.protocol", "SymbolRequest", Version::new(1, 0, 0)),
+            zone_id: zone_id.clone(),
+            created_at: 0,
+            provenance: Provenance::new(zone_id.clone()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        };
+        let request = SymbolRequest::new(
+            header,
+            ObjectId::from_bytes([0; 32]),
+            zone_id,
+            ZoneKeyId::from_bytes([0; 8]),
+            0,
+            DEFAULT_MAX_SYMBOLS_AUTHENTICATED + 1,
+            0,
+        );
+        assert!(request.validate_bounds(true).is_err());
+    }
+
+    #[test]
+    fn signed_frame_tampered_frame_fails_verify() {
+        let signing_key = Ed25519SigningKey::generate();
+        let header = test_header();
+        let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
+        let frame = FcpsFrame { header, symbols };
+
+        let source_id = TailscaleNodeId::new("node-tamper");
+        let mut signed = SignedFcpsFrame::new(frame, source_id, 1000, &signing_key);
+        // Tamper with a symbol
+        signed.frame.symbols[0].data[0] ^= 0xFF;
+        assert!(signed.verify(&signing_key.verifying_key()).is_err());
+    }
+
+    #[test]
+    fn signed_frame_tampered_timestamp_fails_verify() {
+        let signing_key = Ed25519SigningKey::generate();
+        let header = test_header();
+        let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
+        let frame = FcpsFrame { header, symbols };
+
+        let source_id = TailscaleNodeId::new("node-ts");
+        let mut signed = SignedFcpsFrame::new(frame, source_id, 1000, &signing_key);
+        signed.timestamp += 1;
+        assert!(signed.verify(&signing_key.verifying_key()).is_err());
+    }
+
+    #[test]
+    fn signed_frame_tampered_source_id_fails_verify() {
+        let signing_key = Ed25519SigningKey::generate();
+        let header = test_header();
+        let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
+        let frame = FcpsFrame { header, symbols };
+
+        let source_id = TailscaleNodeId::new("node-original");
+        let mut signed = SignedFcpsFrame::new(frame, source_id, 1000, &signing_key);
+        signed.source_id = TailscaleNodeId::new("node-spoofed");
+        assert!(signed.verify(&signing_key.verifying_key()).is_err());
     }
 }

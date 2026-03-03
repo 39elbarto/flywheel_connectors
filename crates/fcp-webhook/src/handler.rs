@@ -600,4 +600,258 @@ mod tests {
         assert!(debug.contains("github"));
         assert!(debug.contains("[REDACTED]"));
     }
+
+    // ── Batch 2: SunnyMoose test expansion ──
+
+    #[test]
+    fn test_verify_exact_payload_size_limit() {
+        let verifier = HmacSha256Verifier::new("secret");
+        let config = WebhookConfig::new().with_max_payload_size(10);
+        let handler = WebhookHandler::with_config(verifier.clone(), "test", config);
+
+        // Exactly at limit should pass (signature check)
+        let body = vec![b'a'; 10];
+        let sig = verifier.compute(&body);
+        assert!(handler.verify(&body, &sig).is_ok());
+
+        // One over limit should fail
+        let body = vec![b'a'; 11];
+        assert!(matches!(
+            handler.verify(&body, "sig"),
+            Err(WebhookError::PayloadTooLarge {
+                size: 11,
+                limit: 10
+            })
+        ));
+    }
+
+    #[test]
+    fn test_verify_zero_max_payload_size() {
+        let verifier = HmacSha256Verifier::new("secret");
+        let config = WebhookConfig::new().with_max_payload_size(0);
+        let handler = WebhookHandler::with_config(verifier, "test", config);
+
+        // Any non-empty body should fail
+        assert!(matches!(
+            handler.verify(b"a", "sig"),
+            Err(WebhookError::PayloadTooLarge { size: 1, limit: 0 })
+        ));
+
+        // Empty body should pass size check (fails on sig)
+        assert!(handler.verify(b"", "sig").is_err()); // sig error, not size error
+    }
+
+    #[test]
+    fn test_ip_allowlist_multiple_entries() {
+        let verifier = HmacSha256Verifier::new("secret");
+        let config = WebhookConfig::new().with_ip_allowlist(vec![
+            "192.168.1.1".to_string(),
+            "10.0.0.1".to_string(),
+            "172.16.0.1".to_string(),
+        ]);
+        let handler = WebhookHandler::with_config(verifier, "test", config);
+
+        assert!(handler.check_ip("192.168.1.1").is_ok());
+        assert!(handler.check_ip("10.0.0.1").is_ok());
+        assert!(handler.check_ip("172.16.0.1").is_ok());
+        assert!(matches!(
+            handler.check_ip("8.8.8.8"),
+            Err(WebhookError::IpNotAllowed(_))
+        ));
+    }
+
+    #[test]
+    fn test_replay_detection_different_events() {
+        let verifier = HmacSha256Verifier::new("secret");
+        let handler = WebhookHandler::new(verifier, "test");
+
+        handler.record_event("evt_1");
+        handler.record_event("evt_2");
+
+        assert!(matches!(
+            handler.check_replay("evt_1"),
+            Err(WebhookError::ReplayDetected { .. })
+        ));
+        assert!(matches!(
+            handler.check_replay("evt_2"),
+            Err(WebhookError::ReplayDetected { .. })
+        ));
+        assert!(handler.check_replay("evt_3").is_ok());
+    }
+
+    #[test]
+    fn test_replay_cleanup_ttl() {
+        let verifier = HmacSha256Verifier::new("secret");
+        let config = WebhookConfig::new().with_idempotency_ttl(Duration::from_millis(1));
+        let handler = WebhookHandler::with_config(verifier, "test", config);
+
+        handler.record_event("evt_ttl");
+        assert!(matches!(
+            handler.check_replay("evt_ttl"),
+            Err(WebhookError::ReplayDetected { .. })
+        ));
+
+        // Wait for TTL to expire
+        std::thread::sleep(Duration::from_millis(10));
+
+        // After TTL, should be cleaned up
+        assert!(handler.check_replay("evt_ttl").is_ok());
+    }
+
+    #[test]
+    fn test_record_event_noop_when_idempotency_disabled() {
+        let verifier = HmacSha256Verifier::new("secret");
+        let config = WebhookConfig::new().with_idempotency(false);
+        let handler = WebhookHandler::with_config(verifier, "test", config);
+
+        handler.record_event("evt_1");
+        // Should not be recorded since idempotency is disabled
+        assert!(handler.check_replay("evt_1").is_ok());
+    }
+
+    #[test]
+    fn test_claim_event_when_idempotency_disabled() {
+        let verifier = HmacSha256Verifier::new("secret");
+        let config = WebhookConfig::new().with_idempotency(false);
+        let handler = WebhookHandler::with_config(verifier, "test", config);
+
+        // Multiple claims should all succeed when idempotency is off
+        assert!(handler.claim_event("evt_1").is_ok());
+        assert!(handler.claim_event("evt_1").is_ok());
+        assert!(handler.claim_event("evt_1").is_ok());
+    }
+
+    #[test]
+    fn test_dead_letter_queue_single_capacity() {
+        let dlq = DeadLetterQueue::new(1);
+
+        dlq.push(crate::WebhookEvent::new("1", "test", "p"));
+        assert_eq!(dlq.len(), 1);
+
+        dlq.push(crate::WebhookEvent::new("2", "test", "p"));
+        assert_eq!(dlq.len(), 1);
+        assert_eq!(dlq.all()[0].id, "2");
+    }
+
+    #[test]
+    fn test_dead_letter_queue_preserves_insertion_order() {
+        let dlq = DeadLetterQueue::new(10);
+        for i in 0..5 {
+            dlq.push(crate::WebhookEvent::new(
+                format!("evt_{i}"),
+                "test",
+                "provider",
+            ));
+        }
+
+        let all = dlq.all();
+        assert_eq!(all.len(), 5);
+        for (i, event) in all.iter().enumerate() {
+            assert_eq!(event.id, format!("evt_{i}"));
+        }
+    }
+
+    #[test]
+    fn test_dead_letter_queue_remove_returns_correct_event() {
+        let dlq = DeadLetterQueue::new(10);
+        dlq.push(crate::WebhookEvent::new("a", "type_a", "p"));
+        dlq.push(crate::WebhookEvent::new("b", "type_b", "p"));
+        dlq.push(crate::WebhookEvent::new("c", "type_c", "p"));
+
+        let removed = dlq.remove("b").unwrap();
+        assert_eq!(removed.id, "b");
+        assert_eq!(removed.event_type, "type_b");
+        assert_eq!(dlq.len(), 2);
+
+        // Remaining should be a and c
+        let all = dlq.all();
+        assert_eq!(all[0].id, "a");
+        assert_eq!(all[1].id, "c");
+    }
+
+    #[test]
+    fn test_event_router_wildcard_pattern() {
+        let mut router = EventRouter::new();
+        router.subscribe(
+            EventSubscription::for_types(vec!["issue.*".to_string()]),
+            "issue_handler",
+        );
+
+        assert_eq!(
+            router
+                .route(&crate::WebhookEvent::new("1", "issue.opened", "gh"))
+                .len(),
+            1
+        );
+        assert_eq!(
+            router
+                .route(&crate::WebhookEvent::new("2", "issue.closed", "gh"))
+                .len(),
+            1
+        );
+        assert!(
+            router
+                .route(&crate::WebhookEvent::new("3", "push", "gh"))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_event_router_overlapping_subscriptions() {
+        let mut router = EventRouter::new();
+        router.subscribe(EventSubscription::all(), "catch_all");
+        router.subscribe(
+            EventSubscription::for_types(vec!["push".to_string()]),
+            "push_specific",
+        );
+        router.subscribe(
+            EventSubscription::all().with_provider("github"),
+            "github_all",
+        );
+
+        let event = crate::WebhookEvent::new("1", "push", "github");
+        let handlers = router.route(&event);
+        assert_eq!(handlers.len(), 3);
+        assert!(handlers.contains(&"catch_all"));
+        assert!(handlers.contains(&"push_specific"));
+        assert!(handlers.contains(&"github_all"));
+    }
+
+    #[test]
+    fn test_webhook_config_debug() {
+        let config = WebhookConfig::default();
+        let debug = format!("{config:?}");
+        assert!(debug.contains("WebhookConfig"));
+        assert!(debug.contains("max_payload_size"));
+    }
+
+    #[test]
+    fn test_webhook_config_clone() {
+        let original = WebhookConfig::new()
+            .with_max_payload_size(1024)
+            .with_max_retries(5);
+        let copy = original;
+        assert_eq!(copy.max_payload_size, 1024);
+        assert_eq!(copy.max_retries, 5);
+    }
+
+    #[test]
+    fn test_handler_shared_across_threads() {
+        let verifier = HmacSha256Verifier::new("secret");
+        let shared = Arc::new(WebhookHandler::new(verifier, "test"));
+
+        let mut success_count = 0_u32;
+        for i in 0..4 {
+            let h = Arc::clone(&shared);
+            let handle = std::thread::spawn(move || {
+                let event_id = format!("evt_{i}");
+                h.claim_event(&event_id).is_ok()
+            });
+            if handle.join().unwrap() {
+                success_count += 1;
+            }
+        }
+        // All 4 should succeed since they use different event IDs
+        assert_eq!(success_count, 4);
+    }
 }

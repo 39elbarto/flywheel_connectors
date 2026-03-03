@@ -404,4 +404,386 @@ mod tests {
         let err = FcpcFrame::decode_with_limit(&bytes, 1).expect_err("payload too large");
         assert!(matches!(err, FcpcError::PayloadTooLarge { .. }));
     }
+
+    // ── Batch 2: SunnyMoose test expansion ──
+
+    #[test]
+    fn header_encode_is_exactly_36_bytes() {
+        let session_id = MeshSessionId(SESSION_ID_BYTES);
+        let header = FcpcFrameHeader {
+            version: FCPC_VERSION,
+            session_id,
+            seq: 0,
+            flags: FcpcFrameFlags::default(),
+            len: 0,
+        };
+        assert_eq!(header.encode().len(), FCPC_HEADER_LEN);
+        assert_eq!(FCPC_HEADER_LEN, 36);
+    }
+
+    #[test]
+    fn header_decode_too_short() {
+        let short = [0u8; 10];
+        let err = FcpcFrameHeader::decode(&short).expect_err("too short");
+        assert!(matches!(err, FcpcError::TooShort { len: 10, min: 36 }));
+    }
+
+    #[test]
+    fn header_decode_preserves_all_fields() {
+        let session_id = MeshSessionId([0xAA; 16]);
+        let header = FcpcFrameHeader {
+            version: FCPC_VERSION,
+            session_id,
+            seq: 0xDEAD_BEEF_CAFE_0042,
+            flags: FcpcFrameFlags::ENCRYPTED | FcpcFrameFlags::COMPRESSED,
+            len: 12345,
+        };
+        let decoded = FcpcFrameHeader::decode(&header.encode()).expect("decode");
+        assert_eq!(decoded.version, FCPC_VERSION);
+        assert_eq!(decoded.session_id, session_id);
+        assert_eq!(decoded.seq, 0xDEAD_BEEF_CAFE_0042);
+        assert!(decoded.flags.contains(FcpcFrameFlags::ENCRYPTED));
+        assert!(decoded.flags.contains(FcpcFrameFlags::COMPRESSED));
+        assert_eq!(decoded.len, 12345);
+    }
+
+    #[test]
+    fn header_decode_rejects_wrong_version() {
+        let session_id = MeshSessionId(SESSION_ID_BYTES);
+        let header = FcpcFrameHeader {
+            version: FCPC_VERSION,
+            session_id,
+            seq: 0,
+            flags: FcpcFrameFlags::default(),
+            len: 0,
+        };
+        let mut bytes = header.encode();
+        bytes[4..6].copy_from_slice(&99u16.to_le_bytes());
+        let err = FcpcFrameHeader::decode(&bytes).expect_err("wrong version");
+        assert!(matches!(err, FcpcError::UnsupportedVersion { version: 99 }));
+    }
+
+    #[test]
+    fn seal_always_sets_encrypted_flag() {
+        let session_id = MeshSessionId(SESSION_ID_BYTES);
+        let dir = SessionDirection::InitiatorToResponder;
+        // Pass empty flags — seal should add ENCRYPTED
+        let frame = FcpcFrame::seal(session_id, 1, dir, FcpcFrameFlags::empty(), b"test", &K_CTX)
+            .expect("seal ok");
+        assert!(frame.header.flags.contains(FcpcFrameFlags::ENCRYPTED));
+    }
+
+    #[test]
+    fn seal_different_directions_produce_different_ciphertext() {
+        let session_id = MeshSessionId(SESSION_ID_BYTES);
+        let plaintext = b"directional test";
+        let frame_i2r = FcpcFrame::seal(
+            session_id,
+            1,
+            SessionDirection::InitiatorToResponder,
+            FcpcFrameFlags::default(),
+            plaintext,
+            &K_CTX,
+        )
+        .expect("seal i2r");
+        let frame_r2i = FcpcFrame::seal(
+            session_id,
+            1,
+            SessionDirection::ResponderToInitiator,
+            FcpcFrameFlags::default(),
+            plaintext,
+            &K_CTX,
+        )
+        .expect("seal r2i");
+        assert_ne!(frame_i2r.ciphertext, frame_r2i.ciphertext);
+    }
+
+    #[test]
+    fn open_wrong_key_fails() {
+        let session_id = MeshSessionId(SESSION_ID_BYTES);
+        let dir = SessionDirection::InitiatorToResponder;
+        let frame = FcpcFrame::seal(
+            session_id,
+            5,
+            dir,
+            FcpcFrameFlags::default(),
+            b"secret data",
+            &K_CTX,
+        )
+        .expect("seal ok");
+        let wrong_key = [0x22; 32];
+        assert!(frame.open(dir, &wrong_key).is_err());
+    }
+
+    #[test]
+    fn open_wrong_direction_fails() {
+        let session_id = MeshSessionId(SESSION_ID_BYTES);
+        let frame = FcpcFrame::seal(
+            session_id,
+            5,
+            SessionDirection::InitiatorToResponder,
+            FcpcFrameFlags::default(),
+            b"direction matters",
+            &K_CTX,
+        )
+        .expect("seal ok");
+        // Try to open with the opposite direction
+        assert!(
+            frame
+                .open(SessionDirection::ResponderToInitiator, &K_CTX)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn tampered_ciphertext_fails_open() {
+        let session_id = MeshSessionId(SESSION_ID_BYTES);
+        let dir = SessionDirection::InitiatorToResponder;
+        let mut frame = FcpcFrame::seal(
+            session_id,
+            10,
+            dir,
+            FcpcFrameFlags::default(),
+            b"integrity check",
+            &K_CTX,
+        )
+        .expect("seal ok");
+        if let Some(byte) = frame.ciphertext.first_mut() {
+            *byte ^= 0xFF;
+        }
+        assert!(frame.open(dir, &K_CTX).is_err());
+    }
+
+    #[test]
+    fn tampered_tag_fails_open() {
+        let session_id = MeshSessionId(SESSION_ID_BYTES);
+        let dir = SessionDirection::InitiatorToResponder;
+        let mut frame = FcpcFrame::seal(
+            session_id,
+            11,
+            dir,
+            FcpcFrameFlags::default(),
+            b"tag integrity",
+            &K_CTX,
+        )
+        .expect("seal ok");
+        frame.tag[0] ^= 0xFF;
+        assert!(frame.open(dir, &K_CTX).is_err());
+    }
+
+    #[test]
+    fn empty_plaintext_roundtrip() {
+        let session_id = MeshSessionId(SESSION_ID_BYTES);
+        let dir = SessionDirection::InitiatorToResponder;
+        let frame = FcpcFrame::seal(session_id, 20, dir, FcpcFrameFlags::default(), b"", &K_CTX)
+            .expect("seal empty ok");
+        let encoded = frame.encode();
+        let decoded = FcpcFrame::decode(&encoded).expect("decode ok");
+        let opened = decoded.open(dir, &K_CTX).expect("open ok");
+        assert!(opened.is_empty());
+    }
+
+    #[test]
+    fn large_payload_roundtrip() {
+        let session_id = MeshSessionId(SESSION_ID_BYTES);
+        let dir = SessionDirection::InitiatorToResponder;
+        let payload = vec![0xAB; 4096];
+        let frame = FcpcFrame::seal(
+            session_id,
+            30,
+            dir,
+            FcpcFrameFlags::default(),
+            &payload,
+            &K_CTX,
+        )
+        .expect("seal large ok");
+        let encoded = frame.encode();
+        let decoded = FcpcFrame::decode(&encoded).expect("decode ok");
+        let opened = decoded.open(dir, &K_CTX).expect("open ok");
+        assert_eq!(opened, payload);
+    }
+
+    #[test]
+    fn replay_window_accepts_different_seqs() {
+        let session_id = MeshSessionId(SESSION_ID_BYTES);
+        let dir = SessionDirection::InitiatorToResponder;
+        let mut window = default_replay_window();
+        // Start at 1; seq 0 is pre-rejected by the replay window
+        for seq in 1..10 {
+            let frame = FcpcFrame::seal(
+                session_id,
+                seq,
+                dir,
+                FcpcFrameFlags::default(),
+                b"x",
+                &K_CTX,
+            )
+            .expect("seal ok");
+            frame.check_replay(&mut window).expect("first seen");
+        }
+    }
+
+    #[test]
+    fn decode_with_limit_exact_boundary() {
+        let session_id = MeshSessionId(SESSION_ID_BYTES);
+        let dir = SessionDirection::InitiatorToResponder;
+        let frame = FcpcFrame::seal(
+            session_id,
+            50,
+            dir,
+            FcpcFrameFlags::default(),
+            b"boundary",
+            &K_CTX,
+        )
+        .expect("seal ok");
+        let bytes = frame.encode();
+        let ciphertext_len = frame.ciphertext.len();
+        // Exact limit should succeed
+        FcpcFrame::decode_with_limit(&bytes, ciphertext_len).expect("exact limit ok");
+        // One byte under should fail
+        let err =
+            FcpcFrame::decode_with_limit(&bytes, ciphertext_len - 1).expect_err("under limit");
+        assert!(matches!(err, FcpcError::PayloadTooLarge { .. }));
+    }
+
+    #[test]
+    fn frame_decode_too_short_for_tag() {
+        // A buffer that is long enough for the header but not the tag
+        let mut bytes = [0u8; FCPC_HEADER_LEN + 5];
+        bytes[0..4].copy_from_slice(&FCPC_MAGIC);
+        bytes[4..6].copy_from_slice(&FCPC_VERSION.to_le_bytes());
+        let err = FcpcFrame::decode(&bytes).expect_err("too short for tag");
+        assert!(matches!(err, FcpcError::TooShort { .. }));
+    }
+
+    #[test]
+    fn default_flags_is_encrypted() {
+        let flags = FcpcFrameFlags::default();
+        assert!(flags.contains(FcpcFrameFlags::ENCRYPTED));
+        assert!(!flags.contains(FcpcFrameFlags::COMPRESSED));
+    }
+
+    #[test]
+    fn error_display_messages() {
+        assert_eq!(
+            FcpcError::TooShort { len: 5, min: 36 }.to_string(),
+            "frame too short (len 5, min 36)"
+        );
+        assert_eq!(
+            FcpcError::InvalidMagic { got: [0, 0, 0, 0] }.to_string(),
+            "invalid magic bytes (expected FCPC, got [0, 0, 0, 0])"
+        );
+        assert_eq!(
+            FcpcError::UnsupportedVersion { version: 42 }.to_string(),
+            "unsupported version 42"
+        );
+        assert_eq!(
+            FcpcError::LengthMismatch {
+                claimed: 100,
+                actual: 50
+            }
+            .to_string(),
+            "payload length mismatch (claimed 100, actual 50)"
+        );
+        assert_eq!(
+            FcpcError::PayloadTooLarge { len: 10, max: 5 }.to_string(),
+            "payload too large (len 10 > max 5)"
+        );
+        assert_eq!(
+            FcpcError::ReplayRejected { seq: 7 }.to_string(),
+            "replay rejected for seq 7"
+        );
+    }
+
+    #[test]
+    fn seal_deterministic_same_inputs() {
+        let session_id = MeshSessionId(SESSION_ID_BYTES);
+        let dir = SessionDirection::InitiatorToResponder;
+        let a = FcpcFrame::seal(
+            session_id,
+            99,
+            dir,
+            FcpcFrameFlags::default(),
+            b"deterministic",
+            &K_CTX,
+        )
+        .expect("seal a");
+        let b = FcpcFrame::seal(
+            session_id,
+            99,
+            dir,
+            FcpcFrameFlags::default(),
+            b"deterministic",
+            &K_CTX,
+        )
+        .expect("seal b");
+        assert_eq!(a.ciphertext, b.ciphertext);
+        assert_eq!(a.tag, b.tag);
+    }
+
+    #[test]
+    fn different_seq_produces_different_ciphertext() {
+        let session_id = MeshSessionId(SESSION_ID_BYTES);
+        let dir = SessionDirection::InitiatorToResponder;
+        let a = FcpcFrame::seal(
+            session_id,
+            1,
+            dir,
+            FcpcFrameFlags::default(),
+            b"same data",
+            &K_CTX,
+        )
+        .expect("seal a");
+        let b = FcpcFrame::seal(
+            session_id,
+            2,
+            dir,
+            FcpcFrameFlags::default(),
+            b"same data",
+            &K_CTX,
+        )
+        .expect("seal b");
+        assert_ne!(a.ciphertext, b.ciphertext);
+    }
+
+    #[test]
+    fn different_session_id_produces_different_ciphertext() {
+        let dir = SessionDirection::InitiatorToResponder;
+        let a = FcpcFrame::seal(
+            MeshSessionId([0xAA; 16]),
+            1,
+            dir,
+            FcpcFrameFlags::default(),
+            b"session test",
+            &K_CTX,
+        )
+        .expect("seal a");
+        let b = FcpcFrame::seal(
+            MeshSessionId([0xBB; 16]),
+            1,
+            dir,
+            FcpcFrameFlags::default(),
+            b"session test",
+            &K_CTX,
+        )
+        .expect("seal b");
+        // Different session IDs lead to different AAD, so decryption should differ
+        assert_ne!(a.encode(), b.encode());
+    }
+
+    #[test]
+    fn frame_header_len_field_matches_ciphertext() {
+        let session_id = MeshSessionId(SESSION_ID_BYTES);
+        let dir = SessionDirection::InitiatorToResponder;
+        let frame = FcpcFrame::seal(
+            session_id,
+            1,
+            dir,
+            FcpcFrameFlags::default(),
+            b"length check",
+            &K_CTX,
+        )
+        .expect("seal ok");
+        assert_eq!(frame.header.len as usize, frame.ciphertext.len());
+    }
 }

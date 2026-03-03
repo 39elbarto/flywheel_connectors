@@ -3,11 +3,13 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use base64::Engine;
 use fcp_core::{
-    AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
-    ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
-    SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
+    AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken,
+    CapabilityVerifier, ConnectorId, CredentialId, EventCaps, FcpError, FcpResult,
+    HandshakeRequest, HandshakeResponse, IdempotencyClass, Introspection, OperationId,
+    OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId, SimulateRequest,
+    SimulateResponse,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -16,7 +18,10 @@ use tracing::{info, instrument};
 use crate::{
     client::{DEFAULT_BASE_URL, OpenAIAuth, OpenAIClient},
     error::OpenAIError,
-    types::{Message, Model, Tool, ToolChoice, Usage},
+    types::{
+        EmbeddingInput, EmbeddingModel, ImageModel, ImageQuality, ImageSize, Message, Model, Tool,
+        ToolChoice, TtsModel, TtsResponseFormat, TtsVoice, Usage, WhisperModel,
+    },
 };
 
 #[derive(Debug, Clone)]
@@ -705,6 +710,904 @@ impl OpenAIConnector {
                         related: vec![],
                     },
                 },
+                OperationInfo {
+                    id: OperationId::from_static("openai.embeddings"),
+                    summary: "Generate text embeddings".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "model": {
+                                "type": "string",
+                                "enum": ["text-embedding-3-small", "text-embedding-3-large", "text-embedding-ada-002"],
+                                "default": "text-embedding-3-small"
+                            },
+                            "input": {
+                                "oneOf": [
+                                    { "type": "string", "minLength": 1 },
+                                    { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1, "maxItems": 2048 }
+                                ]
+                            },
+                            "dimensions": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 3072
+                            }
+                        },
+                        "required": ["input"]
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "model": { "type": "string" },
+                            "data": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "index": { "type": "integer" },
+                                        "embedding": { "type": "array", "items": { "type": "number" } }
+                                    }
+                                }
+                            },
+                            "usage": {
+                                "type": "object",
+                                "properties": {
+                                    "prompt_tokens": { "type": "integer" },
+                                    "total_tokens": { "type": "integer" }
+                                }
+                            },
+                            "cost_usd": { "type": "number" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("openai.embeddings"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Generate vector embeddings from text for semantic search, clustering, or similarity comparisons.".into(),
+                        common_mistakes: vec![
+                            "Exceeding 8191 token input limit".into(),
+                            "Sending empty input text".into(),
+                        ],
+                        examples: vec![
+                            r#"{"input": "Hello world"}"#.into(),
+                            r#"{"input": ["text one", "text two"], "model": "text-embedding-3-large"}"#.into(),
+                        ],
+                        related: vec![],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("openai.images.generate"),
+                    summary: "Generate images from text prompts".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "prompt": { "type": "string", "minLength": 1 },
+                            "model": {
+                                "type": "string",
+                                "enum": ["dall-e-3", "dall-e-2"],
+                                "default": "dall-e-3"
+                            },
+                            "n": { "type": "integer", "minimum": 1, "maximum": 10, "default": 1 },
+                            "size": {
+                                "type": "string",
+                                "enum": ["256x256", "512x512", "1024x1024", "1792x1024", "1024x1792"],
+                                "default": "1024x1024"
+                            },
+                            "quality": {
+                                "type": "string",
+                                "enum": ["standard", "hd"],
+                                "default": "standard"
+                            }
+                        },
+                        "required": ["prompt"]
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "created": { "type": "integer" },
+                            "data": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "b64_json": { "type": "string" },
+                                        "revised_prompt": { "type": "string" }
+                                    }
+                                }
+                            }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("openai.images"),
+                    risk_level: RiskLevel::Medium,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Generate images from text descriptions using DALL-E models.".into(),
+                        common_mistakes: vec![
+                            "Empty prompt string".into(),
+                            "Using DALL-E 2 sizes with DALL-E 3".into(),
+                        ],
+                        examples: vec![
+                            r#"{"prompt": "A sunset over mountains"}"#.into(),
+                            r#"{"prompt": "A cat", "model": "dall-e-3", "size": "1792x1024", "quality": "hd"}"#.into(),
+                        ],
+                        related: vec![],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("openai.audio.transcribe"),
+                    summary: "Transcribe audio to text using Whisper".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "audio_b64": {
+                                "type": "string",
+                                "description": "Base64-encoded audio data"
+                            },
+                            "filename": {
+                                "type": "string",
+                                "description": "Original filename with extension (e.g. recording.mp3)",
+                                "default": "audio.mp3"
+                            },
+                            "model": {
+                                "type": "string",
+                                "enum": ["whisper-1"],
+                                "default": "whisper-1"
+                            },
+                            "language": {
+                                "type": "string",
+                                "description": "ISO-639-1 language code (optional)"
+                            }
+                        },
+                        "required": ["audio_b64"]
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "text": {
+                                "type": "string",
+                                "description": "Transcribed text"
+                            }
+                        },
+                        "required": ["text"]
+                    }),
+                    capability: CapabilityId::from_static("openai.audio.transcribe"),
+                    risk_level: RiskLevel::Medium,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Transcribe audio files to text using OpenAI Whisper.".into(),
+                        common_mistakes: vec![
+                            "Sending empty audio data".into(),
+                            "Exceeding 25MB file size limit".into(),
+                        ],
+                        examples: vec![
+                            r#"{"audio_b64": "<base64-data>", "filename": "recording.mp3"}"#.into(),
+                        ],
+                        related: vec![],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("openai.audio.tts"),
+                    summary: "Convert text to speech audio".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "input": {
+                                "type": "string",
+                                "description": "Text to convert to speech (max 4096 characters)",
+                                "maxLength": 4096,
+                                "minLength": 1
+                            },
+                            "model": {
+                                "type": "string",
+                                "enum": ["tts-1", "tts-1-hd"],
+                                "default": "tts-1"
+                            },
+                            "voice": {
+                                "type": "string",
+                                "enum": ["alloy", "echo", "fable", "onyx", "nova", "shimmer"],
+                                "default": "alloy"
+                            },
+                            "response_format": {
+                                "type": "string",
+                                "enum": ["mp3", "opus", "aac", "flac"],
+                                "default": "mp3"
+                            },
+                            "speed": {
+                                "type": "number",
+                                "minimum": 0.25,
+                                "maximum": 4.0,
+                                "default": 1.0
+                            }
+                        },
+                        "required": ["input"]
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "audio_b64": {
+                                "type": "string",
+                                "description": "Base64-encoded audio data"
+                            },
+                            "format": {
+                                "type": "string",
+                                "description": "Audio format (mp3, opus, aac, flac)"
+                            },
+                            "mime_type": {
+                                "type": "string",
+                                "description": "MIME type of the audio"
+                            },
+                            "input_chars": {
+                                "type": "integer",
+                                "description": "Number of input characters"
+                            }
+                        },
+                        "required": ["audio_b64", "format"]
+                    }),
+                    capability: CapabilityId::from_static("openai.audio.tts"),
+                    risk_level: RiskLevel::Medium,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Convert text to speech audio using OpenAI TTS models.".into(),
+                        common_mistakes: vec![
+                            "Exceeding 4096 character input limit".into(),
+                            "Sending empty input text".into(),
+                        ],
+                        examples: vec![
+                            r#"{"input": "Hello, world!"}"#.into(),
+                            r#"{"input": "Welcome!", "voice": "nova", "model": "tts-1-hd"}"#.into(),
+                        ],
+                        related: vec![],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("openai.finetune.create"),
+                    summary: "Create a fine-tuning job".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "training_file": {
+                                "type": "string",
+                                "description": "Training file ID (from OpenAI Files API)"
+                            },
+                            "model": {
+                                "type": "string",
+                                "description": "Base model to fine-tune",
+                                "enum": ["gpt-4o-mini-2024-07-18", "gpt-3.5-turbo-0125"],
+                                "default": "gpt-4o-mini-2024-07-18"
+                            },
+                            "validation_file": {
+                                "type": "string",
+                                "description": "Optional validation file ID"
+                            },
+                            "suffix": {
+                                "type": "string",
+                                "description": "Suffix for the fine-tuned model name (max 18 chars)",
+                                "maxLength": 18
+                            },
+                            "n_epochs": {
+                                "description": "Number of training epochs (integer or 'auto')",
+                                "default": "auto"
+                            },
+                            "batch_size": {
+                                "description": "Batch size (integer or 'auto')",
+                                "default": "auto"
+                            },
+                            "learning_rate_multiplier": {
+                                "description": "Learning rate multiplier (number or 'auto')",
+                                "default": "auto"
+                            }
+                        },
+                        "required": ["training_file"]
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string", "description": "Fine-tuning job ID" },
+                            "model": { "type": "string" },
+                            "status": { "type": "string" },
+                            "training_file": { "type": "string" },
+                            "created_at": { "type": "integer" }
+                        },
+                        "required": ["id", "status"]
+                    }),
+                    capability: CapabilityId::from_static("openai.finetune.create"),
+                    risk_level: RiskLevel::High,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: Some(ApprovalMode::ElevationToken),
+                    safety_tier: SafetyTier::Risky,
+                    idempotency: IdempotencyClass::None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Create a fine-tuning job to train a custom model on your data.".into(),
+                        common_mistakes: vec![
+                            "Missing training_file ID".into(),
+                            "Using unsupported base model".into(),
+                        ],
+                        examples: vec![
+                            r#"{"training_file": "file-abc123"}"#.into(),
+                            r#"{"training_file": "file-abc123", "model": "gpt-4o-mini-2024-07-18", "suffix": "my-model"}"#.into(),
+                        ],
+                        related: vec![],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("openai.finetune.list"),
+                    summary: "List fine-tuning jobs".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "limit": {
+                                "type": "integer",
+                                "description": "Max number of jobs to return",
+                                "default": 20,
+                                "minimum": 1,
+                                "maximum": 100
+                            },
+                            "after": {
+                                "type": "string",
+                                "description": "Cursor for pagination"
+                            }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "data": { "type": "array" },
+                            "has_more": { "type": "boolean" }
+                        },
+                        "required": ["data", "has_more"]
+                    }),
+                    capability: CapabilityId::from_static("openai.finetune.list"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "List fine-tuning jobs to check status of training runs.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![
+                            r"{}".into(),
+                            r#"{"limit": 10}"#.into(),
+                        ],
+                        related: vec![],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("openai.finetune.get"),
+                    summary: "Get a fine-tuning job by ID".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "job_id": {
+                                "type": "string",
+                                "description": "Fine-tuning job ID"
+                            }
+                        },
+                        "required": ["job_id"]
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string" },
+                            "model": { "type": "string" },
+                            "status": { "type": "string" },
+                            "fine_tuned_model": { "type": "string" },
+                            "training_file": { "type": "string" },
+                            "created_at": { "type": "integer" },
+                            "finished_at": { "type": "integer" },
+                            "trained_tokens": { "type": "integer" }
+                        },
+                        "required": ["id", "status"]
+                    }),
+                    capability: CapabilityId::from_static("openai.finetune.get"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Get details and status of a specific fine-tuning job.".into(),
+                        common_mistakes: vec!["Missing job_id".into()],
+                        examples: vec![
+                            r#"{"job_id": "ftjob-abc123"}"#.into(),
+                        ],
+                        related: vec![],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("openai.finetune.cancel"),
+                    summary: "Cancel a fine-tuning job".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "job_id": {
+                                "type": "string",
+                                "description": "Fine-tuning job ID to cancel"
+                            }
+                        },
+                        "required": ["job_id"]
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string" },
+                            "status": { "type": "string" }
+                        },
+                        "required": ["id", "status"]
+                    }),
+                    capability: CapabilityId::from_static("openai.finetune.cancel"),
+                    risk_level: RiskLevel::High,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: Some(ApprovalMode::ElevationToken),
+                    safety_tier: SafetyTier::Risky,
+                    idempotency: IdempotencyClass::None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Cancel a running or queued fine-tuning job.".into(),
+                        common_mistakes: vec!["Missing job_id".into()],
+                        examples: vec![
+                            r#"{"job_id": "ftjob-abc123"}"#.into(),
+                        ],
+                        related: vec![],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("openai.finetune.events"),
+                    summary: "List events for a fine-tuning job".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "job_id": {
+                                "type": "string",
+                                "description": "Fine-tuning job ID"
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "description": "Max events to return",
+                                "default": 20,
+                                "minimum": 1,
+                                "maximum": 100
+                            },
+                            "after": {
+                                "type": "string",
+                                "description": "Cursor for pagination"
+                            }
+                        },
+                        "required": ["job_id"]
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "data": { "type": "array" },
+                            "has_more": { "type": "boolean" }
+                        },
+                        "required": ["data", "has_more"]
+                    }),
+                    capability: CapabilityId::from_static("openai.finetune.events"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "View training progress events for a fine-tuning job.".into(),
+                        common_mistakes: vec!["Missing job_id".into()],
+                        examples: vec![
+                            r#"{"job_id": "ftjob-abc123"}"#.into(),
+                        ],
+                        related: vec![],
+                    },
+                },
+                // ─────────────── Assistants ───────────────
+                OperationInfo {
+                    id: OperationId::from_static("openai.assistants.create"),
+                    summary: "Create an assistant".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "model": { "type": "string" },
+                            "name": { "type": "string" },
+                            "instructions": { "type": "string" },
+                            "tools": { "type": "array" },
+                            "metadata": { "type": "object" }
+                        },
+                        "required": ["model"]
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string" },
+                            "model": { "type": "string" },
+                            "name": { "type": "string" },
+                            "created_at": { "type": "integer" }
+                        },
+                        "required": ["id", "model"]
+                    }),
+                    capability: CapabilityId::from_static("openai.assistants.create"),
+                    risk_level: RiskLevel::Medium,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Create a new assistant with model, instructions, and tools."
+                            .into(),
+                        common_mistakes: vec!["Missing model".into()],
+                        examples: vec![
+                            r#"{"model": "gpt-4o", "name": "Math Tutor", "instructions": "You help with math."}"#.into(),
+                        ],
+                        related: vec![CapabilityId::from_static("openai.assistants.get"), CapabilityId::from_static("openai.threads.create")],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("openai.assistants.list"),
+                    summary: "List assistants".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "limit": { "type": "integer" },
+                            "after": { "type": "string" }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "data": { "type": "array" },
+                            "has_more": { "type": "boolean" }
+                        },
+                        "required": ["data", "has_more"]
+                    }),
+                    capability: CapabilityId::from_static("openai.assistants.list"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "List assistants with optional pagination.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![r"{}".into()],
+                        related: vec![CapabilityId::from_static("openai.assistants.get")],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("openai.assistants.get"),
+                    summary: "Get an assistant".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "assistant_id": { "type": "string" }
+                        },
+                        "required": ["assistant_id"]
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string" },
+                            "model": { "type": "string" },
+                            "name": { "type": "string" }
+                        },
+                        "required": ["id", "model"]
+                    }),
+                    capability: CapabilityId::from_static("openai.assistants.get"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Get details of a specific assistant.".into(),
+                        common_mistakes: vec!["Missing assistant_id".into()],
+                        examples: vec![r#"{"assistant_id": "asst_abc123"}"#.into()],
+                        related: vec![CapabilityId::from_static("openai.assistants.list")],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("openai.assistants.delete"),
+                    summary: "Delete an assistant".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "assistant_id": { "type": "string" }
+                        },
+                        "required": ["assistant_id"]
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string" },
+                            "deleted": { "type": "boolean" }
+                        },
+                        "required": ["id", "deleted"]
+                    }),
+                    capability: CapabilityId::from_static("openai.assistants.delete"),
+                    risk_level: RiskLevel::High,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: Some(ApprovalMode::ElevationToken),
+                    safety_tier: SafetyTier::Risky,
+                    idempotency: IdempotencyClass::None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Delete an assistant permanently.".into(),
+                        common_mistakes: vec!["Missing assistant_id".into()],
+                        examples: vec![r#"{"assistant_id": "asst_abc123"}"#.into()],
+                        related: vec![],
+                    },
+                },
+                // ─────────────── Threads ───────────────
+                OperationInfo {
+                    id: OperationId::from_static("openai.threads.create"),
+                    summary: "Create a conversation thread".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "messages": { "type": "array" },
+                            "metadata": { "type": "object" }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string" },
+                            "created_at": { "type": "integer" }
+                        },
+                        "required": ["id"]
+                    }),
+                    capability: CapabilityId::from_static("openai.threads.create"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Create a new conversation thread, optionally with initial messages.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![r"{}".into()],
+                        related: vec![CapabilityId::from_static("openai.threads.messages.create"), CapabilityId::from_static("openai.threads.runs.create")],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("openai.threads.get"),
+                    summary: "Retrieve a thread".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "thread_id": { "type": "string" }
+                        },
+                        "required": ["thread_id"]
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string" },
+                            "created_at": { "type": "integer" }
+                        },
+                        "required": ["id"]
+                    }),
+                    capability: CapabilityId::from_static("openai.threads.get"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Retrieve a thread by ID.".into(),
+                        common_mistakes: vec!["Missing thread_id".into()],
+                        examples: vec![r#"{"thread_id": "thread_abc123"}"#.into()],
+                        related: vec![CapabilityId::from_static("openai.threads.create")],
+                    },
+                },
+                // ─────────────── Thread Messages ───────────────
+                OperationInfo {
+                    id: OperationId::from_static("openai.threads.messages.create"),
+                    summary: "Add a message to a thread".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "thread_id": { "type": "string" },
+                            "role": { "type": "string", "enum": ["user"] },
+                            "content": { "type": "string" },
+                            "metadata": { "type": "object" }
+                        },
+                        "required": ["thread_id", "role", "content"]
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string" },
+                            "thread_id": { "type": "string" },
+                            "role": { "type": "string" },
+                            "content": { "type": "array" }
+                        },
+                        "required": ["id", "thread_id"]
+                    }),
+                    capability: CapabilityId::from_static("openai.threads.messages.create"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Add a user message to a thread before creating a run.".into(),
+                        common_mistakes: vec!["Missing content".into(), "Using 'assistant' role".into()],
+                        examples: vec![
+                            r#"{"thread_id": "thread_abc123", "role": "user", "content": "Hello"}"#.into(),
+                        ],
+                        related: vec![CapabilityId::from_static("openai.threads.messages.list"), CapabilityId::from_static("openai.threads.runs.create")],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("openai.threads.messages.list"),
+                    summary: "List messages in a thread".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "thread_id": { "type": "string" },
+                            "limit": { "type": "integer" },
+                            "after": { "type": "string" }
+                        },
+                        "required": ["thread_id"]
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "data": { "type": "array" },
+                            "has_more": { "type": "boolean" }
+                        },
+                        "required": ["data", "has_more"]
+                    }),
+                    capability: CapabilityId::from_static("openai.threads.messages.list"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "List messages in a thread to see conversation history.".into(),
+                        common_mistakes: vec!["Missing thread_id".into()],
+                        examples: vec![r#"{"thread_id": "thread_abc123"}"#.into()],
+                        related: vec![CapabilityId::from_static("openai.threads.messages.create")],
+                    },
+                },
+                // ─────────────── Runs ───────────────
+                OperationInfo {
+                    id: OperationId::from_static("openai.threads.runs.create"),
+                    summary: "Execute an assistant on a thread".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "thread_id": { "type": "string" },
+                            "assistant_id": { "type": "string" },
+                            "instructions": { "type": "string" },
+                            "metadata": { "type": "object" }
+                        },
+                        "required": ["thread_id", "assistant_id"]
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string" },
+                            "thread_id": { "type": "string" },
+                            "assistant_id": { "type": "string" },
+                            "status": { "type": "string" }
+                        },
+                        "required": ["id", "status"]
+                    }),
+                    capability: CapabilityId::from_static("openai.threads.runs.create"),
+                    risk_level: RiskLevel::Medium,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Execute an assistant on a thread to generate a response.".into(),
+                        common_mistakes: vec!["Missing assistant_id".into(), "Missing thread_id".into()],
+                        examples: vec![
+                            r#"{"thread_id": "thread_abc123", "assistant_id": "asst_abc123"}"#.into(),
+                        ],
+                        related: vec![CapabilityId::from_static("openai.threads.runs.get"), CapabilityId::from_static("openai.threads.messages.list")],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("openai.threads.runs.get"),
+                    summary: "Get run status".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "thread_id": { "type": "string" },
+                            "run_id": { "type": "string" }
+                        },
+                        "required": ["thread_id", "run_id"]
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string" },
+                            "status": { "type": "string" },
+                            "started_at": { "type": "integer" },
+                            "completed_at": { "type": "integer" }
+                        },
+                        "required": ["id", "status"]
+                    }),
+                    capability: CapabilityId::from_static("openai.threads.runs.get"),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Check the status of a run to know when it completes.".into(),
+                        common_mistakes: vec!["Missing thread_id or run_id".into()],
+                        examples: vec![
+                            r#"{"thread_id": "thread_abc123", "run_id": "run_abc123"}"#.into(),
+                        ],
+                        related: vec![CapabilityId::from_static("openai.threads.runs.create"), CapabilityId::from_static("openai.threads.runs.cancel")],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("openai.threads.runs.cancel"),
+                    summary: "Cancel a run".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "thread_id": { "type": "string" },
+                            "run_id": { "type": "string" }
+                        },
+                        "required": ["thread_id", "run_id"]
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string" },
+                            "status": { "type": "string" }
+                        },
+                        "required": ["id", "status"]
+                    }),
+                    capability: CapabilityId::from_static("openai.threads.runs.cancel"),
+                    risk_level: RiskLevel::Medium,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Cancel a run that is in progress or queued.".into(),
+                        common_mistakes: vec!["Missing thread_id or run_id".into()],
+                        examples: vec![
+                            r#"{"thread_id": "thread_abc123", "run_id": "run_abc123"}"#.into(),
+                        ],
+                        related: vec![CapabilityId::from_static("openai.threads.runs.get")],
+                    },
+                },
             ],
             events: vec![],
             resource_types: vec![],
@@ -798,6 +1701,53 @@ impl OpenAIConnector {
                 .and_then(|v| v.as_str())
                 .unwrap_or(default_model);
             resource_uris.push(format!("openai:model:{model}"));
+        } else if operation == "openai.embeddings" {
+            let model = input
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or(EmbeddingModel::default().as_str());
+            resource_uris.push(format!("openai:model:{model}"));
+        } else if operation == "openai.images.generate" {
+            let model = input
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or(ImageModel::default().as_str());
+            resource_uris.push(format!("openai:model:{model}"));
+        } else if operation == "openai.audio.transcribe" {
+            let model = input
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or(WhisperModel::default().as_str());
+            resource_uris.push(format!("openai:model:{model}"));
+        } else if operation == "openai.audio.tts" {
+            let model = input
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or(TtsModel::default().as_str());
+            resource_uris.push(format!("openai:model:{model}"));
+        } else if operation == "openai.finetune.create" {
+            let model = input
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or("gpt-4o-mini-2024-07-18");
+            resource_uris.push(format!("openai:model:{model}"));
+            resource_uris.push("openai:finetune".to_string());
+        } else if operation.starts_with("openai.finetune.") {
+            resource_uris.push("openai:finetune".to_string());
+        } else if operation == "openai.assistants.create" {
+            let model = input
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or("gpt-4o");
+            resource_uris.push(format!("openai:model:{model}"));
+            resource_uris.push("openai:assistants".to_string());
+        } else if operation.starts_with("openai.assistants.") {
+            resource_uris.push("openai:assistants".to_string());
+        } else if operation.starts_with("openai.threads.runs.create") {
+            resource_uris.push("openai:assistants".to_string());
+            resource_uris.push("openai:threads".to_string());
+        } else if operation.starts_with("openai.threads.") {
+            resource_uris.push("openai:threads".to_string());
         }
 
         if let Some(verifier) = &self.verifier {
@@ -810,6 +1760,28 @@ impl OpenAIConnector {
             "openai.chat" => self.invoke_chat(input).await,
             "openai.simple_chat" => self.invoke_simple_chat(input).await,
             "openai.get_usage" => self.invoke_get_usage().await,
+            "openai.embeddings" => self.invoke_embeddings(input).await,
+            "openai.images.generate" => self.invoke_generate_image(input).await,
+            "openai.audio.transcribe" => self.invoke_transcribe(input).await,
+            "openai.audio.tts" => self.invoke_tts(input).await,
+            "openai.finetune.create" => self.invoke_finetune_create(input).await,
+            "openai.finetune.list" => self.invoke_finetune_list(input).await,
+            "openai.finetune.get" => self.invoke_finetune_get(input).await,
+            "openai.finetune.cancel" => self.invoke_finetune_cancel(input).await,
+            "openai.finetune.events" => self.invoke_finetune_events(input).await,
+            "openai.assistants.create" => self.invoke_assistants_create(input).await,
+            "openai.assistants.list" => self.invoke_assistants_list(input).await,
+            "openai.assistants.get" => self.invoke_assistants_get(input).await,
+            "openai.assistants.delete" => self.invoke_assistants_delete(input).await,
+            "openai.threads.create" => self.invoke_threads_create(input).await,
+            "openai.threads.get" => self.invoke_threads_get(input).await,
+            "openai.threads.messages.create" => {
+                self.invoke_threads_messages_create(input).await
+            }
+            "openai.threads.messages.list" => self.invoke_threads_messages_list(input).await,
+            "openai.threads.runs.create" => self.invoke_threads_runs_create(input).await,
+            "openai.threads.runs.get" => self.invoke_threads_runs_get(input).await,
+            "openai.threads.runs.cancel" => self.invoke_threads_runs_cancel(input).await,
             _ => Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
             }),
@@ -1028,6 +2000,1172 @@ impl OpenAIConnector {
             "total_cost_usd": self.total_cost(),
             "requests_total": requests_total,
             "requests_error": self.total_errors()
+        }))
+    }
+
+    async fn invoke_embeddings(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+
+        // Parse embedding model
+        let model_str = input
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or(EmbeddingModel::default().as_str());
+
+        let model = match model_str {
+            "text-embedding-3-small" => EmbeddingModel::TextEmbedding3Small,
+            "text-embedding-3-large" => EmbeddingModel::TextEmbedding3Large,
+            "text-embedding-ada-002" => EmbeddingModel::TextEmbeddingAda002,
+            _ => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Unknown embedding model: {model_str}"),
+                });
+            }
+        };
+
+        // Parse input: string or array of strings
+        let raw_input = input.get("input").ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "Missing input".into(),
+        })?;
+
+        let embedding_input = if let Some(s) = raw_input.as_str() {
+            if s.is_empty() {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Input text cannot be empty".into(),
+                });
+            }
+            EmbeddingInput::Single(s.to_string())
+        } else if let Some(arr) = raw_input.as_array() {
+            if arr.is_empty() {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Input array cannot be empty".into(),
+                });
+            }
+            if arr.len() > 2048 {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!(
+                        "Input array exceeds maximum of 2048 items (got {})",
+                        arr.len()
+                    ),
+                });
+            }
+            let texts: Vec<String> = arr
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .map(str::to_string)
+                        .ok_or(FcpError::InvalidRequest {
+                            code: 1003,
+                            message: "All input array elements must be strings".into(),
+                        })
+                })
+                .collect::<FcpResult<_>>()?;
+            EmbeddingInput::Batch(texts)
+        } else {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Input must be a string or array of strings".into(),
+            });
+        };
+
+        // Parse optional dimensions
+        let dimensions = input.get("dimensions").and_then(|v| v.as_u64()).map(|v| {
+            if v > u64::from(u32::MAX) {
+                u32::MAX
+            } else {
+                v as u32
+            }
+        });
+
+        let response = client
+            .create_embeddings(model, embedding_input, dimensions)
+            .await
+            .map_err(|e: OpenAIError| e.to_fcp_error())?;
+
+        let cost = response.usage.calculate_cost(model);
+
+        Ok(json!({
+            "model": response.model,
+            "data": response.data.iter().map(|d| json!({
+                "index": d.index,
+                "embedding": d.embedding
+            })).collect::<Vec<_>>(),
+            "usage": {
+                "prompt_tokens": response.usage.prompt_tokens,
+                "total_tokens": response.usage.total_tokens
+            },
+            "cost_usd": cost,
+            "provenance": {
+                "source": "openai.embeddings",
+                "derived": false,
+                "scope": "model"
+            },
+            "taint": ["external_input"]
+        }))
+    }
+
+    async fn invoke_generate_image(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+
+        // Parse model
+        let model_str = input
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or(ImageModel::default().as_str());
+
+        let model = match model_str {
+            "dall-e-3" => ImageModel::DallE3,
+            "dall-e-2" => ImageModel::DallE2,
+            _ => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Unknown image model: {model_str}"),
+                });
+            }
+        };
+
+        // Parse prompt
+        let prompt =
+            input
+                .get("prompt")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing prompt".into(),
+                })?;
+
+        if prompt.is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Prompt cannot be empty".into(),
+            });
+        }
+
+        // Parse optional parameters
+        let n = input.get("n").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let size: Option<ImageSize> = input
+            .get("size")
+            .and_then(|v| v.as_str())
+            .map(|s| match s {
+                "256x256" => Ok(ImageSize::Size256),
+                "512x512" => Ok(ImageSize::Size512),
+                "1024x1024" => Ok(ImageSize::Size1024),
+                "1792x1024" => Ok(ImageSize::SizeLandscape),
+                "1024x1792" => Ok(ImageSize::SizePortrait),
+                _ => Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Unknown image size: {s}"),
+                }),
+            })
+            .transpose()?;
+
+        let quality: Option<ImageQuality> = input
+            .get("quality")
+            .and_then(|v| v.as_str())
+            .map(|q| match q {
+                "standard" => Ok(ImageQuality::Standard),
+                "hd" => Ok(ImageQuality::Hd),
+                _ => Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Unknown image quality: {q}"),
+                }),
+            })
+            .transpose()?;
+
+        let response = client
+            .generate_image(model, prompt, n, size, quality)
+            .await
+            .map_err(|e: OpenAIError| e.to_fcp_error())?;
+
+        Ok(json!({
+            "created": response.created,
+            "data": response.data.iter().map(|d| json!({
+                "b64_json": d.b64_json,
+                "revised_prompt": d.revised_prompt
+            })).collect::<Vec<_>>(),
+            "provenance": {
+                "source": "openai.images",
+                "derived": true,
+                "scope": "model"
+            },
+            "taint": ["external_input", "ai_generated"]
+        }))
+    }
+
+    async fn invoke_transcribe(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+
+        // Parse model
+        let model_str = input
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or(WhisperModel::default().as_str());
+
+        let model = match model_str {
+            "whisper-1" => WhisperModel::Whisper1,
+            _ => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Unknown whisper model: {model_str}"),
+                });
+            }
+        };
+
+        // Parse base64 audio data
+        let audio_b64 =
+            input
+                .get("audio_b64")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing audio_b64".into(),
+                })?;
+
+        if audio_b64.is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "audio_b64 cannot be empty".into(),
+            });
+        }
+
+        let audio_data = base64::engine::general_purpose::STANDARD
+            .decode(audio_b64)
+            .map_err(|e| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid base64 audio data: {e}"),
+            })?;
+
+        // 25 MB limit
+        if audio_data.len() > 25 * 1024 * 1024 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!(
+                    "Audio data exceeds 25MB limit (got {} bytes)",
+                    audio_data.len()
+                ),
+            });
+        }
+
+        let filename = input
+            .get("filename")
+            .and_then(|v| v.as_str())
+            .unwrap_or("audio.mp3");
+
+        let language = input.get("language").and_then(|v| v.as_str());
+
+        let response = client
+            .create_transcription(model, audio_data, filename, language)
+            .await
+            .map_err(|e: OpenAIError| e.to_fcp_error())?;
+
+        Ok(json!({
+            "text": response.text,
+            "provenance": {
+                "source": "openai.audio.transcribe",
+                "derived": true,
+                "scope": "model"
+            },
+            "taint": ["external_input"]
+        }))
+    }
+
+    async fn invoke_tts(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+
+        // Parse model
+        let model_str = input
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or(TtsModel::default().as_str());
+
+        let model = match model_str {
+            "tts-1" => TtsModel::Tts1,
+            "tts-1-hd" => TtsModel::Tts1Hd,
+            _ => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Unknown TTS model: {model_str}"),
+                });
+            }
+        };
+
+        // Parse input text
+        let text = input
+            .get("input")
+            .and_then(|v| v.as_str())
+            .ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing input text".into(),
+            })?;
+
+        if text.is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Input text cannot be empty".into(),
+            });
+        }
+
+        if text.len() > 4096 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!(
+                    "Input text exceeds 4096 character limit (got {})",
+                    text.len()
+                ),
+            });
+        }
+
+        // Parse voice
+        let voice_str = input
+            .get("voice")
+            .and_then(|v| v.as_str())
+            .unwrap_or(TtsVoice::default().as_str());
+
+        let voice = match voice_str {
+            "alloy" => TtsVoice::Alloy,
+            "echo" => TtsVoice::Echo,
+            "fable" => TtsVoice::Fable,
+            "onyx" => TtsVoice::Onyx,
+            "nova" => TtsVoice::Nova,
+            "shimmer" => TtsVoice::Shimmer,
+            _ => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Unknown voice: {voice_str}"),
+                });
+            }
+        };
+
+        // Parse response format
+        let format_str = input
+            .get("response_format")
+            .and_then(|v| v.as_str())
+            .unwrap_or(TtsResponseFormat::default().as_str());
+
+        let response_format = match format_str {
+            "mp3" => TtsResponseFormat::Mp3,
+            "opus" => TtsResponseFormat::Opus,
+            "aac" => TtsResponseFormat::Aac,
+            "flac" => TtsResponseFormat::Flac,
+            _ => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Unknown response format: {format_str}"),
+                });
+            }
+        };
+
+        // Parse speed
+        let speed = input.get("speed").and_then(|v| v.as_f64());
+        if let Some(s) = speed {
+            if !(0.25..=4.0).contains(&s) {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Speed must be between 0.25 and 4.0 (got {s})"),
+                });
+            }
+        }
+
+        let audio_bytes = client
+            .create_speech(model, text, voice, Some(response_format), speed)
+            .await
+            .map_err(|e: OpenAIError| e.to_fcp_error())?;
+
+        let audio_b64 = base64::engine::general_purpose::STANDARD.encode(&audio_bytes);
+
+        Ok(json!({
+            "audio_b64": audio_b64,
+            "format": response_format.as_str(),
+            "mime_type": response_format.mime_type(),
+            "input_chars": text.len(),
+            "provenance": {
+                "source": "openai.audio.tts",
+                "derived": true,
+                "scope": "model"
+            },
+            "taint": ["ai_generated"]
+        }))
+    }
+
+    async fn invoke_finetune_create(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+
+        let training_file = input.get("training_file").and_then(|v| v.as_str()).ok_or(
+            FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing required field: training_file".into(),
+            },
+        )?;
+
+        if training_file.is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "training_file must not be empty".into(),
+            });
+        }
+
+        let model = input
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or("gpt-4o-mini-2024-07-18");
+
+        let validation_file = input.get("validation_file").and_then(|v| v.as_str());
+
+        let suffix = input.get("suffix").and_then(|v| v.as_str());
+        if let Some(s) = suffix {
+            if s.len() > 18 {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Suffix must be at most 18 characters (got {})", s.len()),
+                });
+            }
+        }
+
+        let hyperparameters = {
+            let n_epochs = input.get("n_epochs").cloned();
+            let batch_size = input.get("batch_size").cloned();
+            let learning_rate_multiplier = input.get("learning_rate_multiplier").cloned();
+            if n_epochs.is_some() || batch_size.is_some() || learning_rate_multiplier.is_some() {
+                Some(crate::types::FineTuneHyperparameters {
+                    n_epochs,
+                    batch_size,
+                    learning_rate_multiplier,
+                })
+            } else {
+                None
+            }
+        };
+
+        let job = client
+            .create_fine_tune(
+                model,
+                training_file,
+                validation_file,
+                hyperparameters,
+                suffix,
+            )
+            .await
+            .map_err(|e: OpenAIError| e.to_fcp_error())?;
+
+        Ok(json!({
+            "id": job.id,
+            "object": job.object,
+            "model": job.model,
+            "status": job.status,
+            "training_file": job.training_file,
+            "validation_file": job.validation_file,
+            "created_at": job.created_at,
+            "provenance": {
+                "source": "openai.finetune.create",
+                "derived": false,
+                "scope": "api"
+            },
+            "taint": ["resource_intensive"]
+        }))
+    }
+
+    async fn invoke_finetune_list(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+
+        let limit = input
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+        let after = input.get("after").and_then(|v| v.as_str());
+
+        let response = client
+            .list_fine_tunes(limit, after)
+            .await
+            .map_err(|e: OpenAIError| e.to_fcp_error())?;
+
+        let jobs: Vec<serde_json::Value> = response
+            .data
+            .iter()
+            .map(|job| {
+                json!({
+                    "id": job.id,
+                    "model": job.model,
+                    "status": job.status,
+                    "fine_tuned_model": job.fine_tuned_model,
+                    "created_at": job.created_at,
+                    "finished_at": job.finished_at,
+                })
+            })
+            .collect();
+
+        Ok(json!({
+            "data": jobs,
+            "has_more": response.has_more,
+            "provenance": {
+                "source": "openai.finetune.list",
+                "derived": false,
+                "scope": "api"
+            }
+        }))
+    }
+
+    async fn invoke_finetune_get(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+
+        let job_id =
+            input
+                .get("job_id")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing required field: job_id".into(),
+                })?;
+
+        if job_id.is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "job_id must not be empty".into(),
+            });
+        }
+
+        let job = client
+            .get_fine_tune(job_id)
+            .await
+            .map_err(|e: OpenAIError| e.to_fcp_error())?;
+
+        Ok(json!({
+            "id": job.id,
+            "object": job.object,
+            "model": job.model,
+            "status": job.status,
+            "training_file": job.training_file,
+            "validation_file": job.validation_file,
+            "fine_tuned_model": job.fine_tuned_model,
+            "created_at": job.created_at,
+            "finished_at": job.finished_at,
+            "trained_tokens": job.trained_tokens,
+            "error": job.error.as_ref().map(|e| json!({
+                "code": e.code,
+                "message": e.message,
+            })),
+            "provenance": {
+                "source": "openai.finetune.get",
+                "derived": false,
+                "scope": "api"
+            }
+        }))
+    }
+
+    async fn invoke_finetune_cancel(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+
+        let job_id =
+            input
+                .get("job_id")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing required field: job_id".into(),
+                })?;
+
+        if job_id.is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "job_id must not be empty".into(),
+            });
+        }
+
+        let job = client
+            .cancel_fine_tune(job_id)
+            .await
+            .map_err(|e: OpenAIError| e.to_fcp_error())?;
+
+        Ok(json!({
+            "id": job.id,
+            "status": job.status,
+            "provenance": {
+                "source": "openai.finetune.cancel",
+                "derived": false,
+                "scope": "api"
+            }
+        }))
+    }
+
+    async fn invoke_finetune_events(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+
+        let job_id =
+            input
+                .get("job_id")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing required field: job_id".into(),
+                })?;
+
+        if job_id.is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "job_id must not be empty".into(),
+            });
+        }
+
+        let limit = input
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+        let after = input.get("after").and_then(|v| v.as_str());
+
+        let response = client
+            .list_fine_tune_events(job_id, limit, after)
+            .await
+            .map_err(|e: OpenAIError| e.to_fcp_error())?;
+
+        let events: Vec<serde_json::Value> = response
+            .data
+            .iter()
+            .map(|evt| {
+                json!({
+                    "id": evt.id,
+                    "created_at": evt.created_at,
+                    "level": evt.level,
+                    "message": evt.message,
+                })
+            })
+            .collect();
+
+        Ok(json!({
+            "data": events,
+            "has_more": response.has_more,
+            "provenance": {
+                "source": "openai.finetune.events",
+                "derived": false,
+                "scope": "api"
+            }
+        }))
+    }
+
+    // ─────────────────────── Assistants ───────────────────────
+
+    async fn invoke_assistants_create(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+
+        let model = input
+            .get("model")
+            .and_then(|v| v.as_str())
+            .ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing required field: model".into(),
+            })?;
+
+        if model.is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "model must not be empty".into(),
+            });
+        }
+
+        let name = input.get("name").and_then(|v| v.as_str()).map(String::from);
+        let instructions = input
+            .get("instructions")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let tools = input.get("tools").and_then(|v| {
+            serde_json::from_value::<Vec<crate::types::AssistantTool>>(v.clone()).ok()
+        });
+        let metadata = input.get("metadata").cloned();
+
+        let request = crate::types::CreateAssistantRequest {
+            model: model.to_string(),
+            name,
+            instructions,
+            tools,
+            metadata,
+        };
+
+        let assistant = client
+            .create_assistant(&request)
+            .await
+            .map_err(|e: OpenAIError| e.to_fcp_error())?;
+
+        Ok(json!({
+            "id": assistant.id,
+            "object": assistant.object,
+            "model": assistant.model,
+            "name": assistant.name,
+            "instructions": assistant.instructions,
+            "tools": assistant.tools,
+            "created_at": assistant.created_at,
+            "provenance": {
+                "source": "openai.assistants.create",
+                "derived": false,
+                "scope": "api",
+                "taint": ["resource_intensive"]
+            }
+        }))
+    }
+
+    async fn invoke_assistants_list(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+
+        let limit = input
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+        let after = input.get("after").and_then(|v| v.as_str());
+
+        let response = client
+            .list_assistants(limit, after)
+            .await
+            .map_err(|e: OpenAIError| e.to_fcp_error())?;
+
+        let assistants: Vec<serde_json::Value> = response
+            .data
+            .iter()
+            .map(|a| {
+                json!({
+                    "id": a.id,
+                    "model": a.model,
+                    "name": a.name,
+                    "created_at": a.created_at,
+                })
+            })
+            .collect();
+
+        Ok(json!({
+            "data": assistants,
+            "has_more": response.has_more,
+            "provenance": {
+                "source": "openai.assistants.list",
+                "derived": false,
+                "scope": "api"
+            }
+        }))
+    }
+
+    async fn invoke_assistants_get(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+
+        let assistant_id =
+            input
+                .get("assistant_id")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing required field: assistant_id".into(),
+                })?;
+
+        if assistant_id.is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "assistant_id must not be empty".into(),
+            });
+        }
+
+        let assistant = client
+            .get_assistant(assistant_id)
+            .await
+            .map_err(|e: OpenAIError| e.to_fcp_error())?;
+
+        Ok(json!({
+            "id": assistant.id,
+            "object": assistant.object,
+            "model": assistant.model,
+            "name": assistant.name,
+            "instructions": assistant.instructions,
+            "tools": assistant.tools,
+            "created_at": assistant.created_at,
+            "provenance": {
+                "source": "openai.assistants.get",
+                "derived": false,
+                "scope": "api"
+            }
+        }))
+    }
+
+    async fn invoke_assistants_delete(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+
+        let assistant_id =
+            input
+                .get("assistant_id")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing required field: assistant_id".into(),
+                })?;
+
+        if assistant_id.is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "assistant_id must not be empty".into(),
+            });
+        }
+
+        let result = client
+            .delete_assistant(assistant_id)
+            .await
+            .map_err(|e: OpenAIError| e.to_fcp_error())?;
+
+        Ok(json!({
+            "id": result.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+            "deleted": result.get("deleted").and_then(|v| v.as_bool()).unwrap_or(false),
+            "provenance": {
+                "source": "openai.assistants.delete",
+                "derived": false,
+                "scope": "api"
+            }
+        }))
+    }
+
+    // ─────────────────────── Threads ───────────────────────
+
+    async fn invoke_threads_create(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+
+        let messages = input
+            .get("messages")
+            .and_then(|v| v.as_array())
+            .cloned();
+        let metadata = input.get("metadata").cloned();
+
+        let thread = client
+            .create_thread(messages, metadata)
+            .await
+            .map_err(|e: OpenAIError| e.to_fcp_error())?;
+
+        Ok(json!({
+            "id": thread.id,
+            "object": thread.object,
+            "created_at": thread.created_at,
+            "provenance": {
+                "source": "openai.threads.create",
+                "derived": false,
+                "scope": "api"
+            }
+        }))
+    }
+
+    async fn invoke_threads_get(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+
+        let thread_id =
+            input
+                .get("thread_id")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing required field: thread_id".into(),
+                })?;
+
+        if thread_id.is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "thread_id must not be empty".into(),
+            });
+        }
+
+        let thread = client
+            .get_thread(thread_id)
+            .await
+            .map_err(|e: OpenAIError| e.to_fcp_error())?;
+
+        Ok(json!({
+            "id": thread.id,
+            "object": thread.object,
+            "created_at": thread.created_at,
+            "provenance": {
+                "source": "openai.threads.get",
+                "derived": false,
+                "scope": "api"
+            }
+        }))
+    }
+
+    // ─────────────────────── Thread Messages ───────────────────────
+
+    async fn invoke_threads_messages_create(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+
+        let thread_id =
+            input
+                .get("thread_id")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing required field: thread_id".into(),
+                })?;
+
+        let role = input
+            .get("role")
+            .and_then(|v| v.as_str())
+            .ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing required field: role".into(),
+            })?;
+
+        let content =
+            input
+                .get("content")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing required field: content".into(),
+                })?;
+
+        if content.is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "content must not be empty".into(),
+            });
+        }
+
+        let metadata = input.get("metadata").cloned();
+
+        let message = client
+            .create_thread_message(thread_id, role, content, metadata)
+            .await
+            .map_err(|e: OpenAIError| e.to_fcp_error())?;
+
+        Ok(json!({
+            "id": message.id,
+            "object": message.object,
+            "thread_id": message.thread_id,
+            "role": message.role,
+            "content": message.content,
+            "created_at": message.created_at,
+            "provenance": {
+                "source": "openai.threads.messages.create",
+                "derived": false,
+                "scope": "api"
+            }
+        }))
+    }
+
+    async fn invoke_threads_messages_list(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+
+        let thread_id =
+            input
+                .get("thread_id")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing required field: thread_id".into(),
+                })?;
+
+        let limit = input
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+        let after = input.get("after").and_then(|v| v.as_str());
+
+        let response = client
+            .list_thread_messages(thread_id, limit, after)
+            .await
+            .map_err(|e: OpenAIError| e.to_fcp_error())?;
+
+        let messages: Vec<serde_json::Value> = response
+            .data
+            .iter()
+            .map(|m| {
+                json!({
+                    "id": m.id,
+                    "thread_id": m.thread_id,
+                    "role": m.role,
+                    "content": m.content,
+                    "created_at": m.created_at,
+                })
+            })
+            .collect();
+
+        Ok(json!({
+            "data": messages,
+            "has_more": response.has_more,
+            "provenance": {
+                "source": "openai.threads.messages.list",
+                "derived": false,
+                "scope": "api"
+            }
+        }))
+    }
+
+    // ─────────────────────── Runs ───────────────────────
+
+    async fn invoke_threads_runs_create(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+
+        let thread_id =
+            input
+                .get("thread_id")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing required field: thread_id".into(),
+                })?;
+
+        let assistant_id =
+            input
+                .get("assistant_id")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing required field: assistant_id".into(),
+                })?;
+
+        let instructions = input.get("instructions").and_then(|v| v.as_str());
+        let metadata = input.get("metadata").cloned();
+
+        let run = client
+            .create_run(thread_id, assistant_id, instructions, metadata)
+            .await
+            .map_err(|e: OpenAIError| e.to_fcp_error())?;
+
+        Ok(json!({
+            "id": run.id,
+            "object": run.object,
+            "thread_id": run.thread_id,
+            "assistant_id": run.assistant_id,
+            "status": format!("{:?}", run.status).to_lowercase(),
+            "model": run.model,
+            "created_at": run.created_at,
+            "provenance": {
+                "source": "openai.threads.runs.create",
+                "derived": false,
+                "scope": "api",
+                "taint": ["resource_intensive"]
+            }
+        }))
+    }
+
+    async fn invoke_threads_runs_get(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+
+        let thread_id =
+            input
+                .get("thread_id")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing required field: thread_id".into(),
+                })?;
+
+        let run_id =
+            input
+                .get("run_id")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing required field: run_id".into(),
+                })?;
+
+        let run = client
+            .get_run(thread_id, run_id)
+            .await
+            .map_err(|e: OpenAIError| e.to_fcp_error())?;
+
+        Ok(json!({
+            "id": run.id,
+            "object": run.object,
+            "thread_id": run.thread_id,
+            "assistant_id": run.assistant_id,
+            "status": format!("{:?}", run.status).to_lowercase(),
+            "model": run.model,
+            "created_at": run.created_at,
+            "started_at": run.started_at,
+            "completed_at": run.completed_at,
+            "usage": run.usage.as_ref().map(|u| json!({
+                "prompt_tokens": u.prompt_tokens,
+                "completion_tokens": u.completion_tokens,
+                "total_tokens": u.total_tokens,
+            })),
+            "provenance": {
+                "source": "openai.threads.runs.get",
+                "derived": false,
+                "scope": "api"
+            }
+        }))
+    }
+
+    async fn invoke_threads_runs_cancel(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+
+        let thread_id =
+            input
+                .get("thread_id")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing required field: thread_id".into(),
+                })?;
+
+        let run_id =
+            input
+                .get("run_id")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing required field: run_id".into(),
+                })?;
+
+        let run = client
+            .cancel_run(thread_id, run_id)
+            .await
+            .map_err(|e: OpenAIError| e.to_fcp_error())?;
+
+        Ok(json!({
+            "id": run.id,
+            "status": format!("{:?}", run.status).to_lowercase(),
+            "provenance": {
+                "source": "openai.threads.runs.cancel",
+                "derived": false,
+                "scope": "api"
+            }
         }))
     }
 

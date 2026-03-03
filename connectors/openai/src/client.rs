@@ -17,8 +17,14 @@ use tracing::{debug, instrument};
 use crate::{
     error::{OpenAIError, OpenAIResult},
     types::{
-        ApiError, ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, Message,
-        Model, Tool, ToolChoice, Usage,
+        ApiError, Assistant, AssistantListResponse, ChatCompletionChunk, ChatCompletionRequest,
+        ChatCompletionResponse, CreateAssistantRequest, CreateFineTuneRequest, EmbeddingInput,
+        EmbeddingModel, EmbeddingRequest, EmbeddingResponse, FineTuneEventListResponse,
+        FineTuneHyperparameters, FineTuneJob, FineTuneListResponse, ImageGenerationRequest,
+        ImageGenerationResponse, ImageModel, ImageQuality, ImageSize, Message, Model, Run,
+        RunListResponse, Thread, ThreadMessage, ThreadMessageListResponse, Tool, ToolChoice,
+        TranscriptionResponse, TtsModel, TtsRequest, TtsResponseFormat, TtsVoice, Usage,
+        WhisperModel,
     },
 };
 
@@ -317,6 +323,286 @@ impl OpenAIClient {
         Ok(parse_sse_stream(response))
     }
 
+    /// Create embeddings for the given input text(s).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failures, rate limiting, authentication errors,
+    /// or if the input exceeds model limits.
+    #[instrument(skip(self, input))]
+    pub async fn create_embeddings(
+        &self,
+        model: EmbeddingModel,
+        input: EmbeddingInput,
+        dimensions: Option<u32>,
+    ) -> OpenAIResult<EmbeddingResponse> {
+        let request = EmbeddingRequest {
+            model: model.as_str().into(),
+            input,
+            encoding_format: Some("float".into()),
+            dimensions,
+        };
+
+        self.post("/v1/embeddings", &request).await
+    }
+
+    /// Generate images from a text prompt.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failures, rate limiting, authentication errors,
+    /// or if the prompt violates content policy.
+    #[instrument(skip(self, prompt))]
+    pub async fn generate_image(
+        &self,
+        model: ImageModel,
+        prompt: &str,
+        n: Option<u32>,
+        size: Option<ImageSize>,
+        quality: Option<ImageQuality>,
+    ) -> OpenAIResult<ImageGenerationResponse> {
+        let request = ImageGenerationRequest {
+            model: model.as_str().into(),
+            prompt: prompt.to_string(),
+            n,
+            size,
+            quality,
+            response_format: "b64_json".into(),
+        };
+
+        self.post("/v1/images/generations", &request).await
+    }
+
+    /// Transcribe audio using the Whisper model.
+    ///
+    /// The audio data is sent as a multipart form upload.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failures, rate limiting, authentication errors,
+    /// or if the audio data is invalid.
+    #[instrument(skip(self, audio_data))]
+    pub async fn create_transcription(
+        &self,
+        model: WhisperModel,
+        audio_data: Vec<u8>,
+        filename: &str,
+        language: Option<&str>,
+    ) -> OpenAIResult<TranscriptionResponse> {
+        let url = format!("{}/v1/audio/transcriptions", self.base_url);
+
+        let file_part = reqwest::multipart::Part::bytes(audio_data)
+            .file_name(filename.to_string())
+            .mime_str("application/octet-stream")
+            .map_err(|e| OpenAIError::Api {
+                error_type: "multipart_error".into(),
+                message: e.to_string(),
+                status_code: None,
+            })?;
+
+        let mut form = reqwest::multipart::Form::new()
+            .text("model", model.as_str().to_string())
+            .text("response_format", "json".to_string())
+            .part("file", file_part);
+
+        if let Some(lang) = language {
+            form = form.text("language", lang.to_string());
+        }
+
+        let request = self.client.post(&url);
+        let request = self.apply_auth(request);
+
+        let response = request.multipart(form).send().await?;
+        let status = response.status();
+        let bytes = response.bytes().await?;
+
+        if status.is_success() {
+            serde_json::from_slice(&bytes).map_err(OpenAIError::from)
+        } else {
+            Err(parse_error_response(status, &bytes))
+        }
+    }
+
+    /// Generate speech audio from text using TTS models.
+    ///
+    /// Returns raw audio bytes in the requested format.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failures, rate limiting, authentication errors,
+    /// or if the input text exceeds the 4096 character limit.
+    #[instrument(skip(self, input))]
+    pub async fn create_speech(
+        &self,
+        model: TtsModel,
+        input: &str,
+        voice: TtsVoice,
+        response_format: Option<TtsResponseFormat>,
+        speed: Option<f64>,
+    ) -> OpenAIResult<Vec<u8>> {
+        let url = format!("{}/v1/audio/speech", self.base_url);
+
+        let request_body = TtsRequest {
+            model: model.as_str().into(),
+            input: input.to_string(),
+            voice: voice.as_str().into(),
+            response_format: response_format.map(|f| f.as_str().into()),
+            speed,
+        };
+
+        let request = self
+            .client
+            .post(&url)
+            .header("Content-Type", "application/json");
+        let request = self.apply_auth(request);
+
+        let response = request.json(&request_body).send().await?;
+        let status = response.status();
+        let bytes = response.bytes().await?;
+
+        if status.is_success() {
+            Ok(bytes.to_vec())
+        } else {
+            Err(parse_error_response(status, &bytes))
+        }
+    }
+
+    /// Create a fine-tuning job.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failures, rate limiting, or authentication errors.
+    #[instrument(skip(self))]
+    pub async fn create_fine_tune(
+        &self,
+        model: &str,
+        training_file: &str,
+        validation_file: Option<&str>,
+        hyperparameters: Option<FineTuneHyperparameters>,
+        suffix: Option<&str>,
+    ) -> OpenAIResult<FineTuneJob> {
+        let request = CreateFineTuneRequest {
+            model: model.to_string(),
+            training_file: training_file.to_string(),
+            validation_file: validation_file.map(String::from),
+            hyperparameters,
+            suffix: suffix.map(String::from),
+        };
+
+        self.post("/v1/fine_tuning/jobs", &request).await
+    }
+
+    /// List fine-tuning jobs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failures, rate limiting, or authentication errors.
+    #[instrument(skip(self))]
+    pub async fn list_fine_tunes(
+        &self,
+        limit: Option<u32>,
+        after: Option<&str>,
+    ) -> OpenAIResult<FineTuneListResponse> {
+        let mut url = format!("{}/v1/fine_tuning/jobs", self.base_url);
+        let mut params = Vec::new();
+        if let Some(limit) = limit {
+            params.push(format!("limit={limit}"));
+        }
+        if let Some(after) = after {
+            params.push(format!("after={after}"));
+        }
+        if !params.is_empty() {
+            url.push('?');
+            url.push_str(&params.join("&"));
+        }
+
+        self.get(&url).await
+    }
+
+    /// Get a fine-tuning job by ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failures, rate limiting, or authentication errors.
+    #[instrument(skip(self))]
+    pub async fn get_fine_tune(&self, job_id: &str) -> OpenAIResult<FineTuneJob> {
+        let url = format!("{}/v1/fine_tuning/jobs/{job_id}", self.base_url);
+        self.get(&url).await
+    }
+
+    /// Cancel a fine-tuning job.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failures, rate limiting, or authentication errors.
+    #[instrument(skip(self))]
+    pub async fn cancel_fine_tune(&self, job_id: &str) -> OpenAIResult<FineTuneJob> {
+        let url = format!("{}/v1/fine_tuning/jobs/{job_id}/cancel", self.base_url);
+
+        let request = self
+            .client
+            .post(&url)
+            .header("Content-Type", "application/json");
+        let request = self.apply_auth(request);
+
+        let response = request.send().await?;
+        let status = response.status();
+        let bytes = response.bytes().await?;
+
+        if status.is_success() {
+            serde_json::from_slice(&bytes).map_err(OpenAIError::from)
+        } else {
+            Err(parse_error_response(status, &bytes))
+        }
+    }
+
+    /// List events for a fine-tuning job.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failures, rate limiting, or authentication errors.
+    #[instrument(skip(self))]
+    pub async fn list_fine_tune_events(
+        &self,
+        job_id: &str,
+        limit: Option<u32>,
+        after: Option<&str>,
+    ) -> OpenAIResult<FineTuneEventListResponse> {
+        let mut url = format!("{}/v1/fine_tuning/jobs/{job_id}/events", self.base_url);
+        let mut params = Vec::new();
+        if let Some(limit) = limit {
+            params.push(format!("limit={limit}"));
+        }
+        if let Some(after) = after {
+            params.push(format!("after={after}"));
+        }
+        if !params.is_empty() {
+            url.push('?');
+            url.push_str(&params.join("&"));
+        }
+
+        self.get(&url).await
+    }
+
+    /// Make a GET request with auth headers.
+    async fn get<R>(&self, url: &str) -> OpenAIResult<R>
+    where
+        R: serde::de::DeserializeOwned + Send,
+    {
+        let request = self.client.get(url);
+        let request = self.apply_auth(request);
+
+        let response = request.send().await?;
+        let status = response.status();
+        let bytes = response.bytes().await?;
+
+        if status.is_success() {
+            serde_json::from_slice(&bytes).map_err(OpenAIError::from)
+        } else {
+            Err(parse_error_response(status, &bytes))
+        }
+    }
+
     /// Make a POST request with retry via the migration framework.
     async fn post<T, R>(&self, endpoint: &str, body: &T) -> OpenAIResult<R>
     where
@@ -389,6 +675,347 @@ impl OpenAIClient {
     where
         R: serde::de::DeserializeOwned + Send,
     {
+        let status = response.status();
+        let bytes = response.bytes().await?;
+
+        if status.is_success() {
+            serde_json::from_slice(&bytes).map_err(OpenAIError::from)
+        } else {
+            Err(parse_error_response(status, &bytes))
+        }
+    }
+
+    /// Make a DELETE request with Assistants API v2 header.
+    async fn delete_v2<R>(&self, url: &str) -> OpenAIResult<R>
+    where
+        R: serde::de::DeserializeOwned + Send,
+    {
+        let request = self
+            .client
+            .delete(url)
+            .header("OpenAI-Beta", "assistants=v2");
+        let request = self.apply_auth(request);
+
+        let response = request.send().await?;
+        let status = response.status();
+        let bytes = response.bytes().await?;
+
+        if status.is_success() {
+            serde_json::from_slice(&bytes).map_err(OpenAIError::from)
+        } else {
+            Err(parse_error_response(status, &bytes))
+        }
+    }
+
+    /// Make a GET request with Assistants API v2 header.
+    async fn get_v2<R>(&self, url: &str) -> OpenAIResult<R>
+    where
+        R: serde::de::DeserializeOwned + Send,
+    {
+        let request = self
+            .client
+            .get(url)
+            .header("OpenAI-Beta", "assistants=v2");
+        let request = self.apply_auth(request);
+
+        let response = request.send().await?;
+        let status = response.status();
+        let bytes = response.bytes().await?;
+
+        if status.is_success() {
+            serde_json::from_slice(&bytes).map_err(OpenAIError::from)
+        } else {
+            Err(parse_error_response(status, &bytes))
+        }
+    }
+
+    /// Make a POST request without a body, with Assistants API v2 header.
+    async fn post_empty_v2<R>(&self, url: &str) -> OpenAIResult<R>
+    where
+        R: serde::de::DeserializeOwned + Send,
+    {
+        let request = self
+            .client
+            .post(url)
+            .header("Content-Type", "application/json")
+            .header("OpenAI-Beta", "assistants=v2");
+        let request = self.apply_auth(request);
+
+        let response = request.send().await?;
+        let status = response.status();
+        let bytes = response.bytes().await?;
+
+        if status.is_success() {
+            serde_json::from_slice(&bytes).map_err(OpenAIError::from)
+        } else {
+            Err(parse_error_response(status, &bytes))
+        }
+    }
+
+    // ─────────────────────── Assistants ───────────────────────
+
+    /// Create an assistant.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failures, rate limiting, or authentication errors.
+    #[instrument(skip(self))]
+    pub async fn create_assistant(
+        &self,
+        request: &CreateAssistantRequest,
+    ) -> OpenAIResult<Assistant> {
+        let url = format!("{}/v1/assistants", self.base_url);
+        self.post_json(&url, request).await
+    }
+
+    /// List assistants.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failures, rate limiting, or authentication errors.
+    #[instrument(skip(self))]
+    pub async fn list_assistants(
+        &self,
+        limit: Option<u32>,
+        after: Option<&str>,
+    ) -> OpenAIResult<AssistantListResponse> {
+        let mut url = format!("{}/v1/assistants", self.base_url);
+        let mut params = Vec::new();
+        if let Some(l) = limit {
+            params.push(format!("limit={l}"));
+        }
+        if let Some(a) = after {
+            params.push(format!("after={a}"));
+        }
+        if !params.is_empty() {
+            url.push('?');
+            url.push_str(&params.join("&"));
+        }
+        self.get_v2(&url).await
+    }
+
+    /// Get an assistant by ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failures, rate limiting, or authentication errors.
+    #[instrument(skip(self))]
+    pub async fn get_assistant(&self, assistant_id: &str) -> OpenAIResult<Assistant> {
+        let url = format!("{}/v1/assistants/{assistant_id}", self.base_url);
+        self.get_v2(&url).await
+    }
+
+    /// Delete an assistant.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failures, rate limiting, or authentication errors.
+    #[instrument(skip(self))]
+    pub async fn delete_assistant(
+        &self,
+        assistant_id: &str,
+    ) -> OpenAIResult<serde_json::Value> {
+        let url = format!("{}/v1/assistants/{assistant_id}", self.base_url);
+        self.delete_v2(&url).await
+    }
+
+    // ─────────────────────── Threads ───────────────────────
+
+    /// Create a thread.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failures, rate limiting, or authentication errors.
+    #[instrument(skip(self))]
+    pub async fn create_thread(
+        &self,
+        messages: Option<Vec<serde_json::Value>>,
+        metadata: Option<serde_json::Value>,
+    ) -> OpenAIResult<Thread> {
+        let url = format!("{}/v1/threads", self.base_url);
+        let mut body = serde_json::Map::new();
+        if let Some(msgs) = messages {
+            body.insert("messages".into(), serde_json::Value::Array(msgs));
+        }
+        if let Some(meta) = metadata {
+            body.insert("metadata".into(), meta);
+        }
+        self.post_json(&url, &serde_json::Value::Object(body))
+            .await
+    }
+
+    /// Get a thread by ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failures, rate limiting, or authentication errors.
+    #[instrument(skip(self))]
+    pub async fn get_thread(&self, thread_id: &str) -> OpenAIResult<Thread> {
+        let url = format!("{}/v1/threads/{thread_id}", self.base_url);
+        self.get_v2(&url).await
+    }
+
+    /// Delete a thread.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failures, rate limiting, or authentication errors.
+    #[instrument(skip(self))]
+    pub async fn delete_thread(&self, thread_id: &str) -> OpenAIResult<serde_json::Value> {
+        let url = format!("{}/v1/threads/{thread_id}", self.base_url);
+        self.delete_v2(&url).await
+    }
+
+    // ─────────────────────── Thread Messages ───────────────────────
+
+    /// Create a message in a thread.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failures, rate limiting, or authentication errors.
+    #[instrument(skip(self))]
+    pub async fn create_thread_message(
+        &self,
+        thread_id: &str,
+        role: &str,
+        content: &str,
+        metadata: Option<serde_json::Value>,
+    ) -> OpenAIResult<ThreadMessage> {
+        let url = format!("{}/v1/threads/{thread_id}/messages", self.base_url);
+        let mut body = serde_json::json!({
+            "role": role,
+            "content": content,
+        });
+        if let Some(meta) = metadata {
+            body["metadata"] = meta;
+        }
+        self.post_json(&url, &body).await
+    }
+
+    /// List messages in a thread.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failures, rate limiting, or authentication errors.
+    #[instrument(skip(self))]
+    pub async fn list_thread_messages(
+        &self,
+        thread_id: &str,
+        limit: Option<u32>,
+        after: Option<&str>,
+    ) -> OpenAIResult<ThreadMessageListResponse> {
+        let mut url = format!("{}/v1/threads/{thread_id}/messages", self.base_url);
+        let mut params = Vec::new();
+        if let Some(l) = limit {
+            params.push(format!("limit={l}"));
+        }
+        if let Some(a) = after {
+            params.push(format!("after={a}"));
+        }
+        if !params.is_empty() {
+            url.push('?');
+            url.push_str(&params.join("&"));
+        }
+        self.get_v2(&url).await
+    }
+
+    // ─────────────────────── Runs ───────────────────────
+
+    /// Create a run on a thread.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failures, rate limiting, or authentication errors.
+    #[instrument(skip(self))]
+    pub async fn create_run(
+        &self,
+        thread_id: &str,
+        assistant_id: &str,
+        instructions: Option<&str>,
+        metadata: Option<serde_json::Value>,
+    ) -> OpenAIResult<Run> {
+        let url = format!("{}/v1/threads/{thread_id}/runs", self.base_url);
+        let mut body = serde_json::json!({
+            "assistant_id": assistant_id,
+        });
+        if let Some(instr) = instructions {
+            body["instructions"] = serde_json::Value::String(instr.into());
+        }
+        if let Some(meta) = metadata {
+            body["metadata"] = meta;
+        }
+        self.post_json(&url, &body).await
+    }
+
+    /// Get a run by ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failures, rate limiting, or authentication errors.
+    #[instrument(skip(self))]
+    pub async fn get_run(&self, thread_id: &str, run_id: &str) -> OpenAIResult<Run> {
+        let url = format!(
+            "{}/v1/threads/{thread_id}/runs/{run_id}",
+            self.base_url
+        );
+        self.get_v2(&url).await
+    }
+
+    /// List runs on a thread.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failures, rate limiting, or authentication errors.
+    #[instrument(skip(self))]
+    pub async fn list_runs(
+        &self,
+        thread_id: &str,
+        limit: Option<u32>,
+        after: Option<&str>,
+    ) -> OpenAIResult<RunListResponse> {
+        let mut url = format!("{}/v1/threads/{thread_id}/runs", self.base_url);
+        let mut params = Vec::new();
+        if let Some(l) = limit {
+            params.push(format!("limit={l}"));
+        }
+        if let Some(a) = after {
+            params.push(format!("after={a}"));
+        }
+        if !params.is_empty() {
+            url.push('?');
+            url.push_str(&params.join("&"));
+        }
+        self.get_v2(&url).await
+    }
+
+    /// Cancel a run.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failures, rate limiting, or authentication errors.
+    #[instrument(skip(self))]
+    pub async fn cancel_run(&self, thread_id: &str, run_id: &str) -> OpenAIResult<Run> {
+        let url = format!(
+            "{}/v1/threads/{thread_id}/runs/{run_id}/cancel",
+            self.base_url
+        );
+        self.post_empty_v2(&url).await
+    }
+
+    /// Generic POST with JSON body (for Assistants API v2).
+    async fn post_json<T, R>(&self, url: &str, body: &T) -> OpenAIResult<R>
+    where
+        T: serde::Serialize + Sync,
+        R: serde::de::DeserializeOwned + Send,
+    {
+        let request = self
+            .client
+            .post(url)
+            .header("Content-Type", "application/json")
+            .header("OpenAI-Beta", "assistants=v2");
+        let request = self.apply_auth(request);
+
+        let response = request.json(body).send().await?;
         let status = response.status();
         let bytes = response.bytes().await?;
 

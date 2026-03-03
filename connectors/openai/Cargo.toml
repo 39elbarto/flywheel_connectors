@@ -27,10 +27,11 @@ fcp-sdk = { path = "../../crates/fcp-sdk", features = ["connector-http"] }
 anyhow.workspace = true
 async-stream = "0.3"
 async-trait.workspace = true
+base64.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
-reqwest = { workspace = true, features = ["stream"] }
+reqwest = { workspace = true, features = ["multipart", "stream"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -41,6 +42,7 @@ url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+base64.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 wiremock.workspace = true
 futures-util.workspace = true

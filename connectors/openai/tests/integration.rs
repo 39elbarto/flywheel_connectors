@@ -25,6 +25,7 @@ use wiremock::{
 };
 
 // ──────────────── re-export the connector under test ────────────────
+use base64::Engine;
 use fcp_openai::client::OpenAIClient;
 use fcp_openai::connector::OpenAIConnector;
 use fcp_openai::types::Model;
@@ -1042,6 +1043,42 @@ async fn lifecycle_introspect_operations() {
         op_ids.contains(&"openai.get_usage"),
         "should include openai.get_usage"
     );
+    assert!(
+        op_ids.contains(&"openai.embeddings"),
+        "should include openai.embeddings"
+    );
+    assert!(
+        op_ids.contains(&"openai.images.generate"),
+        "should include openai.images.generate"
+    );
+    assert!(
+        op_ids.contains(&"openai.audio.transcribe"),
+        "should include openai.audio.transcribe"
+    );
+    assert!(
+        op_ids.contains(&"openai.audio.tts"),
+        "should include openai.audio.tts"
+    );
+    assert!(
+        op_ids.contains(&"openai.finetune.create"),
+        "should include openai.finetune.create"
+    );
+    assert!(
+        op_ids.contains(&"openai.finetune.list"),
+        "should include openai.finetune.list"
+    );
+    assert!(
+        op_ids.contains(&"openai.finetune.get"),
+        "should include openai.finetune.get"
+    );
+    assert!(
+        op_ids.contains(&"openai.finetune.cancel"),
+        "should include openai.finetune.cancel"
+    );
+    assert!(
+        op_ids.contains(&"openai.finetune.events"),
+        "should include openai.finetune.events"
+    );
 }
 
 /// Doctor before configure shows unhealthy.
@@ -1217,4 +1254,2313 @@ async fn get_usage_returns_stats() {
     assert_eq!(result["total_completion_tokens"], 0);
     assert!(result.get("requests_total").is_some());
     assert!(result.get("total_cost_usd").is_some());
+}
+
+// ============================================================================
+// Embeddings Tests
+// ============================================================================
+
+/// Helper: standard `OpenAI` embeddings success response.
+fn openai_embedding_response(
+    model: &str,
+    embeddings: &[Vec<f64>],
+    prompt_tokens: u32,
+) -> serde_json::Value {
+    json!({
+        "object": "list",
+        "data": embeddings.iter().enumerate().map(|(i, emb)| json!({
+            "object": "embedding",
+            "index": i,
+            "embedding": emb
+        })).collect::<Vec<_>>(),
+        "model": model,
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "total_tokens": prompt_tokens
+        }
+    })
+}
+
+/// Happy path: single text embedding.
+#[fcp_async_core::runtime::test]
+async fn embeddings_single_text_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("openai.embeddings.single_text");
+
+    let mock_server = MockServer::start().await;
+    let embedding_vec = vec![0.1, 0.2, 0.3, -0.1, 0.0];
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .and(header("Authorization", "Bearer test-api-key-xyz"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(openai_embedding_response(
+                "text-embedding-3-small",
+                std::slice::from_ref(&embedding_vec),
+                5,
+            )),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.embeddings"]).await;
+    let token = generate_valid_token(&signing_key, "openai.embeddings");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.embeddings",
+            "input": { "input": "Hello world" },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["model"], "text-embedding-3-small");
+    let data = result["data"].as_array().unwrap();
+    assert_eq!(data.len(), 1);
+    assert_eq!(data[0]["index"], 0);
+    let emb = data[0]["embedding"].as_array().unwrap();
+    assert_eq!(emb.len(), 5);
+    assert_eq!(result["usage"]["prompt_tokens"], 5);
+    assert_eq!(result["usage"]["total_tokens"], 5);
+    assert!(result.get("cost_usd").is_some());
+    assert_eq!(result["provenance"]["source"], "openai.embeddings");
+    assert!(
+        result["taint"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("external_input"))
+    );
+}
+
+/// Happy path: batch embedding (multiple texts).
+#[fcp_async_core::runtime::test]
+async fn embeddings_batch_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("openai.embeddings.batch");
+
+    let mock_server = MockServer::start().await;
+    let emb1 = vec![0.1, 0.2, 0.3];
+    let emb2 = vec![0.4, 0.5, 0.6];
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(openai_embedding_response(
+                "text-embedding-3-large",
+                &[emb1, emb2],
+                12,
+            )),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.embeddings"]).await;
+    let token = generate_valid_token(&signing_key, "openai.embeddings");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.embeddings",
+            "input": {
+                "input": ["text one", "text two"],
+                "model": "text-embedding-3-large"
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    let data = result["data"].as_array().unwrap();
+    assert_eq!(data.len(), 2);
+    assert_eq!(data[0]["index"], 0);
+    assert_eq!(data[1]["index"], 1);
+    assert_eq!(result["usage"]["prompt_tokens"], 12);
+}
+
+/// Embeddings with custom dimensions parameter.
+#[fcp_async_core::runtime::test]
+async fn embeddings_with_dimensions() {
+    let _ctx = AsyncTestContext::for_scenario("openai.embeddings.dimensions");
+
+    let mock_server = MockServer::start().await;
+    let emb = vec![0.1, 0.2]; // 2-d output
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(openai_embedding_response(
+                "text-embedding-3-small",
+                &[emb],
+                3,
+            )),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.embeddings"]).await;
+    let token = generate_valid_token(&signing_key, "openai.embeddings");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.embeddings",
+            "input": {
+                "input": "Test",
+                "dimensions": 2
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    let data = result["data"].as_array().unwrap();
+    assert_eq!(data.len(), 1);
+    assert_eq!(data[0]["embedding"].as_array().unwrap().len(), 2);
+}
+
+/// Missing input field returns error.
+#[fcp_async_core::runtime::test]
+async fn embeddings_missing_input() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.embeddings"]).await;
+    let token = generate_valid_token(&signing_key, "openai.embeddings");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.embeddings",
+            "input": {},
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(
+                message.contains("input"),
+                "error should mention 'input': {message}"
+            );
+        }
+        other => panic!("Expected InvalidRequest, got: {other:?}"),
+    }
+}
+
+/// Empty input string returns error.
+#[fcp_async_core::runtime::test]
+async fn embeddings_empty_input_string() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.embeddings"]).await;
+    let token = generate_valid_token(&signing_key, "openai.embeddings");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.embeddings",
+            "input": { "input": "" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(
+                message.contains("empty"),
+                "error should mention 'empty': {message}"
+            );
+        }
+        other => panic!("Expected InvalidRequest, got: {other:?}"),
+    }
+}
+
+/// Empty input array returns error.
+#[fcp_async_core::runtime::test]
+async fn embeddings_empty_input_array() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.embeddings"]).await;
+    let token = generate_valid_token(&signing_key, "openai.embeddings");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.embeddings",
+            "input": { "input": [] },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(
+                message.contains("empty"),
+                "error should mention 'empty': {message}"
+            );
+        }
+        other => panic!("Expected InvalidRequest, got: {other:?}"),
+    }
+}
+
+/// Wrong capability token is rejected.
+#[fcp_async_core::runtime::test]
+async fn embeddings_requires_correct_capability() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    // Handshake with chat capability only
+    let signing_key = setup_handshake(&mut connector, &["openai.chat"]).await;
+    // Generate token for chat, not embeddings
+    let token = generate_valid_token(&signing_key, "openai.chat");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.embeddings",
+            "input": { "input": "Hello" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+}
+
+/// Rate limit error maps correctly for embeddings.
+/// Constructs the error directly to avoid the 30s `retry_after` delay.
+#[fcp_async_core::runtime::test]
+async fn embeddings_rate_limited_error_mapping() {
+    let err = fcp_openai::error::OpenAIError::RateLimited {
+        retry_after_ms: 30_000,
+    };
+
+    let fcp_err = err.to_fcp_error();
+    match fcp_err {
+        fcp_core::FcpError::RateLimited { retry_after_ms, .. } => {
+            assert_eq!(retry_after_ms, 30_000);
+        }
+        other => panic!("Expected RateLimited, got: {other:?}"),
+    }
+}
+
+/// Unknown embedding model returns error.
+#[fcp_async_core::runtime::test]
+async fn embeddings_unknown_model() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.embeddings"]).await;
+    let token = generate_valid_token(&signing_key, "openai.embeddings");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.embeddings",
+            "input": { "input": "Hello", "model": "not-a-real-model" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(
+                message.contains("Unknown embedding model"),
+                "error should mention unknown model: {message}"
+            );
+        }
+        other => panic!("Expected InvalidRequest, got: {other:?}"),
+    }
+}
+
+// ============================================================================
+// Image Generation Tests
+// ============================================================================
+
+/// Helper: standard `OpenAI` image generation success response.
+fn openai_image_response(revised_prompt: Option<&str>) -> serde_json::Value {
+    json!({
+        "created": 1_700_000_000,
+        "data": [{
+            "b64_json": "iVBORw0KGgoAAAANSUhEUg==",
+            "revised_prompt": revised_prompt
+        }]
+    })
+}
+
+/// Happy path: generate an image with `DALL-E` 3.
+#[fcp_async_core::runtime::test]
+async fn images_generate_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("openai.images.generate.happy_path");
+
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/images/generations"))
+        .and(header("Authorization", "Bearer test-api-key-xyz"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(openai_image_response(Some("A beautiful sunset"))),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.images"]).await;
+    let token = generate_valid_token(&signing_key, "openai.images.generate");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.images.generate",
+            "input": { "prompt": "A sunset over mountains" },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["created"], 1_700_000_000);
+    let data = result["data"].as_array().unwrap();
+    assert_eq!(data.len(), 1);
+    assert!(data[0]["b64_json"].as_str().is_some());
+    assert_eq!(data[0]["revised_prompt"], "A beautiful sunset");
+    assert_eq!(result["provenance"]["source"], "openai.images");
+    assert!(result["provenance"]["derived"].as_bool().unwrap());
+    let taint = result["taint"].as_array().unwrap();
+    assert!(taint.contains(&json!("external_input")));
+    assert!(taint.contains(&json!("ai_generated")));
+}
+
+/// Image generation with custom size and quality.
+#[fcp_async_core::runtime::test]
+async fn images_generate_with_options() {
+    let _ctx = AsyncTestContext::for_scenario("openai.images.generate.options");
+
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/images/generations"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(openai_image_response(None)))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.images"]).await;
+    let token = generate_valid_token(&signing_key, "openai.images.generate");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.images.generate",
+            "input": {
+                "prompt": "A cat",
+                "model": "dall-e-3",
+                "size": "1792x1024",
+                "quality": "hd",
+                "n": 1
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["created"], 1_700_000_000);
+    assert_eq!(result["data"].as_array().unwrap().len(), 1);
+}
+
+/// Missing prompt returns error.
+#[fcp_async_core::runtime::test]
+async fn images_generate_missing_prompt() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.images"]).await;
+    let token = generate_valid_token(&signing_key, "openai.images.generate");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.images.generate",
+            "input": {},
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(
+                message.contains("prompt"),
+                "error should mention 'prompt': {message}"
+            );
+        }
+        other => panic!("Expected InvalidRequest for missing prompt, got: {other:?}"),
+    }
+}
+
+/// Empty prompt string returns error.
+#[fcp_async_core::runtime::test]
+async fn images_generate_empty_prompt() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.images"]).await;
+    let token = generate_valid_token(&signing_key, "openai.images.generate");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.images.generate",
+            "input": { "prompt": "" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(
+                message.contains("empty"),
+                "error should mention 'empty': {message}"
+            );
+        }
+        other => panic!("Expected InvalidRequest for empty prompt, got: {other:?}"),
+    }
+}
+
+/// Unknown image model returns error.
+#[fcp_async_core::runtime::test]
+async fn images_generate_unknown_model() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.images"]).await;
+    let token = generate_valid_token(&signing_key, "openai.images.generate");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.images.generate",
+            "input": { "prompt": "A cat", "model": "dall-e-99" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(
+                message.contains("Unknown image model"),
+                "error should mention unknown image model: {message}"
+            );
+        }
+        other => panic!("Expected InvalidRequest for unknown model, got: {other:?}"),
+    }
+}
+
+/// Unknown image size returns error.
+#[fcp_async_core::runtime::test]
+async fn images_generate_unknown_size() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.images"]).await;
+    let token = generate_valid_token(&signing_key, "openai.images.generate");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.images.generate",
+            "input": { "prompt": "A cat", "size": "9999x9999" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(
+                message.contains("Unknown image size"),
+                "error should mention unknown size: {message}"
+            );
+        }
+        other => panic!("Expected InvalidRequest for unknown size, got: {other:?}"),
+    }
+}
+
+/// Wrong capability token is rejected for image generation.
+#[fcp_async_core::runtime::test]
+async fn images_generate_requires_correct_capability() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.chat"]).await;
+    let token = generate_valid_token(&signing_key, "openai.chat");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.images.generate",
+            "input": { "prompt": "A cat" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+}
+
+// ============================================================================
+// Audio Transcription Tests
+// ============================================================================
+
+/// Happy path: transcribe audio via Whisper.
+#[fcp_async_core::runtime::test]
+async fn transcribe_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("openai.audio.transcribe.happy_path");
+
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/audio/transcriptions"))
+        .and(header("Authorization", "Bearer test-api-key-xyz"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"text": "Hello, this is a test transcription."})),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.audio.transcribe"]).await;
+    let token = generate_valid_token(&signing_key, "openai.audio.transcribe");
+
+    // Create small fake audio data and base64 encode it
+    let fake_audio = vec![0xFF, 0xFB, 0x90, 0x00]; // fake MP3 header bytes
+    let audio_b64 = base64::engine::general_purpose::STANDARD.encode(&fake_audio);
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.audio.transcribe",
+            "input": {
+                "audio_b64": audio_b64,
+                "filename": "test.mp3"
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["text"], "Hello, this is a test transcription.");
+    assert_eq!(result["provenance"]["source"], "openai.audio.transcribe");
+    assert!(
+        result["taint"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("external_input"))
+    );
+}
+
+/// Transcription with language parameter.
+#[fcp_async_core::runtime::test]
+async fn transcribe_with_language() {
+    let _ctx = AsyncTestContext::for_scenario("openai.audio.transcribe.language");
+
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/audio/transcriptions"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"text": "Bonjour le monde."})),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.audio.transcribe"]).await;
+    let token = generate_valid_token(&signing_key, "openai.audio.transcribe");
+
+    let audio_b64 = base64::engine::general_purpose::STANDARD.encode([0xFF, 0xFB, 0x90]);
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.audio.transcribe",
+            "input": {
+                "audio_b64": audio_b64,
+                "filename": "french.mp3",
+                "language": "fr"
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["text"], "Bonjour le monde.");
+}
+
+/// Missing `audio_b64` field.
+#[fcp_async_core::runtime::test]
+async fn transcribe_missing_audio() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.audio.transcribe"]).await;
+    let token = generate_valid_token(&signing_key, "openai.audio.transcribe");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.audio.transcribe",
+            "input": {},
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    let message = format!("{:?}", result.unwrap_err());
+    assert!(
+        message.contains("audio_b64"),
+        "error should mention audio_b64: {message}"
+    );
+}
+
+/// Empty `audio_b64` field.
+#[fcp_async_core::runtime::test]
+async fn transcribe_empty_audio() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.audio.transcribe"]).await;
+    let token = generate_valid_token(&signing_key, "openai.audio.transcribe");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.audio.transcribe",
+            "input": { "audio_b64": "" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+}
+
+/// Invalid base64 audio data.
+#[fcp_async_core::runtime::test]
+async fn transcribe_invalid_base64() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.audio.transcribe"]).await;
+    let token = generate_valid_token(&signing_key, "openai.audio.transcribe");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.audio.transcribe",
+            "input": { "audio_b64": "not-valid-base64!!!" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    let message = format!("{:?}", result.unwrap_err());
+    assert!(
+        message.contains("base64"),
+        "error should mention base64: {message}"
+    );
+}
+
+/// Transcription requires correct capability.
+#[fcp_async_core::runtime::test]
+async fn transcribe_requires_correct_capability() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.chat"]).await;
+    let token = generate_valid_token(&signing_key, "openai.chat");
+
+    let audio_b64 = base64::engine::general_purpose::STANDARD.encode([0xFF, 0xFB]);
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.audio.transcribe",
+            "input": { "audio_b64": audio_b64 },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+}
+
+// ============================================================================
+// Audio TTS Tests
+// ============================================================================
+
+/// Happy path: text-to-speech.
+#[fcp_async_core::runtime::test]
+async fn tts_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("openai.audio.tts.happy_path");
+
+    let mock_server = MockServer::start().await;
+    // TTS returns raw audio bytes (not JSON)
+    let fake_audio_bytes: Vec<u8> = vec![0xFF, 0xFB, 0x90, 0x00, 0x01, 0x02];
+    Mock::given(method("POST"))
+        .and(path("/v1/audio/speech"))
+        .and(header("Authorization", "Bearer test-api-key-xyz"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(fake_audio_bytes.clone()))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.audio.tts"]).await;
+    let token = generate_valid_token(&signing_key, "openai.audio.tts");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.audio.tts",
+            "input": { "input": "Hello, world!" },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    // Verify output structure
+    assert!(result.get("audio_b64").is_some());
+    let audio_b64 = result["audio_b64"].as_str().unwrap();
+    assert!(!audio_b64.is_empty());
+
+    // Verify the base64 decodes to our fake audio
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(audio_b64)
+        .unwrap();
+    assert_eq!(decoded, fake_audio_bytes);
+
+    assert_eq!(result["format"], "mp3");
+    assert_eq!(result["mime_type"], "audio/mpeg");
+    assert_eq!(result["input_chars"], 13); // "Hello, world!".len()
+    assert_eq!(result["provenance"]["source"], "openai.audio.tts");
+    assert!(
+        result["taint"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("ai_generated"))
+    );
+}
+
+/// TTS with all options specified.
+#[fcp_async_core::runtime::test]
+async fn tts_with_options() {
+    let _ctx = AsyncTestContext::for_scenario("openai.audio.tts.options");
+
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/audio/speech"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![0x00, 0x01]))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.audio.tts"]).await;
+    let token = generate_valid_token(&signing_key, "openai.audio.tts");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.audio.tts",
+            "input": {
+                "input": "Test speech",
+                "model": "tts-1-hd",
+                "voice": "nova",
+                "response_format": "opus",
+                "speed": 1.5
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["format"], "opus");
+    assert_eq!(result["mime_type"], "audio/opus");
+}
+
+/// TTS missing input text.
+#[fcp_async_core::runtime::test]
+async fn tts_missing_input() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.audio.tts"]).await;
+    let token = generate_valid_token(&signing_key, "openai.audio.tts");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.audio.tts",
+            "input": {},
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    let message = format!("{:?}", result.unwrap_err());
+    assert!(
+        message.contains("input"),
+        "error should mention input: {message}"
+    );
+}
+
+/// TTS empty input text.
+#[fcp_async_core::runtime::test]
+async fn tts_empty_input() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.audio.tts"]).await;
+    let token = generate_valid_token(&signing_key, "openai.audio.tts");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.audio.tts",
+            "input": { "input": "" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+}
+
+/// TTS input exceeding 4096 chars.
+#[fcp_async_core::runtime::test]
+async fn tts_input_too_long() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.audio.tts"]).await;
+    let token = generate_valid_token(&signing_key, "openai.audio.tts");
+
+    let long_text = "a".repeat(4097);
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.audio.tts",
+            "input": { "input": long_text },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    let message = format!("{:?}", result.unwrap_err());
+    assert!(
+        message.contains("4096"),
+        "error should mention limit: {message}"
+    );
+}
+
+/// TTS unknown voice.
+#[fcp_async_core::runtime::test]
+async fn tts_unknown_voice() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.audio.tts"]).await;
+    let token = generate_valid_token(&signing_key, "openai.audio.tts");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.audio.tts",
+            "input": { "input": "Test", "voice": "nonexistent" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    let message = format!("{:?}", result.unwrap_err());
+    assert!(
+        message.contains("voice"),
+        "error should mention voice: {message}"
+    );
+}
+
+/// TTS invalid speed.
+#[fcp_async_core::runtime::test]
+async fn tts_invalid_speed() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.audio.tts"]).await;
+    let token = generate_valid_token(&signing_key, "openai.audio.tts");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.audio.tts",
+            "input": { "input": "Test", "speed": 5.0 },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    let message = format!("{:?}", result.unwrap_err());
+    assert!(
+        message.contains("speed") || message.contains("Speed"),
+        "error should mention speed: {message}"
+    );
+}
+
+/// TTS requires correct capability.
+#[fcp_async_core::runtime::test]
+async fn tts_requires_correct_capability() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.chat"]).await;
+    let token = generate_valid_token(&signing_key, "openai.chat");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.audio.tts",
+            "input": { "input": "Hello" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+}
+
+// ============================================================================
+// Fine-tuning tests
+// ============================================================================
+
+/// Create fine-tuning job: happy path.
+#[fcp_async_core::runtime::test]
+async fn finetune_create_happy_path() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/fine_tuning/jobs"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "ftjob-abc123",
+            "object": "fine_tuning.job",
+            "model": "gpt-4o-mini-2024-07-18",
+            "status": "validating_files",
+            "training_file": "file-train123",
+            "validation_file": null,
+            "fine_tuned_model": null,
+            "created_at": 1_709_900_000,
+            "finished_at": null,
+            "hyperparameters": { "n_epochs": "auto" },
+            "trained_tokens": null,
+            "error": null
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.finetune.create"]).await;
+    let token = generate_valid_token(&signing_key, "openai.finetune.create");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.finetune.create",
+            "input": {
+                "training_file": "file-train123",
+                "model": "gpt-4o-mini-2024-07-18"
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["id"], "ftjob-abc123");
+    assert_eq!(result["status"], "validating_files");
+    assert_eq!(result["training_file"], "file-train123");
+    assert_eq!(result["provenance"]["source"], "openai.finetune.create");
+}
+
+/// Create fine-tuning job with suffix and hyperparameters.
+#[fcp_async_core::runtime::test]
+async fn finetune_create_with_options() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/fine_tuning/jobs"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "ftjob-def456",
+            "object": "fine_tuning.job",
+            "model": "gpt-3.5-turbo-0125",
+            "status": "validating_files",
+            "training_file": "file-train456",
+            "validation_file": "file-val789",
+            "fine_tuned_model": null,
+            "created_at": 1_709_900_100,
+            "finished_at": null,
+            "hyperparameters": { "n_epochs": 3 },
+            "trained_tokens": null,
+            "error": null
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.finetune.create"]).await;
+    let token = generate_valid_token(&signing_key, "openai.finetune.create");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.finetune.create",
+            "input": {
+                "training_file": "file-train456",
+                "model": "gpt-3.5-turbo-0125",
+                "validation_file": "file-val789",
+                "suffix": "my-custom",
+                "n_epochs": 3
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["id"], "ftjob-def456");
+    assert_eq!(result["model"], "gpt-3.5-turbo-0125");
+}
+
+/// Create fine-tuning job: missing `training_file`.
+#[fcp_async_core::runtime::test]
+async fn finetune_create_missing_training_file() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.finetune.create"]).await;
+    let token = generate_valid_token(&signing_key, "openai.finetune.create");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.finetune.create",
+            "input": {},
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    let message = format!("{:?}", result.unwrap_err());
+    assert!(
+        message.contains("training_file"),
+        "error should mention training_file: {message}"
+    );
+}
+
+/// Create fine-tuning job: empty `training_file`.
+#[fcp_async_core::runtime::test]
+async fn finetune_create_empty_training_file() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.finetune.create"]).await;
+    let token = generate_valid_token(&signing_key, "openai.finetune.create");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.finetune.create",
+            "input": { "training_file": "" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+}
+
+/// Create fine-tuning job: suffix too long.
+#[fcp_async_core::runtime::test]
+async fn finetune_create_suffix_too_long() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.finetune.create"]).await;
+    let token = generate_valid_token(&signing_key, "openai.finetune.create");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.finetune.create",
+            "input": {
+                "training_file": "file-abc",
+                "suffix": "this-suffix-is-way-too-long"
+            },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    let message = format!("{:?}", result.unwrap_err());
+    assert!(
+        message.contains("Suffix") || message.contains("suffix"),
+        "error should mention suffix: {message}"
+    );
+}
+
+/// List fine-tuning jobs: happy path.
+#[fcp_async_core::runtime::test]
+async fn finetune_list_happy_path() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/fine_tuning/jobs"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {
+                    "id": "ftjob-abc123",
+                    "object": "fine_tuning.job",
+                    "model": "gpt-4o-mini-2024-07-18",
+                    "status": "succeeded",
+                    "training_file": "file-train123",
+                    "validation_file": null,
+                    "fine_tuned_model": "ft:gpt-4o-mini-2024-07-18:org::abc123",
+                    "created_at": 1_709_900_000,
+                    "finished_at": 1_709_903_600,
+                    "hyperparameters": { "n_epochs": 3 },
+                    "trained_tokens": 50000,
+                    "error": null
+                }
+            ],
+            "has_more": false
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.finetune.list"]).await;
+    let token = generate_valid_token(&signing_key, "openai.finetune.list");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.finetune.list",
+            "input": {},
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    let data = result["data"].as_array().unwrap();
+    assert_eq!(data.len(), 1);
+    assert_eq!(data[0]["id"], "ftjob-abc123");
+    assert_eq!(data[0]["status"], "succeeded");
+    assert!(!result["has_more"].as_bool().unwrap());
+}
+
+/// Get fine-tuning job: happy path.
+#[fcp_async_core::runtime::test]
+async fn finetune_get_happy_path() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/fine_tuning/jobs/ftjob-abc123"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "ftjob-abc123",
+            "object": "fine_tuning.job",
+            "model": "gpt-4o-mini-2024-07-18",
+            "status": "succeeded",
+            "training_file": "file-train123",
+            "validation_file": null,
+            "fine_tuned_model": "ft:gpt-4o-mini-2024-07-18:org::abc123",
+            "created_at": 1_709_900_000,
+            "finished_at": 1_709_903_600,
+            "hyperparameters": { "n_epochs": 3 },
+            "trained_tokens": 50000,
+            "error": null
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.finetune.get"]).await;
+    let token = generate_valid_token(&signing_key, "openai.finetune.get");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.finetune.get",
+            "input": { "job_id": "ftjob-abc123" },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["id"], "ftjob-abc123");
+    assert_eq!(result["status"], "succeeded");
+    assert_eq!(
+        result["fine_tuned_model"],
+        "ft:gpt-4o-mini-2024-07-18:org::abc123"
+    );
+    assert_eq!(result["trained_tokens"], 50000);
+    assert_eq!(result["provenance"]["source"], "openai.finetune.get");
+}
+
+/// Get fine-tuning job: missing `job_id`.
+#[fcp_async_core::runtime::test]
+async fn finetune_get_missing_job_id() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.finetune.get"]).await;
+    let token = generate_valid_token(&signing_key, "openai.finetune.get");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.finetune.get",
+            "input": {},
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    let message = format!("{:?}", result.unwrap_err());
+    assert!(
+        message.contains("job_id"),
+        "error should mention job_id: {message}"
+    );
+}
+
+/// Get fine-tuning job: empty `job_id`.
+#[fcp_async_core::runtime::test]
+async fn finetune_get_empty_job_id() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.finetune.get"]).await;
+    let token = generate_valid_token(&signing_key, "openai.finetune.get");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.finetune.get",
+            "input": { "job_id": "" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+}
+
+/// Cancel fine-tuning job: happy path.
+#[fcp_async_core::runtime::test]
+async fn finetune_cancel_happy_path() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/fine_tuning/jobs/ftjob-abc123/cancel"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "ftjob-abc123",
+            "object": "fine_tuning.job",
+            "model": "gpt-4o-mini-2024-07-18",
+            "status": "cancelled",
+            "training_file": "file-train123",
+            "validation_file": null,
+            "fine_tuned_model": null,
+            "created_at": 1_709_900_000,
+            "finished_at": 1_709_901_000,
+            "hyperparameters": { "n_epochs": "auto" },
+            "trained_tokens": null,
+            "error": null
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.finetune.cancel"]).await;
+    let token = generate_valid_token(&signing_key, "openai.finetune.cancel");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.finetune.cancel",
+            "input": { "job_id": "ftjob-abc123" },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["id"], "ftjob-abc123");
+    assert_eq!(result["status"], "cancelled");
+    assert_eq!(result["provenance"]["source"], "openai.finetune.cancel");
+}
+
+/// Cancel fine-tuning job: missing `job_id`.
+#[fcp_async_core::runtime::test]
+async fn finetune_cancel_missing_job_id() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.finetune.cancel"]).await;
+    let token = generate_valid_token(&signing_key, "openai.finetune.cancel");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.finetune.cancel",
+            "input": {},
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+}
+
+/// List fine-tuning events: happy path.
+#[fcp_async_core::runtime::test]
+async fn finetune_events_happy_path() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/fine_tuning/jobs/ftjob-abc123/events"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {
+                    "id": "fte-event1",
+                    "object": "fine_tuning.job.event",
+                    "created_at": 1_709_900_100,
+                    "level": "info",
+                    "message": "Validating training file"
+                },
+                {
+                    "id": "fte-event2",
+                    "object": "fine_tuning.job.event",
+                    "created_at": 1_709_900_200,
+                    "level": "info",
+                    "message": "Training started"
+                }
+            ],
+            "has_more": false
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.finetune.events"]).await;
+    let token = generate_valid_token(&signing_key, "openai.finetune.events");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.finetune.events",
+            "input": { "job_id": "ftjob-abc123" },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    let events = result["data"].as_array().unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0]["level"], "info");
+    assert_eq!(events[0]["message"], "Validating training file");
+    assert!(!result["has_more"].as_bool().unwrap());
+    assert_eq!(result["provenance"]["source"], "openai.finetune.events");
+}
+
+/// List fine-tuning events: missing `job_id`.
+#[fcp_async_core::runtime::test]
+async fn finetune_events_missing_job_id() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.finetune.events"]).await;
+    let token = generate_valid_token(&signing_key, "openai.finetune.events");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.finetune.events",
+            "input": {},
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+}
+
+/// Fine-tuning requires correct capability.
+#[fcp_async_core::runtime::test]
+async fn finetune_requires_correct_capability() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.chat"]).await;
+    let token = generate_valid_token(&signing_key, "openai.chat");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.finetune.create",
+            "input": { "training_file": "file-abc123" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+}
+
+// ============================================================================
+// Assistants API tests
+// ============================================================================
+
+/// Happy path: create an assistant.
+#[fcp_async_core::runtime::test]
+async fn assistants_create_happy_path() {
+    let mock = MockApiServer::start().await;
+
+    mock.expect_post(
+        "/v1/assistants",
+        json!({
+            "id": "asst_abc123",
+            "object": "assistant",
+            "created_at": 1_709_900_000,
+            "model": "gpt-4o",
+            "name": "Math Tutor",
+            "instructions": "You are a math tutor.",
+            "tools": [],
+            "metadata": null
+        }),
+    )
+    .await;
+
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["openai.assistants.create"]).await;
+    let token = generate_valid_token(&signing_key, "openai.assistants.create");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.assistants.create",
+            "input": {
+                "model": "gpt-4o",
+                "name": "Math Tutor",
+                "instructions": "You are a math tutor."
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("invoke should succeed");
+
+    assert_eq!(result["id"], "asst_abc123");
+    assert_eq!(result["model"], "gpt-4o");
+    assert_eq!(result["name"], "Math Tutor");
+    assert_eq!(result["provenance"]["source"], "openai.assistants.create");
+}
+
+/// Validation: create assistant missing model.
+#[fcp_async_core::runtime::test]
+async fn assistants_create_missing_model() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["openai.assistants.create"]).await;
+    let token = generate_valid_token(&signing_key, "openai.assistants.create");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.assistants.create",
+            "input": { "name": "No Model" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+}
+
+/// Validation: create assistant with empty model.
+#[fcp_async_core::runtime::test]
+async fn assistants_create_empty_model() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["openai.assistants.create"]).await;
+    let token = generate_valid_token(&signing_key, "openai.assistants.create");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.assistants.create",
+            "input": { "model": "" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+}
+
+/// Happy path: list assistants.
+#[fcp_async_core::runtime::test]
+async fn assistants_list_happy_path() {
+    let mock = MockApiServer::start().await;
+
+    mock.expect_get(
+        "/v1/assistants",
+        json!({
+            "data": [
+                {
+                    "id": "asst_001",
+                    "object": "assistant",
+                    "created_at": 1_709_900_000,
+                    "model": "gpt-4o",
+                    "name": "Helper",
+                    "instructions": null,
+                    "tools": [],
+                    "metadata": null
+                }
+            ],
+            "has_more": false
+        }),
+    )
+    .await;
+
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["openai.assistants.list"]).await;
+    let token = generate_valid_token(&signing_key, "openai.assistants.list");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.assistants.list",
+            "input": {},
+            "capability_token": token
+        }))
+        .await
+        .expect("invoke should succeed");
+
+    assert_eq!(result["data"].as_array().unwrap().len(), 1);
+    assert_eq!(result["data"][0]["id"], "asst_001");
+    assert_eq!(result["has_more"], false);
+    assert_eq!(result["provenance"]["source"], "openai.assistants.list");
+}
+
+/// Happy path: get an assistant by ID.
+#[fcp_async_core::runtime::test]
+async fn assistants_get_happy_path() {
+    let mock = MockApiServer::start().await;
+
+    mock.expect_get(
+        "/v1/assistants/asst_abc123",
+        json!({
+            "id": "asst_abc123",
+            "object": "assistant",
+            "created_at": 1_709_900_000,
+            "model": "gpt-4o",
+            "name": "Tutor",
+            "instructions": "Help students.",
+            "tools": [],
+            "metadata": null
+        }),
+    )
+    .await;
+
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["openai.assistants.get"]).await;
+    let token = generate_valid_token(&signing_key, "openai.assistants.get");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.assistants.get",
+            "input": { "assistant_id": "asst_abc123" },
+            "capability_token": token
+        }))
+        .await
+        .expect("invoke should succeed");
+
+    assert_eq!(result["id"], "asst_abc123");
+    assert_eq!(result["name"], "Tutor");
+    assert_eq!(result["provenance"]["source"], "openai.assistants.get");
+}
+
+/// Validation: get assistant missing ID.
+#[fcp_async_core::runtime::test]
+async fn assistants_get_missing_id() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["openai.assistants.get"]).await;
+    let token = generate_valid_token(&signing_key, "openai.assistants.get");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.assistants.get",
+            "input": {},
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+}
+
+/// Validation: get assistant empty ID.
+#[fcp_async_core::runtime::test]
+async fn assistants_get_empty_id() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["openai.assistants.get"]).await;
+    let token = generate_valid_token(&signing_key, "openai.assistants.get");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.assistants.get",
+            "input": { "assistant_id": "" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+}
+
+/// Happy path: delete an assistant.
+#[fcp_async_core::runtime::test]
+async fn assistants_delete_happy_path() {
+    let mock = MockApiServer::start().await;
+
+    mock.expect_json(
+        "/v1/assistants/asst_abc123",
+        json!({
+            "id": "asst_abc123",
+            "object": "assistant.deleted",
+            "deleted": true
+        }),
+    )
+    .await;
+
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["openai.assistants.delete"]).await;
+    let token = generate_valid_token(&signing_key, "openai.assistants.delete");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.assistants.delete",
+            "input": { "assistant_id": "asst_abc123" },
+            "capability_token": token
+        }))
+        .await
+        .expect("invoke should succeed");
+
+    assert_eq!(result["id"], "asst_abc123");
+    assert_eq!(result["deleted"], true);
+    assert_eq!(result["provenance"]["source"], "openai.assistants.delete");
+}
+
+/// Validation: delete assistant missing ID.
+#[fcp_async_core::runtime::test]
+async fn assistants_delete_missing_id() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["openai.assistants.delete"]).await;
+    let token = generate_valid_token(&signing_key, "openai.assistants.delete");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.assistants.delete",
+            "input": {},
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+}
+
+/// Capability: assistants require correct capability token.
+#[fcp_async_core::runtime::test]
+async fn assistants_requires_correct_capability() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.chat"]).await;
+    let token = generate_valid_token(&signing_key, "openai.chat");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.assistants.create",
+            "input": { "model": "gpt-4o" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+}
+
+// ============================================================================
+// Threads API tests
+// ============================================================================
+
+/// Happy path: create a thread.
+#[fcp_async_core::runtime::test]
+async fn threads_create_happy_path() {
+    let mock = MockApiServer::start().await;
+
+    mock.expect_post(
+        "/v1/threads",
+        json!({
+            "id": "thread_abc123",
+            "object": "thread",
+            "created_at": 1_709_900_000,
+            "metadata": null
+        }),
+    )
+    .await;
+
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["openai.threads.create"]).await;
+    let token = generate_valid_token(&signing_key, "openai.threads.create");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.threads.create",
+            "input": {},
+            "capability_token": token
+        }))
+        .await
+        .expect("invoke should succeed");
+
+    assert_eq!(result["id"], "thread_abc123");
+    assert_eq!(result["object"], "thread");
+    assert_eq!(result["provenance"]["source"], "openai.threads.create");
+}
+
+/// Happy path: get a thread by ID.
+#[fcp_async_core::runtime::test]
+async fn threads_get_happy_path() {
+    let mock = MockApiServer::start().await;
+
+    mock.expect_get(
+        "/v1/threads/thread_abc123",
+        json!({
+            "id": "thread_abc123",
+            "object": "thread",
+            "created_at": 1_709_900_000,
+            "metadata": null
+        }),
+    )
+    .await;
+
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["openai.threads.get"]).await;
+    let token = generate_valid_token(&signing_key, "openai.threads.get");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.threads.get",
+            "input": { "thread_id": "thread_abc123" },
+            "capability_token": token
+        }))
+        .await
+        .expect("invoke should succeed");
+
+    assert_eq!(result["id"], "thread_abc123");
+    assert_eq!(result["provenance"]["source"], "openai.threads.get");
+}
+
+/// Validation: get thread missing ID.
+#[fcp_async_core::runtime::test]
+async fn threads_get_missing_id() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["openai.threads.get"]).await;
+    let token = generate_valid_token(&signing_key, "openai.threads.get");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.threads.get",
+            "input": {},
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+}
+
+/// Validation: get thread empty ID.
+#[fcp_async_core::runtime::test]
+async fn threads_get_empty_id() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["openai.threads.get"]).await;
+    let token = generate_valid_token(&signing_key, "openai.threads.get");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.threads.get",
+            "input": { "thread_id": "" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+}
+
+// ============================================================================
+// Thread Messages API tests
+// ============================================================================
+
+/// Happy path: create a thread message.
+#[fcp_async_core::runtime::test]
+async fn threads_messages_create_happy_path() {
+    let mock = MockApiServer::start().await;
+
+    mock.expect_post(
+        "/v1/threads/thread_abc123/messages",
+        json!({
+            "id": "msg_abc123",
+            "object": "thread.message",
+            "created_at": 1_709_900_000,
+            "thread_id": "thread_abc123",
+            "role": "user",
+            "content": [{"type": "text", "text": {"value": "Hello!", "annotations": []}}],
+            "assistant_id": null,
+            "run_id": null,
+            "metadata": null
+        }),
+    )
+    .await;
+
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["openai.threads.messages.create"]).await;
+    let token = generate_valid_token(&signing_key, "openai.threads.messages.create");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.threads.messages.create",
+            "input": {
+                "thread_id": "thread_abc123",
+                "role": "user",
+                "content": "Hello!"
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("invoke should succeed");
+
+    assert_eq!(result["id"], "msg_abc123");
+    assert_eq!(result["thread_id"], "thread_abc123");
+    assert_eq!(result["role"], "user");
+    assert_eq!(
+        result["provenance"]["source"],
+        "openai.threads.messages.create"
+    );
+}
+
+/// Validation: create thread message missing content.
+#[fcp_async_core::runtime::test]
+async fn threads_messages_create_missing_content() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["openai.threads.messages.create"]).await;
+    let token = generate_valid_token(&signing_key, "openai.threads.messages.create");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.threads.messages.create",
+            "input": {
+                "thread_id": "thread_abc123",
+                "role": "user"
+            },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+}
+
+/// Validation: create thread message empty content.
+#[fcp_async_core::runtime::test]
+async fn threads_messages_create_empty_content() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["openai.threads.messages.create"]).await;
+    let token = generate_valid_token(&signing_key, "openai.threads.messages.create");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.threads.messages.create",
+            "input": {
+                "thread_id": "thread_abc123",
+                "role": "user",
+                "content": ""
+            },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+}
+
+/// Validation: create thread message missing role.
+#[fcp_async_core::runtime::test]
+async fn threads_messages_create_missing_role() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["openai.threads.messages.create"]).await;
+    let token = generate_valid_token(&signing_key, "openai.threads.messages.create");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.threads.messages.create",
+            "input": {
+                "thread_id": "thread_abc123",
+                "content": "Hello!"
+            },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+}
+
+/// Happy path: list thread messages.
+#[fcp_async_core::runtime::test]
+async fn threads_messages_list_happy_path() {
+    let mock = MockApiServer::start().await;
+
+    mock.expect_get(
+        "/v1/threads/thread_abc123/messages",
+        json!({
+            "data": [
+                {
+                    "id": "msg_001",
+                    "object": "thread.message",
+                    "created_at": 1_709_900_000,
+                    "thread_id": "thread_abc123",
+                    "role": "user",
+                    "content": [{"type": "text", "text": {"value": "Hi", "annotations": []}}],
+                    "assistant_id": null,
+                    "run_id": null,
+                    "metadata": null
+                }
+            ],
+            "has_more": false
+        }),
+    )
+    .await;
+
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["openai.threads.messages.list"]).await;
+    let token = generate_valid_token(&signing_key, "openai.threads.messages.list");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.threads.messages.list",
+            "input": { "thread_id": "thread_abc123" },
+            "capability_token": token
+        }))
+        .await
+        .expect("invoke should succeed");
+
+    assert_eq!(result["data"].as_array().unwrap().len(), 1);
+    assert_eq!(result["data"][0]["id"], "msg_001");
+    assert_eq!(result["has_more"], false);
+    assert_eq!(
+        result["provenance"]["source"],
+        "openai.threads.messages.list"
+    );
+}
+
+/// Validation: list thread messages missing `thread_id`.
+#[fcp_async_core::runtime::test]
+async fn threads_messages_list_missing_thread_id() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["openai.threads.messages.list"]).await;
+    let token = generate_valid_token(&signing_key, "openai.threads.messages.list");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.threads.messages.list",
+            "input": {},
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+}
+
+// ============================================================================
+// Runs API tests
+// ============================================================================
+
+/// Happy path: create a run.
+#[fcp_async_core::runtime::test]
+async fn runs_create_happy_path() {
+    let mock = MockApiServer::start().await;
+
+    mock.expect_post(
+        "/v1/threads/thread_abc123/runs",
+        json!({
+            "id": "run_abc123",
+            "object": "thread.run",
+            "created_at": 1_709_900_000,
+            "thread_id": "thread_abc123",
+            "assistant_id": "asst_abc123",
+            "status": "queued",
+            "model": "gpt-4o",
+            "instructions": null,
+            "tools": [],
+            "started_at": null,
+            "completed_at": null,
+            "failed_at": null,
+            "cancelled_at": null,
+            "last_error": null,
+            "usage": null,
+            "metadata": null
+        }),
+    )
+    .await;
+
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["openai.threads.runs.create"]).await;
+    let token = generate_valid_token(&signing_key, "openai.threads.runs.create");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.threads.runs.create",
+            "input": {
+                "thread_id": "thread_abc123",
+                "assistant_id": "asst_abc123"
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("invoke should succeed");
+
+    assert_eq!(result["id"], "run_abc123");
+    assert_eq!(result["thread_id"], "thread_abc123");
+    assert_eq!(result["assistant_id"], "asst_abc123");
+    assert_eq!(result["status"], "queued");
+    assert_eq!(result["provenance"]["source"], "openai.threads.runs.create");
+}
+
+/// Validation: create run missing `thread_id`.
+#[fcp_async_core::runtime::test]
+async fn runs_create_missing_thread_id() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["openai.threads.runs.create"]).await;
+    let token = generate_valid_token(&signing_key, "openai.threads.runs.create");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.threads.runs.create",
+            "input": { "assistant_id": "asst_abc123" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+}
+
+/// Validation: create run missing `assistant_id`.
+#[fcp_async_core::runtime::test]
+async fn runs_create_missing_assistant_id() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["openai.threads.runs.create"]).await;
+    let token = generate_valid_token(&signing_key, "openai.threads.runs.create");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.threads.runs.create",
+            "input": { "thread_id": "thread_abc123" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+}
+
+/// Happy path: get a run by ID.
+#[fcp_async_core::runtime::test]
+async fn runs_get_happy_path() {
+    let mock = MockApiServer::start().await;
+
+    mock.expect_get(
+        "/v1/threads/thread_abc123/runs/run_abc123",
+        json!({
+            "id": "run_abc123",
+            "object": "thread.run",
+            "created_at": 1_709_900_000,
+            "thread_id": "thread_abc123",
+            "assistant_id": "asst_abc123",
+            "status": "completed",
+            "model": "gpt-4o",
+            "instructions": null,
+            "tools": [],
+            "started_at": 1_709_900_100,
+            "completed_at": 1_709_900_200,
+            "failed_at": null,
+            "cancelled_at": null,
+            "last_error": null,
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 50,
+                "total_tokens": 150
+            },
+            "metadata": null
+        }),
+    )
+    .await;
+
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["openai.threads.runs.get"]).await;
+    let token = generate_valid_token(&signing_key, "openai.threads.runs.get");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.threads.runs.get",
+            "input": {
+                "thread_id": "thread_abc123",
+                "run_id": "run_abc123"
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("invoke should succeed");
+
+    assert_eq!(result["id"], "run_abc123");
+    assert_eq!(result["status"], "completed");
+    assert_eq!(result["usage"]["total_tokens"], 150);
+    assert_eq!(result["provenance"]["source"], "openai.threads.runs.get");
+}
+
+/// Validation: get run missing `run_id`.
+#[fcp_async_core::runtime::test]
+async fn runs_get_missing_run_id() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["openai.threads.runs.get"]).await;
+    let token = generate_valid_token(&signing_key, "openai.threads.runs.get");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.threads.runs.get",
+            "input": { "thread_id": "thread_abc123" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+}
+
+/// Happy path: cancel a run.
+#[fcp_async_core::runtime::test]
+async fn runs_cancel_happy_path() {
+    let mock = MockApiServer::start().await;
+
+    mock.expect_post(
+        "/v1/threads/thread_abc123/runs/run_abc123/cancel",
+        json!({
+            "id": "run_abc123",
+            "object": "thread.run",
+            "created_at": 1_709_900_000,
+            "thread_id": "thread_abc123",
+            "assistant_id": "asst_abc123",
+            "status": "cancelling",
+            "model": "gpt-4o",
+            "instructions": null,
+            "tools": [],
+            "started_at": 1_709_900_100,
+            "completed_at": null,
+            "failed_at": null,
+            "cancelled_at": null,
+            "last_error": null,
+            "usage": null,
+            "metadata": null
+        }),
+    )
+    .await;
+
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["openai.threads.runs.cancel"]).await;
+    let token = generate_valid_token(&signing_key, "openai.threads.runs.cancel");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.threads.runs.cancel",
+            "input": {
+                "thread_id": "thread_abc123",
+                "run_id": "run_abc123"
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("invoke should succeed");
+
+    assert_eq!(result["id"], "run_abc123");
+    assert_eq!(result["status"], "cancelling");
+    assert_eq!(
+        result["provenance"]["source"],
+        "openai.threads.runs.cancel"
+    );
+}
+
+/// Validation: cancel run missing `thread_id`.
+#[fcp_async_core::runtime::test]
+async fn runs_cancel_missing_thread_id() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["openai.threads.runs.cancel"]).await;
+    let token = generate_valid_token(&signing_key, "openai.threads.runs.cancel");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.threads.runs.cancel",
+            "input": { "run_id": "run_abc123" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+}
+
+/// Validation: cancel run missing `run_id`.
+#[fcp_async_core::runtime::test]
+async fn runs_cancel_missing_run_id() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["openai.threads.runs.cancel"]).await;
+    let token = generate_valid_token(&signing_key, "openai.threads.runs.cancel");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.threads.runs.cancel",
+            "input": { "thread_id": "thread_abc123" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
 }

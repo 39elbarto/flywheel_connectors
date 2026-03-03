@@ -173,3 +173,234 @@ pub struct GraphErrorDetail {
     pub code: Option<String>,
     pub message: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- Message serde roundtrip ----
+
+    #[test]
+    fn message_serde_roundtrip() {
+        let msg = Message {
+            id: Some("msg-1".into()),
+            subject: Some("Test subject".into()),
+            body_preview: Some("Preview text".into()),
+            body: Some(ItemBody {
+                content_type: Some("text".into()),
+                content: Some("Hello world".into()),
+            }),
+            from: Some(Recipient {
+                email_address: Some(EmailAddress {
+                    name: Some("Alice".into()),
+                    address: Some("alice@example.com".into()),
+                }),
+            }),
+            to_recipients: Some(vec![Recipient {
+                email_address: Some(EmailAddress {
+                    name: Some("Bob".into()),
+                    address: Some("bob@example.com".into()),
+                }),
+            }]),
+            received_date_time: Some("2026-03-01T10:00:00Z".into()),
+            is_read: Some(false),
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["id"], "msg-1");
+        assert_eq!(json["subject"], "Test subject");
+        assert_eq!(json["bodyPreview"], "Preview text");
+        assert_eq!(json["isRead"], false);
+
+        let back: Message = serde_json::from_value(json).unwrap();
+        assert_eq!(back.id.as_deref(), Some("msg-1"));
+        assert_eq!(back.is_read, Some(false));
+    }
+
+    #[test]
+    fn message_with_all_nulls_deserializes() {
+        let json = serde_json::json!({});
+        let msg: Message = serde_json::from_value(json).unwrap();
+        assert!(msg.id.is_none());
+        assert!(msg.subject.is_none());
+        assert!(msg.body.is_none());
+        assert!(msg.from.is_none());
+        assert!(msg.to_recipients.is_none());
+        assert!(msg.is_read.is_none());
+    }
+
+    // ---- DriveItem serde ----
+
+    #[test]
+    fn drive_item_folder_vs_file() {
+        let folder = DriveItem {
+            id: Some("folder-1".into()),
+            name: Some("Documents".into()),
+            size: Some(0),
+            web_url: Some("https://example.com/docs".into()),
+            folder: Some(FolderFacet {
+                child_count: Some(5),
+            }),
+            file: None,
+            created_date_time: None,
+            last_modified_date_time: None,
+        };
+        let json = serde_json::to_value(&folder).unwrap();
+        assert!(json.get("folder").is_some());
+        assert!(json.get("file").is_none() || json["file"].is_null());
+
+        let file = DriveItem {
+            id: Some("file-1".into()),
+            name: Some("report.pdf".into()),
+            size: Some(12345),
+            web_url: None,
+            folder: None,
+            file: Some(FileFacet {
+                mime_type: Some("application/pdf".into()),
+            }),
+            created_date_time: Some("2026-01-01T00:00:00Z".into()),
+            last_modified_date_time: Some("2026-03-01T00:00:00Z".into()),
+        };
+        let json = serde_json::to_value(&file).unwrap();
+        assert_eq!(json["name"], "report.pdf");
+        assert_eq!(json["size"], 12345);
+    }
+
+    // ---- Event serde ----
+
+    #[test]
+    fn event_with_attendees_roundtrip() {
+        let event = Event {
+            id: Some("evt-1".into()),
+            subject: Some("Team Meeting".into()),
+            body: None,
+            start: Some(DateTimeTimeZone {
+                date_time: Some("2026-03-15T10:00:00".into()),
+                time_zone: Some("UTC".into()),
+            }),
+            end: Some(DateTimeTimeZone {
+                date_time: Some("2026-03-15T11:00:00".into()),
+                time_zone: Some("UTC".into()),
+            }),
+            location: Some(Location {
+                display_name: Some("Room 101".into()),
+            }),
+            attendees: Some(vec![Attendee {
+                email_address: Some(EmailAddress {
+                    name: Some("Charlie".into()),
+                    address: Some("charlie@example.com".into()),
+                }),
+                attendee_type: Some("required".into()),
+            }]),
+            organizer: None,
+            is_all_day: Some(false),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["subject"], "Team Meeting");
+        assert_eq!(json["isAllDay"], false);
+        assert_eq!(json["location"]["displayName"], "Room 101");
+        let attendees = json["attendees"].as_array().unwrap();
+        assert_eq!(attendees.len(), 1);
+    }
+
+    // ---- TodoTask serde ----
+
+    #[test]
+    fn todo_task_roundtrip() {
+        let task = TodoTask {
+            id: Some("task-1".into()),
+            title: Some("Buy groceries".into()),
+            status: Some("notStarted".into()),
+            body: None,
+            due_date_time: Some(DateTimeTimeZone {
+                date_time: Some("2026-03-20T00:00:00".into()),
+                time_zone: Some("UTC".into()),
+            }),
+            created_date_time: Some("2026-03-01T00:00:00Z".into()),
+            completed_date_time: None,
+        };
+        let json = serde_json::to_value(&task).unwrap();
+        assert_eq!(json["title"], "Buy groceries");
+        assert_eq!(json["status"], "notStarted");
+        let back: TodoTask = serde_json::from_value(json).unwrap();
+        assert_eq!(back.title.as_deref(), Some("Buy groceries"));
+    }
+
+    // ---- TodoTaskList serde ----
+
+    #[test]
+    fn todo_task_list_serde() {
+        let list = TodoTaskList {
+            id: Some("list-1".into()),
+            display_name: Some("Work Tasks".into()),
+            is_owner: Some(true),
+        };
+        let json = serde_json::to_value(&list).unwrap();
+        assert_eq!(json["displayName"], "Work Tasks");
+        assert_eq!(json["isOwner"], true);
+    }
+
+    // ---- Subscription serde ----
+
+    #[test]
+    fn subscription_roundtrip() {
+        let sub = Subscription {
+            id: Some("sub-1".into()),
+            resource: Some("/me/messages".into()),
+            change_type: Some("created".into()),
+            notification_url: Some("https://hook.example.com/notify".into()),
+            expiration_date_time: Some("2026-04-01T00:00:00Z".into()),
+        };
+        let json = serde_json::to_value(&sub).unwrap();
+        assert_eq!(json["changeType"], "created");
+        assert_eq!(json["notificationUrl"], "https://hook.example.com/notify");
+    }
+
+    // ---- GraphListResponse ----
+
+    #[test]
+    fn graph_list_response_with_pagination() {
+        let json = serde_json::json!({
+            "value": [{"id": "1"}, {"id": "2"}],
+            "@odata.nextLink": "https://graph.microsoft.com/v1.0/users?$skip=2"
+        });
+        let resp: GraphListResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.value.len(), 2);
+        assert!(resp.next_link.is_some());
+        assert!(resp.delta_link.is_none());
+    }
+
+    #[test]
+    fn graph_list_response_with_delta_link() {
+        let json = serde_json::json!({
+            "value": [],
+            "@odata.deltaLink": "https://graph.microsoft.com/v1.0/me/messages/delta?$deltatoken=abc"
+        });
+        let resp: GraphListResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.value.len(), 0);
+        assert!(resp.delta_link.is_some());
+        assert!(resp.delta_link.unwrap().contains("deltatoken"));
+    }
+
+    // ---- GraphErrorResponse ----
+
+    #[test]
+    fn graph_error_response_deserializes() {
+        let json = serde_json::json!({
+            "error": {
+                "code": "InvalidAuthenticationToken",
+                "message": "Access token has expired."
+            }
+        });
+        let err: GraphErrorResponse = serde_json::from_value(json).unwrap();
+        let detail = err.error.unwrap();
+        assert_eq!(detail.code.as_deref(), Some("InvalidAuthenticationToken"));
+        assert!(detail.message.unwrap().contains("expired"));
+    }
+
+    #[test]
+    fn graph_error_response_null_error() {
+        let json = serde_json::json!({ "error": null });
+        let err: GraphErrorResponse = serde_json::from_value(json).unwrap();
+        assert!(err.error.is_none());
+    }
+}

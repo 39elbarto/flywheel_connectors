@@ -1,6 +1,13 @@
 //! FCP Microsoft 365 Connector implementation.
 
-use std::{collections::BTreeMap, fmt::Write as _, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    fmt::Write as _,
+    fs, io,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use base64::{
     Engine,
@@ -14,7 +21,7 @@ use fcp_core::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tracing::{info, instrument};
+use tracing::{info, instrument, warn};
 
 use crate::{
     client::{DEFAULT_API_URL, M365Auth, M365Client},
@@ -23,6 +30,9 @@ use crate::{
 
 const DEFAULT_AUTH_URL: &str = "https://login.microsoftonline.com";
 const DEFAULT_CLIENT_CREDENTIAL_SCOPE: &str = "https://graph.microsoft.com/.default";
+const M365_SYNC_STATE_FILE: &str = "m365_sync_state.json";
+const M365_SYNC_LEASE_FILE: &str = "m365_sync_lease.json";
+const M365_SYNC_LEASE_TTL_SECONDS: u64 = 120;
 
 #[derive(Debug, Clone)]
 struct M365Config {
@@ -177,6 +187,162 @@ struct OAuthTokenResponse {
     access_token: String,
 }
 
+fn write_json_file_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp_path = path.with_extension("tmp");
+    let payload = serde_json::to_vec_pretty(value)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    fs::write(&tmp_path, payload)?;
+    fs::rename(tmp_path, path)?;
+    Ok(())
+}
+
+fn read_json_file_if_exists<T>(path: &Path) -> io::Result<Option<T>>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    match fs::read(path) {
+        Ok(bytes) => {
+            let parsed = serde_json::from_slice::<T>(&bytes)
+                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+            Ok(Some(parsed))
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+fn current_unix_timestamp_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct M365SyncState {
+    #[serde(default)]
+    delta_tokens: BTreeMap<String, String>,
+    #[serde(default)]
+    subscriptions: BTreeMap<String, M365SubscriptionState>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct M365SubscriptionState {
+    resource: Option<String>,
+    change_type: Option<String>,
+    notification_url: Option<String>,
+    expiration_datetime: Option<String>,
+}
+
+impl M365SubscriptionState {
+    fn from_graph_payload(payload: &serde_json::Value) -> Self {
+        Self {
+            resource: payload
+                .get("resource")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            change_type: payload
+                .get("changeType")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            notification_url: payload
+                .get("notificationUrl")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            expiration_datetime: payload
+                .get("expirationDateTime")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct M365SyncLeaseRecord {
+    holder_instance_id: String,
+    lease_seq: u64,
+    expires_at: u64,
+}
+
+#[derive(Debug, Clone)]
+struct M365SyncLease {
+    path: PathBuf,
+    holder_instance_id: String,
+    lease_seq: u64,
+}
+
+impl M365SyncLease {
+    fn acquire(path: PathBuf, holder_instance_id: String, ttl_seconds: u64) -> FcpResult<Self> {
+        let now = current_unix_timestamp_secs();
+        let previous = read_json_file_if_exists::<M365SyncLeaseRecord>(&path).map_err(|err| {
+            FcpError::Internal {
+                message: format!("Failed to read m365 sync lease file '{}': {err}", path.display()),
+            }
+        })?;
+
+        if let Some(record) = previous.as_ref()
+            && record.expires_at > now
+            && record.holder_instance_id != holder_instance_id
+        {
+            return Err(FcpError::ResourceExhausted {
+                resource: format!(
+                    "m365 sync lease held by '{}' (lease_seq={}) until {}",
+                    record.holder_instance_id, record.lease_seq, record.expires_at
+                ),
+            });
+        }
+
+        let lease_seq = previous.map_or(1, |record| record.lease_seq.saturating_add(1));
+        let record = M365SyncLeaseRecord {
+            holder_instance_id: holder_instance_id.clone(),
+            lease_seq,
+            expires_at: now.saturating_add(ttl_seconds),
+        };
+        write_json_file_atomic(&path, &record).map_err(|err| FcpError::Internal {
+            message: format!(
+                "Failed to persist m365 sync lease file '{}': {err}",
+                path.display()
+            ),
+        })?;
+
+        Ok(Self {
+            path,
+            holder_instance_id,
+            lease_seq,
+        })
+    }
+
+    fn release(&self) -> FcpResult<()> {
+        let existing =
+            read_json_file_if_exists::<M365SyncLeaseRecord>(&self.path).map_err(|err| {
+                FcpError::Internal {
+                    message: format!(
+                        "Failed to read m365 sync lease file '{}': {err}",
+                        self.path.display()
+                    ),
+                }
+            })?;
+
+        if let Some(record) = existing
+            && record.holder_instance_id == self.holder_instance_id
+            && record.lease_seq == self.lease_seq
+            && let Err(err) = fs::remove_file(&self.path)
+            && err.kind() != io::ErrorKind::NotFound
+        {
+            return Err(FcpError::Internal {
+                message: format!(
+                    "Failed to release m365 sync lease file '{}': {err}",
+                    self.path.display()
+                ),
+            });
+        }
+
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct ThreadSummary {
     thread_id: String,
@@ -194,6 +360,7 @@ pub struct M365Connector {
     client: Option<M365Client>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
+    zone_dir: Option<PathBuf>,
 }
 
 impl M365Connector {
@@ -208,6 +375,7 @@ impl M365Connector {
             client: None,
             verifier: None,
             session_id: None,
+            zone_dir: None,
         }
     }
 
@@ -334,6 +502,13 @@ impl M365Connector {
                 message: format!("Invalid handshake request: {e}"),
             })?;
 
+        self.zone_dir = req.zone_dir.clone().map(PathBuf::from);
+        if let Some(zone_dir) = self.zone_dir.as_ref() {
+            fs::create_dir_all(zone_dir).map_err(|err| FcpError::Internal {
+                message: format!("Failed to prepare Microsoft 365 zone_dir '{}': {err}", zone_dir.display()),
+            })?;
+        }
+
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
             req.zone.clone(),
@@ -371,6 +546,47 @@ impl M365Connector {
 
         serde_json::to_value(response).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize response: {e}"),
+        })
+    }
+
+    fn sync_state_path(&self) -> FcpResult<PathBuf> {
+        let zone_dir = self.zone_dir.as_ref().ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "Handshake zone_dir is required for m365 sync state persistence".into(),
+        })?;
+        Ok(zone_dir.join(M365_SYNC_STATE_FILE))
+    }
+
+    fn sync_lease_path(&self) -> FcpResult<PathBuf> {
+        let zone_dir = self.zone_dir.as_ref().ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "Handshake zone_dir is required for m365 singleton-writer lease".into(),
+        })?;
+        Ok(zone_dir.join(M365_SYNC_LEASE_FILE))
+    }
+
+    fn sync_lease_holder_id(&self) -> FcpResult<String> {
+        let session_id = self.session_id.as_ref().ok_or(FcpError::NotConfigured)?;
+        Ok(session_id.to_string())
+    }
+
+    fn acquire_sync_lease(&self) -> FcpResult<M365SyncLease> {
+        let lease_path = self.sync_lease_path()?;
+        let holder = self.sync_lease_holder_id()?;
+        M365SyncLease::acquire(lease_path, holder, M365_SYNC_LEASE_TTL_SECONDS)
+    }
+
+    fn load_sync_state(path: &Path) -> FcpResult<M365SyncState> {
+        read_json_file_if_exists::<M365SyncState>(path)
+            .map(|state| state.unwrap_or_default())
+            .map_err(|err| FcpError::Internal {
+                message: format!("Failed to read m365 sync state file '{}': {err}", path.display()),
+            })
+    }
+
+    fn persist_sync_state(path: &Path, state: &M365SyncState) -> FcpResult<()> {
+        write_json_file_atomic(path, state).map_err(|err| FcpError::Internal {
+            message: format!("Failed to write m365 sync state file '{}': {err}", path.display()),
         })
     }
 
@@ -1173,21 +1389,40 @@ impl M365Connector {
         input: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let state_path = self.sync_state_path()?;
+        let sync_lease = self.acquire_sync_lease()?;
         let change_type = require_str(&input, "change_type")?;
         let notification_url = require_str(&input, "notification_url")?;
         let resource = require_str(&input, "resource")?;
         let expiration = require_str(&input, "expiration_datetime")?;
-        let sub = json!({
-            "changeType": change_type,
-            "notificationUrl": notification_url,
-            "resource": resource,
-            "expirationDateTime": expiration,
-        });
-        let created = client
-            .create_subscription(&sub)
-            .await
-            .map_err(|e: M365Error| e.to_fcp_error())?;
-        Ok(json!({ "subscription": created }))
+        let result = async {
+            let sub = json!({
+                "changeType": change_type,
+                "notificationUrl": notification_url,
+                "resource": resource,
+                "expirationDateTime": expiration,
+            });
+            let created = client
+                .create_subscription(&sub)
+                .await
+                .map_err(|e: M365Error| e.to_fcp_error())?;
+
+            if let Some(subscription_id) = created.get("id").and_then(|value| value.as_str()) {
+                let mut state = Self::load_sync_state(&state_path)?;
+                state.subscriptions.insert(
+                    subscription_id.to_string(),
+                    M365SubscriptionState::from_graph_payload(&created),
+                );
+                Self::persist_sync_state(&state_path, &state)?;
+            }
+
+            Ok(json!({ "subscription": created }))
+        }
+        .await;
+        if let Err(err) = sync_lease.release() {
+            warn!(error = %err, "Failed to release m365 sync lease after create_subscription");
+        }
+        result
     }
 
     async fn invoke_renew_subscription(
@@ -1195,13 +1430,34 @@ impl M365Connector {
         input: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let state_path = self.sync_state_path()?;
+        let sync_lease = self.acquire_sync_lease()?;
         let subscription_id = require_str(&input, "subscription_id")?;
         let expiration = require_str(&input, "expiration_datetime")?;
-        let renewed = client
-            .renew_subscription(subscription_id, expiration)
-            .await
-            .map_err(|e: M365Error| e.to_fcp_error())?;
-        Ok(json!({ "subscription": renewed }))
+        let result = async {
+            let renewed = client
+                .renew_subscription(subscription_id, expiration)
+                .await
+                .map_err(|e: M365Error| e.to_fcp_error())?;
+
+            let mut state = Self::load_sync_state(&state_path)?;
+            let state_key = renewed
+                .get("id")
+                .and_then(|value| value.as_str())
+                .unwrap_or(subscription_id);
+            state.subscriptions.insert(
+                state_key.to_string(),
+                M365SubscriptionState::from_graph_payload(&renewed),
+            );
+            Self::persist_sync_state(&state_path, &state)?;
+
+            Ok(json!({ "subscription": renewed }))
+        }
+        .await;
+        if let Err(err) = sync_lease.release() {
+            warn!(error = %err, "Failed to release m365 sync lease after renew_subscription");
+        }
+        result
     }
 
     async fn invoke_delete_subscription(
@@ -1209,40 +1465,74 @@ impl M365Connector {
         input: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let state_path = self.sync_state_path()?;
+        let sync_lease = self.acquire_sync_lease()?;
         let subscription_id = require_str(&input, "subscription_id")?;
-        client
-            .delete_subscription(subscription_id)
-            .await
-            .map_err(|e: M365Error| e.to_fcp_error())?;
-        Ok(json!({ "status": "deleted" }))
+        let result = async {
+            client
+                .delete_subscription(subscription_id)
+                .await
+                .map_err(|e: M365Error| e.to_fcp_error())?;
+
+            let mut state = Self::load_sync_state(&state_path)?;
+            state.subscriptions.remove(subscription_id);
+            Self::persist_sync_state(&state_path, &state)?;
+
+            Ok(json!({ "status": "deleted" }))
+        }
+        .await;
+        if let Err(err) = sync_lease.release() {
+            warn!(error = %err, "Failed to release m365 sync lease after delete_subscription");
+        }
+        result
     }
 
     // ── Delta operation implementations ──────────────────────────
 
     async fn invoke_delta_sync(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let state_path = self.sync_state_path()?;
+        let sync_lease = self.acquire_sync_lease()?;
         let resource = require_str(&input, "resource")?;
-        let delta_token = input.get("delta_token").and_then(|v| v.as_str());
-        let result = client
-            .delta_sync(resource, delta_token)
-            .await
-            .map_err(|e: M365Error| e.to_fcp_error())?;
+        let result = async {
+            let mut state = Self::load_sync_state(&state_path)?;
+            let effective_delta_token = input
+                .get("delta_token")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+                .or_else(|| state.delta_tokens.get(resource).cloned());
 
-        // Extract delta token from deltaLink if present
-        let token = result
-            .delta_link
-            .as_deref()
-            .and_then(|link| {
-                link.split("$deltatoken=")
-                    .nth(1)
-                    .map(std::string::ToString::to_string)
-            })
-            .unwrap_or_default();
+            let result = client
+                .delta_sync(resource, effective_delta_token.as_deref())
+                .await
+                .map_err(|e: M365Error| e.to_fcp_error())?;
 
-        Ok(json!({
-            "changes": result.value,
-            "delta_token": token,
-        }))
+            // Extract delta token from deltaLink if present
+            let token = result
+                .delta_link
+                .as_deref()
+                .and_then(|link| {
+                    link.split("$deltatoken=")
+                        .nth(1)
+                        .map(std::string::ToString::to_string)
+                })
+                .unwrap_or_default();
+
+            if !token.is_empty() {
+                state.delta_tokens.insert(resource.to_string(), token.clone());
+                Self::persist_sync_state(&state_path, &state)?;
+            }
+
+            Ok(json!({
+                "changes": result.value,
+                "delta_token": token,
+            }))
+        }
+        .await;
+        if let Err(err) = sync_lease.release() {
+            warn!(error = %err, "Failed to release m365 sync lease after delta_sync");
+        }
+        result
     }
 
     /// Handle shutdown.
@@ -2459,9 +2749,10 @@ mod tests {
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_manifest::ConnectorManifest;
     use std::path::PathBuf;
+    use uuid::Uuid;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
-        matchers::{method, path},
+        matchers::{method, path, query_param},
     };
 
     fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> CapabilityToken {
@@ -2488,6 +2779,12 @@ mod tests {
         format!("{header}.{payload}.signature")
     }
 
+    fn unique_zone_dir(label: &str) -> String {
+        let mut path = std::env::temp_dir();
+        path.push(format!("fcp-m365-{label}-{}", Uuid::new_v4()));
+        path.to_string_lossy().into_owned()
+    }
+
     #[fcp_async_core::runtime::test]
     async fn test_handshake() {
         let mut connector = M365Connector::new();
@@ -2502,6 +2799,248 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result["status"], "accepted");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_sync_operations_require_zone_dir() {
+        let mut connector = M365Connector::new();
+        let token = make_access_token(&["Mail.Read"], &[]);
+        connector
+            .handle_configure(json!({
+                "allow_test_api_url": true,
+                "api_url": "http://localhost:9999",
+                "access_token": token
+            }))
+            .await
+            .unwrap();
+
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["m365.delta.sync"]
+            }))
+            .await
+            .unwrap();
+
+        let cap = generate_valid_token(&signing_key, "m365.delta.sync");
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "m365.delta.sync",
+                "input": {"resource": "/me/messages"},
+                "capability_token": cap
+            }))
+            .await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("zone_dir"));
+            }
+            other => panic!("Expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_delta_sync_uses_persisted_token_when_input_missing() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/me/messages/delta"))
+            .and(query_param("$deltatoken", "seed-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "value": [{ "id": "first" }],
+                "@odata.deltaLink": "https://graph.microsoft.com/v1.0/me/messages/delta?$deltatoken=opaque123"
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/me/messages/delta"))
+            .and(query_param("$deltatoken", "opaque123"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "value": [{ "id": "second" }],
+                "@odata.deltaLink": "https://graph.microsoft.com/v1.0/me/messages/delta?$deltatoken=opaque456"
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let zone_dir = unique_zone_dir("delta-state");
+        let mut connector = M365Connector::new();
+        let token = make_access_token(&["Mail.Read"], &[]);
+        connector
+            .handle_configure(json!({
+                "allow_test_api_url": true,
+                "api_url": mock_server.uri(),
+                "access_token": token
+            }))
+            .await
+            .unwrap();
+
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "zone_dir": zone_dir,
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["m365.delta.sync"]
+            }))
+            .await
+            .unwrap();
+
+        let cap = generate_valid_token(&signing_key, "m365.delta.sync");
+        let first = connector
+            .handle_invoke(json!({
+                "operation": "m365.delta.sync",
+                "input": {
+                    "resource": "/me/messages",
+                    "delta_token": "seed-token"
+                },
+                "capability_token": cap
+            }))
+            .await
+            .unwrap();
+        assert_eq!(first["delta_token"], "opaque123");
+
+        let cap = generate_valid_token(&signing_key, "m365.delta.sync");
+        let second = connector
+            .handle_invoke(json!({
+                "operation": "m365.delta.sync",
+                "input": {
+                    "resource": "/me/messages"
+                },
+                "capability_token": cap
+            }))
+            .await
+            .unwrap();
+        assert_eq!(second["delta_token"], "opaque456");
+
+        let state_path = PathBuf::from(zone_dir).join(M365_SYNC_STATE_FILE);
+        let state = read_json_file_if_exists::<M365SyncState>(&state_path)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            state.delta_tokens.get("/me/messages").map(String::as_str),
+            Some("opaque456")
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_subscription_state_persists_and_deletes() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/subscriptions"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "id": "sub-123",
+                "resource": "/me/messages",
+                "changeType": "created,updated",
+                "notificationUrl": "https://hooks.example.test/m365",
+                "expirationDateTime": "2026-03-10T00:00:00Z"
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/subscriptions/sub-123"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let zone_dir = unique_zone_dir("sub-state");
+        let mut connector = M365Connector::new();
+        let token = make_access_token(&["Mail.Read"], &[]);
+        connector
+            .handle_configure(json!({
+                "allow_test_api_url": true,
+                "api_url": mock_server.uri(),
+                "access_token": token
+            }))
+            .await
+            .unwrap();
+
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "zone_dir": zone_dir,
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["m365.subscriptions.create", "m365.subscriptions.delete"]
+            }))
+            .await
+            .unwrap();
+
+        let create_cap = generate_valid_token(&signing_key, "m365.subscriptions.create");
+        let created = connector
+            .handle_invoke(json!({
+                "operation": "m365.subscriptions.create",
+                "input": {
+                    "change_type": "created,updated",
+                    "notification_url": "https://hooks.example.test/m365",
+                    "resource": "/me/messages",
+                    "expiration_datetime": "2026-03-10T00:00:00Z"
+                },
+                "capability_token": create_cap
+            }))
+            .await
+            .unwrap();
+        assert_eq!(created["subscription"]["id"], "sub-123");
+
+        let state_path = PathBuf::from(&zone_dir).join(M365_SYNC_STATE_FILE);
+        let state = read_json_file_if_exists::<M365SyncState>(&state_path)
+            .unwrap()
+            .unwrap();
+        assert!(state.subscriptions.contains_key("sub-123"));
+
+        let delete_cap = generate_valid_token(&signing_key, "m365.subscriptions.delete");
+        connector
+            .handle_invoke(json!({
+                "operation": "m365.subscriptions.delete",
+                "input": {
+                    "subscription_id": "sub-123"
+                },
+                "capability_token": delete_cap
+            }))
+            .await
+            .unwrap();
+
+        let state = read_json_file_if_exists::<M365SyncState>(&state_path)
+            .unwrap()
+            .unwrap();
+        assert!(!state.subscriptions.contains_key("sub-123"));
+    }
+
+    #[test]
+    fn test_m365_sync_lease_fences_second_holder() {
+        let lease_root = PathBuf::from(unique_zone_dir("lease-fence"));
+        std::fs::create_dir_all(&lease_root).unwrap();
+        let lease_path = lease_root.join(M365_SYNC_LEASE_FILE);
+
+        let first = M365SyncLease::acquire(
+            lease_path.clone(),
+            "holder-a".to_string(),
+            M365_SYNC_LEASE_TTL_SECONDS,
+        )
+        .unwrap();
+        let second = M365SyncLease::acquire(
+            lease_path,
+            "holder-b".to_string(),
+            M365_SYNC_LEASE_TTL_SECONDS,
+        );
+        assert!(matches!(second, Err(FcpError::ResourceExhausted { .. })));
+        first.release().unwrap();
     }
 
     #[fcp_async_core::runtime::test]
@@ -2838,5 +3377,661 @@ mod tests {
 
         let result = connector.handle_doctor().await.unwrap();
         assert_eq!(result["status"], "pass");
+    }
+
+    // ── Schema completeness tests ─────────────────────────────────
+
+    #[test]
+    fn all_operations_have_input_and_output_schemas() {
+        let ops = build_operations();
+        for op in &ops {
+            assert_eq!(
+                op.input_schema["type"], "object",
+                "op {} input_schema should be object",
+                op.id
+            );
+            assert_eq!(
+                op.output_schema["type"], "object",
+                "op {} output_schema should be object",
+                op.id
+            );
+        }
+    }
+
+    #[test]
+    fn all_operations_have_summaries() {
+        let ops = build_operations();
+        for op in &ops {
+            assert!(
+                !op.summary.is_empty(),
+                "op {} should have a non-empty summary",
+                op.id
+            );
+        }
+    }
+
+    #[test]
+    fn read_operations_have_safe_risk_levels() {
+        let ops = build_operations();
+        let safe_ops = [
+            "m365.mail.list_messages",
+            "m365.mail.get_message",
+            "m365.mail.search_messages",
+            "m365.mail.list_threads",
+            "m365.mail.list_attachments",
+            "m365.files.list_items",
+            "m365.files.get_item",
+            "m365.files.download_file",
+            "m365.files.search",
+            "m365.calendar.list_events",
+            "m365.calendar.get_event",
+            "m365.calendar.get_freebusy",
+            "m365.tasks.list_task_lists",
+            "m365.tasks.list_tasks",
+            "m365.delta.sync",
+        ];
+        for op in &ops {
+            let id_str = op.id.to_string();
+            if safe_ops.contains(&id_str.as_str()) {
+                assert_eq!(
+                    op.risk_level,
+                    RiskLevel::Low,
+                    "read op {} should be Low risk",
+                    op.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dangerous_operations_have_high_risk() {
+        let ops = build_operations();
+        let dangerous_ops = [
+            "m365.mail.send_message",
+            "m365.mail.reply_message",
+            "m365.mail.forward_message",
+            "m365.files.delete_item",
+            "m365.calendar.delete_event",
+        ];
+        for op in &ops {
+            let id_str = op.id.to_string();
+            if dangerous_ops.contains(&id_str.as_str()) {
+                assert_eq!(
+                    op.risk_level,
+                    RiskLevel::High,
+                    "dangerous op {} should be High risk",
+                    op.id
+                );
+                assert_eq!(
+                    op.safety_tier,
+                    SafetyTier::Dangerous,
+                    "dangerous op {} should have Dangerous safety tier",
+                    op.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn operations_are_deterministic() {
+        let ops1 = build_operations();
+        let ops2 = build_operations();
+        assert_eq!(ops1.len(), ops2.len());
+        for (a, b) in ops1.iter().zip(ops2.iter()) {
+            assert_eq!(a.id, b.id);
+            assert_eq!(a.summary, b.summary);
+        }
+    }
+
+    #[test]
+    fn operation_count_matches_expected() {
+        let ops = build_operations();
+        // Mail: 10, Files: 7, Calendar: 6, Tasks: 3, Subscriptions: 3, Delta: 1 = 30
+        assert_eq!(ops.len(), 30);
+    }
+
+    // ── Helper function tests ─────────────────────────────────────
+
+    #[test]
+    fn validate_endpoint_allows_graph_microsoft_com() {
+        let result = validate_endpoint(
+            "https://graph.microsoft.com/v1.0",
+            &["graph.microsoft.com"],
+            false,
+            "api_url",
+        );
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "https://graph.microsoft.com/v1.0");
+    }
+
+    #[test]
+    fn validate_endpoint_strips_trailing_slash() {
+        let result = validate_endpoint(
+            "https://graph.microsoft.com/v1.0/",
+            &["graph.microsoft.com"],
+            false,
+            "api_url",
+        );
+        assert!(result.is_ok());
+        assert!(!result.unwrap().ends_with('/'));
+    }
+
+    #[test]
+    fn validate_endpoint_rejects_empty() {
+        let result = validate_endpoint("", &["graph.microsoft.com"], false, "api_url");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_endpoint_rejects_non_https_in_production() {
+        let result = validate_endpoint(
+            "http://graph.microsoft.com/v1.0",
+            &["graph.microsoft.com"],
+            false,
+            "api_url",
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("https"));
+            }
+            other => panic!("Expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_endpoint_allows_http_in_test_mode() {
+        let result = validate_endpoint(
+            "http://localhost:8080",
+            &["graph.microsoft.com"],
+            true,
+            "api_url",
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_endpoint_rejects_ip_literal_in_production() {
+        let result = validate_endpoint(
+            "https://192.168.1.1/v1",
+            &["graph.microsoft.com"],
+            false,
+            "api_url",
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_endpoint_rejects_unauthorized_host() {
+        let result = validate_endpoint(
+            "https://evil.com/v1.0",
+            &["graph.microsoft.com"],
+            false,
+            "api_url",
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("not allowed"));
+            }
+            other => panic!("Expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn is_local_test_host_recognizes_localhost() {
+        assert!(is_local_test_host("localhost"));
+        assert!(is_local_test_host("127.0.0.1"));
+        assert!(is_local_test_host("::1"));
+        assert!(!is_local_test_host("example.com"));
+        assert!(!is_local_test_host("10.0.0.1"));
+    }
+
+    #[test]
+    fn parse_access_token_from_top_level() {
+        let params = json!({ "access_token": "my-jwt-token" });
+        assert_eq!(parse_access_token(&params), Some("my-jwt-token".into()));
+    }
+
+    #[test]
+    fn parse_access_token_from_oauth_nested() {
+        let params = json!({ "oauth": { "access_token": "nested-token" } });
+        assert_eq!(parse_access_token(&params), Some("nested-token".into()));
+    }
+
+    #[test]
+    fn parse_access_token_prefers_top_level() {
+        let params = json!({
+            "access_token": "top-level",
+            "oauth": { "access_token": "nested" }
+        });
+        assert_eq!(parse_access_token(&params), Some("top-level".into()));
+    }
+
+    #[test]
+    fn parse_access_token_ignores_empty_and_whitespace() {
+        let params = json!({ "access_token": "" });
+        assert_eq!(parse_access_token(&params), None);
+
+        let params = json!({ "access_token": "   " });
+        assert_eq!(parse_access_token(&params), None);
+    }
+
+    #[test]
+    fn parse_access_token_missing_returns_none() {
+        let params = json!({});
+        assert_eq!(parse_access_token(&params), None);
+    }
+
+    #[test]
+    fn parse_required_permissions_deduplicates() {
+        let params = json!({ "required_permissions": ["Mail.Read", "Mail.Read", "Calendar.Read"] });
+        let result = parse_required_permissions(&params).unwrap();
+        assert_eq!(result.len(), 2);
+        assert!(result.contains(&"Mail.Read".to_string()));
+        assert!(result.contains(&"Calendar.Read".to_string()));
+    }
+
+    #[test]
+    fn parse_required_permissions_skips_empty_strings() {
+        let params = json!({ "required_permissions": ["Mail.Read", "", "  "] });
+        let result = parse_required_permissions(&params).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], "Mail.Read");
+    }
+
+    #[test]
+    fn parse_required_permissions_returns_empty_when_absent() {
+        let params = json!({});
+        let result = parse_required_permissions(&params).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn parse_required_permissions_rejects_non_array() {
+        let params = json!({ "required_permissions": "not an array" });
+        assert!(parse_required_permissions(&params).is_err());
+    }
+
+    #[test]
+    fn parse_credential_id_valid_uuid() {
+        let params = json!({ "credential_id": "11223344-5566-7788-99aa-bbccddeeff00" });
+        let result = parse_credential_id(&params).unwrap();
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn parse_credential_id_invalid_uuid() {
+        let params = json!({ "credential_id": "not-a-uuid" });
+        assert!(parse_credential_id(&params).is_err());
+    }
+
+    #[test]
+    fn parse_credential_id_missing() {
+        let params = json!({});
+        let result = parse_credential_id(&params).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_credential_id_non_string() {
+        let params = json!({ "credential_id": 42 });
+        assert!(parse_credential_id(&params).is_err());
+    }
+
+    #[test]
+    fn parse_app_credentials_valid() {
+        let params = json!({
+            "app_credentials": {
+                "tenant_id": "t-123",
+                "client_id": "c-456",
+                "client_secret": "secret"
+            }
+        });
+        let result = parse_app_credentials(&params).unwrap();
+        assert!(result.is_some());
+        let config = result.unwrap();
+        assert_eq!(config.tenant_id, "t-123");
+        assert_eq!(config.scope, DEFAULT_CLIENT_CREDENTIAL_SCOPE);
+    }
+
+    #[test]
+    fn parse_app_credentials_rejects_empty_fields() {
+        let params = json!({
+            "app_credentials": {
+                "tenant_id": "",
+                "client_id": "c-456",
+                "client_secret": "secret"
+            }
+        });
+        assert!(parse_app_credentials(&params).is_err());
+    }
+
+    #[test]
+    fn parse_app_credentials_missing_returns_none() {
+        let params = json!({});
+        let result = parse_app_credentials(&params).unwrap();
+        assert!(result.is_none());
+    }
+
+    // ── TokenPermissions tests ────────────────────────────────────
+
+    #[test]
+    fn token_permissions_parse_with_scopes() {
+        let token = make_access_token(&["Mail.Read", "Calendar.Read"], &[]);
+        let perms = TokenPermissions::parse(&token).unwrap();
+        assert_eq!(perms.scopes.len(), 2);
+        assert!(perms.scopes.contains(&"Mail.Read".to_string()));
+        assert!(perms.roles.is_empty());
+    }
+
+    #[test]
+    fn token_permissions_parse_with_roles() {
+        let token = make_access_token(&[], &["Mail.Read.All"]);
+        let perms = TokenPermissions::parse(&token).unwrap();
+        assert!(perms.scopes.is_empty());
+        assert_eq!(perms.roles.len(), 1);
+    }
+
+    #[test]
+    fn token_permissions_parse_rejects_no_claims() {
+        let header = BASE64_URL.encode(r#"{"alg":"none","typ":"JWT"}"#);
+        let payload = BASE64_URL.encode(r#"{"sub":"user"}"#);
+        let token = format!("{header}.{payload}.sig");
+        assert!(TokenPermissions::parse(&token).is_err());
+    }
+
+    #[test]
+    fn token_permissions_parse_rejects_non_jwt() {
+        assert!(TokenPermissions::parse("not-a-jwt").is_err());
+    }
+
+    #[test]
+    fn token_permissions_missing_required() {
+        let token = make_access_token(&["User.Read"], &[]);
+        let perms = TokenPermissions::parse(&token).unwrap();
+        let missing = perms.missing_required(&["User.Read".to_string(), "Mail.Read".to_string()]);
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0], "Mail.Read");
+    }
+
+    #[test]
+    fn token_permissions_all_combines_scopes_and_roles() {
+        let token = make_access_token(&["Mail.Read"], &["Calendar.Read.All"]);
+        let perms = TokenPermissions::parse(&token).unwrap();
+        let all = perms.all();
+        assert_eq!(all.len(), 2);
+        assert!(all.contains(&"Mail.Read".to_string()));
+        assert!(all.contains(&"Calendar.Read.All".to_string()));
+    }
+
+    // ── M365AuthMode tests ───────────────────────────────────────
+
+    #[test]
+    fn auth_mode_labels() {
+        assert_eq!(M365AuthMode::AccessToken.label(), "access_token");
+        let cred_mode = M365AuthMode::ClientCredentials {
+            tenant_id: "t".into(),
+            client_id: "c".into(),
+            scope: "s".into(),
+        };
+        assert_eq!(cred_mode.label(), "client_credentials");
+    }
+
+    #[test]
+    fn auth_mode_summary_redacts_client_id() {
+        let mode = M365AuthMode::ClientCredentials {
+            tenant_id: "tenant-123".into(),
+            client_id: "11111111-2222-3333-4444-555555555555".into(),
+            scope: "https://graph.microsoft.com/.default".into(),
+        };
+        let summary = mode.summary();
+        assert_eq!(summary["mode"], "client_credentials");
+        // Only prefix of client_id should be present
+        assert_eq!(summary["client_id_prefix"], "11111111");
+    }
+
+    // ── encode_form_body tests ───────────────────────────────────
+
+    #[test]
+    fn encode_form_body_basic() {
+        let result = encode_form_body(&[("key", "value"), ("foo", "bar")]);
+        assert_eq!(result, "key=value&foo=bar");
+    }
+
+    #[test]
+    fn encode_form_body_encodes_special_chars() {
+        let result = encode_form_body(&[("scope", "https://graph.microsoft.com/.default")]);
+        assert!(result.contains("https%3A%2F%2F"));
+        assert!(!result.contains("://"));
+    }
+
+    #[test]
+    fn encode_form_body_encodes_spaces_as_plus() {
+        let result = encode_form_body(&[("q", "hello world")]);
+        assert_eq!(result, "q=hello+world");
+    }
+
+    #[test]
+    fn encode_form_body_empty_input() {
+        let result = encode_form_body(&[]);
+        assert!(result.is_empty());
+    }
+
+    // ── Configure edge cases ─────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_multiple_auth_sources() {
+        let mut connector = M365Connector::new();
+        let token = make_access_token(&["Mail.Read"], &[]);
+        let result = connector
+            .handle_configure(json!({
+                "access_token": token,
+                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00"
+            }))
+            .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("exactly one auth source"));
+            }
+            other => panic!("Expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_no_auth_source() {
+        let mut connector = M365Connector::new();
+        let result = connector.handle_configure(json!({})).await;
+        assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_unauthorized_api_url() {
+        let mut connector = M365Connector::new();
+        let token = make_access_token(&["Mail.Read"], &[]);
+        let result = connector
+            .handle_configure(json!({
+                "access_token": token,
+                "api_url": "https://evil.com/v1.0"
+            }))
+            .await;
+        assert!(result.is_err());
+    }
+
+    // ── Simulate test ────────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_returns_allowed() {
+        let connector = M365Connector::new();
+        let signing_key = Ed25519SigningKey::generate();
+        let token = generate_valid_token(&signing_key, "m365.mail.list_messages");
+        let result = connector
+            .handle_simulate(json!({
+                "type": "simulate",
+                "id": "sim-1",
+                "connector_id": "fcp.microsoft365",
+                "operation": "m365.mail.list_messages",
+                "zone_id": "z:work",
+                "input": { "user_id": "me" },
+                "capability_token": token
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result["would_succeed"], true);
+    }
+
+    // ── Shutdown test ────────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_shutdown_returns_status() {
+        let connector = M365Connector::new();
+        let result = connector.handle_shutdown(json!({})).await.unwrap();
+        assert_eq!(result["status"], "shutdown");
+    }
+
+    // ── Self-check edge cases ────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_not_configured() {
+        let connector = M365Connector::new();
+        let result = connector.handle_self_check().await.unwrap();
+        assert_eq!(result["status"], "degraded");
+        assert_eq!(result["reason_code"], "not_configured");
+    }
+
+    // ── Invoke edge cases ────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_unknown_operation() {
+        let mut connector = M365Connector::new();
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+
+        connector.client = Some(
+            M365Client::new("test_token")
+                .unwrap()
+                .with_api_url("http://localhost:9999"),
+        );
+
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["m365.nonexistent.op"]
+            }))
+            .await
+            .unwrap();
+
+        let token = generate_valid_token(&signing_key, "m365.nonexistent.op");
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "m365.nonexistent.op",
+                "input": {},
+                "capability_token": token
+            }))
+            .await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            FcpError::OperationNotGranted { .. }
+        ));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_missing_operation() {
+        let connector = M365Connector::new();
+        let result = connector.handle_invoke(json!({})).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("Missing operation"));
+            }
+            other => panic!("Expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_missing_capability_token() {
+        let connector = M365Connector::new();
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "m365.mail.list_messages",
+                "input": { "user_id": "me" }
+            }))
+            .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("capability_token"));
+            }
+            other => panic!("Expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    // ── Handshake details ────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_handshake_sets_session_and_capabilities() {
+        let mut connector = M365Connector::new();
+        let result = connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": vec![0u8; 32],
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["m365.mail.read", "m365.files.read"]
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(result["status"], "accepted");
+        let grants = result["capabilities_granted"].as_array().unwrap();
+        assert_eq!(grants.len(), 2);
+        assert!(result["session_id"].is_string());
+        // streaming events
+        assert_eq!(result["event_caps"]["streaming"], true);
+        assert_eq!(result["event_caps"]["replay"], false);
+    }
+
+    // ── require_str tests ────────────────────────────────────────
+
+    #[test]
+    fn require_str_present() {
+        let input = json!({ "user_id": "me" });
+        assert_eq!(require_str(&input, "user_id").unwrap(), "me");
+    }
+
+    #[test]
+    fn require_str_missing() {
+        let input = json!({});
+        assert!(require_str(&input, "user_id").is_err());
+    }
+
+    #[test]
+    fn require_str_non_string() {
+        let input = json!({ "user_id": 42 });
+        assert!(require_str(&input, "user_id").is_err());
+    }
+
+    // ── Health after configure ───────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_health_shows_permissions_after_configure() {
+        let mut connector = M365Connector::new();
+        let token = make_access_token(&["Mail.Read", "Calendar.Read"], &["User.Read.All"]);
+        connector
+            .handle_configure(json!({ "access_token": token }))
+            .await
+            .unwrap();
+
+        let health = connector.handle_health().await.unwrap();
+        assert_eq!(health["status"], "healthy");
+        let permissions = health["permissions"].as_array().unwrap();
+        assert_eq!(permissions.len(), 3);
     }
 }

@@ -19,6 +19,7 @@ use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_testkit::AsyncTestContext;
 use serde_json::json;
+use uuid::Uuid;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{method, path, path_regex},
@@ -44,14 +45,22 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> fcp_core:
     fcp_core::CapabilityToken { raw: cose }
 }
 
+fn unique_zone_dir(label: &str) -> String {
+    let mut path = std::env::temp_dir();
+    path.push(format!("fcp-m365-integration-{label}-{}", Uuid::new_v4()));
+    path.to_string_lossy().into_owned()
+}
+
 async fn setup_handshake(connector: &mut M365Connector, caps: &[&str]) -> Ed25519SigningKey {
     let signing_key = Ed25519SigningKey::generate();
     let verifying_key = signing_key.verifying_key();
+    let zone_dir = unique_zone_dir("handshake");
 
     connector
         .handle_handshake(json!({
             "protocol_version": "1.0.0",
             "zone": "z:work",
+            "zone_dir": zone_dir,
             "host_public_key": verifying_key.to_bytes(),
             "nonce": vec![0u8; 32],
             "capabilities_requested": caps

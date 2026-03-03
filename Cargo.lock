@@ -1897,6 +1897,8 @@ dependencies = [
  "fcp-async-core",
  "fcp-core",
  "fcp-crypto",
+ "fcp-discord",
+ "fcp-manifest",
  "fcp-sdk",
  "fcp-testkit",
  "futures-util",
@@ -1933,6 +1935,7 @@ dependencies = [
  "fcp-google-calendar",
  "fcp-jira",
  "fcp-linear",
+ "fcp-llm-router",
  "fcp-manifest",
  "fcp-microsoft365",
  "fcp-notion",
@@ -2185,6 +2188,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-llm-router"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-llm-router",
+ "fcp-manifest",
+ "fcp-testkit",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "wiremock",
+]
+
+[[package]]
 name = "fcp-manifest"
 version = "0.1.0"
 dependencies = [
@@ -2322,6 +2348,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "fcp-async-core",
@@ -2677,9 +2704,13 @@ dependencies = [
  "fcp-manifest",
  "fcp-testkit",
  "futures-util",
+ "hex",
+ "hmac",
  "reqwest 0.13.2",
  "serde",
  "serde_json",
+ "sha2",
+ "subtle",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -2726,6 +2757,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "toml 1.0.3+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -2855,6 +2887,7 @@ dependencies = [
  "chrono",
  "fcp-async-core",
  "fcp-core",
+ "fcp-crypto",
  "fcp-testkit",
  "reqwest 0.13.2",
  "serde",

@@ -2456,4 +2456,215 @@ mod tests {
             assert!(op_ids.contains(&"telegram.answer_callback_query"));
         });
     }
+
+    // ─── Schema completeness tests ─────────────────────────────────────
+
+    const ALL_OPERATIONS: &[&str] = &[
+        "telegram.send_message",
+        "telegram.send_media",
+        "telegram.get_file",
+        "telegram.answer_callback_query",
+    ];
+
+    #[test]
+    fn test_all_operations_have_input_schema() {
+        for op in ALL_OPERATIONS {
+            assert!(
+                TelegramConnector::input_schema_for(op).is_some(),
+                "Missing input schema for {op}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_all_operations_have_output_schema() {
+        for op in ALL_OPERATIONS {
+            assert!(
+                TelegramConnector::output_schema_for(op).is_some(),
+                "Missing output schema for {op}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_unknown_operation_returns_none_schema() {
+        assert!(TelegramConnector::input_schema_for("telegram.nonexistent").is_none());
+        assert!(TelegramConnector::output_schema_for("telegram.nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_input_schemas_are_object_type() {
+        for op in ALL_OPERATIONS {
+            let schema = TelegramConnector::input_schema_for(op).unwrap();
+            assert_eq!(
+                schema["type"], "object",
+                "Input schema for {op} must be type=object"
+            );
+        }
+    }
+
+    #[test]
+    fn test_schemas_deterministic_across_calls() {
+        for op in ALL_OPERATIONS {
+            let a = TelegramConnector::input_schema_for(op).unwrap();
+            let b = TelegramConnector::input_schema_for(op).unwrap();
+            assert_eq!(a, b, "Input schema for {op} not deterministic");
+
+            let a = TelegramConnector::output_schema_for(op).unwrap();
+            let b = TelegramConnector::output_schema_for(op).unwrap();
+            assert_eq!(a, b, "Output schema for {op} not deterministic");
+        }
+    }
+
+    // ─── Introspection metadata tests ──────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_all_ops_have_required_metadata() {
+        let connector = TelegramConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            assert!(
+                op["capability"].as_str().is_some(),
+                "Op {id} missing capability"
+            );
+            assert!(
+                op["risk_level"].as_str().is_some(),
+                "Op {id} missing risk_level"
+            );
+            assert!(
+                op["safety_tier"].as_str().is_some(),
+                "Op {id} missing safety_tier"
+            );
+            assert!(
+                op["idempotency"].as_str().is_some(),
+                "Op {id} missing idempotency"
+            );
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_risk_levels_valid() {
+        let connector = TelegramConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        let valid_risk = ["low", "medium", "high", "critical"];
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            let risk = op["risk_level"].as_str().unwrap();
+            assert!(
+                valid_risk.contains(&risk),
+                "Op {id} has invalid risk_level: {risk}"
+            );
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_read_ops_are_safe() {
+        let connector = TelegramConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            if id == "telegram.get_file" {
+                assert_eq!(op["safety_tier"], "safe", "Read op {id} should be safe");
+                assert_eq!(op["risk_level"], "low", "Read op {id} should be low risk");
+            }
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_deterministic() {
+        let connector = TelegramConnector::new();
+        let a = connector.handle_introspect().await.unwrap();
+        let b = connector.handle_introspect().await.unwrap();
+        assert_eq!(a, b, "Introspection should be deterministic");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_events_present() {
+        let connector = TelegramConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let events = result["events"].as_array().unwrap();
+
+        assert_eq!(events.len(), 5, "Expected 5 events");
+        let topics: Vec<&str> = events.iter().filter_map(|e| e["topic"].as_str()).collect();
+        assert!(topics.contains(&"telegram.message.new"));
+        assert!(topics.contains(&"telegram.message.edited"));
+        assert!(topics.contains(&"telegram.callback_query"));
+    }
+
+    // ─── Schema validation (required fields) ───────────────────────────
+
+    #[test]
+    fn test_send_message_requires_chat_id_and_text() {
+        let schema = TelegramConnector::input_schema_for("telegram.send_message").unwrap();
+        let required = schema["required"].as_array().unwrap();
+        let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(required_strs.contains(&"chat_id"));
+        assert!(required_strs.contains(&"text"));
+    }
+
+    #[test]
+    fn test_get_file_requires_file_id() {
+        let schema = TelegramConnector::input_schema_for("telegram.get_file").unwrap();
+        let required = schema["required"].as_array().unwrap();
+        assert!(required.iter().any(|v| v.as_str().unwrap() == "file_id"));
+    }
+
+    #[test]
+    fn test_answer_callback_query_requires_id() {
+        let schema = TelegramConnector::input_schema_for("telegram.answer_callback_query").unwrap();
+        let required = schema["required"].as_array().unwrap();
+        assert!(
+            required
+                .iter()
+                .any(|v| v.as_str().unwrap() == "callback_query_id")
+        );
+    }
+
+    // ─── Manifest interface hash determinism ───────────────────────────
+
+    #[test]
+    fn test_manifest_parses_as_valid_toml_and_is_deterministic() {
+        let manifest_str = include_str!("../manifest.toml");
+        // Parse as generic TOML twice and verify determinism
+        let val_a: toml::Value =
+            toml::from_str(manifest_str).expect("manifest should be valid TOML");
+        let val_b: toml::Value =
+            toml::from_str(manifest_str).expect("manifest should be valid TOML");
+        assert_eq!(val_a, val_b, "TOML parse must be deterministic");
+
+        // Verify key structural sections exist
+        let table = val_a.as_table().unwrap();
+        assert!(table.contains_key("manifest"), "missing [manifest] section");
+        assert!(
+            table.contains_key("connector"),
+            "missing [connector] section"
+        );
+        assert!(table.contains_key("provides"), "missing [provides] section");
+
+        // Verify operations exist
+        let ops = table["provides"]["operations"].as_table().unwrap();
+        assert!(ops.contains_key("telegram.send_message"));
+        assert!(ops.contains_key("telegram.send_media"));
+        assert!(ops.contains_key("telegram.get_file"));
+        assert!(ops.contains_key("telegram.answer_callback_query"));
+
+        // Verify interface_hash field exists with expected prefix
+        let hash = table["manifest"]["interface_hash"].as_str().unwrap();
+        assert!(
+            hash.starts_with("blake3-256:"),
+            "interface_hash should have blake3-256 prefix"
+        );
+
+        // Verify serialization is deterministic
+        let ser_a = toml::to_string(&val_a).unwrap();
+        let ser_b = toml::to_string(&val_b).unwrap();
+        assert_eq!(ser_a, ser_b, "TOML serialization must be deterministic");
+    }
 }

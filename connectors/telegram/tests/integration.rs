@@ -416,6 +416,166 @@ async fn shutdown_succeeds() {
 }
 
 // ============================================================================
+// Send media tests
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn send_media_photo_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("telegram.send_media.photo.happy_path");
+    let mut connector = TelegramConnector::new();
+    let (mock_server, signing_key) = full_setup(&mut connector, &["telegram.send_media"]).await;
+
+    Mock::given(method("POST"))
+        .and(path(token_path("sendPhoto")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "result": {
+                "message_id": 100,
+                "chat": { "id": 789, "type": "group", "title": "Test Group" },
+                "date": 1234567890,
+                "photo": [{ "file_id": "photo_small", "file_unique_id": "uniq1", "width": 90, "height": 90 }]
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let token = generate_valid_token(&signing_key, "telegram.send_media");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "telegram.send_media",
+            "input": {
+                "chat_id": "789",
+                "media_type": "photo",
+                "media": "AgACAgIAAxkBAAIsK2Y"
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("send_media invoke should succeed");
+
+    assert_eq!(result["message_id"], 100);
+}
+
+#[fcp_async_core::runtime::test]
+async fn send_media_document_with_caption() {
+    let _ctx = AsyncTestContext::for_scenario("telegram.send_media.document.caption");
+    let mut connector = TelegramConnector::new();
+    let (mock_server, signing_key) = full_setup(&mut connector, &["telegram.send_media"]).await;
+
+    Mock::given(method("POST"))
+        .and(path(token_path("sendDocument")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "result": {
+                "message_id": 101,
+                "chat": { "id": 456, "type": "private", "first_name": "User" },
+                "date": 1234567890,
+                "document": { "file_id": "doc_id", "file_unique_id": "uniq2", "file_name": "report.pdf" }
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let token = generate_valid_token(&signing_key, "telegram.send_media");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "telegram.send_media",
+            "input": {
+                "chat_id": "456",
+                "media_type": "document",
+                "media": "https://example.com/report.pdf",
+                "caption": "Monthly report"
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("send_media invoke should succeed");
+
+    assert_eq!(result["message_id"], 101);
+}
+
+// ============================================================================
+// Additional error taxonomy tests
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn server_error_500_maps_to_external_error() {
+    let _ctx = AsyncTestContext::for_scenario("telegram.error.server_500");
+    let mut connector = TelegramConnector::new();
+    let (mock_server, signing_key) = full_setup(&mut connector, &["telegram.send_message"]).await;
+
+    Mock::given(method("POST"))
+        .and(path(token_path("sendMessage")))
+        .respond_with(ResponseTemplate::new(500).set_body_json(json!({
+            "ok": false,
+            "error_code": 500,
+            "description": "Internal Server Error"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let token = generate_valid_token(&signing_key, "telegram.send_message");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "telegram.send_message",
+            "input": { "chat_id": "123", "text": "server error" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_with_null_capability_token_denied() {
+    let _ctx = AsyncTestContext::for_scenario("telegram.deny.null_token");
+    let mut connector = TelegramConnector::new();
+    let (_mock_server, _signing_key) = full_setup(&mut connector, &["telegram.send_message"]).await;
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "telegram.send_message",
+            "input": { "chat_id": "123", "text": "no token" },
+            "capability_token": null
+        }))
+        .await;
+
+    assert!(result.is_err());
+}
+
+// ============================================================================
+// Self-check lifecycle
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn self_check_not_configured() {
+    let _ctx = AsyncTestContext::for_scenario("telegram.lifecycle.self_check_not_configured");
+    let connector = TelegramConnector::new();
+    let result = connector
+        .handle_self_check()
+        .await
+        .expect("self_check should succeed");
+    assert_eq!(result["status"], "degraded");
+}
+
+#[fcp_async_core::runtime::test]
+async fn self_check_healthy() {
+    let _ctx = AsyncTestContext::for_scenario("telegram.lifecycle.self_check_healthy");
+    let mock_server = MockServer::start().await;
+    mount_get_me_mock(&mock_server).await;
+
+    let mut connector = TelegramConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let result = connector
+        .handle_self_check()
+        .await
+        .expect("self_check should succeed");
+    assert_eq!(result["status"], "ok");
+    assert!(result.get("details").is_some());
+}
+
+// ============================================================================
 // Input validation edge cases
 // ============================================================================
 
@@ -465,4 +625,97 @@ async fn send_message_missing_text_fails() {
         }
         e => panic!("Expected InvalidRequest, got: {e:?}"),
     }
+}
+
+#[fcp_async_core::runtime::test]
+async fn send_message_with_parse_mode() {
+    let _ctx = AsyncTestContext::for_scenario("telegram.validation.send_message_html");
+    let mut connector = TelegramConnector::new();
+    let (mock_server, signing_key) = full_setup(&mut connector, &["telegram.send_message"]).await;
+
+    Mock::given(method("POST"))
+        .and(path(token_path("sendMessage")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "result": {
+                "message_id": 55,
+                "chat": { "id": 111, "type": "private", "first_name": "Test" },
+                "date": 1234567890,
+                "text": "<b>Bold</b>"
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let token = generate_valid_token(&signing_key, "telegram.send_message");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "telegram.send_message",
+            "input": {
+                "chat_id": "111",
+                "text": "<b>Bold</b>",
+                "parse_mode": "HTML"
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("send_message with parse_mode should succeed");
+
+    assert_eq!(result["message_id"], 55);
+}
+
+#[fcp_async_core::runtime::test]
+async fn send_message_invalid_parse_mode_rejected() {
+    let _ctx = AsyncTestContext::for_scenario("telegram.validation.invalid_parse_mode");
+    let mut connector = TelegramConnector::new();
+    let (_mock_server, signing_key) = full_setup(&mut connector, &["telegram.send_message"]).await;
+    let token = generate_valid_token(&signing_key, "telegram.send_message");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "telegram.send_message",
+            "input": {
+                "chat_id": "123",
+                "text": "test",
+                "parse_mode": "LaTeX"
+            },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+}
+
+#[fcp_async_core::runtime::test]
+async fn send_media_invalid_type_rejected() {
+    let _ctx = AsyncTestContext::for_scenario("telegram.validation.invalid_media_type");
+    let mut connector = TelegramConnector::new();
+    let (_mock_server, signing_key) = full_setup(&mut connector, &["telegram.send_media"]).await;
+    let token = generate_valid_token(&signing_key, "telegram.send_media");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "telegram.send_media",
+            "input": {
+                "chat_id": "123",
+                "media_type": "hologram",
+                "media": "file_id_123"
+            },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+}
+
+#[fcp_async_core::runtime::test]
+async fn doctor_not_configured() {
+    let _ctx = AsyncTestContext::for_scenario("telegram.lifecycle.doctor_not_configured");
+    let connector = TelegramConnector::new();
+    let result = connector
+        .handle_doctor()
+        .await
+        .expect("doctor should succeed");
+    // Doctor should report a check about configuration status
+    assert!(result.get("checks").is_some());
 }

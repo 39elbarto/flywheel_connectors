@@ -51,12 +51,11 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use bytes::Bytes;
 use thiserror::Error;
-use tokio::sync::Mutex;
 use tracing::{debug, info, trace};
 use wasmtime::{
     Config, Engine, Store,
@@ -576,7 +575,10 @@ impl WasiHostState {
     /// Get random bytes (respecting deterministic mode).
     pub fn get_random_bytes(&self, len: usize) -> Vec<u8> {
         if self.deterministic_mode {
-            let mut rng = self.deterministic_rng.blocking_lock();
+            let mut rng = self
+                .deterministic_rng
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             (0..len).map(|_| rng.next_byte()).collect()
         } else {
             use rand::RngCore;

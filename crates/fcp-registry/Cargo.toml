@@ -34,5 +34,5 @@ sigstore = { workspace = true, optional = true }
 sigstore-trust-root = { workspace = true, optional = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt"] }
+fcp-async-core = { path = "../fcp-async-core" }
 uuid = { workspace = true }

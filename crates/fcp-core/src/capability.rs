@@ -8,6 +8,7 @@ use std::fmt;
 use std::time::Duration;
 
 use chrono::Utc;
+use fcp_async_core::time;
 use fcp_crypto::ed25519::Ed25519VerifyingKey;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
@@ -1322,9 +1323,9 @@ where
             Ok(result) => return Ok(result),
             Err(e) if e.is_retryable() && attempt < config.max_attempts => {
                 if let Some(retry_after) = e.retry_after() {
-                    tokio::time::sleep(retry_after).await;
+                    time::sleep(retry_after).await;
                 } else {
-                    tokio::time::sleep(delay).await;
+                    time::sleep(delay).await;
                     delay = std::cmp::min(
                         Duration::from_secs_f64(delay.as_secs_f64() * config.multiplier),
                         config.max_delay,

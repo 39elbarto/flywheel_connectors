@@ -19,13 +19,13 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use fcp_async_core::sync::RwLock;
 use fcp_core::{
     CanaryPolicy, ConnectorId, HealthMetrics, LifecycleError, LifecycleManager, LifecycleRecord,
     LifecycleState, LifecycleStatus, TransitionReason,
 };
 use fcp_testkit::LogCapture;
 use serde_json::json;
-use tokio::sync::RwLock;
 use uuid::Uuid;
 
 // ─────────────────────────────────────────────────────────────────────────────

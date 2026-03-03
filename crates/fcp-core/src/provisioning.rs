@@ -1484,8 +1484,9 @@ mod tests {
         }
 
         fn set_prompt_value(&mut self, step_id: &str, value: &str) {
-            self.prompted_values
-                .insert(StepId::new(step_id), value.to_string());
+            let sid = StepId::new(step_id);
+            self.prompted_values.insert(sid.clone(), value.to_string());
+            self.mark_completed(&sid);
         }
 
         fn remove_awaiting_prompt(&mut self, step_id: &StepId) {
@@ -1656,7 +1657,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     #[allow(clippy::too_many_lines)]
     async fn provisioning_interface_executes_host_mediated_setup_flow() {
         let recipe = ProvisioningRecipe::new(
@@ -1771,7 +1772,7 @@ mod tests {
         assert!(!logs.contains("super-secret-token"));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn provisioning_interface_requires_approval_for_privileged_step() {
         let recipe = ProvisioningRecipe::new(
             RecipeId::new("discord/privileged"),
@@ -1822,7 +1823,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn provisioning_validation_fails_when_required_secret_is_missing() {
         let recipe = ProvisioningRecipe::new(
             RecipeId::new("discord/missing-secret"),

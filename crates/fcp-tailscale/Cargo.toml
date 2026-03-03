@@ -14,6 +14,7 @@ workspace = true
 [dependencies]
 fcp-core.workspace = true
 fcp-crypto.workspace = true
+fcp-async-core = { path = "../fcp-async-core" }
 
 base64.workspace = true
 chrono.workspace = true
@@ -21,11 +22,9 @@ reqwest = { workspace = true, features = ["json"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-fcp-async-core = { path = "../fcp-async-core" }
 semver = "1.0"
 fcp-cbor = { path = "../fcp-cbor" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

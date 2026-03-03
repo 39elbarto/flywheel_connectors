@@ -35,7 +35,6 @@ wasmtime.workspace = true
 wasmtime-wasi.workspace = true
 
 # Async runtime
-tokio.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
 

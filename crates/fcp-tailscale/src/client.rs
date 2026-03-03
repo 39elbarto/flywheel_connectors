@@ -8,11 +8,11 @@
 //! - `/localapi/v0/status` - Get current tailnet status
 //! - `/localapi/v0/whois?addr=<ip>` - Look up peer by IP address
 
+use fcp_async_core::sync::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 use crate::error::{TailscaleError, TailscaleResult};
 use crate::identity::NodeId;

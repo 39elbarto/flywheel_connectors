@@ -1045,7 +1045,7 @@ mod tests {
     {
         let start = Instant::now();
         let result = panic::catch_unwind(AssertUnwindSafe(|| {
-            let rt = tokio::runtime::Builder::new_current_thread()
+            let rt = fcp_async_core::runtime::Builder::new_current_thread()
                 .enable_time()
                 .build()
                 .expect("runtime");

@@ -69,11 +69,7 @@ impl LlmRouterConnector {
         })
     }
 
-    fn verify_capability(
-        &self,
-        params: &serde_json::Value,
-        required_cap: &str,
-    ) -> FcpResult<()> {
+    fn verify_capability(&self, params: &serde_json::Value, required_cap: &str) -> FcpResult<()> {
         let token_value = params
             .get("capability_token")
             .ok_or(FcpError::Unauthorized {
@@ -307,10 +303,7 @@ impl LlmRouterConnector {
         self.base.set_handshaken(true);
 
         // Create capability verifier from host public key for token verification.
-        let instance_id = req
-            .requested_instance_id
-            .clone()
-            .unwrap_or_default();
+        let instance_id = req.requested_instance_id.clone().unwrap_or_default();
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
             req.zone.clone(),
@@ -405,7 +398,10 @@ impl LlmRouterConnector {
         }
 
         // Check 4: Network constraints (CRITICAL)
-        let all_hosts_ok = config.providers.iter().all(|p| Self::host_allowed(&p.base_url));
+        let all_hosts_ok = config
+            .providers
+            .iter()
+            .all(|p| Self::host_allowed(&p.base_url));
         checks.push(json!({
             "name": "network_constraints",
             "passed": all_hosts_ok,
@@ -598,8 +594,7 @@ impl LlmRouterConnector {
                 summary: "Route a chat completion request to the optimal provider/model"
                     .to_string(),
                 description: None,
-                input_schema: Self::operation_input_schema("llm-router.route")
-                    .unwrap_or(json!({})),
+                input_schema: Self::operation_input_schema("llm-router.route").unwrap_or(json!({})),
                 output_schema: Self::operation_output_schema("llm-router.route")
                     .unwrap_or(json!({})),
                 capability: CapabilityId::from_static("llm-router.route"),
@@ -694,18 +689,16 @@ impl LlmRouterConnector {
         &mut self,
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
-        let operation = params
-            .get("operation")
-            .and_then(|v| v.as_str())
-            .ok_or(FcpError::InvalidRequest {
-                code: 1002,
-                message: "Missing operation field".into(),
-            })?;
+        let operation =
+            params
+                .get("operation")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1002,
+                    message: "Missing operation field".into(),
+                })?;
 
-        let input = params
-            .get("input")
-            .cloned()
-            .unwrap_or(json!({}));
+        let input = params.get("input").cloned().unwrap_or(json!({}));
 
         let result = match operation {
             "llm-router.route" => {
@@ -739,10 +732,7 @@ impl LlmRouterConnector {
         result
     }
 
-    pub async fn handle_simulate(
-        &self,
-        params: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    pub async fn handle_simulate(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
         let operation = params
             .get("operation")
             .and_then(|v| v.as_str())
@@ -771,19 +761,17 @@ impl LlmRouterConnector {
     // Operation Implementations
     // -------------------------------------------------------------------------
 
-    async fn invoke_route(
-        &mut self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_route(&mut self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let config = self.config_ref()?.clone();
 
-        let messages = input
-            .get("messages")
-            .and_then(|v| v.as_array())
-            .ok_or(FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing or invalid messages array".into(),
-            })?;
+        let messages =
+            input
+                .get("messages")
+                .and_then(|v| v.as_array())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing or invalid messages array".into(),
+                })?;
 
         if messages.is_empty() {
             return Err(FcpError::InvalidRequest {
@@ -798,15 +786,9 @@ impl LlmRouterConnector {
             .and_then(RoutingStrategy::from_str_opt)
             .unwrap_or(config.default_strategy);
 
-        let preferred_provider = input
-            .get("preferred_provider")
-            .and_then(|v| v.as_str());
-        let preferred_model = input
-            .get("preferred_model")
-            .and_then(|v| v.as_str());
-        let budget_limit = input
-            .get("budget_limit_usd")
-            .and_then(|v| v.as_f64());
+        let preferred_provider = input.get("preferred_provider").and_then(|v| v.as_str());
+        let preferred_model = input.get("preferred_model").and_then(|v| v.as_str());
+        let budget_limit = input.get("budget_limit_usd").and_then(|v| v.as_f64());
         let max_tokens = input
             .get("max_tokens")
             .and_then(|v| v.as_u64())
@@ -843,8 +825,12 @@ impl LlmRouterConnector {
             .sum();
 
         // Build candidates and select
-        let candidates =
-            routing::build_candidates(&config.providers, &self.provider_status, input_tokens, max_tokens);
+        let candidates = routing::build_candidates(
+            &config.providers,
+            &self.provider_status,
+            input_tokens,
+            max_tokens,
+        );
 
         let (selected_idx, reason) = routing::select_candidate(
             &candidates,
@@ -911,19 +897,17 @@ impl LlmRouterConnector {
         }))
     }
 
-    async fn invoke_estimate_cost(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_estimate_cost(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let config = self.config_ref()?;
 
-        let messages = input
-            .get("messages")
-            .and_then(|v| v.as_array())
-            .ok_or(FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing or invalid messages array".into(),
-            })?;
+        let messages =
+            input
+                .get("messages")
+                .and_then(|v| v.as_array())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing or invalid messages array".into(),
+                })?;
 
         let max_tokens = input
             .get("max_tokens")
@@ -1060,10 +1044,7 @@ impl LlmRouterConnector {
         }))
     }
 
-    async fn invoke_get_usage(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_get_usage(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let group_by = input
             .get("group_by")
             .and_then(|v| v.as_str())
@@ -1122,13 +1103,14 @@ impl LlmRouterConnector {
     // -------------------------------------------------------------------------
 
     fn parse_providers(params: &serde_json::Value) -> FcpResult<Vec<ProviderConfig>> {
-        let providers_val = params
-            .get("providers")
-            .and_then(|v| v.as_array())
-            .ok_or(FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing providers array in configuration".into(),
-            })?;
+        let providers_val =
+            params
+                .get("providers")
+                .and_then(|v| v.as_array())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing providers array in configuration".into(),
+                })?;
 
         let mut providers = Vec::new();
         for (idx, pv) in providers_val.iter().enumerate() {
@@ -1541,7 +1523,12 @@ mod tests {
         // Verify provenance
         let provenance = &result["provenance"];
         assert_eq!(provenance["integrity"], "untrusted");
-        assert!(provenance["taint"].as_array().unwrap().contains(&json!("AI_GENERATED")));
+        assert!(
+            provenance["taint"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("AI_GENERATED"))
+        );
 
         // Verify usage was tracked
         let usage_result = connector
@@ -1695,9 +1682,7 @@ mod tests {
         // Should note credential injection is required
         let reasons = result["reasons"].as_array().unwrap();
         let has_cred_info = reasons.iter().any(|r| {
-            r.get("code")
-                .and_then(|v| v.as_str())
-                == Some("credential_injection_required")
+            r.get("code").and_then(|v| v.as_str()) == Some("credential_injection_required")
         });
         assert!(has_cred_info);
     }
@@ -1745,5 +1730,456 @@ mod tests {
 
         let cred_auth = ProviderAuth::CredentialId("my-uuid".into());
         assert_eq!(cred_auth.redacted_label(), "credential_id:my-uuid");
+    }
+
+    // ---- Schema completeness tests ----
+
+    #[test]
+    fn all_operations_have_input_schema() {
+        let ops = [
+            "llm-router.route",
+            "llm-router.estimate_cost",
+            "llm-router.list_providers",
+            "llm-router.get_usage",
+            "llm-router.get_budget",
+        ];
+        for op in ops {
+            let schema = LlmRouterConnector::operation_input_schema(op);
+            assert!(schema.is_some(), "Missing input schema for {op}");
+            let schema = schema.unwrap();
+            assert_eq!(
+                schema["type"], "object",
+                "Input schema for {op} must be object type"
+            );
+        }
+    }
+
+    #[test]
+    fn all_operations_have_output_schema() {
+        let ops = [
+            "llm-router.route",
+            "llm-router.estimate_cost",
+            "llm-router.list_providers",
+            "llm-router.get_usage",
+            "llm-router.get_budget",
+        ];
+        for op in ops {
+            let schema = LlmRouterConnector::operation_output_schema(op);
+            assert!(schema.is_some(), "Missing output schema for {op}");
+            let schema = schema.unwrap();
+            assert_eq!(
+                schema["type"], "object",
+                "Output schema for {op} must be object type"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_operation_schema_is_none() {
+        assert!(LlmRouterConnector::operation_input_schema("llm-router.nonexistent").is_none());
+        assert!(LlmRouterConnector::operation_output_schema("llm-router.nonexistent").is_none());
+        assert!(LlmRouterConnector::operation_input_schema("").is_none());
+        assert!(LlmRouterConnector::operation_output_schema("").is_none());
+    }
+
+    #[test]
+    fn schema_is_deterministic() {
+        let ops = [
+            "llm-router.route",
+            "llm-router.estimate_cost",
+            "llm-router.list_providers",
+            "llm-router.get_usage",
+            "llm-router.get_budget",
+        ];
+        for op in ops {
+            let s1 = LlmRouterConnector::operation_input_schema(op).unwrap();
+            let s2 = LlmRouterConnector::operation_input_schema(op).unwrap();
+            assert_eq!(s1, s2, "Input schema for {op} is not deterministic");
+
+            let o1 = LlmRouterConnector::operation_output_schema(op).unwrap();
+            let o2 = LlmRouterConnector::operation_output_schema(op).unwrap();
+            assert_eq!(o1, o2, "Output schema for {op} is not deterministic");
+        }
+    }
+
+    #[test]
+    fn route_output_schema_has_required_fields() {
+        let schema = LlmRouterConnector::operation_output_schema("llm-router.route").unwrap();
+        let required = schema["required"].as_array().unwrap();
+        let required_strs: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+        assert!(required_strs.contains(&"response"));
+        assert!(required_strs.contains(&"provider"));
+        assert!(required_strs.contains(&"model"));
+        assert!(required_strs.contains(&"cost_usd"));
+        assert!(required_strs.contains(&"provenance"));
+    }
+
+    #[test]
+    fn route_input_schema_requires_messages() {
+        let schema = LlmRouterConnector::operation_input_schema("llm-router.route").unwrap();
+        let required = schema["required"].as_array().unwrap();
+        assert!(required.contains(&json!("messages")));
+    }
+
+    #[test]
+    fn get_budget_output_schema_has_required_fields() {
+        let schema = LlmRouterConnector::operation_output_schema("llm-router.get_budget").unwrap();
+        let required = schema["required"].as_array().unwrap();
+        let required_strs: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+        assert!(required_strs.contains(&"budget_usd"));
+        assert!(required_strs.contains(&"spent_usd"));
+        assert!(required_strs.contains(&"remaining_usd"));
+        assert!(required_strs.contains(&"enforcement"));
+    }
+
+    // ---- Network constraint tests ----
+
+    #[test]
+    fn host_allowed_accepts_valid_hosts() {
+        assert!(LlmRouterConnector::host_allowed(
+            "https://api.anthropic.com"
+        ));
+        assert!(LlmRouterConnector::host_allowed("https://api.openai.com"));
+        assert!(LlmRouterConnector::host_allowed(
+            "https://generativelanguage.googleapis.com"
+        ));
+        // With paths
+        assert!(LlmRouterConnector::host_allowed(
+            "https://api.anthropic.com/v1/messages"
+        ));
+        // With ports
+        assert!(LlmRouterConnector::host_allowed(
+            "https://api.openai.com:443"
+        ));
+    }
+
+    #[test]
+    fn host_allowed_rejects_invalid_hosts() {
+        assert!(!LlmRouterConnector::host_allowed(
+            "https://evil.example.com"
+        ));
+        assert!(!LlmRouterConnector::host_allowed(
+            "https://api.competitor.io"
+        ));
+        assert!(!LlmRouterConnector::host_allowed(
+            "https://phishing-openai.com"
+        ));
+        assert!(!LlmRouterConnector::host_allowed(""));
+    }
+
+    #[test]
+    fn host_allowed_accepts_localhost_in_test() {
+        // In #[cfg(test)], localhost should be allowed
+        assert!(LlmRouterConnector::host_allowed("http://localhost:8080"));
+        assert!(LlmRouterConnector::host_allowed("http://127.0.0.1:3000"));
+    }
+
+    #[tokio::test]
+    async fn configure_rejects_network_constraint_violation() {
+        let mut connector = LlmRouterConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "providers": [{
+                    "name": "evil",
+                    "base_url": "https://evil.example.com",
+                    "api_key": "key-123",
+                    "models": []
+                }]
+            }))
+            .await;
+        assert!(result.is_err());
+    }
+
+    // ---- Simulate handler ----
+
+    #[tokio::test]
+    async fn simulate_returns_expected_format() {
+        let connector = LlmRouterConnector::new();
+        let result = connector
+            .handle_simulate(json!({
+                "operation": "llm-router.route"
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result["operation"], "llm-router.route");
+        assert_eq!(result["would_succeed"], false); // not configured
+        assert!(result["estimated_latency_ms"].as_u64().is_some());
+        assert!(result["side_effects"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn simulate_succeeds_when_configured() {
+        let mut connector = LlmRouterConnector::new();
+        connector
+            .handle_configure(test_config_params())
+            .await
+            .unwrap();
+        let result = connector
+            .handle_simulate(json!({
+                "operation": "llm-router.route"
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result["would_succeed"], true);
+    }
+
+    // ---- Shutdown handler ----
+
+    #[tokio::test]
+    async fn shutdown_returns_zero_cost_before_routing() {
+        let mut connector = LlmRouterConnector::new();
+        let result = connector.handle_shutdown(json!({})).await.unwrap();
+        assert_eq!(result["status"], "shutdown");
+        assert_eq!(result["total_cost_usd"], 0.0);
+    }
+
+    // ---- Configure edge cases ----
+
+    #[tokio::test]
+    async fn configure_missing_providers_array() {
+        let mut connector = LlmRouterConnector::new();
+        let result = connector.handle_configure(json!({})).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn configure_provider_missing_name() {
+        let mut connector = LlmRouterConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "providers": [{
+                    "base_url": "https://api.anthropic.com",
+                    "api_key": "key",
+                    "models": []
+                }]
+            }))
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn configure_default_strategy_when_missing() {
+        let mut connector = LlmRouterConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "providers": [{
+                    "name": "anthropic",
+                    "base_url": "https://api.anthropic.com",
+                    "api_key": "key",
+                    "models": []
+                }]
+            }))
+            .await
+            .unwrap();
+        // default_strategy should default to cost (serde lowercase)
+        assert_eq!(result["default_strategy"], "cost");
+    }
+
+    #[tokio::test]
+    async fn configure_default_budget_when_missing() {
+        let mut connector = LlmRouterConnector::new();
+        connector
+            .handle_configure(json!({
+                "providers": [{
+                    "name": "anthropic",
+                    "base_url": "https://api.anthropic.com",
+                    "api_key": "key",
+                    "models": []
+                }]
+            }))
+            .await
+            .unwrap();
+
+        let budget = connector
+            .handle_invoke(json!({
+                "operation": "llm-router.get_budget",
+                "capability_token": "test",
+                "input": {}
+            }))
+            .await
+            .unwrap();
+
+        // Default budget is infinite — serialized as null in JSON
+        assert!(
+            budget["budget_usd"].is_null() || {
+                budget["budget_usd"]
+                    .as_f64()
+                    .is_some_and(|v| v.is_infinite())
+            }
+        );
+        assert_eq!(budget["enforcement"], "none");
+    }
+
+    #[tokio::test]
+    async fn configure_whitespace_only_api_key_rejected() {
+        let mut connector = LlmRouterConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "providers": [{
+                    "name": "test",
+                    "base_url": "https://api.anthropic.com",
+                    "api_key": "   ",
+                    "models": []
+                }]
+            }))
+            .await;
+        // Whitespace-only key should be treated as missing
+        assert!(result.is_err());
+    }
+
+    // ---- Invoke edge cases ----
+
+    #[tokio::test]
+    async fn invoke_missing_operation_field() {
+        let mut connector = LlmRouterConnector::new();
+        connector
+            .handle_configure(test_config_params())
+            .await
+            .unwrap();
+
+        let result = connector
+            .handle_invoke(json!({
+                "capability_token": "test",
+                "input": {}
+            }))
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn invoke_missing_capability_token() {
+        let mut connector = LlmRouterConnector::new();
+        connector
+            .handle_configure(test_config_params())
+            .await
+            .unwrap();
+
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "llm-router.route",
+                "input": {"messages": [{"role": "user", "content": "hi"}]}
+            }))
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn invoke_invalid_capability_token_format() {
+        let mut connector = LlmRouterConnector::new();
+        connector
+            .handle_configure(test_config_params())
+            .await
+            .unwrap();
+
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "llm-router.route",
+                "capability_token": 12345,
+                "input": {"messages": [{"role": "user", "content": "hi"}]}
+            }))
+            .await;
+        assert!(result.is_err());
+    }
+
+    // ---- Usage tracking ----
+
+    #[tokio::test]
+    async fn usage_with_provider_breakdown() {
+        let mut connector = LlmRouterConnector::new();
+        connector
+            .handle_configure(test_config_params())
+            .await
+            .unwrap();
+
+        // Route a request to generate usage
+        connector
+            .handle_invoke(json!({
+                "operation": "llm-router.route",
+                "capability_token": "test",
+                "input": {
+                    "messages": [{"role": "user", "content": "Hello world"}],
+                    "strategy": "cost"
+                }
+            }))
+            .await
+            .unwrap();
+
+        // Get usage with provider breakdown
+        let usage = connector
+            .handle_invoke(json!({
+                "operation": "llm-router.get_usage",
+                "capability_token": "test",
+                "input": {"group_by": "provider"}
+            }))
+            .await
+            .unwrap();
+
+        assert!(usage["requests_total"].as_u64().unwrap() > 0);
+        assert!(usage["breakdown"].as_array().is_some());
+        let breakdown = usage["breakdown"].as_array().unwrap();
+        assert!(!breakdown.is_empty());
+    }
+
+    // ---- Health after configure ----
+
+    #[tokio::test]
+    async fn health_after_configure_reports_ok() {
+        let mut connector = LlmRouterConnector::new();
+        connector
+            .handle_configure(test_config_params())
+            .await
+            .unwrap();
+        let result = connector.handle_health().await.unwrap();
+        assert_eq!(result["status"], "ok");
+        assert_eq!(result["configured"], true);
+    }
+
+    // ---- List providers without models ----
+
+    #[tokio::test]
+    async fn list_providers_no_models_flag() {
+        let mut connector = LlmRouterConnector::new();
+        connector
+            .handle_configure(test_config_params())
+            .await
+            .unwrap();
+
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "llm-router.list_providers",
+                "capability_token": "test",
+                "input": {}  // include_models defaults to false
+            }))
+            .await
+            .unwrap();
+
+        let providers = result["providers"].as_array().unwrap();
+        // Without include_models flag, no "models" key expected
+        assert!(providers[0].get("models").is_none());
+    }
+
+    // ---- Self-check with network violation ----
+
+    #[tokio::test]
+    async fn self_check_reports_no_models_warning() {
+        let mut connector = LlmRouterConnector::new();
+        connector
+            .handle_configure(json!({
+                "providers": [{
+                    "name": "anthropic",
+                    "base_url": "https://api.anthropic.com",
+                    "api_key": "key",
+                    "models": []  // No models
+                }]
+            }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_self_check().await.unwrap();
+        let reasons = result["reasons"].as_array().unwrap();
+        let has_no_models = reasons
+            .iter()
+            .any(|r| r.get("code").and_then(|v| v.as_str()) == Some("providers_no_models"));
+        assert!(has_no_models);
     }
 }

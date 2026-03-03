@@ -84,10 +84,7 @@ async fn handle_message(connector: &mut LlmRouterConnector, message: &str) -> se
         }
     };
 
-    let method = request
-        .get("method")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let method = request.get("method").and_then(|v| v.as_str()).unwrap_or("");
     let id = request.get("id").cloned();
     let params = request
         .get("params")

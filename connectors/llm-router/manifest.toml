@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:pending"
+interface_hash = "blake3-256:fcp.interface.v2:73e3292529996229226b1cb9dc9ad62e47d9d5346fbdd3251e4544571dc6e945"
 
 [connector]
 id = "fcp.llm-router"
@@ -324,24 +324,6 @@ type = "string"
 
 [provides.operations."llm-router.estimate_cost".output_schema.properties.recommended.properties.estimated_cost_usd]
 type = "number"
-
-[provides.operations."llm-router.estimate_cost".network_constraints]
-host_allow = []
-port_allow = []
-ip_allow = []
-cidr_deny = []
-deny_localhost = true
-deny_private_ranges = true
-deny_tailnet_ranges = true
-require_sni = true
-spki_pins = []
-deny_ip_literals = true
-require_host_canonicalization = true
-dns_max_ips = 16
-max_redirects = 0
-connect_timeout_ms = 5000
-total_timeout_ms = 10000
-max_response_bytes = 1048576
 
 [provides.operations."llm-router.estimate_cost".ai_hints]
 when_to_use = "Preview cost across providers before committing to a request. Useful for budget-sensitive workflows."

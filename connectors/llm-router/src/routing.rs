@@ -58,7 +58,10 @@ pub fn select_candidate(
             .find(|(_, c)| c.provider_name == pref_provider)
         {
             if strategy == RoutingStrategy::Fallback {
-                return Ok((*idx, format!("preferred provider '{pref_provider}' available")));
+                return Ok((
+                    *idx,
+                    format!("preferred provider '{pref_provider}' available"),
+                ));
             }
         }
     }
@@ -247,15 +250,8 @@ mod tests {
     #[test]
     fn cost_strategy_selects_cheapest() {
         let candidates = test_candidates();
-        let (idx, reason) = select_candidate(
-            &candidates,
-            RoutingStrategy::Cost,
-            &[],
-            None,
-            None,
-            None,
-        )
-        .unwrap();
+        let (idx, reason) =
+            select_candidate(&candidates, RoutingStrategy::Cost, &[], None, None, None).unwrap();
         assert_eq!(candidates[idx].provider_name, "google-ai");
         assert!(reason.contains("lowest cost"));
     }
@@ -263,15 +259,8 @@ mod tests {
     #[test]
     fn latency_strategy_selects_fastest() {
         let candidates = test_candidates();
-        let (idx, reason) = select_candidate(
-            &candidates,
-            RoutingStrategy::Latency,
-            &[],
-            None,
-            None,
-            None,
-        )
-        .unwrap();
+        let (idx, reason) =
+            select_candidate(&candidates, RoutingStrategy::Latency, &[], None, None, None).unwrap();
         assert_eq!(candidates[idx].provider_name, "google-ai");
         assert!(reason.contains("lowest latency"));
     }
@@ -355,14 +344,7 @@ mod tests {
 
     #[test]
     fn empty_candidates_errors() {
-        let result = select_candidate(
-            &[],
-            RoutingStrategy::Cost,
-            &[],
-            None,
-            None,
-            None,
-        );
+        let result = select_candidate(&[], RoutingStrategy::Cost, &[], None, None, None);
         assert!(result.is_err());
     }
 

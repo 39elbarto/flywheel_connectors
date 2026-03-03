@@ -105,9 +105,7 @@ async fn configure_with_three_providers() {
 #[tokio::test]
 async fn configure_rejects_empty_providers() {
     let mut connector = LlmRouterConnector::new();
-    let result = connector
-        .handle_configure(json!({"providers": []}))
-        .await;
+    let result = connector.handle_configure(json!({"providers": []})).await;
     assert!(result.is_err());
 }
 
@@ -478,10 +476,7 @@ async fn shutdown_reports_cost() {
         .await
         .unwrap();
 
-    let result = connector
-        .handle_shutdown(json!({}))
-        .await
-        .unwrap();
+    let result = connector.handle_shutdown(json!({})).await.unwrap();
 
     assert_eq!(result["status"], "shutdown");
     assert!(result["total_cost_usd"].as_f64().unwrap() > 0.0);
@@ -567,7 +562,11 @@ async fn configure_with_credential_id_reports_secretless() {
     let check = connector.handle_self_check().await.unwrap();
     assert_eq!(check["ready"], true);
     let reasons = check["reasons"].as_array().unwrap();
-    assert!(reasons.iter().any(|r| r["code"] == "credential_injection_required"));
+    assert!(
+        reasons
+            .iter()
+            .any(|r| r["code"] == "credential_injection_required")
+    );
 }
 
 #[tokio::test]

@@ -14,8 +14,26 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
-pub use tokio::select;
-pub use tokio::task_local;
+#[doc(hidden)]
+pub mod __private {
+    pub use tokio;
+}
+
+/// `select!` macro routed through the async-core substrate.
+#[macro_export]
+macro_rules! select {
+    ($($tokens:tt)*) => {
+        $crate::__private::tokio::select! { $($tokens)* }
+    };
+}
+
+/// `task_local!` macro routed through the async-core substrate.
+#[macro_export]
+macro_rules! task_local {
+    ($($tokens:tt)*) => {
+        $crate::__private::tokio::task_local! { $($tokens)* }
+    };
+}
 
 /// Unified async failure taxonomy for substrate consumers.
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
@@ -84,11 +102,90 @@ impl Instrumentation for NoopInstrumentation {}
 
 /// Runtime bridging helpers.
 pub mod runtime {
+    use std::io;
+
     use super::{AsyncError, Future};
 
     pub use tokio::main;
-    pub use tokio::runtime::{Builder, Runtime};
     pub use tokio::test;
+
+    /// Runtime builder abstraction owned by async-core.
+    pub struct Builder {
+        inner: tokio::runtime::Builder,
+    }
+
+    impl Builder {
+        /// Create a single-threaded runtime builder.
+        #[must_use]
+        pub fn new_current_thread() -> Self {
+            Self {
+                inner: tokio::runtime::Builder::new_current_thread(),
+            }
+        }
+
+        /// Create a multi-threaded runtime builder.
+        #[must_use]
+        pub fn new_multi_thread() -> Self {
+            Self {
+                inner: tokio::runtime::Builder::new_multi_thread(),
+            }
+        }
+
+        /// Enable all Tokio drivers.
+        #[must_use]
+        pub fn enable_all(mut self) -> Self {
+            self.inner.enable_all();
+            self
+        }
+
+        /// Enable Tokio time driver.
+        #[must_use]
+        pub fn enable_time(mut self) -> Self {
+            self.inner.enable_time();
+            self
+        }
+
+        /// Enable Tokio I/O driver.
+        #[must_use]
+        pub fn enable_io(mut self) -> Self {
+            self.inner.enable_io();
+            self
+        }
+
+        /// Build runtime.
+        ///
+        /// # Errors
+        ///
+        /// Returns I/O errors from runtime initialization.
+        pub fn build(mut self) -> io::Result<Runtime> {
+            self.inner.build().map(|inner| Runtime { inner })
+        }
+    }
+
+    /// Runtime abstraction owned by async-core.
+    #[derive(Debug)]
+    pub struct Runtime {
+        inner: tokio::runtime::Runtime,
+    }
+
+    impl Runtime {
+        /// Create a default multi-thread runtime with all drivers enabled.
+        ///
+        /// # Errors
+        ///
+        /// Returns I/O errors from runtime initialization.
+        pub fn new() -> io::Result<Self> {
+            Builder::new_multi_thread().enable_all().build()
+        }
+
+        /// Block on a future.
+        pub fn block_on<F>(&self, future: F) -> F::Output
+        where
+            F: Future,
+        {
+            self.inner.block_on(future)
+        }
+    }
 
     /// Execute a future from sync context.
     ///
@@ -109,11 +206,11 @@ pub mod runtime {
             });
         }
 
-        let runtime = tokio::runtime::Builder::new_current_thread()
+        let runtime = Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|err| AsyncError::Runtime {
-                message: err.to_string(),
+                message: format!("failed to build runtime: {err}"),
             })?;
         Ok(runtime.block_on(future))
     }
@@ -122,21 +219,51 @@ pub mod runtime {
 /// Time/timer helpers.
 pub mod time {
     use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
     use std::time::Duration;
 
     use super::AsyncError;
 
-    pub use tokio::time::{Interval, Sleep};
+    /// Sleep future abstraction owned by async-core.
+    pub struct Sleep {
+        inner: Pin<Box<tokio::time::Sleep>>,
+    }
+
+    impl Future for Sleep {
+        type Output = ();
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            self.inner.as_mut().poll(cx)
+        }
+    }
+
+    /// Interval abstraction owned by async-core.
+    pub struct Interval {
+        inner: tokio::time::Interval,
+    }
+
+    impl Interval {
+        /// Wait for the next interval tick.
+        pub async fn tick(&mut self) -> std::time::Instant {
+            self.inner.tick().await.into()
+        }
+    }
 
     /// Sleep for a duration.
+    #[must_use]
     pub fn sleep(duration: Duration) -> Sleep {
-        tokio::time::sleep(duration)
+        Sleep {
+            inner: Box::pin(tokio::time::sleep(duration)),
+        }
     }
 
     /// Create interval ticker.
     #[must_use]
     pub fn interval(period: Duration) -> Interval {
-        tokio::time::interval(period)
+        Interval {
+            inner: tokio::time::interval(period),
+        }
     }
 
     /// Timeout wrapper with normalized error mapping.
@@ -148,7 +275,7 @@ pub mod time {
     where
         F: Future<Output = T>,
     {
-        tokio::time::timeout(duration, future)
+        asupersync::time::timeout(asupersync::time::wall_now(), duration, future)
             .await
             .map_err(|_| AsyncError::Timeout {
                 timeout_ms: u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
@@ -310,7 +437,7 @@ impl ExecutionContext {
             return Err(AsyncError::Cancelled);
         }
 
-        tokio::select! {
+        crate::select! {
             biased;
             _ = listener.cancelled() => Err(AsyncError::Cancelled),
             output = async {
@@ -328,7 +455,7 @@ impl ExecutionContext {
     ///
     /// Returns timeout/cancellation failures according to context semantics.
     pub async fn sleep(&self, duration: Duration) -> Result<(), AsyncError> {
-        self.run(tokio::time::sleep(duration)).await
+        self.run(time::sleep(duration)).await
     }
 }
 
@@ -340,7 +467,82 @@ pub mod channel {
 
     use super::{AsyncError, Instrumentation, NoopInstrumentation};
 
-    pub use tokio::sync::{broadcast, mpsc, watch};
+    /// Tokio broadcast compatibility surface owned by async-core.
+    pub mod broadcast {
+        pub type Sender<T> = tokio::sync::broadcast::Sender<T>;
+        pub type Receiver<T> = tokio::sync::broadcast::Receiver<T>;
+
+        pub mod error {
+            pub type RecvError = tokio::sync::broadcast::error::RecvError;
+            pub type SendError<T> = tokio::sync::broadcast::error::SendError<T>;
+        }
+
+        /// Create a bounded broadcast channel.
+        #[must_use]
+        pub fn channel<T: Clone>(capacity: usize) -> (Sender<T>, Receiver<T>) {
+            tokio::sync::broadcast::channel(capacity)
+        }
+    }
+
+    /// Tokio mpsc compatibility surface owned by async-core.
+    pub mod mpsc {
+        pub type Sender<T> = tokio::sync::mpsc::Sender<T>;
+        pub type Receiver<T> = tokio::sync::mpsc::Receiver<T>;
+        pub type UnboundedSender<T> = tokio::sync::mpsc::UnboundedSender<T>;
+        pub type UnboundedReceiver<T> = tokio::sync::mpsc::UnboundedReceiver<T>;
+
+        pub mod error {
+            pub type SendError<T> = tokio::sync::mpsc::error::SendError<T>;
+            pub type TrySendError<T> = tokio::sync::mpsc::error::TrySendError<T>;
+            pub type TryRecvError = tokio::sync::mpsc::error::TryRecvError;
+        }
+
+        /// Create a bounded mpsc channel.
+        #[must_use]
+        pub fn channel<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
+            tokio::sync::mpsc::channel(capacity)
+        }
+
+        /// Create an unbounded mpsc channel.
+        #[must_use]
+        pub fn unbounded_channel<T>() -> (UnboundedSender<T>, UnboundedReceiver<T>) {
+            tokio::sync::mpsc::unbounded_channel()
+        }
+    }
+
+    /// Tokio oneshot compatibility surface owned by async-core.
+    pub mod oneshot {
+        pub type Sender<T> = tokio::sync::oneshot::Sender<T>;
+        pub type Receiver<T> = tokio::sync::oneshot::Receiver<T>;
+
+        pub mod error {
+            pub type RecvError = tokio::sync::oneshot::error::RecvError;
+        }
+
+        /// Create a one-shot channel.
+        #[must_use]
+        pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
+            tokio::sync::oneshot::channel()
+        }
+    }
+
+    /// Tokio watch compatibility surface owned by async-core.
+    pub mod watch {
+        pub type Sender<T> = tokio::sync::watch::Sender<T>;
+        pub type Receiver<T> = tokio::sync::watch::Receiver<T>;
+        pub type Ref<'a, T> = tokio::sync::watch::Ref<'a, T>;
+
+        pub mod error {
+            pub type RecvError = tokio::sync::watch::error::RecvError;
+            pub type SendError<T> = tokio::sync::watch::error::SendError<T>;
+        }
+
+        /// Create a watch channel.
+        #[must_use]
+        pub fn channel<T>(value: T) -> (Sender<T>, Receiver<T>) {
+            tokio::sync::watch::channel(value)
+        }
+    }
 
     /// Bounded sender with queue instrumentation hooks.
     #[derive(Clone)]
@@ -459,7 +661,7 @@ pub mod channel {
 pub mod shutdown {
     use std::time::Duration;
 
-    use super::{AsyncError, channel::watch};
+    use super::{AsyncError, channel::watch, time};
 
     /// Wait until shutdown is signaled (`true`).
     ///
@@ -495,37 +697,62 @@ pub mod shutdown {
             return Err(AsyncError::Cancelled);
         }
 
-        tokio::select! {
+        crate::select! {
             biased;
             _ = wait_for_shutdown(shutdown) => Err(AsyncError::Cancelled),
-            () = tokio::time::sleep(duration) => Ok(()),
+            () = time::sleep(duration) => Ok(()),
         }
     }
 }
 
-/// Synchronization re-exports.
+/// Synchronization compatibility surface owned by async-core.
 pub mod sync {
-    pub use tokio::sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
+    pub type Mutex<T> = tokio::sync::Mutex<T>;
+    pub type OwnedSemaphorePermit = tokio::sync::OwnedSemaphorePermit;
+    pub type RwLock<T> = tokio::sync::RwLock<T>;
+    pub type Semaphore = tokio::sync::Semaphore;
 }
 
-/// Task re-exports.
+/// Task compatibility surface owned by async-core.
 pub mod task {
-    pub use tokio::task::{JoinHandle, spawn, yield_now};
+    use std::future::Future;
+
+    pub type JoinHandle<T> = tokio::task::JoinHandle<T>;
+
+    /// Spawn an asynchronous task.
+    pub fn spawn<F>(future: F) -> JoinHandle<F::Output>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        tokio::task::spawn(future)
+    }
+
+    /// Cooperatively yield execution.
+    pub async fn yield_now() {
+        tokio::task::yield_now().await;
+    }
 }
 
 /// Tokio IO re-exports.
 pub mod io {
-    pub use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    pub use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+    pub type BufReader<R> = tokio::io::BufReader<R>;
 }
 
 /// Tokio process re-exports.
 pub mod process {
-    pub use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
+    pub type Child = tokio::process::Child;
+    pub type ChildStderr = tokio::process::ChildStderr;
+    pub type ChildStdin = tokio::process::ChildStdin;
+    pub type ChildStdout = tokio::process::ChildStdout;
+    pub type Command = tokio::process::Command;
 }
 
 /// Tokio net re-exports.
 pub mod net {
-    pub use tokio::net::{TcpListener, TcpStream};
+    pub type TcpListener = tokio::net::TcpListener;
+    pub type TcpStream = tokio::net::TcpStream;
 }
 
 /// Cooperative cancellation token.
@@ -606,7 +833,7 @@ impl CancellationListener {
 /// Structured task group with cooperative shutdown.
 pub struct TaskGroup {
     cancellation: CancellationToken,
-    tasks: Vec<(String, tokio::task::JoinHandle<Result<(), AsyncError>>)>,
+    tasks: Vec<(String, task::JoinHandle<Result<(), AsyncError>>)>,
     instrumentation: Arc<dyn Instrumentation>,
 }
 
@@ -649,7 +876,7 @@ impl TaskGroup {
 
         let instrumentation = Arc::clone(&self.instrumentation);
         let hook_name = task_name.clone();
-        let handle = tokio::task::spawn(async move {
+        let handle = task::spawn(async move {
             let result = future.await;
             instrumentation.on_task_exit(&hook_name, &result);
             result
@@ -667,16 +894,15 @@ impl TaskGroup {
         self.cancellation.cancel();
 
         let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
+        let deadline = std::time::Instant::now()
+            .checked_add(timeout)
+            .unwrap_or_else(std::time::Instant::now);
         let mut first_error: Option<AsyncError> = None;
 
         for (task_name, mut handle) in self.tasks.drain(..) {
-            match tokio::time::timeout(timeout, &mut handle).await {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            match time::timeout(remaining, &mut handle).await {
                 Ok(Ok(Ok(()))) => {}
-                Ok(Ok(Err(err))) => {
-                    if first_error.is_none() {
-                        first_error = Some(err);
-                    }
-                }
                 Ok(Err(err)) => {
                     if first_error.is_none() {
                         first_error = Some(AsyncError::Join {
@@ -684,10 +910,15 @@ impl TaskGroup {
                         });
                     }
                 }
-                Err(_) => {
+                Err(AsyncError::Timeout { .. }) => {
                     handle.abort();
                     if first_error.is_none() {
                         first_error = Some(AsyncError::Timeout { timeout_ms });
+                    }
+                }
+                Ok(Ok(Err(err))) | Err(err) => {
+                    if first_error.is_none() {
+                        first_error = Some(err);
                     }
                 }
             }
@@ -705,6 +936,7 @@ impl Default for TaskGroup {
 
 #[cfg(test)]
 mod tests {
+    use std::future;
     use std::time::Duration;
     use std::{
         sync::Arc,
@@ -715,6 +947,29 @@ mod tests {
         AsyncError, CancellationToken, ContextScope, ExecutionContext, TaskGroup, channel, runtime,
         task, time,
     };
+
+    #[test]
+    fn block_on_sync_executes_outside_tokio_runtime() {
+        let output = runtime::block_on_sync(async { 7_u8 }).expect("block_on_sync should succeed");
+        assert_eq!(output, 7);
+    }
+
+    #[test]
+    fn block_on_sync_supports_io_driver() {
+        let result = runtime::block_on_sync(async {
+            let listener = super::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind local listener");
+            drop(listener);
+        });
+        assert!(result.is_ok());
+    }
+
+    #[runtime::test]
+    async fn timeout_maps_elapsed_to_async_error() {
+        let timeout_result = time::timeout(Duration::from_millis(5), future::pending::<()>()).await;
+        assert!(matches!(timeout_result, Err(AsyncError::Timeout { .. })));
+    }
 
     #[runtime::test]
     async fn cancellation_propagates_to_all_listeners() {

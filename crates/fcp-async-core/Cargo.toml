@@ -13,4 +13,5 @@ workspace = true
 
 [dependencies]
 tokio = { workspace = true, features = ["full"] }
+asupersync = { path = "/dp/asupersync", default-features = false }
 thiserror.workspace = true

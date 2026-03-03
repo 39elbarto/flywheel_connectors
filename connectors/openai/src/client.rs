@@ -712,10 +712,7 @@ impl OpenAIClient {
     where
         R: serde::de::DeserializeOwned + Send,
     {
-        let request = self
-            .client
-            .get(url)
-            .header("OpenAI-Beta", "assistants=v2");
+        let request = self.client.get(url).header("OpenAI-Beta", "assistants=v2");
         let request = self.apply_auth(request);
 
         let response = request.send().await?;
@@ -811,10 +808,7 @@ impl OpenAIClient {
     ///
     /// Returns an error on HTTP failures, rate limiting, or authentication errors.
     #[instrument(skip(self))]
-    pub async fn delete_assistant(
-        &self,
-        assistant_id: &str,
-    ) -> OpenAIResult<serde_json::Value> {
+    pub async fn delete_assistant(&self, assistant_id: &str) -> OpenAIResult<serde_json::Value> {
         let url = format!("{}/v1/assistants/{assistant_id}", self.base_url);
         self.delete_v2(&url).await
     }
@@ -840,8 +834,7 @@ impl OpenAIClient {
         if let Some(meta) = metadata {
             body.insert("metadata".into(), meta);
         }
-        self.post_json(&url, &serde_json::Value::Object(body))
-            .await
+        self.post_json(&url, &serde_json::Value::Object(body)).await
     }
 
     /// Get a thread by ID.
@@ -954,10 +947,7 @@ impl OpenAIClient {
     /// Returns an error on HTTP failures, rate limiting, or authentication errors.
     #[instrument(skip(self))]
     pub async fn get_run(&self, thread_id: &str, run_id: &str) -> OpenAIResult<Run> {
-        let url = format!(
-            "{}/v1/threads/{thread_id}/runs/{run_id}",
-            self.base_url
-        );
+        let url = format!("{}/v1/threads/{thread_id}/runs/{run_id}", self.base_url);
         self.get_v2(&url).await
     }
 

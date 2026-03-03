@@ -1775,9 +1775,7 @@ impl OpenAIConnector {
             "openai.assistants.delete" => self.invoke_assistants_delete(input).await,
             "openai.threads.create" => self.invoke_threads_create(input).await,
             "openai.threads.get" => self.invoke_threads_get(input).await,
-            "openai.threads.messages.create" => {
-                self.invoke_threads_messages_create(input).await
-            }
+            "openai.threads.messages.create" => self.invoke_threads_messages_create(input).await,
             "openai.threads.messages.list" => self.invoke_threads_messages_list(input).await,
             "openai.threads.runs.create" => self.invoke_threads_runs_create(input).await,
             "openai.threads.runs.get" => self.invoke_threads_runs_get(input).await,
@@ -2665,13 +2663,14 @@ impl OpenAIConnector {
     ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
 
-        let model = input
-            .get("model")
-            .and_then(|v| v.as_str())
-            .ok_or(FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing required field: model".into(),
-            })?;
+        let model =
+            input
+                .get("model")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing required field: model".into(),
+                })?;
 
         if model.is_empty() {
             return Err(FcpError::InvalidRequest {
@@ -2850,10 +2849,7 @@ impl OpenAIConnector {
     ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
 
-        let messages = input
-            .get("messages")
-            .and_then(|v| v.as_array())
-            .cloned();
+        let messages = input.get("messages").and_then(|v| v.as_array()).cloned();
         let metadata = input.get("metadata").cloned();
 
         let thread = client
@@ -2873,10 +2869,7 @@ impl OpenAIConnector {
         }))
     }
 
-    async fn invoke_threads_get(
-        &self,
-        input: serde_json::Value,
-    ) -> FcpResult<serde_json::Value> {
+    async fn invoke_threads_get(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
 
         let thread_id =

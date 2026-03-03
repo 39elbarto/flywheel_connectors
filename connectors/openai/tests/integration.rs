@@ -2710,8 +2710,7 @@ async fn assistants_create_happy_path() {
 
     let mut connector = OpenAIConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
-    let signing_key =
-        setup_handshake(&mut connector, &["openai.assistants.create"]).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.assistants.create"]).await;
     let token = generate_valid_token(&signing_key, "openai.assistants.create");
 
     let result = connector
@@ -2739,8 +2738,7 @@ async fn assistants_create_missing_model() {
     let mock = MockApiServer::start().await;
     let mut connector = OpenAIConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
-    let signing_key =
-        setup_handshake(&mut connector, &["openai.assistants.create"]).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.assistants.create"]).await;
     let token = generate_valid_token(&signing_key, "openai.assistants.create");
 
     let result = connector
@@ -2760,8 +2758,7 @@ async fn assistants_create_empty_model() {
     let mock = MockApiServer::start().await;
     let mut connector = OpenAIConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
-    let signing_key =
-        setup_handshake(&mut connector, &["openai.assistants.create"]).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.assistants.create"]).await;
     let token = generate_valid_token(&signing_key, "openai.assistants.create");
 
     let result = connector
@@ -2802,8 +2799,7 @@ async fn assistants_list_happy_path() {
 
     let mut connector = OpenAIConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
-    let signing_key =
-        setup_handshake(&mut connector, &["openai.assistants.list"]).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.assistants.list"]).await;
     let token = generate_valid_token(&signing_key, "openai.assistants.list");
 
     let result = connector
@@ -2843,8 +2839,7 @@ async fn assistants_get_happy_path() {
 
     let mut connector = OpenAIConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
-    let signing_key =
-        setup_handshake(&mut connector, &["openai.assistants.get"]).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.assistants.get"]).await;
     let token = generate_valid_token(&signing_key, "openai.assistants.get");
 
     let result = connector
@@ -2867,8 +2862,7 @@ async fn assistants_get_missing_id() {
     let mock = MockApiServer::start().await;
     let mut connector = OpenAIConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
-    let signing_key =
-        setup_handshake(&mut connector, &["openai.assistants.get"]).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.assistants.get"]).await;
     let token = generate_valid_token(&signing_key, "openai.assistants.get");
 
     let result = connector
@@ -2888,8 +2882,7 @@ async fn assistants_get_empty_id() {
     let mock = MockApiServer::start().await;
     let mut connector = OpenAIConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
-    let signing_key =
-        setup_handshake(&mut connector, &["openai.assistants.get"]).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.assistants.get"]).await;
     let token = generate_valid_token(&signing_key, "openai.assistants.get");
 
     let result = connector
@@ -2920,8 +2913,7 @@ async fn assistants_delete_happy_path() {
 
     let mut connector = OpenAIConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
-    let signing_key =
-        setup_handshake(&mut connector, &["openai.assistants.delete"]).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.assistants.delete"]).await;
     let token = generate_valid_token(&signing_key, "openai.assistants.delete");
 
     let result = connector
@@ -2944,8 +2936,7 @@ async fn assistants_delete_missing_id() {
     let mock = MockApiServer::start().await;
     let mut connector = OpenAIConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
-    let signing_key =
-        setup_handshake(&mut connector, &["openai.assistants.delete"]).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.assistants.delete"]).await;
     let token = generate_valid_token(&signing_key, "openai.assistants.delete");
 
     let result = connector
@@ -3001,8 +2992,7 @@ async fn threads_create_happy_path() {
 
     let mut connector = OpenAIConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
-    let signing_key =
-        setup_handshake(&mut connector, &["openai.threads.create"]).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.threads.create"]).await;
     let token = generate_valid_token(&signing_key, "openai.threads.create");
 
     let result = connector
@@ -3037,8 +3027,7 @@ async fn threads_get_happy_path() {
 
     let mut connector = OpenAIConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
-    let signing_key =
-        setup_handshake(&mut connector, &["openai.threads.get"]).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.threads.get"]).await;
     let token = generate_valid_token(&signing_key, "openai.threads.get");
 
     let result = connector
@@ -3060,8 +3049,7 @@ async fn threads_get_missing_id() {
     let mock = MockApiServer::start().await;
     let mut connector = OpenAIConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
-    let signing_key =
-        setup_handshake(&mut connector, &["openai.threads.get"]).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.threads.get"]).await;
     let token = generate_valid_token(&signing_key, "openai.threads.get");
 
     let result = connector
@@ -3081,8 +3069,7 @@ async fn threads_get_empty_id() {
     let mock = MockApiServer::start().await;
     let mut connector = OpenAIConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
-    let signing_key =
-        setup_handshake(&mut connector, &["openai.threads.get"]).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.threads.get"]).await;
     let token = generate_valid_token(&signing_key, "openai.threads.get");
 
     let result = connector
@@ -3123,8 +3110,7 @@ async fn threads_messages_create_happy_path() {
 
     let mut connector = OpenAIConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
-    let signing_key =
-        setup_handshake(&mut connector, &["openai.threads.messages.create"]).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.threads.messages.create"]).await;
     let token = generate_valid_token(&signing_key, "openai.threads.messages.create");
 
     let result = connector
@@ -3155,8 +3141,7 @@ async fn threads_messages_create_missing_content() {
     let mock = MockApiServer::start().await;
     let mut connector = OpenAIConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
-    let signing_key =
-        setup_handshake(&mut connector, &["openai.threads.messages.create"]).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.threads.messages.create"]).await;
     let token = generate_valid_token(&signing_key, "openai.threads.messages.create");
 
     let result = connector
@@ -3179,8 +3164,7 @@ async fn threads_messages_create_empty_content() {
     let mock = MockApiServer::start().await;
     let mut connector = OpenAIConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
-    let signing_key =
-        setup_handshake(&mut connector, &["openai.threads.messages.create"]).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.threads.messages.create"]).await;
     let token = generate_valid_token(&signing_key, "openai.threads.messages.create");
 
     let result = connector
@@ -3204,8 +3188,7 @@ async fn threads_messages_create_missing_role() {
     let mock = MockApiServer::start().await;
     let mut connector = OpenAIConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
-    let signing_key =
-        setup_handshake(&mut connector, &["openai.threads.messages.create"]).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.threads.messages.create"]).await;
     let token = generate_valid_token(&signing_key, "openai.threads.messages.create");
 
     let result = connector
@@ -3250,8 +3233,7 @@ async fn threads_messages_list_happy_path() {
 
     let mut connector = OpenAIConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
-    let signing_key =
-        setup_handshake(&mut connector, &["openai.threads.messages.list"]).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.threads.messages.list"]).await;
     let token = generate_valid_token(&signing_key, "openai.threads.messages.list");
 
     let result = connector
@@ -3278,8 +3260,7 @@ async fn threads_messages_list_missing_thread_id() {
     let mock = MockApiServer::start().await;
     let mut connector = OpenAIConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
-    let signing_key =
-        setup_handshake(&mut connector, &["openai.threads.messages.list"]).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.threads.messages.list"]).await;
     let token = generate_valid_token(&signing_key, "openai.threads.messages.list");
 
     let result = connector
@@ -3327,8 +3308,7 @@ async fn runs_create_happy_path() {
 
     let mut connector = OpenAIConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
-    let signing_key =
-        setup_handshake(&mut connector, &["openai.threads.runs.create"]).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.threads.runs.create"]).await;
     let token = generate_valid_token(&signing_key, "openai.threads.runs.create");
 
     let result = connector
@@ -3356,8 +3336,7 @@ async fn runs_create_missing_thread_id() {
     let mock = MockApiServer::start().await;
     let mut connector = OpenAIConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
-    let signing_key =
-        setup_handshake(&mut connector, &["openai.threads.runs.create"]).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.threads.runs.create"]).await;
     let token = generate_valid_token(&signing_key, "openai.threads.runs.create");
 
     let result = connector
@@ -3377,8 +3356,7 @@ async fn runs_create_missing_assistant_id() {
     let mock = MockApiServer::start().await;
     let mut connector = OpenAIConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
-    let signing_key =
-        setup_handshake(&mut connector, &["openai.threads.runs.create"]).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.threads.runs.create"]).await;
     let token = generate_valid_token(&signing_key, "openai.threads.runs.create");
 
     let result = connector
@@ -3426,8 +3404,7 @@ async fn runs_get_happy_path() {
 
     let mut connector = OpenAIConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
-    let signing_key =
-        setup_handshake(&mut connector, &["openai.threads.runs.get"]).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.threads.runs.get"]).await;
     let token = generate_valid_token(&signing_key, "openai.threads.runs.get");
 
     let result = connector
@@ -3454,8 +3431,7 @@ async fn runs_get_missing_run_id() {
     let mock = MockApiServer::start().await;
     let mut connector = OpenAIConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
-    let signing_key =
-        setup_handshake(&mut connector, &["openai.threads.runs.get"]).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.threads.runs.get"]).await;
     let token = generate_valid_token(&signing_key, "openai.threads.runs.get");
 
     let result = connector
@@ -3499,8 +3475,7 @@ async fn runs_cancel_happy_path() {
 
     let mut connector = OpenAIConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
-    let signing_key =
-        setup_handshake(&mut connector, &["openai.threads.runs.cancel"]).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.threads.runs.cancel"]).await;
     let token = generate_valid_token(&signing_key, "openai.threads.runs.cancel");
 
     let result = connector
@@ -3517,10 +3492,7 @@ async fn runs_cancel_happy_path() {
 
     assert_eq!(result["id"], "run_abc123");
     assert_eq!(result["status"], "cancelling");
-    assert_eq!(
-        result["provenance"]["source"],
-        "openai.threads.runs.cancel"
-    );
+    assert_eq!(result["provenance"]["source"], "openai.threads.runs.cancel");
 }
 
 /// Validation: cancel run missing `thread_id`.
@@ -3529,8 +3501,7 @@ async fn runs_cancel_missing_thread_id() {
     let mock = MockApiServer::start().await;
     let mut connector = OpenAIConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
-    let signing_key =
-        setup_handshake(&mut connector, &["openai.threads.runs.cancel"]).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.threads.runs.cancel"]).await;
     let token = generate_valid_token(&signing_key, "openai.threads.runs.cancel");
 
     let result = connector
@@ -3550,8 +3521,7 @@ async fn runs_cancel_missing_run_id() {
     let mock = MockApiServer::start().await;
     let mut connector = OpenAIConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
-    let signing_key =
-        setup_handshake(&mut connector, &["openai.threads.runs.cancel"]).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.threads.runs.cancel"]).await;
     let token = generate_valid_token(&signing_key, "openai.threads.runs.cancel");
 
     let result = connector

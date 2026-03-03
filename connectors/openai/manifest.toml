@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:pending"
+interface_hash = "blake3-256:fcp.interface.v2:6dd0b9c47f03cc738ab04178ca9c2ab2b10fdf13ced350729f460cd43b1918d6"
 
 [connector]
 id = "fcp.openai"
@@ -19,7 +19,7 @@ archetypes = [
 format = "native"
 
 [connector.state]
-model = "none"
+model = "stateless"
 state_schema_version = "1"
 migration_hint = "init"
 
@@ -716,7 +716,7 @@ description = "Create a fine-tuning job to train a custom model"
 capability = "openai.finetune.create"
 risk_level = "high"
 safety_tier = "risky"
-requires_approval = "execution"
+requires_approval = "interactive"
 idempotency = "none"
 
 [provides.operations.finetune_create.rate_limit]
@@ -955,7 +955,7 @@ description = "Cancel a running or queued fine-tuning job"
 capability = "openai.finetune.cancel"
 risk_level = "high"
 safety_tier = "risky"
-requires_approval = "execution"
+requires_approval = "interactive"
 idempotency = "none"
 
 [provides.operations.finetune_cancel.rate_limit]
@@ -1302,7 +1302,7 @@ description = "Delete an assistant"
 capability = "openai.assistants.delete"
 risk_level = "high"
 safety_tier = "risky"
-requires_approval = "execution"
+requires_approval = "interactive"
 idempotency = "none"
 
 [provides.operations.assistants_delete.rate_limit]

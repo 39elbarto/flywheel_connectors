@@ -317,15 +317,18 @@ mod tests {
             serde_json::from_str::<serde_json::Value>("invalid").unwrap_err();
         let err = SlackError::Json(json_err);
         let fcp = err.to_fcp_error();
-        assert!(
-            matches!(fcp, FcpError::Internal { message } if message.contains("JSON error"))
-        );
+        assert!(matches!(fcp, FcpError::Internal { message } if message.contains("JSON error")));
     }
 
     #[test]
     fn test_retryable_checks() {
         // Retryable
-        assert!(SlackError::RateLimited { retry_after_secs: 1 }.is_retryable());
+        assert!(
+            SlackError::RateLimited {
+                retry_after_secs: 1
+            }
+            .is_retryable()
+        );
         for error_str in &[
             "internal_error",
             "request_timeout",
@@ -345,23 +348,29 @@ mod tests {
 
         // Not retryable
         assert!(!SlackError::Unauthorized.is_retryable());
-        assert!(!SlackError::ChannelNotFound {
-            channel: "x".into()
-        }
-        .is_retryable());
+        assert!(
+            !SlackError::ChannelNotFound {
+                channel: "x".into()
+            }
+            .is_retryable()
+        );
         assert!(!SlackError::UserNotFound { user: "x".into() }.is_retryable());
-        assert!(!SlackError::Api {
-            error: "not_authed".into(),
-            code: None,
-            ok: false,
-        }
-        .is_retryable());
-        assert!(!SlackError::Api {
-            error: "channel_not_found".into(),
-            code: None,
-            ok: false,
-        }
-        .is_retryable());
+        assert!(
+            !SlackError::Api {
+                error: "not_authed".into(),
+                code: None,
+                ok: false,
+            }
+            .is_retryable()
+        );
+        assert!(
+            !SlackError::Api {
+                error: "channel_not_found".into(),
+                code: None,
+                ok: false,
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
@@ -375,18 +384,22 @@ mod tests {
             Some(60)
         );
         assert!(SlackError::Unauthorized.retry_after().is_none());
-        assert!(SlackError::ChannelNotFound {
-            channel: "x".into()
-        }
-        .retry_after()
-        .is_none());
-        assert!(SlackError::Api {
-            error: "internal_error".into(),
-            code: None,
-            ok: false,
-        }
-        .retry_after()
-        .is_none());
+        assert!(
+            SlackError::ChannelNotFound {
+                channel: "x".into()
+            }
+            .retry_after()
+            .is_none()
+        );
+        assert!(
+            SlackError::Api {
+                error: "internal_error".into(),
+                code: None,
+                ok: false,
+            }
+            .retry_after()
+            .is_none()
+        );
     }
 
     #[test]
@@ -400,7 +413,13 @@ mod tests {
             assert!(err.is_retryable(), "{error_str} should be retryable");
             let fcp = err.to_fcp_error();
             assert!(
-                matches!(fcp, FcpError::External { retryable: true, .. }),
+                matches!(
+                    fcp,
+                    FcpError::External {
+                        retryable: true,
+                        ..
+                    }
+                ),
                 "{error_str} should map to retryable External"
             );
         }

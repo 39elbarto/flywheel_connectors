@@ -142,7 +142,12 @@ impl PoolState {
         if elapsed >= self.config.config.window {
             0
         } else {
-            let remaining = self.config.config.window.checked_sub(elapsed).unwrap();
+            let remaining = self
+                .config
+                .config
+                .window
+                .checked_sub(elapsed)
+                .unwrap_or(Duration::ZERO);
             u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX)
         }
     }

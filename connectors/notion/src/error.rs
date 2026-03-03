@@ -219,54 +219,68 @@ mod tests {
             serde_json::from_str::<serde_json::Value>("invalid").unwrap_err();
         let err = NotionError::Json(json_err);
         let fcp = err.to_fcp_error();
-        assert!(
-            matches!(fcp, FcpError::Internal { message } if message.contains("JSON error"))
-        );
+        assert!(matches!(fcp, FcpError::Internal { message } if message.contains("JSON error")));
     }
 
     #[test]
     fn test_retryable_checks() {
         assert!(NotionError::RateLimited { retry_after_ms: 1 }.is_retryable());
-        assert!(NotionError::Api {
-            message: String::new(),
-            status_code: Some(500),
-        }
-        .is_retryable());
-        assert!(NotionError::Api {
-            message: String::new(),
-            status_code: Some(502),
-        }
-        .is_retryable());
-        assert!(NotionError::Api {
-            message: String::new(),
-            status_code: Some(503),
-        }
-        .is_retryable());
-        assert!(NotionError::Api {
-            message: String::new(),
-            status_code: Some(429),
-        }
-        .is_retryable());
+        assert!(
+            NotionError::Api {
+                message: String::new(),
+                status_code: Some(500),
+            }
+            .is_retryable()
+        );
+        assert!(
+            NotionError::Api {
+                message: String::new(),
+                status_code: Some(502),
+            }
+            .is_retryable()
+        );
+        assert!(
+            NotionError::Api {
+                message: String::new(),
+                status_code: Some(503),
+            }
+            .is_retryable()
+        );
+        assert!(
+            NotionError::Api {
+                message: String::new(),
+                status_code: Some(429),
+            }
+            .is_retryable()
+        );
 
         assert!(!NotionError::Unauthorized.is_retryable());
-        assert!(!NotionError::NotFound {
-            resource: "x".into()
-        }
-        .is_retryable());
-        assert!(!NotionError::Validation {
-            message: "x".into()
-        }
-        .is_retryable());
-        assert!(!NotionError::Api {
-            message: String::new(),
-            status_code: Some(401),
-        }
-        .is_retryable());
-        assert!(!NotionError::Api {
-            message: String::new(),
-            status_code: Some(404),
-        }
-        .is_retryable());
+        assert!(
+            !NotionError::NotFound {
+                resource: "x".into()
+            }
+            .is_retryable()
+        );
+        assert!(
+            !NotionError::Validation {
+                message: "x".into()
+            }
+            .is_retryable()
+        );
+        assert!(
+            !NotionError::Api {
+                message: String::new(),
+                status_code: Some(401),
+            }
+            .is_retryable()
+        );
+        assert!(
+            !NotionError::Api {
+                message: String::new(),
+                status_code: Some(404),
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
@@ -280,11 +294,13 @@ mod tests {
             Some(3000)
         );
         assert!(NotionError::Unauthorized.retry_after().is_none());
-        assert!(NotionError::Api {
-            message: String::new(),
-            status_code: Some(429),
-        }
-        .retry_after()
-        .is_none());
+        assert!(
+            NotionError::Api {
+                message: String::new(),
+                status_code: Some(429),
+            }
+            .retry_after()
+            .is_none()
+        );
     }
 }

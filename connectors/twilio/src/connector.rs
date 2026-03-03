@@ -1431,7 +1431,10 @@ mod tests {
         for op in ops {
             let id = op["id"].as_str().unwrap();
             assert!(op.get("summary").is_some(), "{id} missing summary");
-            assert!(!op["summary"].as_str().unwrap().is_empty(), "{id} empty summary");
+            assert!(
+                !op["summary"].as_str().unwrap().is_empty(),
+                "{id} empty summary"
+            );
             assert!(op.get("capability").is_some(), "{id} missing capability");
             assert!(op.get("risk_level").is_some(), "{id} missing risk_level");
             assert!(op.get("safety_tier").is_some(), "{id} missing safety_tier");
@@ -1464,7 +1467,10 @@ mod tests {
         for op in ops {
             let id = op["id"].as_str().unwrap();
             let tier = op["safety_tier"].as_str().unwrap();
-            assert!(valid.contains(&tier), "{id} has invalid safety_tier: {tier}");
+            assert!(
+                valid.contains(&tier),
+                "{id} has invalid safety_tier: {tier}"
+            );
         }
     }
 
@@ -1568,7 +1574,10 @@ mod tests {
         let connector = TwilioConnector::new();
         let result = connector.handle_introspect().await.unwrap();
         let ops = result["operations"].as_array().unwrap();
-        let op = ops.iter().find(|o| o["id"] == "twilio.send_message").unwrap();
+        let op = ops
+            .iter()
+            .find(|o| o["id"] == "twilio.send_message")
+            .unwrap();
         assert_eq!(op["safety_tier"].as_str().unwrap(), "risky");
     }
 
@@ -1577,7 +1586,10 @@ mod tests {
         let connector = TwilioConnector::new();
         let result = connector.handle_introspect().await.unwrap();
         let ops = result["operations"].as_array().unwrap();
-        let op = ops.iter().find(|o| o["id"] == "twilio.create_call").unwrap();
+        let op = ops
+            .iter()
+            .find(|o| o["id"] == "twilio.create_call")
+            .unwrap();
         assert_eq!(op["safety_tier"].as_str().unwrap(), "dangerous");
     }
 
@@ -1588,7 +1600,10 @@ mod tests {
         let connector = TwilioConnector::new();
         let result = connector.handle_introspect().await.unwrap();
         let ops = result["operations"].as_array().unwrap();
-        let op = ops.iter().find(|o| o["id"] == "twilio.send_message").unwrap();
+        let op = ops
+            .iter()
+            .find(|o| o["id"] == "twilio.send_message")
+            .unwrap();
         assert_eq!(op["risk_level"].as_str().unwrap(), "high");
     }
 
@@ -1597,7 +1612,10 @@ mod tests {
         let connector = TwilioConnector::new();
         let result = connector.handle_introspect().await.unwrap();
         let ops = result["operations"].as_array().unwrap();
-        let op = ops.iter().find(|o| o["id"] == "twilio.create_call").unwrap();
+        let op = ops
+            .iter()
+            .find(|o| o["id"] == "twilio.create_call")
+            .unwrap();
         assert_eq!(op["risk_level"].as_str().unwrap(), "high");
     }
 
@@ -1711,10 +1729,7 @@ mod tests {
                 .unwrap_or_default();
 
             for field in *expected {
-                assert!(
-                    required.contains(field),
-                    "{op_id} should require '{field}'"
-                );
+                assert!(required.contains(field), "{op_id} should require '{field}'");
             }
         }
     }
@@ -1732,7 +1747,10 @@ mod tests {
         let input = json!({});
         let result = require_str(&input, "to");
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), FcpError::InvalidRequest { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            FcpError::InvalidRequest { .. }
+        ));
     }
 
     #[test]
@@ -1761,7 +1779,10 @@ mod tests {
             .handle_configure(json!({ "auth_token": "test" }))
             .await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), FcpError::InvalidRequest { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            FcpError::InvalidRequest { .. }
+        ));
     }
 
     #[test]

@@ -1280,7 +1280,9 @@ mod duration_millis {
     where
         S: Serializer,
     {
-        u64::try_from(duration.as_millis()).unwrap_or(u64::MAX).serialize(serializer)
+        u64::try_from(duration.as_millis())
+            .unwrap_or(u64::MAX)
+            .serialize(serializer)
     }
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>

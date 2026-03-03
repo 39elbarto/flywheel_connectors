@@ -1710,7 +1710,11 @@ mod tests {
         let connector = SlackConnector::new();
         let result = connector.handle_introspect().await.unwrap();
         let ops = result["operations"].as_array().unwrap();
-        assert!(!ops.iter().map(|o| o["id"].as_str().unwrap()).any(|x| x == "slack.nonexistent"));
+        assert!(
+            !ops.iter()
+                .map(|o| o["id"].as_str().unwrap())
+                .any(|x| x == "slack.nonexistent")
+        );
     }
 
     // ── Introspection metadata tests ─────────────────────────────
@@ -1724,7 +1728,10 @@ mod tests {
         for op in ops {
             let id = op["id"].as_str().unwrap();
             assert!(op.get("summary").is_some(), "{id} missing summary");
-            assert!(!op["summary"].as_str().unwrap().is_empty(), "{id} empty summary");
+            assert!(
+                !op["summary"].as_str().unwrap().is_empty(),
+                "{id} empty summary"
+            );
             assert!(op.get("capability").is_some(), "{id} missing capability");
             assert!(op.get("risk_level").is_some(), "{id} missing risk_level");
             assert!(op.get("safety_tier").is_some(), "{id} missing safety_tier");
@@ -1743,10 +1750,7 @@ mod tests {
         for op in ops {
             let id = op["id"].as_str().unwrap();
             let risk = op["risk_level"].as_str().unwrap();
-            assert!(
-                valid.contains(&risk),
-                "{id} has invalid risk_level: {risk}"
-            );
+            assert!(valid.contains(&risk), "{id} has invalid risk_level: {risk}");
         }
     }
 
@@ -1911,7 +1915,10 @@ mod tests {
         let connector = SlackConnector::new();
         let result = connector.handle_introspect().await.unwrap();
         let ops = result["operations"].as_array().unwrap();
-        let reaction = ops.iter().find(|o| o["id"] == "slack.add_reaction").unwrap();
+        let reaction = ops
+            .iter()
+            .find(|o| o["id"] == "slack.add_reaction")
+            .unwrap();
         assert_eq!(reaction["safety_tier"].as_str().unwrap(), "safe");
     }
 
@@ -1971,7 +1978,10 @@ mod tests {
         let connector = SlackConnector::new();
         let result = connector.handle_introspect().await.unwrap();
         let ops = result["operations"].as_array().unwrap();
-        let reaction = ops.iter().find(|o| o["id"] == "slack.add_reaction").unwrap();
+        let reaction = ops
+            .iter()
+            .find(|o| o["id"] == "slack.add_reaction")
+            .unwrap();
         assert_eq!(reaction["risk_level"].as_str().unwrap(), "low");
     }
 
@@ -2063,18 +2073,11 @@ mod tests {
             let op = ops.iter().find(|o| o["id"] == *op_id).unwrap();
             let required = op["input_schema"]["required"]
                 .as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str())
-                        .collect::<Vec<_>>()
-                })
+                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
                 .unwrap_or_default();
 
             for field in *expected {
-                assert!(
-                    required.contains(field),
-                    "{op_id} should require '{field}'"
-                );
+                assert!(required.contains(field), "{op_id} should require '{field}'");
             }
         }
     }
@@ -2088,7 +2091,10 @@ mod tests {
         let events = result["events"].as_array().unwrap();
 
         assert_eq!(events.len(), 5);
-        let topics: Vec<&str> = events.iter().map(|e| e["topic"].as_str().unwrap()).collect();
+        let topics: Vec<&str> = events
+            .iter()
+            .map(|e| e["topic"].as_str().unwrap())
+            .collect();
         assert!(topics.contains(&"slack.message.new"));
         assert!(topics.contains(&"slack.message.edited"));
         assert!(topics.contains(&"slack.message.deleted"));
@@ -2157,7 +2163,8 @@ mod tests {
 
     #[test]
     fn test_parse_subscribe_topics_deduplicates() {
-        let params = json!({ "topics": ["slack.message.new", "slack.message.new", "slack.message.new"] });
+        let params =
+            json!({ "topics": ["slack.message.new", "slack.message.new", "slack.message.new"] });
         let topics = parse_subscribe_topics(&params);
         assert_eq!(topics.len(), 1);
     }
@@ -2174,7 +2181,10 @@ mod tests {
     #[test]
     fn test_socket_frame_topic_events_api_message_new() {
         let payload = json!({ "event": { "type": "message" } });
-        assert_eq!(socket_frame_topic("events_api", &payload), "slack.message.new");
+        assert_eq!(
+            socket_frame_topic("events_api", &payload),
+            "slack.message.new"
+        );
     }
 
     #[test]

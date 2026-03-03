@@ -410,7 +410,7 @@ mod tests {
         assert_eq!(escape_control_chars("Hello\nWorld"), "Hello\nWorld");
         assert_eq!(escape_control_chars("Hello\r\nWorld"), "Hello\r\nWorld");
         assert_eq!(escape_control_chars("Hello\tWorld"), "Hello\tWorld");
-        assert_eq!(escape_control_chars("Hello\x00World"), "Hello\\x00World");
-        assert_eq!(escape_control_chars("Hello\x1bWorld"), "Hello\\x1bWorld");
+        assert_eq!(escape_control_chars("Hello\x00World"), "Hello\\u{0}World");
+        assert_eq!(escape_control_chars("Hello\x1bWorld"), "Hello\\u{1b}World");
     }
 }

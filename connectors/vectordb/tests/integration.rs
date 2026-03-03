@@ -1850,6 +1850,7 @@ impl TestLog {
         Ok(())
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn check_eq<T: std::fmt::Debug + PartialEq>(
         &mut self,
         left: T,
@@ -1864,6 +1865,7 @@ impl TestLog {
         Ok(())
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn emit(&mut self, phase: &str, result: &str, context: serde_json::Value) {
         let duration_ms = u64::try_from(self.start.elapsed().as_millis()).unwrap_or(u64::MAX);
         let entry = json!({
@@ -1905,11 +1907,7 @@ impl Drop for TestLog {
         } else {
             "pass"
         };
-        self.emit(
-            "verify",
-            result,
-            json!({ "connector_id": "vectordb" }),
-        );
+        self.emit("verify", result, json!({ "connector_id": "vectordb" }));
     }
 }
 
@@ -1954,10 +1952,14 @@ fn logged_schema_completeness_all_ops_have_schemas() -> Result<(), String> {
         )?;
     }
 
-    log.emit("verify", "pass", json!({
-        "operations_checked": introspection.operations.len(),
-        "checks": ["input_schema", "output_schema", "summary", "capabilities"]
-    }));
+    log.emit(
+        "verify",
+        "pass",
+        json!({
+            "operations_checked": introspection.operations.len(),
+            "checks": ["input_schema", "output_schema", "summary", "capabilities"]
+        }),
+    );
     Ok(())
 }
 
@@ -1971,7 +1973,10 @@ fn logged_schema_unknown_op_returns_none() -> Result<(), String> {
         .operations
         .iter()
         .find(|op| op.id.as_str() == "vectordb.nonexistent");
-    log.check(unknown.is_none(), "unknown op should not appear in introspection")?;
+    log.check(
+        unknown.is_none(),
+        "unknown op should not appear in introspection",
+    )?;
     Ok(())
 }
 
@@ -1996,9 +2001,13 @@ async fn logged_error_taxonomy_not_configured() -> Result<(), String> {
         matches!(&result, Err(FcpError::NotConfigured)),
         "unconfigured connector must return NotConfigured",
     )?;
-    log.emit("verify", "pass", json!({
-        "error_variant": "NotConfigured"
-    }));
+    log.emit(
+        "verify",
+        "pass",
+        json!({
+            "error_variant": "NotConfigured"
+        }),
+    );
     Ok(())
 }
 
@@ -2039,16 +2048,24 @@ async fn logged_error_taxonomy_invalid_request_codes() -> Result<(), String> {
     .await;
 
     if let Err(FcpError::InvalidRequest { code, .. }) = &result2 {
-        log.check_eq(*code, 1003u16, "InvalidRequest code must be 1003 for name validation")?;
+        log.check_eq(
+            *code,
+            1003u16,
+            "InvalidRequest code must be 1003 for name validation",
+        )?;
     } else {
         log.check(false, &format!("expected InvalidRequest, got {result2:?}"))?;
     }
 
-    log.emit("verify", "pass", json!({
-        "error_variant": "InvalidRequest",
-        "expected_code": 1003,
-        "scenarios_tested": 2
-    }));
+    log.emit(
+        "verify",
+        "pass",
+        json!({
+            "error_variant": "InvalidRequest",
+            "expected_code": 1003,
+            "scenarios_tested": 2
+        }),
+    );
     Ok(())
 }
 
@@ -2065,9 +2082,13 @@ async fn logged_error_taxonomy_operation_not_granted() -> Result<(), String> {
         matches!(&result, Err(FcpError::OperationNotGranted { .. })),
         "unknown operation must return OperationNotGranted",
     )?;
-    log.emit("verify", "pass", json!({
-        "error_variant": "OperationNotGranted"
-    }));
+    log.emit(
+        "verify",
+        "pass",
+        json!({
+            "error_variant": "OperationNotGranted"
+        }),
+    );
     Ok(())
 }
 
@@ -2141,10 +2162,14 @@ async fn logged_capability_gating_per_operation() -> Result<(), String> {
     }
 
     log.check_eq(ops_verified, 9u32, "all 9 operations must be verified")?;
-    log.emit("verify", "pass", json!({
-        "operations_verified": ops_verified,
-        "check": "correct_capability_grants_access"
-    }));
+    log.emit(
+        "verify",
+        "pass",
+        json!({
+            "operations_verified": ops_verified,
+            "check": "correct_capability_grants_access"
+        }),
+    );
     Ok(())
 }
 
@@ -2172,8 +2197,7 @@ async fn logged_capability_wrong_cap_denies_access() -> Result<(), String> {
     log.check(result.is_err(), "wrong capability must deny access")?;
 
     // Try delete op with write capability
-    let (c2, key2) =
-        setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.write"]).await;
+    let (c2, key2) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.write"]).await;
     let token2 = generate_token(
         &key2,
         "vectordb.vectors.write",
@@ -2189,10 +2213,14 @@ async fn logged_capability_wrong_cap_denies_access() -> Result<(), String> {
     .await;
 
     log.check(result2.is_err(), "write cap must not grant delete access")?;
-    log.emit("verify", "pass", json!({
-        "scenarios_tested": 2,
-        "check": "wrong_capability_denies_access"
-    }));
+    log.emit(
+        "verify",
+        "pass",
+        json!({
+            "scenarios_tested": 2,
+            "check": "wrong_capability_denies_access"
+        }),
+    );
     Ok(())
 }
 
@@ -2225,7 +2253,9 @@ async fn logged_redaction_chain_no_credential_leakage() -> Result<(), String> {
     )?;
 
     // Step 3: Check doctor output
-    let doctor = connector.handle_doctor().await
+    let doctor = connector
+        .handle_doctor()
+        .await
         .map_err(|err| format!("doctor failed: {err}"))?;
     let doctor_str = serde_json::to_string(&doctor).unwrap_or_default();
     log.check(
@@ -2257,10 +2287,14 @@ async fn logged_redaction_chain_no_credential_leakage() -> Result<(), String> {
         )?;
     }
 
-    log.emit("verify", "pass", json!({
-        "credential_tested": "aabbccdd-...redacted...",
-        "paths_checked": ["health", "doctor", "configure_error"]
-    }));
+    log.emit(
+        "verify",
+        "pass",
+        json!({
+            "credential_tested": "aabbccdd-...redacted...",
+            "paths_checked": ["health", "doctor", "configure_error"]
+        }),
+    );
     Ok(())
 }
 
@@ -2274,7 +2308,12 @@ fn logged_retry_idempotency_classification() -> Result<(), String> {
     let connector = VectorDbConnector::new();
     let introspection = connector.handle_introspect();
 
-    let find = |id: &str| introspection.operations.iter().find(|op| op.id.as_str() == id);
+    let find = |id: &str| {
+        introspection
+            .operations
+            .iter()
+            .find(|op| op.id.as_str() == id)
+    };
 
     // Read operations: idempotent (class None = safe to retry, always same result)
     let read_ops = [
@@ -2284,7 +2323,7 @@ fn logged_retry_idempotency_classification() -> Result<(), String> {
         "vectordb.fetch_vectors",
     ];
     for op_id in &read_ops {
-        let op = find(op_id).ok_or(format!("missing operation: {op_id}"))?;
+        let op = find(op_id).ok_or_else(|| format!("missing operation: {op_id}"))?;
         log.check_eq(op.idempotency, IdempotencyClass::None, op_id)?;
     }
 
@@ -2297,14 +2336,18 @@ fn logged_retry_idempotency_classification() -> Result<(), String> {
         "vectordb.update_vector_metadata",
     ];
     for op_id in &write_ops {
-        let op = find(op_id).ok_or(format!("missing operation: {op_id}"))?;
+        let op = find(op_id).ok_or_else(|| format!("missing operation: {op_id}"))?;
         log.check_eq(op.idempotency, IdempotencyClass::BestEffort, op_id)?;
     }
 
-    log.emit("verify", "pass", json!({
-        "read_ops_none": read_ops.len(),
-        "write_ops_best_effort": write_ops.len()
-    }));
+    log.emit(
+        "verify",
+        "pass",
+        json!({
+            "read_ops_none": read_ops.len(),
+            "write_ops_best_effort": write_ops.len()
+        }),
+    );
     Ok(())
 }
 
@@ -2318,7 +2361,12 @@ fn logged_risk_levels_and_safety_tiers() -> Result<(), String> {
     let connector = VectorDbConnector::new();
     let introspection = connector.handle_introspect();
 
-    let find = |id: &str| introspection.operations.iter().find(|op| op.id.as_str() == id);
+    let find = |id: &str| {
+        introspection
+            .operations
+            .iter()
+            .find(|op| op.id.as_str() == id)
+    };
 
     // Read ops: low risk, safe tier
     for op_id in &[
@@ -2328,7 +2376,7 @@ fn logged_risk_levels_and_safety_tiers() -> Result<(), String> {
         "vectordb.fetch_vectors",
         "vectordb.update_vector_metadata",
     ] {
-        let op = find(op_id).ok_or(format!("missing: {op_id}"))?;
+        let op = find(op_id).ok_or_else(|| format!("missing: {op_id}"))?;
         log.check_eq(op.risk_level, RiskLevel::Low, &format!("{op_id} risk"))?;
         log.check_eq(op.safety_tier, SafetyTier::Safe, &format!("{op_id} safety"))?;
     }
@@ -2339,13 +2387,12 @@ fn logged_risk_levels_and_safety_tiers() -> Result<(), String> {
         "vectordb.upsert_vectors",
         "vectordb.delete_vectors",
     ] {
-        let op = find(op_id).ok_or(format!("missing: {op_id}"))?;
+        let op = find(op_id).ok_or_else(|| format!("missing: {op_id}"))?;
         log.check_eq(op.risk_level, RiskLevel::Medium, &format!("{op_id} risk"))?;
     }
 
     // Delete collection: high risk, requires interactive approval
-    let delete = find("vectordb.delete_collection")
-        .ok_or("missing delete_collection")?;
+    let delete = find("vectordb.delete_collection").ok_or("missing delete_collection")?;
     log.check_eq(delete.risk_level, RiskLevel::High, "delete_collection risk")?;
     log.check_eq(
         delete.safety_tier,
@@ -2353,11 +2400,15 @@ fn logged_risk_levels_and_safety_tiers() -> Result<(), String> {
         "delete_collection safety_tier",
     )?;
 
-    log.emit("verify", "pass", json!({
-        "low_risk_ops": 5,
-        "medium_risk_ops": 3,
-        "high_risk_ops": 1
-    }));
+    log.emit(
+        "verify",
+        "pass",
+        json!({
+            "low_risk_ops": 5,
+            "medium_risk_ops": 3,
+            "high_risk_ops": 1
+        }),
+    );
     Ok(())
 }
 
@@ -2416,16 +2467,12 @@ async fn logged_payload_bounds_enforcement() -> Result<(), String> {
     log.check(result.is_err(), "top_k 0 must be rejected")?;
 
     // Upsert empty batch rejected
-    let token_uw = generate_token(
-        &key,
-        "vectordb.vectors.write",
-        &["vectordb.upsert_vectors"],
-    );
+    let token_upsert = generate_token(&key, "vectordb.vectors.write", &["vectordb.upsert_vectors"]);
     let result = invoke(
         &c,
         "vectordb.upsert_vectors",
         json!({"collection": "test", "vectors": []}),
-        &token_uw,
+        &token_upsert,
     )
     .await;
     log.check(result.is_err(), "empty vector batch must be rejected")?;
@@ -2462,7 +2509,7 @@ fn logged_config_timeout_validation() -> Result<(), String> {
     let valid = VectorDbConfig {
         provider: VectorDbProvider::Qdrant,
         endpoint: "localhost:6333".into(),
-        credential_id: credential_id.clone(),
+        credential_id,
         use_tls: false,
         namespace: None,
         connect_timeout_ms: 10_000,
@@ -2475,28 +2522,40 @@ fn logged_config_timeout_validation() -> Result<(), String> {
         connect_timeout_ms: 0,
         ..valid.clone()
     };
-    log.check(too_low.validate().is_err(), "connect_timeout_ms=0 must fail")?;
+    log.check(
+        too_low.validate().is_err(),
+        "connect_timeout_ms=0 must fail",
+    )?;
 
     // Request timeout too high
     let too_high = VectorDbConfig {
         request_timeout_ms: 700_000,
         ..valid.clone()
     };
-    log.check(too_high.validate().is_err(), "request_timeout_ms=700000 must fail")?;
+    log.check(
+        too_high.validate().is_err(),
+        "request_timeout_ms=700000 must fail",
+    )?;
 
     // Connect timeout at upper bound
     let upper = VectorDbConfig {
         connect_timeout_ms: 300_000,
         ..valid.clone()
     };
-    log.check(upper.validate().is_ok(), "connect_timeout_ms=300000 should pass")?;
+    log.check(
+        upper.validate().is_ok(),
+        "connect_timeout_ms=300000 should pass",
+    )?;
 
     // Request timeout at upper bound
     let req_upper = VectorDbConfig {
         request_timeout_ms: 600_000,
         ..valid
     };
-    log.check(req_upper.validate().is_ok(), "request_timeout_ms=600000 should pass")?;
+    log.check(
+        req_upper.validate().is_ok(),
+        "request_timeout_ms=600000 should pass",
+    )?;
 
     log.emit("verify", "pass", json!({
         "scenarios": ["valid", "connect_too_low", "request_too_high", "connect_upper", "request_upper"]
@@ -2520,10 +2579,18 @@ fn logged_introspection_deterministic() -> Result<(), String> {
     let s1 = serde_json::to_string(&i1.operations).unwrap_or_default();
     let s2 = serde_json::to_string(&i2.operations).unwrap_or_default();
 
-    log.check_eq(s1, s2, "introspection must be deterministic across instances")?;
-    log.emit("verify", "pass", json!({
-        "check": "deterministic_serialization"
-    }));
+    log.check_eq(
+        s1,
+        s2,
+        "introspection must be deterministic across instances",
+    )?;
+    log.emit(
+        "verify",
+        "pass",
+        json!({
+            "check": "deterministic_serialization"
+        }),
+    );
     Ok(())
 }
 
@@ -2552,7 +2619,10 @@ async fn logged_lifecycle_configure_handshake_invoke() -> Result<(), String> {
         .await
         .map_err(|err| format!("configure failed: {err}"))?;
 
-    log.check(connector.is_configured(), "must be configured after configure")?;
+    log.check(
+        connector.is_configured(),
+        "must be configured after configure",
+    )?;
     log.check_eq(
         connector.provider(),
         Some(VectorDbProvider::Qdrant),
@@ -2573,7 +2643,11 @@ async fn logged_lifecycle_configure_handshake_invoke() -> Result<(), String> {
         .await
         .map_err(|err| format!("handshake failed: {err}"))?;
 
-    log.check_eq(hs_result["status"].as_str(), Some("accepted"), "handshake accepted")?;
+    log.check_eq(
+        hs_result["status"].as_str(),
+        Some("accepted"),
+        "handshake accepted",
+    )?;
 
     // Step 5: Invoke
     let token = generate_token(
@@ -2586,17 +2660,25 @@ async fn logged_lifecycle_configure_handshake_invoke() -> Result<(), String> {
         .map_err(|err| format!("invoke failed: {err}"))?;
 
     log.check(
-        result.get("collections").is_some_and(|v| v.is_array()),
+        result
+            .get("collections")
+            .is_some_and(serde_json::Value::is_array),
         "collections must be an array",
     )?;
 
     // Step 6: Metrics after invoke
     let health_after = connector.handle_health();
-    let total = health_after["metrics"]["requests_total"].as_u64().unwrap_or(0);
+    let total = health_after["metrics"]["requests_total"]
+        .as_u64()
+        .unwrap_or(0);
     log.check(total >= 1, "requests_total must be >= 1 after invoke")?;
 
-    log.emit("verify", "pass", json!({
-        "steps": ["unconfigured", "configure", "health", "handshake", "invoke", "metrics"]
-    }));
+    log.emit(
+        "verify",
+        "pass",
+        json!({
+            "steps": ["unconfigured", "configure", "health", "handshake", "invoke", "metrics"]
+        }),
+    );
     Ok(())
 }

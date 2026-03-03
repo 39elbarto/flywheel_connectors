@@ -355,7 +355,7 @@ const fn is_markdown_control(ch: char) -> bool {
 fn escape_control_chars(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for ch in input.chars() {
-        if ch.is_control() {
+        if ch.is_control() && !matches!(ch, '\n' | '\r' | '\t') {
             out.extend(ch.escape_default());
         } else {
             out.push(ch);
@@ -399,4 +399,18 @@ fn decode_numeric_entity(entity: &str) -> Option<char> {
         return char::from_u32(value);
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_escape_control_chars() {
+        assert_eq!(escape_control_chars("Hello\nWorld"), "Hello\nWorld");
+        assert_eq!(escape_control_chars("Hello\r\nWorld"), "Hello\r\nWorld");
+        assert_eq!(escape_control_chars("Hello\tWorld"), "Hello\tWorld");
+        assert_eq!(escape_control_chars("Hello\x00World"), "Hello\\x00World");
+        assert_eq!(escape_control_chars("Hello\x1bWorld"), "Hello\\x1bWorld");
+    }
 }

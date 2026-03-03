@@ -191,3 +191,422 @@ pub struct GmailErrorItem {
     #[serde(default)]
     pub message: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- GmailMessage serde ----
+
+    #[test]
+    fn gmail_message_serde_roundtrip() {
+        let msg = GmailMessage {
+            id: "msg-1".into(),
+            thread_id: Some("thread-1".into()),
+            label_ids: vec!["INBOX".into(), "UNREAD".into()],
+            snippet: "Hello world".into(),
+            history_id: Some("12345".into()),
+            internal_date: Some("1709294400000".into()),
+            size_estimate: 2048,
+            payload: Some(MessagePart {
+                part_id: "0".into(),
+                mime_type: "text/plain".into(),
+                filename: String::new(),
+                headers: vec![Header {
+                    name: "Subject".into(),
+                    value: "Test Subject".into(),
+                }],
+                body: Some(MessagePartBody {
+                    attachment_id: None,
+                    size: 100,
+                    data: Some("SGVsbG8=".into()),
+                }),
+                parts: None,
+            }),
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["id"], "msg-1");
+        assert_eq!(json["threadId"], "thread-1");
+        assert_eq!(json["sizeEstimate"], 2048);
+
+        let back: GmailMessage = serde_json::from_value(json).unwrap();
+        assert_eq!(back.id, "msg-1");
+        assert_eq!(back.thread_id.as_deref(), Some("thread-1"));
+        assert_eq!(back.label_ids.len(), 2);
+    }
+
+    #[test]
+    fn gmail_message_minimal_deserializes() {
+        let json = serde_json::json!({"id": "msg-2"});
+        let msg: GmailMessage = serde_json::from_value(json).unwrap();
+        assert_eq!(msg.id, "msg-2");
+        assert!(msg.thread_id.is_none());
+        assert!(msg.label_ids.is_empty());
+        assert!(msg.snippet.is_empty());
+        assert!(msg.payload.is_none());
+        assert_eq!(msg.size_estimate, 0);
+    }
+
+    // ---- MessagePart serde ----
+
+    #[test]
+    fn message_part_with_nested_parts() {
+        let part = MessagePart {
+            part_id: "0".into(),
+            mime_type: "multipart/alternative".into(),
+            filename: String::new(),
+            headers: vec![],
+            body: None,
+            parts: Some(vec![
+                MessagePart {
+                    part_id: "0.1".into(),
+                    mime_type: "text/plain".into(),
+                    filename: String::new(),
+                    headers: vec![],
+                    body: Some(MessagePartBody {
+                        attachment_id: None,
+                        size: 50,
+                        data: Some("dGV4dA==".into()),
+                    }),
+                    parts: None,
+                },
+                MessagePart {
+                    part_id: "0.2".into(),
+                    mime_type: "text/html".into(),
+                    filename: String::new(),
+                    headers: vec![],
+                    body: Some(MessagePartBody {
+                        attachment_id: None,
+                        size: 100,
+                        data: Some("PGh0bWw+".into()),
+                    }),
+                    parts: None,
+                },
+            ]),
+        };
+        let json = serde_json::to_value(&part).unwrap();
+        assert_eq!(json["mimeType"], "multipart/alternative");
+        let nested = json["parts"].as_array().unwrap();
+        assert_eq!(nested.len(), 2);
+        assert_eq!(nested[0]["mimeType"], "text/plain");
+    }
+
+    // ---- MessagePartBody serde ----
+
+    #[test]
+    fn message_part_body_with_attachment() {
+        let body = MessagePartBody {
+            attachment_id: Some("att-1".into()),
+            size: 5000,
+            data: None,
+        };
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["attachmentId"], "att-1");
+        assert_eq!(json["size"], 5000);
+        assert!(json["data"].is_null());
+    }
+
+    #[test]
+    fn message_part_body_minimal_deserializes() {
+        let json = serde_json::json!({});
+        let body: MessagePartBody = serde_json::from_value(json).unwrap();
+        assert!(body.attachment_id.is_none());
+        assert_eq!(body.size, 0);
+        assert!(body.data.is_none());
+    }
+
+    // ---- Header serde ----
+
+    #[test]
+    fn header_serde_roundtrip() {
+        let header = Header {
+            name: "From".into(),
+            value: "user@example.com".into(),
+        };
+        let json = serde_json::to_value(&header).unwrap();
+        assert_eq!(json["name"], "From");
+        let back: Header = serde_json::from_value(json).unwrap();
+        assert_eq!(back.value, "user@example.com");
+    }
+
+    // ---- GmailThread serde ----
+
+    #[test]
+    fn gmail_thread_serde_roundtrip() {
+        let thread = GmailThread {
+            id: "thread-1".into(),
+            history_id: Some("999".into()),
+            messages: vec![GmailMessage {
+                id: "msg-in-thread".into(),
+                thread_id: Some("thread-1".into()),
+                label_ids: vec![],
+                snippet: "Thread message".into(),
+                history_id: None,
+                internal_date: None,
+                size_estimate: 0,
+                payload: None,
+            }],
+            snippet: "Thread snippet".into(),
+        };
+        let json = serde_json::to_value(&thread).unwrap();
+        assert_eq!(json["id"], "thread-1");
+        assert_eq!(json["historyId"], "999");
+        assert_eq!(json["messages"].as_array().unwrap().len(), 1);
+
+        let back: GmailThread = serde_json::from_value(json).unwrap();
+        assert_eq!(back.messages.len(), 1);
+        assert_eq!(back.snippet, "Thread snippet");
+    }
+
+    #[test]
+    fn gmail_thread_minimal_deserializes() {
+        let json = serde_json::json!({"id": "t-2"});
+        let thread: GmailThread = serde_json::from_value(json).unwrap();
+        assert_eq!(thread.id, "t-2");
+        assert!(thread.messages.is_empty());
+        assert!(thread.snippet.is_empty());
+    }
+
+    // ---- GmailLabel serde ----
+
+    #[test]
+    fn gmail_label_serde_roundtrip() {
+        let label = GmailLabel {
+            id: "Label_1".into(),
+            name: "Work".into(),
+            message_list_visibility: Some("show".into()),
+            label_list_visibility: Some("labelShow".into()),
+            label_type: Some("user".into()),
+            messages_total: 42,
+            messages_unread: 5,
+            threads_total: 30,
+            threads_unread: 3,
+        };
+        let json = serde_json::to_value(&label).unwrap();
+        assert_eq!(json["id"], "Label_1");
+        assert_eq!(json["name"], "Work");
+        assert_eq!(json["messageListVisibility"], "show");
+        assert_eq!(json["type"], "user");
+        assert_eq!(json["messagesTotal"], 42);
+        assert_eq!(json["threadsUnread"], 3);
+
+        let back: GmailLabel = serde_json::from_value(json).unwrap();
+        assert_eq!(back.messages_unread, 5);
+    }
+
+    #[test]
+    fn gmail_label_minimal_deserializes() {
+        let json = serde_json::json!({"id": "INBOX", "name": "INBOX"});
+        let label: GmailLabel = serde_json::from_value(json).unwrap();
+        assert_eq!(label.id, "INBOX");
+        assert_eq!(label.messages_total, 0);
+        assert!(label.label_type.is_none());
+    }
+
+    // ---- GmailDraft serde ----
+
+    #[test]
+    fn gmail_draft_serde_roundtrip() {
+        let draft = GmailDraft {
+            id: "draft-1".into(),
+            message: Some(GmailMessage {
+                id: "msg-draft".into(),
+                thread_id: None,
+                label_ids: vec!["DRAFT".into()],
+                snippet: "Draft content".into(),
+                history_id: None,
+                internal_date: None,
+                size_estimate: 0,
+                payload: None,
+            }),
+        };
+        let json = serde_json::to_value(&draft).unwrap();
+        assert_eq!(json["id"], "draft-1");
+        assert!(json["message"].is_object());
+
+        let back: GmailDraft = serde_json::from_value(json).unwrap();
+        assert!(back.message.is_some());
+    }
+
+    #[test]
+    fn gmail_draft_without_message() {
+        let json = serde_json::json!({"id": "draft-2"});
+        let draft: GmailDraft = serde_json::from_value(json).unwrap();
+        assert_eq!(draft.id, "draft-2");
+        assert!(draft.message.is_none());
+    }
+
+    // ---- MessagesListResponse serde ----
+
+    #[test]
+    fn messages_list_response_with_pagination() {
+        let json = serde_json::json!({
+            "messages": [
+                {"id": "m1", "threadId": "t1"},
+                {"id": "m2"}
+            ],
+            "nextPageToken": "token-abc",
+            "resultSizeEstimate": 100
+        });
+        let resp: MessagesListResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.messages.len(), 2);
+        assert_eq!(resp.next_page_token.as_deref(), Some("token-abc"));
+        assert_eq!(resp.result_size_estimate, 100);
+    }
+
+    #[test]
+    fn messages_list_response_empty() {
+        let json = serde_json::json!({});
+        let resp: MessagesListResponse = serde_json::from_value(json).unwrap();
+        assert!(resp.messages.is_empty());
+        assert!(resp.next_page_token.is_none());
+        assert_eq!(resp.result_size_estimate, 0);
+    }
+
+    // ---- MessageRef serde ----
+
+    #[test]
+    fn message_ref_serde_roundtrip() {
+        let msg_ref = MessageRef {
+            id: "m1".into(),
+            thread_id: Some("t1".into()),
+        };
+        let json = serde_json::to_value(&msg_ref).unwrap();
+        assert_eq!(json["id"], "m1");
+        assert_eq!(json["threadId"], "t1");
+
+        let back: MessageRef = serde_json::from_value(json).unwrap();
+        assert_eq!(back.thread_id.as_deref(), Some("t1"));
+    }
+
+    // ---- LabelsListResponse serde ----
+
+    #[test]
+    fn labels_list_response_deserializes() {
+        let json = serde_json::json!({
+            "labels": [
+                {"id": "INBOX", "name": "INBOX"},
+                {"id": "SENT", "name": "SENT"}
+            ]
+        });
+        let resp: LabelsListResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.labels.len(), 2);
+    }
+
+    #[test]
+    fn labels_list_response_empty() {
+        let json = serde_json::json!({});
+        let resp: LabelsListResponse = serde_json::from_value(json).unwrap();
+        assert!(resp.labels.is_empty());
+    }
+
+    // ---- ThreadsListResponse serde ----
+
+    #[test]
+    fn threads_list_response_with_pagination() {
+        let json = serde_json::json!({
+            "threads": [
+                {"id": "t1", "snippet": "Hello"},
+                {"id": "t2"}
+            ],
+            "nextPageToken": "next-token",
+            "resultSizeEstimate": 50
+        });
+        let resp: ThreadsListResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.threads.len(), 2);
+        assert_eq!(resp.next_page_token.as_deref(), Some("next-token"));
+        assert_eq!(resp.result_size_estimate, 50);
+    }
+
+    // ---- ThreadRef serde ----
+
+    #[test]
+    fn thread_ref_serde_roundtrip() {
+        let tref = ThreadRef {
+            id: "t1".into(),
+            snippet: "Thread preview".into(),
+            history_id: Some("500".into()),
+        };
+        let json = serde_json::to_value(&tref).unwrap();
+        assert_eq!(json["id"], "t1");
+        assert_eq!(json["historyId"], "500");
+
+        let back: ThreadRef = serde_json::from_value(json).unwrap();
+        assert_eq!(back.snippet, "Thread preview");
+    }
+
+    // ---- HistoryListResponse serde ----
+
+    #[test]
+    fn history_list_response_roundtrip() {
+        let resp = HistoryListResponse {
+            history: vec![serde_json::json!({"id": "101"})],
+            next_page_token: Some("page2".into()),
+            history_id: Some("101".into()),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["historyId"], "101");
+        assert_eq!(json["nextPageToken"], "page2");
+        assert_eq!(json["history"].as_array().unwrap().len(), 1);
+
+        let back: HistoryListResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(back.history.len(), 1);
+    }
+
+    #[test]
+    fn history_list_response_empty() {
+        let json = serde_json::json!({});
+        let resp: HistoryListResponse = serde_json::from_value(json).unwrap();
+        assert!(resp.history.is_empty());
+        assert!(resp.next_page_token.is_none());
+        assert!(resp.history_id.is_none());
+    }
+
+    // ---- GmailApiError serde ----
+
+    #[test]
+    fn gmail_api_error_deserializes() {
+        let json = serde_json::json!({
+            "error": {
+                "code": 404,
+                "message": "Requested entity was not found.",
+                "errors": [
+                    {
+                        "domain": "global",
+                        "reason": "notFound",
+                        "message": "Requested entity was not found."
+                    }
+                ]
+            }
+        });
+        let err: GmailApiError = serde_json::from_value(json).unwrap();
+        assert_eq!(err.error.code, 404);
+        assert!(err.error.message.contains("not found"));
+        assert_eq!(err.error.errors.len(), 1);
+        assert_eq!(err.error.errors[0].reason, "notFound");
+    }
+
+    #[test]
+    fn gmail_api_error_without_error_items() {
+        let json = serde_json::json!({
+            "error": {
+                "code": 500,
+                "message": "Backend Error"
+            }
+        });
+        let err: GmailApiError = serde_json::from_value(json).unwrap();
+        assert_eq!(err.error.code, 500);
+        assert!(err.error.errors.is_empty());
+    }
+
+    // ---- GmailErrorItem serde ----
+
+    #[test]
+    fn gmail_error_item_defaults() {
+        let json = serde_json::json!({});
+        let item: GmailErrorItem = serde_json::from_value(json).unwrap();
+        assert!(item.domain.is_empty());
+        assert!(item.reason.is_empty());
+        assert!(item.message.is_empty());
+    }
+}

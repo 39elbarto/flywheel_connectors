@@ -125,3 +125,354 @@ impl GmailError {
 
 /// Result type for Gmail operations.
 pub type GmailResult<T> = Result<T, GmailError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- is_retryable ----
+
+    #[test]
+    fn rate_limited_is_retryable() {
+        let err = GmailError::RateLimited {
+            retry_after_secs: 30,
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn api_429_is_retryable() {
+        let err = GmailError::Api {
+            code: 429,
+            message: "throttled".into(),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn api_500_is_retryable() {
+        let err = GmailError::Api {
+            code: 500,
+            message: "internal error".into(),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn api_502_is_retryable() {
+        let err = GmailError::Api {
+            code: 502,
+            message: "bad gateway".into(),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn api_503_is_retryable() {
+        let err = GmailError::Api {
+            code: 503,
+            message: "service unavailable".into(),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn api_400_not_retryable() {
+        let err = GmailError::Api {
+            code: 400,
+            message: "bad request".into(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn api_401_not_retryable() {
+        let err = GmailError::Api {
+            code: 401,
+            message: "unauthorized".into(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn api_404_not_retryable() {
+        let err = GmailError::Api {
+            code: 404,
+            message: "not found".into(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn json_error_not_retryable() {
+        let inner = serde_json::from_str::<serde_json::Value>("bad json").unwrap_err();
+        let err = GmailError::Json(inner);
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn unauthorized_not_retryable() {
+        let err = GmailError::Unauthorized;
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn message_not_found_not_retryable() {
+        let err = GmailError::MessageNotFound {
+            message_id: "msg-1".into(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn thread_not_found_not_retryable() {
+        let err = GmailError::ThreadNotFound {
+            thread_id: "thread-1".into(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn label_not_found_not_retryable() {
+        let err = GmailError::LabelNotFound {
+            label: "IMPORTANT".into(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    // ---- retry_after ----
+
+    #[test]
+    fn rate_limited_has_retry_after() {
+        let err = GmailError::RateLimited {
+            retry_after_secs: 5,
+        };
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn non_rate_limit_errors_have_no_retry_after() {
+        let err = GmailError::Unauthorized;
+        assert_eq!(err.retry_after(), None);
+
+        let err = GmailError::Api {
+            code: 500,
+            message: "error".into(),
+        };
+        assert_eq!(err.retry_after(), None);
+
+        let err = GmailError::MessageNotFound {
+            message_id: "m".into(),
+        };
+        assert_eq!(err.retry_after(), None);
+    }
+
+    // ---- to_fcp_error ----
+
+    #[test]
+    fn api_401_maps_to_unauthorized() {
+        let err = GmailError::Api {
+            code: 401,
+            message: "bad credentials".into(),
+        };
+        match err.to_fcp_error() {
+            FcpError::Unauthorized { code, message } => {
+                assert_eq!(code, 2001);
+                assert!(message.contains("Gmail credentials"));
+            }
+            other => panic!("Expected Unauthorized, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_429_maps_to_rate_limited() {
+        let err = GmailError::Api {
+            code: 429,
+            message: "throttled".into(),
+        };
+        match err.to_fcp_error() {
+            FcpError::RateLimited { retry_after_ms, .. } => {
+                assert_eq!(retry_after_ms, 60_000);
+            }
+            other => panic!("Expected RateLimited, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_404_maps_to_resource_not_found() {
+        let err = GmailError::Api {
+            code: 404,
+            message: "message not found".into(),
+        };
+        match err.to_fcp_error() {
+            FcpError::ResourceNotFound { resource } => {
+                assert!(resource.contains("message not found"));
+            }
+            other => panic!("Expected ResourceNotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_500_maps_to_external() {
+        let err = GmailError::Api {
+            code: 500,
+            message: "internal error".into(),
+        };
+        match err.to_fcp_error() {
+            FcpError::External {
+                service, retryable, ..
+            } => {
+                assert_eq!(service, "gmail");
+                assert!(retryable);
+            }
+            other => panic!("Expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_403_maps_to_external() {
+        let err = GmailError::Api {
+            code: 403,
+            message: "forbidden".into(),
+        };
+        match err.to_fcp_error() {
+            FcpError::External {
+                service,
+                retryable,
+                status_code,
+                ..
+            } => {
+                assert_eq!(service, "gmail");
+                assert!(!retryable);
+                assert_eq!(status_code, Some(403));
+            }
+            other => panic!("Expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rate_limited_maps_to_rate_limited() {
+        let err = GmailError::RateLimited {
+            retry_after_secs: 30,
+        };
+        match err.to_fcp_error() {
+            FcpError::RateLimited {
+                retry_after_ms,
+                violation,
+            } => {
+                assert_eq!(retry_after_ms, 30_000);
+                assert!(violation.is_none());
+            }
+            other => panic!("Expected RateLimited, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unauthorized_maps_to_unauthorized() {
+        let err = GmailError::Unauthorized;
+        match err.to_fcp_error() {
+            FcpError::Unauthorized { code, message } => {
+                assert_eq!(code, 2001);
+                assert!(message.contains("expired"));
+            }
+            other => panic!("Expected Unauthorized, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn message_not_found_maps_to_resource_not_found() {
+        let err = GmailError::MessageNotFound {
+            message_id: "msg-123".into(),
+        };
+        match err.to_fcp_error() {
+            FcpError::ResourceNotFound { resource } => {
+                assert!(resource.contains("message:msg-123"));
+            }
+            other => panic!("Expected ResourceNotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn thread_not_found_maps_to_resource_not_found() {
+        let err = GmailError::ThreadNotFound {
+            thread_id: "thread-456".into(),
+        };
+        match err.to_fcp_error() {
+            FcpError::ResourceNotFound { resource } => {
+                assert!(resource.contains("thread:thread-456"));
+            }
+            other => panic!("Expected ResourceNotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn label_not_found_maps_to_resource_not_found() {
+        let err = GmailError::LabelNotFound {
+            label: "IMPORTANT".into(),
+        };
+        match err.to_fcp_error() {
+            FcpError::ResourceNotFound { resource } => {
+                assert!(resource.contains("label:IMPORTANT"));
+            }
+            other => panic!("Expected ResourceNotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn json_error_maps_to_internal() {
+        let inner = serde_json::from_str::<serde_json::Value>("invalid").unwrap_err();
+        let err = GmailError::Json(inner);
+        match err.to_fcp_error() {
+            FcpError::Internal { message } => {
+                assert!(message.contains("JSON error"));
+            }
+            other => panic!("Expected Internal, got {other:?}"),
+        }
+    }
+
+    // ---- Display ----
+
+    #[test]
+    fn error_display_messages() {
+        assert_eq!(
+            GmailError::Unauthorized.to_string(),
+            "Invalid or expired Gmail credentials"
+        );
+        assert!(
+            GmailError::RateLimited {
+                retry_after_secs: 10
+            }
+            .to_string()
+            .contains("10s")
+        );
+        assert!(
+            GmailError::Api {
+                code: 500,
+                message: "oops".into()
+            }
+            .to_string()
+            .contains("oops")
+        );
+        assert!(
+            GmailError::MessageNotFound {
+                message_id: "m1".into()
+            }
+            .to_string()
+            .contains("m1")
+        );
+        assert!(
+            GmailError::ThreadNotFound {
+                thread_id: "t1".into()
+            }
+            .to_string()
+            .contains("t1")
+        );
+        assert!(
+            GmailError::LabelNotFound {
+                label: "INBOX".into()
+            }
+            .to_string()
+            .contains("INBOX")
+        );
+    }
+}

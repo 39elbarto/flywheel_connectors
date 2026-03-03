@@ -145,7 +145,8 @@ impl RateLimiter {
             return;
         }
 
-        if let Some(new_tokens) = (elapsed.as_nanos() as u64).checked_div(nanos_per_token) {
+        let elapsed_nanos = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
+        if let Some(new_tokens) = elapsed_nanos.checked_div(nanos_per_token) {
             if new_tokens > 0 {
                 // Determine new token count, capped at max
                 let updated = tokens.saturating_add(u32::try_from(new_tokens).unwrap_or(u32::MAX));
@@ -982,7 +983,7 @@ mod tests {
 
                 let mut next_esi = 0_u32;
                 for _ in 0..5 {
-                    let node = if rng.gen_bool(0.5) { 1 } else { 2 };
+                    let node = if rng.gen_bool(0.5) { 1 } else { 3 };
                     let symbol = StoredSymbol {
                         meta: SymbolMeta {
                             object_id,

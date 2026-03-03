@@ -233,10 +233,11 @@ impl RateLimiter for TokenBucket {
 
             let wait_time = self.wait_time().await;
             let total_waited = start.elapsed();
+            let projected = total_waited.checked_add(wait_time).unwrap_or(Duration::MAX);
 
-            if total_waited + wait_time > max_wait {
+            if projected > max_wait {
                 return Err(RateLimitError::WaitExceeded {
-                    wait_time: total_waited + wait_time,
+                    wait_time: projected,
                     max_wait,
                 });
             }
@@ -250,6 +251,10 @@ impl RateLimiter for TokenBucket {
     }
 
     async fn wait_time(&self) -> Duration {
+        if self.capacity == 0 {
+            return Duration::MAX;
+        }
+
         if self.tokens.load(Ordering::Acquire) > 0 {
             Duration::ZERO
         } else {

@@ -86,10 +86,11 @@ impl RateLimiter for SlidingWindow {
 
             let wait_time = self.wait_time().await;
             let total_waited = start.elapsed();
+            let projected = total_waited.checked_add(wait_time).unwrap_or(Duration::MAX);
 
-            if total_waited + wait_time > max_wait {
+            if projected > max_wait {
                 return Err(RateLimitError::WaitExceeded {
-                    wait_time: total_waited + wait_time,
+                    wait_time: projected,
                     max_wait,
                 });
             }
@@ -103,6 +104,10 @@ impl RateLimiter for SlidingWindow {
     }
 
     async fn wait_time(&self) -> Duration {
+        if self.limit == 0 {
+            return Duration::MAX;
+        }
+
         self.cleanup();
 
         let timestamps = self.timestamps.lock();
@@ -216,10 +221,11 @@ impl RateLimiter for FixedWindow {
 
             let wait_time = self.wait_time().await;
             let total_waited = start.elapsed();
+            let projected = total_waited.checked_add(wait_time).unwrap_or(Duration::MAX);
 
-            if total_waited + wait_time > max_wait {
+            if projected > max_wait {
                 return Err(RateLimitError::WaitExceeded {
-                    wait_time: total_waited + wait_time,
+                    wait_time: projected,
                     max_wait,
                 });
             }
@@ -241,6 +247,10 @@ impl RateLimiter for FixedWindow {
     }
 
     async fn wait_time(&self) -> Duration {
+        if self.limit == 0 {
+            return Duration::MAX;
+        }
+
         let mut state = self.state.lock();
         let now = Instant::now();
 

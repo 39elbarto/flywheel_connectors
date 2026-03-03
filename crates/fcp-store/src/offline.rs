@@ -72,7 +72,14 @@ impl OfflineAccess {
             return 0;
         }
         // coverage_bps = (local_symbols / k) * 10000
-        (self.local_symbols as u64 * 10000 / self.k as u64) as u32
+        let bps = self.local_symbols as u64 * 10000 / self.k as u64;
+        
+        // Prevent silent numeric truncation if overcoverage is extreme
+        if bps > u32::MAX as u64 {
+            u32::MAX
+        } else {
+            bps as u32
+        }
     }
 
     /// Calculate coverage as a floating-point ratio.

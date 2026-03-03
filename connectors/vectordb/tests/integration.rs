@@ -1,0 +1,1878 @@
+//! `VectorDB` connector integration tests (flywheel_connectors-lszk.26.3).
+//!
+//! Deterministic mock-only tests covering the bead acceptance criteria:
+//! - Schema validation (collection names, dimension bounds, vector arrays, ID lengths)
+//! - Error taxonomy mapping (error codes, error messages, error categories)
+//! - Retry & idempotency rules (idempotency class declarations)
+//! - Redaction (no credential leakage in errors, doctor output, logs)
+//! - Payload bounds and timeouts (batch sizes, `top_k` limits, timeout configs)
+//! - Introspection completeness (schemas, risk levels, capabilities, required fields)
+//! - Capability verification (default deny, capability mismatch)
+
+#![allow(clippy::too_many_lines)]
+
+use chrono::{Duration, Utc};
+use fcp_core::{
+    CapabilityId, CapabilityToken, FcpError, HandshakeRequest, IdempotencyClass, InstanceId,
+    RiskLevel, SafetyTier, ZoneId,
+};
+use fcp_crypto::cose::CapabilityTokenBuilder;
+use fcp_crypto::ed25519::Ed25519SigningKey;
+use serde_json::json;
+
+use fcp_vectordb::VectorDbConnector;
+use fcp_vectordb::config::{DoctorStatus, VectorDbConfig, VectorDbProvider};
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+fn generate_token(signing_key: &Ed25519SigningKey, cap: &str, ops: &[&str]) -> CapabilityToken {
+    let now = Utc::now();
+    let cose = CapabilityTokenBuilder::new()
+        .capability_id(cap)
+        .zone_id("z:work")
+        .principal("user:test")
+        .operations(ops)
+        .issuer("node:test")
+        .validity(now, now + Duration::hours(1))
+        .sign(signing_key)
+        .expect("token sign");
+    CapabilityToken { raw: cose }
+}
+
+fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> HandshakeRequest {
+    HandshakeRequest {
+        protocol_version: "2.0".to_string(),
+        zone: ZoneId::work(),
+        zone_dir: None,
+        host_public_key,
+        nonce: [7u8; 32],
+        capabilities_requested: capabilities
+            .iter()
+            .map(|cap| cap.parse::<CapabilityId>().expect("capability id"))
+            .collect(),
+        host: None,
+        transport_caps: None,
+        requested_instance_id: Some(InstanceId::new()),
+    }
+}
+
+async fn setup_connector(
+    provider: &str,
+    endpoint: &str,
+    caps: &[&str],
+) -> (VectorDbConnector, Ed25519SigningKey) {
+    let mut connector = VectorDbConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+
+    let mut params = json!({
+        "provider": provider,
+        "endpoint": endpoint,
+        "credential_id": "11223344-5566-7788-99aa-bbccddeeff00"
+    });
+    if provider == "qdrant" && !endpoint.contains("pinecone") {
+        params["use_tls"] = json!(false);
+    }
+
+    connector
+        .handle_configure(params)
+        .await
+        .expect("configure should succeed");
+
+    let hs = handshake_request(signing_key.verifying_key().to_bytes(), caps);
+    connector
+        .handle_handshake(serde_json::to_value(hs).expect("serialize"))
+        .await
+        .expect("handshake should succeed");
+
+    (connector, signing_key)
+}
+
+async fn invoke(
+    connector: &VectorDbConnector,
+    operation: &str,
+    input: serde_json::Value,
+    token: &CapabilityToken,
+) -> Result<serde_json::Value, FcpError> {
+    connector
+        .handle_invoke(json!({
+            "operation": operation,
+            "input": input,
+            "capability_token": token
+        }))
+        .await
+}
+
+// ============================================================================
+// Schema Validation: Collection Names
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn schema_create_collection_valid_name() {
+    let (c, key) =
+        setup_connector("qdrant", "localhost:6333", &["vectordb.collections.write"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.collections.write",
+        &["vectordb.create_collection"],
+    );
+
+    let result = invoke(
+        &c,
+        "vectordb.create_collection",
+        json!({"collection": "my-docs-123", "dimension": 768}),
+        &token,
+    )
+    .await;
+    assert!(result.is_ok(), "valid name should succeed: {result:?}");
+}
+
+#[fcp_async_core::runtime::test]
+async fn schema_create_collection_name_must_start_lowercase() {
+    let (c, key) =
+        setup_connector("qdrant", "localhost:6333", &["vectordb.collections.write"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.collections.write",
+        &["vectordb.create_collection"],
+    );
+
+    let result = invoke(
+        &c,
+        "vectordb.create_collection",
+        json!({"collection": "Uppercase", "dimension": 768}),
+        &token,
+    )
+    .await;
+    assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+}
+
+#[fcp_async_core::runtime::test]
+async fn schema_create_collection_name_rejects_spaces() {
+    let (c, key) =
+        setup_connector("qdrant", "localhost:6333", &["vectordb.collections.write"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.collections.write",
+        &["vectordb.create_collection"],
+    );
+
+    let result = invoke(
+        &c,
+        "vectordb.create_collection",
+        json!({"collection": "my collection", "dimension": 768}),
+        &token,
+    )
+    .await;
+    assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+}
+
+#[fcp_async_core::runtime::test]
+async fn schema_create_collection_name_rejects_dots() {
+    let (c, key) =
+        setup_connector("qdrant", "localhost:6333", &["vectordb.collections.write"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.collections.write",
+        &["vectordb.create_collection"],
+    );
+
+    let result = invoke(
+        &c,
+        "vectordb.create_collection",
+        json!({"collection": "my.collection", "dimension": 768}),
+        &token,
+    )
+    .await;
+    assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+}
+
+#[fcp_async_core::runtime::test]
+async fn schema_create_collection_name_rejects_numeric_start() {
+    let (c, key) =
+        setup_connector("qdrant", "localhost:6333", &["vectordb.collections.write"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.collections.write",
+        &["vectordb.create_collection"],
+    );
+
+    let result = invoke(
+        &c,
+        "vectordb.create_collection",
+        json!({"collection": "123abc", "dimension": 768}),
+        &token,
+    )
+    .await;
+    assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+}
+
+#[fcp_async_core::runtime::test]
+async fn schema_create_collection_name_allows_hyphens_underscores() {
+    let (c, key) =
+        setup_connector("qdrant", "localhost:6333", &["vectordb.collections.write"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.collections.write",
+        &["vectordb.create_collection"],
+    );
+
+    let result = invoke(
+        &c,
+        "vectordb.create_collection",
+        json!({"collection": "my_doc-store", "dimension": 768}),
+        &token,
+    )
+    .await;
+    assert!(result.is_ok(), "hyphens/underscores should be valid");
+}
+
+// ============================================================================
+// Schema Validation: Dimension Bounds
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn schema_create_collection_dimension_min() {
+    let (c, key) =
+        setup_connector("qdrant", "localhost:6333", &["vectordb.collections.write"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.collections.write",
+        &["vectordb.create_collection"],
+    );
+
+    let result = invoke(
+        &c,
+        "vectordb.create_collection",
+        json!({"collection": "test", "dimension": 1}),
+        &token,
+    )
+    .await;
+    assert!(result.is_ok(), "dimension 1 should be valid");
+}
+
+#[fcp_async_core::runtime::test]
+async fn schema_create_collection_dimension_max() {
+    let (c, key) =
+        setup_connector("qdrant", "localhost:6333", &["vectordb.collections.write"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.collections.write",
+        &["vectordb.create_collection"],
+    );
+
+    let result = invoke(
+        &c,
+        "vectordb.create_collection",
+        json!({"collection": "test", "dimension": 10000}),
+        &token,
+    )
+    .await;
+    assert!(result.is_ok(), "dimension 10000 should be valid");
+}
+
+#[fcp_async_core::runtime::test]
+async fn schema_create_collection_dimension_zero() {
+    let (c, key) =
+        setup_connector("qdrant", "localhost:6333", &["vectordb.collections.write"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.collections.write",
+        &["vectordb.create_collection"],
+    );
+
+    let result = invoke(
+        &c,
+        "vectordb.create_collection",
+        json!({"collection": "test", "dimension": 0}),
+        &token,
+    )
+    .await;
+    assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+}
+
+#[fcp_async_core::runtime::test]
+async fn schema_create_collection_dimension_exceeds_max() {
+    let (c, key) =
+        setup_connector("qdrant", "localhost:6333", &["vectordb.collections.write"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.collections.write",
+        &["vectordb.create_collection"],
+    );
+
+    let result = invoke(
+        &c,
+        "vectordb.create_collection",
+        json!({"collection": "test", "dimension": 10001}),
+        &token,
+    )
+    .await;
+    assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+}
+
+// ============================================================================
+// Schema Validation: Metric Values
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn schema_create_collection_valid_metrics() {
+    let (c, key) =
+        setup_connector("qdrant", "localhost:6333", &["vectordb.collections.write"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.collections.write",
+        &["vectordb.create_collection"],
+    );
+
+    for metric in ["cosine", "euclidean", "dotproduct"] {
+        let result = invoke(
+            &c,
+            "vectordb.create_collection",
+            json!({"collection": "test", "dimension": 768, "metric": metric}),
+            &token,
+        )
+        .await;
+        assert!(result.is_ok(), "metric '{metric}' should be valid");
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn schema_create_collection_invalid_metric() {
+    let (c, key) =
+        setup_connector("qdrant", "localhost:6333", &["vectordb.collections.write"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.collections.write",
+        &["vectordb.create_collection"],
+    );
+
+    let result = invoke(
+        &c,
+        "vectordb.create_collection",
+        json!({"collection": "test", "dimension": 768, "metric": "manhattan"}),
+        &token,
+    )
+    .await;
+    assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+}
+
+// ============================================================================
+// Schema Validation: Query Vectors
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn schema_query_vectors_top_k_min() {
+    let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.read"]).await;
+    let token = generate_token(&key, "vectordb.vectors.read", &["vectordb.query_vectors"]);
+
+    let result = invoke(
+        &c,
+        "vectordb.query_vectors",
+        json!({"collection": "docs", "vector": [0.1, 0.2, 0.3], "top_k": 1}),
+        &token,
+    )
+    .await;
+    assert!(result.is_ok(), "top_k 1 should be valid");
+}
+
+#[fcp_async_core::runtime::test]
+async fn schema_query_vectors_top_k_max() {
+    let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.read"]).await;
+    let token = generate_token(&key, "vectordb.vectors.read", &["vectordb.query_vectors"]);
+
+    let result = invoke(
+        &c,
+        "vectordb.query_vectors",
+        json!({"collection": "docs", "vector": [0.1, 0.2, 0.3], "top_k": 10000}),
+        &token,
+    )
+    .await;
+    assert!(result.is_ok(), "top_k 10000 should be valid");
+}
+
+#[fcp_async_core::runtime::test]
+async fn schema_query_vectors_top_k_zero() {
+    let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.read"]).await;
+    let token = generate_token(&key, "vectordb.vectors.read", &["vectordb.query_vectors"]);
+
+    let result = invoke(
+        &c,
+        "vectordb.query_vectors",
+        json!({"collection": "docs", "vector": [0.1, 0.2, 0.3], "top_k": 0}),
+        &token,
+    )
+    .await;
+    assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+}
+
+#[fcp_async_core::runtime::test]
+async fn schema_query_vectors_top_k_exceeds_max() {
+    let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.read"]).await;
+    let token = generate_token(&key, "vectordb.vectors.read", &["vectordb.query_vectors"]);
+
+    let result = invoke(
+        &c,
+        "vectordb.query_vectors",
+        json!({"collection": "docs", "vector": [0.1, 0.2, 0.3], "top_k": 10001}),
+        &token,
+    )
+    .await;
+    assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+}
+
+#[fcp_async_core::runtime::test]
+async fn schema_query_vectors_empty_vector() {
+    let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.read"]).await;
+    let token = generate_token(&key, "vectordb.vectors.read", &["vectordb.query_vectors"]);
+
+    let result = invoke(
+        &c,
+        "vectordb.query_vectors",
+        json!({"collection": "docs", "vector": []}),
+        &token,
+    )
+    .await;
+    assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+}
+
+#[fcp_async_core::runtime::test]
+async fn schema_query_vectors_non_numeric() {
+    let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.read"]).await;
+    let token = generate_token(&key, "vectordb.vectors.read", &["vectordb.query_vectors"]);
+
+    let result = invoke(
+        &c,
+        "vectordb.query_vectors",
+        json!({"collection": "docs", "vector": ["not", "numbers"]}),
+        &token,
+    )
+    .await;
+    assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+}
+
+#[fcp_async_core::runtime::test]
+async fn schema_query_vectors_default_top_k() {
+    let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.read"]).await;
+    let token = generate_token(&key, "vectordb.vectors.read", &["vectordb.query_vectors"]);
+
+    let result = invoke(
+        &c,
+        "vectordb.query_vectors",
+        json!({"collection": "docs", "vector": [0.1, 0.2, 0.3]}),
+        &token,
+    )
+    .await;
+    assert!(result.is_ok(), "default top_k should work");
+}
+
+// ============================================================================
+// Schema Validation: Upsert Vectors
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn schema_upsert_vectors_single() {
+    let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.write"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.vectors.write",
+        &["vectordb.upsert_vectors"],
+    );
+
+    let result = invoke(
+        &c,
+        "vectordb.upsert_vectors",
+        json!({"collection": "docs", "vectors": [{"id": "v1", "values": [0.1, 0.2]}]}),
+        &token,
+    )
+    .await;
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap()["upserted_count"], 1);
+}
+
+#[fcp_async_core::runtime::test]
+async fn schema_upsert_vectors_empty_batch() {
+    let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.write"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.vectors.write",
+        &["vectordb.upsert_vectors"],
+    );
+
+    let result = invoke(
+        &c,
+        "vectordb.upsert_vectors",
+        json!({"collection": "docs", "vectors": []}),
+        &token,
+    )
+    .await;
+    assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+}
+
+#[fcp_async_core::runtime::test]
+async fn schema_upsert_vectors_exceeds_max_batch() {
+    let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.write"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.vectors.write",
+        &["vectordb.upsert_vectors"],
+    );
+
+    let vectors: Vec<serde_json::Value> = (0..1001)
+        .map(|i| json!({"id": format!("v{i}"), "values": [0.1]}))
+        .collect();
+
+    let result = invoke(
+        &c,
+        "vectordb.upsert_vectors",
+        json!({"collection": "docs", "vectors": vectors}),
+        &token,
+    )
+    .await;
+    assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+}
+
+#[fcp_async_core::runtime::test]
+async fn schema_upsert_vectors_max_batch_ok() {
+    let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.write"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.vectors.write",
+        &["vectordb.upsert_vectors"],
+    );
+
+    let vectors: Vec<serde_json::Value> = (0..1000)
+        .map(|i| json!({"id": format!("v{i}"), "values": [0.1]}))
+        .collect();
+
+    let result = invoke(
+        &c,
+        "vectordb.upsert_vectors",
+        json!({"collection": "docs", "vectors": vectors}),
+        &token,
+    )
+    .await;
+    assert!(result.is_ok(), "1000 vectors should be within limit");
+    assert_eq!(result.unwrap()["upserted_count"], 1000);
+}
+
+#[fcp_async_core::runtime::test]
+async fn schema_upsert_vectors_id_empty() {
+    let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.write"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.vectors.write",
+        &["vectordb.upsert_vectors"],
+    );
+
+    let result = invoke(
+        &c,
+        "vectordb.upsert_vectors",
+        json!({"collection": "docs", "vectors": [{"id": "", "values": [0.1]}]}),
+        &token,
+    )
+    .await;
+    assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+}
+
+#[fcp_async_core::runtime::test]
+async fn schema_upsert_vectors_id_max_length() {
+    let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.write"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.vectors.write",
+        &["vectordb.upsert_vectors"],
+    );
+
+    let id_512 = "a".repeat(512);
+    let result = invoke(
+        &c,
+        "vectordb.upsert_vectors",
+        json!({"collection": "docs", "vectors": [{"id": id_512, "values": [0.1]}]}),
+        &token,
+    )
+    .await;
+    assert!(result.is_ok(), "512-char ID should be valid");
+}
+
+#[fcp_async_core::runtime::test]
+async fn schema_upsert_vectors_id_exceeds_max_length() {
+    let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.write"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.vectors.write",
+        &["vectordb.upsert_vectors"],
+    );
+
+    let id_513 = "a".repeat(513);
+    let result = invoke(
+        &c,
+        "vectordb.upsert_vectors",
+        json!({"collection": "docs", "vectors": [{"id": id_513, "values": [0.1]}]}),
+        &token,
+    )
+    .await;
+    assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+}
+
+#[fcp_async_core::runtime::test]
+async fn schema_upsert_vectors_missing_id() {
+    let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.write"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.vectors.write",
+        &["vectordb.upsert_vectors"],
+    );
+
+    let result = invoke(
+        &c,
+        "vectordb.upsert_vectors",
+        json!({"collection": "docs", "vectors": [{"values": [0.1]}]}),
+        &token,
+    )
+    .await;
+    assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+}
+
+#[fcp_async_core::runtime::test]
+async fn schema_upsert_vectors_missing_values() {
+    let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.write"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.vectors.write",
+        &["vectordb.upsert_vectors"],
+    );
+
+    let result = invoke(
+        &c,
+        "vectordb.upsert_vectors",
+        json!({"collection": "docs", "vectors": [{"id": "v1"}]}),
+        &token,
+    )
+    .await;
+    assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+}
+
+#[fcp_async_core::runtime::test]
+async fn schema_upsert_vectors_empty_values() {
+    let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.write"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.vectors.write",
+        &["vectordb.upsert_vectors"],
+    );
+
+    let result = invoke(
+        &c,
+        "vectordb.upsert_vectors",
+        json!({"collection": "docs", "vectors": [{"id": "v1", "values": []}]}),
+        &token,
+    )
+    .await;
+    assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+}
+
+#[fcp_async_core::runtime::test]
+async fn schema_upsert_vectors_non_numeric_values() {
+    let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.write"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.vectors.write",
+        &["vectordb.upsert_vectors"],
+    );
+
+    let result = invoke(
+        &c,
+        "vectordb.upsert_vectors",
+        json!({"collection": "docs", "vectors": [{"id": "v1", "values": ["a", "b"]}]}),
+        &token,
+    )
+    .await;
+    assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+}
+
+#[fcp_async_core::runtime::test]
+async fn schema_upsert_vectors_metadata_must_be_object() {
+    let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.write"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.vectors.write",
+        &["vectordb.upsert_vectors"],
+    );
+
+    let result = invoke(
+        &c,
+        "vectordb.upsert_vectors",
+        json!({"collection": "docs", "vectors": [{"id": "v1", "values": [0.1], "metadata": "string"}]}),
+        &token,
+    )
+    .await;
+    assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+}
+
+#[fcp_async_core::runtime::test]
+async fn schema_upsert_vectors_sparse_values_must_be_object() {
+    let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.write"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.vectors.write",
+        &["vectordb.upsert_vectors"],
+    );
+
+    let result = invoke(
+        &c,
+        "vectordb.upsert_vectors",
+        json!({"collection": "docs", "vectors": [{"id": "v1", "values": [0.1], "sparse_values": [1, 2]}]}),
+        &token,
+    )
+    .await;
+    assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+}
+
+#[fcp_async_core::runtime::test]
+async fn schema_upsert_vectors_element_must_be_object() {
+    let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.write"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.vectors.write",
+        &["vectordb.upsert_vectors"],
+    );
+
+    let result = invoke(
+        &c,
+        "vectordb.upsert_vectors",
+        json!({"collection": "docs", "vectors": ["not_an_object"]}),
+        &token,
+    )
+    .await;
+    assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+}
+
+#[fcp_async_core::runtime::test]
+async fn schema_upsert_vectors_with_metadata() {
+    let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.write"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.vectors.write",
+        &["vectordb.upsert_vectors"],
+    );
+
+    let result = invoke(
+        &c,
+        "vectordb.upsert_vectors",
+        json!({
+            "collection": "docs",
+            "vectors": [{"id": "v1", "values": [0.1, 0.2], "metadata": {"category": "test"}}]
+        }),
+        &token,
+    )
+    .await;
+    assert!(result.is_ok());
+}
+
+// ============================================================================
+// Schema Validation: Fetch Vectors
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn schema_fetch_vectors_valid() {
+    let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.read"]).await;
+    let token = generate_token(&key, "vectordb.vectors.read", &["vectordb.fetch_vectors"]);
+
+    let result = invoke(
+        &c,
+        "vectordb.fetch_vectors",
+        json!({"collection": "docs", "ids": ["id1", "id2"]}),
+        &token,
+    )
+    .await;
+    assert!(result.is_ok());
+    let resp = result.unwrap();
+    assert!(resp["vectors"]["id1"].is_object());
+    assert!(resp["vectors"]["id2"].is_object());
+}
+
+#[fcp_async_core::runtime::test]
+async fn schema_fetch_vectors_empty_ids() {
+    let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.read"]).await;
+    let token = generate_token(&key, "vectordb.vectors.read", &["vectordb.fetch_vectors"]);
+
+    let result = invoke(
+        &c,
+        "vectordb.fetch_vectors",
+        json!({"collection": "docs", "ids": []}),
+        &token,
+    )
+    .await;
+    assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+}
+
+#[fcp_async_core::runtime::test]
+async fn schema_fetch_vectors_ids_non_string() {
+    let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.read"]).await;
+    let token = generate_token(&key, "vectordb.vectors.read", &["vectordb.fetch_vectors"]);
+
+    let result = invoke(
+        &c,
+        "vectordb.fetch_vectors",
+        json!({"collection": "docs", "ids": [123, 456]}),
+        &token,
+    )
+    .await;
+    assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+}
+
+#[fcp_async_core::runtime::test]
+async fn schema_fetch_vectors_exceeds_max_ids() {
+    let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.read"]).await;
+    let token = generate_token(&key, "vectordb.vectors.read", &["vectordb.fetch_vectors"]);
+
+    let ids: Vec<String> = (0..1001).map(|i| format!("id{i}")).collect();
+    let result = invoke(
+        &c,
+        "vectordb.fetch_vectors",
+        json!({"collection": "docs", "ids": ids}),
+        &token,
+    )
+    .await;
+    assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+}
+
+// ============================================================================
+// Schema Validation: Delete Vectors
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn schema_delete_vectors_by_ids() {
+    let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.delete"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.vectors.delete",
+        &["vectordb.delete_vectors"],
+    );
+
+    let result = invoke(
+        &c,
+        "vectordb.delete_vectors",
+        json!({"collection": "docs", "ids": ["id1", "id2"]}),
+        &token,
+    )
+    .await;
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap()["deleted_count"], 2);
+}
+
+#[fcp_async_core::runtime::test]
+async fn schema_delete_vectors_by_filter() {
+    let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.delete"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.vectors.delete",
+        &["vectordb.delete_vectors"],
+    );
+
+    let result = invoke(
+        &c,
+        "vectordb.delete_vectors",
+        json!({"collection": "docs", "filter": {"category": "stale"}}),
+        &token,
+    )
+    .await;
+    assert!(result.is_ok());
+}
+
+#[fcp_async_core::runtime::test]
+async fn schema_delete_vectors_by_delete_all() {
+    let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.delete"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.vectors.delete",
+        &["vectordb.delete_vectors"],
+    );
+
+    let result = invoke(
+        &c,
+        "vectordb.delete_vectors",
+        json!({"collection": "docs", "delete_all": true}),
+        &token,
+    )
+    .await;
+    assert!(result.is_ok());
+}
+
+#[fcp_async_core::runtime::test]
+async fn schema_delete_vectors_no_criteria() {
+    let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.delete"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.vectors.delete",
+        &["vectordb.delete_vectors"],
+    );
+
+    let result = invoke(
+        &c,
+        "vectordb.delete_vectors",
+        json!({"collection": "docs"}),
+        &token,
+    )
+    .await;
+    assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+}
+
+#[fcp_async_core::runtime::test]
+async fn schema_delete_vectors_ids_type_validation() {
+    let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.delete"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.vectors.delete",
+        &["vectordb.delete_vectors"],
+    );
+
+    let result = invoke(
+        &c,
+        "vectordb.delete_vectors",
+        json!({"collection": "docs", "ids": [123, 456]}),
+        &token,
+    )
+    .await;
+    assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+}
+
+#[fcp_async_core::runtime::test]
+async fn schema_delete_vectors_filter_type_validation() {
+    let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.delete"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.vectors.delete",
+        &["vectordb.delete_vectors"],
+    );
+
+    let result = invoke(
+        &c,
+        "vectordb.delete_vectors",
+        json!({"collection": "docs", "filter": "not_an_object"}),
+        &token,
+    )
+    .await;
+    assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+}
+
+// ============================================================================
+// Schema Validation: Update Vector Metadata
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn schema_update_metadata_valid() {
+    let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.write"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.vectors.write",
+        &["vectordb.update_vector_metadata"],
+    );
+
+    let result = invoke(
+        &c,
+        "vectordb.update_vector_metadata",
+        json!({"collection": "docs", "id": "v1", "metadata": {"key": "value"}}),
+        &token,
+    )
+    .await;
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap()["updated"], true);
+}
+
+#[fcp_async_core::runtime::test]
+async fn schema_update_metadata_missing_id() {
+    let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.write"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.vectors.write",
+        &["vectordb.update_vector_metadata"],
+    );
+
+    let result = invoke(
+        &c,
+        "vectordb.update_vector_metadata",
+        json!({"collection": "docs", "metadata": {"key": "value"}}),
+        &token,
+    )
+    .await;
+    assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+}
+
+#[fcp_async_core::runtime::test]
+async fn schema_update_metadata_missing_metadata() {
+    let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.write"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.vectors.write",
+        &["vectordb.update_vector_metadata"],
+    );
+
+    let result = invoke(
+        &c,
+        "vectordb.update_vector_metadata",
+        json!({"collection": "docs", "id": "v1"}),
+        &token,
+    )
+    .await;
+    assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+}
+
+// ============================================================================
+// Error Taxonomy
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn error_not_configured() {
+    let connector = VectorDbConnector::new();
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "vectordb.list_collections",
+            "input": {},
+            "capability_token": {"raw": []}
+        }))
+        .await;
+    assert!(matches!(result, Err(FcpError::NotConfigured)));
+}
+
+#[fcp_async_core::runtime::test]
+async fn error_missing_operation() {
+    let (c, key) =
+        setup_connector("qdrant", "localhost:6333", &["vectordb.collections.read"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.collections.read",
+        &["vectordb.list_collections"],
+    );
+
+    let result = c
+        .handle_invoke(json!({"input": {}, "capability_token": token}))
+        .await;
+    assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+}
+
+#[fcp_async_core::runtime::test]
+async fn error_unknown_operation() {
+    let (c, key) =
+        setup_connector("qdrant", "localhost:6333", &["vectordb.collections.read"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.collections.read",
+        &["vectordb.nonexistent"],
+    );
+
+    let result = invoke(&c, "vectordb.nonexistent", json!({}), &token).await;
+    assert!(matches!(result, Err(FcpError::OperationNotGranted { .. })));
+}
+
+#[fcp_async_core::runtime::test]
+async fn error_input_not_object() {
+    let (c, key) =
+        setup_connector("qdrant", "localhost:6333", &["vectordb.collections.read"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.collections.read",
+        &["vectordb.list_collections"],
+    );
+
+    let result = c
+        .handle_invoke(json!({
+            "operation": "vectordb.list_collections",
+            "input": "not_an_object",
+            "capability_token": token
+        }))
+        .await;
+    assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+}
+
+#[fcp_async_core::runtime::test]
+async fn error_missing_capability_token() {
+    let (c, _) =
+        setup_connector("qdrant", "localhost:6333", &["vectordb.collections.read"]).await;
+
+    let result = c
+        .handle_invoke(json!({
+            "operation": "vectordb.list_collections",
+            "input": {}
+        }))
+        .await;
+    assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+}
+
+#[fcp_async_core::runtime::test]
+async fn error_capability_mismatch() {
+    let (c, key) =
+        setup_connector("qdrant", "localhost:6333", &["vectordb.collections.read"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.collections.read",
+        &["vectordb.create_collection"],
+    );
+
+    let result = invoke(
+        &c,
+        "vectordb.create_collection",
+        json!({"collection": "test", "dimension": 768}),
+        &token,
+    )
+    .await;
+    assert!(result.is_err());
+}
+
+#[fcp_async_core::runtime::test]
+async fn error_missing_required_field_message() {
+    let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.read"]).await;
+    let token = generate_token(&key, "vectordb.vectors.read", &["vectordb.query_vectors"]);
+
+    let result = invoke(
+        &c,
+        "vectordb.query_vectors",
+        json!({"collection": "docs"}),
+        &token,
+    )
+    .await;
+
+    if let Err(FcpError::InvalidRequest { code, message }) = result {
+        assert_eq!(code, 1003);
+        assert!(
+            message.contains("vector"),
+            "message should mention missing field: {message}"
+        );
+    } else {
+        panic!("expected InvalidRequest, got {result:?}");
+    }
+}
+
+// ============================================================================
+// Idempotency Rules
+// ============================================================================
+
+#[test]
+fn idempotency_read_ops_are_none() {
+    let connector = VectorDbConnector::new();
+    let introspection = connector.handle_introspect();
+
+    for op_id in [
+        "vectordb.list_collections",
+        "vectordb.describe_collection",
+        "vectordb.query_vectors",
+        "vectordb.fetch_vectors",
+    ] {
+        let op = introspection
+            .operations
+            .iter()
+            .find(|o| o.id.as_str() == op_id)
+            .unwrap_or_else(|| panic!("missing {op_id}"));
+        assert_eq!(op.idempotency, IdempotencyClass::None, "{op_id}");
+    }
+}
+
+#[test]
+fn idempotency_write_ops_are_best_effort() {
+    let connector = VectorDbConnector::new();
+    let introspection = connector.handle_introspect();
+
+    for op_id in [
+        "vectordb.create_collection",
+        "vectordb.delete_collection",
+        "vectordb.upsert_vectors",
+        "vectordb.delete_vectors",
+        "vectordb.update_vector_metadata",
+    ] {
+        let op = introspection
+            .operations
+            .iter()
+            .find(|o| o.id.as_str() == op_id)
+            .unwrap_or_else(|| panic!("missing {op_id}"));
+        assert_eq!(op.idempotency, IdempotencyClass::BestEffort, "{op_id}");
+    }
+}
+
+// ============================================================================
+// Redaction: No Credential Leakage
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn redaction_doctor_does_not_leak_credential_id() {
+    let mut connector = VectorDbConnector::new();
+    let cred = "aabbccdd-1122-3344-5566-778899aabbcc";
+    connector
+        .handle_configure(json!({
+            "provider": "pinecone",
+            "endpoint": "my-index.svc.us-east-1.pinecone.io",
+            "credential_id": cred
+        }))
+        .await
+        .expect("configure ok");
+
+    let result = connector.handle_doctor().await.expect("doctor ok");
+    let serialized = serde_json::to_string(&result).expect("serialize");
+    assert!(
+        !serialized.contains(cred),
+        "doctor output must not contain full credential id"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn redaction_configure_error_does_not_leak_credential() {
+    let mut connector = VectorDbConnector::new();
+    let cred = "aabbccdd-1122-3344-5566-778899aabbcc";
+
+    let result = connector
+        .handle_configure(json!({
+            "provider": "pinecone",
+            "endpoint": "",
+            "credential_id": cred
+        }))
+        .await;
+
+    if let Err(err) = result {
+        let err_str = format!("{err}");
+        assert!(
+            !err_str.contains(cred),
+            "error must not contain credential id: {err_str}"
+        );
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn redaction_health_does_not_leak_credential() {
+    let mut connector = VectorDbConnector::new();
+    let cred = "aabbccdd-1122-3344-5566-778899aabbcc";
+    connector
+        .handle_configure(json!({
+            "provider": "qdrant",
+            "endpoint": "localhost:6333",
+            "credential_id": cred,
+            "use_tls": false
+        }))
+        .await
+        .expect("configure ok");
+
+    let health = connector.handle_health();
+    let serialized = serde_json::to_string(&health).expect("serialize");
+    assert!(
+        !serialized.contains(cred),
+        "health output must not contain full credential id"
+    );
+}
+
+// ============================================================================
+// Introspection Completeness
+// ============================================================================
+
+#[test]
+fn introspect_all_ops_have_input_schema() {
+    let connector = VectorDbConnector::new();
+    let introspection = connector.handle_introspect();
+
+    for op in &introspection.operations {
+        assert!(op.input_schema.is_object(), "{}: input_schema", op.id);
+        assert_eq!(op.input_schema["type"], "object", "{}: type", op.id);
+    }
+}
+
+#[test]
+fn introspect_all_ops_have_output_schema() {
+    let connector = VectorDbConnector::new();
+    let introspection = connector.handle_introspect();
+
+    for op in &introspection.operations {
+        assert!(op.output_schema.is_object(), "{}: output_schema", op.id);
+        assert_eq!(op.output_schema["type"], "object", "{}: type", op.id);
+    }
+}
+
+#[test]
+fn introspect_all_ops_have_summary() {
+    let connector = VectorDbConnector::new();
+    let introspection = connector.handle_introspect();
+
+    for op in &introspection.operations {
+        assert!(!op.summary.is_empty(), "{}: summary empty", op.id);
+    }
+}
+
+#[test]
+fn introspect_read_ops_are_safe() {
+    let connector = VectorDbConnector::new();
+    let introspection = connector.handle_introspect();
+
+    for op_id in [
+        "vectordb.list_collections",
+        "vectordb.describe_collection",
+        "vectordb.query_vectors",
+        "vectordb.fetch_vectors",
+    ] {
+        let op = introspection
+            .operations
+            .iter()
+            .find(|o| o.id.as_str() == op_id)
+            .unwrap_or_else(|| panic!("missing {op_id}"));
+        assert_eq!(op.safety_tier, SafetyTier::Safe, "{op_id}");
+        assert_eq!(op.risk_level, RiskLevel::Low, "{op_id}");
+    }
+}
+
+#[test]
+fn introspect_dangerous_ops_require_interactive_approval() {
+    let connector = VectorDbConnector::new();
+    let introspection = connector.handle_introspect();
+
+    let op = introspection
+        .operations
+        .iter()
+        .find(|o| o.id.as_str() == "vectordb.delete_collection")
+        .expect("delete_collection must exist");
+
+    assert_eq!(op.safety_tier, SafetyTier::Dangerous);
+    assert_eq!(op.risk_level, RiskLevel::High);
+    assert_eq!(
+        op.requires_approval,
+        Some(fcp_core::ApprovalMode::Interactive)
+    );
+}
+
+#[test]
+fn introspect_risky_ops_require_policy_approval() {
+    let connector = VectorDbConnector::new();
+    let introspection = connector.handle_introspect();
+
+    for op_id in [
+        "vectordb.create_collection",
+        "vectordb.upsert_vectors",
+        "vectordb.delete_vectors",
+    ] {
+        let op = introspection
+            .operations
+            .iter()
+            .find(|o| o.id.as_str() == op_id)
+            .unwrap_or_else(|| panic!("missing {op_id}"));
+        assert_eq!(op.safety_tier, SafetyTier::Risky, "{op_id}");
+        assert_eq!(
+            op.requires_approval,
+            Some(fcp_core::ApprovalMode::Policy),
+            "{op_id}"
+        );
+    }
+}
+
+#[test]
+fn introspect_required_fields_documented_in_schema() {
+    let connector = VectorDbConnector::new();
+    let introspection = connector.handle_introspect();
+
+    let ops_with_required: &[(&str, &[&str])] = &[
+        ("vectordb.describe_collection", &["collection"]),
+        ("vectordb.create_collection", &["collection", "dimension"]),
+        ("vectordb.delete_collection", &["collection"]),
+        ("vectordb.query_vectors", &["collection", "vector"]),
+        ("vectordb.fetch_vectors", &["collection", "ids"]),
+        ("vectordb.upsert_vectors", &["collection", "vectors"]),
+        ("vectordb.delete_vectors", &["collection"]),
+        (
+            "vectordb.update_vector_metadata",
+            &["collection", "id", "metadata"],
+        ),
+    ];
+
+    for (op_id, required_fields) in ops_with_required {
+        let op = introspection
+            .operations
+            .iter()
+            .find(|o| o.id.as_str() == *op_id)
+            .unwrap_or_else(|| panic!("missing {op_id}"));
+
+        let schema_required = op
+            .input_schema
+            .get("required")
+            .and_then(|r| r.as_array())
+            .unwrap_or_else(|| panic!("{op_id}: missing required array"));
+
+        for field in *required_fields {
+            assert!(
+                schema_required.iter().any(|r| r.as_str() == Some(field)),
+                "{op_id}: field '{field}' not in schema required"
+            );
+        }
+    }
+}
+
+#[test]
+fn introspect_capability_mapping_per_operation() {
+    let connector = VectorDbConnector::new();
+    let introspection = connector.handle_introspect();
+
+    let expected: &[(&str, &str)] = &[
+        ("vectordb.list_collections", "vectordb.collections.read"),
+        ("vectordb.describe_collection", "vectordb.collections.read"),
+        ("vectordb.create_collection", "vectordb.collections.write"),
+        ("vectordb.delete_collection", "vectordb.collections.delete"),
+        ("vectordb.query_vectors", "vectordb.vectors.read"),
+        ("vectordb.fetch_vectors", "vectordb.vectors.read"),
+        ("vectordb.upsert_vectors", "vectordb.vectors.write"),
+        ("vectordb.delete_vectors", "vectordb.vectors.delete"),
+        ("vectordb.update_vector_metadata", "vectordb.vectors.write"),
+    ];
+
+    for (op_id, cap) in expected {
+        let op = introspection
+            .operations
+            .iter()
+            .find(|o| o.id.as_str() == *op_id)
+            .unwrap_or_else(|| panic!("missing {op_id}"));
+        assert_eq!(op.capability.as_str(), *cap, "{op_id}");
+    }
+}
+
+#[test]
+fn introspect_deterministic_output() {
+    let c1 = VectorDbConnector::new();
+    let c2 = VectorDbConnector::new();
+    let i1 = c1.handle_introspect();
+    let i2 = c2.handle_introspect();
+
+    assert_eq!(i1.operations.len(), i2.operations.len());
+    for (a, b) in i1.operations.iter().zip(i2.operations.iter()) {
+        assert_eq!(a.id, b.id);
+        assert_eq!(a.input_schema, b.input_schema);
+        assert_eq!(a.output_schema, b.output_schema);
+    }
+}
+
+// ============================================================================
+// Payload Bounds: Schema-Declared Limits
+// ============================================================================
+
+#[test]
+fn payload_bounds_upsert_schema_declares_max_items() {
+    let connector = VectorDbConnector::new();
+    let introspection = connector.handle_introspect();
+
+    let upsert = introspection
+        .operations
+        .iter()
+        .find(|o| o.id.as_str() == "vectordb.upsert_vectors")
+        .expect("upsert must exist");
+
+    let max_items = upsert.input_schema["properties"]["vectors"]["maxItems"]
+        .as_i64()
+        .expect("maxItems missing");
+    assert_eq!(max_items, 1000);
+}
+
+#[test]
+fn payload_bounds_fetch_schema_declares_id_limits() {
+    let connector = VectorDbConnector::new();
+    let introspection = connector.handle_introspect();
+
+    let fetch = introspection
+        .operations
+        .iter()
+        .find(|o| o.id.as_str() == "vectordb.fetch_vectors")
+        .expect("fetch must exist");
+
+    assert_eq!(fetch.input_schema["properties"]["ids"]["maxItems"], 1000);
+    assert_eq!(fetch.input_schema["properties"]["ids"]["minItems"], 1);
+}
+
+#[test]
+fn payload_bounds_create_collection_dimension_range() {
+    let connector = VectorDbConnector::new();
+    let introspection = connector.handle_introspect();
+
+    let create = introspection
+        .operations
+        .iter()
+        .find(|o| o.id.as_str() == "vectordb.create_collection")
+        .expect("create must exist");
+
+    let dim = &create.input_schema["properties"]["dimension"];
+    assert_eq!(dim["minimum"], 1);
+    assert_eq!(dim["maximum"], 10000);
+}
+
+#[test]
+fn payload_bounds_query_top_k_range() {
+    let connector = VectorDbConnector::new();
+    let introspection = connector.handle_introspect();
+
+    let query = introspection
+        .operations
+        .iter()
+        .find(|o| o.id.as_str() == "vectordb.query_vectors")
+        .expect("query must exist");
+
+    let top_k = &query.input_schema["properties"]["top_k"];
+    assert_eq!(top_k["minimum"], 1);
+    assert_eq!(top_k["maximum"], 10000);
+}
+
+// ============================================================================
+// Config Validation: Timeout Bounds
+// ============================================================================
+
+#[test]
+fn config_timeout_boundaries() {
+    // Zero connect timeout
+    let config = VectorDbConfig {
+        provider: VectorDbProvider::Qdrant,
+        endpoint: "localhost:6333".into(),
+        credential_id: fcp_core::CredentialId::new(),
+        use_tls: false,
+        namespace: None,
+        connect_timeout_ms: 0,
+        request_timeout_ms: 60_000,
+    };
+    assert!(config.validate().is_err());
+
+    // Exceeds max connect timeout
+    let config2 = VectorDbConfig {
+        connect_timeout_ms: 300_001,
+        ..config.clone()
+    };
+    assert!(config2.validate().is_err());
+
+    // Zero request timeout
+    let config3 = VectorDbConfig {
+        connect_timeout_ms: 10_000,
+        request_timeout_ms: 0,
+        ..config.clone()
+    };
+    assert!(config3.validate().is_err());
+
+    // Exceeds max request timeout
+    let config4 = VectorDbConfig {
+        connect_timeout_ms: 10_000,
+        request_timeout_ms: 600_001,
+        ..config.clone()
+    };
+    assert!(config4.validate().is_err());
+
+    // Valid boundaries (min)
+    let config5 = VectorDbConfig {
+        connect_timeout_ms: 1,
+        request_timeout_ms: 1,
+        ..config.clone()
+    };
+    assert!(config5.validate().is_ok());
+
+    // Valid boundaries (max)
+    let config6 = VectorDbConfig {
+        connect_timeout_ms: 300_000,
+        request_timeout_ms: 600_000,
+        ..config
+    };
+    assert!(config6.validate().is_ok());
+}
+
+// ============================================================================
+// Config Validation: Provider-Specific
+// ============================================================================
+
+#[test]
+fn config_provider_display() {
+    assert_eq!(VectorDbProvider::Pinecone.to_string(), "pinecone");
+    assert_eq!(VectorDbProvider::Qdrant.to_string(), "qdrant");
+}
+
+#[test]
+fn config_provider_default_ports() {
+    assert_eq!(VectorDbProvider::Pinecone.default_port(), 443);
+    assert_eq!(VectorDbProvider::Qdrant.default_port(), 6333);
+}
+
+#[test]
+fn config_provider_tls_requirements() {
+    assert!(VectorDbProvider::Pinecone.requires_tls());
+    assert!(!VectorDbProvider::Qdrant.requires_tls());
+}
+
+#[test]
+fn config_endpoint_allowlist_qdrant_patterns() {
+    let base = VectorDbConfig {
+        provider: VectorDbProvider::Qdrant,
+        endpoint: "my-cluster.qdrant.io".into(),
+        credential_id: fcp_core::CredentialId::new(),
+        use_tls: true,
+        namespace: None,
+        connect_timeout_ms: 10_000,
+        request_timeout_ms: 60_000,
+    };
+    assert!(base.is_endpoint_allowed());
+
+    let tech = VectorDbConfig {
+        endpoint: "my-cluster.qdrant.tech".into(),
+        ..base.clone()
+    };
+    assert!(tech.is_endpoint_allowed());
+
+    let evil = VectorDbConfig {
+        endpoint: "evil.com".into(),
+        ..base.clone()
+    };
+    assert!(!evil.is_endpoint_allowed());
+
+    // Port stripped for matching
+    let with_port = VectorDbConfig {
+        endpoint: "my-cluster.qdrant.io:6333".into(),
+        ..base
+    };
+    assert!(with_port.is_endpoint_allowed());
+}
+
+#[test]
+fn config_serde_round_trip() {
+    let config = VectorDbConfig {
+        provider: VectorDbProvider::Pinecone,
+        endpoint: "my-index.svc.us-east-1.pinecone.io".into(),
+        credential_id: fcp_core::CredentialId::new(),
+        use_tls: true,
+        namespace: Some("production".into()),
+        connect_timeout_ms: 5_000,
+        request_timeout_ms: 30_000,
+    };
+
+    let serialized = serde_json::to_value(&config).expect("serialize");
+    let deserialized: VectorDbConfig = serde_json::from_value(serialized).expect("deserialize");
+
+    assert_eq!(deserialized.provider, config.provider);
+    assert_eq!(deserialized.endpoint, config.endpoint);
+    assert_eq!(deserialized.use_tls, config.use_tls);
+    assert_eq!(deserialized.namespace, config.namespace);
+    assert_eq!(deserialized.connect_timeout_ms, config.connect_timeout_ms);
+    assert_eq!(deserialized.request_timeout_ms, config.request_timeout_ms);
+}
+
+// ============================================================================
+// Doctor Checks
+// ============================================================================
+
+#[test]
+fn doctor_from_checks_all_pass() {
+    let checks = vec![
+        fcp_vectordb::config::DoctorCheck {
+            name: "a".into(),
+            passed: true,
+            message: None,
+            critical: true,
+        },
+        fcp_vectordb::config::DoctorCheck {
+            name: "b".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        },
+    ];
+    let result = fcp_vectordb::config::DoctorResult::from_checks(checks);
+    assert_eq!(result.status, DoctorStatus::Healthy);
+    assert!(result.is_healthy());
+}
+
+#[test]
+fn doctor_from_checks_non_critical_fail() {
+    let checks = vec![
+        fcp_vectordb::config::DoctorCheck {
+            name: "a".into(),
+            passed: true,
+            message: None,
+            critical: true,
+        },
+        fcp_vectordb::config::DoctorCheck {
+            name: "b".into(),
+            passed: false,
+            message: Some("minor issue".into()),
+            critical: false,
+        },
+    ];
+    let result = fcp_vectordb::config::DoctorResult::from_checks(checks);
+    assert_eq!(result.status, DoctorStatus::Degraded);
+}
+
+#[test]
+fn doctor_from_checks_critical_fail() {
+    let checks = vec![fcp_vectordb::config::DoctorCheck {
+        name: "a".into(),
+        passed: false,
+        message: Some("critical fail".into()),
+        critical: true,
+    }];
+    let result = fcp_vectordb::config::DoctorResult::from_checks(checks);
+    assert_eq!(result.status, DoctorStatus::Unhealthy);
+}
+
+// ============================================================================
+// Describe Collection Output Shape
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn describe_collection_output_shape() {
+    let (c, key) =
+        setup_connector("qdrant", "localhost:6333", &["vectordb.collections.read"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.collections.read",
+        &["vectordb.describe_collection"],
+    );
+
+    let result = invoke(
+        &c,
+        "vectordb.describe_collection",
+        json!({"collection": "docs"}),
+        &token,
+    )
+    .await
+    .expect("describe should succeed");
+
+    assert!(result["name"].is_string());
+    assert!(result["dimension"].is_number());
+    assert!(result["metric"].is_string());
+    assert!(result["status"].is_string());
+    assert!(result["created_at"].is_string());
+    assert!(result["provider_metadata"].is_object());
+}
+
+// ============================================================================
+// Delete Collection Confirm Semantics
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn delete_collection_confirm_true_succeeds() {
+    let (c, key) =
+        setup_connector("qdrant", "localhost:6333", &["vectordb.collections.delete"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.collections.delete",
+        &["vectordb.delete_collection"],
+    );
+
+    let result = invoke(
+        &c,
+        "vectordb.delete_collection",
+        json!({"collection": "old", "confirm": true}),
+        &token,
+    )
+    .await;
+    assert!(result.is_ok());
+    let resp = result.unwrap();
+    assert_eq!(resp["deleted"], true);
+    assert_eq!(resp["collection"], "old");
+}
+
+#[fcp_async_core::runtime::test]
+async fn delete_collection_missing_confirm() {
+    let (c, key) =
+        setup_connector("qdrant", "localhost:6333", &["vectordb.collections.delete"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.collections.delete",
+        &["vectordb.delete_collection"],
+    );
+
+    let result = invoke(
+        &c,
+        "vectordb.delete_collection",
+        json!({"collection": "old"}),
+        &token,
+    )
+    .await;
+    assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+}
+
+// ============================================================================
+// Connector Lifecycle
+// ============================================================================
+
+#[test]
+fn connector_default_trait() {
+    let c = VectorDbConnector::default();
+    assert!(!c.is_configured());
+    assert!(c.provider().is_none());
+}
+
+#[fcp_async_core::runtime::test]
+async fn connector_handshake_sets_session() {
+    let mut connector = VectorDbConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+
+    connector
+        .handle_configure(json!({
+            "provider": "qdrant",
+            "endpoint": "localhost:6333",
+            "credential_id": "11223344-5566-7788-99aa-bbccddeeff00",
+            "use_tls": false
+        }))
+        .await
+        .expect("configure ok");
+
+    let hs = handshake_request(
+        signing_key.verifying_key().to_bytes(),
+        &["vectordb.collections.read"],
+    );
+    let result = connector
+        .handle_handshake(serde_json::to_value(hs).expect("serialize"))
+        .await;
+    assert!(result.is_ok());
+
+    let resp = result.unwrap();
+    assert_eq!(resp["status"], "accepted");
+    assert!(resp["session_id"].is_string());
+}
+
+// ============================================================================
+// Metrics Tracking
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn metrics_track_successful_invoke() {
+    let (c, key) =
+        setup_connector("qdrant", "localhost:6333", &["vectordb.collections.read"]).await;
+    let token = generate_token(
+        &key,
+        "vectordb.collections.read",
+        &["vectordb.list_collections"],
+    );
+
+    let health_before = c.handle_health();
+    let total_before = health_before["metrics"]["requests_total"]
+        .as_u64()
+        .unwrap_or(0);
+
+    invoke(&c, "vectordb.list_collections", json!({}), &token)
+        .await
+        .expect("invoke ok");
+
+    let health_after = c.handle_health();
+    let total_after = health_after["metrics"]["requests_total"]
+        .as_u64()
+        .unwrap_or(0);
+    assert_eq!(total_after, total_before + 1);
+}
+
+#[fcp_async_core::runtime::test]
+async fn metrics_track_failed_invoke() {
+    let (c, key) = setup_connector("qdrant", "localhost:6333", &["vectordb.vectors.read"]).await;
+    let token = generate_token(&key, "vectordb.vectors.read", &["vectordb.query_vectors"]);
+
+    let health_before = c.handle_health();
+    let errors_before = health_before["metrics"]["requests_error"]
+        .as_u64()
+        .unwrap_or(0);
+
+    // Missing vector field → will fail
+    let _ = invoke(
+        &c,
+        "vectordb.query_vectors",
+        json!({"collection": "docs"}),
+        &token,
+    )
+    .await;
+
+    let health_after = c.handle_health();
+    let errors_after = health_after["metrics"]["requests_error"]
+        .as_u64()
+        .unwrap_or(0);
+    assert_eq!(errors_after, errors_before + 1);
+}

@@ -543,7 +543,7 @@ async fn invoke_get_record_through_connector() {
 async fn invoke_list_tables_through_connector() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/meta/bases/appABC/tables"))
+        .and(path("/meta/bases/appABC123/tables"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "tables": [
                 {
@@ -582,7 +582,7 @@ async fn invoke_list_tables_through_connector() {
 async fn invoke_get_table_rejects_ambiguous_table_name() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/meta/bases/appABC/tables"))
+        .and(path("/meta/bases/appABC123/tables"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "tables": [
                 {
@@ -629,7 +629,7 @@ async fn invoke_get_table_rejects_ambiguous_table_name() {
 async fn invoke_list_fields_resolves_ids_and_names() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/meta/bases/appABC/tables"))
+        .and(path("/meta/bases/appABC123/tables"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "tables": [
                 {
@@ -673,8 +673,7 @@ async fn invoke_list_fields_resolves_ids_and_names() {
 async fn discovery_ops_reuse_schema_cache_within_ttl() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/meta/bases/appABC/tables"))
-        .expect(1)
+        .and(path("/meta/bases/appABC123/tables"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "tables": [
                 {
@@ -687,6 +686,7 @@ async fn discovery_ops_reuse_schema_cache_within_ttl() {
                 }
             ]
         })))
+        .expect(1)
         .mount(&server)
         .await;
 

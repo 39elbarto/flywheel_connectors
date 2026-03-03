@@ -1236,7 +1236,11 @@ impl AirtableConnector {
 
     async fn get_base_schema_cached(&self, base_id: &str) -> FcpResult<BaseSchemaResponse> {
         let now = Instant::now();
-        if let Some(cached) = self.schema_cache.lock().await.get(base_id).cloned() {
+        let cached = {
+            let cache = self.schema_cache.lock().await;
+            cache.get(base_id).cloned()
+        };
+        if let Some(cached) = cached {
             if now.saturating_duration_since(cached.fetched_at) <= SCHEMA_CACHE_TTL {
                 return Ok(cached.schema);
             }
@@ -1301,7 +1305,7 @@ fn require_nonempty_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpRes
     Ok(value)
 }
 
-fn require_base_id<'a>(input: &'a serde_json::Value) -> FcpResult<&'a str> {
+fn require_base_id(input: &serde_json::Value) -> FcpResult<&str> {
     let base_id = require_nonempty_str(input, "base_id")?;
     let valid_format = base_id.starts_with("app")
         && base_id.len() >= 6

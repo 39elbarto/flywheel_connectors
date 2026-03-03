@@ -1469,7 +1469,7 @@ fn figma_full_manifest_parses_with_all_operations() {
 
     assert_eq!(parsed.connector.id.as_str(), "fcp.figma");
 
-    // Verify all 15 operations present
+    // Verify all 17 operations present
     let ops = &parsed.provides.operations;
     let expected_ops = [
         "figma.list_team_projects",
@@ -1479,6 +1479,8 @@ fn figma_full_manifest_parses_with_all_operations() {
         "figma.get_file_nodes",
         "figma.get_file_components",
         "figma.get_file_styles",
+        "figma.styles.list",
+        "figma.tokens.export",
         "figma.export_images",
         "figma.list_file_versions",
         "figma.list_comments",
@@ -3691,4 +3693,229 @@ fn microsoft365_full_manifest_parses_with_all_operations() {
     assert!(op_pools.contains_key("m365.mail.search_messages"));
     assert!(op_pools.contains_key("m365.calendar.create_event"));
     assert!(op_pools.contains_key("m365.files.upload_file"));
+}
+
+// =============================================================================
+// Google AI (Gemini) connector tests
+// =============================================================================
+
+#[test]
+fn google_ai_full_manifest_parses_with_all_operations() {
+    let _log = TestLog::new(
+        "google_ai_full_manifest_parses_with_all_operations",
+        "fcp-manifest",
+        Some("fcp.google-ai"),
+        Some("0.1.0"),
+        Some(4),
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("../../connectors/google-ai/manifest.toml");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read google-ai manifest: {err}"));
+    let with_hash = with_computed_hash(&raw);
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid full google-ai manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.google-ai");
+
+    // Verify all 8 operations present
+    let ops = &parsed.provides.operations;
+    let expected_ops = [
+        "google-ai.batch_embed_contents",
+        "google-ai.count_tokens",
+        "google-ai.embed_content",
+        "google-ai.generate_content",
+        "google-ai.generate_content_stream",
+        "google-ai.get_model",
+        "google-ai.get_usage",
+        "google-ai.list_models",
+    ];
+    for op_name in &expected_ops {
+        assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
+    }
+    assert_eq!(ops.len(), expected_ops.len());
+
+    let unchecked = ConnectorManifest::parse_str_unchecked(&raw).expect("unchecked");
+    let hash = unchecked.compute_interface_hash().expect("hash");
+    println!("GOOGLE_AI_INTERFACE_HASH={hash}");
+
+    // Verify 3 rate limit pools
+    let pools = parsed.rate_limits.as_ref().expect("rate_limits");
+    assert_eq!(pools.pools.len(), 3);
+
+    // Verify operation pool mappings exist for all operations
+    let op_pools = &pools.operation_pools;
+    for op_name in &expected_ops {
+        assert!(
+            op_pools.contains_key(*op_name),
+            "missing rate limit pool mapping for: {op_name}"
+        );
+    }
+}
+
+// =============================================================================
+// VectorDB connector tests
+// =============================================================================
+
+#[test]
+fn vectordb_full_manifest_parses_with_all_operations() {
+    let _log = TestLog::new(
+        "vectordb_full_manifest_parses_with_all_operations",
+        "fcp-manifest",
+        Some("fcp.vectordb"),
+        Some("0.1.0"),
+        Some(6),
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("../../connectors/vectordb/manifest.toml");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read vectordb manifest: {err}"));
+    let with_hash = with_computed_hash(&raw);
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid full vectordb manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.vectordb");
+
+    // Verify all 9 operations present
+    let ops = &parsed.provides.operations;
+    let expected_ops = [
+        "create_collection",
+        "delete_collection",
+        "delete_vectors",
+        "describe_collection",
+        "fetch_vectors",
+        "list_collections",
+        "query_vectors",
+        "update_vector_metadata",
+        "upsert_vectors",
+    ];
+    for op_name in &expected_ops {
+        assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
+    }
+    assert_eq!(ops.len(), expected_ops.len());
+
+    let unchecked = ConnectorManifest::parse_str_unchecked(&raw).expect("unchecked");
+    let hash = unchecked.compute_interface_hash().expect("hash");
+    println!("VECTORDB_INTERFACE_HASH={hash}");
+
+    // Verify 3 rate limit pools
+    let pools = parsed.rate_limits.as_ref().expect("rate_limits");
+    assert_eq!(pools.pools.len(), 3);
+}
+
+// =============================================================================
+// Discord connector tests (generic TOML validation)
+// =============================================================================
+
+#[test]
+fn discord_manifest_parses_as_valid_toml_with_expected_structure() {
+    let _log = TestLog::new(
+        "discord_manifest_parses_as_valid_toml_with_expected_structure",
+        "fcp-manifest",
+        Some("fcp.discord"),
+        Some("0.1.0"),
+        Some(4),
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("../../connectors/discord/manifest.toml");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read discord manifest: {err}"));
+    let parsed: toml::Value = toml::from_str(&raw).expect("valid TOML");
+
+    // Verify manifest structure
+    let manifest = parsed.get("manifest").expect("manifest section");
+    assert_eq!(
+        manifest.get("format").and_then(|v| v.as_str()),
+        Some("fcp-connector-manifest")
+    );
+
+    let connector = parsed.get("connector").expect("connector section");
+    assert_eq!(
+        connector.get("id").and_then(|v| v.as_str()),
+        Some("fcp.discord")
+    );
+
+    // Verify 9 operations
+    let provides = parsed.get("provides").expect("provides section");
+    let operations = provides
+        .get("operations")
+        .expect("operations")
+        .as_table()
+        .expect("table");
+    let expected_ops = [
+        "send_message",
+        "edit_message",
+        "delete_message",
+        "get_channel",
+        "get_guild",
+        "trigger_typing",
+        "add_reaction",
+        "list_channels",
+        "create_thread",
+    ];
+    for op_name in &expected_ops {
+        assert!(
+            operations.contains_key(*op_name),
+            "missing discord operation: {op_name}"
+        );
+    }
+    assert_eq!(operations.len(), expected_ops.len());
+
+    // Verify streaming section exists (not yet supported by fcp-manifest parser)
+    assert!(
+        provides.get("streaming").is_some(),
+        "discord manifest should have streaming section"
+    );
+}
+
+// =============================================================================
+// Telegram connector tests (generic TOML validation)
+// =============================================================================
+
+#[test]
+fn telegram_manifest_parses_as_valid_toml_with_expected_structure() {
+    let _log = TestLog::new(
+        "telegram_manifest_parses_as_valid_toml_with_expected_structure",
+        "fcp-manifest",
+        Some("fcp.telegram"),
+        Some("0.1.0"),
+        Some(2),
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("../../connectors/telegram/manifest.toml");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read telegram manifest: {err}"));
+    let parsed: toml::Value = toml::from_str(&raw).expect("valid TOML");
+
+    // Verify manifest structure
+    let manifest = parsed.get("manifest").expect("manifest section");
+    assert_eq!(
+        manifest.get("format").and_then(|v| v.as_str()),
+        Some("fcp-connector-manifest")
+    );
+
+    let connector = parsed.get("connector").expect("connector section");
+    assert_eq!(
+        connector.get("id").and_then(|v| v.as_str()),
+        Some("fcp.telegram")
+    );
+
+    // Verify 4 operations
+    let provides = parsed.get("provides").expect("provides section");
+    let operations = provides
+        .get("operations")
+        .expect("operations")
+        .as_table()
+        .expect("table");
+    let expected_ops = [
+        "telegram.send_message",
+        "telegram.send_media",
+        "telegram.get_file",
+        "telegram.answer_callback_query",
+    ];
+    for op_name in &expected_ops {
+        assert!(
+            operations.contains_key(*op_name),
+            "missing telegram operation: {op_name}"
+        );
+    }
+    assert_eq!(operations.len(), expected_ops.len());
 }

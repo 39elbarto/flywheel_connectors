@@ -164,9 +164,7 @@ pub enum TokenValue {
     },
     /// Raw fallback for unrecognized token types.
     #[serde(rename = "raw")]
-    Raw {
-        data: serde_json::Value,
-    },
+    Raw { data: serde_json::Value },
 }
 
 // ---------------------------------------------------------------------------

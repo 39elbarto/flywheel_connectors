@@ -1745,14 +1745,24 @@ async fn styles_list_happy_path() {
     // Verify provenance/taint
     assert_eq!(result["provenance"]["source"], "figma.styles");
     assert_eq!(result["provenance"]["derived"], true);
-    assert!(result["taint"].as_array().unwrap().contains(&json!("external_input")));
+    assert!(
+        result["taint"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("external_input"))
+    );
 
     // Verify first color token has expected structure
     let color_token = tokens.iter().find(|t| t["name"] == "primary-500").unwrap();
     assert_eq!(color_token["category"], "color");
     assert_eq!(color_token["original_name"], "Primary / 500");
     assert_eq!(color_token["value"]["type"], "color");
-    assert!(color_token["value"]["hex"].as_str().unwrap().starts_with('#'));
+    assert!(
+        color_token["value"]["hex"]
+            .as_str()
+            .unwrap()
+            .starts_with('#')
+    );
 }
 
 #[fcp_async_core::runtime::test]

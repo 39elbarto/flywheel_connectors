@@ -1739,8 +1739,8 @@ impl DiscordConnector {
         let gateway = self.gateway.clone().ok_or(FcpError::NotConfigured)?;
         let zone_dir = self.zone_dir.clone().ok_or(FcpError::InvalidRequest {
             code: 1003,
-            message:
-                "Handshake zone_dir is required before Discord gateway streaming can start".into(),
+            message: "Handshake zone_dir is required before Discord gateway streaming can start"
+                .into(),
         })?;
         let state_path = zone_dir.join(DISCORD_GATEWAY_STATE_FILE);
         let lease_path = zone_dir.join(DISCORD_GATEWAY_LEASE_FILE);

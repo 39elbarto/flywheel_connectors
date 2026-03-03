@@ -65,9 +65,9 @@ pub const DISCORD_GATEWAY_STATE_FILE: &str = "discord_gateway_state.json";
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fcp_async_core::net::TcpListener;
     use fcp_async_core::time::sleep;
     use serde_json::json;
-    use tokio::net::TcpListener;
     use tokio_tungstenite::accept_async;
 
     fn parse_payload(msg: WsMessage) -> GatewayPayload {
@@ -509,7 +509,11 @@ mod tests {
 
         let _ = stream.events.recv().await.expect("ready event");
         let _ = stream.events.recv().await.expect("message event");
-        stream.join_handle.await.expect("join").expect("loop success");
+        stream
+            .join_handle
+            .await
+            .expect("join")
+            .expect("loop success");
         server.await.expect("server task");
 
         let persisted = read_json_file_if_exists::<GatewayStateRecord>(&state_path)
@@ -573,7 +577,11 @@ mod tests {
             GatewayEvent::Resumed => {}
             other => panic!("expected Resumed event, got {other:?}"),
         }
-        stream.join_handle.await.expect("join").expect("loop success");
+        stream
+            .join_handle
+            .await
+            .expect("join")
+            .expect("loop success");
         server.await.expect("server task");
 
         let persisted = read_json_file_if_exists::<GatewayStateRecord>(&state_path)
@@ -624,7 +632,11 @@ mod tests {
             .connect_once_with_state_path(Some(state_path.clone()))
             .await
             .expect("connect should succeed with identify fallback");
-        stream.join_handle.await.expect("join").expect("loop success");
+        stream
+            .join_handle
+            .await
+            .expect("join")
+            .expect("loop success");
         server.await.expect("server task");
 
         let persisted = read_json_file_if_exists::<GatewayStateRecord>(&state_path)
@@ -743,7 +755,8 @@ impl GatewayConnection {
         if let Some(path) = state_path.as_deref()
             && let Some(persisted) = load_persisted_gateway_state(path)?
             && (!state_snapshot.is_resume_ready()
-                || state_snapshot.sequence.unwrap_or_default() < persisted.sequence.unwrap_or_default())
+                || state_snapshot.sequence.unwrap_or_default()
+                    < persisted.sequence.unwrap_or_default())
         {
             state_snapshot = persisted;
         }
@@ -780,16 +793,15 @@ impl GatewayConnection {
 
         let active_connection = Arc::clone(&self.active_connection);
         let join_handle = fcp_async_core::task::spawn(async move {
-            let result =
-                run_gateway_loop(
-                    ws_stream,
-                    config,
-                    event_tx,
-                    state_snapshot,
-                    state_store,
-                    state_path,
-                )
-                .await;
+            let result = run_gateway_loop(
+                ws_stream,
+                config,
+                event_tx,
+                state_snapshot,
+                state_store,
+                state_path,
+            )
+            .await;
             active_connection.store(false, Ordering::Release);
             result
         });
@@ -978,9 +990,14 @@ async fn run_gateway_loop(
     state_store: Arc<Mutex<GatewayState>>,
     state_path: Option<PathBuf>,
 ) -> DiscordResult<()> {
-    let result =
-        run_gateway_loop_inner(ws_stream, config, &event_tx, &mut state, state_path.as_deref())
-            .await;
+    let result = run_gateway_loop_inner(
+        ws_stream,
+        config,
+        &event_tx,
+        &mut state,
+        state_path.as_deref(),
+    )
+    .await;
     let persisted_state = state.clone();
     let mut store = state_store.lock().await;
     *store = state;

@@ -278,7 +278,10 @@ impl M365SyncLease {
         let now = current_unix_timestamp_secs();
         let previous = read_json_file_if_exists::<M365SyncLeaseRecord>(&path).map_err(|err| {
             FcpError::Internal {
-                message: format!("Failed to read m365 sync lease file '{}': {err}", path.display()),
+                message: format!(
+                    "Failed to read m365 sync lease file '{}': {err}",
+                    path.display()
+                ),
             }
         })?;
 
@@ -505,7 +508,10 @@ impl M365Connector {
         self.zone_dir = req.zone_dir.clone().map(PathBuf::from);
         if let Some(zone_dir) = self.zone_dir.as_ref() {
             fs::create_dir_all(zone_dir).map_err(|err| FcpError::Internal {
-                message: format!("Failed to prepare Microsoft 365 zone_dir '{}': {err}", zone_dir.display()),
+                message: format!(
+                    "Failed to prepare Microsoft 365 zone_dir '{}': {err}",
+                    zone_dir.display()
+                ),
             })?;
         }
 
@@ -580,13 +586,19 @@ impl M365Connector {
         read_json_file_if_exists::<M365SyncState>(path)
             .map(|state| state.unwrap_or_default())
             .map_err(|err| FcpError::Internal {
-                message: format!("Failed to read m365 sync state file '{}': {err}", path.display()),
+                message: format!(
+                    "Failed to read m365 sync state file '{}': {err}",
+                    path.display()
+                ),
             })
     }
 
     fn persist_sync_state(path: &Path, state: &M365SyncState) -> FcpResult<()> {
         write_json_file_atomic(path, state).map_err(|err| FcpError::Internal {
-            message: format!("Failed to write m365 sync state file '{}': {err}", path.display()),
+            message: format!(
+                "Failed to write m365 sync state file '{}': {err}",
+                path.display()
+            ),
         })
     }
 
@@ -1519,7 +1531,9 @@ impl M365Connector {
                 .unwrap_or_default();
 
             if !token.is_empty() {
-                state.delta_tokens.insert(resource.to_string(), token.clone());
+                state
+                    .delta_tokens
+                    .insert(resource.to_string(), token.clone());
                 Self::persist_sync_state(&state_path, &state)?;
             }
 

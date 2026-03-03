@@ -1431,10 +1431,7 @@ impl FigmaConnector {
             .get("format")
             .and_then(|v| v.as_str())
             .unwrap_or("json");
-        let prefix = input
-            .get("prefix")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let prefix = input.get("prefix").and_then(|v| v.as_str()).unwrap_or("");
         let categories: Option<Vec<&str>> = input.get("categories").and_then(|v| {
             v.as_array()
                 .map(|arr| arr.iter().filter_map(|s| s.as_str()).collect())
@@ -1663,7 +1660,10 @@ fn extract_tokens_from_styles(meta: &serde_json::Value) -> Vec<DesignToken> {
                         .unwrap_or("unknown")
                         .to_string();
                     let radius = style.get("radius").and_then(|v| v.as_f64());
-                    let color = style.get("effect_color").and_then(|v| v.as_str()).map(String::from);
+                    let color = style
+                        .get("effect_color")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
                     let offset_x = style.get("offset_x").and_then(|v| v.as_f64());
                     let offset_y = style.get("offset_y").and_then(|v| v.as_f64());
                     TokenValue::Effect {

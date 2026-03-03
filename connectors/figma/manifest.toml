@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:7ef01baf39b045d3c927e6d5ce87660887426432d8f0ee91fbce61fcbccd96b6"
+interface_hash = "blake3-256:fcp.interface.v2:b1ba3bd47e7fadc44b4bc5f7a3bcc41c396058b56b0b19edd498cdd888ca9633"
 
 [connector]
 id = "fcp.figma"

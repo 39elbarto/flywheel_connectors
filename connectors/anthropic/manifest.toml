@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:b81e36b42a0ca574db6781c26e204269c973f58c2a203c712063f186d8e7df3d"
+interface_hash = "blake3-256:fcp.interface.v2:5477d445c6ce3d5ab466beeb2e283372a0e3124f8996e572f98c391aa1d0dc8e"
 
 [connector]
 id = "fcp.anthropic"
@@ -94,6 +94,7 @@ required = [
     "response",
     "usage",
     "cost_usd",
+    "provenance",
 ]
 type = "object"
 
@@ -111,6 +112,29 @@ type = "integer"
 
 [provides.operations."anthropic.chat".output_schema.properties.usage.properties.output_tokens]
 type = "integer"
+
+[provides.operations."anthropic.chat".output_schema.properties.provenance]
+description = "Provenance and taint metadata for the AI-generated output"
+type = "object"
+
+[provides.operations."anthropic.chat".output_schema.properties.provenance.properties.source]
+type = "string"
+
+[provides.operations."anthropic.chat".output_schema.properties.provenance.properties.model]
+type = "string"
+
+[provides.operations."anthropic.chat".output_schema.properties.provenance.properties.integrity]
+type = "string"
+
+[provides.operations."anthropic.chat".output_schema.properties.provenance.properties.has_tool_calls]
+type = "boolean"
+
+[provides.operations."anthropic.chat".output_schema.properties.provenance.properties.chunk_count]
+type = "integer"
+
+[provides.operations."anthropic.chat".output_schema.properties.provenance.properties.taint]
+description = "Taint flags indicating data classification (e.g. AI_GENERATED)"
+type = "array"
 
 [provides.operations."anthropic.chat".network_constraints]
 host_allow = ["api.anthropic.com"]
@@ -265,11 +289,16 @@ required = [
     "model",
     "usage",
     "cost_usd",
+    "provenance",
 ]
 type = "object"
 
 [provides.operations."anthropic.message".output_schema.properties.content]
 type = "string"
+
+[provides.operations."anthropic.message".output_schema.properties.content_blocks]
+description = "Structured content blocks including text and tool_use"
+type = "array"
 
 [provides.operations."anthropic.message".output_schema.properties.cost_usd]
 type = "number"
@@ -291,6 +320,29 @@ type = "integer"
 
 [provides.operations."anthropic.message".output_schema.properties.usage.properties.output_tokens]
 type = "integer"
+
+[provides.operations."anthropic.message".output_schema.properties.provenance]
+description = "Provenance and taint metadata for the AI-generated output"
+type = "object"
+
+[provides.operations."anthropic.message".output_schema.properties.provenance.properties.source]
+type = "string"
+
+[provides.operations."anthropic.message".output_schema.properties.provenance.properties.model]
+type = "string"
+
+[provides.operations."anthropic.message".output_schema.properties.provenance.properties.integrity]
+type = "string"
+
+[provides.operations."anthropic.message".output_schema.properties.provenance.properties.has_tool_calls]
+type = "boolean"
+
+[provides.operations."anthropic.message".output_schema.properties.provenance.properties.chunk_count]
+type = "integer"
+
+[provides.operations."anthropic.message".output_schema.properties.provenance.properties.taint]
+description = "Taint flags indicating data classification (e.g. AI_GENERATED)"
+type = "array"
 
 [provides.operations."anthropic.message".network_constraints]
 host_allow = ["api.anthropic.com"]
@@ -405,6 +457,7 @@ required = [
     "usage",
     "cost_usd",
     "streamed",
+    "provenance",
 ]
 type = "object"
 
@@ -438,6 +491,29 @@ type = "integer"
 
 [provides.operations."anthropic.message.stream".output_schema.properties.usage.properties.output_tokens]
 type = "integer"
+
+[provides.operations."anthropic.message.stream".output_schema.properties.provenance]
+description = "Provenance and taint metadata for the AI-generated output"
+type = "object"
+
+[provides.operations."anthropic.message.stream".output_schema.properties.provenance.properties.source]
+type = "string"
+
+[provides.operations."anthropic.message.stream".output_schema.properties.provenance.properties.model]
+type = "string"
+
+[provides.operations."anthropic.message.stream".output_schema.properties.provenance.properties.integrity]
+type = "string"
+
+[provides.operations."anthropic.message.stream".output_schema.properties.provenance.properties.has_tool_calls]
+type = "boolean"
+
+[provides.operations."anthropic.message.stream".output_schema.properties.provenance.properties.chunk_count]
+type = "integer"
+
+[provides.operations."anthropic.message.stream".output_schema.properties.provenance.properties.taint]
+description = "Taint flags indicating data classification (e.g. AI_GENERATED)"
+type = "array"
 
 [provides.operations."anthropic.message.stream".network_constraints]
 host_allow = ["api.anthropic.com"]

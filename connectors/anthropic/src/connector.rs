@@ -615,7 +615,9 @@ impl AnthropicConnector {
                     safety_tier: SafetyTier::Safe,
                     idempotency: IdempotencyClass::None,
                     ai_hints: AgentHint {
-                        when_to_use: "Stream Claude responses token-by-token via SSE for lower latency.".into(),
+                        when_to_use:
+                            "Stream Claude responses token-by-token via SSE for lower latency."
+                                .into(),
                         common_mistakes: vec![
                             "Not handling SSE events incrementally.".into(),
                             "Not providing messages array.".into(),
@@ -624,8 +626,8 @@ impl AnthropicConnector {
                             r#"{"messages": [{"role": "user", "content": "Write a poem"}]}"#.into(),
                         ],
                         related: vec![
-                            "anthropic.message".into(),
-                            "anthropic.chat".into(),
+                            CapabilityId::from_static("anthropic.message"),
+                            CapabilityId::from_static("anthropic.chat"),
                         ],
                     },
                 },
@@ -883,6 +885,11 @@ impl AnthropicConnector {
             .collect::<Vec<_>>()
             .join("");
 
+        let has_tool_calls = response
+            .content
+            .iter()
+            .any(|b| matches!(b, crate::types::ResponseContentBlock::ToolUse { .. }));
+
         Ok(json!({
             "id": response.id,
             "content": text_content,
@@ -893,12 +900,24 @@ impl AnthropicConnector {
                 "input_tokens": response.usage.input_tokens,
                 "output_tokens": response.usage.output_tokens
             },
-            "cost_usd": cost
+            "cost_usd": cost,
+            "provenance": {
+                "source": "anthropic",
+                "model": model_str,
+                "integrity": "untrusted",
+                "has_tool_calls": has_tool_calls,
+                "chunk_count": 1,
+                "taint": ["AI_GENERATED"]
+            }
         }))
     }
 
-    async fn invoke_message_stream(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+    async fn invoke_message_stream(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         use futures_util::StreamExt;
+        use std::pin::pin;
 
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
 
@@ -972,7 +991,7 @@ impl AnthropicConnector {
             })?;
 
         // Use the streaming API and assemble the final response
-        let mut stream = client
+        let stream = client
             .message_stream(
                 model,
                 messages,
@@ -984,6 +1003,7 @@ impl AnthropicConnector {
             )
             .await
             .map_err(|e: AnthropicError| e.to_fcp_error())?;
+        let mut stream = pin!(stream);
 
         let mut message_id = String::new();
         let mut response_model = String::new();
@@ -996,6 +1016,7 @@ impl AnthropicConnector {
         };
 
         // Accumulate content blocks from the stream
+        #[allow(clippy::items_after_statements)]
         struct BlockAccumulator {
             block_type: String,
             text: String,
@@ -1014,29 +1035,28 @@ impl AnthropicConnector {
                     response_model = msg.model;
                     usage = msg.usage;
                 }
-                crate::types::StreamEvent::ContentBlockStart {
-                    content_block,
-                    ..
-                } => match content_block {
-                    crate::types::ContentBlockStartData::Text { text } => {
-                        blocks.push(BlockAccumulator {
-                            block_type: "text".into(),
-                            text,
-                            tool_id: String::new(),
-                            tool_name: String::new(),
-                            tool_input_json: String::new(),
-                        });
+                crate::types::StreamEvent::ContentBlockStart { content_block, .. } => {
+                    match content_block {
+                        crate::types::ContentBlockStartData::Text { text } => {
+                            blocks.push(BlockAccumulator {
+                                block_type: "text".into(),
+                                text,
+                                tool_id: String::new(),
+                                tool_name: String::new(),
+                                tool_input_json: String::new(),
+                            });
+                        }
+                        crate::types::ContentBlockStartData::ToolUse { id, name, .. } => {
+                            blocks.push(BlockAccumulator {
+                                block_type: "tool_use".into(),
+                                text: String::new(),
+                                tool_id: id,
+                                tool_name: name,
+                                tool_input_json: String::new(),
+                            });
+                        }
                     }
-                    crate::types::ContentBlockStartData::ToolUse { id, name, .. } => {
-                        blocks.push(BlockAccumulator {
-                            block_type: "tool_use".into(),
-                            text: String::new(),
-                            tool_id: id,
-                            tool_name: name,
-                            tool_input_json: String::new(),
-                        });
-                    }
-                },
+                }
                 crate::types::StreamEvent::ContentBlockDelta { delta, .. } => {
                     if let Some(block) = blocks.last_mut() {
                         match delta {
@@ -1062,9 +1082,12 @@ impl AnthropicConnector {
                 | crate::types::StreamEvent::MessageStop
                 | crate::types::StreamEvent::Ping => {}
                 crate::types::StreamEvent::Error { error } => {
-                    return Err(FcpError::ExternalService {
+                    return Err(FcpError::External {
                         service: "anthropic".into(),
                         message: error.message,
+                        status_code: None,
+                        retryable: false,
+                        retry_after: None,
                     });
                 }
             }
@@ -1094,6 +1117,9 @@ impl AnthropicConnector {
             .collect::<Vec<_>>()
             .join("");
 
+        let has_tool_calls = blocks.iter().any(|b| b.block_type == "tool_use");
+        let chunk_count = content_blocks.len();
+
         Ok(json!({
             "id": message_id,
             "content": text_content,
@@ -1105,7 +1131,15 @@ impl AnthropicConnector {
                 "output_tokens": usage.output_tokens
             },
             "cost_usd": cost,
-            "streamed": true
+            "streamed": true,
+            "provenance": {
+                "source": "anthropic",
+                "model": model_str,
+                "integrity": "untrusted",
+                "has_tool_calls": has_tool_calls,
+                "chunk_count": chunk_count,
+                "taint": ["AI_GENERATED"]
+            }
         }))
     }
 
@@ -1180,7 +1214,15 @@ impl AnthropicConnector {
                 "input_tokens": response.usage.input_tokens,
                 "output_tokens": response.usage.output_tokens
             },
-            "cost_usd": cost
+            "cost_usd": cost,
+            "provenance": {
+                "source": "anthropic",
+                "model": model_str,
+                "integrity": "untrusted",
+                "has_tool_calls": false,
+                "chunk_count": 1,
+                "taint": ["AI_GENERATED"]
+            }
         }))
     }
 

@@ -1219,9 +1219,10 @@ async fn lifecycle_introspect_operations() {
     let op_ids: Vec<&str> = ops.iter().map(|o| o["id"].as_str().unwrap()).collect();
 
     assert!(op_ids.contains(&"anthropic.message"));
+    assert!(op_ids.contains(&"anthropic.message.stream"));
     assert!(op_ids.contains(&"anthropic.chat"));
     assert!(op_ids.contains(&"anthropic.get_usage"));
-    assert_eq!(op_ids.len(), 3);
+    assert_eq!(op_ids.len(), 4);
 
     // Verify schemas are present
     for op in ops {
@@ -1362,4 +1363,207 @@ async fn metrics_error_counter_increments() {
         "request counter should increment: {}",
         connector.total_requests()
     );
+}
+
+// ============================================================================
+// Provenance Metadata Tests
+// ============================================================================
+
+/// Provenance: chat invoke includes provenance/taint metadata.
+#[fcp_async_core::runtime::test]
+async fn chat_invoke_provenance_metadata() {
+    let _ctx = AsyncTestContext::for_scenario("anthropic.chat.provenance");
+    let mock = MockApiServer::start().await;
+
+    mock.expect_post(
+        "/v1/messages",
+        anthropic_success_response("msg_prov_001", "Provenance test", 10, 5),
+    )
+    .await;
+
+    let mut connector = AnthropicConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["anthropic.chat"]).await;
+    let token = generate_valid_token(&signing_key, "anthropic.chat");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "anthropic.chat",
+            "input": { "message": "test" },
+            "capability_token": token
+        }))
+        .await
+        .expect("invoke should succeed");
+
+    let provenance = &result["provenance"];
+    assert_eq!(provenance["source"], "anthropic");
+    assert_eq!(provenance["integrity"], "untrusted");
+    assert_eq!(provenance["has_tool_calls"], false);
+    assert_eq!(provenance["chunk_count"], 1);
+    assert!(
+        provenance["model"].as_str().is_some(),
+        "model should be present"
+    );
+    let taint = provenance["taint"]
+        .as_array()
+        .expect("taint should be array");
+    assert!(
+        taint.iter().any(|v| v == "AI_GENERATED"),
+        "taint should include AI_GENERATED"
+    );
+}
+
+/// Provenance: message invoke includes provenance/taint metadata.
+#[fcp_async_core::runtime::test]
+async fn message_invoke_provenance_metadata() {
+    let _ctx = AsyncTestContext::for_scenario("anthropic.message.provenance");
+    let mock = MockApiServer::start().await;
+
+    mock.expect_post(
+        "/v1/messages",
+        anthropic_success_response("msg_prov_002", "Hello provenance", 15, 6),
+    )
+    .await;
+
+    let mut connector = AnthropicConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["anthropic.message"]).await;
+    let token = generate_valid_token(&signing_key, "anthropic.message");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "anthropic.message",
+            "input": {
+                "messages": [{"role": "user", "content": "Hello"}],
+                "max_tokens": 100
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("invoke should succeed");
+
+    let provenance = &result["provenance"];
+    assert_eq!(provenance["source"], "anthropic");
+    assert_eq!(provenance["integrity"], "untrusted");
+    assert_eq!(provenance["has_tool_calls"], false);
+    assert_eq!(provenance["chunk_count"], 1);
+    let taint = provenance["taint"]
+        .as_array()
+        .expect("taint should be array");
+    assert!(
+        taint.iter().any(|v| v == "AI_GENERATED"),
+        "taint should include AI_GENERATED"
+    );
+}
+
+// ============================================================================
+// Connector-Level Streaming Tests
+// ============================================================================
+
+/// Streaming via `handle_invoke`: message.stream operation assembles full response with provenance.
+#[fcp_async_core::runtime::test]
+async fn message_stream_invoke_full_response() {
+    let _ctx = AsyncTestContext::for_scenario("anthropic.message.stream.invoke");
+    let mock_server = MockServer::start().await;
+
+    let sse_body = build_sse_body(&[
+        (
+            "message_start",
+            json!({
+                "type": "message_start",
+                "message": {
+                    "id": "msg_stream_inv_001",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-20250514",
+                    "usage": {"input_tokens": 20, "output_tokens": 0}
+                }
+            }),
+        ),
+        (
+            "content_block_start",
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+        ),
+        (
+            "content_block_delta",
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Streamed"}}),
+        ),
+        (
+            "content_block_delta",
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": " response"}}),
+        ),
+        (
+            "content_block_stop",
+            json!({"type": "content_block_stop", "index": 0}),
+        ),
+        (
+            "message_delta",
+            json!({
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn", "stop_sequence": null},
+                "usage": {"input_tokens": 20, "output_tokens": 8}
+            }),
+        ),
+        ("message_stop", json!({"type": "message_stop"})),
+    ]);
+
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(sse_body)
+                .insert_header("content-type", "text/event-stream"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = AnthropicConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["anthropic.message.stream"]).await;
+    let token = generate_valid_token(&signing_key, "anthropic.message.stream");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "anthropic.message.stream",
+            "input": {
+                "messages": [{"role": "user", "content": "Stream test"}],
+                "max_tokens": 256
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("streaming invoke should succeed");
+
+    // Verify assembled response
+    assert_eq!(result["id"], "msg_stream_inv_001");
+    assert_eq!(result["content"], "Streamed response");
+    assert_eq!(result["streamed"], true);
+    assert_eq!(result["usage"]["input_tokens"], 20);
+    assert_eq!(result["usage"]["output_tokens"], 8);
+
+    // Verify content blocks
+    let blocks = result["content_blocks"]
+        .as_array()
+        .expect("should have content_blocks");
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0]["type"], "text");
+    assert_eq!(blocks[0]["text"], "Streamed response");
+
+    // Verify provenance
+    let provenance = &result["provenance"];
+    assert_eq!(provenance["source"], "anthropic");
+    assert_eq!(provenance["integrity"], "untrusted");
+    assert_eq!(provenance["has_tool_calls"], false);
+    assert_eq!(provenance["chunk_count"], 1);
+    let taint = provenance["taint"]
+        .as_array()
+        .expect("taint should be array");
+    assert!(
+        taint.iter().any(|v| v == "AI_GENERATED"),
+        "taint should include AI_GENERATED"
+    );
+
+    // Cost should be present
+    let cost = result["cost_usd"].as_f64().unwrap();
+    assert!(cost >= 0.0, "cost should be non-negative");
 }

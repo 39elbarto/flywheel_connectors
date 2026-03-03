@@ -61,6 +61,14 @@ pub struct Invoice {
     pub created: Option<i64>,
 }
 
+/// A Stripe deleted resource response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeletedResource {
+    pub id: String,
+    pub object: String,
+    pub deleted: bool,
+}
+
 /// A Stripe balance.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Balance {
@@ -99,4 +107,22 @@ pub struct ApiErrorDetail {
     #[serde(rename = "type")]
     pub error_type: Option<String>,
     pub code: Option<String>,
+}
+
+/// Stripe webhook event envelope.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StripeWebhookEvent {
+    pub id: String,
+    pub object: String,
+    #[serde(rename = "type")]
+    pub event_type: String,
+    pub created: i64,
+    pub livemode: Option<bool>,
+    pub data: StripeWebhookEventData,
+}
+
+/// Stripe webhook event payload wrapper.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StripeWebhookEventData {
+    pub object: serde_json::Value,
 }

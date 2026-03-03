@@ -11,7 +11,8 @@ use tracing::{debug, warn};
 use crate::{
     error::{StripeError, StripeResult},
     types::{
-        ApiErrorResponse, Balance, Customer, ListResponse, PaymentIntent, Refund, Subscription,
+        ApiErrorResponse, Balance, Customer, DeletedResource, Invoice, ListResponse, PaymentIntent,
+        Refund, Subscription,
     },
 };
 
@@ -135,12 +136,25 @@ impl StripeClient {
 
     /// Create a customer.
     pub async fn create_customer(&self, email: &str, name: Option<&str>) -> StripeResult<Customer> {
+        self.create_customer_with_idempotency(email, name, None)
+            .await
+    }
+
+    /// Create a customer with an idempotency key.
+    pub async fn create_customer_with_idempotency(
+        &self,
+        email: &str,
+        name: Option<&str>,
+        idempotency_key: Option<&str>,
+    ) -> StripeResult<Customer> {
         let url = format!("{}/customers", self.api_url);
         let mut body = serde_json::json!({ "email": email });
         if let Some(n) = name {
             body["name"] = serde_json::Value::String(n.to_string());
         }
-        let data = self.post_json(&url, &body).await?;
+        let data = self
+            .post_json_with_idempotency(&url, &body, idempotency_key)
+            .await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -148,6 +162,39 @@ impl StripeClient {
     pub async fn get_customer(&self, customer_id: &str) -> StripeResult<Customer> {
         let url = format!("{}/customers/{customer_id}", self.api_url);
         let data = self.get(&url).await?;
+        Ok(serde_json::from_value(data)?)
+    }
+
+    /// Update a customer.
+    pub async fn update_customer(
+        &self,
+        customer_id: &str,
+        email: Option<&str>,
+        name: Option<&str>,
+        idempotency_key: Option<&str>,
+    ) -> StripeResult<Customer> {
+        let url = format!("{}/customers/{customer_id}", self.api_url);
+        let mut body = serde_json::json!({});
+        if let Some(e) = email {
+            body["email"] = serde_json::Value::String(e.to_string());
+        }
+        if let Some(n) = name {
+            body["name"] = serde_json::Value::String(n.to_string());
+        }
+        let data = self
+            .post_json_with_idempotency(&url, &body, idempotency_key)
+            .await?;
+        Ok(serde_json::from_value(data)?)
+    }
+
+    /// Delete a customer.
+    pub async fn delete_customer(
+        &self,
+        customer_id: &str,
+        idempotency_key: Option<&str>,
+    ) -> StripeResult<DeletedResource> {
+        let url = format!("{}/customers/{customer_id}", self.api_url);
+        let data = self.delete_with_idempotency(&url, idempotency_key).await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -315,23 +362,85 @@ impl StripeClient {
         customer: &str,
         price: &str,
     ) -> StripeResult<Subscription> {
+        self.create_subscription_with_idempotency(customer, price, None)
+            .await
+    }
+
+    /// Create a subscription with an idempotency key.
+    pub async fn create_subscription_with_idempotency(
+        &self,
+        customer: &str,
+        price: &str,
+        idempotency_key: Option<&str>,
+    ) -> StripeResult<Subscription> {
         let url = format!("{}/subscriptions", self.api_url);
         let body = serde_json::json!({
             "customer": customer,
             "items": [{ "price": price }],
         });
-        let data = self.post_json(&url, &body).await?;
+        let data = self
+            .post_json_with_idempotency(&url, &body, idempotency_key)
+            .await?;
+        Ok(serde_json::from_value(data)?)
+    }
+
+    /// Get a subscription by ID.
+    pub async fn get_subscription(&self, subscription_id: &str) -> StripeResult<Subscription> {
+        let url = format!("{}/subscriptions/{subscription_id}", self.api_url);
+        let data = self.get(&url).await?;
+        Ok(serde_json::from_value(data)?)
+    }
+
+    /// List subscriptions.
+    pub async fn list_subscriptions(
+        &self,
+        customer: Option<&str>,
+        status: Option<&str>,
+        limit: Option<u32>,
+    ) -> StripeResult<ListResponse> {
+        let mut url = format!("{}/subscriptions", self.api_url);
+        let mut params = Vec::new();
+        if let Some(c) = customer {
+            params.push(format!("customer={c}"));
+        }
+        if let Some(s) = status {
+            params.push(format!("status={s}"));
+        }
+        if let Some(l) = limit {
+            params.push(format!("limit={l}"));
+        }
+        if !params.is_empty() {
+            url = format!("{url}?{}", params.join("&"));
+        }
+        let data = self.get(&url).await?;
         Ok(serde_json::from_value(data)?)
     }
 
     /// Cancel a subscription.
     pub async fn cancel_subscription(&self, subscription_id: &str) -> StripeResult<Subscription> {
+        self.cancel_subscription_with_idempotency(subscription_id, None)
+            .await
+    }
+
+    /// Cancel a subscription with an idempotency key.
+    pub async fn cancel_subscription_with_idempotency(
+        &self,
+        subscription_id: &str,
+        idempotency_key: Option<&str>,
+    ) -> StripeResult<Subscription> {
         let url = format!("{}/subscriptions/{subscription_id}", self.api_url);
-        let data = self.delete(&url).await?;
+        let data = self.delete_with_idempotency(&url, idempotency_key).await?;
         Ok(serde_json::from_value(data)?)
     }
 
     // ── Invoice operations ────────────────────────────────────────
+
+    /// Get an invoice by ID.
+    pub async fn get_invoice(&self, invoice_id: &str) -> StripeResult<Invoice> {
+        let url = format!("{}/invoices/{invoice_id}", self.api_url);
+        let data = self.get(&url).await?;
+        Ok(serde_json::from_value(data)?)
+    }
 
     /// List invoices.
     pub async fn list_invoices(
@@ -394,8 +503,22 @@ impl StripeClient {
     }
 
     async fn delete(&self, url: &str) -> StripeResult<serde_json::Value> {
-        self.execute(|| self.apply_auth(self.http.delete(url)))
-            .await
+        self.delete_with_idempotency(url, None).await
+    }
+
+    async fn delete_with_idempotency(
+        &self,
+        url: &str,
+        idempotency_key: Option<&str>,
+    ) -> StripeResult<serde_json::Value> {
+        self.execute(|| {
+            let mut req = self.apply_auth(self.http.delete(url));
+            if let Some(key) = idempotency_key {
+                req = req.header("Idempotency-Key", key);
+            }
+            req
+        })
+        .await
     }
 
     async fn execute(

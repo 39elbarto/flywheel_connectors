@@ -14,7 +14,9 @@
 use chrono::{Duration, Utc};
 use fcp_core::{CapabilityToken, FcpError};
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
+use hmac::{Hmac, Mac};
 use serde_json::json;
+use sha2::Sha256;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{header, method, path},
@@ -66,6 +68,13 @@ async fn setup_configure(connector: &mut StripeConnector, api_url: &str) {
         }))
         .await
         .expect("configure should succeed");
+}
+
+fn build_webhook_signature(secret: &str, payload: &str, timestamp: i64) -> String {
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("hmac init");
+    mac.update(format!("{timestamp}.{payload}").as_bytes());
+    let digest = mac.finalize().into_bytes();
+    format!("t={timestamp},v1={}", hex::encode(digest))
 }
 
 // ============================================================================
@@ -351,6 +360,63 @@ async fn get_customer_success() {
     assert_eq!(customer.email.as_deref(), Some("test@example.com"));
 }
 
+/// `update_customer` applies mutable fields and returns customer data.
+#[fcp_async_core::runtime::test]
+async fn update_customer_success() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/customers/cus_42"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "cus_42",
+            "object": "customer",
+            "email": "updated@example.com",
+            "name": "Updated Name"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = StripeClient::new("sk_test")
+        .unwrap()
+        .with_api_url(&format!("{}/v1", mock_server.uri()));
+
+    let customer = client
+        .update_customer(
+            "cus_42",
+            Some("updated@example.com"),
+            Some("Updated Name"),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(customer.id, "cus_42");
+    assert_eq!(customer.email.as_deref(), Some("updated@example.com"));
+}
+
+/// `delete_customer` returns Stripe deletion payload.
+#[fcp_async_core::runtime::test]
+async fn delete_customer_success() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("DELETE"))
+        .and(path("/v1/customers/cus_42"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "cus_42",
+            "object": "customer",
+            "deleted": true
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = StripeClient::new("sk_test")
+        .unwrap()
+        .with_api_url(&format!("{}/v1", mock_server.uri()));
+
+    let deleted = client.delete_customer("cus_42", None).await.unwrap();
+    assert_eq!(deleted.id, "cus_42");
+    assert!(deleted.deleted);
+}
+
 /// `create_payment_intent` returns the created intent.
 #[fcp_async_core::runtime::test]
 async fn create_payment_intent_success() {
@@ -437,6 +503,60 @@ async fn create_subscription_success() {
     assert_eq!(sub.status, "active");
 }
 
+/// `get_subscription` returns the subscription by id.
+#[fcp_async_core::runtime::test]
+async fn get_subscription_success() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/subscriptions/sub_123"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "sub_123",
+            "object": "subscription",
+            "status": "active",
+            "customer": "cus_42"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = StripeClient::new("sk_test")
+        .unwrap()
+        .with_api_url(&format!("{}/v1", mock_server.uri()));
+
+    let sub = client.get_subscription("sub_123").await.unwrap();
+    assert_eq!(sub.id, "sub_123");
+    assert_eq!(sub.status, "active");
+}
+
+/// `list_subscriptions` returns a list response.
+#[fcp_async_core::runtime::test]
+async fn list_subscriptions_success() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/subscriptions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": "list",
+            "data": [
+                { "id": "sub_1", "object": "subscription", "status": "active" }
+            ],
+            "has_more": false
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = StripeClient::new("sk_test")
+        .unwrap()
+        .with_api_url(&format!("{}/v1", mock_server.uri()));
+
+    let result = client
+        .list_subscriptions(Some("cus_42"), Some("active"), Some(10))
+        .await
+        .unwrap();
+    assert_eq!(result.data.len(), 1);
+    assert!(!result.has_more);
+}
+
 /// `cancel_subscription` returns the cancelled subscription.
 #[fcp_async_core::runtime::test]
 async fn cancel_subscription_success() {
@@ -485,6 +605,32 @@ async fn list_invoices_success() {
     let result = client.list_invoices(None, Some(10)).await.unwrap();
     assert_eq!(result.data.len(), 1);
     assert!(!result.has_more);
+}
+
+/// `get_invoice` returns invoice details.
+#[fcp_async_core::runtime::test]
+async fn get_invoice_success() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/invoices/in_1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "in_1",
+            "object": "invoice",
+            "amount_due": 2000,
+            "currency": "usd",
+            "status": "open"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = StripeClient::new("sk_test")
+        .unwrap()
+        .with_api_url(&format!("{}/v1", mock_server.uri()));
+
+    let invoice = client.get_invoice("in_1").await.unwrap();
+    assert_eq!(invoice.id, "in_1");
+    assert_eq!(invoice.amount_due, Some(2000));
 }
 
 /// `get_balance` returns account balance.
@@ -579,6 +725,217 @@ async fn invoke_create_customer_through_connector() {
     assert_eq!(result["customer"]["id"], "cus_new");
 }
 
+/// `stripe.create_customer` derives idempotency key from invoke metadata.
+#[fcp_async_core::runtime::test]
+async fn invoke_create_customer_derives_idempotency_key_from_operation_id() {
+    let mock_server = MockServer::start().await;
+    let expected_key = "fcp2:stripe.create_customer:op-cc-1";
+
+    Mock::given(method("POST"))
+        .and(path("/v1/customers"))
+        .and(header("Idempotency-Key", expected_key))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "cus_new",
+            "object": "customer",
+            "email": "new@example.com"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = StripeConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["stripe.create_customer"]).await;
+    let token = generate_valid_token(&signing_key, "stripe.create_customer");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "stripe.create_customer",
+            "operation_id": "op-cc-1",
+            "input": { "email": "new@example.com" },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["customer"]["id"], "cus_new");
+    assert_eq!(result["audit"]["idempotency_key"], expected_key);
+}
+
+/// Invoke `stripe.update_customer` through the connector.
+#[fcp_async_core::runtime::test]
+async fn invoke_update_customer_through_connector() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/customers/cus_42"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "cus_42",
+            "object": "customer",
+            "email": "updated@example.com"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = StripeConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["stripe.update_customer"]).await;
+    let token = generate_valid_token(&signing_key, "stripe.update_customer");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "stripe.update_customer",
+            "operation_id": "op-update-1",
+            "input": { "customer_id": "cus_42", "email": "updated@example.com" },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["customer"]["id"], "cus_42");
+    assert_eq!(
+        result["audit"]["idempotency_key"],
+        "fcp2:stripe.update_customer:op-update-1"
+    );
+}
+
+/// Invoke `stripe.delete_customer` through the connector.
+#[fcp_async_core::runtime::test]
+async fn invoke_delete_customer_through_connector() {
+    let mock_server = MockServer::start().await;
+    let expected_key = "fcp2:stripe.delete_customer:op-delete-1";
+
+    Mock::given(method("DELETE"))
+        .and(path("/v1/customers/cus_42"))
+        .and(header("Idempotency-Key", expected_key))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "cus_42",
+            "object": "customer",
+            "deleted": true
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = StripeConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["stripe.delete_customer"]).await;
+    let token = generate_valid_token(&signing_key, "stripe.delete_customer");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "stripe.delete_customer",
+            "operation_id": "op-delete-1",
+            "input": { "customer_id": "cus_42" },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["deleted"]["id"], "cus_42");
+    assert_eq!(result["audit"]["idempotency_key"], expected_key);
+}
+
+/// Invoke `stripe.get_subscription` through the connector.
+#[fcp_async_core::runtime::test]
+async fn invoke_get_subscription_through_connector() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/subscriptions/sub_123"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "sub_123",
+            "object": "subscription",
+            "status": "active",
+            "customer": "cus_42"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = StripeConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["stripe.get_subscription"]).await;
+    let token = generate_valid_token(&signing_key, "stripe.get_subscription");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "stripe.get_subscription",
+            "input": { "subscription_id": "sub_123" },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["subscription"]["id"], "sub_123");
+}
+
+/// Invoke `stripe.list_subscriptions` through the connector.
+#[fcp_async_core::runtime::test]
+async fn invoke_list_subscriptions_through_connector() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/subscriptions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": "list",
+            "data": [
+                { "id": "sub_1", "object": "subscription", "status": "active" }
+            ],
+            "has_more": false
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = StripeConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["stripe.list_subscriptions"]).await;
+    let token = generate_valid_token(&signing_key, "stripe.list_subscriptions");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "stripe.list_subscriptions",
+            "input": { "customer": "cus_42", "status": "active", "limit": 10 },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["data"].as_array().unwrap().len(), 1);
+    assert_eq!(result["has_more"], false);
+}
+
+/// Invoke `stripe.get_invoice` through the connector.
+#[fcp_async_core::runtime::test]
+async fn invoke_get_invoice_through_connector() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/invoices/in_123"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "in_123",
+            "object": "invoice",
+            "amount_due": 1500,
+            "currency": "usd",
+            "status": "open"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = StripeConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["stripe.get_invoice"]).await;
+    let token = generate_valid_token(&signing_key, "stripe.get_invoice");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "stripe.get_invoice",
+            "input": { "invoice_id": "in_123" },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["invoice"]["id"], "in_123");
+}
+
 /// Invoke `stripe.create_refund` through the connector.
 #[fcp_async_core::runtime::test]
 async fn invoke_create_refund_through_connector() {
@@ -613,6 +970,80 @@ async fn invoke_create_refund_through_connector() {
 
     assert_eq!(result["refund"]["id"], "re_456");
     assert_eq!(result["refund"]["amount"], 500);
+}
+
+/// Side-effect subscription creation derives idempotency key and emits audit payload.
+#[fcp_async_core::runtime::test]
+async fn invoke_create_subscription_derives_idempotency_key_from_operation_id() {
+    let mock_server = MockServer::start().await;
+    let expected_key = "fcp2:stripe.create_subscription:op-sub-create-1";
+
+    Mock::given(method("POST"))
+        .and(path("/v1/subscriptions"))
+        .and(header("Idempotency-Key", expected_key))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "sub_derived",
+            "object": "subscription",
+            "status": "active",
+            "customer": "cus_42"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = StripeConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["stripe.create_subscription"]).await;
+    let token = generate_valid_token(&signing_key, "stripe.create_subscription");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "stripe.create_subscription",
+            "operation_id": "op-sub-create-1",
+            "input": { "customer": "cus_42", "price": "price_abc123" },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["subscription"]["id"], "sub_derived");
+    assert_eq!(result["audit"]["idempotency_key"], expected_key);
+}
+
+/// Side-effect subscription cancellation derives idempotency key and emits audit payload.
+#[fcp_async_core::runtime::test]
+async fn invoke_cancel_subscription_derives_idempotency_key_from_operation_id() {
+    let mock_server = MockServer::start().await;
+    let expected_key = "fcp2:stripe.cancel_subscription:op-sub-cancel-1";
+
+    Mock::given(method("DELETE"))
+        .and(path("/v1/subscriptions/sub_derived"))
+        .and(header("Idempotency-Key", expected_key))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "sub_derived",
+            "object": "subscription",
+            "status": "canceled",
+            "customer": "cus_42"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = StripeConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["stripe.cancel_subscription"]).await;
+    let token = generate_valid_token(&signing_key, "stripe.cancel_subscription");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "stripe.cancel_subscription",
+            "operation_id": "op-sub-cancel-1",
+            "input": { "subscription_id": "sub_derived" },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["subscription"]["id"], "sub_derived");
+    assert_eq!(result["audit"]["idempotency_key"], expected_key);
 }
 
 /// Side-effect operations derive an idempotency key from invoke `operation_id`.
@@ -719,4 +1150,115 @@ async fn unknown_operation_rejected() {
         .await;
 
     assert!(result.is_err());
+}
+
+/// Ingesting a webhook validates signature and returns normalized event metadata.
+#[fcp_async_core::runtime::test]
+async fn invoke_ingest_webhook_event_success() {
+    let mut connector = StripeConnector::new();
+    connector
+        .handle_configure(json!({
+            "secret_key": "sk_test_integration_key",
+            "api_url": "http://127.0.0.1:9/v1",
+            "webhook_signing_secret": "whsec_integration"
+        }))
+        .await
+        .expect("configure should succeed");
+
+    let signing_key = setup_handshake(&mut connector, &["stripe.ingest_webhook_event"]).await;
+    let token = generate_valid_token(&signing_key, "stripe.ingest_webhook_event");
+
+    let payload = r#"{"id":"evt_integration","object":"event","type":"invoice.paid","created":1700000000,"data":{"object":{"id":"in_123","object":"invoice"}}}"#;
+    let signature = build_webhook_signature("whsec_integration", payload, 1_700_000_000);
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "stripe.ingest_webhook_event",
+            "input": {
+                "payload": payload,
+                "stripe_signature": signature,
+                "received_at": 1_700_000_010
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["event"]["id"], "evt_integration");
+    assert_eq!(result["event"]["type"], "invoice.paid");
+    assert_eq!(result["delivery"]["signature_verified"], true);
+    assert_eq!(result["delivery"]["replay_protected"], true);
+}
+
+/// Duplicate delivery IDs are rejected to prevent replay.
+#[fcp_async_core::runtime::test]
+async fn invoke_ingest_webhook_event_replay_rejected() {
+    let mut connector = StripeConnector::new();
+    connector
+        .handle_configure(json!({
+            "secret_key": "sk_test_integration_key",
+            "api_url": "http://127.0.0.1:9/v1",
+            "webhook_signing_secret": "whsec_replay"
+        }))
+        .await
+        .expect("configure should succeed");
+
+    let signing_key = setup_handshake(&mut connector, &["stripe.ingest_webhook_event"]).await;
+    let token = generate_valid_token(&signing_key, "stripe.ingest_webhook_event");
+
+    let payload = r#"{"id":"evt_replay_test","object":"event","type":"invoice.paid","created":1700000000,"data":{"object":{"id":"in_123","object":"invoice"}}}"#;
+    let signature = build_webhook_signature("whsec_replay", payload, 1_700_000_000);
+    let invoke = json!({
+        "operation": "stripe.ingest_webhook_event",
+        "input": {
+            "payload": payload,
+            "stripe_signature": signature,
+            "received_at": 1_700_000_005
+        },
+        "capability_token": token
+    });
+
+    connector.handle_invoke(invoke.clone()).await.unwrap();
+    let err = connector.handle_invoke(invoke).await.unwrap_err();
+
+    assert!(
+        matches!(err, FcpError::Conflict { .. }),
+        "expected Conflict on replay, got {err:?}"
+    );
+}
+
+/// Signature validation failures must not leak the configured webhook secret.
+#[fcp_async_core::runtime::test]
+async fn invoke_ingest_webhook_event_invalid_signature_is_redacted() {
+    let mut connector = StripeConnector::new();
+    let secret = "whsec_should_not_leak";
+    connector
+        .handle_configure(json!({
+            "secret_key": "sk_test_integration_key",
+            "api_url": "http://127.0.0.1:9/v1",
+            "webhook_signing_secret": secret
+        }))
+        .await
+        .expect("configure should succeed");
+
+    let signing_key = setup_handshake(&mut connector, &["stripe.ingest_webhook_event"]).await;
+    let token = generate_valid_token(&signing_key, "stripe.ingest_webhook_event");
+
+    let payload = r#"{"id":"evt_invalid_sig","object":"event","type":"invoice.paid","created":1700000000,"data":{"object":{"id":"in_123","object":"invoice"}}}"#;
+    let err = connector
+        .handle_invoke(json!({
+            "operation": "stripe.ingest_webhook_event",
+            "input": {
+                "payload": payload,
+                "stripe_signature": "t=1700000000,v1=badbadbad",
+                "received_at": 1_700_000_000
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap_err();
+
+    let rendered = format!("{err:?}");
+    assert!(!rendered.contains(secret), "webhook secret leaked in error");
+    assert!(matches!(err, FcpError::Unauthorized { .. }));
 }

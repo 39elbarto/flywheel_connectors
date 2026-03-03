@@ -1469,9 +1469,12 @@ fn figma_full_manifest_parses_with_all_operations() {
 
     assert_eq!(parsed.connector.id.as_str(), "fcp.figma");
 
-    // Verify all 12 operations present
+    // Verify all 15 operations present
     let ops = &parsed.provides.operations;
     let expected_ops = [
+        "figma.list_team_projects",
+        "figma.list_project_files",
+        "figma.get_file_meta",
         "figma.get_file",
         "figma.get_file_nodes",
         "figma.get_file_components",

@@ -12,8 +12,8 @@ use crate::{
     error::{FigmaError, FigmaResult},
     types::{
         Comment, CommentsResponse, ComponentsResponse, CreateWebhookRequest, ExportImagesResponse,
-        FileNodesResponse, FileResponse, PostCommentRequest, StylesResponse, VersionsResponse,
-        Webhook, WebhooksListResponse,
+        FileNodesResponse, FileResponse, PostCommentRequest, ProjectFilesResponse, StylesResponse,
+        TeamProjectsResponse, VersionsResponse, Webhook, WebhooksListResponse,
     },
 };
 
@@ -156,6 +156,22 @@ impl FigmaClient {
     #[must_use]
     pub fn total_requests(&self) -> u64 {
         self.total_requests.load(Ordering::Relaxed)
+    }
+
+    // ── Team & project operations ─────────────────────────────────
+
+    /// List projects within a team.
+    #[instrument(skip(self))]
+    pub async fn list_team_projects(&self, team_id: &str) -> FigmaResult<TeamProjectsResponse> {
+        self.get_with_params::<TeamProjectsResponse>(&format!("teams/{team_id}/projects"), &[])
+            .await
+    }
+
+    /// List files within a project.
+    #[instrument(skip(self))]
+    pub async fn list_project_files(&self, project_id: &str) -> FigmaResult<ProjectFilesResponse> {
+        self.get_with_params::<ProjectFilesResponse>(&format!("projects/{project_id}/files"), &[])
+            .await
     }
 
     // ── File operations ─────────────────────────────────────────

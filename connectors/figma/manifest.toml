@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:90cf5924ec5439414b712a706aa82f36eddafe147dca2db40b1a4589d1ba6bd0"
+interface_hash = "blake3-256:fcp.interface.v2:7ef01baf39b045d3c927e6d5ce87660887426432d8f0ee91fbce61fcbccd96b6"
 
 [connector]
 id = "fcp.figma"
@@ -46,6 +46,185 @@ forbidden = [
     "system.exec",
     "network.listen",
 ]
+
+# ---------------------------------------------------------------------------
+# Operations: Resource Discovery (Teams, Projects, Files)
+# ---------------------------------------------------------------------------
+
+[provides.operations."figma.list_team_projects"]
+description = "List projects within a Figma team. Returns project IDs and names for resource discovery."
+capability = "figma.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."figma.list_team_projects".rate_limit]
+max = 30
+per_ms = 60000
+
+[provides.operations."figma.list_team_projects".input_schema]
+required = ["team_id"]
+type = "object"
+
+[provides.operations."figma.list_team_projects".input_schema.properties.team_id]
+description = "Figma team ID"
+type = "string"
+
+[provides.operations."figma.list_team_projects".output_schema]
+required = ["name", "projects"]
+type = "object"
+
+[provides.operations."figma.list_team_projects".output_schema.properties.name]
+description = "Team name (tainted: external input)"
+type = "string"
+
+[provides.operations."figma.list_team_projects".output_schema.properties.projects]
+description = "List of projects in the team"
+type = "array"
+
+[provides.operations."figma.list_team_projects".output_schema.properties.provenance]
+description = "Data provenance metadata"
+type = "object"
+
+[provides.operations."figma.list_team_projects".output_schema.properties.taint]
+description = "Taint flags for data classification"
+type = "array"
+
+[provides.operations."figma.list_team_projects".network_constraints]
+host_allow = ["api.figma.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."figma.list_team_projects".ai_hints]
+when_to_use = "Discover projects in a Figma team before listing files."
+common_mistakes = ["Using project ID where team ID is expected."]
+examples = ['{"team_id": "12345"}']
+related = ["figma.list_project_files"]
+
+[provides.operations."figma.list_project_files"]
+description = "List files within a Figma project. Returns file keys, names, thumbnails, and last-modified timestamps."
+capability = "figma.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."figma.list_project_files".rate_limit]
+max = 30
+per_ms = 60000
+
+[provides.operations."figma.list_project_files".input_schema]
+required = ["project_id"]
+type = "object"
+
+[provides.operations."figma.list_project_files".input_schema.properties.project_id]
+description = "Figma project ID"
+type = "string"
+
+[provides.operations."figma.list_project_files".output_schema]
+required = ["name", "files"]
+type = "object"
+
+[provides.operations."figma.list_project_files".output_schema.properties.name]
+description = "Project name (tainted: external input)"
+type = "string"
+
+[provides.operations."figma.list_project_files".output_schema.properties.files]
+description = "List of files in the project"
+type = "array"
+
+[provides.operations."figma.list_project_files".output_schema.properties.provenance]
+description = "Data provenance metadata"
+type = "object"
+
+[provides.operations."figma.list_project_files".output_schema.properties.taint]
+description = "Taint flags for data classification"
+type = "array"
+
+[provides.operations."figma.list_project_files".network_constraints]
+host_allow = ["api.figma.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."figma.list_project_files".ai_hints]
+when_to_use = "List files in a project after discovering projects with figma.list_team_projects."
+common_mistakes = ["Using team ID where project ID is expected.", "Accessing thumbnail_url without network constraints for CDN host."]
+examples = ['{"project_id": "67890"}']
+related = ["figma.list_team_projects", "figma.get_file"]
+
+[provides.operations."figma.get_file_meta"]
+description = "Get minimal file metadata (name, last modified, version) without downloading the full document tree. Lighter and faster than figma.get_file."
+capability = "figma.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."figma.get_file_meta".rate_limit]
+max = 30
+per_ms = 60000
+
+[provides.operations."figma.get_file_meta".input_schema]
+required = ["file_key"]
+type = "object"
+
+[provides.operations."figma.get_file_meta".input_schema.properties.file_key]
+description = "Figma file key from the URL (e.g., 'abc123DEF456')"
+type = "string"
+
+[provides.operations."figma.get_file_meta".output_schema]
+required = ["name", "lastModified", "version"]
+type = "object"
+
+[provides.operations."figma.get_file_meta".output_schema.properties.name]
+description = "File name (tainted: external input)"
+type = "string"
+
+[provides.operations."figma.get_file_meta".output_schema.properties.lastModified]
+description = "ISO 8601 timestamp of last modification"
+type = "string"
+
+[provides.operations."figma.get_file_meta".output_schema.properties.version]
+description = "File version identifier"
+type = "string"
+
+[provides.operations."figma.get_file_meta".output_schema.properties.provenance]
+description = "Data provenance metadata"
+type = "object"
+
+[provides.operations."figma.get_file_meta".output_schema.properties.taint]
+description = "Taint flags for data classification"
+type = "array"
+
+[provides.operations."figma.get_file_meta".network_constraints]
+host_allow = ["api.figma.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."figma.get_file_meta".ai_hints]
+when_to_use = "Get lightweight metadata for a file without downloading the full document tree. Cheaper and faster than figma.get_file."
+common_mistakes = ["Using get_file_meta when you need the full document tree (use figma.get_file instead)."]
+examples = ['{"file_key": "abc123DEF456"}']
+related = ["figma.get_file", "figma.list_project_files"]
 
 # ---------------------------------------------------------------------------
 # Operations: Design Knowledge (Files, Components, Styles)
@@ -987,6 +1166,9 @@ burst = 2
 scope = "instance"
 
 [rate_limits.operation_pools]
+"figma.list_team_projects" = ["figma.read"]
+"figma.list_project_files" = ["figma.read"]
+"figma.get_file_meta" = ["figma.read"]
 "figma.get_file" = ["figma.read"]
 "figma.get_file_nodes" = ["figma.read"]
 "figma.get_file_components" = ["figma.read"]

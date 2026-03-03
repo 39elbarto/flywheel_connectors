@@ -1,7 +1,8 @@
-//! Figma connector integration tests (flywheel_connectors-vuwy.3).
+//! Figma connector integration tests (flywheel_connectors-vuwy.3 + 9c0).
 //!
 //! Deterministic integration tests using wiremock to mock the Figma REST API.
 //! No real API calls. Covers:
+//! - Resource discovery (list team projects, list project files, file meta)
 //! - Files (get file, get nodes, components, styles)
 //! - Image export
 //! - Version history
@@ -875,10 +876,13 @@ async fn lifecycle_introspect_lists_all_operations() {
     let result = connector.handle_introspect().await.unwrap();
 
     let ops = result["operations"].as_array().unwrap();
-    assert_eq!(ops.len(), 12);
+    assert_eq!(ops.len(), 15);
 
     let op_ids: Vec<&str> = ops.iter().map(|o| o["id"].as_str().unwrap()).collect();
     for expected in &[
+        "figma.list_team_projects",
+        "figma.list_project_files",
+        "figma.get_file_meta",
         "figma.get_file",
         "figma.get_file_nodes",
         "figma.get_file_components",
@@ -911,10 +915,13 @@ async fn introspect_risk_levels() {
     let result = connector.handle_introspect().await.unwrap();
 
     let ops = result["operations"].as_array().unwrap();
-    assert_eq!(ops.len(), 12);
+    assert_eq!(ops.len(), 15);
 
     // Low-risk: all read ops + post_comment + list_webhooks
     let low_ops = [
+        "figma.list_team_projects",
+        "figma.list_project_files",
+        "figma.get_file_meta",
         "figma.get_file",
         "figma.get_file_nodes",
         "figma.get_file_components",
@@ -952,7 +959,7 @@ async fn introspect_risk_levels() {
         .iter()
         .filter(|o| o["risk_level"].as_str() == Some("medium"))
         .count();
-    assert_eq!(low_count, 9, "should have 9 low-risk ops");
+    assert_eq!(low_count, 12, "should have 12 low-risk ops");
     assert_eq!(medium_count, 3, "should have 3 medium-risk ops");
 }
 
@@ -1368,5 +1375,278 @@ async fn rate_limit_429_without_retry_after_defaults() {
             );
         }
         e => panic!("Expected RateLimited, got: {e:?}"),
+    }
+}
+
+// ============================================================================
+// Resource Discovery tests (flywheel_connectors-9c0)
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn list_team_projects_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("figma.list_team_projects.happy_path");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/teams/12345/projects"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "name": "Design Team",
+            "projects": [
+                { "id": 111, "name": "Web App" },
+                { "id": 222, "name": "Mobile App" },
+                { "id": 333, "name": "Brand Assets" }
+            ]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = FigmaConnector::new();
+    let key = setup_handshake(&mut connector, &["figma.list_team_projects"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "figma.list_team_projects");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "figma.list_team_projects",
+            "input": { "team_id": "12345" },
+            "capability_token": token
+        }))
+        .await
+        .expect("invoke should succeed");
+
+    assert_eq!(result["name"], "Design Team");
+    let projects = result["projects"].as_array().unwrap();
+    assert_eq!(projects.len(), 3);
+    assert_eq!(projects[0]["id"], 111);
+    assert_eq!(projects[0]["name"], "Web App");
+    assert_eq!(projects[2]["name"], "Brand Assets");
+
+    // Verify provenance/taint metadata
+    assert_eq!(result["provenance"]["source"], "figma.teams");
+    assert_eq!(result["provenance"]["scope"], "team");
+    let taint = result["taint"].as_array().unwrap();
+    assert!(taint.contains(&json!("external_input")));
+}
+
+#[fcp_async_core::runtime::test]
+async fn list_project_files_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("figma.list_project_files.happy_path");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/projects/67890/files"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "name": "Web App",
+            "files": [
+                {
+                    "key": "abc123",
+                    "name": "Homepage Design",
+                    "thumbnail_url": "https://s3-alpha.figma.com/thumbnails/abc123.png",
+                    "last_modified": "2026-03-01T10:00:00Z"
+                },
+                {
+                    "key": "def456",
+                    "name": "Settings Page",
+                    "thumbnail_url": "https://s3-alpha.figma.com/thumbnails/def456.png",
+                    "last_modified": "2026-02-28T15:30:00Z"
+                }
+            ]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = FigmaConnector::new();
+    let key = setup_handshake(&mut connector, &["figma.list_project_files"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "figma.list_project_files");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "figma.list_project_files",
+            "input": { "project_id": "67890" },
+            "capability_token": token
+        }))
+        .await
+        .expect("invoke should succeed");
+
+    assert_eq!(result["name"], "Web App");
+    let files = result["files"].as_array().unwrap();
+    assert_eq!(files.len(), 2);
+    assert_eq!(files[0]["key"], "abc123");
+    assert_eq!(files[0]["name"], "Homepage Design");
+    assert!(
+        files[0]["thumbnail_url"]
+            .as_str()
+            .unwrap()
+            .starts_with("https://")
+    );
+    assert_eq!(files[1]["key"], "def456");
+
+    // Verify provenance/taint metadata
+    assert_eq!(result["provenance"]["source"], "figma.projects");
+    assert_eq!(result["provenance"]["scope"], "project");
+    let taint = result["taint"].as_array().unwrap();
+    assert!(taint.contains(&json!("external_input")));
+}
+
+#[fcp_async_core::runtime::test]
+async fn get_file_meta_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("figma.get_file_meta.happy_path");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/files/meta123"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "name": "Dashboard Design",
+            "document": { "id": "0:0", "type": "DOCUMENT", "children": [] },
+            "lastModified": "2026-03-02T12:00:00Z",
+            "version": "789012"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = FigmaConnector::new();
+    let key = setup_handshake(&mut connector, &["figma.get_file_meta"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "figma.get_file_meta");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "figma.get_file_meta",
+            "input": { "file_key": "meta123" },
+            "capability_token": token
+        }))
+        .await
+        .expect("invoke should succeed");
+
+    assert_eq!(result["name"], "Dashboard Design");
+    assert_eq!(result["lastModified"], "2026-03-02T12:00:00Z");
+    assert_eq!(result["version"], "789012");
+
+    // Should NOT include the full document tree
+    assert!(result.get("document").is_none());
+
+    // Verify provenance/taint metadata
+    assert_eq!(result["provenance"]["source"], "figma.files");
+    assert_eq!(result["provenance"]["scope"], "file");
+    let taint = result["taint"].as_array().unwrap();
+    assert!(taint.contains(&json!("external_input")));
+}
+
+#[fcp_async_core::runtime::test]
+async fn list_team_projects_requires_capability() {
+    let _ctx = AsyncTestContext::for_scenario("figma.list_team_projects.cap_required");
+
+    let mut connector = FigmaConnector::new();
+    // Handshake with only figma.get_file capability (not figma.list_team_projects)
+    let key = setup_handshake(&mut connector, &["figma.get_file"]).await;
+
+    let mock_server = MockServer::start().await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    // Generate token for figma.get_file, but try to call list_team_projects
+    let token = generate_valid_token(&key, "figma.get_file");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "figma.list_team_projects",
+            "input": { "team_id": "12345" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err(), "should reject: wrong capability");
+}
+
+#[fcp_async_core::runtime::test]
+async fn list_team_projects_missing_team_id() {
+    let _ctx = AsyncTestContext::for_scenario("figma.list_team_projects.missing_team_id");
+
+    let mut connector = FigmaConnector::new();
+    let key = setup_handshake(&mut connector, &["figma.list_team_projects"]).await;
+
+    let mock_server = MockServer::start().await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "figma.list_team_projects");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "figma.list_team_projects",
+            "input": {},
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("team_id"));
+        }
+        e => panic!("Expected InvalidRequest about team_id, got: {e:?}"),
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn list_project_files_empty_result() {
+    let _ctx = AsyncTestContext::for_scenario("figma.list_project_files.empty");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/projects/99999/files"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "name": "Empty Project",
+            "files": []
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = FigmaConnector::new();
+    let key = setup_handshake(&mut connector, &["figma.list_project_files"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "figma.list_project_files");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "figma.list_project_files",
+            "input": { "project_id": "99999" },
+            "capability_token": token
+        }))
+        .await
+        .expect("invoke should succeed");
+
+    assert_eq!(result["name"], "Empty Project");
+    assert_eq!(result["files"].as_array().unwrap().len(), 0);
+    // Still has provenance/taint even with empty results
+    assert_eq!(result["provenance"]["source"], "figma.projects");
+    let taint = result["taint"].as_array().unwrap();
+    assert!(taint.contains(&json!("external_input")));
+}
+
+#[fcp_async_core::runtime::test]
+async fn list_team_projects_unauthorized() {
+    let _ctx = AsyncTestContext::for_scenario("figma.list_team_projects.unauthorized");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/teams/12345/projects"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+            "status": 403,
+            "err": "Forbidden: insufficient permissions for team"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = FigmaClient::new("bad-token")
+        .unwrap()
+        .with_base_url(mock_server.uri())
+        .with_retry_config(0, 100, 200);
+
+    let result = client.list_team_projects("12345").await;
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_figma::error::FigmaError::Api { status, .. } => {
+            assert_eq!(status, 403);
+        }
+        fcp_figma::error::FigmaError::Unauthorized => {}
+        e => panic!("Expected Api(403) or Unauthorized, got: {e:?}"),
     }
 }

@@ -16,6 +16,41 @@ pub struct FigmaErrorResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Teams & Projects
+// ---------------------------------------------------------------------------
+
+/// Response from `GET /v1/teams/:team_id/projects`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeamProjectsResponse {
+    pub name: String,
+    pub projects: Vec<Project>,
+}
+
+/// A Figma project within a team.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Project {
+    pub id: u64,
+    pub name: String,
+}
+
+/// Response from `GET /v1/projects/:project_id/files`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectFilesResponse {
+    pub name: String,
+    pub files: Vec<ProjectFile>,
+}
+
+/// A file within a Figma project.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectFile {
+    pub key: String,
+    pub name: String,
+    #[serde(default)]
+    pub thumbnail_url: Option<String>,
+    pub last_modified: String,
+}
+
+// ---------------------------------------------------------------------------
 // Files & Nodes
 // ---------------------------------------------------------------------------
 

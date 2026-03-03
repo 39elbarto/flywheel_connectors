@@ -359,6 +359,141 @@ impl FigmaConnector {
         let introspection = Introspection {
             operations: vec![
                 // ── Design Knowledge ──────────────────────────────────
+                // ── Resource Discovery ─────────────────────────────────
+                op_info(
+                    "figma.list_team_projects",
+                    "List projects within a Figma team",
+                    json!({
+                        "type": "object",
+                        "required": ["team_id"],
+                        "properties": {
+                            "team_id": { "type": "string", "description": "Figma team ID" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": ["name", "projects"],
+                        "properties": {
+                            "name": { "type": "string", "description": "Team name" },
+                            "projects": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "required": ["id", "name"],
+                                    "properties": {
+                                        "id": { "type": "integer" },
+                                        "name": { "type": "string" }
+                                    }
+                                }
+                            },
+                            "provenance": { "type": "object" },
+                            "taint": { "type": "array" }
+                        }
+                    }),
+                    "figma.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Discover projects in a Figma team before listing files."
+                            .into(),
+                        common_mistakes: vec![
+                            "Using project ID where team ID is expected.".into(),
+                        ],
+                        examples: vec![r#"{"team_id": "12345"}"#.into()],
+                        related: vec![
+                            CapabilityId::from_static("figma.list_project_files"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "figma.list_project_files",
+                    "List files within a Figma project",
+                    json!({
+                        "type": "object",
+                        "required": ["project_id"],
+                        "properties": {
+                            "project_id": { "type": "string", "description": "Figma project ID" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": ["name", "files"],
+                        "properties": {
+                            "name": { "type": "string", "description": "Project name" },
+                            "files": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "required": ["key", "name", "last_modified"],
+                                    "properties": {
+                                        "key": { "type": "string" },
+                                        "name": { "type": "string" },
+                                        "thumbnail_url": { "type": "string" },
+                                        "last_modified": { "type": "string" }
+                                    }
+                                }
+                            },
+                            "provenance": { "type": "object" },
+                            "taint": { "type": "array" }
+                        }
+                    }),
+                    "figma.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "List files in a project after discovering projects with figma.list_team_projects.".into(),
+                        common_mistakes: vec![
+                            "Using team ID where project ID is expected.".into(),
+                            "Accessing thumbnail_url without network constraints for CDN host.".into(),
+                        ],
+                        examples: vec![r#"{"project_id": "67890"}"#.into()],
+                        related: vec![
+                            CapabilityId::from_static("figma.list_team_projects"),
+                            CapabilityId::from_static("figma.get_file"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "figma.get_file_meta",
+                    "Get minimal file metadata (name, last modified, thumbnail) without the full document tree",
+                    json!({
+                        "type": "object",
+                        "required": ["file_key"],
+                        "properties": {
+                            "file_key": { "type": "string", "description": "Figma file key" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": ["name", "lastModified", "version"],
+                        "properties": {
+                            "name": { "type": "string" },
+                            "lastModified": { "type": "string" },
+                            "version": { "type": "string" },
+                            "thumbnailUrl": { "type": "string" },
+                            "provenance": { "type": "object" },
+                            "taint": { "type": "array" }
+                        }
+                    }),
+                    "figma.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Get lightweight metadata for a file without downloading the full document tree. Cheaper and faster than figma.get_file.".into(),
+                        common_mistakes: vec![
+                            "Using get_file_meta when you need the full document tree (use figma.get_file instead).".into(),
+                        ],
+                        examples: vec![r#"{"file_key": "abc123DEF456"}"#.into()],
+                        related: vec![
+                            CapabilityId::from_static("figma.get_file"),
+                            CapabilityId::from_static("figma.list_project_files"),
+                        ],
+                    },
+                ),
+                // ── Design Knowledge ──────────────────────────────────
                 op_info(
                     "figma.get_file",
                     "Get a Figma file's document tree",
@@ -840,6 +975,9 @@ impl FigmaConnector {
         }
 
         match operation {
+            "figma.list_team_projects" => self.invoke_list_team_projects(input).await,
+            "figma.list_project_files" => self.invoke_list_project_files(input).await,
+            "figma.get_file_meta" => self.invoke_get_file_meta(input).await,
             "figma.get_file" => self.invoke_get_file(input).await,
             "figma.get_file_nodes" => self.invoke_get_file_nodes(input).await,
             "figma.get_file_components" => self.invoke_get_file_components(input).await,
@@ -856,6 +994,87 @@ impl FigmaConnector {
                 operation: operation.into(),
             }),
         }
+    }
+
+    // ── Resource Discovery implementations ─────────────────────────
+
+    async fn invoke_list_team_projects(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let team_id = require_str(&input, "team_id")?;
+
+        let resp = client
+            .list_team_projects(team_id)
+            .await
+            .map_err(|e: FigmaError| e.to_fcp_error())?;
+
+        Ok(json!({
+            "name": resp.name,
+            "projects": resp.projects.iter().map(|p| json!({
+                "id": p.id,
+                "name": p.name,
+            })).collect::<Vec<_>>(),
+            "provenance": {
+                "source": "figma.teams",
+                "derived": false,
+                "scope": "team"
+            },
+            "taint": ["external_input"]
+        }))
+    }
+
+    async fn invoke_list_project_files(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let project_id = require_str(&input, "project_id")?;
+
+        let resp = client
+            .list_project_files(project_id)
+            .await
+            .map_err(|e: FigmaError| e.to_fcp_error())?;
+
+        Ok(json!({
+            "name": resp.name,
+            "files": resp.files.iter().map(|f| json!({
+                "key": f.key,
+                "name": f.name,
+                "thumbnail_url": f.thumbnail_url,
+                "last_modified": f.last_modified,
+            })).collect::<Vec<_>>(),
+            "provenance": {
+                "source": "figma.projects",
+                "derived": false,
+                "scope": "project"
+            },
+            "taint": ["external_input"]
+        }))
+    }
+
+    async fn invoke_get_file_meta(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let file_key = require_str(&input, "file_key")?;
+
+        // Use depth=1 for lightweight metadata (minimal document traversal)
+        let file = client
+            .get_file(file_key, None, Some(1), None, None)
+            .await
+            .map_err(|e: FigmaError| e.to_fcp_error())?;
+
+        Ok(json!({
+            "name": file.name,
+            "lastModified": file.last_modified,
+            "version": file.version,
+            "provenance": {
+                "source": "figma.files",
+                "derived": false,
+                "scope": "file"
+            },
+            "taint": ["external_input"]
+        }))
     }
 
     // ── Operation implementations ─────────────────────────────────
@@ -1283,6 +1502,9 @@ mod tests {
         let ops = result["operations"].as_array().unwrap();
         let op_ids: Vec<&str> = ops.iter().map(|o| o["id"].as_str().unwrap()).collect();
 
+        assert!(op_ids.contains(&"figma.list_team_projects"));
+        assert!(op_ids.contains(&"figma.list_project_files"));
+        assert!(op_ids.contains(&"figma.get_file_meta"));
         assert!(op_ids.contains(&"figma.get_file"));
         assert!(op_ids.contains(&"figma.get_file_nodes"));
         assert!(op_ids.contains(&"figma.get_file_components"));
@@ -1295,7 +1517,7 @@ mod tests {
         assert!(op_ids.contains(&"figma.list_webhooks"));
         assert!(op_ids.contains(&"figma.create_webhook"));
         assert!(op_ids.contains(&"figma.delete_webhook"));
-        assert_eq!(ops.len(), 12);
+        assert_eq!(ops.len(), 15);
     }
 
     #[fcp_async_core::runtime::test]

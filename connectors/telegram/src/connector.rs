@@ -3,8 +3,11 @@
 //! Implements the FcpConnector trait with Telegram-specific operations.
 
 use std::collections::HashSet;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fcp_async_core::channel::{broadcast, watch};
 use fcp_async_core::sync::RwLock;
@@ -25,6 +28,9 @@ use crate::types::{GetUpdatesRequest, Message, Update, UpdateKind};
 const DEFAULT_TELEGRAM_BASE_URL: &str = "https://api.telegram.org";
 const MIN_POLL_TIMEOUT_SECS: i32 = 1;
 const MAX_POLL_TIMEOUT_SECS: i32 = 50;
+const MIN_POLL_LEASE_TTL_SECS: u64 = 10;
+const TELEGRAM_POLL_CURSOR_FILE: &str = "telegram_poll_cursor.json";
+const TELEGRAM_POLL_LEASE_FILE: &str = "telegram_poll_lease.json";
 const KNOWN_ALLOWED_UPDATES: &[&str] = &[
     "message",
     "edited_message",
@@ -214,16 +220,59 @@ impl DoctorResult {
     }
 }
 
+fn current_unix_timestamp_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
+}
+
+fn write_json_file_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let tmp_path = path.with_extension(format!("tmp-{}", std::process::id()));
+    let payload = serde_json::to_vec(value).map_err(io::Error::other)?;
+    fs::write(&tmp_path, payload)?;
+    fs::rename(&tmp_path, path)?;
+    Ok(())
+}
+
+fn read_json_file_if_exists<T>(path: &Path) -> io::Result<Option<T>>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    match fs::read(path) {
+        Ok(bytes) => {
+            let value = serde_json::from_slice::<T>(&bytes).map_err(io::Error::other)?;
+            Ok(Some(value))
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TelegramPollingCursorState {
+    offset: Option<i64>,
+    last_poll_count: usize,
+    updated_at: u64,
+}
+
 #[derive(Debug, Default)]
 struct TelegramPollingCursor {
     offset: Option<i64>,
     last_poll_at: Option<Instant>,
     last_poll_count: usize,
+    state_path: Option<PathBuf>,
 }
 
 impl TelegramPollingCursor {
-    fn new() -> Self {
-        Self::default()
+    fn new(state_path: Option<PathBuf>) -> Self {
+        Self {
+            state_path,
+            ..Self::default()
+        }
     }
 }
 
@@ -250,10 +299,161 @@ impl PollingCursor for TelegramPollingCursor {
     }
 
     fn persist(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if let Some(path) = &self.state_path {
+            let state = TelegramPollingCursorState {
+                offset: self.offset,
+                last_poll_count: self.last_poll_count,
+                updated_at: current_unix_timestamp_secs(),
+            };
+            write_json_file_atomic(path, &state)?;
+        }
         Ok(())
     }
 
     fn restore(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if let Some(path) = &self.state_path
+            && let Some(state) = read_json_file_if_exists::<TelegramPollingCursorState>(path)?
+        {
+            self.offset = state.offset;
+            self.last_poll_count = state.last_poll_count;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TelegramPollLeaseRecord {
+    holder_instance_id: String,
+    lease_seq: u64,
+    updated_at: u64,
+    expires_at: u64,
+}
+
+#[derive(Debug, Clone)]
+struct TelegramPollLease {
+    path: PathBuf,
+    holder_instance_id: String,
+    lease_seq: u64,
+    ttl_secs: u64,
+}
+
+impl TelegramPollLease {
+    fn acquire(path: PathBuf, holder_instance_id: String, ttl_secs: u64) -> FcpResult<Self> {
+        let ttl_secs = ttl_secs.max(MIN_POLL_LEASE_TTL_SECS);
+        let now = current_unix_timestamp_secs();
+        let previous =
+            read_json_file_if_exists::<TelegramPollLeaseRecord>(&path).map_err(|err| {
+                FcpError::Internal {
+                    message: format!(
+                        "Failed to read polling lease file '{}': {err}",
+                        path.display()
+                    ),
+                }
+            })?;
+
+        if let Some(record) = &previous
+            && record.expires_at > now
+            && record.holder_instance_id != holder_instance_id
+        {
+            return Err(FcpError::Conflict {
+                message: format!(
+                    "telegram polling lease held by '{}' (lease_seq={}) until {}",
+                    record.holder_instance_id, record.lease_seq, record.expires_at
+                ),
+            });
+        }
+
+        let lease_seq = previous
+            .map(|record| record.lease_seq.saturating_add(1))
+            .unwrap_or(1);
+
+        let record = TelegramPollLeaseRecord {
+            holder_instance_id: holder_instance_id.clone(),
+            lease_seq,
+            updated_at: now,
+            expires_at: now.saturating_add(ttl_secs),
+        };
+
+        write_json_file_atomic(&path, &record).map_err(|err| FcpError::Internal {
+            message: format!(
+                "Failed to persist polling lease file '{}': {err}",
+                path.display()
+            ),
+        })?;
+
+        Ok(Self {
+            path,
+            holder_instance_id,
+            lease_seq,
+            ttl_secs,
+        })
+    }
+
+    fn renew(&self) -> FcpResult<()> {
+        let Some(mut record) = read_json_file_if_exists::<TelegramPollLeaseRecord>(&self.path)
+            .map_err(|err| FcpError::Internal {
+                message: format!(
+                    "Failed to read polling lease file '{}': {err}",
+                    self.path.display()
+                ),
+            })?
+        else {
+            return Err(FcpError::Conflict {
+                message: "telegram polling lease file is missing".into(),
+            });
+        };
+
+        if record.holder_instance_id != self.holder_instance_id
+            || record.lease_seq != self.lease_seq
+        {
+            return Err(FcpError::Conflict {
+                message: format!(
+                    "telegram polling lease fencing violation (expected holder='{}' lease_seq={}, found holder='{}' lease_seq={})",
+                    self.holder_instance_id,
+                    self.lease_seq,
+                    record.holder_instance_id,
+                    record.lease_seq
+                ),
+            });
+        }
+
+        let now = current_unix_timestamp_secs();
+        record.updated_at = now;
+        record.expires_at = now.saturating_add(self.ttl_secs);
+        write_json_file_atomic(&self.path, &record).map_err(|err| FcpError::Internal {
+            message: format!(
+                "Failed to renew polling lease file '{}': {err}",
+                self.path.display()
+            ),
+        })?;
+        Ok(())
+    }
+
+    fn release(&self) -> FcpResult<()> {
+        let record =
+            read_json_file_if_exists::<TelegramPollLeaseRecord>(&self.path).map_err(|err| {
+                FcpError::Internal {
+                    message: format!(
+                        "Failed to read polling lease file '{}': {err}",
+                        self.path.display()
+                    ),
+                }
+            })?;
+
+        if let Some(record) = record
+            && record.holder_instance_id == self.holder_instance_id
+            && record.lease_seq == self.lease_seq
+            && let Err(err) = fs::remove_file(&self.path)
+            && err.kind() != io::ErrorKind::NotFound
+        {
+            return Err(FcpError::Internal {
+                message: format!(
+                    "Failed to release polling lease file '{}': {err}",
+                    self.path.display()
+                ),
+            });
+        }
+
         Ok(())
     }
 }
@@ -265,6 +465,7 @@ pub struct TelegramConnector {
     client: Option<TelegramClient>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
+    zone_dir: Option<PathBuf>,
     // instance_id: InstanceId, // Remove
 
     // Polling state
@@ -331,6 +532,7 @@ impl TelegramConnector {
             client: None,
             verifier: None,
             session_id: None,
+            zone_dir: None,
             // instance_id: InstanceId::new(), // Remove
             poll_running: Arc::new(RwLock::new(false)),
             poll_task: None,
@@ -435,6 +637,19 @@ impl TelegramConnector {
                 message: format!("Invalid handshake request: {e}"),
             })?;
 
+        let zone_dir = req.zone_dir.clone().ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "zone_dir is required for Telegram polling cursor + singleton-writer lease persistence".into(),
+        })?;
+        let zone_dir = PathBuf::from(zone_dir);
+        fs::create_dir_all(&zone_dir).map_err(|err| FcpError::Internal {
+            message: format!(
+                "Failed to prepare Telegram zone_dir '{}': {err}",
+                zone_dir.display()
+            ),
+        })?;
+        self.zone_dir = Some(zone_dir.clone());
+
         // Verify bot is reachable
         let client = self.client.as_ref().ok_or_else(|| {
             if self
@@ -465,6 +680,7 @@ impl TelegramConnector {
         info!(
             bot_username = ?bot_info.username,
             bot_id = bot_info.id,
+            zone_dir = %zone_dir.display(),
             "Telegram bot verified"
         );
 
@@ -1486,8 +1702,14 @@ impl TelegramConnector {
         }
         *self.poll_running.write().await = false;
 
-        if let Some(task) = self.poll_task.take() {
-            task.abort();
+        if let Some(mut task) = self.poll_task.take() {
+            if fcp_async_core::time::timeout(Duration::from_secs(2), &mut task)
+                .await
+                .is_err()
+            {
+                warn!("Polling task did not stop within timeout, aborting");
+                task.abort();
+            }
         }
 
         Ok(json!({ "status": "shutdown" }))
@@ -1506,6 +1728,19 @@ impl TelegramConnector {
         let instance_id = self.base.instance_id.clone(); // Use base.instance_id
         let connector_id = self.base.id.clone();
         let base = self.base.clone();
+        let zone_dir = self.zone_dir.clone().ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "Handshake zone_dir is required before polling can start".into(),
+        })?;
+        let cursor_path = zone_dir.join(TELEGRAM_POLL_CURSOR_FILE);
+        let lease_path = zone_dir.join(TELEGRAM_POLL_LEASE_FILE);
+        let poll_timeout_secs =
+            u64::try_from(config.poll_timeout.max(MIN_POLL_TIMEOUT_SECS)).unwrap_or(30);
+        let poll_lease = TelegramPollLease::acquire(
+            lease_path,
+            instance_id.to_string(),
+            poll_timeout_secs.saturating_mul(3),
+        )?;
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         self.poll_shutdown_tx = Some(shutdown_tx.clone());
@@ -1515,8 +1750,10 @@ impl TelegramConnector {
         let task = fcp_async_core::task::spawn(async move {
             info!("Starting Telegram polling loop");
 
-            let mut supervisor =
-                PollingSupervisor::new(SupervisorConfig::default(), TelegramPollingCursor::new());
+            let mut supervisor = PollingSupervisor::new(
+                SupervisorConfig::default(),
+                TelegramPollingCursor::new(Some(cursor_path)),
+            );
 
             let outcome = supervisor
                 .run(
@@ -1525,7 +1762,14 @@ impl TelegramConnector {
                     |offset| {
                         let client = client.clone();
                         let config = config.clone();
+                        let poll_lease = poll_lease.clone();
                         async move {
+                            if let Err(err) = poll_lease.renew() {
+                                return PollResult::fatal(format!(
+                                    "singleton-writer lease renewal failed: {err}"
+                                ));
+                            }
+
                             let request = GetUpdatesRequest {
                                 offset,
                                 limit: Some(100),
@@ -1567,6 +1811,9 @@ impl TelegramConnector {
                 .await;
 
             info!(?outcome, "Telegram polling supervisor stopped");
+            if let Err(err) = poll_lease.release() {
+                warn!(error = %err, "Failed to release Telegram polling lease");
+            }
 
             info!("Telegram polling loop stopped");
             *poll_running.write().await = false;
@@ -1705,6 +1952,7 @@ mod tests {
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_testkit::LogCapture;
+    use uuid::Uuid;
 
     fn generate_valid_token(
         signing_key: &Ed25519SigningKey,
@@ -1730,6 +1978,14 @@ mod tests {
 
     fn token_path(method: &str) -> String {
         format!("/bot{TEST_BOT_TOKEN}/{method}")
+    }
+
+    fn unique_zone_dir(label: &str) -> String {
+        let dir = std::env::temp_dir()
+            .join("fcp-telegram-tests")
+            .join(format!("{label}-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("failed to create unique zone dir");
+        dir.to_string_lossy().into_owned()
     }
 
     async fn setup_connector_with_token(
@@ -1775,11 +2031,13 @@ mod tests {
 
         let signing_key = Ed25519SigningKey::generate();
         let verifying_key = signing_key.verifying_key();
+        let zone_dir = unique_zone_dir("setup-connector");
 
         connector
             .handle_handshake(serde_json::json!({
                 "protocol_version": "1.0.0",
                 "zone": "z:work",
+                "zone_dir": zone_dir,
                 "host_public_key": verifying_key.to_bytes(),
                 "nonce": vec![0u8; 32],
                 "capabilities_requested": [cap]
@@ -1852,7 +2110,9 @@ mod tests {
 
     #[test]
     fn test_polling_cursor_advances_and_persists() {
-        let mut cursor = TelegramPollingCursor::new();
+        let cursor_path = std::path::PathBuf::from(unique_zone_dir("cursor-state"))
+            .join(TELEGRAM_POLL_CURSOR_FILE);
+        let mut cursor = TelegramPollingCursor::new(Some(cursor_path.clone()));
         assert_eq!(cursor.offset(), None);
 
         cursor.advance_if_newer(100);
@@ -1865,7 +2125,132 @@ mod tests {
         assert_eq!(cursor.offset(), Some(102));
 
         assert!(cursor.persist().is_ok());
-        assert!(cursor.restore().is_ok());
+        let mut restored = TelegramPollingCursor::new(Some(cursor_path));
+        assert!(restored.restore().is_ok());
+        assert_eq!(restored.offset(), Some(102));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_handshake_requires_zone_dir_for_polling_state() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(token_path("getMe")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": {
+                    "id": 123456789,
+                    "is_bot": true,
+                    "first_name": "Test Bot",
+                    "username": "test_bot"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let mut connector = TelegramConnector::new();
+        connector
+            .handle_configure(serde_json::json!({
+                "credential": TEST_BOT_TOKEN,
+                "base_url": mock_server.uri()
+            }))
+            .await
+            .expect("configure should succeed");
+
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let result = connector
+            .handle_handshake(serde_json::json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["telegram.read"]
+            }))
+            .await;
+
+        assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_polling_lease_fences_second_instance() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path(token_path("getMe")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": {
+                    "id": 123456789,
+                    "is_bot": true,
+                    "first_name": "Test Bot",
+                    "username": "test_bot"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path(token_path("getUpdates")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": []
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let zone_dir = unique_zone_dir("lease-fence");
+
+        let mut connector_a = TelegramConnector::new();
+        connector_a
+            .handle_configure(serde_json::json!({
+                "credential": TEST_BOT_TOKEN,
+                "base_url": mock_server.uri(),
+                "poll_timeout": 1
+            }))
+            .await
+            .expect("configure A should succeed");
+        let signing_key_a = Ed25519SigningKey::generate();
+        let verifying_key_a = signing_key_a.verifying_key();
+        connector_a
+            .handle_handshake(serde_json::json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "zone_dir": zone_dir,
+                "host_public_key": verifying_key_a.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["telegram.read"]
+            }))
+            .await
+            .expect("first handshake should succeed");
+
+        let mut connector_b = TelegramConnector::new();
+        connector_b
+            .handle_configure(serde_json::json!({
+                "credential": TEST_BOT_TOKEN,
+                "base_url": mock_server.uri(),
+                "poll_timeout": 1
+            }))
+            .await
+            .expect("configure B should succeed");
+        let signing_key_b = Ed25519SigningKey::generate();
+        let verifying_key_b = signing_key_b.verifying_key();
+        let second = connector_b
+            .handle_handshake(serde_json::json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "zone_dir": zone_dir,
+                "host_public_key": verifying_key_b.to_bytes(),
+                "nonce": vec![1u8; 32],
+                "capabilities_requested": ["telegram.read"]
+            }))
+            .await;
+
+        assert!(matches!(second, Err(FcpError::Conflict { .. })));
+
+        connector_a
+            .handle_shutdown(json!({}))
+            .await
+            .expect("shutdown should succeed");
     }
 
     #[test]
@@ -2073,10 +2458,12 @@ mod tests {
 
         let signing_key = Ed25519SigningKey::generate();
         let verifying_key = signing_key.verifying_key();
+        let zone_dir = unique_zone_dir("polling-event");
         connector
             .handle_handshake(serde_json::json!({
                 "protocol_version": "1.0.0",
                 "zone": "z:work",
+                "zone_dir": zone_dir,
                 "host_public_key": verifying_key.to_bytes(),
                 "nonce": vec![0u8; 32],
                 "capabilities_requested": ["telegram.read"]

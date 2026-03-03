@@ -17,6 +17,7 @@ use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_testkit::AsyncTestContext;
 use serde_json::json;
+use uuid::Uuid;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{method, path},
@@ -32,6 +33,14 @@ const TEST_BOT_TOKEN: &str = "123456:ABCDEFGHIJKLMNOPQRSTUVWXyz012345";
 
 fn token_path(api_method: &str) -> String {
     format!("/bot{TEST_BOT_TOKEN}/{api_method}")
+}
+
+fn unique_zone_dir(label: &str) -> String {
+    let dir = std::env::temp_dir()
+        .join("fcp-telegram-integration")
+        .join(format!("{label}-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("failed to create unique zone dir");
+    dir.to_string_lossy().into_owned()
 }
 
 // ============================================================================
@@ -101,11 +110,13 @@ async fn setup_handshake(
 
     let signing_key = Ed25519SigningKey::generate();
     let verifying_key = signing_key.verifying_key();
+    let zone_dir = unique_zone_dir("integration-handshake");
 
     connector
         .handle_handshake(json!({
             "protocol_version": "1.0.0",
             "zone": "z:work",
+            "zone_dir": zone_dir,
             "host_public_key": verifying_key.to_bytes(),
             "nonce": vec![0u8; 32],
             "capabilities_requested": caps
@@ -718,4 +729,100 @@ async fn doctor_not_configured() {
         .expect("doctor should succeed");
     // Doctor should report a check about configuration status
     assert!(result.get("checks").is_some());
+}
+
+#[fcp_async_core::runtime::test]
+async fn concurrent_handshake_same_zone_dir_is_fenced() {
+    let _ctx = AsyncTestContext::for_scenario("telegram.polling.concurrent_handshake_fenced");
+    let mock_server = MockServer::start().await;
+    mount_get_me_mock(&mock_server).await;
+    mount_get_updates_mock(&mock_server).await;
+
+    let shared_zone_dir = unique_zone_dir("integration-lease-fence");
+
+    let mut connector_a = TelegramConnector::new();
+    setup_configure(&mut connector_a, &mock_server.uri()).await;
+    let key_a = Ed25519SigningKey::generate();
+    let verify_a = key_a.verifying_key();
+    connector_a
+        .handle_handshake(json!({
+            "protocol_version": "1.0.0",
+            "zone": "z:work",
+            "zone_dir": shared_zone_dir,
+            "host_public_key": verify_a.to_bytes(),
+            "nonce": vec![0u8; 32],
+            "capabilities_requested": ["telegram.get_file"]
+        }))
+        .await
+        .expect("first handshake should succeed");
+
+    let mut connector_b = TelegramConnector::new();
+    setup_configure(&mut connector_b, &mock_server.uri()).await;
+    let key_b = Ed25519SigningKey::generate();
+    let verify_b = key_b.verifying_key();
+    let second = connector_b
+        .handle_handshake(json!({
+            "protocol_version": "1.0.0",
+            "zone": "z:work",
+            "zone_dir": shared_zone_dir,
+            "host_public_key": verify_b.to_bytes(),
+            "nonce": vec![1u8; 32],
+            "capabilities_requested": ["telegram.get_file"]
+        }))
+        .await;
+
+    assert!(
+        matches!(second, Err(fcp_core::FcpError::Conflict { .. })),
+        "second handshake should be lease-fenced, got: {second:?}"
+    );
+
+    let shutdown = connector_a
+        .handle_shutdown(json!({}))
+        .await
+        .expect("shutdown should succeed");
+    assert_eq!(shutdown["status"], "shutdown");
+}
+
+#[fcp_async_core::runtime::test]
+async fn malformed_get_updates_payload_does_not_panic() {
+    let _ctx = AsyncTestContext::for_scenario("telegram.polling.malformed_update_payload");
+    let mock_server = MockServer::start().await;
+    mount_get_me_mock(&mock_server).await;
+
+    Mock::given(method("POST"))
+        .and(path(token_path("getUpdates")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "result": [{
+                "update_id": "bad-update-id",
+                "message": { "message_id": "bad-message-id" }
+            }]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = TelegramConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let signing_key = Ed25519SigningKey::generate();
+    let verifying_key = signing_key.verifying_key();
+    connector
+        .handle_handshake(json!({
+            "protocol_version": "1.0.0",
+            "zone": "z:work",
+            "zone_dir": unique_zone_dir("integration-malformed-updates"),
+            "host_public_key": verifying_key.to_bytes(),
+            "nonce": vec![0u8; 32],
+            "capabilities_requested": ["telegram.get_file"]
+        }))
+        .await
+        .expect("handshake should succeed despite malformed updates");
+
+    fcp_async_core::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    let shutdown = connector
+        .handle_shutdown(json!({}))
+        .await
+        .expect("shutdown should succeed");
+    assert_eq!(shutdown["status"], "shutdown");
 }

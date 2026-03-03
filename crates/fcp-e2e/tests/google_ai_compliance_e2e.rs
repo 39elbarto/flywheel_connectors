@@ -560,7 +560,7 @@ async fn google_ai_streaming_backpressure_is_deterministic() {
             }
         }
         // Simulate backpressure by delaying between chunk processing
-        tokio::time::sleep(Duration::from_millis(8)).await;
+        fcp_async_core::time::sleep(Duration::from_millis(8)).await;
     }
 
     assert_eq!(collected, "Hello world!");

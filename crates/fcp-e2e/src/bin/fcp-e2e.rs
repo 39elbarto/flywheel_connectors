@@ -210,7 +210,7 @@ fn write_scan_report(report: &LogScanReport, output: &Path) -> io::Result<()> {
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))
 }
 
-#[tokio::main(flavor = "current_thread")]
+#[fcp_async_core::runtime::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = match parse_args() {
         Ok(parsed) => parsed,

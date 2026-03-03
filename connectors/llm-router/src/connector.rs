@@ -1343,7 +1343,7 @@ mod tests {
         })
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn configure_succeeds() {
         let mut connector = LlmRouterConnector::new();
         let result = connector.handle_configure(test_config_params()).await;
@@ -1353,21 +1353,21 @@ mod tests {
         assert_eq!(val["providers"].as_array().unwrap().len(), 2);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn configure_requires_providers() {
         let mut connector = LlmRouterConnector::new();
         let result = connector.handle_configure(json!({"providers": []})).await;
         assert!(result.is_err());
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn health_before_configure() {
         let connector = LlmRouterConnector::new();
         let result = connector.handle_health().await.unwrap();
         assert_eq!(result["status"], "unconfigured");
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn introspect_returns_all_operations() {
         let connector = LlmRouterConnector::new();
         let result = connector.handle_introspect().await.unwrap();
@@ -1385,7 +1385,7 @@ mod tests {
         assert!(op_ids.contains(&"llm-router.get_budget"));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn invoke_route_without_configure_fails() {
         let mut connector = LlmRouterConnector::new();
         let result = connector
@@ -1398,7 +1398,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn list_providers_after_configure() {
         let mut connector = LlmRouterConnector::new();
         connector
@@ -1421,7 +1421,7 @@ mod tests {
         assert!(providers[0]["models"].as_array().is_some());
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn estimate_cost_returns_sorted() {
         let mut connector = LlmRouterConnector::new();
         connector
@@ -1448,7 +1448,7 @@ mod tests {
         assert!(cost_0 <= cost_1);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn get_usage_initially_zero() {
         let mut connector = LlmRouterConnector::new();
         connector
@@ -1470,7 +1470,7 @@ mod tests {
         assert_eq!(result["requests_total"], 0);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn get_budget_reflects_config() {
         let mut connector = LlmRouterConnector::new();
         connector
@@ -1493,7 +1493,7 @@ mod tests {
         assert_eq!(result["enforcement"], "hard");
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn route_selects_provider_and_tracks_usage() {
         let mut connector = LlmRouterConnector::new();
         connector
@@ -1543,7 +1543,7 @@ mod tests {
         assert!(usage_result["requests_total"].as_u64().unwrap() > 0);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn doctor_reports_healthy_after_configure() {
         let mut connector = LlmRouterConnector::new();
         connector
@@ -1555,7 +1555,7 @@ mod tests {
         assert_eq!(result["status"], "healthy");
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn self_check_reports_ready() {
         let mut connector = LlmRouterConnector::new();
         connector
@@ -1569,7 +1569,7 @@ mod tests {
         assert!(result["details"]["providers"].as_array().is_some());
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn self_check_unconfigured() {
         let connector = LlmRouterConnector::new();
         let result = connector.handle_self_check().await.unwrap();
@@ -1577,7 +1577,7 @@ mod tests {
         assert_eq!(result["reason_code"], "not_configured");
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn configure_returns_provisioning_readiness() {
         let mut connector = LlmRouterConnector::new();
         let result = connector
@@ -1597,7 +1597,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn configure_rejects_both_api_key_and_credential_id() {
         let mut connector = LlmRouterConnector::new();
         let result = connector
@@ -1615,7 +1615,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn configure_rejects_missing_auth() {
         let mut connector = LlmRouterConnector::new();
         let result = connector
@@ -1631,7 +1631,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn configure_accepts_credential_id() {
         let mut connector = LlmRouterConnector::new();
         let result = connector
@@ -1656,7 +1656,7 @@ mod tests {
         assert_eq!(provisioning[0]["auth_mode"], "credential_id");
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn self_check_reports_credential_injection() {
         let mut connector = LlmRouterConnector::new();
         connector
@@ -1687,7 +1687,7 @@ mod tests {
         assert!(has_cred_info);
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn doctor_reports_detailed_checks() {
         let mut connector = LlmRouterConnector::new();
         connector
@@ -1713,14 +1713,14 @@ mod tests {
         assert!(check_names.contains(&"provider.openai"));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn doctor_unconfigured_is_unhealthy() {
         let connector = LlmRouterConnector::new();
         let result = connector.handle_doctor().await.unwrap();
         assert_eq!(result["status"], "unhealthy");
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn auth_redacted_label() {
         let api_key_auth = ProviderAuth::ApiKey("sk-1234567890abcdef".into());
         let label = api_key_auth.redacted_label();
@@ -1874,7 +1874,7 @@ mod tests {
         assert!(LlmRouterConnector::host_allowed("http://127.0.0.1:3000"));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn configure_rejects_network_constraint_violation() {
         let mut connector = LlmRouterConnector::new();
         let result = connector
@@ -1892,7 +1892,7 @@ mod tests {
 
     // ---- Simulate handler ----
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn simulate_returns_expected_format() {
         let connector = LlmRouterConnector::new();
         let result = connector
@@ -1907,7 +1907,7 @@ mod tests {
         assert!(result["side_effects"].as_array().unwrap().is_empty());
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn simulate_succeeds_when_configured() {
         let mut connector = LlmRouterConnector::new();
         connector
@@ -1925,7 +1925,7 @@ mod tests {
 
     // ---- Shutdown handler ----
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn shutdown_returns_zero_cost_before_routing() {
         let mut connector = LlmRouterConnector::new();
         let result = connector.handle_shutdown(json!({})).await.unwrap();
@@ -1935,14 +1935,14 @@ mod tests {
 
     // ---- Configure edge cases ----
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn configure_missing_providers_array() {
         let mut connector = LlmRouterConnector::new();
         let result = connector.handle_configure(json!({})).await;
         assert!(result.is_err());
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn configure_provider_missing_name() {
         let mut connector = LlmRouterConnector::new();
         let result = connector
@@ -1957,7 +1957,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn configure_default_strategy_when_missing() {
         let mut connector = LlmRouterConnector::new();
         let result = connector
@@ -1975,7 +1975,7 @@ mod tests {
         assert_eq!(result["default_strategy"], "cost");
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn configure_default_budget_when_missing() {
         let mut connector = LlmRouterConnector::new();
         connector
@@ -2010,7 +2010,7 @@ mod tests {
         assert_eq!(budget["enforcement"], "none");
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn configure_whitespace_only_api_key_rejected() {
         let mut connector = LlmRouterConnector::new();
         let result = connector
@@ -2029,7 +2029,7 @@ mod tests {
 
     // ---- Invoke edge cases ----
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn invoke_missing_operation_field() {
         let mut connector = LlmRouterConnector::new();
         connector
@@ -2046,7 +2046,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn invoke_missing_capability_token() {
         let mut connector = LlmRouterConnector::new();
         connector
@@ -2063,7 +2063,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn invoke_invalid_capability_token_format() {
         let mut connector = LlmRouterConnector::new();
         connector
@@ -2083,7 +2083,7 @@ mod tests {
 
     // ---- Usage tracking ----
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn usage_with_provider_breakdown() {
         let mut connector = LlmRouterConnector::new();
         connector
@@ -2122,7 +2122,7 @@ mod tests {
 
     // ---- Health after configure ----
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn health_after_configure_reports_ok() {
         let mut connector = LlmRouterConnector::new();
         connector
@@ -2136,7 +2136,7 @@ mod tests {
 
     // ---- List providers without models ----
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn list_providers_no_models_flag() {
         let mut connector = LlmRouterConnector::new();
         connector
@@ -2160,7 +2160,7 @@ mod tests {
 
     // ---- Self-check with network violation ----
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn self_check_reports_no_models_warning() {
         let mut connector = LlmRouterConnector::new();
         connector

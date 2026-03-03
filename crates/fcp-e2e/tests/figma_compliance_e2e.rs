@@ -37,14 +37,14 @@ use wiremock::{
 // ============================================================================
 
 struct FigmaConnectorAdapter {
-    connector: tokio::sync::Mutex<FigmaConnector>,
+    connector: fcp_async_core::sync::Mutex<FigmaConnector>,
     id: ConnectorId,
 }
 
 impl FigmaConnectorAdapter {
     fn new() -> Self {
         Self {
-            connector: tokio::sync::Mutex::new(FigmaConnector::new()),
+            connector: fcp_async_core::sync::Mutex::new(FigmaConnector::new()),
             id: ConnectorId::from_static("figma"),
         }
     }
@@ -614,10 +614,15 @@ fn figma_operation_risk_levels_properly_gated() {
 
     // Read operations should be low risk + safe + no approval
     let safe_ops = [
+        "figma.list_team_projects",
+        "figma.list_project_files",
+        "figma.get_file_meta",
         "figma.get_file",
         "figma.get_file_nodes",
         "figma.get_file_components",
         "figma.get_file_styles",
+        "figma.styles.list",
+        "figma.tokens.export",
         "figma.export_images",
         "figma.list_file_versions",
         "figma.list_comments",
@@ -662,7 +667,7 @@ fn figma_operation_risk_levels_properly_gated() {
     // Total operation count
     assert_eq!(
         operations.len(),
-        12,
-        "Figma manifest should have 12 operations"
+        17,
+        "Figma manifest should have 17 operations"
     );
 }

@@ -563,7 +563,7 @@ async fn anthropic_streaming_backpressure_is_deterministic() {
         }
         chunks_seen += 1;
         // Simulate backpressure by delaying between chunks
-        tokio::time::sleep(Duration::from_millis(8)).await;
+        fcp_async_core::time::sleep(Duration::from_millis(8)).await;
     }
 
     assert_eq!(collected, "Hello world");

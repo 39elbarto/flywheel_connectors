@@ -22,7 +22,7 @@ use fcp_testkit::AsyncTestContext;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use std::time::Duration as StdDuration;
-use tokio::sync::oneshot;
+use fcp_async_core::channel::oneshot;
 use tokio_tungstenite::{accept_async, tungstenite::protocol::Message as WsMessage};
 use wiremock::{
     Mock, MockServer, ResponseTemplate,

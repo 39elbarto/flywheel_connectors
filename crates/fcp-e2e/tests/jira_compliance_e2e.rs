@@ -37,14 +37,14 @@ use wiremock::{
 // ============================================================================
 
 struct JiraConnectorAdapter {
-    connector: tokio::sync::Mutex<JiraConnector>,
+    connector: fcp_async_core::sync::Mutex<JiraConnector>,
     id: ConnectorId,
 }
 
 impl JiraConnectorAdapter {
     fn new() -> Self {
         Self {
-            connector: tokio::sync::Mutex::new(JiraConnector::new()),
+            connector: fcp_async_core::sync::Mutex::new(JiraConnector::new()),
             id: ConnectorId::from_static("jira"),
         }
     }

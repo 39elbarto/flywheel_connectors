@@ -163,7 +163,7 @@ mod connector_unit_tests {
 
     // ── Schema completeness tests ────────────────────────────────────────
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn introspect_all_ops_have_input_and_output_schema() {
         let connector = make_connector();
         let result = connector.handle_introspect().await.expect("introspect");
@@ -192,7 +192,7 @@ mod connector_unit_tests {
         }
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn introspect_operation_ids_are_deterministic() {
         let c1 = make_connector();
         let c2 = make_connector();
@@ -219,7 +219,7 @@ mod connector_unit_tests {
         );
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn introspect_op_count_matches_dispatch() {
         let connector = make_connector();
         let result = connector.handle_introspect().await.expect("introspect");
@@ -233,7 +233,7 @@ mod connector_unit_tests {
         );
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn introspect_no_duplicate_operation_ids() {
         let connector = make_connector();
         let result = connector.handle_introspect().await.expect("introspect");
@@ -248,7 +248,7 @@ mod connector_unit_tests {
 
     // ── Introspection metadata tests ─────────────────────────────────────
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn introspect_all_ops_have_required_metadata() {
         let connector = make_connector();
         let result = connector.handle_introspect().await.expect("introspect");
@@ -264,7 +264,7 @@ mod connector_unit_tests {
         }
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn introspect_valid_risk_levels() {
         let connector = make_connector();
         let result = connector.handle_introspect().await.expect("introspect");
@@ -278,7 +278,7 @@ mod connector_unit_tests {
         }
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn introspect_valid_safety_tiers() {
         let connector = make_connector();
         let result = connector.handle_introspect().await.expect("introspect");
@@ -295,7 +295,7 @@ mod connector_unit_tests {
         }
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn introspect_agent_hints_have_when_to_use() {
         let connector = make_connector();
         let result = connector.handle_introspect().await.expect("introspect");
@@ -311,7 +311,7 @@ mod connector_unit_tests {
 
     // ── Required field validation via schema ──────────────────────────────
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn introspect_required_fields_declared() {
         let connector = make_connector();
         let result = connector.handle_introspect().await.expect("introspect");
@@ -355,7 +355,7 @@ mod connector_unit_tests {
         }
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn introspect_unknown_op_not_present() {
         let connector = make_connector();
         let result = connector.handle_introspect().await.expect("introspect");
@@ -418,7 +418,7 @@ mod connector_unit_tests {
 
     // ── Doctor tests ─────────────────────────────────────────────────────
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn doctor_unconfigured_has_failures() {
         let connector = make_connector();
         let result = connector.handle_doctor().await.expect("doctor");
@@ -434,7 +434,7 @@ mod connector_unit_tests {
         assert_eq!(config_check["status"].as_str(), Some("fail"));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn doctor_configured_has_pass_or_warn() {
         let mut connector = make_connector();
         connector
@@ -462,7 +462,7 @@ mod connector_unit_tests {
         assert_eq!(config_check["status"].as_str(), Some("pass"));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn doctor_http_url_warns() {
         let mut connector = make_connector();
         connector
@@ -487,7 +487,7 @@ mod connector_unit_tests {
 
     // ── Configure validation tests ───────────────────────────────────────
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn configure_rejects_credential_id_plus_oauth() {
         let mut connector = make_connector();
         let result = connector
@@ -505,7 +505,7 @@ mod connector_unit_tests {
         assert!(matches!(err, FcpError::InvalidRequest { .. }));
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn configure_rejects_missing_consumer_key() {
         let mut connector = make_connector();
         let result = connector.handle_configure(json!({})).await;
@@ -515,7 +515,7 @@ mod connector_unit_tests {
         );
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn configure_rejects_empty_consumer_secret() {
         let mut connector = make_connector();
         let result = connector
@@ -529,7 +529,7 @@ mod connector_unit_tests {
         assert!(result.is_err(), "should reject empty consumer_secret");
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn configure_accepts_credential_id() {
         let mut connector = make_connector();
         let result = connector
@@ -540,7 +540,7 @@ mod connector_unit_tests {
         assert!(result.is_ok(), "credential_id mode should succeed");
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn configure_rejects_invalid_credential_id() {
         let mut connector = make_connector();
         let result = connector
@@ -553,7 +553,7 @@ mod connector_unit_tests {
 
     // ── Self-check tests ─────────────────────────────────────────────────
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn self_check_not_configured_returns_failed() {
         let connector = make_connector();
         let result = connector.handle_self_check().await.expect("self_check");
@@ -563,7 +563,7 @@ mod connector_unit_tests {
 
     // ── Health tests ─────────────────────────────────────────────────────
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn health_includes_stream_metrics() {
         let connector = make_connector();
         let result = connector.handle_health().await.expect("health");
@@ -583,7 +583,7 @@ mod connector_unit_tests {
         );
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn health_not_ready_when_unconfigured() {
         let connector = make_connector();
         let result = connector.handle_health().await.expect("health");
@@ -592,7 +592,7 @@ mod connector_unit_tests {
 
     // ── Simulate tests ───────────────────────────────────────────────────
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn simulate_returns_allowed() {
         use fcp_core::{CapabilityToken, ConnectorId, SimulateRequest, ZoneId};
 
@@ -612,7 +612,7 @@ mod connector_unit_tests {
 
     // ── Capability mapping tests ─────────────────────────────────────────
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn read_ops_require_read_capabilities() {
         let connector = make_connector();
         let result = connector.handle_introspect().await.expect("introspect");
@@ -643,7 +643,7 @@ mod connector_unit_tests {
         }
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn write_ops_require_write_capabilities() {
         let connector = make_connector();
         let result = connector.handle_introspect().await.expect("introspect");
@@ -673,7 +673,7 @@ mod connector_unit_tests {
         }
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn stream_ops_require_stream_capabilities() {
         let connector = make_connector();
         let result = connector.handle_introspect().await.expect("introspect");
@@ -698,7 +698,7 @@ mod connector_unit_tests {
         }
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn dm_events_requires_read_dms() {
         let connector = make_connector();
         let result = connector.handle_introspect().await.expect("introspect");
@@ -717,7 +717,7 @@ mod connector_unit_tests {
 
     // ── Event capabilities tests ─────────────────────────────────────────
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn event_caps_streaming_enabled() {
         let connector = make_connector();
         let result = connector.handle_introspect().await.expect("introspect");
@@ -729,7 +729,7 @@ mod connector_unit_tests {
 
     // ── Shutdown tests ───────────────────────────────────────────────────
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn shutdown_returns_status() {
         let mut connector = make_connector();
         let result = connector
@@ -741,7 +741,7 @@ mod connector_unit_tests {
 
     // ── Read operations should be safe ───────────────────────────────────
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn read_ops_are_safe() {
         let connector = make_connector();
         let result = connector.handle_introspect().await.expect("introspect");
@@ -773,7 +773,7 @@ mod connector_unit_tests {
         }
     }
 
-    #[tokio::test]
+    #[fcp_async_core::runtime::test]
     async fn create_delete_ops_are_dangerous() {
         let connector = make_connector();
         let result = connector.handle_introspect().await.expect("introspect");

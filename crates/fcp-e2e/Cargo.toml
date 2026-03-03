@@ -37,6 +37,7 @@ llm_router = []
 
 [dependencies]
 fcp-core = { workspace = true }
+fcp-async-core = { workspace = true }
 fcp-conformance = { workspace = true }
 fcp-testkit = { workspace = true }
 serde = { workspace = true }
@@ -47,7 +48,6 @@ tracing = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "macros", "process", "rt", "time"] }
 
 [dev-dependencies]
-fcp-async-core = { workspace = true }
 fcp-crypto = { workspace = true }
 fcp-anthropic = { path = "../../connectors/anthropic" }
 fcp-openai = { path = "../../connectors/openai" }

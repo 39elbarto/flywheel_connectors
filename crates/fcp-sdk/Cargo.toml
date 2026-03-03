@@ -31,7 +31,6 @@ connector-http = ["dep:reqwest"]
 
 [dev-dependencies]
 async-trait = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
 futures-util = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }

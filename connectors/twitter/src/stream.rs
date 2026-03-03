@@ -171,8 +171,10 @@ async fn process_stream(
 
         // Process complete lines
         while let Some(newline_pos) = buffer.iter().position(|&b| b == b'\n') {
-            let line: Vec<u8> = buffer.drain(..=newline_pos).collect();
-            let line_str = String::from_utf8_lossy(&line).trim().to_string();
+            let line_str = String::from_utf8_lossy(&buffer[..newline_pos])
+                .trim()
+                .to_string();
+            buffer.drain(..=newline_pos);
 
             match parse_stream_line(&line_str) {
                 Ok(Some(event)) => {

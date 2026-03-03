@@ -79,7 +79,7 @@ async fn configured_connector() -> LlmRouterConnector {
     c
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_with_three_providers() {
     let mut connector = LlmRouterConnector::new();
     let result = connector.handle_configure(test_config()).await.unwrap();
@@ -102,21 +102,21 @@ async fn configure_with_three_providers() {
     }
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_rejects_empty_providers() {
     let mut connector = LlmRouterConnector::new();
     let result = connector.handle_configure(json!({"providers": []})).await;
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_rejects_missing_providers() {
     let mut connector = LlmRouterConnector::new();
     let result = connector.handle_configure(json!({})).await;
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn introspect_lists_five_operations() {
     let connector = LlmRouterConnector::new();
     let result = connector.handle_introspect().await.unwrap();
@@ -124,7 +124,7 @@ async fn introspect_lists_five_operations() {
     assert_eq!(ops.len(), 5);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn route_with_cost_strategy() {
     let mut connector = configured_connector().await;
 
@@ -150,7 +150,7 @@ async fn route_with_cost_strategy() {
     assert!(decision["reason"].as_str().unwrap().contains("lowest cost"));
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn route_with_capability_requirement() {
     let mut connector = configured_connector().await;
 
@@ -172,7 +172,7 @@ async fn route_with_capability_requirement() {
     assert_eq!(result["model"], "gpt-4o");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn route_with_fallback_strategy() {
     let mut connector = configured_connector().await;
 
@@ -192,7 +192,7 @@ async fn route_with_fallback_strategy() {
     assert_eq!(result["provider"], "anthropic");
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn route_provenance_metadata() {
     let mut connector = configured_connector().await;
 
@@ -216,7 +216,7 @@ async fn route_provenance_metadata() {
     assert!(taint.contains(&json!("AI_GENERATED")));
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn route_empty_messages_fails() {
     let mut connector = configured_connector().await;
 
@@ -233,7 +233,7 @@ async fn route_empty_messages_fails() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn estimate_cost_all_providers() {
     let mut connector = configured_connector().await;
 
@@ -264,7 +264,7 @@ async fn estimate_cost_all_providers() {
     assert!(recommended.get("provider").is_some());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn estimate_cost_filtered_providers() {
     let mut connector = configured_connector().await;
 
@@ -288,7 +288,7 @@ async fn estimate_cost_filtered_providers() {
     }
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn list_providers_without_models() {
     let mut connector = configured_connector().await;
 
@@ -313,7 +313,7 @@ async fn list_providers_without_models() {
     }
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn list_providers_with_models() {
     let mut connector = configured_connector().await;
 
@@ -332,7 +332,7 @@ async fn list_providers_with_models() {
     }
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn usage_tracking_across_routes() {
     let mut connector = configured_connector().await;
 
@@ -364,7 +364,7 @@ async fn usage_tracking_across_routes() {
     assert!(usage.get("breakdown").is_some());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn budget_tracks_spending() {
     let mut connector = configured_connector().await;
 
@@ -394,7 +394,7 @@ async fn budget_tracks_spending() {
     assert!(budget["remaining_usd"].as_f64().unwrap() < 50.0);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn unknown_operation_fails() {
     let mut connector = configured_connector().await;
 
@@ -409,7 +409,7 @@ async fn unknown_operation_fails() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn missing_capability_token_fails() {
     let mut connector = configured_connector().await;
 
@@ -425,7 +425,7 @@ async fn missing_capability_token_fails() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn doctor_check_structure() {
     let connector = configured_connector().await;
 
@@ -447,7 +447,7 @@ async fn doctor_check_structure() {
     assert!(check_names.contains(&"budget"));
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn self_check_structure() {
     let connector = configured_connector().await;
 
@@ -460,7 +460,7 @@ async fn self_check_structure() {
     assert_eq!(result["details"]["provider_count"], 3);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn shutdown_reports_cost() {
     let mut connector = configured_connector().await;
 
@@ -484,7 +484,7 @@ async fn shutdown_reports_cost() {
 
 // ─── Provisioning-specific tests ─────────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_rejects_missing_credentials() {
     let mut connector = LlmRouterConnector::new();
     let result = connector
@@ -499,7 +499,7 @@ async fn configure_rejects_missing_credentials() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_rejects_dual_credentials() {
     let mut connector = LlmRouterConnector::new();
     let result = connector
@@ -516,7 +516,7 @@ async fn configure_rejects_dual_credentials() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_rejects_empty_api_key() {
     let mut connector = LlmRouterConnector::new();
     let result = connector
@@ -533,7 +533,7 @@ async fn configure_rejects_empty_api_key() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_with_credential_id_reports_secretless() {
     let mut connector = LlmRouterConnector::new();
     let result = connector
@@ -569,7 +569,7 @@ async fn configure_with_credential_id_reports_secretless() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_rejects_disallowed_host() {
     let mut connector = LlmRouterConnector::new();
     let result = connector
@@ -591,7 +591,7 @@ async fn configure_rejects_disallowed_host() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn doctor_unconfigured_is_unhealthy() {
     let connector = LlmRouterConnector::new();
     let result = connector.handle_doctor().await.unwrap();
@@ -604,7 +604,7 @@ async fn doctor_unconfigured_is_unhealthy() {
 
 // ─── Redaction tests (no secret/PII leakage) ────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_response_does_not_leak_api_keys() {
     let mut connector = LlmRouterConnector::new();
     let secret_key = "sk-secret-1234567890abcdef";
@@ -634,7 +634,7 @@ async fn configure_response_does_not_leak_api_keys() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_messages_do_not_leak_api_keys() {
     let mut connector = LlmRouterConnector::new();
     let secret_key = "sk-topSecret789xyz";
@@ -677,7 +677,7 @@ async fn error_messages_do_not_leak_api_keys() {
     }
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn doctor_does_not_leak_full_api_keys() {
     let mut connector = LlmRouterConnector::new();
     let secret_key = "sk-my-super-secret-key-9999";
@@ -712,7 +712,7 @@ async fn doctor_does_not_leak_full_api_keys() {
 
 // ─── Error taxonomy + retry semantics ────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn budget_exceeded_is_capability_denied() {
     let mut connector = LlmRouterConnector::new();
     connector
@@ -752,7 +752,7 @@ async fn budget_exceeded_is_capability_denied() {
     );
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn no_capability_match_is_invalid_request() {
     let mut connector = configured_connector().await;
 
@@ -775,7 +775,7 @@ async fn no_capability_match_is_invalid_request() {
 
 // ─── Adversarial inputs ──────────────────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn route_with_malformed_messages() {
     let mut connector = configured_connector().await;
 
@@ -795,7 +795,7 @@ async fn route_with_malformed_messages() {
     assert!(result.is_ok() || result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn route_with_null_content() {
     let mut connector = configured_connector().await;
 
@@ -813,7 +813,7 @@ async fn route_with_null_content() {
     assert!(result.is_ok() || result.is_err());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn route_with_very_long_content() {
     let mut connector = configured_connector().await;
 
@@ -834,7 +834,7 @@ async fn route_with_very_long_content() {
     assert!(val["usage"]["input_tokens"].as_u64().unwrap() > 100_000);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn estimate_cost_with_invalid_provider_filter() {
     let mut connector = configured_connector().await;
 
@@ -855,7 +855,7 @@ async fn estimate_cost_with_invalid_provider_filter() {
     assert!(estimates.is_empty());
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn route_with_invalid_strategy_uses_default() {
     let mut connector = configured_connector().await;
 
@@ -878,7 +878,7 @@ async fn route_with_invalid_strategy_uses_default() {
 
 // ─── Schema & bounds ─────────────────────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn all_operations_have_schemas() {
     let connector = LlmRouterConnector::new();
     let result = connector.handle_introspect().await.unwrap();
@@ -897,7 +897,7 @@ async fn all_operations_have_schemas() {
     }
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn operations_have_correct_risk_levels() {
     let connector = LlmRouterConnector::new();
     let result = connector.handle_introspect().await.unwrap();
@@ -914,7 +914,7 @@ async fn operations_have_correct_risk_levels() {
     }
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn usage_accumulates_correctly() {
     let mut connector = configured_connector().await;
 
@@ -945,7 +945,7 @@ async fn usage_accumulates_correctly() {
     assert!(usage["total_output_tokens"].as_u64().unwrap() > 0);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn budget_remaining_decreases_after_route() {
     let mut connector = LlmRouterConnector::new();
     connector
@@ -1004,7 +1004,7 @@ async fn budget_remaining_decreases_after_route() {
 
 // ─── Idempotency ─────────────────────────────────────────────────────────────
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_is_idempotent() {
     let mut connector = LlmRouterConnector::new();
 
@@ -1016,7 +1016,7 @@ async fn configure_is_idempotent() {
     assert_eq!(r1["providers"], r2["providers"]);
 }
 
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn introspect_is_deterministic() {
     let connector = LlmRouterConnector::new();
 

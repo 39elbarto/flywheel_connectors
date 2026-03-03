@@ -26,7 +26,7 @@ use fcp_manifest::ConnectorManifest;
 use serde_json::json;
 
 use fcp_llm_router::connector::LlmRouterConnector;
-use tokio::sync::Mutex;
+use fcp_async_core::sync::Mutex;
 
 // ============================================================================
 // FcpConnector adapter for LlmRouterConnector

@@ -2333,7 +2333,7 @@ mod openai_e2e_tests {
                 collected.push_str(delta);
             }
             chunks_seen += 1;
-            tokio::time::sleep(Duration::from_millis(8)).await;
+            fcp_async_core::time::sleep(Duration::from_millis(8)).await;
         }
 
         assert_eq!(collected, "Hello world");

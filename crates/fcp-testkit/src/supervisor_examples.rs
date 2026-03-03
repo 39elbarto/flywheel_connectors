@@ -37,7 +37,7 @@ use fcp_sdk::runtime::{
     StreamingSession, SupervisorConfig, SupervisorOutcome,
 };
 use semver::Version;
-use tokio::sync::watch;
+use fcp_async_core::channel::watch;
 
 #[cfg(feature = "cursor-store-object-store")]
 use fcp_core::ObjectIdKey;
@@ -230,7 +230,7 @@ impl FakePollingApi {
 ///
 /// ```rust
 /// use fcp_testkit::supervisor_examples::{FakePollingConnector, FakePollingApi};
-/// use tokio::sync::watch;
+/// use fcp_async_core::channel::watch;
 ///
 /// # async fn example() {
 /// let api = FakePollingApi::always_success(2);
@@ -239,12 +239,12 @@ impl FakePollingApi {
 /// let (shutdown_tx, shutdown_rx) = watch::channel(false);
 ///
 /// // Run supervisor in background
-/// let handle = tokio::spawn(async move {
+/// let handle = fcp_async_core::task::spawn(async move {
 ///     connector.run(shutdown_rx).await
 /// });
 ///
 /// // Let it run a bit, then shutdown
-/// tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+/// fcp_async_core::time::sleep(std::time::Duration::from_millis(100)).await;
 /// shutdown_tx.send(true).unwrap();
 ///
 /// let outcome = handle.await.unwrap();

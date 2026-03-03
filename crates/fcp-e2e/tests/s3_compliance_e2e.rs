@@ -37,14 +37,14 @@ use fcp_s3::connector::S3Connector;
 // ============================================================================
 
 struct S3ConnectorAdapter {
-    connector: tokio::sync::Mutex<S3Connector>,
+    connector: fcp_async_core::sync::Mutex<S3Connector>,
     id: ConnectorId,
 }
 
 impl S3ConnectorAdapter {
     fn new() -> Self {
         Self {
-            connector: tokio::sync::Mutex::new(S3Connector::new()),
+            connector: fcp_async_core::sync::Mutex::new(S3Connector::new()),
             id: ConnectorId::from_static("s3"),
         }
     }

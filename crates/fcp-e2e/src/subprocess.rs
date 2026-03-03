@@ -7,10 +7,10 @@ use std::io;
 use std::process::Stdio;
 use std::sync::Arc;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-use tokio::sync::Mutex;
-use tokio::task::JoinHandle;
+use fcp_async_core::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use fcp_async_core::process::{Child, ChildStdin, ChildStdout, Command};
+use fcp_async_core::sync::Mutex;
+use fcp_async_core::task::JoinHandle;
 
 /// Subprocess runner for connector binaries using JSONL IPC.
 pub struct ConnectorProcessRunner {
@@ -54,7 +54,7 @@ impl ConnectorProcessRunner {
 
         let stderr_lines = Arc::new(Mutex::new(Vec::new()));
         let stderr_lines_task = Arc::clone(&stderr_lines);
-        let stderr_task = tokio::spawn(async move {
+        let stderr_task = fcp_async_core::task::spawn(async move {
             let mut reader = BufReader::new(stderr);
             let mut line = String::new();
             loop {

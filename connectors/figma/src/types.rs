@@ -91,6 +91,85 @@ pub struct StylesResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Design Tokens
+// ---------------------------------------------------------------------------
+
+/// A normalized design token extracted from Figma styles.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DesignToken {
+    /// Normalized token name (kebab-case, e.g. "color-primary-500").
+    pub name: String,
+    /// Original Figma style name before normalization.
+    pub original_name: String,
+    /// Token category: "color", "typography", "effect", "grid".
+    pub category: String,
+    /// The Figma style type (FILL, TEXT, EFFECT, GRID).
+    pub style_type: String,
+    /// The resolved token value.
+    pub value: TokenValue,
+    /// Figma node ID for this style (e.g. "1:2").
+    #[serde(default)]
+    pub node_id: Option<String>,
+    /// Description from Figma style metadata.
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// Resolved value for a design token.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum TokenValue {
+    /// RGBA color value.
+    #[serde(rename = "color")]
+    Color {
+        r: f64,
+        g: f64,
+        b: f64,
+        a: f64,
+        /// Hex representation (e.g. "#ff5500ff").
+        hex: String,
+    },
+    /// Typography token with font properties.
+    #[serde(rename = "typography")]
+    Typography {
+        font_family: String,
+        font_size: f64,
+        font_weight: f64,
+        line_height: Option<f64>,
+        letter_spacing: Option<f64>,
+    },
+    /// Effect token (shadows, blurs).
+    #[serde(rename = "effect")]
+    Effect {
+        effect_type: String,
+        #[serde(default)]
+        radius: Option<f64>,
+        #[serde(default)]
+        color: Option<String>,
+        #[serde(default)]
+        offset_x: Option<f64>,
+        #[serde(default)]
+        offset_y: Option<f64>,
+    },
+    /// Grid layout token.
+    #[serde(rename = "grid")]
+    Grid {
+        pattern: String,
+        #[serde(default)]
+        size: Option<f64>,
+        #[serde(default)]
+        gutter: Option<f64>,
+        #[serde(default)]
+        count: Option<f64>,
+    },
+    /// Raw fallback for unrecognized token types.
+    #[serde(rename = "raw")]
+    Raw {
+        data: serde_json::Value,
+    },
+}
+
+// ---------------------------------------------------------------------------
 // Image Export
 // ---------------------------------------------------------------------------
 

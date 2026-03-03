@@ -14,6 +14,7 @@ use tracing::{info, instrument};
 
 use crate::client::{DEFAULT_BASE_URL, FigmaAuth, FigmaClient};
 use crate::error::FigmaError;
+use crate::types::{DesignToken, TokenValue};
 
 /// Parsed configuration for the Figma connector.
 struct FigmaConfig {
@@ -892,6 +893,103 @@ impl FigmaConnector {
                         related: vec![CapabilityId::from_static("figma.list_webhooks")],
                     },
                 ),
+                // ── Design Tokens ───────────────────────────────────────
+                op_info(
+                    "figma.styles.list",
+                    "List file styles as structured design tokens with categories and normalized names",
+                    json!({
+                        "type": "object",
+                        "required": ["file_key"],
+                        "properties": {
+                            "file_key": { "type": "string", "description": "Figma file key" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": ["tokens"],
+                        "properties": {
+                            "tokens": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "required": ["name", "category", "style_type", "value"],
+                                    "properties": {
+                                        "name": { "type": "string", "description": "Normalized kebab-case token name" },
+                                        "original_name": { "type": "string", "description": "Original Figma style name" },
+                                        "category": { "type": "string", "description": "Token category: color, typography, effect, grid" },
+                                        "style_type": { "type": "string" },
+                                        "value": { "type": "object" },
+                                        "node_id": { "type": "string" },
+                                        "description": { "type": "string" }
+                                    }
+                                }
+                            },
+                            "count": { "type": "integer" },
+                            "provenance": { "type": "object" },
+                            "taint": { "type": "array" }
+                        }
+                    }),
+                    "figma.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "List all design tokens from a file's published styles. Returns structured tokens with normalized names and categorized values.".into(),
+                        common_mistakes: vec![
+                            "Using get_file_styles when you want structured tokens — use styles.list instead.".into(),
+                        ],
+                        examples: vec![r#"{"file_key": "abc123DEF456"}"#.into()],
+                        related: vec![
+                            CapabilityId::from_static("figma.tokens.export"),
+                            CapabilityId::from_static("figma.get_file_styles"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "figma.tokens.export",
+                    "Export design tokens as JSON or CSS custom properties",
+                    json!({
+                        "type": "object",
+                        "required": ["file_key"],
+                        "properties": {
+                            "file_key": { "type": "string", "description": "Figma file key" },
+                            "format": { "type": "string", "description": "Output format", "enum": ["json", "css"], "default": "json" },
+                            "prefix": { "type": "string", "description": "CSS custom property prefix (default: empty)", "default": "" },
+                            "categories": { "type": "array", "items": { "type": "string" }, "description": "Filter to specific categories: color, typography, effect, grid" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": ["output", "format", "count"],
+                        "properties": {
+                            "output": { "type": "string", "description": "Exported tokens in the requested format" },
+                            "format": { "type": "string" },
+                            "count": { "type": "integer" },
+                            "provenance": { "type": "object" },
+                            "taint": { "type": "array" }
+                        }
+                    }),
+                    "figma.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Export design tokens in a consumable format (JSON for code, CSS for stylesheets). Normalizes names and produces stable, sorted output.".into(),
+                        common_mistakes: vec![
+                            "Not specifying format — defaults to json.".into(),
+                            "Using css format for typography tokens — CSS custom properties work best for colors.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"file_key": "abc123DEF456", "format": "json"}"#.into(),
+                            r#"{"file_key": "abc123DEF456", "format": "css", "prefix": "ds"}"#.into(),
+                            r#"{"file_key": "abc123DEF456", "format": "json", "categories": ["color"]}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("figma.styles.list"),
+                            CapabilityId::from_static("figma.get_file_styles"),
+                        ],
+                    },
+                ),
             ],
             events: vec![],
             resource_types: vec![],
@@ -990,6 +1088,8 @@ impl FigmaConnector {
             "figma.list_webhooks" => self.invoke_list_webhooks(input).await,
             "figma.create_webhook" => self.invoke_create_webhook(input).await,
             "figma.delete_webhook" => self.invoke_delete_webhook(input).await,
+            "figma.styles.list" => self.invoke_styles_list(input).await,
+            "figma.tokens.export" => self.invoke_tokens_export(input).await,
             _ => Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
             }),
@@ -1299,6 +1399,84 @@ impl FigmaConnector {
         Ok(json!({}))
     }
 
+    // ── Design Token implementations ─────────────────────────────
+
+    async fn invoke_styles_list(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let file_key = require_str(&input, "file_key")?;
+
+        let styles = client
+            .get_file_styles(file_key)
+            .await
+            .map_err(|e: FigmaError| e.to_fcp_error())?;
+
+        let tokens = extract_tokens_from_styles(&styles.meta);
+
+        Ok(json!({
+            "tokens": tokens,
+            "count": tokens.len(),
+            "provenance": {
+                "source": "figma.styles",
+                "derived": true,
+                "scope": "file"
+            },
+            "taint": ["external_input"]
+        }))
+    }
+
+    async fn invoke_tokens_export(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let file_key = require_str(&input, "file_key")?;
+        let format = input
+            .get("format")
+            .and_then(|v| v.as_str())
+            .unwrap_or("json");
+        let prefix = input
+            .get("prefix")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let categories: Option<Vec<&str>> = input.get("categories").and_then(|v| {
+            v.as_array()
+                .map(|arr| arr.iter().filter_map(|s| s.as_str()).collect())
+        });
+
+        if format != "json" && format != "css" {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Unsupported format: {format}. Use 'json' or 'css'."),
+            });
+        }
+
+        let styles = client
+            .get_file_styles(file_key)
+            .await
+            .map_err(|e: FigmaError| e.to_fcp_error())?;
+
+        let mut tokens = extract_tokens_from_styles(&styles.meta);
+
+        // Filter by categories if specified
+        if let Some(ref cats) = categories {
+            tokens.retain(|t| cats.contains(&t.category.as_str()));
+        }
+
+        let output = match format {
+            "css" => tokens_to_css(&tokens, prefix),
+            _ => tokens_to_json(&tokens),
+        };
+
+        Ok(json!({
+            "output": output,
+            "format": format,
+            "count": tokens.len(),
+            "provenance": {
+                "source": "figma.styles",
+                "derived": true,
+                "scope": "file"
+            },
+            "taint": ["external_input"]
+        }))
+    }
+
     /// Handle shutdown.
     ///
     /// # Errors
@@ -1356,6 +1534,233 @@ fn op_info(
         idempotency,
         ai_hints,
     }
+}
+
+// ── Design token extraction helpers ──────────────────────────────
+
+/// Normalize a Figma style name to kebab-case token name.
+/// Examples: "Primary / 500" -> "primary-500", "Header Bold" -> "header-bold"
+fn normalize_token_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+/// Map Figma `style_type` to a token category.
+fn style_type_to_category(style_type: &str) -> &'static str {
+    match style_type {
+        "FILL" => "color",
+        "TEXT" => "typography",
+        "EFFECT" => "effect",
+        "GRID" => "grid",
+        _ => "raw",
+    }
+}
+
+/// Convert RGBA [0..1] floats to a hex color string.
+fn rgba_to_hex(r: f64, g: f64, b: f64, a: f64) -> String {
+    let ri = (r.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let gi = (g.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let bi = (b.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let ai = (a.clamp(0.0, 1.0) * 255.0).round() as u8;
+    format!("#{ri:02x}{gi:02x}{bi:02x}{ai:02x}")
+}
+
+/// Extract structured design tokens from the Figma styles metadata.
+///
+/// The `meta` field from the styles API can be either:
+/// - An object with `styles` array: `{ "styles": [...] }`
+/// - Directly an array of style entries
+///
+/// Each style entry has: `key`, `name`, `style_type`, `description`, `node_id`.
+fn extract_tokens_from_styles(meta: &serde_json::Value) -> Vec<DesignToken> {
+    let styles = meta
+        .get("styles")
+        .and_then(|v| v.as_array())
+        .or_else(|| meta.as_array());
+
+    let Some(styles) = styles else {
+        return Vec::new();
+    };
+
+    let mut tokens: Vec<DesignToken> = styles
+        .iter()
+        .filter_map(|style| {
+            let name = style.get("name")?.as_str()?;
+            let style_type = style.get("style_type").and_then(|v| v.as_str())?;
+            let description = style
+                .get("description")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from);
+            let node_id = style
+                .get("node_id")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+
+            let category = style_type_to_category(style_type);
+            let normalized = normalize_token_name(name);
+
+            let value = match style_type {
+                "FILL" => {
+                    // Look for color in style properties
+                    if let Some(color) = style.get("color") {
+                        let r = color.get("r").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let g = color.get("g").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let b = color.get("b").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let a = color.get("a").and_then(|v| v.as_f64()).unwrap_or(1.0);
+                        TokenValue::Color {
+                            r,
+                            g,
+                            b,
+                            a,
+                            hex: rgba_to_hex(r, g, b, a),
+                        }
+                    } else {
+                        TokenValue::Raw {
+                            data: style.clone(),
+                        }
+                    }
+                }
+                "TEXT" => {
+                    let font_family = style
+                        .get("font_family")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("sans-serif")
+                        .to_string();
+                    let font_size = style
+                        .get("font_size")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(16.0);
+                    let font_weight = style
+                        .get("font_weight")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(400.0);
+                    let line_height = style.get("line_height").and_then(|v| v.as_f64());
+                    let letter_spacing = style.get("letter_spacing").and_then(|v| v.as_f64());
+                    TokenValue::Typography {
+                        font_family,
+                        font_size,
+                        font_weight,
+                        line_height,
+                        letter_spacing,
+                    }
+                }
+                "EFFECT" => {
+                    let effect_type = style
+                        .get("effect_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+                    let radius = style.get("radius").and_then(|v| v.as_f64());
+                    let color = style.get("effect_color").and_then(|v| v.as_str()).map(String::from);
+                    let offset_x = style.get("offset_x").and_then(|v| v.as_f64());
+                    let offset_y = style.get("offset_y").and_then(|v| v.as_f64());
+                    TokenValue::Effect {
+                        effect_type,
+                        radius,
+                        color,
+                        offset_x,
+                        offset_y,
+                    }
+                }
+                "GRID" => {
+                    let pattern = style
+                        .get("pattern")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("columns")
+                        .to_string();
+                    let size = style.get("size").and_then(|v| v.as_f64());
+                    let gutter = style.get("gutter").and_then(|v| v.as_f64());
+                    let count = style.get("count").and_then(|v| v.as_f64());
+                    TokenValue::Grid {
+                        pattern,
+                        size,
+                        gutter,
+                        count,
+                    }
+                }
+                _ => TokenValue::Raw {
+                    data: style.clone(),
+                },
+            };
+
+            Some(DesignToken {
+                name: normalized,
+                original_name: name.to_string(),
+                category: category.to_string(),
+                style_type: style_type.to_string(),
+                value,
+                node_id,
+                description,
+            })
+        })
+        .collect();
+
+    // Stable sort by name for deterministic output
+    tokens.sort_by(|a, b| a.name.cmp(&b.name));
+    tokens
+}
+
+/// Serialize tokens to a pretty-printed JSON string.
+fn tokens_to_json(tokens: &[DesignToken]) -> String {
+    serde_json::to_string_pretty(tokens).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Serialize tokens to CSS custom properties.
+fn tokens_to_css(tokens: &[DesignToken], prefix: &str) -> String {
+    use std::fmt::Write;
+    let mut css = String::from(":root {\n");
+    let prefix_str = if prefix.is_empty() {
+        String::new()
+    } else {
+        format!("{prefix}-")
+    };
+
+    for token in tokens {
+        let var_name = format!("--{prefix_str}{}", token.name);
+        let value = match &token.value {
+            TokenValue::Color { hex, .. } => hex.clone(),
+            TokenValue::Typography {
+                font_family,
+                font_size,
+                ..
+            } => format!("{font_size}px {font_family}"),
+            TokenValue::Effect {
+                effect_type,
+                radius,
+                ..
+            } => {
+                if let Some(r) = radius {
+                    format!("{effect_type} {r}px")
+                } else {
+                    effect_type.clone()
+                }
+            }
+            TokenValue::Grid { pattern, size, .. } => {
+                if let Some(s) = size {
+                    format!("{pattern} {s}px")
+                } else {
+                    pattern.clone()
+                }
+            }
+            TokenValue::Raw { data } => data.to_string(),
+        };
+        let _ = writeln!(css, "  {var_name}: {value};");
+    }
+
+    css.push('}');
+    css
 }
 
 #[cfg(test)]
@@ -1517,7 +1922,9 @@ mod tests {
         assert!(op_ids.contains(&"figma.list_webhooks"));
         assert!(op_ids.contains(&"figma.create_webhook"));
         assert!(op_ids.contains(&"figma.delete_webhook"));
-        assert_eq!(ops.len(), 15);
+        assert!(op_ids.contains(&"figma.styles.list"));
+        assert!(op_ids.contains(&"figma.tokens.export"));
+        assert_eq!(ops.len(), 17);
     }
 
     #[fcp_async_core::runtime::test]
@@ -1775,5 +2182,274 @@ mod tests {
         let result = connector.handle_self_check().await.unwrap();
         assert_eq!(result["status"], "degraded");
         assert_eq!(result["reason_code"], "credential_injection_required");
+    }
+
+    // ── Design Token helper tests ────────────────────────────────
+
+    #[test]
+    fn test_normalize_token_name_basic() {
+        assert_eq!(normalize_token_name("Primary / 500"), "primary-500");
+        assert_eq!(normalize_token_name("Header Bold"), "header-bold");
+        assert_eq!(normalize_token_name("color-gray-100"), "color-gray-100");
+    }
+
+    #[test]
+    fn test_normalize_token_name_special_chars() {
+        assert_eq!(
+            normalize_token_name("Brand / Color / Primary"),
+            "brand-color-primary"
+        );
+        assert_eq!(normalize_token_name("  spacing__large  "), "spacing-large");
+        assert_eq!(normalize_token_name("A"), "a");
+    }
+
+    #[test]
+    fn test_rgba_to_hex() {
+        assert_eq!(rgba_to_hex(1.0, 0.0, 0.0, 1.0), "#ff0000ff");
+        assert_eq!(rgba_to_hex(0.0, 0.0, 0.0, 1.0), "#000000ff");
+        assert_eq!(rgba_to_hex(1.0, 1.0, 1.0, 0.5), "#ffffff80");
+        assert_eq!(rgba_to_hex(0.0, 0.0, 0.0, 0.0), "#00000000");
+    }
+
+    #[test]
+    fn test_style_type_to_category() {
+        assert_eq!(style_type_to_category("FILL"), "color");
+        assert_eq!(style_type_to_category("TEXT"), "typography");
+        assert_eq!(style_type_to_category("EFFECT"), "effect");
+        assert_eq!(style_type_to_category("GRID"), "grid");
+        assert_eq!(style_type_to_category("UNKNOWN"), "raw");
+    }
+
+    #[test]
+    fn test_extract_tokens_from_styles_color() {
+        let meta = json!({
+            "styles": [
+                {
+                    "key": "s1",
+                    "name": "Primary / 500",
+                    "style_type": "FILL",
+                    "description": "Main brand color",
+                    "node_id": "1:2",
+                    "color": { "r": 0.2, "g": 0.4, "b": 0.8, "a": 1.0 }
+                }
+            ]
+        });
+
+        let tokens = extract_tokens_from_styles(&meta);
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].name, "primary-500");
+        assert_eq!(tokens[0].original_name, "Primary / 500");
+        assert_eq!(tokens[0].category, "color");
+        assert_eq!(tokens[0].description.as_deref(), Some("Main brand color"));
+        assert_eq!(tokens[0].node_id.as_deref(), Some("1:2"));
+
+        match &tokens[0].value {
+            TokenValue::Color { r, g, b, a, hex } => {
+                assert!((r - 0.2).abs() < f64::EPSILON);
+                assert!((g - 0.4).abs() < f64::EPSILON);
+                assert!((b - 0.8).abs() < f64::EPSILON);
+                assert!((a - 1.0).abs() < f64::EPSILON);
+                assert_eq!(hex, "#3366ccff");
+            }
+            other => panic!("Expected Color, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_extract_tokens_from_styles_typography() {
+        let meta = json!({
+            "styles": [
+                {
+                    "key": "s2",
+                    "name": "Heading Large",
+                    "style_type": "TEXT",
+                    "description": "",
+                    "font_family": "Inter",
+                    "font_size": 32.0,
+                    "font_weight": 700.0,
+                    "line_height": 40.0
+                }
+            ]
+        });
+
+        let tokens = extract_tokens_from_styles(&meta);
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].name, "heading-large");
+        assert_eq!(tokens[0].category, "typography");
+        // Empty description should be None
+        assert!(tokens[0].description.is_none());
+
+        match &tokens[0].value {
+            TokenValue::Typography {
+                font_family,
+                font_size,
+                font_weight,
+                line_height,
+                ..
+            } => {
+                assert_eq!(font_family, "Inter");
+                assert!((font_size - 32.0).abs() < f64::EPSILON);
+                assert!((font_weight - 700.0).abs() < f64::EPSILON);
+                assert_eq!(*line_height, Some(40.0));
+            }
+            other => panic!("Expected Typography, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_extract_tokens_stable_sort_order() {
+        let meta = json!({
+            "styles": [
+                { "name": "Zebra", "style_type": "FILL", "color": { "r": 0.0, "g": 0.0, "b": 0.0, "a": 1.0 } },
+                { "name": "Apple", "style_type": "FILL", "color": { "r": 1.0, "g": 0.0, "b": 0.0, "a": 1.0 } },
+                { "name": "Mango", "style_type": "FILL", "color": { "r": 0.0, "g": 1.0, "b": 0.0, "a": 1.0 } }
+            ]
+        });
+
+        let tokens = extract_tokens_from_styles(&meta);
+        assert_eq!(tokens.len(), 3);
+        assert_eq!(tokens[0].name, "apple");
+        assert_eq!(tokens[1].name, "mango");
+        assert_eq!(tokens[2].name, "zebra");
+    }
+
+    #[test]
+    fn test_extract_tokens_empty_meta() {
+        assert!(extract_tokens_from_styles(&json!({})).is_empty());
+        assert!(extract_tokens_from_styles(&json!(null)).is_empty());
+        assert!(extract_tokens_from_styles(&json!({ "styles": [] })).is_empty());
+    }
+
+    #[test]
+    fn test_tokens_to_css() {
+        let tokens = vec![DesignToken {
+            name: "color-primary".into(),
+            original_name: "Color/Primary".into(),
+            category: "color".into(),
+            style_type: "FILL".into(),
+            value: TokenValue::Color {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+                hex: "#ff0000ff".into(),
+            },
+            node_id: None,
+            description: None,
+        }];
+
+        let css = tokens_to_css(&tokens, "");
+        assert!(css.contains(":root {"));
+        assert!(css.contains("--color-primary: #ff0000ff;"));
+        assert!(css.ends_with('}'));
+
+        let css_prefixed = tokens_to_css(&tokens, "ds");
+        assert!(css_prefixed.contains("--ds-color-primary: #ff0000ff;"));
+    }
+
+    #[test]
+    fn test_tokens_to_json_deterministic() {
+        let tokens = vec![
+            DesignToken {
+                name: "a-token".into(),
+                original_name: "A Token".into(),
+                category: "color".into(),
+                style_type: "FILL".into(),
+                value: TokenValue::Color {
+                    r: 1.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                    hex: "#ff0000ff".into(),
+                },
+                node_id: None,
+                description: None,
+            },
+            DesignToken {
+                name: "b-token".into(),
+                original_name: "B Token".into(),
+                category: "color".into(),
+                style_type: "FILL".into(),
+                value: TokenValue::Color {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 1.0,
+                    a: 1.0,
+                    hex: "#0000ffff".into(),
+                },
+                node_id: None,
+                description: None,
+            },
+        ];
+
+        let json1 = tokens_to_json(&tokens);
+        let json2 = tokens_to_json(&tokens);
+        assert_eq!(json1, json2, "JSON output must be deterministic");
+
+        let parsed: Vec<DesignToken> = serde_json::from_str(&json1).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].name, "a-token");
+        assert_eq!(parsed[1].name, "b-token");
+    }
+
+    #[test]
+    fn test_extract_tokens_mixed_types() {
+        let meta = json!({
+            "styles": [
+                {
+                    "name": "Shadow / Medium",
+                    "style_type": "EFFECT",
+                    "effect_type": "DROP_SHADOW",
+                    "radius": 8.0,
+                    "offset_x": 0.0,
+                    "offset_y": 4.0
+                },
+                {
+                    "name": "Grid / 12col",
+                    "style_type": "GRID",
+                    "pattern": "columns",
+                    "count": 12.0,
+                    "gutter": 24.0,
+                    "size": 80.0
+                }
+            ]
+        });
+
+        let tokens = extract_tokens_from_styles(&meta);
+        assert_eq!(tokens.len(), 2);
+
+        // Sorted alphabetically: "grid-12col" < "shadow-medium"
+        assert_eq!(tokens[0].name, "grid-12col");
+        assert_eq!(tokens[0].category, "grid");
+        assert_eq!(tokens[1].name, "shadow-medium");
+        assert_eq!(tokens[1].category, "effect");
+
+        match &tokens[1].value {
+            TokenValue::Effect {
+                effect_type,
+                radius,
+                offset_y,
+                ..
+            } => {
+                assert_eq!(effect_type, "DROP_SHADOW");
+                assert_eq!(*radius, Some(8.0));
+                assert_eq!(*offset_y, Some(4.0));
+            }
+            other => panic!("Expected Effect, got: {other:?}"),
+        }
+
+        match &tokens[0].value {
+            TokenValue::Grid {
+                pattern,
+                count,
+                gutter,
+                ..
+            } => {
+                assert_eq!(pattern, "columns");
+                assert_eq!(*count, Some(12.0));
+                assert_eq!(*gutter, Some(24.0));
+            }
+            other => panic!("Expected Grid, got: {other:?}"),
+        }
     }
 }

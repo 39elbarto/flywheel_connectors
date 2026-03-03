@@ -516,6 +516,148 @@ related = [
 ]
 
 # ---------------------------------------------------------------------------
+# Operations: Design Tokens
+# ---------------------------------------------------------------------------
+
+[provides.operations."figma.styles.list"]
+description = "List file styles as structured design tokens with categories and normalized names"
+capability = "figma.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."figma.styles.list".rate_limit]
+max = 30
+per_ms = 60000
+
+[provides.operations."figma.styles.list".input_schema]
+required = ["file_key"]
+type = "object"
+
+[provides.operations."figma.styles.list".input_schema.properties.file_key]
+description = "Figma file key"
+type = "string"
+
+[provides.operations."figma.styles.list".output_schema]
+required = ["tokens", "count"]
+type = "object"
+
+[provides.operations."figma.styles.list".output_schema.properties.tokens]
+description = "Array of structured design tokens with normalized names and typed values"
+type = "array"
+
+[provides.operations."figma.styles.list".output_schema.properties.count]
+description = "Number of tokens extracted"
+type = "integer"
+
+[provides.operations."figma.styles.list".output_schema.properties.provenance]
+description = "Data provenance metadata"
+type = "object"
+
+[provides.operations."figma.styles.list".output_schema.properties.taint]
+description = "Taint flags for data classification"
+type = "array"
+
+[provides.operations."figma.styles.list".network_constraints]
+host_allow = ["api.figma.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."figma.styles.list".ai_hints]
+when_to_use = "List all design tokens from a file's published styles. Returns structured tokens with normalized names and categorized values."
+common_mistakes = ["Using get_file_styles when you want structured tokens — use styles.list instead."]
+examples = ['{"file_key": "abc123DEF456"}']
+related = ["figma.tokens.export", "figma.get_file_styles"]
+
+[provides.operations."figma.tokens.export"]
+description = "Export design tokens as JSON or CSS custom properties with naming normalization and stable sorted output"
+capability = "figma.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."figma.tokens.export".rate_limit]
+max = 30
+per_ms = 60000
+
+[provides.operations."figma.tokens.export".input_schema]
+required = ["file_key"]
+type = "object"
+
+[provides.operations."figma.tokens.export".input_schema.properties.file_key]
+description = "Figma file key"
+type = "string"
+
+[provides.operations."figma.tokens.export".input_schema.properties.format]
+description = "Output format: json or css"
+type = "string"
+enum = ["json", "css"]
+
+[provides.operations."figma.tokens.export".input_schema.properties.prefix]
+description = "CSS custom property prefix (e.g., 'ds' produces --ds-color-primary)"
+type = "string"
+
+[provides.operations."figma.tokens.export".input_schema.properties.categories]
+description = "Filter to specific categories: color, typography, effect, grid"
+type = "array"
+
+[provides.operations."figma.tokens.export".output_schema]
+required = ["output", "format", "count"]
+type = "object"
+
+[provides.operations."figma.tokens.export".output_schema.properties.output]
+description = "Exported tokens in the requested format (JSON string or CSS string)"
+type = "string"
+
+[provides.operations."figma.tokens.export".output_schema.properties.format]
+description = "The format used for export"
+type = "string"
+
+[provides.operations."figma.tokens.export".output_schema.properties.count]
+description = "Number of tokens exported"
+type = "integer"
+
+[provides.operations."figma.tokens.export".output_schema.properties.provenance]
+description = "Data provenance metadata"
+type = "object"
+
+[provides.operations."figma.tokens.export".output_schema.properties.taint]
+description = "Taint flags for data classification"
+type = "array"
+
+[provides.operations."figma.tokens.export".network_constraints]
+host_allow = ["api.figma.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."figma.tokens.export".ai_hints]
+when_to_use = "Export design tokens in a consumable format (JSON for code, CSS for stylesheets). Normalizes names and produces stable, sorted output."
+common_mistakes = [
+    "Not specifying format — defaults to json.",
+    "Using css format for typography tokens — CSS custom properties work best for colors.",
+]
+examples = [
+    '{"file_key": "abc123DEF456", "format": "json"}',
+    '{"file_key": "abc123DEF456", "format": "css", "prefix": "ds"}',
+    '{"file_key": "abc123DEF456", "format": "json", "categories": ["color"]}',
+]
+related = ["figma.styles.list", "figma.get_file_styles"]
+
+# ---------------------------------------------------------------------------
 # Operations: Image Export
 # ---------------------------------------------------------------------------
 
@@ -1173,6 +1315,8 @@ scope = "instance"
 "figma.get_file_nodes" = ["figma.read"]
 "figma.get_file_components" = ["figma.read"]
 "figma.get_file_styles" = ["figma.read"]
+"figma.styles.list" = ["figma.read"]
+"figma.tokens.export" = ["figma.read"]
 "figma.export_images" = ["figma.export"]
 "figma.list_file_versions" = ["figma.read"]
 "figma.list_comments" = ["figma.read"]

@@ -876,7 +876,7 @@ async fn lifecycle_introspect_lists_all_operations() {
     let result = connector.handle_introspect().await.unwrap();
 
     let ops = result["operations"].as_array().unwrap();
-    assert_eq!(ops.len(), 15);
+    assert_eq!(ops.len(), 17);
 
     let op_ids: Vec<&str> = ops.iter().map(|o| o["id"].as_str().unwrap()).collect();
     for expected in &[
@@ -895,6 +895,8 @@ async fn lifecycle_introspect_lists_all_operations() {
         "figma.list_webhooks",
         "figma.create_webhook",
         "figma.delete_webhook",
+        "figma.styles.list",
+        "figma.tokens.export",
     ] {
         assert!(op_ids.contains(expected), "Missing op: {expected}");
     }
@@ -915,9 +917,9 @@ async fn introspect_risk_levels() {
     let result = connector.handle_introspect().await.unwrap();
 
     let ops = result["operations"].as_array().unwrap();
-    assert_eq!(ops.len(), 15);
+    assert_eq!(ops.len(), 17);
 
-    // Low-risk: all read ops + post_comment + list_webhooks
+    // Low-risk: all read ops + post_comment + list_webhooks + design token ops
     let low_ops = [
         "figma.list_team_projects",
         "figma.list_project_files",
@@ -931,6 +933,8 @@ async fn introspect_risk_levels() {
         "figma.list_comments",
         "figma.post_comment",
         "figma.list_webhooks",
+        "figma.styles.list",
+        "figma.tokens.export",
     ];
     // Medium-risk: delete_comment, create_webhook, delete_webhook
     let medium_ops = [
@@ -959,7 +963,7 @@ async fn introspect_risk_levels() {
         .iter()
         .filter(|o| o["risk_level"].as_str() == Some("medium"))
         .count();
-    assert_eq!(low_count, 12, "should have 12 low-risk ops");
+    assert_eq!(low_count, 14, "should have 14 low-risk ops");
     assert_eq!(medium_count, 3, "should have 3 medium-risk ops");
 }
 
@@ -1648,5 +1652,409 @@ async fn list_team_projects_unauthorized() {
         }
         fcp_figma::error::FigmaError::Unauthorized => {}
         e => panic!("Expected Api(403) or Unauthorized, got: {e:?}"),
+    }
+}
+
+// ============================================================================
+// Design Token operations (figma.styles.list, figma.tokens.export)
+// ============================================================================
+
+fn styles_api_response() -> serde_json::Value {
+    json!({
+        "meta": {
+            "styles": [
+                {
+                    "key": "s1",
+                    "name": "Primary / 500",
+                    "style_type": "FILL",
+                    "description": "Main brand color",
+                    "node_id": "10:1",
+                    "color": { "r": 0.2, "g": 0.4, "b": 0.8, "a": 1.0 }
+                },
+                {
+                    "key": "s2",
+                    "name": "Gray / 100",
+                    "style_type": "FILL",
+                    "description": "Light gray",
+                    "node_id": "10:2",
+                    "color": { "r": 0.95, "g": 0.95, "b": 0.95, "a": 1.0 }
+                },
+                {
+                    "key": "s3",
+                    "name": "Heading / Large",
+                    "style_type": "TEXT",
+                    "description": "Page title",
+                    "node_id": "10:3",
+                    "font_family": "Inter",
+                    "font_size": 32.0,
+                    "font_weight": 700.0,
+                    "line_height": 40.0
+                },
+                {
+                    "key": "s4",
+                    "name": "Shadow / Medium",
+                    "style_type": "EFFECT",
+                    "description": "",
+                    "node_id": "10:4",
+                    "effect_type": "DROP_SHADOW",
+                    "radius": 8.0,
+                    "offset_x": 0.0,
+                    "offset_y": 4.0
+                }
+            ]
+        }
+    })
+}
+
+#[fcp_async_core::runtime::test]
+async fn styles_list_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("figma.styles.list.happy_path");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/files/abc123/styles"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(styles_api_response()))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = FigmaConnector::new();
+    let key = setup_handshake(&mut connector, &["figma.styles.list"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "figma.styles.list");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "figma.styles.list",
+            "input": { "file_key": "abc123" },
+            "capability_token": token
+        }))
+        .await
+        .expect("invoke should succeed");
+
+    assert_eq!(result["count"], 4);
+    let tokens = result["tokens"].as_array().unwrap();
+    assert_eq!(tokens.len(), 4);
+
+    // Tokens should be sorted by normalized name
+    let names: Vec<&str> = tokens.iter().map(|t| t["name"].as_str().unwrap()).collect();
+    assert_eq!(
+        names,
+        vec!["gray-100", "heading-large", "primary-500", "shadow-medium"]
+    );
+
+    // Verify provenance/taint
+    assert_eq!(result["provenance"]["source"], "figma.styles");
+    assert_eq!(result["provenance"]["derived"], true);
+    assert!(result["taint"].as_array().unwrap().contains(&json!("external_input")));
+
+    // Verify first color token has expected structure
+    let color_token = tokens.iter().find(|t| t["name"] == "primary-500").unwrap();
+    assert_eq!(color_token["category"], "color");
+    assert_eq!(color_token["original_name"], "Primary / 500");
+    assert_eq!(color_token["value"]["type"], "color");
+    assert!(color_token["value"]["hex"].as_str().unwrap().starts_with('#'));
+}
+
+#[fcp_async_core::runtime::test]
+async fn styles_list_empty_file() {
+    let _ctx = AsyncTestContext::for_scenario("figma.styles.list.empty");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/files/empty123/styles"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "meta": { "styles": [] }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = FigmaConnector::new();
+    let key = setup_handshake(&mut connector, &["figma.styles.list"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "figma.styles.list");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "figma.styles.list",
+            "input": { "file_key": "empty123" },
+            "capability_token": token
+        }))
+        .await
+        .expect("invoke should succeed");
+
+    assert_eq!(result["count"], 0);
+    assert_eq!(result["tokens"].as_array().unwrap().len(), 0);
+}
+
+#[fcp_async_core::runtime::test]
+async fn tokens_export_json_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("figma.tokens.export.json");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/files/abc123/styles"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(styles_api_response()))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = FigmaConnector::new();
+    let key = setup_handshake(&mut connector, &["figma.tokens.export"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "figma.tokens.export");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "figma.tokens.export",
+            "input": { "file_key": "abc123", "format": "json" },
+            "capability_token": token
+        }))
+        .await
+        .expect("invoke should succeed");
+
+    assert_eq!(result["format"], "json");
+    assert_eq!(result["count"], 4);
+
+    // Output should be valid JSON
+    let output = result["output"].as_str().unwrap();
+    let parsed: Vec<serde_json::Value> = serde_json::from_str(output).unwrap();
+    assert_eq!(parsed.len(), 4);
+
+    // Verify provenance
+    assert_eq!(result["provenance"]["derived"], true);
+}
+
+#[fcp_async_core::runtime::test]
+async fn tokens_export_css_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("figma.tokens.export.css");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/files/abc123/styles"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(styles_api_response()))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = FigmaConnector::new();
+    let key = setup_handshake(&mut connector, &["figma.tokens.export"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "figma.tokens.export");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "figma.tokens.export",
+            "input": { "file_key": "abc123", "format": "css", "prefix": "ds" },
+            "capability_token": token
+        }))
+        .await
+        .expect("invoke should succeed");
+
+    assert_eq!(result["format"], "css");
+    assert_eq!(result["count"], 4);
+
+    let css = result["output"].as_str().unwrap();
+    assert!(css.contains(":root {"));
+    assert!(css.contains("--ds-primary-500:"));
+    assert!(css.contains("--ds-gray-100:"));
+    assert!(css.contains("--ds-heading-large:"));
+    assert!(css.contains("--ds-shadow-medium:"));
+    assert!(css.ends_with('}'));
+}
+
+#[fcp_async_core::runtime::test]
+async fn tokens_export_css_no_prefix() {
+    let _ctx = AsyncTestContext::for_scenario("figma.tokens.export.css_no_prefix");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/files/abc123/styles"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(styles_api_response()))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = FigmaConnector::new();
+    let key = setup_handshake(&mut connector, &["figma.tokens.export"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "figma.tokens.export");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "figma.tokens.export",
+            "input": { "file_key": "abc123", "format": "css" },
+            "capability_token": token
+        }))
+        .await
+        .expect("invoke should succeed");
+
+    let css = result["output"].as_str().unwrap();
+    // Without prefix, variables should be --name directly
+    assert!(css.contains("--primary-500:"));
+    assert!(css.contains("--gray-100:"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn tokens_export_category_filter() {
+    let _ctx = AsyncTestContext::for_scenario("figma.tokens.export.category_filter");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/files/abc123/styles"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(styles_api_response()))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = FigmaConnector::new();
+    let key = setup_handshake(&mut connector, &["figma.tokens.export"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "figma.tokens.export");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "figma.tokens.export",
+            "input": {
+                "file_key": "abc123",
+                "format": "json",
+                "categories": ["color"]
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("invoke should succeed");
+
+    // Only 2 FILL styles → color category
+    assert_eq!(result["count"], 2);
+
+    let output = result["output"].as_str().unwrap();
+    let parsed: Vec<serde_json::Value> = serde_json::from_str(output).unwrap();
+    assert_eq!(parsed.len(), 2);
+    assert!(parsed.iter().all(|t| t["category"] == "color"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn tokens_export_invalid_format() {
+    let _ctx = AsyncTestContext::for_scenario("figma.tokens.export.invalid_format");
+    let mock_server = MockServer::start().await;
+
+    // No mock needed - validation happens before API call
+    let mut connector = FigmaConnector::new();
+    let key = setup_handshake(&mut connector, &["figma.tokens.export"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "figma.tokens.export");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "figma.tokens.export",
+            "input": { "file_key": "abc123", "format": "yaml" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("yaml"));
+        }
+        e => panic!("Expected InvalidRequest, got: {e:?}"),
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn tokens_export_default_json_format() {
+    let _ctx = AsyncTestContext::for_scenario("figma.tokens.export.default_format");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/files/abc123/styles"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(styles_api_response()))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = FigmaConnector::new();
+    let key = setup_handshake(&mut connector, &["figma.tokens.export"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "figma.tokens.export");
+    // No format specified — should default to json
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "figma.tokens.export",
+            "input": { "file_key": "abc123" },
+            "capability_token": token
+        }))
+        .await
+        .expect("invoke should succeed");
+
+    assert_eq!(result["format"], "json");
+    // Output should be parseable JSON
+    let output = result["output"].as_str().unwrap();
+    let _parsed: Vec<serde_json::Value> = serde_json::from_str(output).unwrap();
+}
+
+#[fcp_async_core::runtime::test]
+async fn tokens_export_deterministic_output() {
+    let _ctx = AsyncTestContext::for_scenario("figma.tokens.export.deterministic");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/files/abc123/styles"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(styles_api_response()))
+        .expect(2)
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = FigmaConnector::new();
+    let key = setup_handshake(&mut connector, &["figma.tokens.export"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token1 = generate_valid_token(&key, "figma.tokens.export");
+    let result1 = connector
+        .handle_invoke(json!({
+            "operation": "figma.tokens.export",
+            "input": { "file_key": "abc123", "format": "json" },
+            "capability_token": token1
+        }))
+        .await
+        .expect("first invoke should succeed");
+
+    let token2 = generate_valid_token(&key, "figma.tokens.export");
+    let result2 = connector
+        .handle_invoke(json!({
+            "operation": "figma.tokens.export",
+            "input": { "file_key": "abc123", "format": "json" },
+            "capability_token": token2
+        }))
+        .await
+        .expect("second invoke should succeed");
+
+    assert_eq!(
+        result1["output"].as_str().unwrap(),
+        result2["output"].as_str().unwrap(),
+        "Token export must produce deterministic output across invocations"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn styles_list_missing_file_key() {
+    let _ctx = AsyncTestContext::for_scenario("figma.styles.list.missing_file_key");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = FigmaConnector::new();
+    let key = setup_handshake(&mut connector, &["figma.styles.list"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, "figma.styles.list");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "figma.styles.list",
+            "input": {},
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("file_key"));
+        }
+        e => panic!("Expected InvalidRequest, got: {e:?}"),
     }
 }

@@ -523,7 +523,6 @@ impl TargetedRepairEngine {
 
         let limit = request
             .max_response_symbols
-            .saturating_add(1)
             .try_into()
             .unwrap_or(usize::MAX);
 
@@ -645,7 +644,12 @@ impl SymbolResponseBuilder {
             .take(self.max_symbols as usize)
             .collect();
 
-        self.was_bounded = limited.len() < available_count;
+        // Response was bounded if:
+        // 1. The builder truncated the selection, OR
+        // 2. select_symbols hit the max_response_symbols limit (more may exist)
+        self.was_bounded = limited.len() < available_count
+            || (available_count > 0
+                && available_count as u32 >= request.max_response_symbols);
         self.selected_esis = limited;
         self
     }
@@ -963,7 +967,7 @@ mod tests {
 
         let selected = engine.select_symbols(&request, &HashSet::new());
 
-        assert_eq!(selected, vec![10, 5, 3, 0, 1]);
+        assert_eq!(selected, vec![10, 5, 3, 0]);
     }
 
     #[test]
@@ -982,7 +986,7 @@ mod tests {
 
         let selected = engine.select_symbols(&request, &HashSet::new());
 
-        assert_eq!(selected, vec![0, 1, 2, 3, 4, 5]);
+        assert_eq!(selected, vec![0, 1, 2, 3, 4]);
     }
 
     #[test]
@@ -1311,7 +1315,7 @@ mod tests {
             .add_from_repair_engine(&engine, &request, &already_sent)
             .build(available_len, already_sent.len());
 
-            let effective_limit = builder_max.min(request_max.saturating_add(1));
+            let effective_limit = builder_max.min(request_max);
             prop_assert!(response.symbol_count() <= effective_limit);
         }
 
@@ -1342,7 +1346,7 @@ mod tests {
             prop_assert!(selected
                 .iter()
                 .all(|esi| !already_sent_set.contains(esi)));
-            prop_assert!(selected.len() <= request_max as usize + 1);
+            prop_assert!(selected.len() <= request_max as usize);
         }
     }
 

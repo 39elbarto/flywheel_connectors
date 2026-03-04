@@ -252,7 +252,9 @@ impl WasiConfig {
     /// This is a heuristic mapping. In practice, fuel consumption varies
     /// by instruction type.
     fn cpu_percent_to_fuel(cpu_percent: u8) -> u64 {
-        if cpu_percent >= 100 {
+        if cpu_percent == 0 {
+            1 // Minimal fuel: effectively prevents meaningful execution
+        } else if cpu_percent >= 100 {
             0 // Unlimited
         } else {
             // Base fuel per "time slice" scaled by percentage
@@ -1241,7 +1243,10 @@ mod tests {
 
     #[test]
     fn test_cpu_percent_to_fuel_zero() {
-        assert_eq!(WasiConfig::cpu_percent_to_fuel(0), 0);
+        // cpu_percent=0 must not grant unlimited CPU (defense-in-depth;
+        // the manifest validator already rejects 0, but the function
+        // should be correct on its own).
+        assert_eq!(WasiConfig::cpu_percent_to_fuel(0), 1);
     }
 
     #[test]

@@ -526,8 +526,20 @@ impl MeshNode {
         self.metrics.peer_updates += 1;
     }
 
-    /// Remove a peer from tracking.
+    /// Remove a peer from tracking (also cleans up session and admission state).
     pub fn remove_peer(&mut self, node_id: &NodeId) {
+        // Clean up session/admission state before removing peer data,
+        // to prevent stale authentication surviving peer removal.
+        let now_ms = self
+            .peers
+            .get(node_id)
+            .map_or(0, |p| p.last_seen_ms);
+        if self.sessions.contains_key(node_id) {
+            self.remove_session(node_id, now_ms);
+        } else {
+            // Even without a session, clear admission auth state.
+            self.admission.set_authenticated(node_id, false, now_ms);
+        }
         self.peers.remove(node_id);
         self.peer_signing_keys.remove(node_id);
     }

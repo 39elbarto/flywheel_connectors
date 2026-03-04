@@ -229,17 +229,20 @@ impl RepairController {
 
     /// Get the next repair request if rate limit allows.
     pub fn next_repair(&self) -> Option<RepairRequest> {
+        // Acquire write lock first, then check emptiness before consuming a
+        // rate-limit token. This avoids a TOCTOU race where the queue is drained
+        // between the emptiness check and token acquisition, wasting the token.
+        let mut queue = self.queue.write();
+        if queue.is_empty() {
+            return None;
+        }
+
         if !self.rate_limiter.try_acquire() {
             self.stats.write().rate_limited += 1;
             return None;
         }
 
-        let mut queue = self.queue.write();
-        let request = if queue.is_empty() {
-            None
-        } else {
-            Some(queue.remove(0))
-        };
+        let request = Some(queue.remove(0));
         self.stats.write().queue_depth = queue.len();
         request
     }

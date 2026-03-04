@@ -681,10 +681,16 @@ impl EgressGuard {
             });
         }
 
-        // Check custom CIDR deny list
+        // Check custom CIDR deny list.
+        // Normalize IPv4-mapped IPv6 (::ffff:x.x.x.x) to pure IPv4 so that
+        // IPv4 CIDR deny rules cannot be bypassed with mapped addresses.
+        let check_ip = match ip {
+            IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
+            IpAddr::V4(_) => ip,
+        };
         for cidr_str in &constraints.cidr_deny {
             if let Ok(cidr) = cidr_str.parse::<IpNet>() {
-                if cidr.contains(&ip) {
+                if cidr.contains(&check_ip) {
                     return Err(EgressError::Denied {
                         reason: format!("CIDR deny rule matched: {ip} in {cidr_str}"),
                         code: DenyReason::CidrDenyMatched,

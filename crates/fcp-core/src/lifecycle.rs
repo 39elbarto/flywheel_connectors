@@ -75,7 +75,10 @@ impl LifecycleState {
     /// Check if this state can transition to canary.
     #[must_use]
     pub const fn can_start_canary(&self) -> bool {
-        matches!(self, Self::Pending | Self::Installing | Self::RolledBack)
+        matches!(
+            self,
+            Self::Installing | Self::Production | Self::RolledBack | Self::Disabled
+        )
     }
 
     /// Check if this state can be promoted to production.
@@ -460,6 +463,7 @@ impl LifecycleRecord {
         // Update latency tracking
         if let Some(latency) = latency_ms {
             self.health.total_latency_ms += u64::from(latency);
+            self.health.latency_samples += 1;
             if latency > self.health.max_latency_ms {
                 self.health.max_latency_ms = latency;
             }
@@ -536,6 +540,9 @@ pub struct HealthMetrics {
     /// Total latency in milliseconds (for average calculation).
     pub total_latency_ms: u64,
 
+    /// Number of samples that included latency data (for correct average).
+    pub latency_samples: u64,
+
     /// Maximum observed latency.
     pub max_latency_ms: u32,
 
@@ -551,6 +558,7 @@ impl Default for HealthMetrics {
             samples: 0,
             success_rate: 100, // Start optimistic
             total_latency_ms: 0,
+            latency_samples: 0,
             max_latency_ms: 0,
             last_updated: Utc::now(),
         }
@@ -563,7 +571,7 @@ impl HealthMetrics {
     #[allow(clippy::cast_possible_truncation)]
     pub fn avg_latency_ms(&self) -> Option<u32> {
         self.total_latency_ms
-            .checked_div(self.samples)
+            .checked_div(self.latency_samples)
             .map(|avg| avg as u32)
     }
 }
@@ -1083,6 +1091,7 @@ mod tests {
     fn health_metrics_avg_latency() {
         let metrics = HealthMetrics {
             samples: 4,
+            latency_samples: 4,
             total_latency_ms: 400,
             ..Default::default()
         };
@@ -1241,12 +1250,16 @@ mod tests {
 
     #[test]
     fn lifecycle_state_can_start_canary() {
-        assert!(LifecycleState::Pending.can_start_canary());
+        // Pending cannot go directly to Canary (must go through Installing first)
+        assert!(!LifecycleState::Pending.can_start_canary());
+        // These match the valid transitions in validate_transition:
+        // Installing/Production/RolledBack/Disabled -> Canary
         assert!(LifecycleState::Installing.can_start_canary());
+        assert!(LifecycleState::Production.can_start_canary());
         assert!(LifecycleState::RolledBack.can_start_canary());
+        assert!(LifecycleState::Disabled.can_start_canary());
+        // Canary/Uninstalled cannot transition to Canary
         assert!(!LifecycleState::Canary.can_start_canary());
-        assert!(!LifecycleState::Production.can_start_canary());
-        assert!(!LifecycleState::Disabled.can_start_canary());
         assert!(!LifecycleState::Uninstalled.can_start_canary());
     }
 
@@ -1889,6 +1902,7 @@ mod tests {
             samples: 105,
             success_rate: 95,
             total_latency_ms: 21000,
+            latency_samples: 105,
             max_latency_ms: 500,
             last_updated: Utc::now(),
         };
@@ -1899,6 +1913,7 @@ mod tests {
         assert_eq!(back.samples, 105);
         assert_eq!(back.success_rate, 95);
         assert_eq!(back.total_latency_ms, 21000);
+        assert_eq!(back.latency_samples, 105);
         assert_eq!(back.max_latency_ms, 500);
     }
 
@@ -1907,6 +1922,7 @@ mod tests {
         let m = HealthMetrics {
             total_latency_ms: 1000,
             samples: 10,
+            latency_samples: 10,
             ..Default::default()
         };
         assert_eq!(m.avg_latency_ms(), Some(100));
@@ -2728,7 +2744,9 @@ mod tests {
         record.update_health(true, None);
         assert_eq!(record.health.total_latency_ms, 0);
         assert_eq!(record.health.max_latency_ms, 0);
-        assert_eq!(record.health.avg_latency_ms(), Some(0));
+        assert_eq!(record.health.latency_samples, 0);
+        // No latency data provided, so average should be None (not Some(0))
+        assert!(record.health.avg_latency_ms().is_none());
     }
 
     #[test]

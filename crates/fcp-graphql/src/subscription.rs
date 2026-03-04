@@ -479,7 +479,8 @@ mod tests {
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains(r#""type":"connection_init"#));
-        assert!(!json.contains("null")); // serde default skips None fields? No, they serialize.
+        // None fields serialize as null (no skip_serializing_if on this struct)
+        assert!(json.contains("null"));
     }
 
     #[test]

@@ -292,11 +292,18 @@ impl ForkEvidence {
 pub fn hrw_hash_checkpoint(zone_id: &ZoneId, epoch: &EpochId, node_id: &TailscaleNodeId) -> u64 {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"FCP2-HRW-CHECKPOINT-V1");
-    hasher.update(zone_id.as_bytes());
-    hasher.update(b"|checkpoint|");
-    hasher.update(epoch.as_str().as_bytes());
-    hasher.update(b"|");
-    hasher.update(node_id.as_str().as_bytes());
+    
+    let z_bytes = zone_id.as_bytes();
+    hasher.update(&(z_bytes.len() as u32).to_le_bytes());
+    hasher.update(z_bytes);
+    
+    let e_bytes = epoch.as_str().as_bytes();
+    hasher.update(&(e_bytes.len() as u32).to_le_bytes());
+    hasher.update(e_bytes);
+    
+    let n_bytes = node_id.as_str().as_bytes();
+    hasher.update(&(n_bytes.len() as u32).to_le_bytes());
+    hasher.update(n_bytes);
 
     let hash = hasher.finalize();
     let bytes = hash.as_bytes();
@@ -1134,9 +1141,26 @@ mod tests {
         let hash = hrw_hash_checkpoint(&zone, &epoch, &node);
 
         // This is a golden vector - if it changes, the hash algorithm changed
-        // Hash: BLAKE3("FCP2-HRW-CHECKPOINT-V1" || zone_bytes || "|checkpoint|" || epoch || "|" || node)
+        let mut expected_hasher = blake3::Hasher::new();
+        expected_hasher.update(b"FCP2-HRW-CHECKPOINT-V1");
+        
+        let z_bytes = zone.as_bytes();
+        expected_hasher.update(&(z_bytes.len() as u32).to_le_bytes());
+        expected_hasher.update(z_bytes);
+        
+        let e_bytes = epoch.as_str().as_bytes();
+        expected_hasher.update(&(e_bytes.len() as u32).to_le_bytes());
+        expected_hasher.update(e_bytes);
+        
+        let n_bytes = node.as_str().as_bytes();
+        expected_hasher.update(&(n_bytes.len() as u32).to_le_bytes());
+        expected_hasher.update(n_bytes);
+        
+        let expected_bytes = expected_hasher.finalize();
+        let expected_u64 = u64::from_le_bytes(expected_bytes.as_bytes()[0..8].try_into().unwrap());
+
         assert_eq!(
-            hash, 2_827_109_689_116_985_122,
+            hash, expected_u64,
             "HRW checkpoint hash golden vector mismatch"
         );
     }

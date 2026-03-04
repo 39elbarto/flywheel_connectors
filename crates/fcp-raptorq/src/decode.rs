@@ -29,7 +29,8 @@ impl RaptorQDecoder {
     /// Create a decoder with the given transmission info.
     #[must_use]
     pub fn new(oti: ObjectTransmissionInformation, config: &RaptorQConfig) -> Self {
-        let k = (oti.transfer_length() as usize).div_ceil(usize::from(oti.symbol_size()));
+        let size = usize::from(oti.symbol_size()).max(1);
+        let k = (oti.transfer_length() as usize).div_ceil(size);
 
         Self {
             inner: Decoder::new(oti),

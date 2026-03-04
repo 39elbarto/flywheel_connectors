@@ -104,7 +104,9 @@
         "context": { "$ref": "#/$defs/context" },
         "artifacts": { "$ref": "#/$defs/artifacts" },
         "error_code": { "$ref": "#/$defs/non_empty_string" },
-        "details": { "$ref": "#/$defs/details" }
+        "details": { "$ref": "#/$defs/details" },
+        "run_id": { "$ref": "#/$defs/non_empty_string" },
+        "scenario_id": { "$ref": "#/$defs/non_empty_string" }
       }
     },
     "script_entry": {

@@ -127,11 +127,9 @@ impl TokenBucket {
 
         if elapsed >= self.refill_interval {
             // Calculate how many refill periods have passed
-            // Use saturating conversion to avoid overflow with large elapsed times
-            let periods = (elapsed.as_nanos() / self.refill_interval.as_nanos())
-                .try_into()
-                .unwrap_or(u32::MAX);
-            let tokens_to_add = periods.saturating_mul(self.refill_amount);
+            let periods_u128 = elapsed.as_nanos() / self.refill_interval.as_nanos();
+            let tokens_to_add_u128 = periods_u128.saturating_mul(u128::from(self.refill_amount));
+            let tokens_to_add = u32::try_from(tokens_to_add_u128).unwrap_or(u32::MAX);
 
             // Add tokens up to capacity using compare_exchange to avoid race with try_acquire
             loop {
@@ -165,7 +163,18 @@ impl TokenBucket {
                     .checked_sub(Duration::new(rem_secs, rem_nanos))
                     .unwrap_or(now);
             } else {
-                *last_refill += periods * self.refill_interval;
+                let advance_nanos = periods_u128.saturating_mul(self.refill_interval.as_nanos());
+                let adv_secs = u64::try_from(advance_nanos / 1_000_000_000).unwrap_or(u64::MAX);
+                let adv_nanos = (advance_nanos % 1_000_000_000) as u32;
+                if adv_secs < u64::MAX {
+                    if let Some(advanced) = last_refill.checked_add(Duration::new(adv_secs, adv_nanos)) {
+                        *last_refill = advanced;
+                    } else {
+                        *last_refill = now;
+                    }
+                } else {
+                    *last_refill = now;
+                }
             }
         }
     }

@@ -975,6 +975,7 @@ fn test_transition_timestamps() {
 
 /// Test multiple rollback → retry → canary cycles with version tracking.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn test_multi_rollback_retry_cycle() {
     let mut ctx = TestContext::new(
         "multi_rollback_retry_cycle",
@@ -1194,7 +1195,7 @@ fn test_full_lifecycle_with_version_upgrade() {
 // Crash Loop Detection Integration
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Test crash loop detector with record_crash_and_maybe_rollback.
+/// Test crash loop detector with `record_crash_and_maybe_rollback`.
 #[test]
 fn test_crash_loop_triggers_auto_rollback() {
     use fcp_core::CrashLoopDetector;
@@ -1257,7 +1258,7 @@ fn test_crash_loop_triggers_auto_rollback() {
     ctx.finalize("pass");
 }
 
-/// Test crash loop without previous version fails with NoRollbackTarget.
+/// Test crash loop without previous version fails with `NoRollbackTarget`.
 #[test]
 fn test_crash_loop_no_rollback_target() {
     use fcp_core::CrashLoopDetector;
@@ -1297,7 +1298,7 @@ fn test_crash_loop_no_rollback_target() {
     let result = record.record_crash_and_maybe_rollback(&mut detector, now, "crash 2");
     ctx.assert_true(result.is_err(), "Should fail without rollback target");
 
-    if let Err(LifecycleError::NoRollbackTarget) = result {
+    if result == Err(LifecycleError::NoRollbackTarget) {
         ctx.log_phase(
             "assert",
             Some(json!({"error": "NoRollbackTarget", "state": record.state.as_str()})),
@@ -1841,7 +1842,7 @@ fn test_lifecycle_record_persistence_roundtrip() {
     ctx.finalize("pass");
 }
 
-/// Test that LifecycleStatus serializes correctly for API responses.
+/// Test that `LifecycleStatus` serializes correctly for API responses.
 #[test]
 fn test_lifecycle_status_api_response_format() {
     use fcp_core::{CrashLoopDetector, LifecycleStatus};

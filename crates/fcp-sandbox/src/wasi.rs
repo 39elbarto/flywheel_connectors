@@ -526,6 +526,8 @@ pub struct WasiHostState {
     start_time: Instant,
     /// Wall-clock timeout.
     timeout: Duration,
+    /// Maximum allowed memory size in bytes.
+    memory_limit_bytes: usize,
 }
 
 impl WasiHostState {
@@ -551,6 +553,7 @@ impl WasiHostState {
             deterministic_rng: Mutex::new(DeterministicRng::new(config.deterministic_seed)),
             start_time: Instant::now(),
             timeout: config.wall_clock_timeout,
+            memory_limit_bytes: config.memory_limit_bytes as usize,
         }
     }
 
@@ -586,6 +589,28 @@ impl WasiHostState {
             rand::thread_rng().fill_bytes(&mut bytes);
             bytes
         }
+    }
+}
+
+impl wasmtime::ResourceLimiter for WasiHostState {
+    fn memory_growing(
+        &mut self,
+        _current: usize,
+        desired: usize,
+        _maximum: Option<usize>,
+    ) -> Result<bool, anyhow::Error> {
+        // Enforce the memory limit bound
+        Ok(desired <= self.memory_limit_bytes)
+    }
+
+    fn table_growing(
+        &mut self,
+        _current: u32,
+        _desired: u32,
+        _maximum: Option<u32>,
+    ) -> Result<bool, anyhow::Error> {
+        // Tables are allowed to grow per default bounds
+        Ok(true)
     }
 }
 
@@ -772,6 +797,7 @@ impl WasiRuntime {
         let host_state = WasiHostState::new(&self.config, wasi_ctx);
 
         let mut store = Store::new(&self.engine, host_state);
+        store.limiter(|state| state as &mut dyn wasmtime::ResourceLimiter);
 
         // Set fuel limit if configured
         if self.config.max_fuel > 0 {

@@ -19,7 +19,7 @@
 //!
 //! The nonce is NOT transmitted; it's derived deterministically from frame fields.
 
-use fcp_core::{ObjectId, TailscaleNodeId, ZoneIdHash, ZoneKeyId};
+use fcp_core::{ObjectId, TailscaleNodeId, ZoneIdHash, ZoneKey, ZoneKeyId};
 use fcp_crypto::{
     AeadKey, ChaCha20Nonce, ChaCha20Poly1305Cipher, XChaCha20Nonce, XChaCha20Poly1305Cipher,
     hkdf_sha256_array,
@@ -108,7 +108,7 @@ pub fn derive_sender_subkey(
     info.extend_from_slice(b"FCP2-SENDER-KEY-V1");
     
     let sender_bytes = sender_node_id.as_str().as_bytes();
-    info.extend_from_slice(&(sender_bytes.len() as u32).to_le_bytes());
+    info.extend_from_slice(&u32::try_from(sender_bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
     info.extend_from_slice(sender_bytes);
     
     info.extend_from_slice(&sender_instance_id.to_le_bytes());

@@ -18,6 +18,7 @@ pedantic = "warn"
 nursery = "warn"
 
 [dependencies]
+anyhow.workspace = true
 fcp-core.workspace = true
 fcp-manifest.workspace = true
 idna = "1.0"

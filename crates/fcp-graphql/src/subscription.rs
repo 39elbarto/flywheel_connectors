@@ -463,3 +463,304 @@ impl From<StreamError> for GraphqlClientError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- GraphqlWsMessage serde ----
+
+    #[test]
+    fn ws_message_serialize_connection_init() {
+        let msg = GraphqlWsMessage {
+            message_type: "connection_init".to_string(),
+            id: None,
+            payload: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""type":"connection_init"#));
+        assert!(!json.contains("null")); // serde default skips None fields? No, they serialize.
+    }
+
+    #[test]
+    fn ws_message_serialize_subscribe() {
+        let msg = GraphqlWsMessage {
+            message_type: "subscribe".to_string(),
+            id: Some("1".to_string()),
+            payload: Some(serde_json::json!({"query": "subscription { events }"})),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""type":"subscribe"#));
+        assert!(json.contains(r#""id":"1"#));
+        assert!(json.contains("events"));
+    }
+
+    #[test]
+    fn ws_message_deserialize_next() {
+        let json = r#"{"type":"next","id":"1","payload":{"data":{"event":"hello"}}}"#;
+        let msg: GraphqlWsMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.message_type, "next");
+        assert_eq!(msg.id.as_deref(), Some("1"));
+        assert!(msg.payload.is_some());
+    }
+
+    #[test]
+    fn ws_message_deserialize_complete() {
+        let json = r#"{"type":"complete","id":"1"}"#;
+        let msg: GraphqlWsMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.message_type, "complete");
+        assert_eq!(msg.id.as_deref(), Some("1"));
+        assert!(msg.payload.is_none());
+    }
+
+    #[test]
+    fn ws_message_deserialize_connection_ack() {
+        let json = r#"{"type":"connection_ack"}"#;
+        let msg: GraphqlWsMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.message_type, "connection_ack");
+        assert!(msg.id.is_none());
+        assert!(msg.payload.is_none());
+    }
+
+    #[test]
+    fn ws_message_deserialize_error() {
+        let json = r#"{"type":"error","id":"1","payload":[{"message":"syntax error"}]}"#;
+        let msg: GraphqlWsMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.message_type, "error");
+        assert!(msg.payload.unwrap().is_array());
+    }
+
+    #[test]
+    fn ws_message_roundtrip() {
+        let msg = GraphqlWsMessage {
+            message_type: "ping".to_string(),
+            id: None,
+            payload: Some(serde_json::json!({})),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: GraphqlWsMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.message_type, "ping");
+    }
+
+    // ---- decode_ws_message ----
+
+    #[test]
+    fn decode_text_message() {
+        let text = r#"{"type":"next","id":"1","payload":{"data":{"x":1}}}"#;
+        let msg = WsMessage::Text(text.to_string());
+        let result = decode_ws_message(msg).unwrap();
+        assert_eq!(result.message_type, "next");
+        assert_eq!(result.id.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn decode_binary_message() {
+        let json = r#"{"type":"connection_ack"}"#;
+        let msg = WsMessage::Binary(json.as_bytes().to_vec());
+        let result = decode_ws_message(msg).unwrap();
+        assert_eq!(result.message_type, "connection_ack");
+    }
+
+    #[test]
+    fn decode_text_invalid_json() {
+        let msg = WsMessage::Text("{not json".to_string());
+        let result = decode_ws_message(msg);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            GraphqlClientError::Json(s) => assert!(!s.is_empty()),
+            other => panic!("expected Json error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_binary_invalid_json() {
+        let msg = WsMessage::Binary(b"not json".to_vec());
+        let result = decode_ws_message(msg);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            GraphqlClientError::Json(_) => {}
+            other => panic!("expected Json error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_ping_returns_protocol_error() {
+        let msg = WsMessage::Ping(vec![]);
+        let result = decode_ws_message(msg);
+        match result.unwrap_err() {
+            GraphqlClientError::Protocol { message } => {
+                assert!(message.contains("ping/pong"));
+            }
+            other => panic!("expected Protocol error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_pong_returns_protocol_error() {
+        let msg = WsMessage::Pong(vec![1, 2, 3]);
+        let result = decode_ws_message(msg);
+        match result.unwrap_err() {
+            GraphqlClientError::Protocol { message } => {
+                assert!(message.contains("ping/pong"));
+            }
+            other => panic!("expected Protocol error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_close_returns_protocol_error() {
+        let msg = WsMessage::Close(None);
+        let result = decode_ws_message(msg);
+        match result.unwrap_err() {
+            GraphqlClientError::Protocol { message } => {
+                assert!(message.contains("closed"));
+            }
+            other => panic!("expected Protocol error, got {other:?}"),
+        }
+    }
+
+    // ---- reconnect_config_from_ws ----
+
+    #[test]
+    fn reconnect_config_auto_reconnect_disabled() {
+        let ws_config = WsConfig {
+            auto_reconnect: false,
+            ..WsConfig::default()
+        };
+        let config = reconnect_config_from_ws(&ws_config);
+        // max_attempts should be Some(0) when auto_reconnect is false
+        assert_eq!(config.max_attempts, Some(0));
+    }
+
+    #[test]
+    fn reconnect_config_auto_reconnect_with_max() {
+        let ws_config = WsConfig {
+            auto_reconnect: true,
+            max_reconnect_attempts: Some(5),
+            ..WsConfig::default()
+        };
+        let config = reconnect_config_from_ws(&ws_config);
+        assert_eq!(config.max_attempts, Some(5));
+    }
+
+    #[test]
+    fn reconnect_config_auto_reconnect_unlimited() {
+        let ws_config = WsConfig {
+            auto_reconnect: true,
+            max_reconnect_attempts: None,
+            ..WsConfig::default()
+        };
+        let config = reconnect_config_from_ws(&ws_config);
+        assert!(config.max_attempts.is_none());
+    }
+
+    #[test]
+    fn reconnect_config_preserves_initial_delay() {
+        let ws_config = WsConfig {
+            auto_reconnect: true,
+            reconnect_delay: Duration::from_secs(5),
+            ..WsConfig::default()
+        };
+        let config = reconnect_config_from_ws(&ws_config);
+        assert_eq!(config.initial_delay, Duration::from_secs(5));
+    }
+
+    // ---- GraphqlSubscriptionConfig ----
+
+    #[test]
+    fn subscription_config_default() {
+        let config = GraphqlSubscriptionConfig::default();
+        assert!(config.init_payload.is_none());
+        assert_eq!(config.ack_timeout, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn subscription_config_debug() {
+        let config = GraphqlSubscriptionConfig::default();
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("GraphqlSubscriptionConfig"));
+    }
+
+    #[test]
+    fn subscription_config_clone() {
+        let mut config = GraphqlSubscriptionConfig::default();
+        config.ack_timeout = Duration::from_secs(30);
+        config.init_payload = Some(serde_json::json!({"token": "abc"}));
+        let cloned = config.clone();
+        assert_eq!(cloned.ack_timeout, Duration::from_secs(30));
+        assert!(cloned.init_payload.is_some());
+    }
+
+    // ---- GraphqlSubscriptionClient ----
+
+    #[test]
+    fn subscription_client_new() {
+        let client = GraphqlSubscriptionClient::new("wss://api.test.com/graphql", "github");
+        assert_eq!(client.url, "wss://api.test.com/graphql");
+        assert_eq!(client.service_name, "github");
+        assert!(client.headers.is_empty());
+    }
+
+    #[test]
+    fn subscription_client_with_header() {
+        let client = GraphqlSubscriptionClient::new("wss://api.test.com/graphql", "github")
+            .with_header("Authorization", "Bearer tok123");
+        assert_eq!(client.headers.get("Authorization").unwrap(), "Bearer tok123");
+    }
+
+    #[test]
+    fn subscription_client_with_multiple_headers() {
+        let client = GraphqlSubscriptionClient::new("wss://api.test.com/graphql", "github")
+            .with_header("Authorization", "Bearer tok")
+            .with_header("X-Custom", "value");
+        assert_eq!(client.headers.len(), 2);
+    }
+
+    #[test]
+    fn subscription_client_with_config() {
+        let mut config = GraphqlSubscriptionConfig::default();
+        config.ack_timeout = Duration::from_secs(60);
+        let client = GraphqlSubscriptionClient::new("wss://api.test.com/graphql", "github")
+            .with_config(config);
+        assert_eq!(client.config.ack_timeout, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn subscription_client_clone() {
+        let client = GraphqlSubscriptionClient::new("wss://api.test.com/graphql", "github")
+            .with_header("Authorization", "Bearer tok");
+        let cloned = client.clone();
+        assert_eq!(cloned.url, client.url);
+        assert_eq!(cloned.service_name, client.service_name);
+        assert_eq!(cloned.headers, client.headers);
+    }
+
+    #[test]
+    fn subscription_client_debug() {
+        let client = GraphqlSubscriptionClient::new("wss://api.test.com/graphql", "github");
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("GraphqlSubscriptionClient"));
+        assert!(dbg.contains("api.test.com"));
+    }
+
+    // ---- SUBSCRIPTION_ID constant ----
+
+    #[test]
+    fn subscription_id_is_one() {
+        assert_eq!(SUBSCRIPTION_ID, "1");
+    }
+
+    // ---- StreamError conversion ----
+
+    #[test]
+    fn stream_error_converts_to_protocol() {
+        let stream_err = StreamError::ConnectionFailed("test disconnect".to_string());
+        let gql_err: GraphqlClientError = stream_err.into();
+        match gql_err {
+            GraphqlClientError::Protocol { message } => {
+                assert!(!message.is_empty());
+            }
+            other => panic!("expected Protocol error, got {other:?}"),
+        }
+    }
+}

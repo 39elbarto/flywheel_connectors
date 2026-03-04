@@ -535,4 +535,176 @@ mod tests {
         assert!(genesis.validate().is_ok());
         assert!(dir.path().join("genesis.cbor").exists());
     }
+
+    // ---- BootstrapMode Display ----
+
+    #[test]
+    fn test_mode_display_single_device() {
+        assert_eq!(BootstrapMode::SingleDevice.to_string(), "Single Device");
+    }
+
+    #[test]
+    fn test_mode_display_multi_device() {
+        let mode = BootstrapMode::MultiDevice {
+            device_count: 5,
+            threshold: 3,
+        };
+        assert_eq!(mode.to_string(), "Multi-Device (3/5)");
+    }
+
+    #[test]
+    fn test_mode_display_import() {
+        let phrase = RecoveryPhrase::generate().unwrap();
+        let mode = BootstrapMode::Import { phrase };
+        assert_eq!(mode.to_string(), "Import from Recovery Phrase");
+    }
+
+    // ---- Config builder edge cases ----
+
+    #[test]
+    fn test_config_builder_missing_mode() {
+        let dir = tempdir().unwrap();
+        let result = BootstrapConfig::builder().data_dir(dir.path()).build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_config_builder_all_flags() {
+        let dir = tempdir().unwrap();
+        let config = BootstrapConfig::builder()
+            .data_dir(dir.path())
+            .mode(BootstrapMode::SingleDevice)
+            .skip_time_validation(true)
+            .allow_time_drift_warning(true)
+            .force_overwrite(true)
+            .build()
+            .unwrap();
+
+        assert!(config.skip_time_validation);
+        assert!(config.allow_time_drift_warning);
+        assert!(config.force_overwrite);
+    }
+
+    #[test]
+    fn test_config_builder_defaults() {
+        let dir = tempdir().unwrap();
+        let config = BootstrapConfig::builder()
+            .data_dir(dir.path())
+            .mode(BootstrapMode::SingleDevice)
+            .build()
+            .unwrap();
+
+        assert!(!config.skip_time_validation);
+        assert!(!config.allow_time_drift_warning);
+        assert!(!config.force_overwrite);
+    }
+
+    // ---- Multi-device not yet implemented ----
+
+    #[test]
+    fn test_multi_device_not_implemented() {
+        let dir = tempdir().unwrap();
+        let config = BootstrapConfig::builder()
+            .data_dir(dir.path())
+            .mode(BootstrapMode::MultiDevice {
+                device_count: 3,
+                threshold: 2,
+            })
+            .skip_time_validation(true)
+            .build()
+            .unwrap();
+
+        let workflow = BootstrapWorkflow::new(config).unwrap();
+        let result = workflow.run();
+        assert!(matches!(result, Err(BootstrapError::Ceremony(_))));
+    }
+
+    // ---- Import mode bootstrap ----
+
+    #[test]
+    fn test_import_mode_bootstrap() {
+        let dir = tempdir().unwrap();
+        let phrase = RecoveryPhrase::generate().unwrap();
+        let config = BootstrapConfig::builder()
+            .data_dir(dir.path())
+            .mode(BootstrapMode::Import { phrase })
+            .skip_time_validation(true)
+            .build()
+            .unwrap();
+
+        let workflow = BootstrapWorkflow::new(config).unwrap();
+        let genesis = workflow.run().unwrap();
+        assert!(genesis.validate().is_ok());
+        assert!(dir.path().join("genesis.cbor").exists());
+    }
+
+    // ---- Force overwrite existing genesis ----
+
+    #[test]
+    fn test_force_overwrite() {
+        let dir = tempdir().unwrap();
+
+        // Create an initial genesis
+        let signing_key = fcp_crypto::Ed25519SigningKey::generate();
+        let genesis = GenesisState::create(&signing_key.verifying_key());
+        let cbor = genesis.to_cbor().unwrap();
+        std::fs::write(dir.path().join("genesis.cbor"), cbor).unwrap();
+
+        // Force overwrite should succeed
+        let config = BootstrapConfig::builder()
+            .data_dir(dir.path())
+            .mode(BootstrapMode::SingleDevice)
+            .skip_time_validation(true)
+            .force_overwrite(true)
+            .build()
+            .unwrap();
+
+        let workflow = BootstrapWorkflow::new(config).unwrap();
+        let genesis = workflow.run().unwrap();
+        assert!(genesis.validate().is_ok());
+    }
+
+    // ---- Partial state detection ----
+
+    #[test]
+    fn test_workflow_detects_partial_state() {
+        let dir = tempdir().unwrap();
+
+        // Create a lock file to simulate partial state
+        let phase = BootstrapPhase::KeyGeneration;
+        crate::phase::write_phase_lock(dir.path(), &phase).unwrap();
+
+        let config = BootstrapConfig::builder()
+            .data_dir(dir.path())
+            .mode(BootstrapMode::SingleDevice)
+            .build()
+            .unwrap();
+
+        let result = BootstrapWorkflow::new(config);
+        assert!(matches!(result, Err(BootstrapError::PartialState { .. })));
+    }
+
+    // ---- BootstrapMode eq ----
+
+    #[test]
+    fn test_mode_eq() {
+        assert_eq!(BootstrapMode::SingleDevice, BootstrapMode::SingleDevice);
+        assert_ne!(
+            BootstrapMode::SingleDevice,
+            BootstrapMode::MultiDevice {
+                device_count: 3,
+                threshold: 2,
+            }
+        );
+    }
+
+    // ---- detect_hardware_tokens ----
+
+    #[test]
+    fn test_detect_hardware_tokens_does_not_panic() {
+        // Just verify it doesn't crash — no real tokens expected in CI
+        let tokens = detect_hardware_tokens();
+        // tokens will be empty in CI environment
+        let _ = tokens;
+    }
 }

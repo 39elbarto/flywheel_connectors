@@ -309,4 +309,259 @@ mod tests {
         let detected_after = detect_partial_state(dir.path());
         assert!(detected_after.is_none());
     }
+
+    // ---- is_terminal for all variants ----
+
+    #[test]
+    fn test_non_terminal_phases() {
+        let non_terminal = [
+            BootstrapPhase::Uninitialized,
+            BootstrapPhase::TimeValidation,
+            BootstrapPhase::KeyGeneration,
+            BootstrapPhase::CeremonySetup {
+                participant_count: 3,
+                threshold: 2,
+            },
+            BootstrapPhase::CeremonyRound1 {
+                commitments_collected: 1,
+                commitments_needed: 3,
+            },
+            BootstrapPhase::CeremonyRound2 {
+                shares_distributed: 0,
+                shares_needed: 3,
+            },
+            BootstrapPhase::GenesisCreate,
+            BootstrapPhase::Enrollment,
+        ];
+        for phase in &non_terminal {
+            assert!(!phase.is_terminal(), "{phase} should not be terminal");
+        }
+    }
+
+    // ---- is_resumable ----
+
+    #[test]
+    fn test_is_resumable() {
+        assert!(!BootstrapPhase::Uninitialized.is_resumable());
+        assert!(BootstrapPhase::TimeValidation.is_resumable());
+        assert!(BootstrapPhase::KeyGeneration.is_resumable());
+        assert!(BootstrapPhase::CeremonySetup {
+            participant_count: 3,
+            threshold: 2,
+        }
+        .is_resumable());
+        assert!(BootstrapPhase::CeremonyRound1 {
+            commitments_collected: 1,
+            commitments_needed: 3,
+        }
+        .is_resumable());
+        // Round2 is NOT resumable
+        assert!(!BootstrapPhase::CeremonyRound2 {
+            shares_distributed: 1,
+            shares_needed: 3,
+        }
+        .is_resumable());
+        assert!(!BootstrapPhase::GenesisCreate.is_resumable());
+        assert!(!BootstrapPhase::Enrollment.is_resumable());
+    }
+
+    // ---- description for all variants ----
+
+    #[test]
+    fn test_all_phases_have_descriptions() {
+        let phases: Vec<BootstrapPhase> = vec![
+            BootstrapPhase::Uninitialized,
+            BootstrapPhase::TimeValidation,
+            BootstrapPhase::KeyGeneration,
+            BootstrapPhase::CeremonySetup {
+                participant_count: 3,
+                threshold: 2,
+            },
+            BootstrapPhase::CeremonyRound1 {
+                commitments_collected: 0,
+                commitments_needed: 3,
+            },
+            BootstrapPhase::CeremonyRound2 {
+                shares_distributed: 0,
+                shares_needed: 3,
+            },
+            BootstrapPhase::GenesisCreate,
+            BootstrapPhase::Enrollment,
+            BootstrapPhase::Completed {
+                fingerprint: "fp".into(),
+                completed_at: Utc::now(),
+            },
+            BootstrapPhase::Failed {
+                reason: "test".into(),
+                at_phase: "test".into(),
+            },
+        ];
+        for phase in &phases {
+            let desc = phase.description();
+            assert!(!desc.is_empty(), "{phase} has empty description");
+        }
+    }
+
+    // ---- Display for all variants ----
+
+    #[test]
+    fn test_display_all_variants() {
+        assert_eq!(format!("{}", BootstrapPhase::Uninitialized), "Uninitialized");
+        assert_eq!(
+            format!("{}", BootstrapPhase::TimeValidation),
+            "TimeValidation"
+        );
+        assert_eq!(
+            format!("{}", BootstrapPhase::KeyGeneration),
+            "KeyGeneration"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                BootstrapPhase::CeremonySetup {
+                    participant_count: 5,
+                    threshold: 3,
+                }
+            ),
+            "CeremonySetup(3/5)"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                BootstrapPhase::CeremonyRound2 {
+                    shares_distributed: 1,
+                    shares_needed: 5,
+                }
+            ),
+            "CeremonyRound2(1/5)"
+        );
+        assert_eq!(format!("{}", BootstrapPhase::GenesisCreate), "GenesisCreate");
+        assert_eq!(format!("{}", BootstrapPhase::Enrollment), "Enrollment");
+        assert!(format!(
+            "{}",
+            BootstrapPhase::Completed {
+                fingerprint: "fp123".into(),
+                completed_at: Utc::now(),
+            }
+        )
+        .contains("fp123"));
+        assert!(format!(
+            "{}",
+            BootstrapPhase::Failed {
+                reason: "disk full".into(),
+                at_phase: "genesis".into(),
+            }
+        )
+        .contains("disk full"));
+    }
+
+    // ---- Serde roundtrip ----
+
+    #[test]
+    fn test_phase_serde_roundtrip_all() {
+        let phases = vec![
+            BootstrapPhase::Uninitialized,
+            BootstrapPhase::TimeValidation,
+            BootstrapPhase::KeyGeneration,
+            BootstrapPhase::CeremonySetup {
+                participant_count: 3,
+                threshold: 2,
+            },
+            BootstrapPhase::CeremonyRound1 {
+                commitments_collected: 1,
+                commitments_needed: 3,
+            },
+            BootstrapPhase::CeremonyRound2 {
+                shares_distributed: 2,
+                shares_needed: 3,
+            },
+            BootstrapPhase::GenesisCreate,
+            BootstrapPhase::Enrollment,
+        ];
+        for phase in phases {
+            let json = serde_json::to_string(&phase).unwrap();
+            let back: BootstrapPhase = serde_json::from_str(&json).unwrap();
+            assert_eq!(phase, back, "serde roundtrip failed for {phase}");
+        }
+    }
+
+    // ---- detect_partial_state ----
+
+    #[test]
+    fn test_detect_partial_state_genesis_partial() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("genesis.partial")).unwrap();
+        let detected = detect_partial_state(dir.path());
+        assert_eq!(detected, Some(BootstrapPhase::GenesisCreate));
+    }
+
+    #[test]
+    fn test_detect_partial_state_keys_partial() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("keys.partial")).unwrap();
+        let detected = detect_partial_state(dir.path());
+        assert_eq!(detected, Some(BootstrapPhase::KeyGeneration));
+    }
+
+    #[test]
+    fn test_detect_partial_state_corrupt_lock() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("init.lock"), "not valid json").unwrap();
+        let detected = detect_partial_state(dir.path());
+        // Corrupt lock → fallback to TimeValidation
+        assert_eq!(detected, Some(BootstrapPhase::TimeValidation));
+    }
+
+    #[test]
+    fn test_detect_no_partial_state() {
+        let dir = tempdir().unwrap();
+        assert!(detect_partial_state(dir.path()).is_none());
+    }
+
+    // ---- remove_phase_lock idempotent ----
+
+    #[test]
+    fn test_remove_phase_lock_when_no_lock() {
+        let dir = tempdir().unwrap();
+        // Should not error when lock doesn't exist
+        assert!(remove_phase_lock(dir.path()).is_ok());
+    }
+
+    // ---- InitSuggestion Display ----
+
+    #[test]
+    fn test_init_suggestion_display() {
+        assert!(InitSuggestion::UseExisting.to_string().contains("Use the existing"));
+        assert!(InitSuggestion::ForceOverwrite.to_string().contains("--force"));
+        assert!(
+            InitSuggestion::UseDifferentPath
+                .to_string()
+                .contains("different directory")
+        );
+    }
+
+    // ---- PartialStateSuggestion Display ----
+
+    #[test]
+    fn test_partial_state_suggestion_display() {
+        assert!(PartialStateSuggestion::Resume.to_string().contains("Resume"));
+        assert!(
+            PartialStateSuggestion::CleanAndRetry
+                .to_string()
+                .contains("Clean up")
+        );
+    }
+
+    // ---- InitSuggestion/PartialStateSuggestion eq ----
+
+    #[test]
+    fn test_suggestion_eq() {
+        assert_eq!(InitSuggestion::UseExisting, InitSuggestion::UseExisting);
+        assert_ne!(InitSuggestion::UseExisting, InitSuggestion::ForceOverwrite);
+        assert_eq!(PartialStateSuggestion::Resume, PartialStateSuggestion::Resume);
+        assert_ne!(
+            PartialStateSuggestion::Resume,
+            PartialStateSuggestion::CleanAndRetry
+        );
+    }
 }

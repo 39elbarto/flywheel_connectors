@@ -95,3 +95,147 @@ impl From<ciborium::de::Error<std::io::Error>> for BootstrapError {
         Self::Serialization(e.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    // ---- Display messages ----
+
+    #[test]
+    fn display_time_skew() {
+        let err = BootstrapError::TimeSkew {
+            drift: Duration::from_secs(120),
+            suggestion: "sync clock",
+        };
+        let s = err.to_string();
+        assert!(s.contains("time skew"));
+        assert!(s.contains("sync clock"));
+    }
+
+    #[test]
+    fn display_already_exists() {
+        let err = BootstrapError::AlreadyExists {
+            fingerprint: "abc123".into(),
+        };
+        assert!(err.to_string().contains("abc123"));
+    }
+
+    #[test]
+    fn display_partial_state() {
+        let err = BootstrapError::PartialState {
+            phase: "CeremonyRound1".into(),
+        };
+        assert!(err.to_string().contains("CeremonyRound1"));
+    }
+
+    #[test]
+    fn display_invalid_recovery_phrase() {
+        let err = BootstrapError::InvalidRecoveryPhrase("bad words".into());
+        assert!(err.to_string().contains("bad words"));
+    }
+
+    #[test]
+    fn display_fingerprint_mismatch() {
+        let err = BootstrapError::FingerprintMismatch {
+            expected: "aaa".into(),
+            actual: "bbb".into(),
+        };
+        let s = err.to_string();
+        assert!(s.contains("aaa"));
+        assert!(s.contains("bbb"));
+    }
+
+    #[test]
+    fn display_ceremony() {
+        let err = BootstrapError::Ceremony("round failed".into());
+        assert!(err.to_string().contains("round failed"));
+    }
+
+    #[test]
+    fn display_ceremony_timeout() {
+        let err = BootstrapError::CeremonyTimeout {
+            phase: "Round2".into(),
+        };
+        assert!(err.to_string().contains("timed out"));
+        assert!(err.to_string().contains("Round2"));
+    }
+
+    #[test]
+    fn display_hardware_token() {
+        let err = BootstrapError::HardwareToken("PKCS#11 init failed".into());
+        assert!(err.to_string().contains("PKCS#11"));
+    }
+
+    #[test]
+    fn display_no_hardware_tokens() {
+        let err = BootstrapError::NoHardwareTokens;
+        assert!(err.to_string().contains("no hardware tokens"));
+    }
+
+    #[test]
+    fn display_crypto() {
+        let err = BootstrapError::Crypto("key derivation failed".into());
+        assert!(err.to_string().contains("key derivation"));
+    }
+
+    #[test]
+    fn display_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file missing");
+        let err = BootstrapError::Io(io_err);
+        assert!(err.to_string().contains("file missing"));
+    }
+
+    #[test]
+    fn display_serialization() {
+        let err = BootstrapError::Serialization("CBOR decode error".into());
+        assert!(err.to_string().contains("CBOR decode"));
+    }
+
+    #[test]
+    fn display_config() {
+        let err = BootstrapError::Config("data_dir required".into());
+        assert!(err.to_string().contains("data_dir required"));
+    }
+
+    #[test]
+    fn display_internal() {
+        let err = BootstrapError::Internal("unexpected state".into());
+        assert!(err.to_string().contains("unexpected state"));
+    }
+
+    // ---- From impls ----
+
+    #[test]
+    fn from_io_error() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let err: BootstrapError = io_err.into();
+        match err {
+            BootstrapError::Io(e) => assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied),
+            other => panic!("expected Io, got {other:?}"),
+        }
+    }
+
+    // ---- std::error::Error impl ----
+
+    #[test]
+    fn error_trait_impl() {
+        let err = BootstrapError::Config("test".into());
+        let _: &dyn std::error::Error = &err;
+    }
+
+    // ---- BootstrapResult type alias ----
+
+    #[test]
+    fn bootstrap_result_ok() {
+        let r: BootstrapResult<u32> = Ok(42);
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn bootstrap_result_err() {
+        let r: BootstrapResult<u32> = Err(BootstrapError::NoHardwareTokens);
+        assert!(r.is_err());
+    }
+}

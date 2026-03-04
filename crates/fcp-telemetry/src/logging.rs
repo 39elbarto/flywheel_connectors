@@ -50,9 +50,23 @@ pub fn init_logging(config: &TelemetryConfig) -> Result<(), TelemetryError> {
     Ok(())
 }
 
+const MAX_REDACTION_DEPTH: usize = 128;
+
 /// Redact sensitive fields from a JSON value.
 #[must_use]
 pub fn redact_sensitive(value: &serde_json::Value, fields: &[String]) -> serde_json::Value {
+    redact_sensitive_with_depth(value, fields, 0)
+}
+
+fn redact_sensitive_with_depth(
+    value: &serde_json::Value,
+    fields: &[String],
+    depth: usize,
+) -> serde_json::Value {
+    if depth > MAX_REDACTION_DEPTH {
+        return serde_json::Value::String("[MAX_DEPTH_EXCEEDED]".to_string());
+    }
+
     match value {
         serde_json::Value::Object(map) => {
             let mut result = serde_json::Map::new();
@@ -66,13 +80,13 @@ pub fn redact_sensitive(value: &serde_json::Value, fields: &[String]) -> serde_j
                         serde_json::Value::String("[REDACTED]".to_string()),
                     );
                 } else {
-                    result.insert(key.clone(), redact_sensitive(val, fields));
+                    result.insert(key.clone(), redact_sensitive_with_depth(val, fields, depth + 1));
                 }
             }
             serde_json::Value::Object(result)
         }
         serde_json::Value::Array(arr) => {
-            serde_json::Value::Array(arr.iter().map(|v| redact_sensitive(v, fields)).collect())
+            serde_json::Value::Array(arr.iter().map(|v| redact_sensitive_with_depth(v, fields, depth + 1)).collect())
         }
         other => other.clone(),
     }

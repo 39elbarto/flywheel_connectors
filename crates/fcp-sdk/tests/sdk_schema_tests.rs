@@ -51,12 +51,10 @@ mod json_schema_tests {
         });
 
         assert_eq!(output_schema["type"], json!("object"));
-        assert!(
-            output_schema["required"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("message_id"))
-        );
+        assert!(output_schema["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("message_id")));
     }
 
     #[test]
@@ -134,12 +132,10 @@ mod json_schema_tests {
 
         let user_schema = &schema["properties"]["user"];
         assert_eq!(user_schema["type"], json!("object"));
-        assert!(
-            user_schema["required"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("id"))
-        );
+        assert!(user_schema["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("id")));
     }
 
     #[test]
@@ -662,8 +658,8 @@ mod schema_validation_helper_tests {
 
 mod validation_before_side_effect_tests {
     use super::*;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     #[derive(Debug, Clone)]
     struct ValidatingTestConnector {

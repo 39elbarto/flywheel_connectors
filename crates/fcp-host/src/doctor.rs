@@ -225,7 +225,7 @@ pub struct DoctorService<R> {
 
 impl<R> DoctorService<R>
 where
-    R: ConnectorRegistry,
+    R: ConnectorRegistry + 'static,
 {
     /// Create a new doctor service.
     #[allow(clippy::missing_const_for_fn)]

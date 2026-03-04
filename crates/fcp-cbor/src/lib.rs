@@ -308,33 +308,42 @@ fn write_canonical_cbor<T: Serialize>(
     out: &mut Vec<u8>,
 ) -> Result<(), SerializationError> {
     let mut v = Value::serialized(value)?;
-    canonicalize_value_in_place(&mut v)?;
+    canonicalize_value_in_place(&mut v, 0)?;
     into_writer(&v, out)?;
     Ok(())
 }
 
-fn canonicalize_value_in_place(v: &mut Value) -> Result<(), SerializationError> {
+const MAX_CANONICALIZATION_DEPTH: usize = 128;
+
+fn canonicalize_value_in_place(v: &mut Value, depth: usize) -> Result<(), SerializationError> {
+    if depth > MAX_CANONICALIZATION_DEPTH {
+        return Err(SerializationError::PayloadTooLarge {
+            len: depth,
+            max: MAX_CANONICALIZATION_DEPTH,
+        });
+    }
+
     match v {
         Value::Array(items) => {
             for item in items {
-                canonicalize_value_in_place(item)?;
+                canonicalize_value_in_place(item, depth + 1)?;
             }
         }
-        Value::Map(entries) => canonicalize_map(entries)?,
-        Value::Tag(_, boxed) => canonicalize_value_in_place(boxed)?,
+        Value::Map(entries) => canonicalize_map(entries, depth + 1)?,
+        Value::Tag(_, boxed) => canonicalize_value_in_place(boxed, depth + 1)?,
         _ => {}
     }
 
     Ok(())
 }
 
-fn canonicalize_map(entries: &mut Vec<(Value, Value)>) -> Result<(), SerializationError> {
+fn canonicalize_map(entries: &mut Vec<(Value, Value)>, depth: usize) -> Result<(), SerializationError> {
     use std::cmp::Ordering;
 
     let mut with_keys = Vec::with_capacity(entries.len());
     for (mut key, mut value) in std::mem::take(entries) {
-        canonicalize_value_in_place(&mut key)?;
-        canonicalize_value_in_place(&mut value)?;
+        canonicalize_value_in_place(&mut key, depth)?;
+        canonicalize_value_in_place(&mut value, depth)?;
 
         let mut key_bytes = Vec::new();
         into_writer(&key, &mut key_bytes)?;

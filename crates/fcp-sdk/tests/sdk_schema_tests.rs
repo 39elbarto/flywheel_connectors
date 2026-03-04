@@ -657,6 +657,135 @@ mod schema_validation_helper_tests {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Integration-Style Validation Guard Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+mod validation_before_side_effect_tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Debug, Clone)]
+    struct ValidatingTestConnector {
+        schema: serde_json::Value,
+        limits: Limits,
+        side_effect_count: Arc<AtomicUsize>,
+    }
+
+    impl ValidatingTestConnector {
+        fn new(schema: serde_json::Value, limits: Limits) -> Self {
+            Self {
+                schema,
+                limits,
+                side_effect_count: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn side_effects(&self) -> usize {
+            self.side_effect_count.load(Ordering::SeqCst)
+        }
+
+        fn invoke(&self, input: serde_json::Value) -> Result<serde_json::Value, FcpError> {
+            // Critical contract: validate before mutating state or making outbound calls.
+            validate_input_with_limits(&self.schema, &input, &self.limits)?;
+            self.side_effect_count.fetch_add(1, Ordering::SeqCst);
+            Ok(json!({ "status": "side_effect_applied" }))
+        }
+    }
+
+    fn operation_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "minLength": 1 },
+                "count": { "type": "integer", "minimum": 1 }
+            },
+            "required": ["name", "count"],
+            "additionalProperties": false
+        })
+    }
+
+    #[test]
+    fn integration_invalid_schema_blocks_side_effect() {
+        let connector = ValidatingTestConnector::new(
+            json!({ "type": "not-a-real-json-schema-type" }),
+            Limits::default(),
+        );
+
+        let err = connector
+            .invoke(json!({ "name": "demo", "count": 1 }))
+            .expect_err("invalid schema must fail closed");
+
+        if let FcpError::Internal { message } = err {
+            assert!(message.contains("input schema invalid"));
+        } else {
+            assert!(false, "expected internal schema error, got {err:?}");
+        }
+        assert_eq!(connector.side_effects(), 0, "no side effects allowed");
+    }
+
+    #[test]
+    fn integration_invalid_value_blocks_side_effect() {
+        let connector = ValidatingTestConnector::new(operation_schema(), Limits::default());
+
+        let err = connector
+            .invoke(json!({ "name": "demo", "count": "one" }))
+            .expect_err("invalid payload must fail");
+
+        if let FcpError::InvalidRequest { code, message } = err {
+            assert_eq!(code, 1001);
+            assert!(message.contains("input schema validation failed"));
+        } else {
+            assert!(false, "expected invalid request, got {err:?}");
+        }
+        assert_eq!(connector.side_effects(), 0, "no side effects allowed");
+    }
+
+    #[test]
+    fn integration_oversized_payload_blocks_side_effect() {
+        let connector = ValidatingTestConnector::new(
+            operation_schema(),
+            Limits {
+                max_bytes: Some(20),
+                max_array_len: Some(32),
+                max_depth: Some(8),
+            },
+        );
+
+        let err = connector
+            .invoke(json!({ "name": "payload-exceeds-byte-limit", "count": 1 }))
+            .expect_err("oversized payload must fail");
+
+        if let FcpError::InvalidRequest { code, message } = err {
+            assert_eq!(code, 1004);
+            assert!(message.contains("payload size"));
+        } else {
+            assert!(false, "expected invalid request for limits, got {err:?}");
+        }
+        assert_eq!(connector.side_effects(), 0, "no side effects allowed");
+    }
+
+    #[test]
+    fn integration_valid_payload_applies_side_effect_once() {
+        let connector = ValidatingTestConnector::new(
+            operation_schema(),
+            Limits {
+                max_bytes: Some(1024),
+                max_array_len: Some(32),
+                max_depth: Some(8),
+            },
+        );
+
+        let response = connector
+            .invoke(json!({ "name": "demo", "count": 2 }))
+            .expect("valid payload should pass");
+
+        assert_eq!(response["status"], json!("side_effect_applied"));
+        assert_eq!(connector.side_effects(), 1);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Limits Helper Tests
 // ─────────────────────────────────────────────────────────────────────────────
 

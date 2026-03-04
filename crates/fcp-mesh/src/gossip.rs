@@ -458,9 +458,19 @@ impl GossipSummary {
     pub fn signing_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"FCP2-GOSSIP-SUMMARY-V1");
-        bytes.extend_from_slice(self.from.as_str().as_bytes());
-        bytes.extend_from_slice(self.zone_id.as_bytes());
-        bytes.extend_from_slice(self.epoch_id.as_str().as_bytes());
+        
+        let from_bytes = self.from.as_str().as_bytes();
+        bytes.extend_from_slice(&(from_bytes.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(from_bytes);
+        
+        let zone_bytes = self.zone_id.as_bytes();
+        bytes.extend_from_slice(&(zone_bytes.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(zone_bytes);
+        
+        let epoch_bytes = self.epoch_id.as_str().as_bytes();
+        bytes.extend_from_slice(&(epoch_bytes.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(epoch_bytes);
+        
         bytes.extend_from_slice(&self.object_filter_digest);
         bytes.extend_from_slice(&self.symbol_filter_digest);
         bytes.extend_from_slice(&self.object_count.to_le_bytes());

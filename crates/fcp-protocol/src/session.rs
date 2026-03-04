@@ -728,8 +728,15 @@ pub fn derive_session_keys(
 ) -> Result<SessionKeys, SessionError> {
     let mut info = Vec::new();
     info.extend_from_slice(b"FCP2-SESSION-V1");
-    info.extend_from_slice(initiator_node_id.as_str().as_bytes());
-    info.extend_from_slice(responder_node_id.as_str().as_bytes());
+    
+    let init_bytes = initiator_node_id.as_str().as_bytes();
+    info.extend_from_slice(&(init_bytes.len() as u32).to_le_bytes());
+    info.extend_from_slice(init_bytes);
+    
+    let resp_bytes = responder_node_id.as_str().as_bytes();
+    info.extend_from_slice(&(resp_bytes.len() as u32).to_le_bytes());
+    info.extend_from_slice(resp_bytes);
+    
     info.extend_from_slice(hello_nonce.as_bytes());
     info.extend_from_slice(ack_nonce.as_bytes());
 

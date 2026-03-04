@@ -284,14 +284,14 @@ impl HolderProof {
         bytes.extend_from_slice(b"FCP2-HOLDER-PROOF-V1");
         
         let req_bytes = request_id.0.as_bytes();
-        bytes.extend_from_slice(&(req_bytes.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&u32::try_from(req_bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
         bytes.extend_from_slice(req_bytes);
-        
+
         let op_bytes = operation_id.as_str().as_bytes();
-        bytes.extend_from_slice(&(op_bytes.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&u32::try_from(op_bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
         bytes.extend_from_slice(op_bytes);
-        
-        bytes.extend_from_slice(&(token_jti.len() as u32).to_le_bytes());
+
+        bytes.extend_from_slice(&u32::try_from(token_jti.len()).unwrap_or(u32::MAX).to_le_bytes());
         bytes.extend_from_slice(token_jti);
         
         bytes
@@ -2867,7 +2867,7 @@ mod tests {
         };
         let cloned = ctx;
         assert_eq!(cloned.locale, Some("ja-JP".into()));
-        assert!(cloned.request_tags.get("env"), Some(&"prod".into()));
+        assert_eq!(cloned.request_tags.get("env"), Some(&"prod".into()));
     }
 
     #[test]

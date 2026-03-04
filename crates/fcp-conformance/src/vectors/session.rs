@@ -229,8 +229,15 @@ impl SessionGoldenVector {
 
         let mut info = Vec::new();
         info.extend_from_slice(b"FCP2-SESSION-V1");
-        info.extend_from_slice(self.initiator_id.as_bytes());
-        info.extend_from_slice(self.responder_id.as_bytes());
+        
+        let init_bytes = self.initiator_id.as_bytes();
+        info.extend_from_slice(&(init_bytes.len() as u32).to_le_bytes());
+        info.extend_from_slice(init_bytes);
+        
+        let resp_bytes = self.responder_id.as_bytes();
+        info.extend_from_slice(&(resp_bytes.len() as u32).to_le_bytes());
+        info.extend_from_slice(resp_bytes);
+        
         info.extend_from_slice(&hello_nonce);
         info.extend_from_slice(&ack_nonce);
 
@@ -386,8 +393,15 @@ mod tests {
 
         let mut info = Vec::new();
         info.extend_from_slice(b"FCP2-SESSION-V1");
-        info.extend_from_slice(b"node.initiator.ts.net");
-        info.extend_from_slice(b"node.responder.ts.net");
+        
+        let init_bytes = b"node.initiator.ts.net";
+        info.extend_from_slice(&(init_bytes.len() as u32).to_le_bytes());
+        info.extend_from_slice(init_bytes);
+        
+        let resp_bytes = b"node.responder.ts.net";
+        info.extend_from_slice(&(resp_bytes.len() as u32).to_le_bytes());
+        info.extend_from_slice(resp_bytes);
+        
         info.extend_from_slice(&hello_nonce);
         info.extend_from_slice(&ack_nonce);
 

@@ -99,19 +99,23 @@ pub struct SymbolContext {
 /// Panics if HKDF expansion fails (should never happen for 32-byte output).
 #[must_use]
 pub fn derive_sender_subkey(
-    zone_key: &AeadKey,
+    zone_key: &ZoneKey,
     zone_key_id: &ZoneKeyId,
     sender_node_id: &TailscaleNodeId,
     sender_instance_id: u64,
 ) -> AeadKey {
-    let mut info = Vec::with_capacity(22 + sender_node_id.as_str().len() + 8);
+    let mut info = Vec::with_capacity(22 + sender_node_id.as_str().len() + 12);
     info.extend_from_slice(b"FCP2-SENDER-KEY-V1");
-    info.extend_from_slice(sender_node_id.as_str().as_bytes());
+    
+    let sender_bytes = sender_node_id.as_str().as_bytes();
+    info.extend_from_slice(&(sender_bytes.len() as u32).to_le_bytes());
+    info.extend_from_slice(sender_bytes);
+    
     info.extend_from_slice(&sender_instance_id.to_le_bytes());
 
     let subkey_bytes: [u8; 32] =
         hkdf_sha256_array(Some(zone_key_id.as_bytes()), zone_key.as_bytes(), &info)
-            .expect("HKDF expansion for 32 bytes should never fail");
+            .expect("HKDF expansion failed");
     AeadKey::from_bytes(subkey_bytes)
 }
 

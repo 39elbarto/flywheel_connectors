@@ -6,12 +6,12 @@
 //! - Timeout precision: fcp-async-core timeouts meet wall-clock accuracy thresholds
 //! - Scheduling behavior: spawn ordering and yield semantics match expectations
 //! - Cancellation propagation: signal latency within acceptable bounds
-//! - Shutdown ordering: TaskGroup drains deterministically
+//! - Shutdown ordering: `TaskGroup` drains deterministically
 //! - Channel throughput: bounded/unbounded channels meet baseline throughput
 //! - Error/recovery behavior: error paths don't introduce unexpected latency
 
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use fcp_async_core::{AsyncError, CancellationToken, ExecutionContext, TaskGroup};
@@ -57,7 +57,11 @@ async fn timeout_precision_50ms() {
 async fn timeout_precision_cumulative() {
     let start = Instant::now();
     for _ in 0..5 {
-        let _ = time::timeout(Duration::from_millis(20), time::sleep(Duration::from_secs(60))).await;
+        let _ = time::timeout(
+            Duration::from_millis(20),
+            time::sleep(Duration::from_secs(60)),
+        )
+        .await;
     }
     let elapsed = start.elapsed();
 
@@ -115,7 +119,7 @@ async fn spawn_fanout_correctness() {
     assert_eq!(sum.load(Ordering::Relaxed), expected);
 }
 
-/// yield_now yields to other tasks in the same runtime.
+/// `yield_now` yields to other tasks in the same runtime.
 #[fcp_async_core::runtime::test]
 async fn yield_allows_other_tasks_progress() {
     let flag = Arc::new(AtomicBool::new(false));
@@ -191,7 +195,7 @@ async fn cancellation_propagation_across_spawn() {
     );
 }
 
-/// ExecutionContext cancellation propagation through hierarchy.
+/// `ExecutionContext` cancellation propagation through hierarchy.
 #[fcp_async_core::runtime::test]
 async fn context_hierarchy_cancellation_latency() {
     let root = ExecutionContext::request_scoped(Duration::from_secs(10));
@@ -231,7 +235,7 @@ async fn context_hierarchy_cancellation_latency() {
 // Shutdown ordering
 // ============================================================================
 
-/// TaskGroup shutdown completes cooperative tasks before deadline.
+/// `TaskGroup` shutdown completes cooperative tasks before deadline.
 #[fcp_async_core::runtime::test]
 async fn shutdown_ordering_cooperative() {
     let order = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -255,8 +259,8 @@ async fn shutdown_ordering_cooperative() {
     let elapsed = start.elapsed();
 
     assert!(result.is_ok());
-    let finished = order.lock().unwrap();
-    assert_eq!(finished.len(), 4, "all tasks should finish: {finished:?}");
+    let finished = order.lock().unwrap().len();
+    assert_eq!(finished, 4, "all tasks should finish");
 
     // Shutdown of cooperative tasks should be fast (< 100ms)
     assert!(
@@ -265,7 +269,7 @@ async fn shutdown_ordering_cooperative() {
     );
 }
 
-/// TaskGroup shutdown with timeout reports stuck tasks quickly.
+/// `TaskGroup` shutdown with timeout reports stuck tasks quickly.
 #[fcp_async_core::runtime::test]
 async fn shutdown_timeout_latency() {
     let mut group = TaskGroup::new();
@@ -364,7 +368,11 @@ async fn mpsc_channel_throughput() {
 #[fcp_async_core::runtime::test]
 async fn error_path_no_excess_latency() {
     let start = Instant::now();
-    let result = time::timeout(Duration::from_millis(20), time::sleep(Duration::from_secs(60))).await;
+    let result = time::timeout(
+        Duration::from_millis(20),
+        time::sleep(Duration::from_secs(60)),
+    )
+    .await;
     let elapsed = start.elapsed();
 
     assert!(result.is_err());
@@ -420,7 +428,7 @@ async fn consecutive_errors_no_accumulation() {
 // Deadline budget tracking accuracy
 // ============================================================================
 
-/// Deadline remaining() tracks real wall-clock consumption.
+/// `Deadline::remaining()` tracks real wall-clock consumption.
 #[fcp_async_core::runtime::test]
 async fn deadline_budget_tracks_wall_clock() {
     let deadline = fcp_async_core::Deadline::after(Duration::from_millis(200));
@@ -433,8 +441,8 @@ async fn deadline_budget_tracks_wall_clock() {
     let after_100 = deadline.remaining();
 
     // Budget should decrease by ~50ms each step (within 20ms tolerance)
-    let consumed_first = initial - after_50;
-    let consumed_second = after_50 - after_100;
+    let consumed_first = initial.saturating_sub(after_50);
+    let consumed_second = after_50.saturating_sub(after_100);
 
     assert!(
         consumed_first >= Duration::from_millis(30) && consumed_first <= Duration::from_millis(70),
@@ -447,7 +455,7 @@ async fn deadline_budget_tracks_wall_clock() {
     );
 }
 
-/// Expired deadline returns Duration::ZERO consistently.
+/// Expired deadline returns `Duration::ZERO` consistently.
 #[fcp_async_core::runtime::test]
 async fn expired_deadline_zero_budget_stable() {
     let deadline = fcp_async_core::Deadline::after(Duration::from_millis(10));
@@ -468,7 +476,7 @@ async fn expired_deadline_zero_budget_stable() {
 async fn interval_cadence_accuracy() {
     let period = Duration::from_millis(20);
     let mut interval = time::interval(period);
-    let tick_count = 5;
+    let tick_count: u32 = 5;
 
     let start = Instant::now();
     for _ in 0..tick_count {
@@ -478,7 +486,7 @@ async fn interval_cadence_accuracy() {
 
     // First tick is immediate, then 4 intervals = 80ms
     // Allow 30ms tolerance
-    let expected = period * (tick_count - 1) as u32;
+    let expected = period * (tick_count - 1);
     let upper = expected + Duration::from_millis(30);
     assert!(
         elapsed >= expected && elapsed <= upper,

@@ -11,18 +11,16 @@
 //! - Bounded channel instrumentation hooks
 //! - Watch channel shutdown propagation
 //! - Cancellation token vs ad-hoc watch patterns
-//! - Select! macro passthrough fidelity
-//! - ExecutionContext vs manual tokio::select! composition
-//! - TaskGroup shutdown vs manual join_all
+//! - `Select!` macro passthrough fidelity
+//! - `ExecutionContext` vs manual `tokio::select!` composition
+//! - `TaskGroup` shutdown vs manual `join_all`
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use fcp_async_core::channel::{broadcast, mpsc, oneshot, watch};
-use fcp_async_core::{
-    AsyncError, CancellationToken, ExecutionContext, Instrumentation, TaskGroup,
-};
+use fcp_async_core::{AsyncError, CancellationToken, ExecutionContext, Instrumentation, TaskGroup};
 use fcp_async_core::{task, time};
 
 // ============================================================================
@@ -33,8 +31,11 @@ use fcp_async_core::{task, time};
 #[fcp_async_core::runtime::test]
 async fn timeout_error_normalized_vs_tokio_elapsed() {
     // fcp-async-core path
-    let fcp_result =
-        time::timeout(Duration::from_millis(10), time::sleep(Duration::from_secs(5))).await;
+    let fcp_result = time::timeout(
+        Duration::from_millis(10),
+        time::sleep(Duration::from_secs(5)),
+    )
+    .await;
     assert!(
         matches!(fcp_result, Err(AsyncError::Timeout { timeout_ms: 10 })),
         "fcp timeout should produce Timeout{{timeout_ms:10}}: {fcp_result:?}"
@@ -119,11 +120,7 @@ async fn sleep_duration_parity() {
     );
 
     // Jitter within 50ms is acceptable
-    let diff = if elapsed_fcp > elapsed_tokio {
-        elapsed_fcp - elapsed_tokio
-    } else {
-        elapsed_tokio - elapsed_fcp
-    };
+    let diff = elapsed_fcp.abs_diff(elapsed_tokio);
     assert!(
         diff < Duration::from_millis(50),
         "timing jitter too large: {diff:?}"
@@ -150,7 +147,7 @@ async fn mpsc_send_recv_parity() {
     assert_eq!(fcp_val, tok_val);
 }
 
-/// Dropping sender causes recv() to return None in both.
+/// Dropping sender causes `recv()` to return `None` in both.
 #[fcp_async_core::runtime::test]
 async fn mpsc_closed_channel_parity() {
     let (fcp_tx, mut fcp_rx) = mpsc::channel::<u32>(8);
@@ -169,7 +166,7 @@ async fn mpsc_closed_channel_parity() {
 // 4. Bounded channel with instrumentation (behavioral improvement)
 // ============================================================================
 
-/// BoundedSender/Receiver fires instrumentation hooks — an intentional improvement.
+/// `BoundedSender`/`BoundedReceiver` fires instrumentation hooks — an intentional improvement.
 #[fcp_async_core::runtime::test]
 async fn bounded_channel_fires_instrumentation_hooks() {
     let sends = Arc::new(AtomicUsize::new(0));
@@ -209,7 +206,7 @@ impl Instrumentation for CountingInstrumentation {
     }
 }
 
-/// Bounded channel normalizes errors to AsyncError variants.
+/// Bounded channel normalizes errors to `AsyncError` variants.
 #[fcp_async_core::runtime::test]
 async fn bounded_channel_error_normalization() {
     let (tx, rx) = fcp_async_core::channel::bounded::<u32>("err-q", 1);
@@ -269,7 +266,7 @@ async fn oneshot_channel_parity() {
     assert_eq!(fcp_val, tok_val);
 }
 
-/// Dropped oneshot sender produces RecvError in both.
+/// Dropped oneshot sender produces `RecvError` in both.
 #[fcp_async_core::runtime::test]
 async fn oneshot_dropped_sender_parity() {
     let (fcp_tx, fcp_rx) = oneshot::channel::<u32>();
@@ -305,7 +302,7 @@ async fn watch_channel_value_propagation_parity() {
 // 8. CancellationToken vs ad-hoc watch (intentional improvement)
 // ============================================================================
 
-/// CancellationToken provides cleaner semantics than manual watch patterns.
+/// `CancellationToken` provides cleaner semantics than manual watch patterns.
 #[fcp_async_core::runtime::test]
 async fn cancellation_token_vs_manual_watch() {
     // fcp-async-core: CancellationToken (purpose-built)
@@ -368,7 +365,7 @@ async fn pre_cancelled_resolution_parity() {
 // 9. ExecutionContext::run() vs manual select! composition
 // ============================================================================
 
-/// ExecutionContext::run() matches manual tokio::select! for timeout.
+/// `ExecutionContext::run()` matches manual `tokio::select!` for timeout.
 #[fcp_async_core::runtime::test]
 async fn execution_context_timeout_vs_manual_select() {
     // fcp-async-core path
@@ -387,7 +384,7 @@ async fn execution_context_timeout_vs_manual_select() {
     assert!(manual_result.is_err());
 }
 
-/// ExecutionContext::run() — cancellation preempts deadline (intentional improvement).
+/// `ExecutionContext::run()` — cancellation preempts deadline (intentional improvement).
 #[fcp_async_core::runtime::test]
 async fn cancellation_preempts_deadline_no_raw_equivalent() {
     let ctx = ExecutionContext::request_scoped(Duration::from_secs(10));
@@ -410,7 +407,7 @@ async fn cancellation_preempts_deadline_no_raw_equivalent() {
 // 10. TaskGroup::shutdown() vs manual join_all
 // ============================================================================
 
-/// TaskGroup provides structured shutdown — manual equivalent needs explicit join.
+/// `TaskGroup` provides structured shutdown — manual equivalent needs explicit join.
 #[fcp_async_core::runtime::test]
 async fn task_group_shutdown_vs_manual_join() {
     let counter = Arc::new(AtomicUsize::new(0));
@@ -468,7 +465,7 @@ async fn task_group_shutdown_vs_manual_join() {
     assert_eq!(fcp_count, manual_count);
 }
 
-/// TaskGroup aborts stuck tasks on timeout — manual equivalent must do this explicitly.
+/// `TaskGroup` aborts stuck tasks on timeout — manual equivalent must do this explicitly.
 #[fcp_async_core::runtime::test]
 async fn task_group_abort_stuck_vs_manual() {
     // fcp-async-core: TaskGroup handles abort on timeout
@@ -500,7 +497,7 @@ async fn task_group_abort_stuck_vs_manual() {
 // 11. Spawn parity
 // ============================================================================
 
-/// task::spawn matches tokio::task::spawn.
+/// `task::spawn` matches `tokio::task::spawn`.
 #[fcp_async_core::runtime::test]
 async fn spawn_parity() {
     let fcp_handle = task::spawn(async { 42 });
@@ -516,20 +513,20 @@ async fn spawn_parity() {
 // 12. Select! macro passthrough
 // ============================================================================
 
-/// The fcp_async_core::select! macro produces identical outcomes to tokio::select!.
+/// The `fcp_async_core::select!` macro produces identical outcomes to `tokio::select!`.
 #[fcp_async_core::runtime::test]
 async fn select_macro_parity() {
     // fcp-async-core select!
     let fcp_winner = fcp_async_core::select! {
-        _ = time::sleep(Duration::from_millis(10)) => "sleep",
-        _ = time::sleep(Duration::from_secs(60)) => "long",
+        () = time::sleep(Duration::from_millis(10)) => "sleep",
+        () = time::sleep(Duration::from_secs(60)) => "long",
     };
     assert_eq!(fcp_winner, "sleep");
 
     // raw tokio select!
     let tokio_winner = tokio::select! {
-        _ = tokio::time::sleep(Duration::from_millis(10)) => "sleep",
-        _ = tokio::time::sleep(Duration::from_secs(60)) => "long",
+        () = tokio::time::sleep(Duration::from_millis(10)) => "sleep",
+        () = tokio::time::sleep(Duration::from_secs(60)) => "long",
     };
     assert_eq!(tokio_winner, "sleep");
 }
@@ -538,7 +535,7 @@ async fn select_macro_parity() {
 // 13. Shutdown propagation: sleep_or_shutdown parity
 // ============================================================================
 
-/// sleep_or_shutdown achieves the same result as manual select! over sleep+watch.
+/// `sleep_or_shutdown` achieves the same result as manual `select!` over sleep+watch.
 #[fcp_async_core::runtime::test]
 async fn sleep_or_shutdown_vs_manual_select() {
     // fcp-async-core: sleep_or_shutdown
@@ -558,8 +555,8 @@ async fn sleep_or_shutdown_vs_manual_select() {
     let (manual_tx, mut manual_rx) = tokio::sync::watch::channel(false);
     let manual_handle = tokio::task::spawn(async move {
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(60)) => Ok(()),
-            _ = async {
+            () = tokio::time::sleep(Duration::from_secs(60)) => Ok(()),
+            () = async {
                 while !*manual_rx.borrow_and_update() {
                     if manual_rx.changed().await.is_err() { break; }
                 }
@@ -582,7 +579,7 @@ async fn sleep_or_shutdown_vs_manual_select() {
 // 14. Sync primitives parity
 // ============================================================================
 
-/// Mutex from fcp-async-core is the same tokio::sync::Mutex.
+/// `Mutex` from fcp-async-core is the same `tokio::sync::Mutex`.
 #[fcp_async_core::runtime::test]
 async fn mutex_parity() {
     let fcp_mutex = fcp_async_core::sync::Mutex::new(0u32);
@@ -672,11 +669,11 @@ async fn retry_under_deadline_equivalence() {
 
     // Both should exhaust in roughly 3-7 attempts (100ms / 20ms = ~5)
     assert!(
-        fcp_count >= 3 && fcp_count <= 7,
+        (3..=7).contains(&fcp_count),
         "fcp attempts out of range: {fcp_count}"
     );
     assert!(
-        tokio_count >= 3 && tokio_count <= 7,
+        (3..=7).contains(&tokio_count),
         "tokio attempts out of range: {tokio_count}"
     );
 

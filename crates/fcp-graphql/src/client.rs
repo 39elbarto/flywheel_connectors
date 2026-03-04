@@ -444,7 +444,7 @@ impl GraphqlClient {
                 .shared();
             guard.insert(key, future.clone());
             drop(guard);
-            
+
             let result = future.await;
             state.inner.lock().await.remove(&key);
             return result;

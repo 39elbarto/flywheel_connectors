@@ -295,14 +295,8 @@ pub fn is_hostname_canonical(hostname: &str) -> bool {
 fn ip_in_any_cidr(ip: IpAddr, cidrs: &[IpNet]) -> bool {
     // Normalize IPv4-mapped IPv6 addresses to pure IPv4 to prevent bypasses
     let check_ip = match ip {
-        IpAddr::V6(v6) => {
-            if let Some(v4) = v6.to_ipv4_mapped() {
-                IpAddr::V4(v4)
-            } else {
-                ip
-            }
-        }
-        _ => ip,
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
+        IpAddr::V4(_) => ip,
     };
     cidrs.iter().any(|net| net.contains(&check_ip))
 }

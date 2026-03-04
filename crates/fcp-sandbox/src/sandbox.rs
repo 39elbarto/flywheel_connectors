@@ -207,13 +207,16 @@ impl CompiledPolicy {
 
 /// Expand special path variables.
 fn expand_path(path: &str, state_dir: Option<&PathBuf>) -> Option<PathBuf> {
-    if let Some(suffix) = path.strip_prefix("$CONNECTOR_STATE/") {
-        state_dir.map(|sd| sd.join(suffix))
-    } else if path == "$CONNECTOR_STATE" {
-        state_dir.cloned()
-    } else {
-        Some(PathBuf::from(path))
-    }
+    path.strip_prefix("$CONNECTOR_STATE/").map_or_else(
+        || {
+            if path == "$CONNECTOR_STATE" {
+                state_dir.cloned()
+            } else {
+                Some(PathBuf::from(path))
+            }
+        },
+        |suffix| state_dir.map(|sd| sd.join(suffix)),
+    )
 }
 
 // ============================================================================

@@ -10,8 +10,8 @@
 //! - Propagation failures in nested context hierarchies
 //! - Dropped-sender detection (watch channel semantics)
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use fcp_async_core::channel::watch;
@@ -33,7 +33,10 @@ async fn cancel_before_subscribe_is_immediately_visible() {
 
     // cancelled() should return immediately, not hang
     let result = time::timeout(Duration::from_millis(100), listener.cancelled()).await;
-    assert!(result.is_ok(), "cancelled() should resolve immediately for pre-cancelled token");
+    assert!(
+        result.is_ok(),
+        "cancelled() should resolve immediately for pre-cancelled token"
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -202,7 +205,10 @@ async fn child_and_parent_share_cancellation_token() {
     child.cancel();
 
     assert!(child.is_cancelled());
-    assert!(parent.is_cancelled(), "shared cancellation: child cancel propagates to parent");
+    assert!(
+        parent.is_cancelled(),
+        "shared cancellation: child cancel propagates to parent"
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -235,9 +241,11 @@ async fn deadline_and_cancellation_race_cancellation_wins() {
     let context_clone = context.clone();
 
     let work = task::spawn(async move {
-        context_clone.run(async {
-            time::sleep(Duration::from_secs(60)).await;
-        }).await
+        context_clone
+            .run(async {
+                time::sleep(Duration::from_secs(60)).await;
+            })
+            .await
     });
 
     // Cancel immediately
@@ -257,9 +265,7 @@ async fn deadline_and_cancellation_race_cancellation_wins() {
 async fn wait_for_shutdown_resolves_when_signaled() {
     let (tx, mut rx) = watch::channel(false);
 
-    let waiter = task::spawn(async move {
-        wait_for_shutdown(&mut rx).await
-    });
+    let waiter = task::spawn(async move { wait_for_shutdown(&mut rx).await });
 
     tx.send(true).expect("send shutdown signal");
 
@@ -283,23 +289,28 @@ async fn wait_for_shutdown_pre_signaled_returns_immediately() {
     let (_tx, mut rx) = watch::channel(true);
 
     let result = time::timeout(Duration::from_millis(100), wait_for_shutdown(&mut rx)).await;
-    assert!(result.is_ok(), "pre-signaled shutdown should resolve immediately");
+    assert!(
+        result.is_ok(),
+        "pre-signaled shutdown should resolve immediately"
+    );
 }
 
 #[fcp_async_core::runtime::test]
 async fn sleep_or_shutdown_respects_shutdown_signal() {
     let (tx, mut rx) = watch::channel(false);
 
-    let sleeper = task::spawn(async move {
-        sleep_or_shutdown(Duration::from_secs(60), &mut rx).await
-    });
+    let sleeper =
+        task::spawn(async move { sleep_or_shutdown(Duration::from_secs(60), &mut rx).await });
 
     // Signal shutdown before sleep completes
     time::sleep(Duration::from_millis(10)).await;
     tx.send(true).expect("send shutdown");
 
     let result = time::timeout(Duration::from_millis(500), sleeper).await;
-    assert!(result.is_ok(), "sleeper should not hang after shutdown signal");
+    assert!(
+        result.is_ok(),
+        "sleeper should not hang after shutdown signal"
+    );
     let inner = result.unwrap().expect("join");
     assert!(matches!(inner, Err(AsyncError::Cancelled)));
 }
@@ -309,7 +320,10 @@ async fn sleep_or_shutdown_completes_sleep_when_no_signal() {
     let (_tx, mut rx) = watch::channel(false);
 
     let result = sleep_or_shutdown(Duration::from_millis(10), &mut rx).await;
-    assert!(result.is_ok(), "sleep should complete without shutdown signal");
+    assert!(
+        result.is_ok(),
+        "sleep should complete without shutdown signal"
+    );
 }
 
 // ============================================================================

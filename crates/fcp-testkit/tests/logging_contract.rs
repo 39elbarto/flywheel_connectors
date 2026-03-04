@@ -24,7 +24,11 @@ async fn timeout_produces_structured_log() {
     let capture = LogCapture::new();
     let _guard = capture.install_json();
 
-    let _ = time::timeout(Duration::from_millis(20), time::sleep(Duration::from_secs(60))).await;
+    let _ = time::timeout(
+        Duration::from_millis(20),
+        time::sleep(Duration::from_secs(60)),
+    )
+    .await;
 
     let jsonl = capture.jsonl();
     // JSON log lines should be present (at least subscriber is active)
@@ -35,10 +39,7 @@ async fn timeout_produces_structured_log() {
         }
         // All lines should be valid JSON
         let parsed: Result<serde_json::Value, _> = serde_json::from_str(line);
-        assert!(
-            parsed.is_ok(),
-            "log line should be valid JSON: {line}"
-        );
+        assert!(parsed.is_ok(), "log line should be valid JSON: {line}");
         let val = parsed.unwrap();
         // Standard tracing fields (JSON fmt layer uses "timestamp")
         assert!(
@@ -52,7 +53,7 @@ async fn timeout_produces_structured_log() {
     }
 }
 
-/// TaskGroup shutdown emits ordered lifecycle events.
+/// `TaskGroup` shutdown emits ordered lifecycle events.
 #[fcp_async_core::runtime::test]
 async fn task_group_lifecycle_logs() {
     let capture = LogCapture::new();
@@ -75,10 +76,7 @@ async fn task_group_lifecycle_logs() {
             continue;
         }
         let parsed: Result<serde_json::Value, _> = serde_json::from_str(line);
-        assert!(
-            parsed.is_ok(),
-            "lifecycle log should be valid JSON: {line}"
-        );
+        assert!(parsed.is_ok(), "lifecycle log should be valid JSON: {line}");
     }
 }
 
@@ -155,7 +153,7 @@ async fn no_secrets_in_error_display() {
     }
 }
 
-/// No secrets in TaskGroup shutdown logs.
+/// No secrets in `TaskGroup` shutdown logs.
 #[fcp_async_core::runtime::test]
 async fn no_secrets_in_shutdown_logs() {
     let capture = LogCapture::new();
@@ -183,18 +181,24 @@ async fn no_secrets_in_shutdown_logs() {
 /// Timeout errors preserve the configured duration.
 #[fcp_async_core::runtime::test]
 async fn timeout_error_preserves_duration_context() {
-    let result =
-        time::timeout(Duration::from_millis(42), time::sleep(Duration::from_secs(60))).await;
+    let result = time::timeout(
+        Duration::from_millis(42),
+        time::sleep(Duration::from_secs(60)),
+    )
+    .await;
 
     match result {
         Err(AsyncError::Timeout { timeout_ms }) => {
-            assert_eq!(timeout_ms, 42, "timeout_ms should preserve configured value");
+            assert_eq!(
+                timeout_ms, 42,
+                "timeout_ms should preserve configured value"
+            );
         }
         other => panic!("expected Timeout error: {other:?}"),
     }
 }
 
-/// ExecutionContext run failure preserves error variant.
+/// `ExecutionContext` run failure preserves error variant.
 #[fcp_async_core::runtime::test]
 async fn context_run_failure_preserves_variant() {
     // Timeout case
@@ -244,7 +248,7 @@ async fn nested_failure_context_distinguishable() {
 // 4. Log JSON schema conformance
 // ============================================================================
 
-/// LogCapture produces valid structured JSON with required fields.
+/// `LogCapture` produces valid structured JSON with required fields.
 #[fcp_async_core::runtime::test]
 async fn log_capture_json_schema() {
     let capture = LogCapture::new();
@@ -275,14 +279,11 @@ async fn log_capture_json_schema() {
             val.get("timestamp").is_some() || val.get("ts").is_some(),
             "missing timestamp in: {val}"
         );
-        assert!(
-            val.get("message").is_some(),
-            "missing message in: {val}"
-        );
+        assert!(val.get("message").is_some(), "missing message in: {val}");
     }
 }
 
-/// TracingCapture records event level and message.
+/// `TracingCapture` records event level and message.
 #[test]
 fn tracing_capture_records_events() {
     let capture = TracingCapture::new();
@@ -293,7 +294,7 @@ fn tracing_capture_records_events() {
     assert!(!capture.has_warnings());
 }
 
-/// LogCapture clear/snapshot cycle works.
+/// `LogCapture` clear/snapshot cycle works.
 #[fcp_async_core::runtime::test]
 async fn log_capture_clear_snapshot_cycle() {
     let capture = LogCapture::new();

@@ -906,12 +906,12 @@ fn read_leb128(bytes: &[u8]) -> Option<(usize, usize)> {
     for &byte in bytes {
         bytes_read += 1;
         let value = (byte & 0x7f) as usize;
-        
+
         // Prevent panic: shift must be less than the target architecture's usize bits
         if shift >= usize::BITS {
             return None;
         }
-        
+
         result |= value << shift;
         if byte & 0x80 == 0 {
             return Some((result, bytes_read));

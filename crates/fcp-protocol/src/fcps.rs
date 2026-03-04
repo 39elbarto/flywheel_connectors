@@ -475,7 +475,7 @@ impl DecodeStatus {
         let mut buf = Vec::new();
         buf.extend_from_slice(b"FCP2-DECODE-STATUS-V1");
         buf.extend_from_slice(self.object_id.as_bytes());
-        
+
         let zone_bytes = self.zone_id.as_bytes();
         let zone_len = u32::try_from(zone_bytes.len()).unwrap_or(u32::MAX);
         buf.extend_from_slice(&zone_len.to_le_bytes());
@@ -871,7 +871,7 @@ impl SignedFcpsFrame {
     ) -> Vec<u8> {
         let mut transcript = Vec::new();
         transcript.extend_from_slice(Self::SIGNATURE_DOMAIN);
-        
+
         let source_bytes = source_id.as_str().as_bytes();
         let source_len = u32::try_from(source_bytes.len()).unwrap_or(u32::MAX);
         transcript.extend_from_slice(&source_len.to_le_bytes());
@@ -882,7 +882,7 @@ impl SignedFcpsFrame {
         let frame_len = u32::try_from(frame_bytes.len()).unwrap_or(u32::MAX);
         transcript.extend_from_slice(&frame_len.to_le_bytes());
         transcript.extend_from_slice(frame_bytes);
-        
+
         transcript
     }
 

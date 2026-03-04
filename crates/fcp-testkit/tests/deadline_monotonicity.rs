@@ -10,12 +10,12 @@
 //! - Timeout error semantics consistency
 //! - Deadline vs cancellation precedence
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use fcp_async_core::{AsyncError, Deadline, ExecutionContext};
 use fcp_async_core::time;
+use fcp_async_core::{AsyncError, Deadline, ExecutionContext};
 
 // ============================================================================
 // Deadline budget monotonicity
@@ -46,7 +46,10 @@ async fn context_remaining_budget_shrinks_over_time() {
     time::sleep(Duration::from_millis(50)).await;
     let after = context.remaining_budget().expect("has deadline");
 
-    assert!(after < initial, "budget must shrink: initial={initial:?} after={after:?}");
+    assert!(
+        after < initial,
+        "budget must shrink: initial={initial:?} after={after:?}"
+    );
 }
 
 // ============================================================================
@@ -90,7 +93,10 @@ async fn expired_context_times_out_async_work() {
         .run(async { time::sleep(Duration::from_millis(10)).await })
         .await;
     assert!(
-        matches!(result, Err(AsyncError::Timeout { .. }) | Err(AsyncError::Cancelled)),
+        matches!(
+            result,
+            Err(AsyncError::Timeout { .. } | AsyncError::Cancelled)
+        ),
         "expired context should fail: {result:?}"
     );
 }
@@ -126,12 +132,13 @@ async fn child_context_inherits_deadline() {
     let child_budget = child.remaining_budget().expect("has deadline");
 
     // Child should have approximately the same budget (shared deadline)
-    let diff = if parent_budget > child_budget {
-        parent_budget - child_budget
-    } else {
-        child_budget - parent_budget
-    };
-    assert!(diff < Duration::from_millis(5), "budgets should be close: diff={diff:?}");
+    let diff = parent_budget
+        .checked_sub(child_budget)
+        .unwrap_or_else(|| child_budget.saturating_sub(parent_budget));
+    assert!(
+        diff < Duration::from_millis(5),
+        "budgets should be close: diff={diff:?}"
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -181,7 +188,10 @@ async fn retry_loop_exhausts_deadline_budget() {
     let mut last_err = None;
     for _ in 0..100 {
         attempts.fetch_add(1, Ordering::SeqCst);
-        match context.run(async { time::sleep(Duration::from_millis(20)).await }).await {
+        match context
+            .run(async { time::sleep(Duration::from_millis(20)).await })
+            .await
+        {
             Ok(()) => {}
             Err(e) => {
                 last_err = Some(e);
@@ -192,7 +202,7 @@ async fn retry_loop_exhausts_deadline_budget() {
 
     let total_attempts = attempts.load(Ordering::SeqCst);
     assert!(
-        total_attempts >= 3 && total_attempts <= 7,
+        (3..=7).contains(&total_attempts),
         "expected 3-7 attempts in 100ms with 20ms sleeps, got {total_attempts}"
     );
     assert!(
@@ -213,7 +223,9 @@ async fn retry_loop_remaining_budget_decreases_each_iteration() {
             }
             budgets.push(budget);
         }
-        let _ = context.run(async { time::sleep(Duration::from_millis(20)).await }).await;
+        let _ = context
+            .run(async { time::sleep(Duration::from_millis(20)).await })
+            .await;
     }
 
     // Verify monotonic decrease
@@ -233,7 +245,11 @@ async fn retry_loop_remaining_budget_decreases_each_iteration() {
 
 #[fcp_async_core::runtime::test]
 async fn timeout_error_contains_timeout_ms() {
-    let result = time::timeout(Duration::from_millis(10), time::sleep(Duration::from_secs(5))).await;
+    let result = time::timeout(
+        Duration::from_millis(10),
+        time::sleep(Duration::from_secs(5)),
+    )
+    .await;
     match result {
         Err(AsyncError::Timeout { timeout_ms }) => {
             assert_eq!(timeout_ms, 10);
@@ -308,7 +324,9 @@ async fn deadline_fires_when_not_cancelled() {
 
 #[fcp_async_core::runtime::test]
 async fn deadline_at_past_instant_is_expired() {
-    let past = Instant::now() - Duration::from_millis(100);
+    let past = Instant::now()
+        .checked_sub(Duration::from_millis(100))
+        .expect("100ms ago");
     let deadline = Deadline::at(past);
 
     assert!(deadline.is_expired());

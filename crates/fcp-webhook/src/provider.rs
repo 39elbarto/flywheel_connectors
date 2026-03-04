@@ -205,7 +205,7 @@ impl StripeWebhook {
                 return Ok((ts, signatures));
             }
         }
-        
+
         Err(WebhookError::InvalidPayload(
             "Invalid Stripe-Signature format".into(),
         ))

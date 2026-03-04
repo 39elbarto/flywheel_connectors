@@ -349,7 +349,7 @@ impl MetricWindow {
     }
 
     const fn roll_if_needed(&mut self, now: u64, configured_window: u64) {
-        if self.window_seconds != configured_window {
+        if self.window_seconds != configured_window || configured_window == 0 {
             self.window_seconds = configured_window;
             self.window_started_at = now;
             self.used = 0;
@@ -358,7 +358,11 @@ impl MetricWindow {
 
         let elapsed = now.saturating_sub(self.window_started_at);
         if elapsed >= self.window_seconds {
-            self.window_started_at = now;
+            // Align the new window start time to prevent drift
+            let windows_passed = elapsed / self.window_seconds;
+            self.window_started_at = self
+                .window_started_at
+                .saturating_add(windows_passed.saturating_mul(self.window_seconds));
             self.used = 0;
         }
     }

@@ -757,3 +757,198 @@ fn bench_fcps_frame_parse_mac(iterations: u32, warmup: u32) -> BenchmarkResult {
     result.outliers_detected = outliers;
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- normalize_size_label ----
+
+    #[test]
+    fn normalize_size_label_lowercase() {
+        assert_eq!(normalize_size_label("1MB"), "1mb");
+    }
+
+    #[test]
+    fn normalize_size_label_already_lower() {
+        assert_eq!(normalize_size_label("100kb"), "100kb");
+    }
+
+    #[test]
+    fn normalize_size_label_trims_whitespace() {
+        assert_eq!(normalize_size_label("  2gb  "), "2gb");
+    }
+
+    #[test]
+    fn normalize_size_label_mixed_case() {
+        assert_eq!(normalize_size_label("512Kb"), "512kb");
+    }
+
+    // ---- parse_size_bytes ----
+
+    #[test]
+    fn parse_size_bytes_megabytes() {
+        assert_eq!(parse_size_bytes("1mb").unwrap(), 1024 * 1024);
+    }
+
+    #[test]
+    fn parse_size_bytes_kilobytes() {
+        assert_eq!(parse_size_bytes("100kb").unwrap(), 100 * 1024);
+    }
+
+    #[test]
+    fn parse_size_bytes_gigabytes() {
+        assert_eq!(parse_size_bytes("2gb").unwrap(), 2 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn parse_size_bytes_raw_bytes_suffix() {
+        assert_eq!(parse_size_bytes("512b").unwrap(), 512);
+    }
+
+    #[test]
+    fn parse_size_bytes_raw_number() {
+        assert_eq!(parse_size_bytes("1024").unwrap(), 1024);
+    }
+
+    #[test]
+    fn parse_size_bytes_with_underscores() {
+        assert_eq!(parse_size_bytes("1_000kb").unwrap(), 1000 * 1024);
+    }
+
+    #[test]
+    fn parse_size_bytes_uppercase() {
+        assert_eq!(parse_size_bytes("1MB").unwrap(), 1024 * 1024);
+    }
+
+    #[test]
+    fn parse_size_bytes_whitespace() {
+        assert_eq!(parse_size_bytes("  512kb  ").unwrap(), 512 * 1024);
+    }
+
+    #[test]
+    fn parse_size_bytes_empty() {
+        let err = parse_size_bytes("").unwrap_err();
+        assert!(err.to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn parse_size_bytes_zero() {
+        let err = parse_size_bytes("0kb").unwrap_err();
+        assert!(err.to_string().contains("greater than zero"));
+    }
+
+    #[test]
+    fn parse_size_bytes_zero_raw() {
+        let err = parse_size_bytes("0").unwrap_err();
+        assert!(err.to_string().contains("greater than zero"));
+    }
+
+    #[test]
+    fn parse_size_bytes_invalid_number() {
+        let err = parse_size_bytes("abcmb").unwrap_err();
+        assert!(err.to_string().contains("invalid size value"));
+    }
+
+    #[test]
+    fn parse_size_bytes_just_suffix() {
+        let err = parse_size_bytes("mb").unwrap_err();
+        assert!(err.to_string().contains("size value missing"));
+    }
+
+    #[test]
+    fn parse_size_bytes_overflow() {
+        let err = parse_size_bytes("999999999999999gb").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("overflow") || msg.contains("too large") || msg.contains("invalid"));
+    }
+
+    // ---- parse_fcps_header ----
+
+    #[test]
+    fn parse_fcps_header_valid() {
+        let mut frame = vec![0u8; FCPS_HEADER_LEN];
+        frame[0..4].copy_from_slice(b"FCPS");
+        frame[106..114].copy_from_slice(&42_u64.to_le_bytes());
+        let header = parse_fcps_header(&frame).unwrap();
+        assert_eq!(header.frame_seq, 42);
+    }
+
+    #[test]
+    fn parse_fcps_header_too_short() {
+        let frame = vec![0u8; FCPS_HEADER_LEN - 1];
+        assert!(parse_fcps_header(&frame).is_none());
+    }
+
+    #[test]
+    fn parse_fcps_header_wrong_magic() {
+        let mut frame = vec![0u8; FCPS_HEADER_LEN];
+        frame[0..4].copy_from_slice(b"NOPE");
+        assert!(parse_fcps_header(&frame).is_none());
+    }
+
+    #[test]
+    fn parse_fcps_header_empty() {
+        assert!(parse_fcps_header(&[]).is_none());
+    }
+
+    #[test]
+    fn parse_fcps_header_exact_size() {
+        let mut frame = vec![0u8; FCPS_HEADER_LEN];
+        frame[0..4].copy_from_slice(b"FCPS");
+        frame[106..114].copy_from_slice(&99_u64.to_le_bytes());
+        let header = parse_fcps_header(&frame).unwrap();
+        assert_eq!(header.frame_seq, 99);
+    }
+
+    #[test]
+    fn parse_fcps_header_large_seq() {
+        let mut frame = vec![0u8; FCPS_HEADER_LEN + 100];
+        frame[0..4].copy_from_slice(b"FCPS");
+        frame[106..114].copy_from_slice(&u64::MAX.to_le_bytes());
+        let header = parse_fcps_header(&frame).unwrap();
+        assert_eq!(header.frame_seq, u64::MAX);
+    }
+
+    // ---- FCPS_HEADER_LEN ----
+
+    #[test]
+    fn fcps_header_len_is_114() {
+        assert_eq!(FCPS_HEADER_LEN, 114);
+    }
+
+    // ---- BenchmarkResult::placeholder ----
+
+    #[test]
+    fn placeholder_result_fields() {
+        let result = BenchmarkResult::placeholder("test-bench", "not ready");
+        assert_eq!(result.name, "test-bench");
+        assert_eq!(result.description, "Not yet implemented");
+        assert!(result.percentiles.is_none());
+        assert_eq!(result.sample_count, 0);
+        assert_eq!(result.warmup_count, 0);
+        assert_eq!(result.note.as_deref(), Some("not ready"));
+        assert!(result.passed.is_none());
+        assert!(result.targets.is_none());
+    }
+
+    #[test]
+    fn placeholder_result_serde_roundtrip() {
+        let result = BenchmarkResult::placeholder("bench-x", "pending");
+        let json = serde_json::to_string(&result).unwrap();
+        let back: BenchmarkResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name, "bench-x");
+        assert_eq!(back.note.as_deref(), Some("pending"));
+        assert!(back.percentiles.is_none());
+    }
+
+    // ---- FcpsHeader clone/copy ----
+
+    #[test]
+    fn fcps_header_clone_copy() {
+        let header = FcpsHeader { frame_seq: 7 };
+        let cloned = header;
+        let copied = cloned;
+        assert_eq!(copied.frame_seq, 7);
+    }
+}

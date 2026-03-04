@@ -147,3 +147,89 @@ fn print_budget_report(report: &BudgetReport) {
         println!();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn simulate_budget_report_no_filter() {
+        let report = simulate_budget_report(None);
+        assert_eq!(report.schema_version, BudgetReport::SCHEMA_VERSION);
+        assert_eq!(report.zones.len(), 2);
+    }
+
+    #[test]
+    fn simulate_budget_report_filter_private() {
+        let report = simulate_budget_report(Some("z:private"));
+        assert_eq!(report.zones.len(), 1);
+        assert_eq!(report.zones[0].zone_id, "z:private");
+    }
+
+    #[test]
+    fn simulate_budget_report_filter_work() {
+        let report = simulate_budget_report(Some("z:work"));
+        assert_eq!(report.zones.len(), 1);
+        assert_eq!(report.zones[0].zone_id, "z:work");
+    }
+
+    #[test]
+    fn simulate_budget_report_filter_nonexistent() {
+        let report = simulate_budget_report(Some("z:nonexistent"));
+        assert!(report.zones.is_empty());
+    }
+
+    #[test]
+    fn private_zone_has_exceeded_budget() {
+        let report = simulate_budget_report(Some("z:private"));
+        let zone = &report.zones[0];
+        let tokens = zone
+            .budgets
+            .iter()
+            .find(|b| b.metric == UsageMetricKind::Tokens)
+            .expect("should have tokens budget");
+        assert_eq!(tokens.status, BudgetStatus::Exceeded);
+        assert!(tokens.used > tokens.limit);
+        assert_eq!(tokens.remaining, 0);
+    }
+
+    #[test]
+    fn work_zone_has_ok_budgets() {
+        let report = simulate_budget_report(Some("z:work"));
+        let zone = &report.zones[0];
+        assert!(zone.budgets.iter().all(|b| b.status == BudgetStatus::Ok));
+    }
+
+    #[test]
+    fn budget_enforcement_modes() {
+        let report = simulate_budget_report(None);
+        let private = report.zones.iter().find(|z| z.zone_id == "z:private").unwrap();
+        let work = report.zones.iter().find(|z| z.zone_id == "z:work").unwrap();
+        assert_eq!(private.enforcement, BudgetEnforcement::Deny);
+        assert_eq!(work.enforcement, BudgetEnforcement::Warn);
+    }
+
+    #[test]
+    fn budget_report_json_roundtrip() {
+        let report = simulate_budget_report(None);
+        let json = serde_json::to_string(&report).unwrap();
+        let parsed: BudgetReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.zones.len(), 2);
+        assert_eq!(parsed.schema_version, BudgetReport::SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn budget_line_item_window_fields() {
+        let report = simulate_budget_report(Some("z:private"));
+        let item = &report.zones[0].budgets[0];
+        assert!(item.window_seconds > 0);
+        assert!(item.window_resets_at > item.window_started_at);
+    }
+
+    #[test]
+    fn budget_report_debug() {
+        let report = simulate_budget_report(None);
+        let dbg = format!("{report:?}");
+        assert!(dbg.contains("BudgetReport"));
+    }
+}

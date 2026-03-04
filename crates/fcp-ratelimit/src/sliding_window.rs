@@ -302,6 +302,8 @@ impl RateLimiter for FixedWindow {
 mod tests {
     use super::*;
 
+    // ── SlidingWindow: basic ───────────────────────────────────────────
+
     #[fcp_async_core::runtime::test]
     async fn test_sliding_window_basic() {
         let limiter = SlidingWindow::new(5, Duration::from_secs(1));
@@ -324,6 +326,156 @@ mod tests {
 
         assert!(limiter.try_acquire().await);
     }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_sliding_window_wait_time() {
+        let limiter = SlidingWindow::new(1, Duration::from_millis(100));
+
+        // Acquire the only permit
+        assert!(limiter.try_acquire().await);
+
+        // Now it should be limited
+        assert!(!limiter.try_acquire().await);
+
+        // Check wait time - should be approx 100ms
+        let wait = limiter.wait_time().await;
+        assert!(wait.as_millis() > 0);
+        assert!(wait.as_millis() <= 100);
+
+        // Wait that amount
+        sleep(wait).await;
+
+        // Should be available now
+        assert!(limiter.try_acquire().await);
+    }
+
+    // ── SlidingWindow: remaining ───────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn sliding_window_remaining_starts_at_limit() {
+        let limiter = SlidingWindow::new(10, Duration::from_secs(60));
+        assert_eq!(limiter.remaining(), 10);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn sliding_window_remaining_decreases_on_acquire() {
+        let limiter = SlidingWindow::new(5, Duration::from_secs(60));
+        limiter.try_acquire().await;
+        assert_eq!(limiter.remaining(), 4);
+        limiter.try_acquire().await;
+        limiter.try_acquire().await;
+        assert_eq!(limiter.remaining(), 2);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn sliding_window_remaining_recovers_after_expiry() {
+        let limiter = SlidingWindow::new(2, Duration::from_millis(50));
+        limiter.try_acquire().await;
+        limiter.try_acquire().await;
+        assert_eq!(limiter.remaining(), 0);
+
+        sleep(Duration::from_millis(60)).await;
+        assert_eq!(limiter.remaining(), 2);
+    }
+
+    // ── SlidingWindow: state ───────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn sliding_window_state_empty() {
+        let limiter = SlidingWindow::new(5, Duration::from_secs(1));
+        let state = limiter.state();
+        assert_eq!(state.limit, 5);
+        assert_eq!(state.remaining, 5);
+        assert!(!state.is_limited);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn sliding_window_state_full() {
+        let limiter = SlidingWindow::new(2, Duration::from_secs(60));
+        limiter.try_acquire().await;
+        limiter.try_acquire().await;
+
+        let state = limiter.state();
+        assert_eq!(state.limit, 2);
+        assert_eq!(state.remaining, 0);
+        assert!(state.is_limited);
+        assert!(state.reset_after > Duration::ZERO);
+    }
+
+    // ── SlidingWindow: reset ───────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn sliding_window_reset_restores_capacity() {
+        let limiter = SlidingWindow::new(3, Duration::from_secs(60));
+        for _ in 0..3 {
+            limiter.try_acquire().await;
+        }
+        assert!(!limiter.try_acquire().await);
+
+        limiter.reset().await;
+        assert_eq!(limiter.remaining(), 3);
+        assert!(limiter.try_acquire().await);
+    }
+
+    // ── SlidingWindow: acquire ─────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn sliding_window_acquire_immediate_when_available() {
+        let limiter = SlidingWindow::new(5, Duration::from_secs(1));
+        let waited = limiter.acquire(Duration::from_secs(1)).await.unwrap();
+        assert!(waited < Duration::from_millis(50));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn sliding_window_acquire_waits_for_expiry() {
+        let limiter = SlidingWindow::new(1, Duration::from_millis(50));
+        limiter.try_acquire().await;
+
+        let waited = limiter.acquire(Duration::from_secs(1)).await.unwrap();
+        assert!(waited >= Duration::from_millis(30));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn sliding_window_acquire_exceeds_max_wait() {
+        let limiter = SlidingWindow::new(1, Duration::from_secs(60));
+        limiter.try_acquire().await;
+
+        let result = limiter.acquire(Duration::from_millis(5)).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            RateLimitError::WaitExceeded { max_wait, .. } => {
+                assert_eq!(max_wait, Duration::from_millis(5));
+            }
+            other => panic!("expected WaitExceeded, got {other:?}"),
+        }
+    }
+
+    // ── SlidingWindow: wait_time edge cases ────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn sliding_window_wait_time_zero_when_available() {
+        let limiter = SlidingWindow::new(5, Duration::from_secs(1));
+        assert_eq!(limiter.wait_time().await, Duration::ZERO);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn sliding_window_wait_time_max_when_zero_limit() {
+        let limiter = SlidingWindow::new(0, Duration::from_secs(1));
+        assert_eq!(limiter.wait_time().await, Duration::MAX);
+    }
+
+    // ── SlidingWindow: try_acquire_n ───────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn sliding_window_try_acquire_n_default_behavior() {
+        let limiter = SlidingWindow::new(5, Duration::from_secs(60));
+
+        // Default try_acquire_n only supports permits == 1
+        assert!(limiter.try_acquire_n(1).await);
+        assert!(!limiter.try_acquire_n(2).await);
+    }
+
+    // ── FixedWindow: basic ─────────────────────────────────────────────
 
     #[fcp_async_core::runtime::test]
     async fn test_fixed_window_basic() {
@@ -350,28 +502,6 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
-    async fn test_sliding_window_wait_time() {
-        let limiter = SlidingWindow::new(1, Duration::from_millis(100));
-
-        // Acquire the only permit
-        assert!(limiter.try_acquire().await);
-
-        // Now it should be limited
-        assert!(!limiter.try_acquire().await);
-
-        // Check wait time - should be approx 100ms
-        let wait = limiter.wait_time().await;
-        assert!(wait.as_millis() > 0);
-        assert!(wait.as_millis() <= 100);
-
-        // Wait that amount
-        sleep(wait).await;
-
-        // Should be available now
-        assert!(limiter.try_acquire().await);
-    }
-
-    #[fcp_async_core::runtime::test]
     async fn test_fixed_window_wait_time() {
         let limiter = FixedWindow::new(1, Duration::from_millis(100));
 
@@ -388,5 +518,114 @@ mod tests {
 
         // Should reset
         assert!(limiter.try_acquire().await);
+    }
+
+    // ── FixedWindow: remaining ─────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn fixed_window_remaining_starts_at_limit() {
+        let limiter = FixedWindow::new(10, Duration::from_secs(60));
+        assert_eq!(limiter.remaining(), 10);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn fixed_window_remaining_decreases_on_acquire() {
+        let limiter = FixedWindow::new(5, Duration::from_secs(60));
+        limiter.try_acquire().await;
+        assert_eq!(limiter.remaining(), 4);
+        limiter.try_acquire().await;
+        limiter.try_acquire().await;
+        assert_eq!(limiter.remaining(), 2);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn fixed_window_remaining_resets_after_window() {
+        let limiter = FixedWindow::new(2, Duration::from_millis(50));
+        limiter.try_acquire().await;
+        limiter.try_acquire().await;
+        assert_eq!(limiter.remaining(), 0);
+
+        sleep(Duration::from_millis(60)).await;
+        assert_eq!(limiter.remaining(), 2);
+    }
+
+    // ── FixedWindow: state ─────────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn fixed_window_state_empty() {
+        let limiter = FixedWindow::new(5, Duration::from_secs(1));
+        let state = limiter.state();
+        assert_eq!(state.limit, 5);
+        assert_eq!(state.remaining, 5);
+        assert!(!state.is_limited);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn fixed_window_state_full() {
+        let limiter = FixedWindow::new(2, Duration::from_secs(60));
+        limiter.try_acquire().await;
+        limiter.try_acquire().await;
+
+        let state = limiter.state();
+        assert_eq!(state.limit, 2);
+        assert_eq!(state.remaining, 0);
+        assert!(state.is_limited);
+        assert!(state.reset_after > Duration::ZERO);
+    }
+
+    // ── FixedWindow: reset ─────────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn fixed_window_manual_reset() {
+        let limiter = FixedWindow::new(3, Duration::from_secs(60));
+        for _ in 0..3 {
+            limiter.try_acquire().await;
+        }
+        assert!(!limiter.try_acquire().await);
+
+        limiter.reset().await;
+        assert_eq!(limiter.remaining(), 3);
+        assert!(limiter.try_acquire().await);
+    }
+
+    // ── FixedWindow: acquire ───────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn fixed_window_acquire_immediate_when_available() {
+        let limiter = FixedWindow::new(5, Duration::from_secs(1));
+        let waited = limiter.acquire(Duration::from_secs(1)).await.unwrap();
+        assert!(waited < Duration::from_millis(50));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn fixed_window_acquire_exceeds_max_wait() {
+        let limiter = FixedWindow::new(1, Duration::from_secs(60));
+        limiter.try_acquire().await;
+
+        let result = limiter.acquire(Duration::from_millis(5)).await;
+        assert!(result.is_err());
+    }
+
+    // ── FixedWindow: wait_time edge cases ──────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn fixed_window_wait_time_zero_when_available() {
+        let limiter = FixedWindow::new(5, Duration::from_secs(1));
+        assert_eq!(limiter.wait_time().await, Duration::ZERO);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn fixed_window_wait_time_max_when_zero_limit() {
+        let limiter = FixedWindow::new(0, Duration::from_secs(1));
+        assert_eq!(limiter.wait_time().await, Duration::MAX);
+    }
+
+    // ── FixedWindow: try_acquire_n default ─────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn fixed_window_try_acquire_n_default() {
+        let limiter = FixedWindow::new(5, Duration::from_secs(60));
+        assert!(limiter.try_acquire_n(1).await);
+        assert!(!limiter.try_acquire_n(2).await);
     }
 }

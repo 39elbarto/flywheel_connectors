@@ -141,6 +141,88 @@ fn count_outliers(sorted_ns: &[u64]) -> u32 {
 mod tests {
     use super::*;
 
+    // ---- calculate_percentiles edge cases ----
+
+    #[test]
+    fn percentiles_empty() {
+        let p = calculate_percentiles(&[]);
+        assert!((p.p50_ms).abs() < f64::EPSILON);
+        assert!((p.mean_ms).abs() < f64::EPSILON);
+        assert!((p.stddev_ms).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn percentiles_single_element() {
+        let sorted = vec![5_000_000_u64]; // 5ms
+        let p = calculate_percentiles(&sorted);
+        assert!((p.p50_ms - 5.0).abs() < 0.01);
+        assert!((p.min_ms - 5.0).abs() < 0.01);
+        assert!((p.max_ms - 5.0).abs() < 0.01);
+        assert!((p.mean_ms - 5.0).abs() < 0.01);
+        assert!((p.stddev_ms).abs() < 0.01); // zero variance
+    }
+
+    #[test]
+    fn percentiles_two_elements() {
+        let sorted = vec![1_000_000_u64, 3_000_000]; // 1ms, 3ms
+        let p = calculate_percentiles(&sorted);
+        assert!((p.min_ms - 1.0).abs() < 0.01);
+        assert!((p.max_ms - 3.0).abs() < 0.01);
+        assert!((p.mean_ms - 2.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn percentiles_uniform_values() {
+        let sorted = vec![10_000_000_u64; 50]; // 50 × 10ms
+        let p = calculate_percentiles(&sorted);
+        assert!((p.p50_ms - 10.0).abs() < 0.01);
+        assert!((p.p99_ms - 10.0).abs() < 0.01);
+        assert!((p.stddev_ms).abs() < 0.01); // zero stddev
+    }
+
+    // ---- count_outliers edge cases ----
+
+    #[test]
+    fn count_outliers_too_few_elements() {
+        assert_eq!(count_outliers(&[1, 2, 3]), 0);
+        assert_eq!(count_outliers(&[1]), 0);
+        assert_eq!(count_outliers(&[]), 0);
+    }
+
+    #[test]
+    fn count_outliers_no_outliers() {
+        let sorted: Vec<u64> = (1..=20).collect();
+        let outliers = count_outliers(&sorted);
+        assert_eq!(outliers, 0);
+    }
+
+    #[test]
+    fn count_outliers_with_extreme() {
+        let mut sorted: Vec<u64> = (1..=50).collect();
+        sorted.push(10_000); // extreme outlier
+        sorted.sort_unstable();
+        let outliers = count_outliers(&sorted);
+        assert!(outliers >= 1);
+    }
+
+    // ---- run_benchmark_with_result ----
+
+    #[test]
+    fn run_benchmark_basic() {
+        let (percentiles, _outliers) = run_benchmark_with_result(2, 10, || 42_u64);
+        assert!(percentiles.min_ms >= 0.0);
+        assert!(percentiles.max_ms >= percentiles.min_ms);
+        assert!(percentiles.mean_ms >= 0.0);
+    }
+
+    #[test]
+    fn run_benchmark_zero_warmup() {
+        let (percentiles, _) = run_benchmark_with_result(0, 5, || "hello");
+        assert!(percentiles.min_ms >= 0.0);
+    }
+
+    // ---- Original tests ----
+
     #[test]
     fn percentiles_calculation() {
         // Create a simple sorted array: 1, 2, 3, ..., 100.

@@ -908,3 +908,299 @@ const fn freshness_color(level: FreshnessLevel) -> &'static str {
         FreshnessLevel::TooStale | FreshnessLevel::Missing => "\x1b[31m",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- DoctorScenario ----
+
+    #[test]
+    fn scenario_default_is_healthy() {
+        let s = DoctorScenario::default();
+        assert!(matches!(s, DoctorScenario::Healthy));
+    }
+
+    #[test]
+    fn scenario_debug() {
+        let dbg = format!("{:?}", DoctorScenario::Critical);
+        assert!(dbg.contains("Critical"));
+    }
+
+    #[test]
+    fn scenario_clone_copy() {
+        let s = DoctorScenario::Degraded;
+        let cloned = s;
+        assert!(matches!(cloned, DoctorScenario::Degraded));
+    }
+
+    // ---- build_doctor_url ----
+
+    #[test]
+    fn build_doctor_url_bare_origin() {
+        let url = build_doctor_url("http://localhost:9090").unwrap();
+        assert_eq!(url.path(), "/doctor");
+        assert_eq!(url.host_str(), Some("localhost"));
+    }
+
+    #[test]
+    fn build_doctor_url_with_trailing_slash() {
+        let url = build_doctor_url("http://localhost:9090/").unwrap();
+        assert_eq!(url.path(), "/doctor");
+    }
+
+    #[test]
+    fn build_doctor_url_preserves_custom_path() {
+        let url = build_doctor_url("http://mesh.local/v2/health").unwrap();
+        assert_eq!(url.path(), "/v2/health");
+    }
+
+    #[test]
+    fn build_doctor_url_invalid() {
+        assert!(build_doctor_url("not a url").is_err());
+    }
+
+    // ---- parse_connector_ids ----
+
+    #[test]
+    fn parse_connector_ids_valid() {
+        let ids = vec!["fcp.telegram:messaging:v1".to_string()];
+        let parsed = parse_connector_ids(&ids).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].to_string(), "fcp.telegram:messaging:v1");
+    }
+
+    #[test]
+    fn parse_connector_ids_multiple() {
+        let ids = vec![
+            "fcp.telegram:messaging:v1".to_string(),
+            "fcp.slack:messaging:v1".to_string(),
+        ];
+        let parsed = parse_connector_ids(&ids).unwrap();
+        assert_eq!(parsed.len(), 2);
+    }
+
+    #[test]
+    fn parse_connector_ids_empty() {
+        let ids: Vec<String> = vec![];
+        let parsed = parse_connector_ids(&ids).unwrap();
+        assert!(parsed.is_empty());
+    }
+
+    // ---- freshness_color ----
+
+    #[test]
+    fn freshness_color_fresh_is_green() {
+        assert_eq!(freshness_color(FreshnessLevel::Fresh), "\x1b[32m");
+    }
+
+    #[test]
+    fn freshness_color_stale_is_yellow() {
+        assert_eq!(freshness_color(FreshnessLevel::Stale), "\x1b[33m");
+    }
+
+    #[test]
+    fn freshness_color_too_stale_is_red() {
+        assert_eq!(freshness_color(FreshnessLevel::TooStale), "\x1b[31m");
+    }
+
+    #[test]
+    fn freshness_color_missing_is_red() {
+        assert_eq!(freshness_color(FreshnessLevel::Missing), "\x1b[31m");
+    }
+
+    // ---- simulate_report scenarios ----
+
+    #[test]
+    fn simulate_healthy_report() {
+        let zone_id: ZoneId = "z:test".parse().unwrap();
+        let report = simulate_report(&zone_id, &[], DoctorScenario::Healthy);
+        assert_eq!(report.overall_status, OverallStatus::Ok);
+        assert_eq!(report.zone_id, "z:test");
+        assert!(!report.degraded_mode.is_degraded);
+        assert_eq!(report.checkpoint.freshness, FreshnessLevel::Fresh);
+        assert_eq!(report.revocation.freshness, FreshnessLevel::Fresh);
+    }
+
+    #[test]
+    fn simulate_degraded_report() {
+        let zone_id: ZoneId = "z:test".parse().unwrap();
+        let report = simulate_report(&zone_id, &[], DoctorScenario::Degraded);
+        assert_eq!(report.overall_status, OverallStatus::Warn);
+        assert!(report.degraded_mode.is_degraded);
+        assert_eq!(report.checkpoint.freshness, FreshnessLevel::Stale);
+    }
+
+    #[test]
+    fn simulate_stale_checkpoint_report() {
+        let zone_id: ZoneId = "z:test".parse().unwrap();
+        let report = simulate_report(&zone_id, &[], DoctorScenario::StaleCheckpoint);
+        assert_eq!(report.overall_status, OverallStatus::Fail);
+        assert_eq!(report.checkpoint.freshness, FreshnessLevel::TooStale);
+        assert!(report.degraded_mode.is_degraded);
+    }
+
+    #[test]
+    fn simulate_stale_revocation_report() {
+        let zone_id: ZoneId = "z:test".parse().unwrap();
+        let report = simulate_report(&zone_id, &[], DoctorScenario::StaleRevocation);
+        assert_eq!(report.overall_status, OverallStatus::Fail);
+        assert_eq!(report.revocation.freshness, FreshnessLevel::TooStale);
+    }
+
+    #[test]
+    fn simulate_network_partition_report() {
+        let zone_id: ZoneId = "z:test".parse().unwrap();
+        let report = simulate_report(&zone_id, &[], DoctorScenario::NetworkPartition);
+        assert_eq!(report.overall_status, OverallStatus::Warn);
+        assert!(report.degraded_mode.is_degraded);
+        assert!(report.degraded_mode.reasons.len() >= 2);
+        assert!(!report.transport_policy.allow_derp);
+    }
+
+    #[test]
+    fn simulate_low_coverage_report() {
+        let zone_id: ZoneId = "z:test".parse().unwrap();
+        let report = simulate_report(&zone_id, &[], DoctorScenario::LowCoverage);
+        assert_eq!(report.overall_status, OverallStatus::Warn);
+        assert!(!report.store_coverage.store_healthy);
+    }
+
+    #[test]
+    fn simulate_critical_report() {
+        let zone_id: ZoneId = "z:test".parse().unwrap();
+        let report = simulate_report(&zone_id, &[], DoctorScenario::Critical);
+        assert_eq!(report.overall_status, OverallStatus::Fail);
+        assert_eq!(report.checkpoint.freshness, FreshnessLevel::Missing);
+        assert_eq!(report.revocation.freshness, FreshnessLevel::Missing);
+        assert!(!report.transport_policy.allow_lan);
+    }
+
+    // ---- simulate_self_checks ----
+
+    #[test]
+    fn simulate_self_checks_healthy() {
+        let connector: ConnectorId = "fcp.test:example:v1".parse().unwrap();
+        let checks = simulate_self_checks(&[connector], DoctorScenario::Healthy);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(
+            checks[0].report.status,
+            fcp_core::SelfCheckStatus::Ok
+        );
+    }
+
+    #[test]
+    fn simulate_self_checks_critical() {
+        let connector: ConnectorId = "fcp.test:example:v1".parse().unwrap();
+        let checks = simulate_self_checks(&[connector], DoctorScenario::Critical);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(
+            checks[0].report.status,
+            fcp_core::SelfCheckStatus::Failed
+        );
+    }
+
+    #[test]
+    fn simulate_self_checks_degraded_scenario() {
+        let connector: ConnectorId = "fcp.test:example:v1".parse().unwrap();
+        let checks = simulate_self_checks(&[connector], DoctorScenario::Degraded);
+        assert_eq!(
+            checks[0].report.status,
+            fcp_core::SelfCheckStatus::Degraded
+        );
+    }
+
+    #[test]
+    fn simulate_self_checks_empty_connectors() {
+        let checks = simulate_self_checks(&[], DoctorScenario::Healthy);
+        assert!(checks.is_empty());
+    }
+
+    #[test]
+    fn simulate_self_checks_multiple_connectors() {
+        let connectors: Vec<ConnectorId> = vec![
+            "fcp.test:a:v1".parse().unwrap(),
+            "fcp.test:b:v1".parse().unwrap(),
+        ];
+        let checks = simulate_self_checks(&connectors, DoctorScenario::Healthy);
+        assert_eq!(checks.len(), 2);
+    }
+
+    // ---- simulate_report with self_checks ----
+
+    #[test]
+    fn simulate_report_includes_self_checks() {
+        let zone_id: ZoneId = "z:test".parse().unwrap();
+        let connector: ConnectorId = "fcp.test:example:v1".parse().unwrap();
+        let report = simulate_report(&zone_id, &[connector], DoctorScenario::Healthy);
+        assert_eq!(report.connector_self_checks.len(), 1);
+    }
+
+    #[test]
+    fn simulate_report_no_self_checks_when_empty() {
+        let zone_id: ZoneId = "z:test".parse().unwrap();
+        let report = simulate_report(&zone_id, &[], DoctorScenario::Healthy);
+        assert!(report.connector_self_checks.is_empty());
+    }
+
+    // ---- DoctorReport JSON roundtrip ----
+
+    #[test]
+    fn simulate_report_json_roundtrip() {
+        let zone_id: ZoneId = "z:test".parse().unwrap();
+        let report = simulate_report(&zone_id, &[], DoctorScenario::Healthy);
+        let json = serde_json::to_string(&report).unwrap();
+        let parsed: types::DoctorReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.zone_id, "z:test");
+        assert_eq!(parsed.overall_status, OverallStatus::Ok);
+    }
+
+    // ---- DoctorRequest serde ----
+
+    #[test]
+    fn doctor_request_serialize() {
+        let req = DoctorRequest {
+            zone_id: "z:work".to_string(),
+            connectors: vec!["fcp.test:a:v1".to_string()],
+            self_check: true,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"zone_id\":\"z:work\""));
+        assert!(json.contains("\"self_check\":true"));
+    }
+
+    // ---- Report checks ----
+
+    #[test]
+    fn healthy_report_has_passing_checks() {
+        let zone_id: ZoneId = "z:test".parse().unwrap();
+        let report = simulate_report(&zone_id, &[], DoctorScenario::Healthy);
+        assert!(report.checks.iter().all(|c| c.status == types::CheckStatus::Ok));
+    }
+
+    #[test]
+    fn degraded_report_has_warning_checks() {
+        let zone_id: ZoneId = "z:test".parse().unwrap();
+        let report = simulate_report(&zone_id, &[], DoctorScenario::Degraded);
+        assert!(report.checks.iter().any(|c| c.status == types::CheckStatus::Warn));
+    }
+
+    #[test]
+    fn critical_report_has_failing_checks() {
+        let zone_id: ZoneId = "z:test".parse().unwrap();
+        let report = simulate_report(&zone_id, &[], DoctorScenario::Critical);
+        assert!(report.checks.iter().any(|c| c.status == types::CheckStatus::Fail));
+    }
+
+    #[test]
+    fn stale_checkpoint_has_reason_code() {
+        let zone_id: ZoneId = "z:test".parse().unwrap();
+        let report = simulate_report(&zone_id, &[], DoctorScenario::StaleCheckpoint);
+        let failing_check = report
+            .checks
+            .iter()
+            .find(|c| c.status == types::CheckStatus::Fail)
+            .expect("should have a failing check");
+        assert!(failing_check.reason_code.is_some());
+    }
+}

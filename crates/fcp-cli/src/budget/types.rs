@@ -54,3 +54,148 @@ pub struct BudgetLineItem {
     /// Status for this budget.
     pub status: BudgetStatus,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn sample_line_item() -> BudgetLineItem {
+        BudgetLineItem {
+            metric: UsageMetricKind::Tokens,
+            used: 500,
+            limit: 1000,
+            remaining: 500,
+            window_seconds: 3600,
+            window_started_at: 1_700_000_000,
+            window_resets_at: 1_700_003_600,
+            status: BudgetStatus::Ok,
+        }
+    }
+
+    #[test]
+    fn budget_report_schema_version() {
+        assert_eq!(BudgetReport::SCHEMA_VERSION, "1.0.0");
+    }
+
+    #[test]
+    fn budget_report_serde_roundtrip() {
+        let report = BudgetReport {
+            schema_version: BudgetReport::SCHEMA_VERSION.to_string(),
+            generated_at: Utc::now(),
+            zones: vec![ZoneBudgetReport {
+                zone_id: "z:test".to_string(),
+                enforcement: BudgetEnforcement::Warn,
+                budgets: vec![sample_line_item()],
+                updated_at: 1_700_000_000,
+            }],
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        let back: BudgetReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.schema_version, "1.0.0");
+        assert_eq!(back.zones.len(), 1);
+        assert_eq!(back.zones[0].zone_id, "z:test");
+    }
+
+    #[test]
+    fn budget_report_empty_zones() {
+        let report = BudgetReport {
+            schema_version: "1.0.0".to_string(),
+            generated_at: Utc::now(),
+            zones: vec![],
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        let back: BudgetReport = serde_json::from_str(&json).unwrap();
+        assert!(back.zones.is_empty());
+    }
+
+    #[test]
+    fn zone_budget_report_serde_roundtrip() {
+        let zone = ZoneBudgetReport {
+            zone_id: "z:private".to_string(),
+            enforcement: BudgetEnforcement::Deny,
+            budgets: vec![sample_line_item()],
+            updated_at: 1_700_000_000,
+        };
+        let json = serde_json::to_string(&zone).unwrap();
+        let back: ZoneBudgetReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.zone_id, "z:private");
+        assert_eq!(back.enforcement, BudgetEnforcement::Deny);
+        assert_eq!(back.updated_at, 1_700_000_000);
+    }
+
+    #[test]
+    fn budget_line_item_serde_roundtrip() {
+        let item = sample_line_item();
+        let json = serde_json::to_string(&item).unwrap();
+        let back: BudgetLineItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.metric, UsageMetricKind::Tokens);
+        assert_eq!(back.used, 500);
+        assert_eq!(back.limit, 1000);
+        assert_eq!(back.remaining, 500);
+        assert_eq!(back.status, BudgetStatus::Ok);
+    }
+
+    #[test]
+    fn budget_line_item_exceeded() {
+        let item = BudgetLineItem {
+            metric: UsageMetricKind::Requests,
+            used: 200,
+            limit: 100,
+            remaining: 0,
+            window_seconds: 60,
+            window_started_at: 1_700_000_000,
+            window_resets_at: 1_700_000_060,
+            status: BudgetStatus::Exceeded,
+        };
+        let json = serde_json::to_string(&item).unwrap();
+        let back: BudgetLineItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.status, BudgetStatus::Exceeded);
+        assert!(back.used > back.limit);
+    }
+
+    #[test]
+    fn budget_line_item_bytes_metric() {
+        let item = BudgetLineItem {
+            metric: UsageMetricKind::Bytes,
+            used: 5_000_000,
+            limit: 10_000_000,
+            remaining: 5_000_000,
+            window_seconds: 3600,
+            window_started_at: 1_700_000_000,
+            window_resets_at: 1_700_003_600,
+            status: BudgetStatus::Ok,
+        };
+        let json = serde_json::to_string(&item).unwrap();
+        let back: BudgetLineItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.metric, UsageMetricKind::Bytes);
+    }
+
+    #[test]
+    fn budget_report_debug() {
+        let report = BudgetReport {
+            schema_version: "1.0.0".to_string(),
+            generated_at: Utc::now(),
+            zones: vec![],
+        };
+        let dbg = format!("{report:?}");
+        assert!(dbg.contains("BudgetReport"));
+    }
+
+    #[test]
+    fn budget_report_clone() {
+        let report = BudgetReport {
+            schema_version: "1.0.0".to_string(),
+            generated_at: Utc::now(),
+            zones: vec![ZoneBudgetReport {
+                zone_id: "z:test".to_string(),
+                enforcement: BudgetEnforcement::Warn,
+                budgets: vec![],
+                updated_at: 0,
+            }],
+        };
+        let cloned = report.clone();
+        assert_eq!(cloned.zones.len(), 1);
+        assert_eq!(cloned.zones[0].zone_id, "z:test");
+    }
+}

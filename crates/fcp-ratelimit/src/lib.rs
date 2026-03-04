@@ -204,3 +204,193 @@ impl Default for RateLimitConfig {
         Self::sixty_per_minute()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- RateLimitConfig ----
+
+    #[test]
+    fn config_new() {
+        let config = RateLimitConfig::new(100, Duration::from_secs(60));
+        assert_eq!(config.requests_per_window, 100);
+        assert_eq!(config.window, Duration::from_secs(60));
+        assert!(config.burst_size.is_none());
+        assert!(!config.enable_queue);
+        assert!(config.max_queue_size.is_none());
+    }
+
+    #[test]
+    fn config_default_is_sixty_per_minute() {
+        let config = RateLimitConfig::default();
+        assert_eq!(config.requests_per_window, 60);
+        assert_eq!(config.window, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn config_with_burst() {
+        let config = RateLimitConfig::new(100, Duration::from_secs(60)).with_burst(200);
+        assert_eq!(config.burst_size, Some(200));
+        assert_eq!(config.requests_per_window, 100);
+    }
+
+    #[test]
+    fn config_with_queue() {
+        let config = RateLimitConfig::new(100, Duration::from_secs(60)).with_queue(50);
+        assert!(config.enable_queue);
+        assert_eq!(config.max_queue_size, Some(50));
+    }
+
+    #[test]
+    fn config_one_per_second() {
+        let config = RateLimitConfig::one_per_second();
+        assert_eq!(config.requests_per_window, 1);
+        assert_eq!(config.window, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn config_ten_per_second() {
+        let config = RateLimitConfig::ten_per_second();
+        assert_eq!(config.requests_per_window, 10);
+        assert_eq!(config.window, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn config_sixty_per_minute() {
+        let config = RateLimitConfig::sixty_per_minute();
+        assert_eq!(config.requests_per_window, 60);
+        assert_eq!(config.window, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn config_thousand_per_minute() {
+        let config = RateLimitConfig::thousand_per_minute();
+        assert_eq!(config.requests_per_window, 1000);
+        assert_eq!(config.window, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn config_chaining() {
+        let config = RateLimitConfig::new(100, Duration::from_secs(60))
+            .with_burst(200)
+            .with_queue(50);
+        assert_eq!(config.requests_per_window, 100);
+        assert_eq!(config.burst_size, Some(200));
+        assert!(config.enable_queue);
+        assert_eq!(config.max_queue_size, Some(50));
+    }
+
+    #[test]
+    fn config_serde_roundtrip() {
+        let config = RateLimitConfig::new(100, Duration::from_secs(60)).with_burst(200);
+        let json = serde_json::to_string(&config).unwrap();
+        let back: RateLimitConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.requests_per_window, 100);
+        assert_eq!(back.burst_size, Some(200));
+    }
+
+    #[test]
+    fn config_serde_defaults_for_optional_fields() {
+        let json = r#"{"requests_per_window":50,"window":{"secs":30,"nanos":0}}"#;
+        let config: RateLimitConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.requests_per_window, 50);
+        assert!(config.burst_size.is_none());
+        assert!(!config.enable_queue);
+        assert!(config.max_queue_size.is_none());
+    }
+
+    #[test]
+    fn config_debug() {
+        let config = RateLimitConfig::default();
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("requests_per_window"));
+    }
+
+    #[test]
+    fn config_clone() {
+        let config = RateLimitConfig::new(100, Duration::from_secs(60)).with_burst(200);
+        let cloned = config.clone();
+        assert_eq!(cloned.requests_per_window, config.requests_per_window);
+        assert_eq!(cloned.burst_size, config.burst_size);
+    }
+
+    // ---- RateLimitState ----
+
+    #[test]
+    fn state_serialize() {
+        let state = RateLimitState {
+            limit: 100,
+            remaining: 50,
+            reset_after: Duration::from_secs(30),
+            is_limited: false,
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains("\"limit\":100"));
+        assert!(json.contains("\"remaining\":50"));
+    }
+
+    #[test]
+    fn state_debug() {
+        let state = RateLimitState {
+            limit: 10,
+            remaining: 5,
+            reset_after: Duration::from_secs(1),
+            is_limited: false,
+        };
+        let dbg = format!("{state:?}");
+        assert!(dbg.contains("limit"));
+        assert!(dbg.contains("remaining"));
+    }
+
+    #[test]
+    fn state_clone() {
+        let state = RateLimitState {
+            limit: 10,
+            remaining: 3,
+            reset_after: Duration::from_millis(500),
+            is_limited: true,
+        };
+        let cloned = state.clone();
+        assert_eq!(cloned.limit, 10);
+        assert_eq!(cloned.remaining, 3);
+        assert!(cloned.is_limited);
+    }
+
+    // ---- RateLimitError ----
+
+    #[test]
+    fn error_exceeded_display() {
+        let err = RateLimitError::Exceeded {
+            retry_after: Duration::from_secs(5),
+        };
+        let s = err.to_string();
+        assert!(s.contains("Rate limit exceeded"));
+        assert!(s.contains("5s"));
+    }
+
+    #[test]
+    fn error_wait_exceeded_display() {
+        let err = RateLimitError::WaitExceeded {
+            wait_time: Duration::from_secs(10),
+            max_wait: Duration::from_secs(5),
+        };
+        let s = err.to_string();
+        assert!(s.contains("exceeds maximum"));
+    }
+
+    #[test]
+    fn error_invalid_config_display() {
+        let err = RateLimitError::InvalidConfig("bad value".into());
+        assert!(err.to_string().contains("bad value"));
+    }
+
+    #[test]
+    fn error_debug() {
+        let err = RateLimitError::Exceeded {
+            retry_after: Duration::from_secs(1),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Exceeded"));
+    }
+}

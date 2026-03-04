@@ -552,3 +552,377 @@ fn print_human_report(report: &NetExplainReport) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_constraints() -> NetworkConstraints {
+        NetworkConstraints {
+            host_allow: vec!["api.example.com".to_string()],
+            port_allow: vec![443, 80],
+            ip_allow: vec![],
+            cidr_deny: vec!["10.0.0.0/8".to_string()],
+            deny_localhost: true,
+            deny_private_ranges: true,
+            deny_tailnet_ranges: true,
+            require_sni: true,
+            spki_pins: vec![],
+            deny_ip_literals: true,
+            require_host_canonicalization: true,
+            dns_max_ips: 4,
+            max_redirects: 5,
+            connect_timeout_ms: 5000,
+            total_timeout_ms: 30000,
+            max_response_bytes: 10_485_760,
+        }
+    }
+
+    // ---- parse_url_info ----
+
+    #[test]
+    fn parse_url_info_https() {
+        let info = parse_url_info("https://api.example.com/v1/data");
+        assert_eq!(info.host.as_deref(), Some("api.example.com"));
+        assert_eq!(info.port, Some(443));
+    }
+
+    #[test]
+    fn parse_url_info_http_with_port() {
+        let info = parse_url_info("http://localhost:8080/test");
+        assert_eq!(info.host.as_deref(), Some("localhost"));
+        assert_eq!(info.port, Some(8080));
+    }
+
+    #[test]
+    fn parse_url_info_invalid_url() {
+        let info = parse_url_info("not a url");
+        assert!(info.host.is_none());
+        assert!(info.port.is_none());
+    }
+
+    #[test]
+    fn parse_url_info_ip_literal() {
+        let info = parse_url_info("http://192.168.1.1:3000/api");
+        assert_eq!(info.host.as_deref(), Some("192.168.1.1"));
+        assert_eq!(info.port, Some(3000));
+    }
+
+    // ---- deny_reason_code ----
+
+    #[test]
+    fn deny_reason_code_host_not_allowed() {
+        let code = deny_reason_code(DenyReason::HostNotAllowed);
+        assert!(!code.is_empty());
+    }
+
+    #[test]
+    fn deny_reason_code_port_not_allowed() {
+        let code = deny_reason_code(DenyReason::PortNotAllowed);
+        assert!(!code.is_empty());
+    }
+
+    #[test]
+    fn deny_reason_code_ip_literal() {
+        let code = deny_reason_code(DenyReason::IpLiteralDenied);
+        assert!(!code.is_empty());
+    }
+
+    #[test]
+    fn deny_reason_code_localhost() {
+        let code = deny_reason_code(DenyReason::LocalhostDenied);
+        assert!(!code.is_empty());
+    }
+
+    #[test]
+    fn deny_reason_code_sni_mismatch() {
+        let code = deny_reason_code(DenyReason::SniMismatch);
+        assert!(!code.is_empty());
+    }
+
+    #[test]
+    fn deny_reason_code_max_redirects() {
+        let code = deny_reason_code(DenyReason::MaxRedirectsExceeded);
+        assert!(!code.is_empty());
+    }
+
+    // ---- error_reason_code ----
+
+    #[test]
+    fn error_reason_code_invalid_request() {
+        assert_eq!(
+            error_reason_code(&EgressError::InvalidRequest("bad".into())),
+            "invalid_request"
+        );
+    }
+
+    #[test]
+    fn error_reason_code_invalid_url() {
+        assert_eq!(
+            error_reason_code(&EgressError::InvalidUrl("bad url".into())),
+            "invalid_url"
+        );
+    }
+
+    #[test]
+    fn error_reason_code_dns_failed() {
+        assert_eq!(
+            error_reason_code(&EgressError::DnsResolutionFailed("nxdomain".into())),
+            "dns_resolution_failed"
+        );
+    }
+
+    // ---- resolve_ip_literal ----
+
+    #[test]
+    fn resolve_ip_literal_from_parsed() {
+        let parsed = ParsedUrlInfo {
+            host: Some("192.168.1.1".to_string()),
+            port: Some(80),
+        };
+        let ip = resolve_ip_literal(&parsed, None).unwrap();
+        assert_eq!(ip, "192.168.1.1".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn resolve_ip_literal_from_override() {
+        let parsed = ParsedUrlInfo {
+            host: Some("example.com".to_string()),
+            port: Some(443),
+        };
+        let ip = resolve_ip_literal(&parsed, Some("10.0.0.1")).unwrap();
+        assert_eq!(ip, "10.0.0.1".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn resolve_ip_literal_hostname_returns_none() {
+        let parsed = ParsedUrlInfo {
+            host: Some("example.com".to_string()),
+            port: Some(443),
+        };
+        assert!(resolve_ip_literal(&parsed, None).is_none());
+    }
+
+    #[test]
+    fn resolve_ip_literal_no_host_returns_none() {
+        let parsed = ParsedUrlInfo {
+            host: None,
+            port: None,
+        };
+        assert!(resolve_ip_literal(&parsed, None).is_none());
+    }
+
+    // ---- match_cidr ----
+
+    #[test]
+    fn match_cidr_hits() {
+        let cidrs = vec!["10.0.0.0/8".to_string(), "172.16.0.0/12".to_string()];
+        let ip: IpAddr = "10.1.2.3".parse().unwrap();
+        let matched = match_cidr(ip, &cidrs);
+        assert_eq!(matched.as_deref(), Some("10.0.0.0/8"));
+    }
+
+    #[test]
+    fn match_cidr_miss() {
+        let cidrs = vec!["10.0.0.0/8".to_string()];
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        assert!(match_cidr(ip, &cidrs).is_none());
+    }
+
+    #[test]
+    fn match_cidr_empty_list() {
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        assert!(match_cidr(ip, &[]).is_none());
+    }
+
+    // ---- canonical_or_raw ----
+
+    #[test]
+    fn canonical_or_raw_with_hostname() {
+        let result = canonical_or_raw(Some("example.com"));
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn canonical_or_raw_none() {
+        assert!(canonical_or_raw(None).is_none());
+    }
+
+    // ---- NetExplainReport serde ----
+
+    #[test]
+    fn net_explain_report_serialize_allowed() {
+        let report = NetExplainReport {
+            url: "https://api.example.com".to_string(),
+            manifest_path: "manifest.toml".to_string(),
+            operation: "send_message".to_string(),
+            allowed: true,
+            reason_code: None,
+            rule_id: None,
+            details: None,
+            suggestion: None,
+            canonical_host: Some("api.example.com".to_string()),
+            port: Some(443),
+            tls_required: Some(true),
+            expected_sni: None,
+            max_redirects: Some(5),
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(json.contains("\"allowed\":true"));
+        assert!(json.contains("\"port\":443"));
+        assert!(!json.contains("reason_code"));
+    }
+
+    #[test]
+    fn net_explain_report_serialize_denied() {
+        let report = NetExplainReport {
+            url: "http://evil.com".to_string(),
+            manifest_path: "manifest.toml".to_string(),
+            operation: "fetch".to_string(),
+            allowed: false,
+            reason_code: Some("HostNotAllowed".to_string()),
+            rule_id: Some("network_constraints.host_allow".to_string()),
+            details: Some("host not in allow list".to_string()),
+            suggestion: Some(SuggestedChange {
+                field: "network_constraints.host_allow".to_string(),
+                action: "add".to_string(),
+                value: Some("evil.com".to_string()),
+                note: None,
+            }),
+            canonical_host: None,
+            port: None,
+            tls_required: None,
+            expected_sni: None,
+            max_redirects: Some(5),
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(json.contains("\"allowed\":false"));
+        assert!(json.contains("HostNotAllowed"));
+        assert!(json.contains("\"action\":\"add\""));
+    }
+
+    // ---- SuggestedChange serde ----
+
+    #[test]
+    fn suggested_change_serialize() {
+        let s = SuggestedChange {
+            field: "network_constraints.host_allow".to_string(),
+            action: "add".to_string(),
+            value: Some("api.example.com".to_string()),
+            note: Some("add to host allow list".to_string()),
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"field\":\"network_constraints.host_allow\""));
+        assert!(json.contains("\"note\":\"add to host allow list\""));
+    }
+
+    #[test]
+    fn suggested_change_serialize_minimal() {
+        let s = SuggestedChange {
+            field: "some.field".to_string(),
+            action: "set".to_string(),
+            value: None,
+            note: None,
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(!json.contains("value"));
+        assert!(!json.contains("note"));
+    }
+
+    // ---- rule_id_for ----
+
+    #[test]
+    fn rule_id_for_host_not_allowed() {
+        let constraints = test_constraints();
+        let parsed = ParsedUrlInfo {
+            host: Some("example.com".to_string()),
+            port: Some(443),
+        };
+        let id = rule_id_for(DenyReason::HostNotAllowed, &constraints, &parsed, None);
+        assert_eq!(id.as_deref(), Some("network_constraints.host_allow"));
+    }
+
+    #[test]
+    fn rule_id_for_port_not_allowed() {
+        let constraints = test_constraints();
+        let parsed = ParsedUrlInfo {
+            host: None,
+            port: None,
+        };
+        let id = rule_id_for(DenyReason::PortNotAllowed, &constraints, &parsed, None);
+        assert_eq!(id.as_deref(), Some("network_constraints.port_allow"));
+    }
+
+    #[test]
+    fn rule_id_for_sni_mismatch() {
+        let constraints = test_constraints();
+        let parsed = ParsedUrlInfo {
+            host: None,
+            port: None,
+        };
+        let id = rule_id_for(DenyReason::SniMismatch, &constraints, &parsed, None);
+        assert_eq!(id.as_deref(), Some("network_constraints.require_sni"));
+    }
+
+    // ---- suggestion_for ----
+
+    #[test]
+    fn suggestion_for_host_not_allowed() {
+        let constraints = test_constraints();
+        let parsed = ParsedUrlInfo {
+            host: Some("api.example.com".to_string()),
+            port: Some(443),
+        };
+        let suggestion =
+            suggestion_for(DenyReason::HostNotAllowed, &constraints, &parsed, None, None);
+        assert!(suggestion.is_some());
+        let s = suggestion.unwrap();
+        assert_eq!(s.field, "network_constraints.host_allow");
+        assert_eq!(s.action, "add");
+    }
+
+    #[test]
+    fn suggestion_for_port_not_allowed() {
+        let constraints = test_constraints();
+        let parsed = ParsedUrlInfo {
+            host: None,
+            port: Some(8080),
+        };
+        let suggestion =
+            suggestion_for(DenyReason::PortNotAllowed, &constraints, &parsed, None, Some(8080));
+        assert!(suggestion.is_some());
+        let s = suggestion.unwrap();
+        assert_eq!(s.field, "network_constraints.port_allow");
+        assert_eq!(s.value.as_deref(), Some("8080"));
+    }
+
+    #[test]
+    fn suggestion_for_ip_literal() {
+        let constraints = test_constraints();
+        let parsed = ParsedUrlInfo {
+            host: None,
+            port: None,
+        };
+        let suggestion =
+            suggestion_for(DenyReason::IpLiteralDenied, &constraints, &parsed, None, None);
+        assert!(suggestion.is_some());
+        let s = suggestion.unwrap();
+        assert_eq!(s.action, "set");
+        assert_eq!(s.value.as_deref(), Some("false"));
+    }
+
+    #[test]
+    fn suggestion_for_max_redirects() {
+        let constraints = test_constraints();
+        let parsed = ParsedUrlInfo {
+            host: None,
+            port: None,
+        };
+        let suggestion =
+            suggestion_for(DenyReason::MaxRedirectsExceeded, &constraints, &parsed, None, None);
+        assert!(suggestion.is_some());
+        let s = suggestion.unwrap();
+        assert_eq!(s.field, "network_constraints.max_redirects");
+        assert_eq!(s.action, "increase");
+    }
+}

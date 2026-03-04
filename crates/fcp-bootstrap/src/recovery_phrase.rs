@@ -278,4 +278,108 @@ mod tests {
             Err(RecoveryPhraseError::InvalidMnemonic(_))
         ));
     }
+
+    // ---- from_words ----
+
+    #[test]
+    fn test_from_words_roundtrip() {
+        let test_phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
+        let phrase = RecoveryPhrase::from_mnemonic(test_phrase).unwrap();
+        let words = phrase.words();
+        let phrase2 = RecoveryPhrase::from_words(&words).unwrap();
+        assert_eq!(phrase, phrase2);
+    }
+
+    #[test]
+    fn test_from_words_wrong_count() {
+        let result = RecoveryPhrase::from_words(&["abandon", "abandon", "abandon"]);
+        assert!(matches!(
+            result,
+            Err(RecoveryPhraseError::WrongWordCount(3))
+        ));
+    }
+
+    // ---- to_phrase ----
+
+    #[test]
+    fn test_to_phrase_returns_24_words() {
+        let phrase = RecoveryPhrase::generate().unwrap();
+        let phrase_str = phrase.to_phrase();
+        let words: Vec<&str> = phrase_str.split_whitespace().collect();
+        assert_eq!(words.len(), 24);
+    }
+
+    // ---- entropy ----
+
+    #[test]
+    fn test_entropy_is_32_bytes() {
+        let phrase = RecoveryPhrase::generate().unwrap();
+        assert_eq!(phrase.entropy().len(), 32);
+    }
+
+    // ---- clone and eq ----
+
+    #[test]
+    fn test_clone_preserves_equality() {
+        let phrase = RecoveryPhrase::generate().unwrap();
+        let cloned = phrase.clone();
+        assert_eq!(phrase, cloned);
+    }
+
+    #[test]
+    fn test_different_phrases_not_equal() {
+        let phrase1 = RecoveryPhrase::generate().unwrap();
+        let phrase2 = RecoveryPhrase::generate().unwrap();
+        assert_ne!(phrase1, phrase2);
+    }
+
+    // ---- Debug doesn't leak phrase ----
+
+    #[test]
+    fn test_debug_does_not_leak_phrase() {
+        let phrase = RecoveryPhrase::generate().unwrap();
+        let debug = format!("{phrase:?}");
+        assert!(debug.contains("RecoveryPhrase"));
+        assert!(debug.contains("word_count"));
+        // Should NOT contain actual mnemonic words
+        assert!(!debug.contains("abandon"));
+    }
+
+    // ---- OwnerKeypair ----
+
+    #[test]
+    fn test_owner_keypair_sign_verify() {
+        let test_phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
+        let phrase = RecoveryPhrase::from_mnemonic(test_phrase).unwrap();
+        let keypair = phrase.derive_owner_keypair();
+        let message = b"test message for signing";
+        let signature = keypair.sign(message);
+        assert!(keypair.public().verify(message, &signature).is_ok());
+    }
+
+    #[test]
+    fn test_owner_keypair_to_bytes() {
+        let phrase = RecoveryPhrase::generate().unwrap();
+        let keypair = phrase.derive_owner_keypair();
+        let bytes = keypair.to_bytes();
+        assert_eq!(bytes.len(), 32);
+    }
+
+    #[test]
+    fn test_owner_keypair_debug_no_private_key() {
+        let phrase = RecoveryPhrase::generate().unwrap();
+        let keypair = phrase.derive_owner_keypair();
+        let debug = format!("{keypair:?}");
+        assert!(debug.contains("OwnerKeypair"));
+        assert!(debug.contains("public_key"));
+    }
+
+    // ---- RecoveryPhraseError Display ----
+
+    #[test]
+    fn test_error_display() {
+        assert!(RecoveryPhraseError::WrongWordCount(12).to_string().contains("12"));
+        assert!(RecoveryPhraseError::InvalidMnemonic("bad".into()).to_string().contains("bad"));
+        assert!(RecoveryPhraseError::DerivationFailed("failed".into()).to_string().contains("failed"));
+    }
 }

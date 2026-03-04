@@ -346,4 +346,176 @@ mod tests {
             Err(GenesisValidationError::MissingRequiredZone(_))
         ));
     }
+
+    // ---- Validation edge cases ----
+
+    #[test]
+    fn genesis_validation_rejects_wrong_schema_version() {
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let mut genesis = GenesisState::create(&verifying_key);
+        genesis.schema_version = 99;
+        let result = genesis.validate();
+        assert!(matches!(
+            result,
+            Err(GenesisValidationError::UnsupportedSchemaVersion(99))
+        ));
+    }
+
+    #[test]
+    fn genesis_validation_rejects_invalid_owner_key() {
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let mut genesis = GenesisState::create(&verifying_key);
+        genesis.owner_public_key = [0xFF; 32]; // not a valid Ed25519 compressed point
+        let result = genesis.validate();
+        assert!(matches!(
+            result,
+            Err(GenesisValidationError::InvalidOwnerKey)
+        ));
+    }
+
+    #[test]
+    fn genesis_validation_rejects_future_timestamp() {
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let mut genesis = GenesisState::create(&verifying_key);
+        genesis.created_at = Utc::now() + chrono::Duration::hours(1);
+        let result = genesis.validate();
+        assert!(matches!(
+            result,
+            Err(GenesisValidationError::FutureTimestamp)
+        ));
+    }
+
+    #[test]
+    fn genesis_validation_rejects_invalid_zone_id_format() {
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let mut genesis = GenesisState::create(&verifying_key);
+        genesis.initial_zones.push(InitialZone {
+            zone_id: "bad_zone".to_string(),
+            name: "Bad Zone".to_string(),
+            integrity_level: 0,
+            confidentiality_level: 0,
+        });
+        let result = genesis.validate();
+        assert!(matches!(
+            result,
+            Err(GenesisValidationError::InvalidZoneId(_))
+        ));
+    }
+
+    // ---- Each required zone triggers MissingRequiredZone ----
+
+    #[test]
+    fn genesis_validation_missing_each_required_zone() {
+        for required in REQUIRED_ZONES {
+            let signing_key = Ed25519SigningKey::generate();
+            let verifying_key = signing_key.verifying_key();
+            let mut genesis = GenesisState::create(&verifying_key);
+            genesis.initial_zones.retain(|z| z.zone_id != *required);
+            let result = genesis.validate();
+            assert!(
+                matches!(result, Err(GenesisValidationError::MissingRequiredZone(ref z)) if z == required),
+                "Expected MissingRequiredZone for {required}"
+            );
+        }
+    }
+
+    // ---- Fingerprint properties ----
+
+    #[test]
+    fn genesis_fingerprint_starts_with_sha256() {
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let genesis = GenesisState::create(&verifying_key);
+        assert!(genesis.fingerprint().starts_with("SHA256:"));
+    }
+
+    #[test]
+    fn genesis_different_keys_different_fingerprints() {
+        let key1 = Ed25519SigningKey::generate();
+        let key2 = Ed25519SigningKey::generate();
+        let g1 = GenesisState::create(&key1.verifying_key());
+        let g2 = GenesisState::create(&key2.verifying_key());
+        assert_ne!(g1.fingerprint(), g2.fingerprint());
+    }
+
+    // ---- Zone hierarchy ----
+
+    #[test]
+    fn genesis_zone_integrity_levels_are_descending() {
+        let signing_key = Ed25519SigningKey::generate();
+        let genesis = GenesisState::create(&signing_key.verifying_key());
+        let levels: Vec<u8> = genesis.initial_zones.iter().map(|z| z.integrity_level).collect();
+        // z:owner=255, z:private=200, z:work=150, z:community=100, z:public=50
+        for w in levels.windows(2) {
+            assert!(w[0] > w[1], "integrity levels should be strictly descending");
+        }
+    }
+
+    #[test]
+    fn genesis_has_5_initial_zones() {
+        let signing_key = Ed25519SigningKey::generate();
+        let genesis = GenesisState::create(&signing_key.verifying_key());
+        assert_eq!(genesis.initial_zones.len(), 5);
+    }
+
+    // ---- Deterministic genesis ----
+
+    #[test]
+    fn genesis_deterministic_has_epoch_timestamp() {
+        let signing_key = Ed25519SigningKey::generate();
+        let genesis = GenesisState::create_deterministic(&signing_key.verifying_key());
+        assert_eq!(
+            genesis.created_at,
+            DateTime::from_timestamp(0, 0).unwrap()
+        );
+    }
+
+    // ---- owner_verifying_key ----
+
+    #[test]
+    fn genesis_owner_verifying_key_roundtrip() {
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let genesis = GenesisState::create(&verifying_key);
+        let recovered = genesis.owner_verifying_key().unwrap();
+        assert_eq!(recovered.to_bytes(), verifying_key.to_bytes());
+    }
+
+    #[test]
+    fn genesis_owner_verifying_key_invalid() {
+        let signing_key = Ed25519SigningKey::generate();
+        let mut genesis = GenesisState::create(&signing_key.verifying_key());
+        genesis.owner_public_key = [0xFF; 32]; // not a valid Ed25519 compressed point
+        assert!(matches!(
+            genesis.owner_verifying_key(),
+            Err(GenesisValidationError::InvalidOwnerKey)
+        ));
+    }
+
+    // ---- OwnerKeypair ----
+
+    #[test]
+    fn owner_keypair_debug_does_not_leak_private_key() {
+        let signing_key = Ed25519SigningKey::generate();
+        let keypair = super::OwnerKeypair::new(signing_key);
+        let debug = format!("{keypair:?}");
+        assert!(debug.contains("OwnerKeypair"));
+        assert!(debug.contains("public_key"));
+        // Should not contain "signing_key" or raw bytes
+        assert!(!debug.contains("signing_key"));
+    }
+
+    #[test]
+    fn owner_keypair_sign_produces_valid_signature() {
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let keypair = super::OwnerKeypair::new(signing_key);
+        let message = b"test message";
+        let signature = keypair.sign(message);
+        assert!(verifying_key.verify(message, &signature).is_ok());
+    }
 }

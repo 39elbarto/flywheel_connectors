@@ -780,4 +780,361 @@ mod tests {
             Err(CeremonyResumeError::NonResumablePhase(_))
         ));
     }
+
+    // ---- CeremonyId ----
+
+    #[test]
+    fn ceremony_id_display_format() {
+        let id = CeremonyId {
+            id: [0xAB, 0xCD, 0xEF, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            threshold: 2,
+            total: 3,
+        };
+        let display = format!("{id}");
+        assert!(display.starts_with("ceremony-"));
+        assert!(display.contains("2/3"));
+        assert!(display.contains("abcdef01"));
+    }
+
+    #[test]
+    fn ceremony_id_generate_has_correct_params() {
+        let id = CeremonyId::generate(3, 5);
+        assert_eq!(id.threshold, 3);
+        assert_eq!(id.total, 5);
+    }
+
+    #[test]
+    fn ceremony_id_serde_roundtrip() {
+        let id = CeremonyId::generate(2, 3);
+        let json = serde_json::to_string(&id).unwrap();
+        let restored: CeremonyId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, restored);
+    }
+
+    // ---- ParticipantId ----
+
+    #[test]
+    fn participant_id_display_format() {
+        let p = test_participant(5);
+        let display = format!("{p}");
+        assert_eq!(display, "participant-5(5)");
+    }
+
+    // ---- ThresholdConfig ----
+
+    #[test]
+    #[should_panic(expected = "threshold must be at least 1")]
+    fn threshold_config_panics_on_zero_threshold() {
+        ThresholdConfig::new(0, 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "threshold must not exceed total")]
+    fn threshold_config_panics_on_threshold_gt_total() {
+        ThresholdConfig::new(4, 3);
+    }
+
+    #[test]
+    fn threshold_config_with_timeout() {
+        let config = ThresholdConfig::new(2, 3).with_timeout(Duration::minutes(10));
+        assert_eq!(config.phase_timeout, Duration::minutes(10));
+    }
+
+    #[test]
+    fn threshold_config_defaults() {
+        let config = ThresholdConfig::new(2, 3);
+        assert_eq!(config.threshold, 2);
+        assert_eq!(config.total, 3);
+        assert_eq!(config.phase_timeout, Duration::minutes(30));
+        assert!(config.allow_resume);
+    }
+
+    #[test]
+    fn threshold_config_edge_case_1_of_1() {
+        let config = ThresholdConfig::new(1, 1);
+        assert_eq!(config.threshold, 1);
+        assert_eq!(config.total, 1);
+    }
+
+    // ---- CeremonyPhase ----
+
+    #[test]
+    fn ceremony_phase_is_terminal_all_variants() {
+        assert!(!CeremonyPhase::Gathering {
+            joined: vec![],
+            target: 3,
+        }
+        .is_terminal());
+        assert!(!CeremonyPhase::Round1Commitments {
+            commitments: HashMap::new(),
+        }
+        .is_terminal());
+        assert!(!CeremonyPhase::Round2Shares {
+            shares: HashMap::new(),
+        }
+        .is_terminal());
+        assert!(CeremonyPhase::Complete {
+            group_public_key: [0; 32],
+        }
+        .is_terminal());
+        assert!(CeremonyPhase::Failed {
+            reason: "test".into(),
+            at_phase: "test".into(),
+        }
+        .is_terminal());
+    }
+
+    // ---- Participant errors ----
+
+    #[test]
+    fn add_participant_rejects_wrong_phase() {
+        let mut ceremony = ThresholdCeremony::new(1, 1);
+        ceremony.add_participant(test_participant(1)).unwrap();
+        let result = ceremony.add_participant(test_participant(2));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Cannot add participants"));
+    }
+
+    #[test]
+    fn all_participants_triggers_round1() {
+        let mut ceremony = ThresholdCeremony::new(2, 3);
+        ceremony.add_participant(test_participant(1)).unwrap();
+        ceremony.add_participant(test_participant(2)).unwrap();
+        ceremony.add_participant(test_participant(3)).unwrap();
+        assert!(matches!(
+            ceremony.phase,
+            CeremonyPhase::Round1Commitments { .. }
+        ));
+    }
+
+    // ---- Commitment errors ----
+
+    #[test]
+    fn add_commitment_rejects_duplicate() {
+        let mut ceremony = ThresholdCeremony::new(2, 2);
+        ceremony.add_participant(test_participant(1)).unwrap();
+        ceremony.add_participant(test_participant(2)).unwrap();
+        ceremony.add_commitment(test_commitment(1)).unwrap();
+        let result = ceremony.add_commitment(test_commitment(1));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("already received"));
+    }
+
+    #[test]
+    fn add_commitment_rejects_wrong_phase() {
+        let mut ceremony = ThresholdCeremony::new(2, 3);
+        let result = ceremony.add_commitment(test_commitment(1));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Cannot add commitment"));
+    }
+
+    // ---- Share errors ----
+
+    #[test]
+    fn add_shares_rejects_duplicate() {
+        let mut ceremony = ThresholdCeremony::new(2, 2);
+        ceremony.add_participant(test_participant(1)).unwrap();
+        ceremony.add_participant(test_participant(2)).unwrap();
+        ceremony.add_commitment(test_commitment(1)).unwrap();
+        ceremony.add_commitment(test_commitment(2)).unwrap();
+        ceremony.add_shares(1, test_shares(1, 2)).unwrap();
+        let result = ceremony.add_shares(1, test_shares(1, 2));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("already received"));
+    }
+
+    #[test]
+    fn add_shares_rejects_wrong_phase() {
+        let mut ceremony = ThresholdCeremony::new(2, 3);
+        let result = ceremony.add_shares(1, test_shares(1, 2));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Cannot add shares"));
+    }
+
+    // ---- Full ceremony with 3 participants ----
+
+    #[test]
+    fn full_ceremony_3_of_3() {
+        let mut ceremony = ThresholdCeremony::new(2, 3);
+        ceremony.add_participant(test_participant(1)).unwrap();
+        ceremony.add_participant(test_participant(2)).unwrap();
+        ceremony.add_participant(test_participant(3)).unwrap();
+        ceremony.add_commitment(test_commitment(1)).unwrap();
+        ceremony.add_commitment(test_commitment(2)).unwrap();
+        ceremony.add_commitment(test_commitment(3)).unwrap();
+        ceremony.add_shares(1, test_shares(1, 2)).unwrap();
+        ceremony.add_shares(2, test_shares(2, 1)).unwrap();
+        ceremony.add_shares(3, test_shares(3, 1)).unwrap();
+        assert!(matches!(ceremony.phase, CeremonyPhase::Complete { .. }));
+        assert!(ceremony.phase.is_terminal());
+    }
+
+    // ---- Abort scenarios ----
+
+    #[test]
+    fn abort_from_gathering_can_resume() {
+        let mut ceremony = ThresholdCeremony::new(2, 3);
+        ceremony.add_participant(test_participant(1)).unwrap();
+        let result = ceremony.abort("network failure");
+        assert!(result.can_resume);
+        assert!(result.checkpoint.is_some());
+        assert!(ceremony.phase.is_terminal());
+    }
+
+    #[test]
+    fn abort_from_round1_can_resume() {
+        let mut ceremony = ThresholdCeremony::new(2, 2);
+        ceremony.add_participant(test_participant(1)).unwrap();
+        ceremony.add_participant(test_participant(2)).unwrap();
+        ceremony.add_commitment(test_commitment(1)).unwrap();
+        let result = ceremony.abort("participant disconnected");
+        assert!(result.can_resume);
+        assert!(result.checkpoint.is_some());
+    }
+
+    #[test]
+    fn abort_from_round2_cannot_resume() {
+        let mut ceremony = ThresholdCeremony::new(2, 2);
+        ceremony.add_participant(test_participant(1)).unwrap();
+        ceremony.add_participant(test_participant(2)).unwrap();
+        ceremony.add_commitment(test_commitment(1)).unwrap();
+        ceremony.add_commitment(test_commitment(2)).unwrap();
+        ceremony.add_shares(1, test_shares(1, 2)).unwrap();
+        let result = ceremony.abort("share exposure risk");
+        assert!(!result.can_resume);
+        assert!(result.checkpoint.is_none());
+    }
+
+    #[test]
+    fn abort_with_resume_disabled_no_checkpoint() {
+        let mut config = ThresholdConfig::new(2, 3);
+        config.allow_resume = false;
+        let mut ceremony = ThresholdCeremony::with_config(config);
+        ceremony.add_participant(test_participant(1)).unwrap();
+        let result = ceremony.abort("user cancelled");
+        assert!(result.can_resume);
+        assert!(result.checkpoint.is_none());
+    }
+
+    // ---- Checkpoint ----
+
+    #[test]
+    fn checkpoint_from_gathering_has_empty_commitments() {
+        let mut ceremony = ThresholdCeremony::new(2, 3);
+        ceremony.add_participant(test_participant(1)).unwrap();
+        let checkpoint = ceremony.create_checkpoint();
+        assert!(checkpoint.commitments.is_empty());
+        assert!(checkpoint.shares.is_empty());
+    }
+
+    #[test]
+    fn checkpoint_from_round1_has_commitments() {
+        let mut ceremony = ThresholdCeremony::new(2, 2);
+        ceremony.add_participant(test_participant(1)).unwrap();
+        ceremony.add_participant(test_participant(2)).unwrap();
+        ceremony.add_commitment(test_commitment(1)).unwrap();
+        let checkpoint = ceremony.create_checkpoint();
+        assert_eq!(checkpoint.commitments.len(), 1);
+        assert!(checkpoint.commitments.contains_key(&1));
+        assert!(checkpoint.shares.is_empty());
+    }
+
+    // ---- Transcript ----
+
+    #[test]
+    fn transcript_records_phase_transitions() {
+        let mut ceremony = ThresholdCeremony::new(2, 2);
+        ceremony.add_participant(test_participant(1)).unwrap();
+        ceremony.add_participant(test_participant(2)).unwrap();
+        assert_eq!(ceremony.transcript.phases.len(), 2);
+        assert_eq!(ceremony.transcript.phases[0].phase, "Gathering");
+        assert_eq!(ceremony.transcript.phases[1].phase, "Round1Commitments");
+    }
+
+    #[test]
+    fn transcript_records_joins() {
+        let mut ceremony = ThresholdCeremony::new(2, 3);
+        ceremony.add_participant(test_participant(1)).unwrap();
+        ceremony.add_participant(test_participant(2)).unwrap();
+        assert_eq!(ceremony.transcript.joins.len(), 2);
+        assert_eq!(ceremony.transcript.joins[0].participant.index, 1);
+        assert_eq!(ceremony.transcript.joins[1].participant.index, 2);
+    }
+
+    #[test]
+    fn transcript_records_commitment_messages() {
+        let mut ceremony = ThresholdCeremony::new(2, 2);
+        ceremony.add_participant(test_participant(1)).unwrap();
+        ceremony.add_participant(test_participant(2)).unwrap();
+        ceremony.add_commitment(test_commitment(1)).unwrap();
+        assert_eq!(ceremony.transcript.messages.len(), 1);
+        assert_eq!(ceremony.transcript.messages[0].from, 1);
+        assert_eq!(ceremony.transcript.messages[0].to, 0);
+        assert_eq!(ceremony.transcript.messages[0].message_type, "commitment");
+    }
+
+    #[test]
+    fn transcript_records_share_messages() {
+        let mut ceremony = ThresholdCeremony::new(2, 2);
+        ceremony.add_participant(test_participant(1)).unwrap();
+        ceremony.add_participant(test_participant(2)).unwrap();
+        ceremony.add_commitment(test_commitment(1)).unwrap();
+        ceremony.add_commitment(test_commitment(2)).unwrap();
+        let shares = vec![EncryptedShare {
+            from_index: 1,
+            to_index: 2,
+            ciphertext: vec![1; 32],
+        }];
+        ceremony.add_shares(1, shares).unwrap();
+        // 2 commitment messages + 1 share message
+        assert_eq!(ceremony.transcript.messages.len(), 3);
+        let share_msg = &ceremony.transcript.messages[2];
+        assert_eq!(share_msg.from, 1);
+        assert_eq!(share_msg.to, 2);
+        assert_eq!(share_msg.message_type, "share");
+    }
+
+    // ---- Resume error Display ----
+
+    #[test]
+    fn ceremony_resume_error_display() {
+        let err = CeremonyResumeError::CheckpointExpired;
+        assert_eq!(err.to_string(), "checkpoint expired");
+        let err = CeremonyResumeError::NonResumablePhase("Round2".into());
+        assert!(err.to_string().contains("Round2"));
+        let err = CeremonyResumeError::InvalidCheckpoint("bad data".into());
+        assert!(err.to_string().contains("bad data"));
+    }
+
+    // ---- with_config ----
+
+    #[test]
+    fn ceremony_with_config_uses_config_values() {
+        let config = ThresholdConfig::new(3, 5).with_timeout(Duration::minutes(10));
+        let ceremony = ThresholdCeremony::with_config(config);
+        assert_eq!(ceremony.config.threshold, 3);
+        assert_eq!(ceremony.config.total, 5);
+        assert_eq!(ceremony.config.phase_timeout, Duration::minutes(10));
+        assert_eq!(ceremony.ceremony_id.threshold, 3);
+        assert_eq!(ceremony.ceremony_id.total, 5);
+    }
+
+    // ---- Abort result fields ----
+
+    #[test]
+    fn abort_result_contains_ceremony_id() {
+        let mut ceremony = ThresholdCeremony::new(2, 3);
+        let expected_id = ceremony.ceremony_id.clone();
+        let result = ceremony.abort("test");
+        assert_eq!(result.ceremony_id, expected_id);
+    }
+
+    #[test]
+    fn abort_records_failure_in_transcript() {
+        let mut ceremony = ThresholdCeremony::new(2, 3);
+        ceremony.abort("timeout");
+        let last_phase = ceremony.transcript.phases.last().unwrap();
+        assert_eq!(last_phase.phase, "Failed");
+        assert_eq!(last_phase.reason.as_deref(), Some("timeout"));
+    }
 }

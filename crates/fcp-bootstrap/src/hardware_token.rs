@@ -339,4 +339,146 @@ mod tests {
             .unwrap();
         assert_eq!(pubkey.len(), 32);
     }
+
+    // ---- DetectedToken mechanism checks ----
+
+    #[test]
+    fn token_without_ed25519_mechanism() {
+        let mut token = test_token();
+        token.mechanisms = vec!["CKM_RSA_PKCS".to_string()];
+        assert!(!token.supports_ed25519());
+    }
+
+    #[test]
+    fn token_supports_ed25519_via_eddsa() {
+        let mut token = test_token();
+        token.mechanisms = vec!["CKM_EDDSA".to_string()];
+        assert!(token.supports_ed25519());
+    }
+
+    #[test]
+    fn token_supports_x25519_via_ecdh() {
+        let token = test_token();
+        assert!(token.supports_x25519());
+    }
+
+    #[test]
+    fn token_without_x25519_mechanism() {
+        let mut token = test_token();
+        token.mechanisms = vec!["CKM_RSA_PKCS".to_string()];
+        assert!(!token.supports_x25519());
+    }
+
+    #[test]
+    fn token_supports_x25519_via_x25519_mechanism() {
+        let mut token = test_token();
+        token.mechanisms = vec!["CKM_X25519".to_string()];
+        assert!(token.supports_x25519());
+    }
+
+    #[test]
+    fn token_empty_mechanisms() {
+        let mut token = test_token();
+        token.mechanisms = vec![];
+        assert!(!token.supports_ed25519());
+        assert!(!token.supports_x25519());
+    }
+
+    // ---- DetectedToken Display ----
+
+    #[test]
+    fn token_display_format() {
+        let token = test_token();
+        let display = format!("{token}");
+        assert_eq!(display, "Test Token (Test Manufacturer) [slot 0]");
+    }
+
+    // ---- DetectedToken serde roundtrip ----
+
+    #[test]
+    fn token_serde_roundtrip() {
+        let token = test_token();
+        let json = serde_json::to_string(&token).unwrap();
+        let restored: DetectedToken = serde_json::from_str(&json).unwrap();
+        assert_eq!(token, restored);
+    }
+
+    // ---- TokenDetector ----
+
+    #[test]
+    fn detector_default_same_as_new() {
+        let d1 = TokenDetector::new();
+        let d2 = TokenDetector::default();
+        assert_eq!(d1.provider_paths.len(), d2.provider_paths.len());
+    }
+
+    #[test]
+    fn detector_add_provider() {
+        let mut detector = TokenDetector::new();
+        let original_count = detector.provider_paths.len();
+        detector.add_provider(PathBuf::from("/custom/pkcs11.so"));
+        assert_eq!(detector.provider_paths.len(), original_count + 1);
+    }
+
+    #[test]
+    fn detector_detect_all_returns_empty_in_ci() {
+        let detector = TokenDetector::new();
+        let tokens = detector.detect_all();
+        // No real PKCS#11 providers in CI
+        assert!(tokens.is_empty());
+    }
+
+    #[test]
+    fn detector_detect_fcp_compatible_returns_empty_in_ci() {
+        let detector = TokenDetector::new();
+        let tokens = detector.detect_fcp_compatible();
+        assert!(tokens.is_empty());
+    }
+
+    // ---- MockTokenProvider ----
+
+    #[test]
+    fn mock_provider_default() {
+        use mock::MockTokenProvider;
+        let provider = MockTokenProvider::default();
+        assert!(provider.list_tokens().is_empty());
+    }
+
+    #[test]
+    fn mock_provider_sign_returns_64_bytes() {
+        use mock::MockTokenProvider;
+        let mut provider = MockTokenProvider::new();
+        let token = test_token();
+        provider.add_token(token.clone());
+        let sig = provider.sign(&token, "1234", "test-key", b"data").unwrap();
+        assert_eq!(sig.len(), 64);
+    }
+
+    #[test]
+    fn mock_provider_multiple_tokens() {
+        use mock::MockTokenProvider;
+        let mut provider = MockTokenProvider::new();
+        let mut t1 = test_token();
+        t1.slot = 0;
+        t1.label = "Token A".into();
+        let mut t2 = test_token();
+        t2.slot = 1;
+        t2.label = "Token B".into();
+        provider.add_token(t1);
+        provider.add_token(t2);
+        assert_eq!(provider.list_tokens().len(), 2);
+    }
+
+    // ---- TokenError Display ----
+
+    #[test]
+    fn token_error_display() {
+        assert_eq!(TokenError::NoTokens.to_string(), "no hardware tokens detected");
+        assert!(TokenError::TokenNotFound("yubikey".into()).to_string().contains("yubikey"));
+        assert_eq!(TokenError::InvalidPin.to_string(), "invalid PIN");
+        assert!(TokenError::KeyNotFound("owner".into()).to_string().contains("owner"));
+        assert!(TokenError::UnsupportedMechanism("RSA".into()).to_string().contains("RSA"));
+        assert!(TokenError::Pkcs11("init failed".into()).to_string().contains("init failed"));
+        assert_eq!(TokenError::Disconnected.to_string(), "token disconnected");
+    }
 }

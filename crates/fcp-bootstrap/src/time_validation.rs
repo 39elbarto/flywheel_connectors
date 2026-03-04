@@ -173,14 +173,15 @@ fn ntp_check_with_timeout(timeout: Duration) -> Option<DateTime<Utc>> {
 }
 
 #[cfg(unix)]
-fn try_ntp_server(server: &str, _timeout: Duration) -> Option<DateTime<Utc>> {
+fn try_ntp_server(server: &str, timeout: Duration) -> Option<DateTime<Utc>> {
     // Use rsntp crate for NTP queries
     use std::net::ToSocketAddrs;
 
     let addr = server.to_socket_addrs().ok()?.next()?;
 
     // Create a simple NTP client
-    let client = rsntp::SntpClient::new();
+    let mut client = rsntp::SntpClient::new();
+    client.set_timeout(timeout);
     let result = client.synchronize(addr);
 
     match result {

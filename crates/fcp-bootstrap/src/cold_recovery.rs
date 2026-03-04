@@ -278,4 +278,117 @@ mod tests {
 
         assert_eq!(recovery1.fingerprint(), recovery2.fingerprint());
     }
+
+    // ---- Warning counts ----
+
+    #[test]
+    fn cold_recovery_without_fingerprint_has_5_warnings() {
+        let phrase = test_phrase();
+        let recovery = ColdRecovery::from_phrase(&phrase, None).unwrap();
+        // FingerprintNotVerified + NoAuditHistory + RevocationStateUnknown +
+        // SingleNodeStart + DataLoss
+        assert_eq!(recovery.warnings.len(), 5);
+    }
+
+    #[test]
+    fn cold_recovery_with_fingerprint_has_4_warnings() {
+        let phrase = test_phrase();
+        let recovery1 = ColdRecovery::from_phrase(&phrase, None).unwrap();
+        let expected = recovery1.fingerprint();
+        let recovery2 = ColdRecovery::from_phrase(&phrase, Some(&expected)).unwrap();
+        // No FingerprintNotVerified, only the 4 standard warnings
+        assert_eq!(recovery2.warnings.len(), 4);
+        assert!(!recovery2
+            .warnings
+            .contains(&ColdRecoveryWarning::FingerprintNotVerified));
+    }
+
+    #[test]
+    fn cold_recovery_always_has_standard_warnings() {
+        let phrase = test_phrase();
+        let recovery = ColdRecovery::from_phrase(&phrase, None).unwrap();
+        assert!(recovery.warnings.contains(&ColdRecoveryWarning::NoAuditHistory));
+        assert!(recovery.warnings.contains(&ColdRecoveryWarning::RevocationStateUnknown));
+        assert!(recovery.warnings.contains(&ColdRecoveryWarning::SingleNodeStart));
+        assert!(recovery.warnings.contains(&ColdRecoveryWarning::DataLoss));
+    }
+
+    // ---- Warning Display ----
+
+    #[test]
+    fn cold_recovery_warning_display() {
+        assert!(ColdRecoveryWarning::NoAuditHistory.to_string().contains("audit"));
+        assert!(ColdRecoveryWarning::RevocationStateUnknown.to_string().contains("revocation"));
+        assert!(ColdRecoveryWarning::SingleNodeStart.to_string().contains("single node"));
+        assert!(ColdRecoveryWarning::DataLoss.to_string().contains("lost"));
+        assert!(ColdRecoveryWarning::FingerprintNotVerified.to_string().contains("skipped"));
+    }
+
+    // ---- ColdRecoveryError Display ----
+
+    #[test]
+    fn cold_recovery_error_display() {
+        let err = ColdRecoveryError::FingerprintMismatch {
+            expected: "SHA256:abc".into(),
+            actual: "SHA256:xyz".into(),
+        };
+        let s = err.to_string();
+        assert!(s.contains("SHA256:abc"));
+        assert!(s.contains("SHA256:xyz"));
+    }
+
+    // ---- CLI module ----
+
+    #[test]
+    fn cli_format_warning_all_variants() {
+        use super::cli::format_warning;
+        let variants = [
+            ColdRecoveryWarning::NoAuditHistory,
+            ColdRecoveryWarning::RevocationStateUnknown,
+            ColdRecoveryWarning::SingleNodeStart,
+            ColdRecoveryWarning::DataLoss,
+            ColdRecoveryWarning::FingerprintNotVerified,
+        ];
+        for variant in &variants {
+            let formatted = format_warning(variant);
+            assert!(!formatted.is_empty(), "format_warning should not be empty for {variant}");
+        }
+    }
+
+    #[test]
+    fn cli_format_confirmation_message_is_non_empty() {
+        use super::cli::format_confirmation_message;
+        let msg = format_confirmation_message();
+        assert!(msg.contains("COLD START RECOVERY"));
+        assert!(msg.contains("genesis"));
+    }
+
+    // ---- was_verified ----
+
+    #[test]
+    fn was_verified_true_when_fingerprint_matches() {
+        let phrase = test_phrase();
+        let r1 = ColdRecovery::from_phrase(&phrase, None).unwrap();
+        let fp = r1.fingerprint();
+        let r2 = ColdRecovery::from_phrase(&phrase, Some(&fp)).unwrap();
+        assert!(r2.was_verified());
+    }
+
+    #[test]
+    fn was_verified_false_when_no_fingerprint() {
+        let phrase = test_phrase();
+        let recovery = ColdRecovery::from_phrase(&phrase, None).unwrap();
+        assert!(!recovery.was_verified());
+    }
+
+    // ---- Genesis is valid after recovery ----
+
+    #[test]
+    fn cold_recovery_genesis_validates() {
+        let phrase = test_phrase();
+        let recovery = ColdRecovery::from_phrase(&phrase, None).unwrap();
+        assert!(recovery.genesis.validate().is_ok());
+        assert_eq!(recovery.genesis.schema_version, 1);
+        assert_eq!(recovery.genesis.initial_zones.len(), 5);
+    }
 }

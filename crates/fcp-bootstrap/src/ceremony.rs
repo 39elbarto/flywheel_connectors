@@ -825,13 +825,13 @@ mod tests {
     #[test]
     #[should_panic(expected = "threshold must be at least 1")]
     fn threshold_config_panics_on_zero_threshold() {
-        ThresholdConfig::new(0, 3);
+        let _ = ThresholdConfig::new(0, 3);
     }
 
     #[test]
     #[should_panic(expected = "threshold must not exceed total")]
     fn threshold_config_panics_on_threshold_gt_total() {
-        ThresholdConfig::new(4, 3);
+        let _ = ThresholdConfig::new(4, 3);
     }
 
     #[test]

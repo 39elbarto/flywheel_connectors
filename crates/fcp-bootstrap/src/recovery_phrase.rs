@@ -305,8 +305,7 @@ mod tests {
     fn test_to_phrase_returns_24_words() {
         let phrase = RecoveryPhrase::generate().unwrap();
         let phrase_str = phrase.to_phrase();
-        let words: Vec<&str> = phrase_str.split_whitespace().collect();
-        assert_eq!(words.len(), 24);
+        assert_eq!(phrase_str.split_whitespace().count(), 24);
     }
 
     // ---- entropy ----

@@ -97,13 +97,31 @@ impl std::fmt::Debug for X25519SecretKey {
 }
 
 /// X25519 encryption public key.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize)]
 #[serde(transparent)]
 pub struct X25519PublicKey {
     #[serde(with = "public_key_serde")]
     inner: PublicKey,
     #[serde(skip)]
     kid: KeyId,
+}
+
+impl<'de> Deserialize<'de> for X25519PublicKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let bytes: Vec<u8> = Deserialize::deserialize(deserializer)?;
+        if bytes.len() != X25519_PUBLIC_KEY_SIZE {
+            return Err(serde::de::Error::custom(format!(
+                "invalid X25519 public key length: expected {X25519_PUBLIC_KEY_SIZE}, got {}",
+                bytes.len()
+            )));
+        }
+        let mut arr = [0u8; X25519_PUBLIC_KEY_SIZE];
+        arr.copy_from_slice(&bytes);
+        Ok(Self::from_bytes(arr))
+    }
 }
 
 mod public_key_serde {

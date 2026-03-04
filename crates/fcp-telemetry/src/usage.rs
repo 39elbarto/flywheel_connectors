@@ -111,11 +111,12 @@ impl CapabilityUsageStore {
             self.config.retention_secs,
         );
 
-        if aggregates.len() >= self.config.max_entries {
+        let key = event.key();
+
+        if aggregates.len() >= self.config.max_entries && !aggregates.contains_key(&key) {
             return false;
         }
 
-        let key = event.key();
         aggregates
             .entry(key.clone())
             .and_modify(|aggregate| aggregate.apply(event))
@@ -461,6 +462,37 @@ mod tests {
         let snapshot = store.snapshot();
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].first_seen, 20);
+    }
+
+    #[test]
+    fn record_updates_existing_when_full() {
+        let config = UsageTelemetryConfig {
+            max_entries: 1,
+            ..UsageTelemetryConfig::default()
+        };
+        let store = CapabilityUsageStore::new(config);
+        
+        let first = sample_event(CapabilityUsageOutcome::Allow, 10);
+        assert!(store.record(&first));
+        
+        // Same key, should update even though map is at max_entries
+        let second = sample_event(CapabilityUsageOutcome::Allow, 20);
+        assert!(store.record(&second));
+        
+        // Different key, should be rejected because map is full
+        let different = event_for(
+            ZoneId::private(),
+            ConnectorId::from_static("fcp.beta:request-response:1"),
+            CapabilityId::from_static("fcp.beta.write"),
+            SafetyTier::Risky,
+            CapabilityUsageOutcome::Allow,
+            30,
+        );
+        assert!(!store.record(&different));
+        
+        let snapshot = store.snapshot();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].total, 2);
     }
 
     #[test]

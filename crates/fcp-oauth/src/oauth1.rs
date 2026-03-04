@@ -284,10 +284,16 @@ impl OAuth1Client {
         );
 
         // Collect all parameters (OAuth + query string)
-        let mut all_params = params.clone();
+        let mut all_params: Vec<(String, String)> = params
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         for (k, v) in parsed_url.query_pairs() {
-            all_params.insert(k.to_string(), v.to_string());
+            all_params.push((k.into_owned(), v.into_owned()));
         }
+
+        // Sort parameters by key, then by value
+        all_params.sort_unstable();
 
         // Build parameter string (sorted)
         let param_string: String = all_params
@@ -379,8 +385,10 @@ fn parse_access_token(body: &str) -> OAuthResult<OAuth1Tokens> {
 /// Generate a random nonce.
 fn generate_nonce() -> String {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use rand::RngCore;
 
-    let bytes: Vec<u8> = (0..32).map(|_| rand::random()).collect();
+    let mut bytes = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
     URL_SAFE_NO_PAD.encode(bytes)
 }
 

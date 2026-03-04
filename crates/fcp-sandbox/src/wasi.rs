@@ -605,9 +605,9 @@ impl wasmtime::ResourceLimiter for WasiHostState {
 
     fn table_growing(
         &mut self,
-        _current: u32,
-        _desired: u32,
-        _maximum: Option<u32>,
+        _current: usize,
+        _desired: usize,
+        _maximum: Option<usize>,
     ) -> Result<bool, anyhow::Error> {
         // Tables are allowed to grow per default bounds
         Ok(true)

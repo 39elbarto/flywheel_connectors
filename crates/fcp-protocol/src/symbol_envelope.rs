@@ -19,7 +19,7 @@
 //!
 //! The nonce is NOT transmitted; it's derived deterministically from frame fields.
 
-use fcp_core::{ObjectId, TailscaleNodeId, ZoneIdHash, ZoneKey, ZoneKeyId};
+use fcp_core::{ObjectId, TailscaleNodeId, ZoneIdHash, ZoneKeyId};
 use fcp_crypto::{
     AeadKey, ChaCha20Nonce, ChaCha20Poly1305Cipher, XChaCha20Nonce, XChaCha20Poly1305Cipher,
     hkdf_sha256_array,
@@ -99,7 +99,7 @@ pub struct SymbolContext {
 /// Panics if HKDF expansion fails (should never happen for 32-byte output).
 #[must_use]
 pub fn derive_sender_subkey(
-    zone_key: &ZoneKey,
+    zone_key: &AeadKey,
     zone_key_id: &ZoneKeyId,
     sender_node_id: &TailscaleNodeId,
     sender_instance_id: u64,

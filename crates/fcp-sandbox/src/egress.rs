@@ -293,9 +293,11 @@ pub fn is_hostname_canonical(hostname: &str) -> bool {
 
 /// Check if an IP address is contained in any of the given CIDR ranges.
 fn ip_in_any_cidr(ip: IpAddr, cidrs: &[IpNet]) -> bool {
-    // Normalize IPv4-mapped and IPv4-compatible IPv6 addresses to pure IPv4 to prevent bypasses
+    // Normalize IPv4-mapped IPv6 addresses (::ffff:x.x.x.x) to pure IPv4 to prevent SSRF
+    // bypasses. Do NOT normalize IPv4-compatible addresses (::x.x.x.x) — those are distinct
+    // IPv6 addresses and should be matched against IPv6 CIDR rules only.
     let check_ip = match ip {
-        IpAddr::V6(v6) => v6.to_ipv4().map_or(ip, IpAddr::V4),
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
         IpAddr::V4(_) => ip,
     };
     cidrs.iter().any(|net| net.contains(&check_ip))

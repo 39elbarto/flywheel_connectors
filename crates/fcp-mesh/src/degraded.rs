@@ -174,7 +174,7 @@ impl DegradedModeEncoder {
 
         // Build the wire payload: length(4 bytes) || schema_hash(32 bytes) || payload
         // Length prefix allows decoder to know exact payload size after RaptorQ padding
-        let payload_len = envelope.payload.len() as u32;
+        let payload_len = u32::try_from(envelope.payload.len()).unwrap_or(u32::MAX);
         let mut wire_payload = Vec::with_capacity(4 + 32 + envelope.payload.len());
         wire_payload.extend_from_slice(&payload_len.to_be_bytes());
         wire_payload.extend_from_slice(&envelope.schema_hash);
@@ -206,12 +206,12 @@ impl DegradedModeEncoder {
             .collect();
 
         let symbol_size = self.config.symbol_size;
-        let total_payload_len: u32 = symbol_records.iter().map(|r| r.wire_size() as u32).sum();
+        let total_payload_len: u32 = symbol_records.iter().map(|r| u32::try_from(r.wire_size()).unwrap_or(u32::MAX)).sum();
 
         let header = FcpsFrameHeader {
             version: FCPS_VERSION,
             flags,
-            symbol_count: symbol_records.len() as u32,
+            symbol_count: u32::try_from(symbol_records.len()).unwrap_or(u32::MAX),
             total_payload_len,
             object_id: envelope.object_id.clone(),
             symbol_size,

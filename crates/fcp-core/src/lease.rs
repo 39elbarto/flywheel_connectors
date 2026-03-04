@@ -247,16 +247,16 @@ fn hrw_hash(zone_id: &ZoneId, subject_id: &ObjectId, node_id: &TailscaleNodeId) 
     hasher.update(b"FCP2-HRW-V1");
     
     let z_bytes = zone_id.as_bytes();
-    hasher.update(&(z_bytes.len() as u32).to_le_bytes());
+    hasher.update(&u32::try_from(z_bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
     hasher.update(z_bytes);
-    
+
     // ObjectId is fixed length (32 bytes), but we prefix it for consistency and future-proofing
     let s_bytes = subject_id.as_bytes();
-    hasher.update(&(s_bytes.len() as u32).to_le_bytes());
+    hasher.update(&u32::try_from(s_bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
     hasher.update(s_bytes);
-    
+
     let n_bytes = node_id.as_str().as_bytes();
-    hasher.update(&(n_bytes.len() as u32).to_le_bytes());
+    hasher.update(&u32::try_from(n_bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
     hasher.update(n_bytes);
 
     let hash = hasher.finalize();

@@ -93,11 +93,11 @@ impl SessionGoldenVector {
             expected_shared_secret:
                 "2ed76ab549b1e73c031eb49c9448f0798aea81b698279a0c3dc3e49fbfc4b953".into(),
             expected_keys: SessionDerivedKeys {
-                k_mac_i2r: "d9af51ed221a05ea177c5382c0e71537fc62e64c4ee0b0771d3681e609f743a1"
+                k_mac_i2r: "d73072b5f69de39577122e53f0cf1271c9764fb0283edd5dbb56afe121f47c97"
                     .into(),
-                k_mac_r2i: "330a4d3c684f52873e85ebc33e9441d1fc6ab4a50aba0329abfc698214e35c9e"
+                k_mac_r2i: "c90b54d2feaf59870a5d130b264290c2d01ea6947fc2837851c31ad83551d205"
                     .into(),
-                k_ctx: "7eda9f6a5f3d2855185740e5535970bfd39e0a695985ea0d17d9d357ab737309".into(),
+                k_ctx: "3ea2facf610100e661ee3ca068b4299171b41cbb9ef4f9f41b46a70f91a23151".into(),
             },
         }
     }
@@ -127,11 +127,11 @@ impl SessionGoldenVector {
             expected_shared_secret:
                 "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742".into(),
             expected_keys: SessionDerivedKeys {
-                k_mac_i2r: "f69616ef8fb6f437468429cb858f0cef91d4f6b1676e26400d4c96dc2ba63647"
+                k_mac_i2r: "ab6e0eb005b6560afd15ff7ae3d20f5ec2869cfbdef52e389bfef501185ad80b"
                     .into(),
-                k_mac_r2i: "1abf952bffeb02082daea1811c8c80a3d2d67aade79cdc861a536ff02b24ba8b"
+                k_mac_r2i: "031a56e897644a88406d6bd49c9b5de03f7f4a3f50a2db077531e08cb2c3ce7c"
                     .into(),
-                k_ctx: "4da477bf4a24abc3bd5a6aa759ed1f4c3adcd2aa5fe500658aaa287f1c92dd60".into(),
+                k_ctx: "88bf5d36d4f652c79b9d31d1c7d204d95d9951855b806271ff73d98656de9211".into(),
             },
         }
     }
@@ -162,11 +162,11 @@ impl SessionGoldenVector {
                 "2ed76ab549b1e73c031eb49c9448f0798aea81b698279a0c3dc3e49fbfc4b953".into(),
             // Different keys due to different nonces
             expected_keys: SessionDerivedKeys {
-                k_mac_i2r: "527b3346f780151e7c893d78d75d725086bacc0f649f0fa98135508f339e2669"
+                k_mac_i2r: "8126a688dcd8b56fe7e9a3919eeb2a5a091eb2416b77d953f93c2a3418cd535f"
                     .into(),
-                k_mac_r2i: "7a8677b0f70f84511506dafd9d3fcb2ce5c14cd0d2bb368fb5e63313f9f3ebec"
+                k_mac_r2i: "a87ea472debd0325d6139e9bf0bc35a23656da8c0f82469a6dccf96235bd85e7"
                     .into(),
-                k_ctx: "fd4028f9a1635a3a2406f7e2c46b612736df6eab9e57f9faed79af3e500a6494".into(),
+                k_ctx: "1c20523195c51ecabbfc67f4df5fbff02e93758f36bb28283e57b486ae7e5c56".into(),
             },
         }
     }
@@ -231,11 +231,11 @@ impl SessionGoldenVector {
         info.extend_from_slice(b"FCP2-SESSION-V1");
         
         let init_bytes = self.initiator_id.as_bytes();
-        info.extend_from_slice(&(init_bytes.len() as u32).to_le_bytes());
+        info.extend_from_slice(&u32::try_from(init_bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
         info.extend_from_slice(init_bytes);
-        
+
         let resp_bytes = self.responder_id.as_bytes();
-        info.extend_from_slice(&(resp_bytes.len() as u32).to_le_bytes());
+        info.extend_from_slice(&u32::try_from(resp_bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
         info.extend_from_slice(resp_bytes);
         
         info.extend_from_slice(&hello_nonce);
@@ -395,11 +395,11 @@ mod tests {
         info.extend_from_slice(b"FCP2-SESSION-V1");
         
         let init_bytes = b"node.initiator.ts.net";
-        info.extend_from_slice(&(init_bytes.len() as u32).to_le_bytes());
+        info.extend_from_slice(&u32::try_from(init_bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
         info.extend_from_slice(init_bytes);
-        
+
         let resp_bytes = b"node.responder.ts.net";
-        info.extend_from_slice(&(resp_bytes.len() as u32).to_le_bytes());
+        info.extend_from_slice(&u32::try_from(resp_bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
         info.extend_from_slice(resp_bytes);
         
         info.extend_from_slice(&hello_nonce);

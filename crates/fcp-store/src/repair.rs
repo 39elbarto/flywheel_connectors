@@ -312,7 +312,8 @@ impl RepairController {
                 // Priority based on deficit
                 let deficit = coverage.coverage_deficit_bps(policy.target_coverage_bps);
                 if diversity_deficit > 0 {
-                    200 + (diversity_deficit as u32) * 10 + deficit / 100
+                    #[allow(clippy::cast_possible_truncation)] // u8 -> u32 is always safe
+                    { 200 + (diversity_deficit as u32) * 10 + deficit / 100 }
                 } else {
                     100 + deficit / 100 // 100-199 range
                 }

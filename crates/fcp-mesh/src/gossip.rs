@@ -368,8 +368,8 @@ impl GossipState {
             epoch_id,
             object_filter_digest: self.object_filter.digest(),
             symbol_filter_digest: self.symbol_filter.digest(),
-            object_count: self.admitted_objects.len() as u32,
-            symbol_count: self.symbol_count() as u32,
+            object_count: u32::try_from(self.admitted_objects.len()).unwrap_or(u32::MAX),
+            symbol_count: u32::try_from(self.symbol_count()).unwrap_or(u32::MAX),
             iblt: self.iblt_state.encode(),
             timestamp: self.last_updated,
             signature: None,
@@ -460,15 +460,15 @@ impl GossipSummary {
         bytes.extend_from_slice(b"FCP2-GOSSIP-SUMMARY-V1");
         
         let from_bytes = self.from.as_str().as_bytes();
-        bytes.extend_from_slice(&(from_bytes.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&u32::try_from(from_bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
         bytes.extend_from_slice(from_bytes);
         
         let zone_bytes = self.zone_id.as_bytes();
-        bytes.extend_from_slice(&(zone_bytes.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&u32::try_from(zone_bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
         bytes.extend_from_slice(zone_bytes);
         
         let epoch_bytes = self.epoch_id.as_str().as_bytes();
-        bytes.extend_from_slice(&(epoch_bytes.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&u32::try_from(epoch_bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
         bytes.extend_from_slice(epoch_bytes);
         
         bytes.extend_from_slice(&self.object_filter_digest);
@@ -887,10 +887,10 @@ impl MeshGossip {
             let mut summary = state.create_summary(self.local_node.clone(), epoch_id);
             summary.object_count = summary
                 .object_count
-                .min(self.config.max_objects_per_summary as u32);
+                .min(u32::try_from(self.config.max_objects_per_summary).unwrap_or(u32::MAX));
             summary.symbol_count = summary
                 .symbol_count
-                .min(self.config.max_symbols_per_summary as u32);
+                .min(u32::try_from(self.config.max_symbols_per_summary).unwrap_or(u32::MAX));
             if tracing::enabled!(tracing::Level::DEBUG) {
                 let object_digest = hex::encode(summary.object_filter_digest);
                 let symbol_digest = hex::encode(summary.symbol_filter_digest);

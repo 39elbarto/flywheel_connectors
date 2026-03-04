@@ -382,7 +382,7 @@ async fn async_main() -> HostResult<()> {
     Ok(())
 }
 
-async fn doctor_handler<R: ConnectorRegistry>(
+async fn doctor_handler<R: ConnectorRegistry + 'static>(
     State(service): State<DoctorService<R>>,
     Json(request): Json<DoctorRequest>,
 ) -> Result<Json<DoctorReport>, (StatusCode, String)> {

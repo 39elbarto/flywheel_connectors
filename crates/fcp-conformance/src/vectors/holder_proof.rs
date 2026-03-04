@@ -70,11 +70,11 @@ impl HolderProofGoldenVector {
 
         let mut expected_bytes = Vec::with_capacity(128);
         expected_bytes.extend_from_slice(domain);
-        expected_bytes.extend_from_slice(&(req_id.len() as u32).to_le_bytes());
+        expected_bytes.extend_from_slice(&u32::try_from(req_id.len()).unwrap_or(u32::MAX).to_le_bytes());
         expected_bytes.extend_from_slice(req_id);
-        expected_bytes.extend_from_slice(&(op_id.len() as u32).to_le_bytes());
+        expected_bytes.extend_from_slice(&u32::try_from(op_id.len()).unwrap_or(u32::MAX).to_le_bytes());
         expected_bytes.extend_from_slice(op_id);
-        expected_bytes.extend_from_slice(&(jti.len() as u32).to_le_bytes());
+        expected_bytes.extend_from_slice(&u32::try_from(jti.len()).unwrap_or(u32::MAX).to_le_bytes());
         expected_bytes.extend_from_slice(&jti);
 
         // Sign it with sk=[0x04; 32]
@@ -111,11 +111,11 @@ impl HolderProofGoldenVector {
 
         let mut expected_bytes = Vec::with_capacity(128);
         expected_bytes.extend_from_slice(domain);
-        expected_bytes.extend_from_slice(&(req_id.len() as u32).to_le_bytes());
+        expected_bytes.extend_from_slice(&u32::try_from(req_id.len()).unwrap_or(u32::MAX).to_le_bytes());
         expected_bytes.extend_from_slice(req_id);
-        expected_bytes.extend_from_slice(&(op_id.len() as u32).to_le_bytes());
+        expected_bytes.extend_from_slice(&u32::try_from(op_id.len()).unwrap_or(u32::MAX).to_le_bytes());
         expected_bytes.extend_from_slice(op_id);
-        expected_bytes.extend_from_slice(&(jti.len() as u32).to_le_bytes());
+        expected_bytes.extend_from_slice(&u32::try_from(jti.len()).unwrap_or(u32::MAX).to_le_bytes());
         expected_bytes.extend_from_slice(&jti);
 
         // Sign it with sk=[0x05; 32]
@@ -152,11 +152,11 @@ impl HolderProofGoldenVector {
 
         let mut expected_bytes = Vec::with_capacity(128);
         expected_bytes.extend_from_slice(domain);
-        expected_bytes.extend_from_slice(&(req_id.len() as u32).to_le_bytes());
+        expected_bytes.extend_from_slice(&u32::try_from(req_id.len()).unwrap_or(u32::MAX).to_le_bytes());
         expected_bytes.extend_from_slice(req_id);
-        expected_bytes.extend_from_slice(&(op_id.len() as u32).to_le_bytes());
+        expected_bytes.extend_from_slice(&u32::try_from(op_id.len()).unwrap_or(u32::MAX).to_le_bytes());
         expected_bytes.extend_from_slice(op_id);
-        expected_bytes.extend_from_slice(&(jti.len() as u32).to_le_bytes());
+        expected_bytes.extend_from_slice(&u32::try_from(jti.len()).unwrap_or(u32::MAX).to_le_bytes());
         expected_bytes.extend_from_slice(&jti);
 
         // Sign it with sk=[0x06; 32]

@@ -338,7 +338,7 @@ impl E2eRunner {
             correlation_id,
             if passed { "pass" } else { "fail" },
             duration_ms,
-            AssertionsSummary::new(summary.passed as u32, summary.failed as u32),
+            AssertionsSummary::new(u32::try_from(summary.passed).unwrap_or(u32::MAX), u32::try_from(summary.failed).unwrap_or(u32::MAX)),
             serde_json::json!({
                 "interop": {
                     "total": summary.total,

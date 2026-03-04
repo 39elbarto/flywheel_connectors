@@ -653,7 +653,7 @@ impl SymbolResponseBuilder {
     /// Build the response.
     #[must_use]
     pub fn build(self, total_available: u32, already_sent: usize) -> SymbolResponse {
-        let sent_count = self.selected_esis.len() as u32;
+        let sent_count = u32::try_from(self.selected_esis.len()).unwrap_or(u32::MAX);
         let already_sent = u32::try_from(already_sent).unwrap_or(u32::MAX);
         let total_sent = sent_count.saturating_add(already_sent);
         let is_final = total_sent >= total_available || self.selected_esis.is_empty();

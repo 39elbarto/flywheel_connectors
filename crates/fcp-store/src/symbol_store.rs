@@ -353,7 +353,7 @@ impl SymbolStore for MemorySymbolStore {
         self.objects
             .read()
             .get(object_id)
-            .map_or(0, |obj| obj.symbols.len() as u32)
+            .map_or(0, |obj| u32::try_from(obj.symbols.len()).unwrap_or(u32::MAX))
     }
 
     async fn delete_object(&self, object_id: &ObjectId) -> Result<(), SymbolStoreError> {
@@ -633,7 +633,7 @@ mod tests {
 
             StoreLogData {
                 object_id: Some(test_object_id()),
-                symbol_count: Some(symbols.len() as u32),
+                symbol_count: Some(u32::try_from(symbols.len()).unwrap_or(u32::MAX)),
                 ..StoreLogData::default()
             }
         });

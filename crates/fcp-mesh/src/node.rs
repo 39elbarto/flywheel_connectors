@@ -1043,7 +1043,7 @@ impl MeshNode {
 
         let response = builder
             .add_from_repair_engine(&engine, validated, already_sent)
-            .build(available.len() as u32, already_sent_count);
+            .build(u32::try_from(available.len()).unwrap_or(u32::MAX), already_sent_count);
 
         debug!(
             object_id = %response.object_id,

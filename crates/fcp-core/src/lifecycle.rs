@@ -2646,7 +2646,7 @@ mod tests {
         detector.record_crash(now);
         let rolled_back =
             record.record_crash_and_maybe_rollback(&mut detector, now, "second crash");
-        assert_eq!(rolled_back.unwrap(), true);
+        assert!(rolled_back.unwrap());
         assert_eq!(record.state, LifecycleState::RolledBack);
     }
 

@@ -141,3 +141,92 @@ pub struct AirtableErrorDetail {
     #[serde(default)]
     pub message: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn base_serde() {
+        let json = json!({"id": "app123", "name": "My Base", "permissionLevel": "create"});
+        let base: Base = serde_json::from_value(json).unwrap();
+        assert_eq!(base.id, "app123");
+        assert_eq!(base.permission_level.as_deref(), Some("create"));
+    }
+
+    #[test]
+    fn list_bases_response() {
+        let json = json!({"bases": [{"id": "app1", "name": "B1"}], "offset": "abc"});
+        let resp: ListBasesResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.bases.len(), 1);
+        assert_eq!(resp.offset.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn table_schema_serde() {
+        let json = json!({
+            "id": "tbl1",
+            "name": "Tasks",
+            "fields": [{"id": "fld1", "name": "Name", "type": "singleLineText"}],
+            "views": [{"id": "viw1", "name": "Grid", "type": "grid"}],
+            "primaryFieldId": "fld1"
+        });
+        let schema: TableSchema = serde_json::from_value(json).unwrap();
+        assert_eq!(schema.fields.len(), 1);
+        assert_eq!(schema.fields[0].field_type, "singleLineText");
+    }
+
+    #[test]
+    fn record_serde() {
+        let json = json!({"id": "rec1", "fields": {"Name": "Task 1"}, "createdTime": "2026-03-01"});
+        let rec: Record = serde_json::from_value(json).unwrap();
+        assert_eq!(rec.id, "rec1");
+        assert!(rec.created_time.is_some());
+    }
+
+    #[test]
+    fn list_records_response() {
+        let json = json!({"records": [], "offset": "next"});
+        let resp: ListRecordsResponse = serde_json::from_value(json).unwrap();
+        assert!(resp.records.is_empty());
+        assert_eq!(resp.offset.as_deref(), Some("next"));
+    }
+
+    #[test]
+    fn delete_record_response() {
+        let resp = DeleteRecordResponse {
+            id: "rec1".to_string(),
+            deleted: true,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let back: DeleteRecordResponse = serde_json::from_str(&json).unwrap();
+        assert!(back.deleted);
+    }
+
+    #[test]
+    fn sort_spec_default_direction() {
+        let json = r#"{"field":"Name"}"#;
+        let sort: SortSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(sort.direction, "asc");
+    }
+
+    #[test]
+    fn attachment_download_serialize() {
+        let dl = AttachmentDownload {
+            data: "base64data".to_string(),
+            content_type: "image/png".to_string(),
+            filename: None,
+        };
+        let json = serde_json::to_string(&dl).unwrap();
+        assert!(!json.contains("filename"));
+    }
+
+    #[test]
+    fn airtable_api_error() {
+        let json = json!({"error": {"type": "INVALID_REQUEST", "message": "Bad field"}});
+        let err: AirtableApiError = serde_json::from_value(json).unwrap();
+        let detail = err.error.unwrap();
+        assert_eq!(detail.error_type.as_deref(), Some("INVALID_REQUEST"));
+    }
+}

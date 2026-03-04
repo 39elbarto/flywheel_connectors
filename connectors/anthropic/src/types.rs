@@ -382,3 +382,273 @@ pub struct ApiError {
     /// Error message
     pub message: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ---- Model ----
+
+    #[test]
+    fn model_as_str() {
+        assert_eq!(Model::ClaudeOpus4_5.as_str(), "claude-opus-4-5-20251101");
+        assert_eq!(Model::ClaudeSonnet4.as_str(), "claude-sonnet-4-20250514");
+        assert_eq!(Model::Claude3_5Haiku.as_str(), "claude-3-5-haiku-20241022");
+        assert_eq!(Model::Claude3_5Sonnet.as_str(), "claude-3-5-sonnet-20241022");
+    }
+
+    #[test]
+    fn model_default_is_sonnet4() {
+        assert_eq!(Model::default(), Model::ClaudeSonnet4);
+    }
+
+    #[test]
+    fn model_serde_roundtrip() {
+        let model = Model::ClaudeOpus4_5;
+        let json = serde_json::to_string(&model).unwrap();
+        assert_eq!(json, "\"claude-opus-4-5-20251101\"");
+        let back: Model = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, Model::ClaudeOpus4_5);
+    }
+
+    #[test]
+    fn model_pricing() {
+        assert!(Model::ClaudeOpus4_5.input_price_per_million() > Model::ClaudeSonnet4.input_price_per_million());
+        assert!(Model::Claude3_5Haiku.input_price_per_million() < Model::ClaudeSonnet4.input_price_per_million());
+        assert!(Model::ClaudeOpus4_5.output_price_per_million() > 0.0);
+    }
+
+    // ---- Role ----
+
+    #[test]
+    fn role_serde() {
+        let json = serde_json::to_string(&Role::User).unwrap();
+        assert_eq!(json, "\"user\"");
+        let back: Role = serde_json::from_str("\"assistant\"").unwrap();
+        assert_eq!(back, Role::Assistant);
+    }
+
+    // ---- StopReason ----
+
+    #[test]
+    fn stop_reason_serde() {
+        let json = serde_json::to_string(&StopReason::EndTurn).unwrap();
+        assert_eq!(json, "\"end_turn\"");
+        let back: StopReason = serde_json::from_str("\"tool_use\"").unwrap();
+        assert_eq!(back, StopReason::ToolUse);
+    }
+
+    // ---- MessageContent ----
+
+    #[test]
+    fn message_content_from_str() {
+        let content: MessageContent = "hello".into();
+        match content {
+            MessageContent::Text(s) => assert_eq!(s, "hello"),
+            _ => panic!("expected Text variant"),
+        }
+    }
+
+    #[test]
+    fn message_content_from_string() {
+        let content: MessageContent = String::from("world").into();
+        match content {
+            MessageContent::Text(s) => assert_eq!(s, "world"),
+            _ => panic!("expected Text variant"),
+        }
+    }
+
+    // ---- ContentBlock ----
+
+    #[test]
+    fn content_block_text_serde() {
+        let block = ContentBlock::Text { text: "hello".to_string() };
+        let json = serde_json::to_string(&block).unwrap();
+        assert!(json.contains("\"type\":\"text\""));
+        let back: ContentBlock = serde_json::from_str(&json).unwrap();
+        match back {
+            ContentBlock::Text { text } => assert_eq!(text, "hello"),
+            _ => panic!("expected Text"),
+        }
+    }
+
+    #[test]
+    fn content_block_tool_use_serde() {
+        let block = ContentBlock::ToolUse {
+            id: "t1".to_string(),
+            name: "calc".to_string(),
+            input: json!({"x": 1}),
+        };
+        let json = serde_json::to_string(&block).unwrap();
+        assert!(json.contains("\"type\":\"tool_use\""));
+        let back: ContentBlock = serde_json::from_str(&json).unwrap();
+        match back {
+            ContentBlock::ToolUse { id, name, .. } => {
+                assert_eq!(id, "t1");
+                assert_eq!(name, "calc");
+            }
+            _ => panic!("expected ToolUse"),
+        }
+    }
+
+    #[test]
+    fn content_block_tool_result_serde() {
+        let block = ContentBlock::ToolResult {
+            tool_use_id: "t1".to_string(),
+            content: "42".to_string(),
+            is_error: Some(false),
+        };
+        let json = serde_json::to_string(&block).unwrap();
+        let back: ContentBlock = serde_json::from_str(&json).unwrap();
+        match back {
+            ContentBlock::ToolResult { tool_use_id, content, is_error } => {
+                assert_eq!(tool_use_id, "t1");
+                assert_eq!(content, "42");
+                assert_eq!(is_error, Some(false));
+            }
+            _ => panic!("expected ToolResult"),
+        }
+    }
+
+    // ---- ResponseContentBlock ----
+
+    #[test]
+    fn response_content_block_as_text() {
+        let block = ResponseContentBlock::Text { text: "hello".to_string() };
+        assert_eq!(block.as_text(), Some("hello"));
+
+        let tool_block = ResponseContentBlock::ToolUse {
+            id: "t1".to_string(),
+            name: "calc".to_string(),
+            input: json!({}),
+        };
+        assert_eq!(tool_block.as_text(), None);
+    }
+
+    // ---- ToolChoice ----
+
+    #[test]
+    fn tool_choice_serde() {
+        let auto = ToolChoice::Auto;
+        let json = serde_json::to_string(&auto).unwrap();
+        assert!(json.contains("\"type\":\"auto\""));
+
+        let specific = ToolChoice::Tool { name: "calc".to_string() };
+        let json = serde_json::to_string(&specific).unwrap();
+        assert!(json.contains("\"calc\""));
+    }
+
+    // ---- Usage ----
+
+    #[test]
+    fn usage_total_tokens() {
+        let usage = Usage {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+        };
+        assert_eq!(usage.total_tokens(), 150);
+    }
+
+    #[test]
+    fn usage_calculate_cost_no_cache() {
+        let usage = Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+        };
+        let cost = usage.calculate_cost(Model::ClaudeSonnet4);
+        // input: 1M * $3/M = $3, output: 1M * $15/M = $15
+        assert!((cost - 18.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn usage_calculate_cost_with_cache() {
+        let usage = Usage {
+            input_tokens: 1000,
+            output_tokens: 500,
+            cache_creation_input_tokens: 200,
+            cache_read_input_tokens: 300,
+        };
+        let cost = usage.calculate_cost(Model::ClaudeSonnet4);
+        assert!(cost > 0.0);
+    }
+
+    #[test]
+    fn usage_deserialize_with_defaults() {
+        let json = r#"{"input_tokens": 10, "output_tokens": 5}"#;
+        let usage: Usage = serde_json::from_str(json).unwrap();
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(usage.output_tokens, 5);
+        assert_eq!(usage.cache_creation_input_tokens, 0);
+        assert_eq!(usage.cache_read_input_tokens, 0);
+    }
+
+    // ---- ImageSource ----
+
+    #[test]
+    fn image_source_base64_serde() {
+        let src = ImageSource::Base64 {
+            media_type: "image/png".to_string(),
+            data: "abc123".to_string(),
+        };
+        let json = serde_json::to_string(&src).unwrap();
+        assert!(json.contains("\"type\":\"base64\""));
+    }
+
+    #[test]
+    fn image_source_url_serde() {
+        let src = ImageSource::Url { url: "https://example.com/img.png".to_string() };
+        let json = serde_json::to_string(&src).unwrap();
+        assert!(json.contains("\"type\":\"url\""));
+    }
+
+    // ---- ApiError ----
+
+    #[test]
+    fn api_error_deserialize() {
+        let json = r#"{"type": "invalid_request_error", "message": "bad input"}"#;
+        let err: ApiError = serde_json::from_str(json).unwrap();
+        assert_eq!(err.error_type, "invalid_request_error");
+        assert_eq!(err.message, "bad input");
+    }
+
+    // ---- MessagesResponse ----
+
+    #[test]
+    fn messages_response_deserialize() {
+        let json = json!({
+            "id": "msg_01",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Hello!"}],
+            "model": "claude-sonnet-4-20250514",
+            "stop_reason": "end_turn",
+            "stop_sequence": null,
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        });
+        let resp: MessagesResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.id, "msg_01");
+        assert_eq!(resp.role, Role::Assistant);
+        assert_eq!(resp.content.len(), 1);
+        assert_eq!(resp.stop_reason, Some(StopReason::EndTurn));
+        assert_eq!(resp.usage.total_tokens(), 15);
+    }
+
+    // ---- Tool ----
+
+    #[test]
+    fn tool_serde_roundtrip() {
+        let tool = Tool {
+            name: "calculator".to_string(),
+            description: "Does math".to_string(),
+            input_schema: json!({"type": "object", "properties": {"x": {"type": "number"}}}),
+        };
+        let json = serde_json::to_string(&tool).unwrap();
+        let back: Tool = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name, "calculator");
+    }
+}

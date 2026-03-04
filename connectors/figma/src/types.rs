@@ -289,3 +289,243 @@ pub struct CreateWebhookRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ---- FigmaErrorResponse ----
+
+    #[test]
+    fn error_response_with_alias() {
+        let json = r#"{"status":404,"err":"Not found"}"#;
+        let resp: FigmaErrorResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.status, Some(404));
+        assert_eq!(resp.message.as_deref(), Some("Not found"));
+    }
+
+    #[test]
+    fn error_response_minimal() {
+        let json = r#"{}"#;
+        let resp: FigmaErrorResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.status.is_none());
+        assert!(resp.message.is_none());
+    }
+
+    // ---- TeamProjectsResponse ----
+
+    #[test]
+    fn team_projects_response_serde() {
+        let resp = TeamProjectsResponse {
+            name: "My Team".to_string(),
+            projects: vec![Project { id: 1, name: "Project A".to_string() }],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let back: TeamProjectsResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.projects.len(), 1);
+        assert_eq!(back.projects[0].id, 1);
+    }
+
+    // ---- ProjectFile ----
+
+    #[test]
+    fn project_file_serde() {
+        let json = json!({
+            "key": "abc123",
+            "name": "Design System",
+            "last_modified": "2026-03-01T00:00:00Z"
+        });
+        let file: ProjectFile = serde_json::from_value(json).unwrap();
+        assert_eq!(file.key, "abc123");
+        assert!(file.thumbnail_url.is_none());
+    }
+
+    // ---- FileResponse (camelCase) ----
+
+    #[test]
+    fn file_response_camel_case() {
+        let json = json!({
+            "name": "My Design",
+            "document": {"id": "0:0", "type": "DOCUMENT"},
+            "lastModified": "2026-03-01",
+            "version": "123"
+        });
+        let resp: FileResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.name, "My Design");
+        assert_eq!(resp.version, "123");
+        assert!(resp.components.is_none());
+    }
+
+    // ---- DesignToken + TokenValue ----
+
+    #[test]
+    fn design_token_color_serde() {
+        let token = DesignToken {
+            name: "color-primary-500".to_string(),
+            original_name: "Primary/500".to_string(),
+            category: "color".to_string(),
+            style_type: "FILL".to_string(),
+            value: TokenValue::Color {
+                r: 1.0, g: 0.5, b: 0.0, a: 1.0,
+                hex: "#ff8000ff".to_string(),
+            },
+            node_id: Some("1:2".to_string()),
+            description: Some("Primary orange".to_string()),
+        };
+        let json = serde_json::to_string(&token).unwrap();
+        let back: DesignToken = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name, "color-primary-500");
+        match &back.value {
+            TokenValue::Color { hex, .. } => assert_eq!(hex, "#ff8000ff"),
+            _ => panic!("expected Color"),
+        }
+    }
+
+    #[test]
+    fn design_token_typography_serde() {
+        let token = DesignToken {
+            name: "text-body".to_string(),
+            original_name: "Body".to_string(),
+            category: "typography".to_string(),
+            style_type: "TEXT".to_string(),
+            value: TokenValue::Typography {
+                font_family: "Inter".to_string(),
+                font_size: 16.0,
+                font_weight: 400.0,
+                line_height: Some(24.0),
+                letter_spacing: None,
+            },
+            node_id: None,
+            description: None,
+        };
+        let json = serde_json::to_string(&token).unwrap();
+        let back: DesignToken = serde_json::from_str(&json).unwrap();
+        match &back.value {
+            TokenValue::Typography { font_family, .. } => assert_eq!(font_family, "Inter"),
+            _ => panic!("expected Typography"),
+        }
+    }
+
+    #[test]
+    fn design_token_effect_serde() {
+        let value = TokenValue::Effect {
+            effect_type: "DROP_SHADOW".to_string(),
+            radius: Some(4.0),
+            color: Some("#00000040".to_string()),
+            offset_x: Some(0.0),
+            offset_y: Some(2.0),
+        };
+        let json = serde_json::to_string(&value).unwrap();
+        let back: TokenValue = serde_json::from_str(&json).unwrap();
+        match back {
+            TokenValue::Effect { effect_type, .. } => assert_eq!(effect_type, "DROP_SHADOW"),
+            _ => panic!("expected Effect"),
+        }
+    }
+
+    #[test]
+    fn design_token_grid_serde() {
+        let value = TokenValue::Grid {
+            pattern: "COLUMNS".to_string(),
+            size: Some(8.0),
+            gutter: Some(16.0),
+            count: Some(12.0),
+        };
+        let json = serde_json::to_string(&value).unwrap();
+        let back: TokenValue = serde_json::from_str(&json).unwrap();
+        match back {
+            TokenValue::Grid { pattern, .. } => assert_eq!(pattern, "COLUMNS"),
+            _ => panic!("expected Grid"),
+        }
+    }
+
+    #[test]
+    fn design_token_raw_serde() {
+        let value = TokenValue::Raw { data: json!({"custom": true}) };
+        let json = serde_json::to_string(&value).unwrap();
+        let back: TokenValue = serde_json::from_str(&json).unwrap();
+        match back {
+            TokenValue::Raw { data } => assert_eq!(data["custom"], true),
+            _ => panic!("expected Raw"),
+        }
+    }
+
+    // ---- FileVersion ----
+
+    #[test]
+    fn file_version_serde() {
+        let json = json!({
+            "id": "v1",
+            "label": "Final",
+            "description": "Ready for handoff",
+            "user": {"handle": "alice", "img_url": null, "id": "u1"},
+            "created_at": "2026-03-01T00:00:00Z"
+        });
+        let ver: FileVersion = serde_json::from_value(json).unwrap();
+        assert_eq!(ver.label.as_deref(), Some("Final"));
+        assert!(ver.user.is_some());
+    }
+
+    // ---- Comment ----
+
+    #[test]
+    fn comment_serde() {
+        let json = json!({
+            "id": "c1",
+            "message": "Looks great!",
+            "created_at": "2026-03-03T00:00:00Z"
+        });
+        let comment: Comment = serde_json::from_value(json).unwrap();
+        assert_eq!(comment.message, "Looks great!");
+        assert!(comment.resolved_at.is_none());
+        assert!(comment.parent_id.is_none());
+    }
+
+    // ---- Webhook ----
+
+    #[test]
+    fn webhook_serde() {
+        let webhook = Webhook {
+            id: "w1".to_string(),
+            team_id: "t1".to_string(),
+            event_type: "FILE_UPDATE".to_string(),
+            endpoint: "https://example.com/hook".to_string(),
+            status: "ACTIVE".to_string(),
+            description: Some("File updates".to_string()),
+            client_id: None,
+            passcode: Some("secret".to_string()),
+        };
+        let json = serde_json::to_string(&webhook).unwrap();
+        let back: Webhook = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.event_type, "FILE_UPDATE");
+        assert_eq!(back.status, "ACTIVE");
+    }
+
+    // ---- CreateWebhookRequest ----
+
+    #[test]
+    fn create_webhook_request_serialize() {
+        let req = CreateWebhookRequest {
+            team_id: "t1".to_string(),
+            event_type: "FILE_UPDATE".to_string(),
+            endpoint: "https://example.com/hook".to_string(),
+            passcode: "secret".to_string(),
+            description: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(!json.contains("description"));
+    }
+
+    // ---- ExportImagesResponse ----
+
+    #[test]
+    fn export_images_response_serde() {
+        let json = json!({
+            "images": {"1:2": "https://example.com/img.png"},
+            "err": null
+        });
+        let resp: ExportImagesResponse = serde_json::from_value(json).unwrap();
+        assert!(resp.err.is_none());
+    }
+}

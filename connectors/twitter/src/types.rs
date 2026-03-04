@@ -1082,3 +1082,333 @@ pub struct MatchingRule {
     #[serde(default)]
     pub tag: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn twitter_response_with_data() {
+        let json = json!({
+            "data": {"id": "1", "text": "Hello"},
+            "meta": {"result_count": 1}
+        });
+        let resp: TwitterResponse<Tweet> = serde_json::from_value(json).unwrap();
+        let tweet = resp.data.unwrap();
+        assert_eq!(tweet.id, "1");
+        assert_eq!(resp.meta.unwrap().result_count, Some(1));
+    }
+
+    #[test]
+    fn twitter_response_empty() {
+        let json = json!({});
+        let resp: TwitterResponse<Tweet> = serde_json::from_value(json).unwrap();
+        assert!(resp.data.is_none());
+        assert!(resp.includes.is_none());
+        assert!(resp.errors.is_none());
+    }
+
+    #[test]
+    fn includes_default() {
+        let inc = Includes::default();
+        assert!(inc.users.is_empty());
+        assert!(inc.tweets.is_empty());
+        assert!(inc.media.is_empty());
+        assert!(inc.places.is_empty());
+        assert!(inc.polls.is_empty());
+    }
+
+    #[test]
+    fn response_meta_serde() {
+        let json = json!({
+            "result_count": 10,
+            "next_token": "abc",
+            "newest_id": "100",
+            "oldest_id": "91"
+        });
+        let meta: ResponseMeta = serde_json::from_value(json).unwrap();
+        assert_eq!(meta.result_count, Some(10));
+        assert_eq!(meta.next_token.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn twitter_api_error_type_rename() {
+        let json = json!({
+            "title": "Not Found",
+            "detail": "Could not find tweet",
+            "type": "https://api.twitter.com/2/problems/resource-not-found",
+            "resource_type": "tweet",
+            "resource_id": "123"
+        });
+        let err: TwitterApiError = serde_json::from_value(json).unwrap();
+        assert_eq!(err.title.as_deref(), Some("Not Found"));
+        assert!(err.error_type.is_some());
+    }
+
+    #[test]
+    fn tweet_serde_full() {
+        let json = json!({
+            "id": "123",
+            "text": "Hello world!",
+            "author_id": "456",
+            "created_at": "2026-03-03T00:00:00Z",
+            "lang": "en",
+            "source": "Twitter Web App",
+            "public_metrics": {
+                "retweet_count": 10,
+                "reply_count": 5,
+                "like_count": 100,
+                "quote_count": 2,
+                "bookmark_count": 3
+            }
+        });
+        let tweet: Tweet = serde_json::from_value(json).unwrap();
+        assert_eq!(tweet.id, "123");
+        let metrics = tweet.public_metrics.unwrap();
+        assert_eq!(metrics.like_count, 100);
+        assert_eq!(metrics.bookmark_count, Some(3));
+    }
+
+    #[test]
+    fn tweet_default() {
+        let tweet = Tweet::default();
+        assert!(tweet.id.is_empty());
+        assert!(tweet.author_id.is_none());
+        assert!(tweet.referenced_tweets.is_none());
+    }
+
+    #[test]
+    fn referenced_tweet_type_rename() {
+        let rt = ReferencedTweet { ref_type: "quoted".into(), id: "999".into() };
+        let json_str = serde_json::to_string(&rt).unwrap();
+        assert!(json_str.contains("\"type\":\"quoted\""));
+        let back: ReferencedTweet = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(back.ref_type, "quoted");
+    }
+
+    #[test]
+    fn user_serde() {
+        let json = json!({
+            "id": "u1",
+            "name": "Alice",
+            "username": "alice",
+            "verified": true,
+            "public_metrics": {
+                "followers_count": 1000,
+                "following_count": 500,
+                "tweet_count": 5000,
+                "listed_count": 50
+            }
+        });
+        let user: User = serde_json::from_value(json).unwrap();
+        assert_eq!(user.username, "alice");
+        let metrics = user.public_metrics.unwrap();
+        assert_eq!(metrics.followers_count, 1000);
+    }
+
+    #[test]
+    fn entities_serde() {
+        let json = json!({
+            "hashtags": [{"tag": "rust", "start": 0, "end": 5}],
+            "mentions": [{"username": "alice", "start": 6, "end": 12}],
+            "urls": [{"url": "https://t.co/abc", "start": 13, "end": 36, "expanded_url": "https://example.com"}]
+        });
+        let ent: Entities = serde_json::from_value(json).unwrap();
+        assert_eq!(ent.hashtags.unwrap()[0].tag, "rust");
+        assert_eq!(ent.mentions.unwrap()[0].username, "alice");
+    }
+
+    #[test]
+    fn media_type_rename() {
+        let m = Media {
+            media_key: "mk1".into(),
+            media_type: "photo".into(),
+            url: Some("https://pbs.twimg.com/photo.jpg".into()),
+            preview_image_url: None,
+            width: Some(1920),
+            height: Some(1080),
+            duration_ms: None,
+            alt_text: Some("A photo".into()),
+            public_metrics: None,
+        };
+        let json_str = serde_json::to_string(&m).unwrap();
+        assert!(json_str.contains("\"type\":\"photo\""));
+        let back: Media = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(back.media_type, "photo");
+    }
+
+    #[test]
+    fn place_geo_type_rename() {
+        let geo = PlaceGeo { geo_type: "Feature".into(), bbox: vec![-122.5, 37.7, -122.3, 37.8] };
+        let json_str = serde_json::to_string(&geo).unwrap();
+        assert!(json_str.contains("\"type\":\"Feature\""));
+    }
+
+    #[test]
+    fn poll_serde() {
+        let json = json!({
+            "id": "poll1",
+            "options": [
+                {"position": 1, "label": "Yes", "votes": 100},
+                {"position": 2, "label": "No", "votes": 50}
+            ],
+            "voting_status": "closed",
+            "duration_minutes": 1440
+        });
+        let poll: Poll = serde_json::from_value(json).unwrap();
+        assert_eq!(poll.options.len(), 2);
+        assert_eq!(poll.options[0].votes, 100);
+    }
+
+    #[test]
+    fn create_tweet_request_skip_none() {
+        let req = CreateTweetRequest {
+            text: Some("Hello".into()),
+            ..Default::default()
+        };
+        let json_str = serde_json::to_string(&req).unwrap();
+        assert!(json_str.contains("\"text\":\"Hello\""));
+        assert!(!json_str.contains("reply"));
+        assert!(!json_str.contains("media"));
+        assert!(!json_str.contains("poll"));
+    }
+
+    #[test]
+    fn create_tweet_response_serde() {
+        let json = json!({
+            "data": {"id": "new1", "text": "Hello", "edit_history_tweet_ids": ["new1"]}
+        });
+        let resp: CreateTweetResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.data.id, "new1");
+    }
+
+    #[test]
+    fn delete_tweet_response_serde() {
+        let json = json!({"data": {"deleted": true}});
+        let resp: DeleteTweetResponse = serde_json::from_value(json).unwrap();
+        assert!(resp.data.deleted);
+    }
+
+    #[test]
+    fn retweet_response_serde() {
+        let json = json!({"data": {"retweeted": true}});
+        let resp: RetweetResponse = serde_json::from_value(json).unwrap();
+        assert!(resp.data.retweeted);
+    }
+
+    #[test]
+    fn like_response_serde() {
+        let json = json!({"data": {"liked": true}});
+        let resp: LikeResponse = serde_json::from_value(json).unwrap();
+        assert!(resp.data.liked);
+    }
+
+    #[test]
+    fn dm_event_serde() {
+        let json = json!({
+            "id": "dm1",
+            "event_type": "MessageCreate",
+            "text": "Hey!",
+            "sender_id": "u1",
+            "dm_conversation_id": "conv1"
+        });
+        let dm: DmEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(dm.event_type, "MessageCreate");
+        assert_eq!(dm.text.as_deref(), Some("Hey!"));
+    }
+
+    #[test]
+    fn send_dm_response_serde() {
+        let json = json!({
+            "data": {"dm_conversation_id": "conv1", "dm_event_id": "evt1"}
+        });
+        let resp: SendDmResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.data.dm_conversation_id, "conv1");
+    }
+
+    #[test]
+    fn create_dm_conversation_request_serde() {
+        let req = CreateDmConversationRequest {
+            conversation_type: "Group".into(),
+            participant_ids: vec!["u1".into(), "u2".into()],
+            message: SendDmRequest { text: "Hi group!".into() },
+        };
+        let json_str = serde_json::to_string(&req).unwrap();
+        assert!(json_str.contains("\"conversation_type\":\"Group\""));
+        assert!(json_str.contains("Hi group!"));
+    }
+
+    #[test]
+    fn trend_serde() {
+        let json = json!({
+            "name": "#Rust",
+            "url": "https://twitter.com/search?q=%23Rust",
+            "query": "%23Rust",
+            "tweet_volume": 50000
+        });
+        let trend: Trend = serde_json::from_value(json).unwrap();
+        assert_eq!(trend.name, "#Rust");
+        assert_eq!(trend.tweet_volume, Some(50000));
+    }
+
+    #[test]
+    fn trends_place_serde() {
+        let json = json!({
+            "trends": [{"name": "#Rust", "url": "u", "query": "q"}],
+            "as_of": "2026-03-03T00:00:00Z",
+            "locations": [{"name": "Worldwide", "woeid": 1}]
+        });
+        let tp: TrendsPlace = serde_json::from_value(json).unwrap();
+        assert_eq!(tp.trends.len(), 1);
+        assert_eq!(tp.locations[0].woeid, 1);
+    }
+
+    #[test]
+    fn stream_rule_skip_none() {
+        let rule = StreamRule { id: None, value: "rust lang".into(), tag: None };
+        let json_str = serde_json::to_string(&rule).unwrap();
+        assert!(!json_str.contains("\"tag\""));
+    }
+
+    #[test]
+    fn stream_rules_response_serde() {
+        let json = json!({
+            "data": [{"id": "r1", "value": "rust", "tag": "lang"}],
+            "meta": {"sent": "2026-03-03T00:00:00Z", "summary": {"created": 1}}
+        });
+        let resp: StreamRulesResponse = serde_json::from_value(json).unwrap();
+        let rules = resp.data.unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].tag.as_deref(), Some("lang"));
+        let summary = resp.meta.unwrap().summary.unwrap();
+        assert_eq!(summary.created, Some(1));
+    }
+
+    #[test]
+    fn stream_tweet_serde() {
+        let json = json!({
+            "data": {"id": "t1", "text": "streaming"},
+            "matching_rules": [{"id": "r1", "tag": "test"}]
+        });
+        let st: StreamTweet = serde_json::from_value(json).unwrap();
+        assert_eq!(st.data.id, "t1");
+        let rules = st.matching_rules.unwrap();
+        assert_eq!(rules[0].id, "r1");
+    }
+
+    #[test]
+    fn annotation_type_rename() {
+        let ann = Annotation {
+            annotation_type: "Person".into(),
+            normalized_text: "Alice".into(),
+            probability: 0.95,
+            start: 0,
+            end: 5,
+        };
+        let json_str = serde_json::to_string(&ann).unwrap();
+        assert!(json_str.contains("\"type\":\"Person\""));
+        let back: Annotation = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(back.annotation_type, "Person");
+    }
+}

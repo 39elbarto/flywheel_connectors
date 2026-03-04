@@ -147,3 +147,106 @@ pub struct FreeBusyResponse {
     #[serde(default)]
     pub calendars: std::collections::HashMap<String, CalendarFreeBusy>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn calendar_entry_serde() {
+        let json = json!({
+            "id": "primary",
+            "summary": "My Calendar",
+            "timeZone": "America/New_York",
+            "primary": true
+        });
+        let cal: CalendarEntry = serde_json::from_value(json).unwrap();
+        assert_eq!(cal.id, "primary");
+        assert!(cal.primary);
+    }
+
+    #[test]
+    fn calendar_entry_defaults() {
+        let json = json!({"id": "test"});
+        let cal: CalendarEntry = serde_json::from_value(json).unwrap();
+        assert!(!cal.primary);
+        assert!(cal.summary.is_none());
+    }
+
+    #[test]
+    fn event_serde() {
+        let json = json!({
+            "id": "evt1",
+            "status": "confirmed",
+            "summary": "Meeting",
+            "start": {"dateTime": "2026-03-03T10:00:00-05:00", "timeZone": "America/New_York"},
+            "end": {"dateTime": "2026-03-03T11:00:00-05:00"},
+            "attendees": [{"email": "alice@example.com", "responseStatus": "accepted"}]
+        });
+        let event: Event = serde_json::from_value(json).unwrap();
+        assert_eq!(event.summary.as_deref(), Some("Meeting"));
+        assert!(event.start.is_some());
+        assert_eq!(event.attendees.len(), 1);
+    }
+
+    #[test]
+    fn event_minimal() {
+        let json = json!({});
+        let event: Event = serde_json::from_value(json).unwrap();
+        assert!(event.id.is_none());
+        assert!(event.attendees.is_empty());
+        assert!(event.recurrence.is_empty());
+    }
+
+    #[test]
+    fn event_date_time_all_day() {
+        let json = json!({"date": "2026-03-03"});
+        let dt: EventDateTime = serde_json::from_value(json).unwrap();
+        assert_eq!(dt.date.as_deref(), Some("2026-03-03"));
+        assert!(dt.date_time.is_none());
+    }
+
+    #[test]
+    fn event_person_self_rename() {
+        let json = json!({"email": "me@example.com", "self": true});
+        let person: EventPerson = serde_json::from_value(json).unwrap();
+        assert!(person.self_);
+    }
+
+    #[test]
+    fn events_list_response() {
+        let json = json!({
+            "items": [],
+            "nextPageToken": "token123",
+            "summary": "My Calendar"
+        });
+        let resp: EventsListResponse = serde_json::from_value(json).unwrap();
+        assert!(resp.items.is_empty());
+        assert_eq!(resp.next_page_token.as_deref(), Some("token123"));
+    }
+
+    #[test]
+    fn free_busy_request_serialize() {
+        let req = FreeBusyRequest {
+            time_min: "2026-03-03T00:00:00Z".to_string(),
+            time_max: "2026-03-04T00:00:00Z".to_string(),
+            items: vec![FreeBusyRequestItem { id: "primary".to_string() }],
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("timeMin"));
+        assert!(json.contains("timeMax"));
+    }
+
+    #[test]
+    fn free_busy_response_serde() {
+        let json = json!({
+            "calendars": {
+                "primary": {"busy": [{"start": "2026-03-03T10:00:00Z", "end": "2026-03-03T11:00:00Z"}]}
+            }
+        });
+        let resp: FreeBusyResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.calendars.len(), 1);
+        assert_eq!(resp.calendars["primary"].busy.len(), 1);
+    }
+}

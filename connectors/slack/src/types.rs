@@ -250,3 +250,255 @@ pub struct DoctorCheck {
     pub passed: bool,
     pub message: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ---- Message ----
+
+    #[test]
+    fn message_serde_roundtrip() {
+        let msg = Message {
+            message_type: "message".to_string(),
+            user: Some("U123".to_string()),
+            text: "Hello!".to_string(),
+            ts: "1234567890.123456".to_string(),
+            thread_ts: None,
+            reply_count: None,
+            reactions: None,
+            files: None,
+            bot_id: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: Message = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.text, "Hello!");
+        assert_eq!(back.user, Some("U123".to_string()));
+    }
+
+    #[test]
+    fn message_deserialize_minimal() {
+        let json = r#"{"text":"hi","ts":"123.456"}"#;
+        let msg: Message = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.text, "hi");
+        assert!(msg.user.is_none());
+        assert!(msg.reactions.is_none());
+        assert!(msg.files.is_none());
+    }
+
+    // ---- Channel ----
+
+    #[test]
+    fn channel_serde_with_booleans() {
+        let ch = Channel {
+            id: "C123".to_string(),
+            name: "general".to_string(),
+            is_channel: true,
+            is_group: false,
+            is_im: false,
+            is_archived: false,
+            is_private: false,
+            num_members: 42,
+            topic: Some(TopicPurpose {
+                value: "Welcome".to_string(),
+                creator: "U001".to_string(),
+                last_set: 1_000_000,
+            }),
+            purpose: None,
+        };
+        let json = serde_json::to_string(&ch).unwrap();
+        let back: Channel = serde_json::from_str(&json).unwrap();
+        assert!(back.is_channel);
+        assert_eq!(back.num_members, 42);
+        assert!(back.topic.is_some());
+    }
+
+    #[test]
+    fn channel_deserialize_defaults() {
+        let json = r#"{"id":"C1","name":"test"}"#;
+        let ch: Channel = serde_json::from_str(json).unwrap();
+        assert!(!ch.is_channel);
+        assert!(!ch.is_archived);
+        assert_eq!(ch.num_members, 0);
+    }
+
+    // ---- User ----
+
+    #[test]
+    fn user_serde_roundtrip() {
+        let user = User {
+            id: "U123".to_string(),
+            name: "testuser".to_string(),
+            real_name: Some("Test User".to_string()),
+            is_bot: false,
+            is_admin: true,
+            deleted: false,
+            profile: Some(UserProfile {
+                display_name: "Test".to_string(),
+                email: Some("test@example.com".to_string()),
+                image_48: None,
+                status_text: None,
+                status_emoji: None,
+            }),
+        };
+        let json = serde_json::to_string(&user).unwrap();
+        let back: User = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.id, "U123");
+        assert!(back.is_admin);
+        assert!(back.profile.is_some());
+    }
+
+    #[test]
+    fn user_deserialize_minimal() {
+        let json = r#"{"id":"U1","text":"unused","name":"","real_name":null}"#;
+        let user: User = serde_json::from_str(json).unwrap();
+        assert!(!user.is_bot);
+        assert!(!user.deleted);
+        assert!(user.profile.is_none());
+    }
+
+    // ---- Reaction ----
+
+    #[test]
+    fn reaction_serde() {
+        let reaction = Reaction {
+            name: "thumbsup".to_string(),
+            count: 5,
+            users: vec!["U1".to_string(), "U2".to_string()],
+        };
+        let json = serde_json::to_string(&reaction).unwrap();
+        let back: Reaction = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.count, 5);
+        assert_eq!(back.users.len(), 2);
+    }
+
+    // ---- SlackFile ----
+
+    #[test]
+    fn slack_file_serde() {
+        let file = SlackFile {
+            id: "F123".to_string(),
+            name: Some("report.pdf".to_string()),
+            title: Some("Q1 Report".to_string()),
+            mimetype: Some("application/pdf".to_string()),
+            filetype: Some("pdf".to_string()),
+            size: 1_048_576,
+            url_private: Some("https://files.slack.com/...".to_string()),
+            url_private_download: None,
+        };
+        let json = serde_json::to_string(&file).unwrap();
+        let back: SlackFile = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.size, 1_048_576);
+    }
+
+    // ---- SlackApiResponse ----
+
+    #[test]
+    fn slack_api_response_ok() {
+        let json = r#"{"ok":true,"channel":"C1","ts":"123.456","message":{"text":"hi","ts":"123.456"}}"#;
+        let resp: SlackApiResponse<PostMessageData> = serde_json::from_str(json).unwrap();
+        assert!(resp.ok);
+        assert!(resp.error.is_none());
+    }
+
+    #[test]
+    fn slack_api_response_error() {
+        let json = r#"{"ok":false,"error":"channel_not_found"}"#;
+        let resp: SlackApiResponse<PostMessageData> = serde_json::from_str(json).unwrap();
+        assert!(!resp.ok);
+        assert_eq!(resp.error.as_deref(), Some("channel_not_found"));
+    }
+
+    // ---- AuthTestInfo ----
+
+    #[test]
+    fn auth_test_info_serde() {
+        let info = AuthTestInfo {
+            url: "https://team.slack.com/".to_string(),
+            team: "Test Team".to_string(),
+            user: "testbot".to_string(),
+            team_id: "T123".to_string(),
+            user_id: "U123".to_string(),
+            bot_id: Some("B123".to_string()),
+            is_enterprise_install: false,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let back: AuthTestInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.team_id, "T123");
+        assert_eq!(back.bot_id, Some("B123".to_string()));
+    }
+
+    // ---- SearchData ----
+
+    #[test]
+    fn search_data_serde() {
+        let data = SearchData {
+            messages: SearchMatches {
+                total: 1,
+                matches: vec![Message {
+                    message_type: "message".to_string(),
+                    user: Some("U1".to_string()),
+                    text: "found it".to_string(),
+                    ts: "123.456".to_string(),
+                    thread_ts: None,
+                    reply_count: None,
+                    reactions: None,
+                    files: None,
+                    bot_id: None,
+                }],
+            },
+        };
+        let json = serde_json::to_string(&data).unwrap();
+        let back: SearchData = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.messages.total, 1);
+        assert_eq!(back.messages.matches.len(), 1);
+    }
+
+    // ---- ResponseMetadata ----
+
+    #[test]
+    fn response_metadata_with_cursor() {
+        let json = r#"{"next_cursor":"abc123"}"#;
+        let meta: ResponseMetadata = serde_json::from_str(json).unwrap();
+        assert_eq!(meta.next_cursor.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn response_metadata_empty() {
+        let json = r#"{}"#;
+        let meta: ResponseMetadata = serde_json::from_str(json).unwrap();
+        assert!(meta.next_cursor.is_none());
+    }
+
+    // ---- OperationReceipt ----
+
+    #[test]
+    fn operation_receipt_serialize() {
+        let receipt = OperationReceipt {
+            operation: "post_message".to_string(),
+            effect: "created".to_string(),
+            resource: "message".to_string(),
+            timestamp: "2026-03-03T00:00:00Z".to_string(),
+        };
+        let json = serde_json::to_string(&receipt).unwrap();
+        assert!(json.contains("post_message"));
+    }
+
+    // ---- DoctorReport ----
+
+    #[test]
+    fn doctor_report_serialize() {
+        let report = DoctorReport {
+            ready: true,
+            checks: vec![DoctorCheck {
+                name: "auth".to_string(),
+                passed: true,
+                message: "Token valid".to_string(),
+            }],
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(json.contains("\"ready\":true"));
+        assert!(json.contains("\"passed\":true"));
+    }
+}

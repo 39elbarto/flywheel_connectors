@@ -256,36 +256,45 @@ where
 
         let mut self_checks = Vec::new();
         if request.self_check {
+            let mut futures = Vec::new();
+            
             for connector in request.connectors {
                 let connector_id: ConnectorId = connector.parse().map_err(|err| {
                     HostError::InvalidFilter(format!("invalid connector id '{connector}': {err}"))
                 })?;
-                let context = ExecutionContext::request_scoped(self.self_check_timeout);
-                let report = match context.run(self.registry.self_check(&connector_id)).await {
-                    Ok(Some(report)) => report,
-                    Ok(None) => {
-                        return Err(HostError::ConnectorNotFound(connector_id.to_string()));
-                    }
-                    Err(AsyncError::Timeout { .. }) => SelfCheckReport::failed(
-                        "self_check_timeout",
-                        format!(
-                            "self_check exceeded {}ms",
-                            self.self_check_timeout.as_millis()
+                
+                let registry = Arc::clone(&self.registry);
+                let timeout = self.self_check_timeout;
+                
+                futures.push(async move {
+                    let context = ExecutionContext::request_scoped(timeout);
+                    let report = match context.run(registry.self_check(&connector_id)).await {
+                        Ok(Some(report)) => report,
+                        Ok(None) => {
+                            return Err(HostError::ConnectorNotFound(connector_id.to_string()));
+                        }
+                        Err(AsyncError::Timeout { .. }) => SelfCheckReport::failed(
+                            "self_check_timeout",
+                            format!("self_check exceeded {}ms", timeout.as_millis()),
                         ),
-                    ),
-                    Err(AsyncError::Cancelled) => SelfCheckReport::failed(
-                        "self_check_cancelled",
-                        "self_check cancelled by execution context".to_string(),
-                    ),
-                    Err(error) => SelfCheckReport::failed(
-                        "self_check_runtime",
-                        format!("self_check runtime failure: {error}"),
-                    ),
-                };
-                self_checks.push(ConnectorSelfCheck {
-                    connector_id: connector_id.to_string(),
-                    report,
+                        Err(AsyncError::Cancelled) => SelfCheckReport::failed(
+                            "self_check_cancelled",
+                            "self_check cancelled by execution context".to_string(),
+                        ),
+                        Err(error) => SelfCheckReport::failed(
+                            "self_check_runtime",
+                            format!("self_check runtime failure: {error}"),
+                        ),
+                    };
+                    Ok(ConnectorSelfCheck {
+                        connector_id: connector_id.to_string(),
+                        report,
+                    })
                 });
+            }
+            
+            for result in futures::future::join_all(futures).await {
+                self_checks.push(result?);
             }
         }
 

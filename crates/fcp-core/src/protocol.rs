@@ -273,7 +273,7 @@ impl HolderProof {
 
     /// Compute the signable bytes for holder proof.
     ///
-    /// Format: `"FCP2-HOLDER-PROOF-V1" || request_id || operation_id || token_jti`
+    /// Format: `"FCP2-HOLDER-PROOF-V1" || len(request_id) || request_id || len(operation_id) || operation_id || len(token_jti) || token_jti`
     #[must_use]
     pub fn signable_bytes(
         request_id: &RequestId,
@@ -282,9 +282,18 @@ impl HolderProof {
     ) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(128);
         bytes.extend_from_slice(b"FCP2-HOLDER-PROOF-V1");
-        bytes.extend_from_slice(request_id.0.as_bytes());
-        bytes.extend_from_slice(operation_id.as_str().as_bytes());
+        
+        let req_bytes = request_id.0.as_bytes();
+        bytes.extend_from_slice(&(req_bytes.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(req_bytes);
+        
+        let op_bytes = operation_id.as_str().as_bytes();
+        bytes.extend_from_slice(&(op_bytes.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(op_bytes);
+        
+        bytes.extend_from_slice(&(token_jti.len() as u32).to_le_bytes());
         bytes.extend_from_slice(token_jti);
+        
         bytes
     }
 }
@@ -2626,9 +2635,9 @@ mod tests {
 
     #[test]
     fn resource_availability_with_details() {
-        let avail = ResourceAvailability::available().with_details("Full access granted");
+        let avail = ResourceAvailability::available().with_details("Healthy");
 
-        assert_eq!(avail.details, Some("Full access granted".into()));
+        assert_eq!(avail.details, Some("Healthy".into()));
     }
 
     #[test]
@@ -2858,7 +2867,7 @@ mod tests {
         };
         let cloned = ctx;
         assert_eq!(cloned.locale, Some("ja-JP".into()));
-        assert_eq!(cloned.request_tags.get("env"), Some(&"prod".into()));
+        assert!(cloned.request_tags.get("env"), Some(&"prod".into()));
     }
 
     #[test]

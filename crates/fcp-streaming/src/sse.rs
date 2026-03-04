@@ -83,6 +83,8 @@ struct SseParser {
     retry: Option<u64>,
     /// Last event ID (for reconnection).
     last_event_id: Option<String>,
+    /// Total bytes accumulated in `data_lines` (`DoS` protection).
+    data_bytes_len: usize,
 }
 
 impl SseParser {
@@ -145,7 +147,13 @@ impl SseParser {
 
         match field {
             "event" => self.event_type = Some(value.to_string()),
-            "data" => self.data_lines.push(value.to_string()),
+            "data" => {
+                let val_len = value.len();
+                if self.data_bytes_len.saturating_add(val_len) <= 10 * 1024 * 1024 {
+                    self.data_lines.push(value.to_string());
+                    self.data_bytes_len += val_len;
+                }
+            }
             "id" => {
                 if !value.contains('\0') {
                     self.event_id = Some(value.to_string());
@@ -182,6 +190,7 @@ impl SseParser {
         }
 
         self.data_lines.clear();
+        self.data_bytes_len = 0;
 
         Some(event)
     }

@@ -138,32 +138,42 @@ impl RateLimiter {
         let now = std::time::Instant::now();
         let elapsed = now.saturating_duration_since(*last);
 
-        let nanos_per_token = 60_000_000_000u64 / u64::from(self.max_tokens);
+        let nanos_per_token = 60_000_000_000u64 / u64::from(self.max_tokens).max(1);
         if nanos_per_token == 0 {
             *tokens = self.max_tokens;
             *last = now;
             return;
         }
 
-        let elapsed_nanos = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
-        if let Some(new_tokens) = elapsed_nanos.checked_div(nanos_per_token) {
-            if new_tokens > 0 {
-                // Determine new token count, capped at max
-                let updated = tokens.saturating_add(u32::try_from(new_tokens).unwrap_or(u32::MAX));
+        let elapsed_nanos = elapsed.as_nanos();
+        let new_tokens_u128 = elapsed_nanos / u128::from(nanos_per_token);
+        
+        if new_tokens_u128 > 0 {
+            let new_tokens = u32::try_from(new_tokens_u128).unwrap_or(u32::MAX);
+            let updated = tokens.saturating_add(new_tokens);
 
-                if updated >= self.max_tokens {
-                    *tokens = self.max_tokens;
-                    *last = now; // Reset time if bucket is full
+            if updated >= self.max_tokens {
+                *tokens = self.max_tokens;
+                let remainder_nanos = elapsed_nanos % u128::from(nanos_per_token);
+                let rem_secs = u64::try_from(remainder_nanos / 1_000_000_000).unwrap_or(0);
+                let rem_nanos = (remainder_nanos % 1_000_000_000) as u32;
+                *last = now.checked_sub(Duration::new(rem_secs, rem_nanos)).unwrap_or(now);
+            } else {
+                *tokens = updated;
+                // Advance time by the amount of tokens added to preserve phase
+                let advance_nanos = new_tokens_u128.saturating_mul(u128::from(nanos_per_token));
+                let adv_secs = u64::try_from(advance_nanos / 1_000_000_000).unwrap_or(u64::MAX);
+                let adv_nanos = (advance_nanos % 1_000_000_000) as u32;
+                if adv_secs < u64::MAX {
+                    if let Some(advanced) = last.checked_add(Duration::new(adv_secs, adv_nanos)) {
+                        *last = advanced;
+                    } else {
+                        *last = now;
+                    }
                 } else {
-                    *tokens = updated;
-                    // Advance time by the amount of tokens added to preserve phase
-                    *last += Duration::from_nanos(new_tokens * nanos_per_token);
+                    *last = now;
                 }
             }
-        } else {
-            // Rate implies > 1 token/ns (unlikely), just fill
-            *tokens = self.max_tokens;
-            *last = now;
         }
     }
 }

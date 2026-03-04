@@ -875,11 +875,13 @@ fn signature_from_entry(sig: &Base64Bytes) -> Result<Ed25519Signature, RegistryE
     Ed25519Signature::try_from_slice(sig.as_bytes()).map_err(|_| RegistryError::SignatureBytes)
 }
 
-/// Build the message to sign/verify: `signing_bytes || binary_hash`.
+/// Build the message to sign/verify: `len(signing_bytes) || signing_bytes || len(binary_hash) || binary_hash`.
 #[must_use]
 pub fn signature_message(signing_bytes: &[u8], binary_hash: &str) -> Vec<u8> {
-    let mut message = Vec::with_capacity(signing_bytes.len() + binary_hash.len());
+    let mut message = Vec::with_capacity(signing_bytes.len() + binary_hash.len() + 8);
+    message.extend_from_slice(&(signing_bytes.len() as u32).to_le_bytes());
     message.extend_from_slice(signing_bytes);
+    message.extend_from_slice(&(binary_hash.len() as u32).to_le_bytes());
     message.extend_from_slice(binary_hash.as_bytes());
     message
 }

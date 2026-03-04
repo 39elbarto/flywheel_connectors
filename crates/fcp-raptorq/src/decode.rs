@@ -365,15 +365,23 @@ impl DecodePermit {
             });
         }
 
-        if self.memory_used + symbol_size > self.max_memory {
+        let projected_memory =
+            self.memory_used
+                .checked_add(symbol_size)
+                .ok_or(DecodeError::MemoryLimitExceeded {
+                    used: usize::MAX,
+                    limit: self.max_memory,
+                })?;
+
+        if projected_memory > self.max_memory {
             return Err(DecodeError::MemoryLimitExceeded {
-                used: self.memory_used + symbol_size,
+                used: projected_memory,
                 limit: self.max_memory,
             });
         }
 
         self.symbols_buffered += 1;
-        self.memory_used += symbol_size;
+        self.memory_used = projected_memory;
         Ok(())
     }
 

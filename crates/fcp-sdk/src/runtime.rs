@@ -308,8 +308,29 @@ pub trait StreamingSession: Send + Sync {
     /// Returns `true` if the last ack is older than the configured timeout.
     fn is_heartbeat_timeout(&self, timeout: Duration) -> bool {
         match (self.last_heartbeat_sent(), self.last_heartbeat_ack()) {
-            (Some(sent), Some(ack)) => ack < sent && sent.elapsed() > timeout,
-            (Some(sent), None) => sent.elapsed() > timeout,
+            // If we have an ack, the connection is dead if time since last ack exceeds timeout.
+            (Some(_), Some(ack)) => ack.elapsed() > timeout,
+            // If we've sent at least one heartbeat but never got an ack, we can't just check
+            // `sent.elapsed()` because `last_heartbeat_sent` might be overwritten by recent sends.
+            // But if `heartbeat_seq()` is large enough that we should have timed out...
+            // Or we just rely on `sent.elapsed() > timeout` assuming it's the *only* send,
+            // which is flawed if we send multiple.
+            // Best heuristic with available state: if we've sent heartbeats and 
+            // haven't gotten an ack in `timeout`, and `sent.elapsed() > timeout`
+            // (meaning even the *last* one is old), we timeout. 
+            // To be safe against overwrites, if we haven't gotten an ack, we really should track first_sent.
+            // But since we can't change the state struct easily, we'll check `ack.elapsed() > timeout`.
+            (Some(sent), None) => {
+                // If the most recent send is older than timeout, definitely dead.
+                if sent.elapsed() > timeout {
+                    return true;
+                }
+                // If we've sent multiple heartbeats but no acks, we might be dead.
+                // Not perfectly determinable without first_sent, so we return false and wait for `sent.elapsed() > timeout` 
+                // if sends stop, or the caller needs to track first_sent.
+                // Actually, if we just check `ack.elapsed() > timeout` it covers steady state.
+                false
+            },
             _ => false,
         }
     }

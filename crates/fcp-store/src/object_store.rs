@@ -123,7 +123,7 @@ impl ObjectStore for MemoryObjectStore {
 
         let size = Self::object_size(&object);
         let used = self.used_bytes.load(Ordering::SeqCst);
-        if used + size > self.config.max_bytes {
+        if used.saturating_add(size) > self.config.max_bytes {
             return Err(ObjectStoreError::QuotaExceeded {
                 used,
                 max: self.config.max_bytes,

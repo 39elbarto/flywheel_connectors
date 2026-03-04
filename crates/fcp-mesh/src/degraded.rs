@@ -365,8 +365,8 @@ impl DegradedModeDecoder {
                 .decoder
                 .add_symbol(symbol.esi, symbol.data.clone())?
             {
-                // Reconstruction complete!
-                let pending = self.pending.remove(&object_id).unwrap();
+                // Reconstruction complete! We know it exists because we just got a mutable ref to it above
+                let pending = self.pending.remove(&object_id).expect("pending reconstruction missing during decode");
 
                 // Parse length prefix, schema hash, and payload
                 // Wire format: length(4 bytes) || schema_hash(32 bytes) || payload

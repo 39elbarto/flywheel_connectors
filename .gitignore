@@ -97,5 +97,13 @@ target_*/
 run_test
 tiny_test
 
+# Scratch/throwaway files (agent experiments, one-off debugging)
+*.orig
+*.patch
+run_test.rs
+test_expand
+test_expand.rs
+test_ip.rs
+
 # Build/test artifacts directory
 artifacts/

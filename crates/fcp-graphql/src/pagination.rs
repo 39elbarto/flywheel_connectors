@@ -115,6 +115,7 @@ where
 }
 
 /// Paginate an offset-based API.
+#[allow(clippy::missing_errors_doc)]
 pub async fn paginate_offset<T, F, Fut>(
     mut offset: u64,
     limit: Option<PageLimit>,
@@ -159,4 +160,80 @@ where
     }
 
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- PageLimit ----
+
+    #[test]
+    fn page_limit_new() {
+        let limit = PageLimit::new(100);
+        assert_eq!(limit.max_items, 100);
+    }
+
+    #[test]
+    fn page_limit_eq() {
+        assert_eq!(PageLimit::new(10), PageLimit::new(10));
+        assert_ne!(PageLimit::new(10), PageLimit::new(20));
+    }
+
+    // ---- CursorPageInfo ----
+
+    #[test]
+    fn cursor_page_info_clone_eq() {
+        let info = CursorPageInfo {
+            has_next_page: true,
+            end_cursor: Some("abc".into()),
+            total_count: Some(42),
+        };
+        let cloned = info.clone();
+        assert_eq!(info, cloned);
+    }
+
+    // ---- CursorPage ----
+
+    #[test]
+    fn cursor_page_clone_eq() {
+        let page = CursorPage {
+            items: vec![1, 2, 3],
+            page_info: CursorPageInfo {
+                has_next_page: false,
+                end_cursor: None,
+                total_count: Some(3),
+            },
+        };
+        let cloned = page.clone();
+        assert_eq!(page, cloned);
+    }
+
+    // ---- OffsetPage ----
+
+    #[test]
+    fn offset_page_clone_eq() {
+        let page = OffsetPage {
+            items: vec!["a", "b"],
+            next_offset: Some(10),
+            total_count: None,
+        };
+        let cloned = page.clone();
+        assert_eq!(page, cloned);
+    }
+
+    // ---- PaginationError ----
+
+    #[test]
+    fn pagination_error_display_limit() {
+        let err = PaginationError::LimitExceeded("too many".into());
+        assert!(err.to_string().contains("too many"));
+    }
+
+    #[test]
+    fn pagination_error_from_client_error() {
+        let client_err = GraphqlClientError::Json("bad".into());
+        let err: PaginationError = client_err.into();
+        assert!(err.to_string().contains("pagination fetch"));
+    }
 }

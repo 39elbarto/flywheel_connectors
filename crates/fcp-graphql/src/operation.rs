@@ -148,3 +148,147 @@ impl<T> GraphqlResponse<T> {
         self.errors.is_empty()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- GraphqlQuery ----
+
+    #[test]
+    fn query_new_and_as_str() {
+        let q = GraphqlQuery::new("{ users { id } }");
+        assert_eq!(q.as_str(), "{ users { id } }");
+    }
+
+    #[test]
+    fn query_from_static() {
+        let q = GraphqlQuery::from_static("query Foo { bar }");
+        assert_eq!(q.as_str(), "query Foo { bar }");
+    }
+
+    #[test]
+    fn query_serde_roundtrip() {
+        let q = GraphqlQuery::new("{ ping }");
+        let json = serde_json::to_string(&q).unwrap();
+        let back: GraphqlQuery = serde_json::from_str(&json).unwrap();
+        assert_eq!(q, back);
+    }
+
+    #[test]
+    fn query_clone_eq() {
+        let q = GraphqlQuery::new("{ x }");
+        let q2 = q.clone();
+        assert_eq!(q, q2);
+    }
+
+    // ---- GraphqlRequest ----
+
+    #[test]
+    fn request_new_no_operation_name() {
+        let req = GraphqlRequest::new(GraphqlQuery::new("{ x }"), serde_json::json!({}));
+        assert!(req.operation_name.is_none());
+    }
+
+    #[test]
+    fn request_with_operation_name() {
+        let req = GraphqlRequest::new(GraphqlQuery::new("{ x }"), serde_json::json!({}))
+            .with_operation_name("GetUsers");
+        assert_eq!(req.operation_name.as_deref(), Some("GetUsers"));
+    }
+
+    #[test]
+    fn request_serde_roundtrip() {
+        let req = GraphqlRequest::new(
+            GraphqlQuery::new("query Q($id: ID!) { user(id: $id) { name } }"),
+            serde_json::json!({"id": "123"}),
+        )
+        .with_operation_name("Q");
+        let json = serde_json::to_string(&req).unwrap();
+        let back: GraphqlRequest<serde_json::Value> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.operation_name.as_deref(), Some("Q"));
+        assert_eq!(back.variables["id"], "123");
+    }
+
+    #[test]
+    fn request_serde_skips_none_operation_name() {
+        let req = GraphqlRequest::new(GraphqlQuery::new("{ x }"), serde_json::json!({}));
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(!json.contains("operation_name"));
+    }
+
+    // ---- GraphqlBatchItem ----
+
+    #[test]
+    fn batch_item_new() {
+        let item = GraphqlBatchItem::new(GraphqlQuery::new("{ x }"), serde_json::json!({}));
+        assert!(item.operation_name.is_none());
+    }
+
+    #[test]
+    fn batch_item_with_operation_name() {
+        let item = GraphqlBatchItem::new(GraphqlQuery::new("{ x }"), serde_json::json!({}))
+            .with_operation_name("Op");
+        assert_eq!(item.operation_name.as_deref(), Some("Op"));
+    }
+
+    // ---- GraphqlResponse ----
+
+    #[test]
+    fn response_is_ok_when_no_errors() {
+        let resp = GraphqlResponse::<serde_json::Value> {
+            data: Some(serde_json::json!({"user": "alice"})),
+            errors: vec![],
+            extensions: None,
+        };
+        assert!(resp.is_ok());
+    }
+
+    #[test]
+    fn response_is_not_ok_when_errors() {
+        let resp = GraphqlResponse::<serde_json::Value> {
+            data: None,
+            errors: vec![GraphqlError {
+                message: "not found".into(),
+                locations: vec![],
+                path: vec![],
+                extensions: None,
+            }],
+            extensions: None,
+        };
+        assert!(!resp.is_ok());
+    }
+
+    #[test]
+    fn response_serde_roundtrip() {
+        let resp = GraphqlResponse {
+            data: Some(serde_json::json!({"count": 42})),
+            errors: vec![],
+            extensions: Some(serde_json::json!({"trace_id": "abc"})),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let back: GraphqlResponse<serde_json::Value> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.data.unwrap()["count"], 42);
+        assert!(back.errors.is_empty());
+        assert!(back.extensions.is_some());
+    }
+
+    #[test]
+    fn response_minimal_json() {
+        let json = "{}";
+        let resp: GraphqlResponse<serde_json::Value> = serde_json::from_str(json).unwrap();
+        assert!(resp.data.is_none());
+        assert!(resp.errors.is_empty());
+        assert!(resp.extensions.is_none());
+        assert!(resp.is_ok());
+    }
+
+    #[test]
+    fn response_with_partial_data_and_errors() {
+        let json = r#"{"data":{"user":null},"errors":[{"message":"Not authorized"}]}"#;
+        let resp: GraphqlResponse<serde_json::Value> = serde_json::from_str(json).unwrap();
+        assert!(resp.data.is_some());
+        assert!(!resp.is_ok());
+        assert_eq!(resp.errors.len(), 1);
+    }
+}

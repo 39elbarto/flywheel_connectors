@@ -67,3 +67,119 @@ impl SchemaCache {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    const SIMPLE_SCHEMA: &str = r#"{
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+            "name": {"type": "string"},
+            "age": {"type": "integer"}
+        }
+    }"#;
+
+    // ---- get_or_compile ----
+
+    #[test]
+    fn compile_valid_schema() {
+        let cache = SchemaCache::default();
+        let result = cache.get_or_compile(SIMPLE_SCHEMA);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn compile_caches_validator() {
+        let cache = SchemaCache::default();
+        let v1 = cache.get_or_compile(SIMPLE_SCHEMA).unwrap();
+        let v2 = cache.get_or_compile(SIMPLE_SCHEMA).unwrap();
+        // Same Arc pointer (cached)
+        assert!(Arc::ptr_eq(&v1, &v2));
+    }
+
+    #[test]
+    fn compile_invalid_json_returns_json_error() {
+        let cache = SchemaCache::default();
+        let result = cache.get_or_compile("{not valid json");
+        match result {
+            Err(GraphqlClientError::Json(_)) => {}
+            other => panic!("expected Json error, got {other:?}"),
+        }
+    }
+
+    // ---- validate ----
+
+    #[test]
+    fn validate_valid_value_passes() {
+        let cache = SchemaCache::default();
+        let value = json!({"name": "Alice", "age": 30});
+        assert!(cache.validate(SIMPLE_SCHEMA, &value).is_ok());
+    }
+
+    #[test]
+    fn validate_missing_required_field_fails() {
+        let cache = SchemaCache::default();
+        let value = json!({"age": 30});
+        match cache.validate(SIMPLE_SCHEMA, &value) {
+            Err(GraphqlClientError::SchemaValidation { errors, .. }) => {
+                assert!(!errors.is_empty());
+            }
+            other => panic!("expected SchemaValidation error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_wrong_type_fails() {
+        let cache = SchemaCache::default();
+        let value = json!({"name": 123});
+        match cache.validate(SIMPLE_SCHEMA, &value) {
+            Err(GraphqlClientError::SchemaValidation { errors, .. }) => {
+                assert!(!errors.is_empty());
+            }
+            other => panic!("expected SchemaValidation error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_collects_multiple_errors() {
+        let schema = r#"{
+            "type": "object",
+            "required": ["a", "b"],
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "integer"}
+            }
+        }"#;
+        let cache = SchemaCache::default();
+        // Missing both required fields
+        let value = json!({});
+        match cache.validate(schema, &value) {
+            Err(GraphqlClientError::SchemaValidation { errors, .. }) => {
+                assert!(errors.len() >= 2, "expected at least 2 errors, got {}", errors.len());
+            }
+            other => panic!("expected SchemaValidation error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_different_schemas_cached_separately() {
+        let cache = SchemaCache::default();
+        let schema_a = r#"{"type": "string"}"#;
+        let schema_b = r#"{"type": "integer"}"#;
+
+        assert!(cache.validate(schema_a, &json!("hello")).is_ok());
+        assert!(cache.validate(schema_b, &json!(42)).is_ok());
+        assert!(cache.validate(schema_a, &json!(42)).is_err());
+        assert!(cache.validate(schema_b, &json!("hello")).is_err());
+    }
+
+    #[test]
+    fn validate_empty_object_against_no_required_passes() {
+        let schema = r#"{"type": "object"}"#;
+        let cache = SchemaCache::default();
+        assert!(cache.validate(schema, &json!({})).is_ok());
+    }
+}

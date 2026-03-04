@@ -70,11 +70,14 @@ impl RateLimitHeaders {
         // GitHub uses x-ratelimit-* headers
         if let Some(reset) = parse_header_u64(headers, "x-ratelimit-reset") {
             result.reset_at = Some(reset);
-            // Convert to seconds from now
+            // Convert epoch timestamp to seconds from now
             if let Ok(now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
                 let now_secs = now.as_secs();
                 if reset > now_secs {
                     result.reset_seconds = Some(reset - now_secs);
+                } else {
+                    // Reset is in the past; window already expired
+                    result.reset_seconds = Some(0);
                 }
             }
         }
@@ -113,6 +116,9 @@ impl RateLimitHeaders {
                 let now_secs = now.as_secs();
                 if reset > now_secs {
                     result.reset_seconds = Some(reset - now_secs);
+                } else {
+                    // Reset is in the past; window already expired
+                    result.reset_seconds = Some(0);
                 }
             }
         }
@@ -246,7 +252,7 @@ fn parse_header_u64(headers: &HashMap<String, String>, key: &str) -> Option<u64>
     headers.get(key).and_then(|v| v.parse().ok())
 }
 
-/// Parse duration strings like "1s", "500ms", "1m30s".
+/// Parse duration strings like "1s", "500ms", "5m", "2h".
 fn parse_duration_string(s: &str) -> Option<Duration> {
     let s = s.trim();
 
@@ -469,9 +475,8 @@ mod tests {
 
         let parsed = RateLimitHeaders::parse_github(&headers);
         assert_eq!(parsed.reset_at, Some(reset_at));
-        // Should not set reset_seconds because it's in the past
-        // (reset <= now, so the `if reset > now_secs` branch is not taken)
-        // The original standard parse would still set it as raw value though
+        // Reset is in the past, so reset_seconds should be 0
+        assert_eq!(parsed.reset_seconds, Some(0));
     }
 
     // ── Twitter header parsing ──────────────────────────────────────────

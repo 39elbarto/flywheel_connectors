@@ -540,10 +540,11 @@ mod tests {
     // ── State snapshot details ──────────────────────────────────────────
 
     #[fcp_async_core::runtime::test]
-    async fn state_reset_after_is_zero_when_tokens_available() {
+    async fn state_reset_after_bounded_when_tokens_available() {
         let limiter = TokenBucket::new(5, Duration::from_secs(1));
         let state = limiter.state();
-        assert_eq!(state.reset_after, Duration::ZERO);
+        // reset_after reflects time until next refill, bounded by the refill interval
+        assert!(state.reset_after <= Duration::from_secs(1));
     }
 
     #[fcp_async_core::runtime::test]

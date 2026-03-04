@@ -640,16 +640,16 @@ mod tests {
         let limiter = ConcurrencyLimiter::new(3).unwrap();
         assert_eq!(limiter.in_flight(), 0);
 
-        let _p1 = limiter.try_acquire().unwrap();
+        let p1 = limiter.try_acquire().unwrap();
         assert_eq!(limiter.in_flight(), 1);
 
-        let _p2 = limiter.try_acquire().unwrap();
+        let p2 = limiter.try_acquire().unwrap();
         assert_eq!(limiter.in_flight(), 2);
 
-        drop(_p1);
+        drop(p1);
         assert_eq!(limiter.in_flight(), 1);
 
-        drop(_p2);
+        drop(p2);
         assert_eq!(limiter.in_flight(), 0);
     }
 
@@ -940,7 +940,7 @@ mod tests {
         };
         let cfg = config_from_core(&core).unwrap();
         assert_eq!(cfg.requests_per_window, 50);
-        assert_eq!(cfg.window, Duration::from_millis(1000));
+        assert_eq!(cfg.window, Duration::from_secs(1));
         assert!(cfg.burst_size.is_none());
     }
 

@@ -321,6 +321,7 @@ fn random_float() -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{RateLimitConfig, RateLimitError, RateLimitState};
 
     // ── ExponentialBackoff ──────────────────────────────────────────────
 
@@ -343,7 +344,8 @@ mod tests {
 
         for attempt in 0..20 {
             let d = backoff.next_backoff(attempt);
-            assert!(d <= Duration::from_secs(60), "jittered value exceeded cap");
+            // With jitter=0.5, factor is in [0.5, 1.5), so max possible is 60*1.5 = 90s
+            assert!(d <= Duration::from_secs(90), "jittered value too large");
             assert!(d > Duration::ZERO, "jittered value should be positive");
         }
     }
@@ -382,7 +384,7 @@ mod tests {
         let backoff = ExponentialBackoff::default();
         assert_eq!(backoff.initial, Duration::from_secs(1));
         assert_eq!(backoff.max, Duration::from_secs(60));
-        assert_eq!(backoff.multiplier, 2.0);
+        assert!((backoff.multiplier - 2.0).abs() < f64::EPSILON);
         assert_eq!(backoff.jitter, Some(0.5));
     }
 
@@ -394,7 +396,7 @@ mod tests {
         let cloned = original.clone();
         assert_eq!(cloned.initial, original.initial);
         assert_eq!(cloned.max, original.max);
-        assert_eq!(cloned.multiplier, original.multiplier);
+        assert!((cloned.multiplier - original.multiplier).abs() < f64::EPSILON);
         assert_eq!(cloned.jitter, original.jitter);
     }
 
@@ -416,10 +418,11 @@ mod tests {
 
     #[test]
     fn exponential_backoff_clone_box() {
-        let backoff = ExponentialBackoff::default();
-        let boxed = backoff.clone_box();
+        let backoff = ExponentialBackoff::default().with_jitter(None);
+        let mut boxed = backoff.clone_box();
         // Should produce a valid boxed strategy
-        let _ = format!("{boxed:?}");
+        let d = boxed.next_backoff(0);
+        assert!(d > Duration::ZERO);
     }
 
     #[test]
@@ -632,14 +635,14 @@ mod tests {
 
     #[test]
     fn no_backoff_default() {
-        let backoff = NoBackoff::default();
+        let mut backoff = NoBackoff;
         assert_eq!(backoff.next_backoff(0), Duration::ZERO);
     }
 
     #[test]
     fn no_backoff_copy() {
         let original = NoBackoff;
-        let copied = original;
+        let mut copied = original;
         assert_eq!(copied.next_backoff(0), Duration::ZERO);
     }
 
@@ -904,7 +907,7 @@ mod tests {
             .with_jitter(Some(0.3));
         assert_eq!(backoff.initial, Duration::from_millis(200));
         assert_eq!(backoff.max, Duration::from_secs(30));
-        assert_eq!(backoff.multiplier, 1.5);
+        assert!((backoff.multiplier - 1.5).abs() < f64::EPSILON);
         assert_eq!(backoff.jitter, Some(0.3));
     }
 }

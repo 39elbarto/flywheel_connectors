@@ -528,7 +528,7 @@ mod tests {
 
         let parsed = RateLimitHeaders::parse_stripe(&headers);
         assert_eq!(parsed.limit, Some(25));
-        assert!(parsed.provider_info.get("request_id").is_none());
+        assert!(!parsed.provider_info.contains_key("request_id"));
     }
 
     // ── OpenAI header parsing ───────────────────────────────────────────
@@ -649,7 +649,7 @@ mod tests {
         let parsed = RateLimitHeaders::parse_anthropic(&headers);
         assert!(parsed.limit.is_none());
         assert!(parsed.remaining.is_none());
-        assert!(parsed.provider_info.get("limit_tokens").is_none());
+        assert!(!parsed.provider_info.contains_key("limit_tokens"));
     }
 
     // ── Provider enum dispatch ──────────────────────────────────────────

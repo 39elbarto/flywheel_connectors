@@ -681,9 +681,9 @@ mod validation_before_side_effect_tests {
             self.side_effect_count.load(Ordering::SeqCst)
         }
 
-        fn invoke(&self, input: serde_json::Value) -> Result<serde_json::Value, FcpError> {
+        fn invoke(&self, input: &serde_json::Value) -> Result<serde_json::Value, FcpError> {
             // Critical contract: validate before mutating state or making outbound calls.
-            validate_input_with_limits(&self.schema, &input, &self.limits)?;
+            validate_input_with_limits(&self.schema, input, &self.limits)?;
             self.side_effect_count.fetch_add(1, Ordering::SeqCst);
             Ok(json!({ "status": "side_effect_applied" }))
         }
@@ -709,7 +709,7 @@ mod validation_before_side_effect_tests {
         );
 
         let err = connector
-            .invoke(json!({ "name": "demo", "count": 1 }))
+            .invoke(&json!({ "name": "demo", "count": 1 }))
             .expect_err("invalid schema must fail closed");
 
         if let FcpError::Internal { message } = err {
@@ -725,7 +725,7 @@ mod validation_before_side_effect_tests {
         let connector = ValidatingTestConnector::new(operation_schema(), Limits::default());
 
         let err = connector
-            .invoke(json!({ "name": "demo", "count": "one" }))
+            .invoke(&json!({ "name": "demo", "count": "one" }))
             .expect_err("invalid payload must fail");
 
         if let FcpError::InvalidRequest { code, message } = err {
@@ -749,7 +749,7 @@ mod validation_before_side_effect_tests {
         );
 
         let err = connector
-            .invoke(json!({ "name": "payload-exceeds-byte-limit", "count": 1 }))
+            .invoke(&json!({ "name": "payload-exceeds-byte-limit", "count": 1 }))
             .expect_err("oversized payload must fail");
 
         if let FcpError::InvalidRequest { code, message } = err {
@@ -773,7 +773,7 @@ mod validation_before_side_effect_tests {
         );
 
         let response = connector
-            .invoke(json!({ "name": "demo", "count": 2 }))
+            .invoke(&json!({ "name": "demo", "count": 2 }))
             .expect("valid payload should pass");
 
         assert_eq!(response["status"], json!("side_effect_applied"));

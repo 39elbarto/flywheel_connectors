@@ -3071,4 +3071,306 @@ deny_ptrace = true
         assert!(matches!(err, ManifestError::Invalid { .. }));
         assert!(err.to_string().contains("port number"));
     }
+
+    // ── ConnectorArchetype ───────────────────────────────────────────────
+
+    #[test]
+    fn connector_archetype_as_str_all_variants() {
+        assert_eq!(ConnectorArchetype::Bidirectional.as_str(), "bidirectional");
+        assert_eq!(ConnectorArchetype::Streaming.as_str(), "streaming");
+        assert_eq!(ConnectorArchetype::Operational.as_str(), "operational");
+        assert_eq!(ConnectorArchetype::Storage.as_str(), "storage");
+        assert_eq!(ConnectorArchetype::Knowledge.as_str(), "knowledge");
+    }
+
+    #[test]
+    fn connector_archetype_serde_roundtrip() {
+        for variant in [
+            ConnectorArchetype::Bidirectional,
+            ConnectorArchetype::Streaming,
+            ConnectorArchetype::Operational,
+            ConnectorArchetype::Storage,
+            ConnectorArchetype::Knowledge,
+        ] {
+            let json = serde_json::to_string(&variant).unwrap();
+            let parsed: ConnectorArchetype = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, variant);
+        }
+    }
+
+    #[test]
+    fn connector_archetype_debug_clone_copy_eq() {
+        let a = ConnectorArchetype::Streaming;
+        let b = a;
+        let c = a;
+        assert_eq!(a, b);
+        assert_eq!(a, c);
+        let _ = format!("{a:?}");
+    }
+
+    // ── ConnectorRuntimeFormat ───────────────────────────────────────────
+
+    #[test]
+    fn connector_runtime_format_serde() {
+        let native: ConnectorRuntimeFormat = serde_json::from_str("\"native\"").unwrap();
+        assert_eq!(native, ConnectorRuntimeFormat::Native);
+        let wasi: ConnectorRuntimeFormat = serde_json::from_str("\"wasi\"").unwrap();
+        assert_eq!(wasi, ConnectorRuntimeFormat::Wasi);
+    }
+
+    #[test]
+    fn connector_runtime_format_debug_clone_copy() {
+        let f = ConnectorRuntimeFormat::Native;
+        let f2 = f;
+        assert_eq!(f, f2);
+        let _ = format!("{f:?}");
+    }
+
+    // ── ConnectorStateModel ──────────────────────────────────────────────
+
+    #[test]
+    fn connector_state_model_is_methods() {
+        assert!(ConnectorStateModel::Stateless.is_stateless());
+        assert!(!ConnectorStateModel::Stateless.is_singleton_writer());
+        assert!(!ConnectorStateModel::Stateless.is_crdt());
+
+        assert!(ConnectorStateModel::SingletonWriter.is_singleton_writer());
+        assert!(!ConnectorStateModel::SingletonWriter.is_stateless());
+
+        let crdt = ConnectorStateModel::Crdt {
+            crdt_type: ConnectorCrdtType::LwwMap,
+        };
+        assert!(crdt.is_crdt());
+        assert!(!crdt.is_stateless());
+    }
+
+    #[test]
+    fn connector_state_model_crdt_type() {
+        assert!(ConnectorStateModel::Stateless.crdt_type().is_none());
+        assert!(ConnectorStateModel::SingletonWriter.crdt_type().is_none());
+        let crdt = ConnectorStateModel::Crdt {
+            crdt_type: ConnectorCrdtType::OrSet,
+        };
+        assert_eq!(crdt.crdt_type(), Some(ConnectorCrdtType::OrSet));
+    }
+
+    #[test]
+    fn connector_state_model_display() {
+        assert_eq!(ConnectorStateModel::Stateless.to_string(), "stateless");
+        assert_eq!(
+            ConnectorStateModel::SingletonWriter.to_string(),
+            "singleton_writer"
+        );
+        let crdt = ConnectorStateModel::Crdt {
+            crdt_type: ConnectorCrdtType::GCounter,
+        };
+        assert_eq!(crdt.to_string(), "crdt(g_counter)");
+    }
+
+    #[test]
+    fn connector_state_model_default_is_stateless() {
+        assert_eq!(
+            ConnectorStateModel::default(),
+            ConnectorStateModel::Stateless
+        );
+    }
+
+    // ── ConnectorCrdtType ────────────────────────────────────────────────
+
+    #[test]
+    fn connector_crdt_type_as_str_all() {
+        assert_eq!(ConnectorCrdtType::LwwMap.as_str(), "lww_map");
+        assert_eq!(ConnectorCrdtType::OrSet.as_str(), "or_set");
+        assert_eq!(ConnectorCrdtType::GCounter.as_str(), "g_counter");
+        assert_eq!(ConnectorCrdtType::PnCounter.as_str(), "pn_counter");
+    }
+
+    #[test]
+    fn connector_crdt_type_serde_roundtrip() {
+        for variant in [
+            ConnectorCrdtType::LwwMap,
+            ConnectorCrdtType::OrSet,
+            ConnectorCrdtType::GCounter,
+            ConnectorCrdtType::PnCounter,
+        ] {
+            let json = serde_json::to_string(&variant).unwrap();
+            let parsed: ConnectorCrdtType = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, variant);
+        }
+    }
+
+    // ── ManifestApprovalMode ─────────────────────────────────────────────
+
+    #[test]
+    fn manifest_approval_mode_serde() {
+        for (s, expected) in [
+            ("\"none\"", ManifestApprovalMode::None),
+            ("\"policy\"", ManifestApprovalMode::Policy),
+            ("\"interactive\"", ManifestApprovalMode::Interactive),
+            ("\"elevation_token\"", ManifestApprovalMode::ElevationToken),
+        ] {
+            let parsed: ManifestApprovalMode = serde_json::from_str(s).unwrap();
+            assert_eq!(parsed, expected);
+            let re_serialized = serde_json::to_string(&parsed).unwrap();
+            assert_eq!(re_serialized, s);
+        }
+    }
+
+    // ── SandboxProfile ───────────────────────────────────────────────────
+
+    #[test]
+    fn sandbox_profile_serde() {
+        let strict: SandboxProfile = serde_json::from_str("\"strict\"").unwrap();
+        assert_eq!(strict, SandboxProfile::Strict);
+        let permissive: SandboxProfile = serde_json::from_str("\"permissive\"").unwrap();
+        assert_eq!(permissive, SandboxProfile::Permissive);
+    }
+
+    // ── ManifestError display ────────────────────────────────────────────
+
+    #[test]
+    fn manifest_error_invalid_display() {
+        let err = ManifestError::Invalid {
+            field: "zones.home",
+            message: "must not be empty".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("zones.home"));
+        assert!(msg.contains("must not be empty"));
+    }
+
+    #[test]
+    fn manifest_error_hash_mismatch_display() {
+        let err = ManifestError::InterfaceHashMismatch {
+            expected: "abc".into(),
+            found: "xyz".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("abc"));
+        assert!(msg.contains("xyz"));
+    }
+
+    // ── InterfaceHash ────────────────────────────────────────────────────
+
+    #[test]
+    fn interface_hash_display_and_eq() {
+        let h1 = InterfaceHash::new_blake3_256(INTERFACE_HASH_DOMAIN, [0xAA; 32]);
+        let h2 = h1;
+        assert_eq!(h1, h2);
+        let display = h1.to_string();
+        assert!(display.starts_with("blake3-256:"));
+        assert!(display.contains(INTERFACE_HASH_DOMAIN));
+        assert!(display.contains(&"aa".repeat(32)));
+    }
+
+    #[test]
+    fn interface_hash_try_from_string() {
+        let hex = "aa".repeat(32);
+        let s = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{hex}");
+        let h = InterfaceHash::try_from(s).unwrap();
+        assert_eq!(h.algorithm, InterfaceHashAlgorithm::Blake3_256);
+        assert_eq!(h.digest, [0xAA; 32]);
+    }
+
+    #[test]
+    fn interface_hash_rejects_uppercase_hex() {
+        let hex = "AA".repeat(32);
+        let s = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{hex}");
+        let err = InterfaceHash::try_from(s).unwrap_err();
+        assert!(err.to_string().contains("lowercase"));
+    }
+
+    #[test]
+    fn interface_hash_rejects_bad_algorithm() {
+        let hex = "aa".repeat(32);
+        let s = format!("sha256:{INTERFACE_HASH_DOMAIN}:{hex}");
+        let err = InterfaceHash::try_from(s).unwrap_err();
+        assert!(err.to_string().contains("algorithm"));
+    }
+
+    // ── ManifestSchemaVersion ────────────────────────────────────────────
+
+    #[test]
+    fn manifest_schema_version_serde() {
+        let v: ManifestSchemaVersion = serde_json::from_str("\"2.1\"").unwrap();
+        assert_eq!(v.major, 2);
+        assert_eq!(v.minor, 1);
+        let serialized = serde_json::to_string(&v).unwrap();
+        assert_eq!(serialized, "\"2.1\"");
+    }
+
+    #[test]
+    fn manifest_schema_version_display() {
+        let v = ManifestSchemaVersion { major: 3, minor: 0 };
+        assert_eq!(v.to_string(), "3.0");
+    }
+
+    // ── RateLimit parsing ────────────────────────────────────────────────
+
+    #[test]
+    fn rate_limit_serde_string() {
+        let rl: RateLimit = serde_json::from_str("\"100/min\"").unwrap();
+        assert_eq!(rl.0.max, 100);
+        assert_eq!(rl.0.per_ms, 60_000);
+    }
+
+    #[test]
+    fn rate_limit_serde_per_sec() {
+        let rl: RateLimit = serde_json::from_str("\"5/sec\"").unwrap();
+        assert_eq!(rl.0.max, 5);
+        assert_eq!(rl.0.per_ms, 1_000);
+    }
+
+    #[test]
+    fn rate_limit_serde_per_hour() {
+        let rl: RateLimit = serde_json::from_str("\"1000/hour\"").unwrap();
+        assert_eq!(rl.0.max, 1000);
+        assert_eq!(rl.0.per_ms, 3_600_000);
+    }
+
+    // ── Base64Bytes ──────────────────────────────────────────────────────
+
+    #[test]
+    fn base64_bytes_serde_roundtrip() {
+        let data = vec![1, 2, 3, 4, 5];
+        let b = Base64Bytes(data.clone());
+        let json = serde_json::to_string(&b).unwrap();
+        let parsed: Base64Bytes = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.as_bytes(), &data);
+    }
+
+    #[test]
+    fn base64_bytes_debug() {
+        let b = Base64Bytes(vec![0xDE, 0xAD]);
+        let debug = format!("{b:?}");
+        assert!(debug.contains("Base64Bytes"));
+    }
+
+    // ── ProtocolRequirement ──────────────────────────────────────────────
+
+    #[test]
+    fn protocol_requirement_serde() {
+        let pr: ProtocolRequirement = serde_json::from_str("\"fcp2-sym/2.0\"").unwrap();
+        assert_eq!(pr.name, "fcp2-sym");
+        assert_eq!(pr.version.major, 2);
+        assert_eq!(pr.version.minor, 0);
+        let serialized = serde_json::to_string(&pr).unwrap();
+        assert_eq!(serialized, "\"fcp2-sym/2.0\"");
+    }
+
+    // ── FeatureId ────────────────────────────────────────────────────────
+
+    #[test]
+    fn feature_id_serde() {
+        let fid: FeatureId = serde_json::from_str("\"fcps.aead.xchacha20poly1305\"").unwrap();
+        assert_eq!(fid.as_str(), "fcps.aead.xchacha20poly1305");
+    }
+
+    // ── Embedded manifest ────────────────────────────────────────────────
+
+    #[test]
+    fn embedded_minimal_manifest_is_valid_utf8() {
+        let text = std::str::from_utf8(EMBEDDED_MINIMAL_MANIFEST);
+        assert!(text.is_ok());
+    }
 }

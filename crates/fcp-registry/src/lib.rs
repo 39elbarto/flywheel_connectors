@@ -3450,4 +3450,277 @@ sig = "base64:{sig_b64}"
             },
         );
     }
+
+    // ── RegistryError display ────────────────────────────────────────────
+
+    #[test]
+    fn registry_error_display_all_variants() {
+        run_registry_test(
+            "registry_error_display_all_variants",
+            "unit",
+            "error-display",
+            1,
+            || async {
+                let err = RegistryError::MissingSignatures;
+                assert!(err.to_string().contains("signature section missing"));
+
+                let err = RegistryError::UnknownKid {
+                    kid: "test-kid".to_string(),
+                };
+                assert!(err.to_string().contains("test-kid"));
+
+                let err = RegistryError::SignatureInvalid {
+                    kid: "bad-kid".to_string(),
+                };
+                assert!(err.to_string().contains("bad-kid"));
+
+                let err = RegistryError::PublisherThresholdUnmet {
+                    required: 3,
+                    valid: 1,
+                };
+                let msg = err.to_string();
+                assert!(msg.contains("3"));
+                assert!(msg.contains("1"));
+
+                let err = RegistryError::RegistrySignatureRequired;
+                assert!(err.to_string().contains("registry signature"));
+
+                let err = RegistryError::TargetMismatch {
+                    expected: "linux-amd64".to_string(),
+                    found: "darwin-arm64".to_string(),
+                };
+                let msg = err.to_string();
+                assert!(msg.contains("linux-amd64"));
+                assert!(msg.contains("darwin-arm64"));
+
+                let err = RegistryError::CapabilityCeilingViolation {
+                    capability: "system.exec".to_string(),
+                };
+                assert!(err.to_string().contains("system.exec"));
+
+                let err = RegistryError::TransparencyLogMissing;
+                assert!(err.to_string().contains("transparency log"));
+
+                let err = RegistryError::TransparencyEvidenceMissing;
+                assert!(err.to_string().contains("evidence"));
+
+                let err = RegistryError::RequiredAttestationMissing {
+                    attestation: "slsa".to_string(),
+                };
+                assert!(err.to_string().contains("slsa"));
+
+                let err = RegistryError::AttestationEvidenceMissing;
+                assert!(err.to_string().contains("evidence"));
+
+                let err = RegistryError::SlsaLevelInsufficient { required: 3 };
+                assert!(err.to_string().contains("3"));
+
+                let err = RegistryError::UntrustedBuilder {
+                    builder: "unknown-ci".to_string(),
+                };
+                assert!(err.to_string().contains("unknown-ci"));
+
+                let err = RegistryError::SignatureBytes;
+                assert!(err.to_string().contains("malformed"));
+
+                RegistryLogData {
+                    reason_code: Some("error_display_verified".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ── ConnectorTarget ──────────────────────────────────────────────────
+
+    #[test]
+    fn connector_target_as_string() {
+        run_registry_test(
+            "connector_target_as_string",
+            "unit",
+            "target",
+            1,
+            || async {
+                let t = ConnectorTarget {
+                    os: "linux".to_string(),
+                    arch: "amd64".to_string(),
+                };
+                assert_eq!(t.as_string(), "linux-amd64");
+
+                RegistryLogData {
+                    reason_code: Some("target_string_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn connector_target_serde_roundtrip() {
+        run_registry_test(
+            "connector_target_serde_roundtrip",
+            "unit",
+            "target",
+            1,
+            || async {
+                let t = ConnectorTarget {
+                    os: "darwin".to_string(),
+                    arch: "arm64".to_string(),
+                };
+                let json = serde_json::to_string(&t).unwrap();
+                let parsed: ConnectorTarget = serde_json::from_str(&json).unwrap();
+                assert_eq!(parsed.os, "darwin");
+                assert_eq!(parsed.arch, "arm64");
+
+                RegistryLogData {
+                    reason_code: Some("target_serde_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn connector_target_eq() {
+        run_registry_test(
+            "connector_target_eq",
+            "unit",
+            "target",
+            1,
+            || async {
+                let t1 = ConnectorTarget {
+                    os: "linux".to_string(),
+                    arch: "amd64".to_string(),
+                };
+                let t2 = t1.clone();
+                assert_eq!(t1, t2);
+
+                let t3 = ConnectorTarget {
+                    os: "darwin".to_string(),
+                    arch: "arm64".to_string(),
+                };
+                assert_ne!(t1, t3);
+
+                RegistryLogData {
+                    reason_code: Some("target_eq_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ── SupplyChainVerificationError display ─────────────────────────────
+
+    #[test]
+    fn supply_chain_error_display() {
+        run_registry_test(
+            "supply_chain_error_display",
+            "unit",
+            "error-display",
+            1,
+            || async {
+                let err = SupplyChainVerificationError::TransparencyEntryNotFound;
+                assert!(err.to_string().contains("not found"));
+
+                let err = SupplyChainVerificationError::TransparencyProofInvalid;
+                assert!(err.to_string().contains("invalid"));
+
+                let err = SupplyChainVerificationError::TufRootMismatch {
+                    expected: "abc".to_string(),
+                    actual: "xyz".to_string(),
+                };
+                let msg = err.to_string();
+                assert!(msg.contains("abc"));
+                assert!(msg.contains("xyz"));
+
+                let err = SupplyChainVerificationError::TufExpired;
+                assert!(err.to_string().contains("expired"));
+
+                let err = SupplyChainVerificationError::TufTargetNotFound {
+                    target: "fcp.test".to_string(),
+                };
+                assert!(err.to_string().contains("fcp.test"));
+
+                let err = SupplyChainVerificationError::TufRollback {
+                    current: 5,
+                    got: 3,
+                };
+                let msg = err.to_string();
+                assert!(msg.contains("5"));
+                assert!(msg.contains("3"));
+
+                let err = SupplyChainVerificationError::TufFreeze;
+                assert!(err.to_string().contains("freeze"));
+
+                let err = SupplyChainVerificationError::SigstoreSignatureInvalid;
+                assert!(err.to_string().contains("invalid"));
+
+                let err = SupplyChainVerificationError::SigstoreCertificateInvalid;
+                assert!(err.to_string().contains("certificate"));
+
+                let err = SupplyChainVerificationError::SigstoreIdentityMismatch {
+                    expected: "a@b.com".to_string(),
+                    actual: "x@y.com".to_string(),
+                };
+                let msg = err.to_string();
+                assert!(msg.contains("a@b.com"));
+                assert!(msg.contains("x@y.com"));
+
+                let err = SupplyChainVerificationError::SigstoreIssuerUntrusted {
+                    issuer: "evil.com".to_string(),
+                };
+                assert!(err.to_string().contains("evil.com"));
+
+                let err = SupplyChainVerificationError::Network("timeout".to_string());
+                assert!(err.to_string().contains("timeout"));
+
+                let err = SupplyChainVerificationError::NotConfigured;
+                assert!(err.to_string().contains("not configured"));
+
+                RegistryLogData {
+                    reason_code: Some("supply_chain_error_display_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ── VerificationReport ───────────────────────────────────────────────
+
+    #[test]
+    fn verification_report_serde_roundtrip() {
+        run_registry_test(
+            "verification_report_serde_roundtrip",
+            "unit",
+            "report",
+            1,
+            || async {
+                let report = RegistryVerificationReport {
+                    connector_id: "fcp.test".to_string(),
+                    manifest_hash: "abc123".to_string(),
+                    binary_hash: "def456".to_string(),
+                    target: ConnectorTarget {
+                        os: "linux".to_string(),
+                        arch: "amd64".to_string(),
+                    },
+                    verified_at: 1_700_000_000,
+                    outcome: "accepted".to_string(),
+                };
+                let json = serde_json::to_string(&report).unwrap();
+                let parsed: RegistryVerificationReport =
+                    serde_json::from_str(&json).unwrap();
+                assert_eq!(parsed.connector_id, "fcp.test");
+                assert_eq!(parsed.outcome, "accepted");
+
+                let cloned = report.clone();
+                assert_eq!(cloned.binary_hash, "def456");
+                let _ = format!("{report:?}");
+
+                RegistryLogData {
+                    reason_code: Some("report_serde_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
 }

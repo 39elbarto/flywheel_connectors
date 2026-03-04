@@ -53,7 +53,7 @@ fcp-crypto = { workspace = true }
 fcp-anthropic = { path = "../../connectors/anthropic" }
 fcp-openai = { path = "../../connectors/openai" }
 fcp-slack = { path = "../../connectors/slack" }
-fcp-discord = { path = "../../connectors/discord" }
+fcp-discord = { path = "../../connectors/discord", features = ["testing"] }
 fcp-google-ai = { path = "../../connectors/google-ai" }
 fcp-qdrant = { path = "../../connectors/qdrant" }
 fcp-telegram = { path = "../../connectors/telegram" }

@@ -556,8 +556,9 @@ fn llm_router_manifest_network_guard_allows_and_denies() {
         );
     }
 
-    // estimate_cost has empty host_allow (local computation only)
-    let estimate_manifest = manifest
+    // estimate_cost has no network_constraints (local computation only).
+    // Either network_constraints is absent entirely, or host_allow is empty.
+    let estimate_host_allow = manifest
         .get("provides")
         .and_then(toml::Value::as_table)
         .and_then(|p| p.get("operations"))
@@ -567,10 +568,9 @@ fn llm_router_manifest_network_guard_allows_and_denies() {
         .and_then(|op| op.get("network_constraints"))
         .and_then(toml::Value::as_table)
         .and_then(|nc| nc.get("host_allow"))
-        .and_then(toml::Value::as_array)
-        .expect("estimate_cost network_constraints.host_allow");
+        .and_then(toml::Value::as_array);
     assert!(
-        estimate_manifest.is_empty(),
-        "estimate_cost should have empty host_allow (local computation)"
+        estimate_host_allow.is_none() || estimate_host_allow.unwrap().is_empty(),
+        "estimate_cost should have no network_constraints or empty host_allow (local computation)"
     );
 }

@@ -188,10 +188,17 @@ fn reference_manifest_with_hash() -> String {
 }
 
 fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> HandshakeRequest {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let zone_dir = std::env::temp_dir().join(format!(
+        "fcp-telegram-e2e-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
     HandshakeRequest {
         protocol_version: "2.0".to_string(),
         zone: ZoneId::work(),
-        zone_dir: None,
+        zone_dir: Some(zone_dir.to_string_lossy().into_owned()),
         host_public_key,
         nonce: [7u8; 32],
         capabilities_requested: capabilities
@@ -490,10 +497,12 @@ async fn telegram_send_message_returns_message_id() {
 
     // Handshake
     let signing_key = Ed25519SigningKey::generate();
+    let zone_dir = std::env::temp_dir().join(format!("fcp-telegram-e2e-send-{}", std::process::id()));
     connector
         .handle_handshake(json!({
             "protocol_version": "2.0",
             "zone": "z:work",
+            "zone_dir": zone_dir.to_string_lossy(),
             "host_public_key": signing_key.verifying_key().to_bytes().to_vec(),
             "nonce": vec![0u8; 32],
             "capabilities_requested": ["telegram.send_message"]

@@ -434,7 +434,9 @@ impl SignatureSet {
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
         for sig in &self.signatures {
-            out.extend_from_slice(sig.node_id.as_str().as_bytes());
+            let node_bytes = sig.node_id.as_str().as_bytes();
+            out.extend_from_slice(&(node_bytes.len() as u32).to_le_bytes());
+            out.extend_from_slice(node_bytes);
             out.extend_from_slice(&sig.signature);
         }
         out

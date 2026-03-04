@@ -25,8 +25,8 @@ use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
 use fcp_manifest::ConnectorManifest;
 use serde_json::json;
 
-use fcp_llm_router::connector::LlmRouterConnector;
 use fcp_async_core::sync::Mutex;
+use fcp_llm_router::connector::LlmRouterConnector;
 
 // ============================================================================
 // FcpConnector adapter for LlmRouterConnector

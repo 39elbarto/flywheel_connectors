@@ -15,6 +15,7 @@
 #![allow(clippy::too_many_lines)]
 
 use chrono::{Duration, Utc};
+use fcp_async_core::channel::oneshot;
 use fcp_async_core::net::TcpListener;
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
@@ -22,7 +23,6 @@ use fcp_testkit::AsyncTestContext;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use std::time::Duration as StdDuration;
-use fcp_async_core::channel::oneshot;
 use tokio_tungstenite::{accept_async, tungstenite::protocol::Message as WsMessage};
 use wiremock::{
     Mock, MockServer, ResponseTemplate,

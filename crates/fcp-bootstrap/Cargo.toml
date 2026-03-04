@@ -17,7 +17,7 @@ fcp-crypto.workspace = true
 fcp-core.workspace = true
 
 # Async runtime
-tokio = { workspace = true, features = ["full", "time", "net"] }
+fcp-async-core = { path = "../fcp-async-core" }
 async-trait.workspace = true
 
 # Serialization
@@ -63,7 +63,7 @@ windows = { version = "0.62", features = ["Win32_System_Time"] }
 
 [dev-dependencies]
 # Testing
-fcp-async-core = { path = "../fcp-async-core" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tokio-test = "0.4"
 pretty_assertions.workspace = true
 rand_chacha = "0.3"

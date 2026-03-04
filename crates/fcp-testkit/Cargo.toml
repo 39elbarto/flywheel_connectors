@@ -21,9 +21,7 @@ fcp-store = { path = "../fcp-store", optional = true }
 
 # Async runtime
 async-trait.workspace = true
-tokio = { workspace = true, features = ["sync", "time", "macros", "rt-multi-thread"] }
 futures-util.workspace = true
-tokio-stream.workspace = true
 
 # Serialization
 serde.workspace = true

@@ -24,6 +24,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
+use fcp_async_core::channel::watch;
 use fcp_cbor::SchemaId;
 use fcp_core::{
     ConnectorId, ConnectorStateSnapshot, CursorState, ObjectHeader, ObjectId, Provenance,
@@ -37,7 +38,6 @@ use fcp_sdk::runtime::{
     StreamingSession, SupervisorConfig, SupervisorOutcome,
 };
 use semver::Version;
-use fcp_async_core::channel::watch;
 
 #[cfg(feature = "cursor-store-object-store")]
 use fcp_core::ObjectIdKey;

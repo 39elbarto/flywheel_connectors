@@ -99,3 +99,166 @@ impl GoogleAiError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_api() {
+        let err = GoogleAiError::Api {
+            message: "model not found".into(),
+            status_code: Some(404),
+            error_type: Some("NOT_FOUND".into()),
+        };
+        assert!(err.to_string().contains("model not found"));
+    }
+
+    #[test]
+    fn display_invalid_config() {
+        let err = GoogleAiError::InvalidConfig("missing API key".into());
+        assert!(err.to_string().contains("missing API key"));
+    }
+
+    #[test]
+    fn is_retryable_rate_limit() {
+        assert!(GoogleAiError::RateLimit {
+            retry_after_ms: 1000
+        }
+        .is_retryable());
+    }
+
+    #[test]
+    fn is_retryable_api_500() {
+        assert!(GoogleAiError::Api {
+            message: "x".into(),
+            status_code: Some(500),
+            error_type: None,
+        }
+        .is_retryable());
+    }
+
+    #[test]
+    fn not_retryable_api_400() {
+        assert!(!GoogleAiError::Api {
+            message: "x".into(),
+            status_code: Some(400),
+            error_type: None,
+        }
+        .is_retryable());
+    }
+
+    #[test]
+    fn not_retryable_invalid_config() {
+        assert!(!GoogleAiError::InvalidConfig("x".into()).is_retryable());
+    }
+
+    #[test]
+    fn retry_after_rate_limit() {
+        let err = GoogleAiError::RateLimit {
+            retry_after_ms: 5000,
+        };
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn retry_after_other_none() {
+        assert_eq!(
+            GoogleAiError::InvalidConfig("x".into()).retry_after(),
+            None
+        );
+    }
+
+    #[test]
+    fn to_fcp_error_api_401() {
+        let err = GoogleAiError::Api {
+            message: "bad key".into(),
+            status_code: Some(401),
+            error_type: None,
+        };
+        assert!(matches!(err.to_fcp_error(), FcpError::Unauthorized { .. }));
+    }
+
+    #[test]
+    fn to_fcp_error_api_429() {
+        let err = GoogleAiError::Api {
+            message: "rate limited".into(),
+            status_code: Some(429),
+            error_type: None,
+        };
+        match err.to_fcp_error() {
+            FcpError::RateLimited {
+                retry_after_ms, ..
+            } => assert_eq!(retry_after_ms, 60_000),
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_api_500() {
+        let err = GoogleAiError::Api {
+            message: "internal".into(),
+            status_code: Some(500),
+            error_type: None,
+        };
+        match err.to_fcp_error() {
+            FcpError::External {
+                service, retryable, ..
+            } => {
+                assert_eq!(service, "google-ai");
+                assert!(retryable);
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_invalid_config() {
+        let err = GoogleAiError::InvalidConfig("missing key".into());
+        match err.to_fcp_error() {
+            FcpError::InvalidRequest { code, message } => {
+                assert_eq!(code, 1003);
+                assert!(message.contains("missing key"));
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_rate_limit() {
+        let err = GoogleAiError::RateLimit {
+            retry_after_ms: 2000,
+        };
+        match err.to_fcp_error() {
+            FcpError::RateLimited {
+                retry_after_ms, ..
+            } => assert_eq!(retry_after_ms, 2000),
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_serialization() {
+        let json_err = serde_json::from_str::<serde_json::Value>("{bad}").unwrap_err();
+        let err = GoogleAiError::Serialization(json_err);
+        assert!(matches!(err.to_fcp_error(), FcpError::Internal { .. }));
+    }
+
+    #[test]
+    fn from_serde_json_error() {
+        let json_err = serde_json::from_str::<serde_json::Value>("x").unwrap_err();
+        let err: GoogleAiError = json_err.into();
+        assert!(matches!(err, GoogleAiError::Serialization(_)));
+    }
+
+    #[test]
+    fn google_ai_result_ok() {
+        let r: GoogleAiResult<u32> = Ok(42);
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn error_trait_impl() {
+        let _: &dyn std::error::Error = &GoogleAiError::InvalidConfig("x".into());
+    }
+}

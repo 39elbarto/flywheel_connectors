@@ -133,3 +133,374 @@ impl YouTubeError {
 
 /// Result type for YouTube operations.
 pub type YouTubeResult<T> = Result<T, YouTubeError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- Display messages ----
+
+    #[test]
+    fn display_api_error() {
+        let err = YouTubeError::Api {
+            message: "videoNotFound".into(),
+            status_code: Some(404),
+        };
+        assert!(err.to_string().contains("videoNotFound"));
+        assert!(err.to_string().contains("404"));
+    }
+
+    #[test]
+    fn display_rate_limited() {
+        let err = YouTubeError::RateLimited {
+            retry_after_ms: 5000,
+        };
+        assert!(err.to_string().contains("5000ms"));
+    }
+
+    #[test]
+    fn display_quota_exceeded() {
+        let err = YouTubeError::QuotaExceeded;
+        assert!(err.to_string().contains("quota exceeded"));
+    }
+
+    #[test]
+    fn display_unauthorized() {
+        let err = YouTubeError::Unauthorized;
+        assert!(err.to_string().contains("credentials"));
+    }
+
+    #[test]
+    fn display_not_found() {
+        let err = YouTubeError::NotFound {
+            resource: "video:abc".into(),
+        };
+        assert!(err.to_string().contains("video:abc"));
+    }
+
+    #[test]
+    fn display_forbidden() {
+        let err = YouTubeError::Forbidden {
+            message: "comments disabled".into(),
+        };
+        assert!(err.to_string().contains("comments disabled"));
+    }
+
+    #[test]
+    fn display_json() {
+        let json_err = serde_json::from_str::<serde_json::Value>("bad").unwrap_err();
+        let err = YouTubeError::Json(json_err);
+        assert!(err.to_string().contains("JSON error"));
+    }
+
+    // ---- is_retryable ----
+
+    #[test]
+    fn is_retryable_rate_limited() {
+        let err = YouTubeError::RateLimited {
+            retry_after_ms: 1000,
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn is_retryable_api_500() {
+        let err = YouTubeError::Api {
+            message: "internal".into(),
+            status_code: Some(500),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn is_retryable_api_503() {
+        let err = YouTubeError::Api {
+            message: "unavailable".into(),
+            status_code: Some(503),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn is_retryable_api_429() {
+        let err = YouTubeError::Api {
+            message: "too many".into(),
+            status_code: Some(429),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn not_retryable_api_400() {
+        let err = YouTubeError::Api {
+            message: "bad request".into(),
+            status_code: Some(400),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn not_retryable_api_no_status() {
+        let err = YouTubeError::Api {
+            message: "unknown".into(),
+            status_code: None,
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn not_retryable_quota_exceeded() {
+        let err = YouTubeError::QuotaExceeded;
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn not_retryable_unauthorized() {
+        let err = YouTubeError::Unauthorized;
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn not_retryable_not_found() {
+        let err = YouTubeError::NotFound {
+            resource: "x".into(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn not_retryable_forbidden() {
+        let err = YouTubeError::Forbidden {
+            message: "x".into(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn not_retryable_json() {
+        let json_err = serde_json::from_str::<serde_json::Value>("x").unwrap_err();
+        let err = YouTubeError::Json(json_err);
+        assert!(!err.is_retryable());
+    }
+
+    // ---- retry_after ----
+
+    #[test]
+    fn retry_after_rate_limited() {
+        let err = YouTubeError::RateLimited {
+            retry_after_ms: 5000,
+        };
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn retry_after_other_variants_none() {
+        assert_eq!(
+            YouTubeError::Api {
+                message: "x".into(),
+                status_code: Some(500)
+            }
+            .retry_after(),
+            None
+        );
+        assert_eq!(YouTubeError::QuotaExceeded.retry_after(), None);
+        assert_eq!(YouTubeError::Unauthorized.retry_after(), None);
+    }
+
+    // ---- to_fcp_error ----
+
+    #[test]
+    fn to_fcp_error_api_401_unauthorized() {
+        let err = YouTubeError::Api {
+            message: "bad key".into(),
+            status_code: Some(401),
+        };
+        match err.to_fcp_error() {
+            FcpError::Unauthorized { code, message } => {
+                assert_eq!(code, 2001);
+                assert!(message.contains("credentials"));
+            }
+            other => panic!("expected Unauthorized, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_api_403_unauthorized() {
+        let err = YouTubeError::Api {
+            message: "forbidden action".into(),
+            status_code: Some(403),
+        };
+        match err.to_fcp_error() {
+            FcpError::Unauthorized { code, message } => {
+                assert_eq!(code, 2001);
+                assert!(message.contains("forbidden action"));
+            }
+            other => panic!("expected Unauthorized, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_api_429_rate_limited() {
+        let err = YouTubeError::Api {
+            message: "too many".into(),
+            status_code: Some(429),
+        };
+        match err.to_fcp_error() {
+            FcpError::RateLimited {
+                retry_after_ms, ..
+            } => {
+                assert_eq!(retry_after_ms, 60_000);
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_api_500_external() {
+        let err = YouTubeError::Api {
+            message: "server error".into(),
+            status_code: Some(500),
+        };
+        match err.to_fcp_error() {
+            FcpError::External {
+                service,
+                retryable,
+                status_code,
+                ..
+            } => {
+                assert_eq!(service, "youtube");
+                assert!(retryable);
+                assert_eq!(status_code, Some(500));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_api_no_status() {
+        let err = YouTubeError::Api {
+            message: "unknown".into(),
+            status_code: None,
+        };
+        match err.to_fcp_error() {
+            FcpError::External {
+                status_code,
+                retryable,
+                ..
+            } => {
+                assert_eq!(status_code, None);
+                assert!(!retryable);
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_rate_limited() {
+        let err = YouTubeError::RateLimited {
+            retry_after_ms: 2500,
+        };
+        match err.to_fcp_error() {
+            FcpError::RateLimited {
+                retry_after_ms,
+                violation,
+            } => {
+                assert_eq!(retry_after_ms, 2500);
+                assert!(violation.is_none());
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_quota_exceeded_24h() {
+        let err = YouTubeError::QuotaExceeded;
+        match err.to_fcp_error() {
+            FcpError::RateLimited {
+                retry_after_ms, ..
+            } => {
+                assert_eq!(retry_after_ms, 86_400_000);
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_unauthorized() {
+        let err = YouTubeError::Unauthorized;
+        match err.to_fcp_error() {
+            FcpError::Unauthorized { code, .. } => assert_eq!(code, 2001),
+            other => panic!("expected Unauthorized, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_not_found() {
+        let err = YouTubeError::NotFound {
+            resource: "video:xyz".into(),
+        };
+        match err.to_fcp_error() {
+            FcpError::ResourceNotFound { resource } => {
+                assert_eq!(resource, "video:xyz");
+            }
+            other => panic!("expected ResourceNotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_forbidden() {
+        let err = YouTubeError::Forbidden {
+            message: "comments disabled".into(),
+        };
+        match err.to_fcp_error() {
+            FcpError::Unauthorized { code, message } => {
+                assert_eq!(code, 2002);
+                assert!(message.contains("comments disabled"));
+            }
+            other => panic!("expected Unauthorized, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_json_internal() {
+        let json_err = serde_json::from_str::<serde_json::Value>("{bad}").unwrap_err();
+        let err = YouTubeError::Json(json_err);
+        match err.to_fcp_error() {
+            FcpError::Internal { message } => {
+                assert!(message.contains("JSON error"));
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
+    }
+
+    // ---- YouTubeResult alias ----
+
+    #[test]
+    fn youtube_result_ok() {
+        let r: YouTubeResult<u32> = Ok(42);
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn youtube_result_err() {
+        let r: YouTubeResult<u32> = Err(YouTubeError::QuotaExceeded);
+        assert!(r.is_err());
+    }
+
+    // ---- From impls ----
+
+    #[test]
+    fn from_serde_json_error() {
+        let json_err = serde_json::from_str::<serde_json::Value>("nope").unwrap_err();
+        let err: YouTubeError = json_err.into();
+        assert!(matches!(err, YouTubeError::Json(_)));
+    }
+
+    // ---- std::error::Error trait ----
+
+    #[test]
+    fn error_trait_impl() {
+        let err = YouTubeError::QuotaExceeded;
+        let _: &dyn std::error::Error = &err;
+    }
+}

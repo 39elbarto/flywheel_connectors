@@ -131,3 +131,317 @@ impl AnthropicError {
 
 /// Result type for Anthropic operations.
 pub type AnthropicResult<T> = Result<T, AnthropicError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- Display ----
+
+    #[test]
+    fn display_api_error() {
+        let err = AnthropicError::Api {
+            error_type: "invalid_request_error".into(),
+            message: "max tokens exceeded".into(),
+            status_code: Some(400),
+        };
+        let s = err.to_string();
+        assert!(s.contains("invalid_request_error"));
+        assert!(s.contains("max tokens exceeded"));
+    }
+
+    #[test]
+    fn display_rate_limited() {
+        let err = AnthropicError::RateLimited {
+            retry_after_ms: 5000,
+        };
+        assert!(err.to_string().contains("5000ms"));
+    }
+
+    #[test]
+    fn display_overloaded() {
+        let err = AnthropicError::Overloaded {
+            retry_after_ms: 10_000,
+        };
+        assert!(err.to_string().contains("overloaded"));
+    }
+
+    #[test]
+    fn display_invalid_api_key() {
+        let err = AnthropicError::InvalidApiKey;
+        assert!(err.to_string().contains("Invalid API key"));
+    }
+
+    #[test]
+    fn display_context_length_exceeded() {
+        let err = AnthropicError::ContextLengthExceeded {
+            message: "200k token limit".into(),
+        };
+        assert!(err.to_string().contains("200k token limit"));
+    }
+
+    #[test]
+    fn display_json() {
+        let json_err = serde_json::from_str::<serde_json::Value>("bad").unwrap_err();
+        let err = AnthropicError::Json(json_err);
+        assert!(err.to_string().contains("JSON error"));
+    }
+
+    // ---- is_retryable ----
+
+    #[test]
+    fn is_retryable_rate_limited() {
+        assert!(AnthropicError::RateLimited {
+            retry_after_ms: 1000
+        }
+        .is_retryable());
+    }
+
+    #[test]
+    fn is_retryable_overloaded() {
+        assert!(AnthropicError::Overloaded {
+            retry_after_ms: 1000
+        }
+        .is_retryable());
+    }
+
+    #[test]
+    fn is_retryable_api_500() {
+        assert!(AnthropicError::Api {
+            error_type: "server_error".into(),
+            message: "internal".into(),
+            status_code: Some(500),
+        }
+        .is_retryable());
+    }
+
+    #[test]
+    fn is_retryable_api_429() {
+        assert!(AnthropicError::Api {
+            error_type: "rate_limit_error".into(),
+            message: "too many".into(),
+            status_code: Some(429),
+        }
+        .is_retryable());
+    }
+
+    #[test]
+    fn not_retryable_api_400() {
+        assert!(!AnthropicError::Api {
+            error_type: "invalid_request_error".into(),
+            message: "bad".into(),
+            status_code: Some(400),
+        }
+        .is_retryable());
+    }
+
+    #[test]
+    fn not_retryable_invalid_api_key() {
+        assert!(!AnthropicError::InvalidApiKey.is_retryable());
+    }
+
+    #[test]
+    fn not_retryable_context_length() {
+        assert!(!AnthropicError::ContextLengthExceeded {
+            message: "x".into()
+        }
+        .is_retryable());
+    }
+
+    #[test]
+    fn not_retryable_json() {
+        let json_err = serde_json::from_str::<serde_json::Value>("x").unwrap_err();
+        assert!(!AnthropicError::Json(json_err).is_retryable());
+    }
+
+    // ---- retry_after ----
+
+    #[test]
+    fn retry_after_rate_limited() {
+        let err = AnthropicError::RateLimited {
+            retry_after_ms: 5000,
+        };
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn retry_after_overloaded() {
+        let err = AnthropicError::Overloaded {
+            retry_after_ms: 10_000,
+        };
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn retry_after_other_none() {
+        assert_eq!(AnthropicError::InvalidApiKey.retry_after(), None);
+        assert_eq!(
+            AnthropicError::Api {
+                error_type: "x".into(),
+                message: "x".into(),
+                status_code: Some(500)
+            }
+            .retry_after(),
+            None
+        );
+    }
+
+    // ---- to_fcp_error ----
+
+    #[test]
+    fn to_fcp_error_api_401() {
+        let err = AnthropicError::Api {
+            error_type: "authentication_error".into(),
+            message: "invalid key".into(),
+            status_code: Some(401),
+        };
+        match err.to_fcp_error() {
+            FcpError::Unauthorized { code, message } => {
+                assert_eq!(code, 2001);
+                assert!(message.contains("Anthropic API key"));
+            }
+            other => panic!("expected Unauthorized, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_api_429() {
+        let err = AnthropicError::Api {
+            error_type: "rate_limit_error".into(),
+            message: "too many".into(),
+            status_code: Some(429),
+        };
+        match err.to_fcp_error() {
+            FcpError::RateLimited {
+                retry_after_ms, ..
+            } => assert_eq!(retry_after_ms, 30_000),
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_api_500_external() {
+        let err = AnthropicError::Api {
+            error_type: "api_error".into(),
+            message: "server error".into(),
+            status_code: Some(500),
+        };
+        match err.to_fcp_error() {
+            FcpError::External {
+                service,
+                retryable,
+                status_code,
+                message,
+                ..
+            } => {
+                assert_eq!(service, "anthropic");
+                assert!(retryable);
+                assert_eq!(status_code, Some(500));
+                assert!(message.contains("api_error"));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_rate_limited() {
+        let err = AnthropicError::RateLimited {
+            retry_after_ms: 2000,
+        };
+        match err.to_fcp_error() {
+            FcpError::RateLimited {
+                retry_after_ms,
+                violation,
+            } => {
+                assert_eq!(retry_after_ms, 2000);
+                assert!(violation.is_none());
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_overloaded_529() {
+        let err = AnthropicError::Overloaded {
+            retry_after_ms: 15_000,
+        };
+        match err.to_fcp_error() {
+            FcpError::External {
+                service,
+                status_code,
+                retryable,
+                retry_after,
+                ..
+            } => {
+                assert_eq!(service, "anthropic");
+                assert_eq!(status_code, Some(529));
+                assert!(retryable);
+                assert_eq!(retry_after, Some(Duration::from_secs(15)));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_invalid_api_key() {
+        match AnthropicError::InvalidApiKey.to_fcp_error() {
+            FcpError::Unauthorized { code, .. } => assert_eq!(code, 2001),
+            other => panic!("expected Unauthorized, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_context_length() {
+        let err = AnthropicError::ContextLengthExceeded {
+            message: "200k tokens".into(),
+        };
+        match err.to_fcp_error() {
+            FcpError::InvalidRequest { code, message } => {
+                assert_eq!(code, 1004);
+                assert!(message.contains("200k tokens"));
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_json_internal() {
+        let json_err = serde_json::from_str::<serde_json::Value>("{bad}").unwrap_err();
+        let err = AnthropicError::Json(json_err);
+        match err.to_fcp_error() {
+            FcpError::Internal { message } => assert!(message.contains("JSON error")),
+            other => panic!("expected Internal, got {other:?}"),
+        }
+    }
+
+    // ---- From impls ----
+
+    #[test]
+    fn from_serde_json_error() {
+        let json_err = serde_json::from_str::<serde_json::Value>("nope").unwrap_err();
+        let err: AnthropicError = json_err.into();
+        assert!(matches!(err, AnthropicError::Json(_)));
+    }
+
+    // ---- Result alias ----
+
+    #[test]
+    fn anthropic_result_ok() {
+        let r: AnthropicResult<u32> = Ok(42);
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn anthropic_result_err() {
+        let r: AnthropicResult<u32> = Err(AnthropicError::InvalidApiKey);
+        assert!(r.is_err());
+    }
+
+    // ---- std::error::Error trait ----
+
+    #[test]
+    fn error_trait_impl() {
+        let err = AnthropicError::InvalidApiKey;
+        let _: &dyn std::error::Error = &err;
+    }
+}

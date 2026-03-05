@@ -206,7 +206,10 @@ impl DegradedModeEncoder {
             .collect();
 
         let symbol_size = self.config.symbol_size;
-        let total_payload_len: u32 = symbol_records.iter().map(|r| u32::try_from(r.wire_size()).unwrap_or(u32::MAX)).sum();
+        let total_payload_len: u32 = symbol_records
+            .iter()
+            .map(|r| u32::try_from(r.wire_size()).unwrap_or(u32::MAX))
+            .sum();
 
         let header = FcpsFrameHeader {
             version: FCPS_VERSION,
@@ -366,7 +369,10 @@ impl DegradedModeDecoder {
                 .add_symbol(symbol.esi, symbol.data.clone())?
             {
                 // Reconstruction complete! We know it exists because we just got a mutable ref to it above
-                let pending = self.pending.remove(&object_id).expect("pending reconstruction missing during decode");
+                let pending = self
+                    .pending
+                    .remove(&object_id)
+                    .expect("pending reconstruction missing during decode");
 
                 // Parse length prefix, schema hash, and payload
                 // Wire format: length(4 bytes) || schema_hash(32 bytes) || payload
@@ -953,5 +959,429 @@ mod tests {
         // Nothing to clear initially
         assert!(!decoder.clear_pending(&object_id));
         assert_eq!(decoder.pending_count(), 0);
+    }
+
+    // --- New tests below ---
+
+    #[test]
+    fn retention_class_default_is_required() {
+        assert_eq!(RetentionClass::default(), RetentionClass::Required);
+    }
+
+    #[test]
+    fn retention_class_clone_and_eq() {
+        let r = RetentionClass::Ephemeral;
+        let r2 = r;
+        assert_eq!(r, r2);
+        assert_ne!(RetentionClass::Required, RetentionClass::Ephemeral);
+    }
+
+    #[test]
+    fn retention_class_debug() {
+        let s = format!("{:?}", RetentionClass::Required);
+        assert!(s.contains("Required"));
+        let s = format!("{:?}", RetentionClass::Ephemeral);
+        assert!(s.contains("Ephemeral"));
+    }
+
+    #[test]
+    fn control_plane_envelope_new_constructor() {
+        let payload = vec![1, 2, 3];
+        let schema_hash = [0xBB; 32];
+        let object_id = ObjectId::from_bytes([0xCC; 32]);
+        let zone_id = test_zone_id();
+        let zone_key_id = ZoneKeyId::from_bytes([0xDD; 8]);
+
+        let env = ControlPlaneEnvelope::new(
+            payload.clone(),
+            schema_hash,
+            object_id.clone(),
+            zone_id.clone(),
+            zone_key_id.clone(),
+            42,
+            RetentionClass::Ephemeral,
+        );
+
+        assert_eq!(env.payload, payload);
+        assert_eq!(env.schema_hash, schema_hash);
+        assert_eq!(env.object_id, object_id);
+        assert_eq!(env.zone_id, zone_id);
+        assert_eq!(env.zone_key_id, zone_key_id);
+        assert_eq!(env.epoch_id, 42);
+        assert_eq!(env.retention, RetentionClass::Ephemeral);
+    }
+
+    #[test]
+    fn control_plane_envelope_debug_and_clone() {
+        let env = test_envelope();
+        let cloned = env.clone();
+        assert_eq!(cloned.payload, env.payload);
+        assert_eq!(cloned.object_id, env.object_id);
+        let s = format!("{:?}", env);
+        assert!(s.contains("ControlPlaneEnvelope"));
+    }
+
+    #[test]
+    fn error_display_incomplete() {
+        let e = DegradedTransportError::Incomplete {
+            received: 5,
+            needed: 10,
+        };
+        let s = e.to_string();
+        assert!(s.contains("5"));
+        assert!(s.contains("10"));
+        assert!(s.contains("incomplete"));
+    }
+
+    #[test]
+    fn error_display_schema_hash_mismatch() {
+        let e = DegradedTransportError::SchemaHashMismatch {
+            expected: [0xAA; 32],
+            actual: [0xBB; 32],
+        };
+        let s = e.to_string();
+        assert!(s.contains("schema hash mismatch"));
+    }
+
+    #[test]
+    fn error_display_object_id_mismatch() {
+        let e = DegradedTransportError::ObjectIdMismatch;
+        assert!(e.to_string().contains("object ID mismatch"));
+    }
+
+    #[test]
+    fn error_display_retention_violation() {
+        let e = DegradedTransportError::RetentionViolation;
+        assert!(e.to_string().contains("retention violation"));
+    }
+
+    #[test]
+    fn error_display_missing_control_plane_flag() {
+        let e = DegradedTransportError::MissingControlPlaneFlag;
+        assert!(e.to_string().contains("CONTROL_PLANE"));
+    }
+
+    #[test]
+    fn error_display_zone_mismatch() {
+        let z1 = test_zone_id().hash();
+        let z2: ZoneId = "z:other".parse().unwrap();
+        let z2h = z2.hash();
+        let e = DegradedTransportError::ZoneMismatch {
+            expected: z1,
+            got: z2h,
+        };
+        assert!(e.to_string().contains("zone id hash mismatch"));
+    }
+
+    #[test]
+    fn error_display_signature_verification_failed() {
+        let e = DegradedTransportError::SignatureVerificationFailed;
+        assert!(e.to_string().contains("signature verification failed"));
+    }
+
+    #[test]
+    fn error_debug_all_variants() {
+        let errors: Vec<DegradedTransportError> = vec![
+            DegradedTransportError::ObjectIdMismatch,
+            DegradedTransportError::RetentionViolation,
+            DegradedTransportError::MissingControlPlaneFlag,
+            DegradedTransportError::SignatureVerificationFailed,
+            DegradedTransportError::Incomplete {
+                received: 1,
+                needed: 2,
+            },
+            DegradedTransportError::SchemaHashMismatch {
+                expected: [0; 32],
+                actual: [1; 32],
+            },
+        ];
+        for e in &errors {
+            let s = format!("{e:?}");
+            assert!(!s.is_empty());
+        }
+    }
+
+    #[test]
+    fn encoder_sets_sender_instance_id() {
+        let config = test_config();
+        let instance_id = 0x1234_5678_9ABC_DEF0;
+        let mut encoder = DegradedModeEncoder::new(config, instance_id);
+
+        let envelope = test_envelope();
+        let frames = encoder.encode(&envelope, 100).unwrap();
+
+        assert_eq!(frames[0].header.sender_instance_id, instance_id);
+    }
+
+    #[test]
+    fn encoder_sets_epoch_id_in_header() {
+        let config = test_config();
+        let mut encoder = DegradedModeEncoder::new(config, 1);
+
+        let envelope = test_envelope();
+        let frames = encoder.encode(&envelope, 7777).unwrap();
+
+        assert_eq!(frames[0].header.epoch_id, 7777);
+    }
+
+    #[test]
+    fn encoder_sets_object_id_in_header() {
+        let config = test_config();
+        let mut encoder = DegradedModeEncoder::new(config, 1);
+
+        let envelope = test_envelope();
+        let frames = encoder.encode(&envelope, 1).unwrap();
+
+        assert_eq!(frames[0].header.object_id, envelope.object_id);
+    }
+
+    #[test]
+    fn encoder_symbols_have_correct_k() {
+        let config = test_config();
+        let mut encoder = DegradedModeEncoder::new(config, 1);
+
+        let envelope = test_envelope();
+        let frames = encoder.encode(&envelope, 1).unwrap();
+
+        // All symbols in a frame should have the same k value
+        let frame = &frames[0];
+        if frame.symbols.len() > 1 {
+            let k = frame.symbols[0].k;
+            for sym in &frame.symbols {
+                assert_eq!(sym.k, k);
+            }
+        }
+    }
+
+    #[test]
+    fn decode_roundtrip_preserves_zone_key_id() {
+        let config = test_config();
+        let mut encoder = DegradedModeEncoder::new(config.clone(), 1);
+        let mut decoder = DegradedModeDecoder::new(config);
+
+        let envelope = test_envelope();
+        let zone_id = envelope.zone_id.clone();
+
+        let frames = encoder.encode(&envelope, 1).unwrap();
+
+        let mut result = None;
+        for frame in &frames {
+            if let Some(decoded) = decoder
+                .process_frame(frame, &zone_id, RetentionClass::Required)
+                .unwrap()
+            {
+                result = Some(decoded);
+                break;
+            }
+        }
+
+        let decoded = result.expect("should decode");
+        assert_eq!(decoded.zone_key_id, envelope.zone_key_id);
+        assert_eq!(decoded.zone_id, envelope.zone_id);
+    }
+
+    #[test]
+    fn decode_roundtrip_with_ephemeral_retention() {
+        let config = test_config();
+        let mut encoder = DegradedModeEncoder::new(config.clone(), 1);
+        let mut decoder = DegradedModeDecoder::new(config);
+
+        let mut envelope = test_envelope();
+        envelope.retention = RetentionClass::Ephemeral;
+        let zone_id = envelope.zone_id.clone();
+
+        let frames = encoder.encode(&envelope, 1).unwrap();
+
+        let mut result = None;
+        for frame in &frames {
+            if let Some(decoded) = decoder
+                .process_frame(frame, &zone_id, RetentionClass::Ephemeral)
+                .unwrap()
+            {
+                result = Some(decoded);
+                break;
+            }
+        }
+
+        let decoded = result.expect("should decode");
+        assert_eq!(decoded.retention, RetentionClass::Ephemeral);
+    }
+
+    #[test]
+    fn decode_roundtrip_small_payload() {
+        let config = test_config();
+        let mut encoder = DegradedModeEncoder::new(config.clone(), 1);
+        let mut decoder = DegradedModeDecoder::new(config);
+
+        let mut envelope = test_envelope();
+        envelope.payload = vec![0xFF; 8]; // very small payload
+        let zone_id = envelope.zone_id.clone();
+
+        let frames = encoder.encode(&envelope, 1).unwrap();
+        let mut result = None;
+        for frame in &frames {
+            if let Some(decoded) = decoder
+                .process_frame(frame, &zone_id, RetentionClass::Required)
+                .unwrap()
+            {
+                result = Some(decoded);
+                break;
+            }
+        }
+
+        let decoded = result.expect("should decode");
+        assert_eq!(decoded.payload, vec![0xFF; 8]);
+    }
+
+    #[test]
+    fn decoder_pending_count_after_incomplete_frame() {
+        let config = RaptorQConfig {
+            symbol_size: 64,
+            repair_ratio_bps: 500,
+            max_object_size: 1024 * 1024,
+            decode_timeout: std::time::Duration::from_secs(30),
+            max_chunk_threshold: 64, // force chunking to get multiple symbols
+            chunk_size: 64,
+        };
+        let mut decoder = DegradedModeDecoder::new(config);
+        let zone_id = test_zone_id();
+
+        // Manually create a frame with a single symbol (insufficient for decode)
+        let frame = FcpsFrame {
+            header: FcpsFrameHeader {
+                version: FCPS_VERSION,
+                flags: FrameFlags::ENCRYPTED | FrameFlags::RAPTORQ | FrameFlags::CONTROL_PLANE,
+                symbol_count: 1,
+                total_payload_len: 100,
+                object_id: ObjectId::from_bytes([0x55; 32]),
+                symbol_size: 64,
+                zone_key_id: ZoneKeyId::from_bytes([0; 8]),
+                zone_id_hash: zone_id.hash(),
+                epoch_id: 0,
+                sender_instance_id: 0,
+                frame_seq: 0,
+            },
+            symbols: vec![SymbolRecord {
+                esi: 0,
+                k: 10, // claim 10 source symbols needed
+                data: vec![0u8; 64],
+                auth_tag: [0u8; 16],
+            }],
+        };
+
+        let result = decoder.process_frame(&frame, &zone_id, RetentionClass::Required);
+        // Should be Ok(None) - incomplete
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+
+        // Now should have 1 pending
+        assert_eq!(decoder.pending_count(), 1);
+
+        // get_status should return info
+        let status = decoder
+            .get_status(&ObjectId::from_bytes([0x55; 32]))
+            .expect("should have status");
+        assert_eq!(status.received, 1);
+        assert!(!status.likely_complete);
+
+        // clear_pending should work
+        assert!(decoder.clear_pending(&ObjectId::from_bytes([0x55; 32])));
+        assert_eq!(decoder.pending_count(), 0);
+    }
+
+    #[test]
+    fn decode_status_info_debug_and_clone() {
+        let info = DecodeStatusInfo {
+            received: 5,
+            needed: 10,
+            likely_complete: false,
+        };
+        let cloned = info;
+        assert_eq!(cloned.received, 5);
+        assert_eq!(cloned.needed, 10);
+        assert!(!cloned.likely_complete);
+        let s = format!("{info:?}");
+        assert!(s.contains("DecodeStatusInfo"));
+    }
+
+    #[test]
+    fn handler_unknown_zone_returns_empty_epochs() {
+        let handler = InMemoryControlPlaneHandler::new();
+        let unknown_zone: ZoneId = "z:unknown".parse().unwrap();
+        assert!(handler.list_epochs(&unknown_zone, None).is_empty());
+        assert!(handler.fetch_epoch(&unknown_zone, 0).is_empty());
+    }
+
+    #[test]
+    fn handler_replaces_object_with_same_id() {
+        let handler = InMemoryControlPlaneHandler::new();
+
+        let mut env1 = test_envelope();
+        env1.payload = vec![0x01; 100];
+        env1.epoch_id = 1;
+        let oid = env1.object_id.clone();
+
+        handler.handle(env1).unwrap();
+        assert_eq!(handler.count(), 1);
+
+        // Replace same object_id with different payload/epoch
+        let mut env2 = test_envelope();
+        env2.payload = vec![0x02; 200];
+        env2.epoch_id = 2;
+
+        handler.handle(env2).unwrap();
+        assert_eq!(handler.count(), 1); // still 1 object
+
+        let stored = handler.get(&oid).unwrap();
+        assert_eq!(stored.payload, vec![0x02; 200]);
+        assert_eq!(stored.epoch_id, 2);
+
+        // Old epoch should be cleaned up, new epoch should exist
+        let zone_id = test_zone_id();
+        let epochs = handler.list_epochs(&zone_id, None);
+        assert!(!epochs.contains(&1)); // old epoch removed
+        assert!(epochs.contains(&2));
+    }
+
+    #[test]
+    fn handler_multiple_objects_same_epoch() {
+        let handler = InMemoryControlPlaneHandler::new();
+        let zone_id = test_zone_id();
+
+        let mut env1 = test_envelope();
+        env1.object_id = ObjectId::from_bytes([0xA1; 32]);
+        env1.epoch_id = 5;
+
+        let mut env2 = test_envelope();
+        env2.object_id = ObjectId::from_bytes([0xA2; 32]);
+        env2.epoch_id = 5;
+
+        handler.handle(env1).unwrap();
+        handler.handle(env2).unwrap();
+
+        assert_eq!(handler.count(), 2);
+        let objects = handler.fetch_epoch(&zone_id, 5);
+        assert_eq!(objects.len(), 2);
+    }
+
+    #[test]
+    fn handler_list_epochs_since_filters_correctly() {
+        let handler = InMemoryControlPlaneHandler::new();
+        let zone_id = test_zone_id();
+
+        for epoch in [1, 3, 5, 7, 9] {
+            let mut env = test_envelope();
+            env.object_id = ObjectId::from_bytes([epoch as u8; 32]);
+            env.epoch_id = epoch;
+            handler.handle(env).unwrap();
+        }
+
+        // since_epoch=5 should return only 7 and 9
+        let epochs = handler.list_epochs(&zone_id, Some(5));
+        assert_eq!(epochs, vec![7, 9]);
+
+        // since_epoch=0 should return all
+        let epochs = handler.list_epochs(&zone_id, Some(0));
+        assert_eq!(epochs, vec![1, 3, 5, 7, 9]);
     }
 }

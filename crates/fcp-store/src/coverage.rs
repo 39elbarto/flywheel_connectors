@@ -268,13 +268,24 @@ mod tests {
 
     use super::*;
 
-    #[derive(Default)]
     struct StoreLogData {
         object_id: Option<ObjectId>,
         symbol_count: Option<u32>,
         coverage_bps: Option<u32>,
         nodes_holding: Option<Vec<String>>,
         details: Option<serde_json::Value>,
+    }
+
+    impl Default for StoreLogData {
+        fn default() -> Self {
+            Self {
+                object_id: None,
+                symbol_count: None,
+                coverage_bps: None,
+                nodes_holding: None,
+                details: None,
+            }
+        }
     }
 
     fn run_store_test<F>(test_name: &str, phase: &str, operation: &str, assertions: u32, f: F)
@@ -793,6 +804,298 @@ mod tests {
                 }
             },
         );
+    }
+
+    // --- Additional coverage tests ---
+
+    #[test]
+    fn zero_source_symbols_distribution() {
+        run_store_test("zero_source_symbols", "verify", "placement", 3, || {
+            let object_id = test_object_id();
+            let dist = SymbolDistribution::new(0);
+            let eval = CoverageEvaluation::from_distribution(object_id, &dist);
+
+            assert_eq!(eval.coverage_bps, 0);
+            assert_eq!(eval.max_node_fraction_bps, 0);
+            // 0 >= 0 is true: zero-source objects are trivially available
+            assert!(eval.is_available);
+
+            StoreLogData {
+                object_id: Some(object_id),
+                coverage_bps: Some(0),
+                details: Some(json!({"zero_source": true})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn coverage_evaluation_serde_roundtrip() {
+        run_store_test("coverage_eval_serde", "verify", "serde", 1, || {
+            let object_id = test_object_id();
+            let mut dist = SymbolDistribution::new(10);
+            for _ in 0..10 {
+                dist.add_symbol(1, 100);
+            }
+            let eval = CoverageEvaluation::from_distribution(object_id, &dist);
+
+            let json = serde_json::to_string(&eval).unwrap();
+            let deserialized: CoverageEvaluation = serde_json::from_str(&json).unwrap();
+            assert_eq!(deserialized.coverage_bps, eval.coverage_bps);
+            assert_eq!(deserialized.distinct_nodes, eval.distinct_nodes);
+            assert_eq!(deserialized.is_available, eval.is_available);
+
+            StoreLogData {
+                object_id: Some(object_id),
+                coverage_bps: Some(eval.coverage_bps),
+                details: Some(json!({"serde": "roundtrip_ok"})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn coverage_health_serde_roundtrip() {
+        run_store_test("coverage_health_serde", "verify", "serde", 3, || {
+            for &health in &[
+                CoverageHealth::Healthy,
+                CoverageHealth::Degraded,
+                CoverageHealth::Unavailable,
+            ] {
+                let json = serde_json::to_string(&health).unwrap();
+                let deserialized: CoverageHealth = serde_json::from_str(&json).unwrap();
+                assert_eq!(health, deserialized);
+            }
+
+            StoreLogData {
+                details: Some(json!({"serde": "all_variants_ok"})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn coverage_health_copy_and_eq() {
+        run_store_test("coverage_health_copy_eq", "verify", "traits", 2, || {
+            let h1 = CoverageHealth::Healthy;
+            let h2 = h1; // Copy
+            assert_eq!(h1, h2);
+
+            let h3 = CoverageHealth::Degraded;
+            assert_ne!(h1, h3);
+
+            StoreLogData {
+                details: Some(json!({"copy_eq": true})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn coverage_deficit_at_target() {
+        run_store_test("deficit_at_target", "verify", "placement", 1, || {
+            let object_id = test_object_id();
+            let mut dist = SymbolDistribution::new(10);
+            for _ in 0..10 {
+                dist.add_symbol(1, 100);
+            }
+            let eval = CoverageEvaluation::from_distribution(object_id, &dist);
+
+            assert_eq!(eval.coverage_deficit_bps(10000), 0);
+
+            StoreLogData {
+                object_id: Some(object_id),
+                coverage_bps: Some(eval.coverage_bps),
+                details: Some(json!({"deficit": 0})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn coverage_deficit_above_target() {
+        run_store_test("deficit_above_target", "verify", "placement", 1, || {
+            let object_id = test_object_id();
+            let mut dist = SymbolDistribution::new(10);
+            for _ in 0..15 {
+                dist.add_symbol(1, 100);
+            }
+            let eval = CoverageEvaluation::from_distribution(object_id, &dist);
+
+            assert_eq!(eval.coverage_deficit_bps(10000), 0);
+
+            StoreLogData {
+                object_id: Some(object_id),
+                coverage_bps: Some(eval.coverage_bps),
+                details: Some(json!({"overcoverage": true})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn symbols_needed_at_target() {
+        run_store_test("symbols_needed_at_target", "verify", "placement", 1, || {
+            let object_id = test_object_id();
+            let mut dist = SymbolDistribution::new(10);
+            for _ in 0..10 {
+                dist.add_symbol(1, 100);
+            }
+            let eval = CoverageEvaluation::from_distribution(object_id, &dist);
+
+            assert_eq!(eval.symbols_needed(10000), 0);
+
+            StoreLogData {
+                object_id: Some(object_id),
+                details: Some(json!({"needed": 0})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn max_node_symbols_empty() {
+        run_store_test("max_node_symbols_empty", "verify", "placement", 1, || {
+            let dist = SymbolDistribution::new(10);
+            assert_eq!(dist.max_node_symbols(), 0);
+
+            StoreLogData {
+                details: Some(json!({"max": 0})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn remove_symbol_nonexistent_node() {
+        run_store_test(
+            "remove_symbol_nonexistent_node",
+            "verify",
+            "placement",
+            2,
+            || {
+                let mut dist = SymbolDistribution::new(10);
+                dist.add_symbol(1, 100);
+
+                // Remove from node that has no symbols
+                dist.remove_symbol(999, 100);
+                assert_eq!(dist.total_symbols, 1); // Unchanged
+                assert_eq!(dist.distinct_nodes(), 1);
+
+                StoreLogData {
+                    details: Some(json!({"noop": true})),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn symbol_distribution_default() {
+        run_store_test("distribution_default", "verify", "placement", 3, || {
+            let dist = SymbolDistribution::default();
+            assert_eq!(dist.source_symbols, 0);
+            assert_eq!(dist.total_symbols, 0);
+            assert!(dist.nodes.is_empty());
+
+            StoreLogData {
+                details: Some(json!({"default": true})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn symbol_distribution_clone() {
+        run_store_test("distribution_clone", "verify", "traits", 2, || {
+            let mut dist = SymbolDistribution::new(5);
+            dist.add_symbol(1, 50);
+            dist.add_symbol(2, 50);
+
+            let cloned = dist.clone();
+            assert_eq!(cloned.total_symbols, dist.total_symbols);
+            assert_eq!(cloned.distinct_nodes(), dist.distinct_nodes());
+
+            StoreLogData {
+                details: Some(json!({"clone": true})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn diversity_bps_exact_match() {
+        run_store_test("diversity_bps_exact", "verify", "placement", 1, || {
+            let object_id = test_object_id();
+            let mut dist = SymbolDistribution::new(10);
+            dist.add_symbol(1, 100);
+            dist.add_symbol(2, 100);
+            dist.add_symbol(3, 100);
+            let eval = CoverageEvaluation::from_distribution(object_id, &dist);
+
+            // Have 3 nodes, need 3 → 10000 bps
+            assert_eq!(eval.diversity_bps(3), 10_000);
+
+            StoreLogData {
+                details: Some(json!({"diversity_bps": 10_000})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn meets_diversity_unavailable() {
+        run_store_test(
+            "meets_diversity_unavailable",
+            "verify",
+            "placement",
+            1,
+            || {
+                let object_id = test_object_id();
+                // Only 3 symbols but need 10 → unavailable
+                let mut dist = SymbolDistribution::new(10);
+                for _ in 0..3 {
+                    dist.add_symbol(1, 100);
+                }
+                let eval = CoverageEvaluation::from_distribution(object_id, &dist);
+
+                let policy = fcp_core::ObjectPlacementPolicy {
+                    min_nodes: 1,
+                    max_node_fraction_bps: 10_000,
+                    preferred_devices: vec![],
+                    excluded_devices: vec![],
+                    target_coverage_bps: 10000,
+                    min_source_diversity: 0,
+                };
+
+                assert!(!eval.meets_diversity_for_reconstruction(&policy));
+
+                StoreLogData {
+                    details: Some(json!({"unavailable": true})),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn coverage_evaluation_clone() {
+        run_store_test("coverage_eval_clone", "verify", "traits", 2, || {
+            let object_id = test_object_id();
+            let mut dist = SymbolDistribution::new(10);
+            for _ in 0..5 {
+                dist.add_symbol(1, 100);
+            }
+            let eval = CoverageEvaluation::from_distribution(object_id, &dist);
+            let cloned = eval.clone();
+            assert_eq!(cloned.coverage_bps, eval.coverage_bps);
+            assert_eq!(cloned.is_available, eval.is_available);
+
+            StoreLogData {
+                details: Some(json!({"clone": true})),
+                ..StoreLogData::default()
+            }
+        });
     }
 
     #[test]

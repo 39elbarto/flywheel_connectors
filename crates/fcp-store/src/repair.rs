@@ -147,7 +147,7 @@ impl RateLimiter {
 
         let elapsed_nanos = elapsed.as_nanos();
         let new_tokens_u128 = elapsed_nanos / u128::from(nanos_per_token);
-        
+
         if new_tokens_u128 > 0 {
             let new_tokens = u32::try_from(new_tokens_u128).unwrap_or(u32::MAX);
             let updated = tokens.saturating_add(new_tokens);
@@ -157,7 +157,9 @@ impl RateLimiter {
                 let remainder_nanos = elapsed_nanos % u128::from(nanos_per_token);
                 let rem_secs = u64::try_from(remainder_nanos / 1_000_000_000).unwrap_or(0);
                 let rem_nanos = (remainder_nanos % 1_000_000_000) as u32;
-                *last = now.checked_sub(Duration::new(rem_secs, rem_nanos)).unwrap_or(now);
+                *last = now
+                    .checked_sub(Duration::new(rem_secs, rem_nanos))
+                    .unwrap_or(now);
             } else {
                 *tokens = updated;
                 // Advance time by the amount of tokens added to preserve phase
@@ -326,7 +328,9 @@ impl RepairController {
                 let deficit = coverage.coverage_deficit_bps(policy.target_coverage_bps);
                 if diversity_deficit > 0 {
                     #[allow(clippy::cast_possible_truncation)] // u8 -> u32 is always safe
-                    { 200 + (diversity_deficit as u32) * 10 + deficit / 100 }
+                    {
+                        200 + (diversity_deficit as u32) * 10 + deficit / 100
+                    }
                 } else {
                     100 + deficit / 100 // 100-199 range
                 }
@@ -959,6 +963,185 @@ mod tests {
         assert_eq!(controller.queue_depth(), 0);
     }
 
+    // --- New edge case tests ---
+
+    #[test]
+    fn config_default_values() {
+        let config = RepairControllerConfig::default();
+        assert_eq!(config.max_concurrent_repairs, 10);
+        assert_eq!(config.max_repairs_per_minute, 100);
+        assert_eq!(config.repair_interval, Duration::from_secs(60));
+        assert_eq!(config.min_deficit_bps, 500);
+        assert_eq!(config.max_symbols_per_repair, 100);
+    }
+
+    #[test]
+    fn repair_stats_default() {
+        let stats = RepairStats::default();
+        assert_eq!(stats.repairs_attempted, 0);
+        assert_eq!(stats.repairs_succeeded, 0);
+        assert_eq!(stats.repairs_failed, 0);
+        assert_eq!(stats.symbols_added, 0);
+        assert_eq!(stats.queue_depth, 0);
+        assert_eq!(stats.rate_limited, 0);
+    }
+
+    #[test]
+    fn repair_result_serde_roundtrip() {
+        let result = RepairResult {
+            object_id: ObjectId::from_bytes([1; 32]),
+            success: true,
+            new_coverage_bps: 10000,
+            symbols_added: 5,
+            error: None,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let deserialized: RepairResult = serde_json::from_str(&json).unwrap();
+        assert!(deserialized.success);
+        assert_eq!(deserialized.new_coverage_bps, 10000);
+        assert_eq!(deserialized.symbols_added, 5);
+        assert!(deserialized.error.is_none());
+    }
+
+    #[test]
+    fn repair_result_serde_with_error() {
+        let result = RepairResult {
+            object_id: ObjectId::from_bytes([2; 32]),
+            success: false,
+            new_coverage_bps: 5000,
+            symbols_added: 0,
+            error: Some("timeout".into()),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let deserialized: RepairResult = serde_json::from_str(&json).unwrap();
+        assert!(!deserialized.success);
+        assert_eq!(deserialized.error.as_deref(), Some("timeout"));
+    }
+
+    #[test]
+    fn repair_stats_serde_roundtrip() {
+        let stats = RepairStats {
+            repairs_attempted: 10,
+            repairs_succeeded: 8,
+            repairs_failed: 2,
+            symbols_added: 40,
+            queue_depth: 3,
+            rate_limited: 1,
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        let deserialized: RepairStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.repairs_attempted, 10);
+        assert_eq!(deserialized.repairs_succeeded, 8);
+        assert_eq!(deserialized.symbols_added, 40);
+    }
+
+    #[test]
+    fn next_repair_empty_queue() {
+        let controller = RepairController::new(RepairControllerConfig::default());
+        assert!(controller.next_repair().is_none());
+        // No rate_limited bump on empty queue
+        assert_eq!(controller.stats().rate_limited, 0);
+    }
+
+    #[test]
+    fn needs_repair_small_deficit_below_threshold() {
+        let controller = RepairController::new(RepairControllerConfig {
+            min_deficit_bps: 500,
+            ..Default::default()
+        });
+
+        // 96% coverage = 4% deficit = 400 bps (below 500 threshold)
+        let mut coverage = test_coverage(10, 10);
+        coverage.coverage_bps = 9600;
+        coverage.is_available = true;
+        let policy = test_policy();
+
+        assert!(!controller.needs_repair(&coverage, &policy));
+    }
+
+    #[test]
+    fn config_accessor() {
+        let config = RepairControllerConfig {
+            max_concurrent_repairs: 5,
+            max_repairs_per_minute: 50,
+            ..Default::default()
+        };
+        let controller = RepairController::new(config);
+        assert_eq!(controller.config().max_concurrent_repairs, 5);
+        assert_eq!(controller.config().max_repairs_per_minute, 50);
+    }
+
+    #[test]
+    fn available_rate_tokens_initially_full() {
+        let config = RepairControllerConfig {
+            max_repairs_per_minute: 100,
+            ..Default::default()
+        };
+        let controller = RepairController::new(config);
+        assert_eq!(controller.available_rate_tokens(), 100);
+    }
+
+    #[test]
+    fn targeted_repair_request_default() {
+        let id = ObjectId::from_bytes([1; 32]);
+        let request = TargetedRepairRequest::new(id);
+        assert_eq!(request.object_id, id);
+        assert!(request.esis.is_empty());
+        assert!(request.preferred_sources.is_empty());
+        assert!(request.excluded_sources.is_empty());
+    }
+
+    #[test]
+    fn targeted_repair_request_serde_roundtrip() {
+        let request = TargetedRepairRequest::new(ObjectId::from_bytes([1; 32]))
+            .with_esis(vec![0, 1, 2])
+            .with_preferred_sources(vec![100])
+            .with_excluded_sources(vec![200, 300]);
+
+        let json = serde_json::to_string(&request).unwrap();
+        let deserialized: TargetedRepairRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.esis, vec![0, 1, 2]);
+        assert_eq!(deserialized.preferred_sources, vec![100]);
+        assert_eq!(deserialized.excluded_sources, vec![200, 300]);
+    }
+
+    #[test]
+    fn clear_queue_resets_stats_depth() {
+        let controller = RepairController::new(RepairControllerConfig::default());
+
+        controller.queue_repair(RepairRequest {
+            object_id: ObjectId::from_bytes([1; 32]),
+            zone_id: "z:test".parse().unwrap(),
+            coverage: test_coverage(5, 10),
+            policy: test_policy(),
+            priority: 100,
+        });
+
+        assert_eq!(controller.stats().queue_depth, 1);
+        controller.clear_queue();
+        assert_eq!(controller.stats().queue_depth, 0);
+    }
+
+    #[test]
+    fn repair_controller_config_serde_roundtrip() {
+        let config = RepairControllerConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: RepairControllerConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            deserialized.max_concurrent_repairs,
+            config.max_concurrent_repairs
+        );
+        assert_eq!(deserialized.min_deficit_bps, config.min_deficit_bps);
+    }
+
+    #[test]
+    fn calculate_priority_healthy_is_zero() {
+        let controller = RepairController::new(RepairControllerConfig::default());
+        let healthy = test_coverage(10, 10);
+        let policy = test_policy();
+        assert_eq!(controller.calculate_priority(&healthy, &policy), 0);
+    }
+
     #[test]
     #[allow(clippy::too_many_lines)]
     fn repair_loop_improves_coverage() {
@@ -1356,5 +1539,408 @@ mod tests {
                 }
             },
         );
+    }
+
+    // ================================================================
+    // Unit tests for types and controller logic (bead 3p99)
+    // ================================================================
+
+    // ---- RepairControllerConfig ----
+
+    #[test]
+    fn config_default_all_fields() {
+        let c = RepairControllerConfig::default();
+        assert_eq!(c.max_concurrent_repairs, 10);
+        assert_eq!(c.max_repairs_per_minute, 100);
+        assert_eq!(c.repair_interval, Duration::from_secs(60));
+        assert_eq!(c.min_deficit_bps, 500);
+        assert_eq!(c.max_symbols_per_repair, 100);
+    }
+
+    #[test]
+    fn config_serde_roundtrip() {
+        let c = RepairControllerConfig::default();
+        let json = serde_json::to_string(&c).unwrap();
+        let back: RepairControllerConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.max_concurrent_repairs, 10);
+        assert_eq!(back.max_repairs_per_minute, 100);
+        assert_eq!(back.max_symbols_per_repair, 100);
+    }
+
+    #[test]
+    fn config_debug_clone() {
+        let c = RepairControllerConfig::default();
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("RepairControllerConfig"));
+        let cloned = c.clone();
+        assert_eq!(cloned.max_concurrent_repairs, c.max_concurrent_repairs);
+    }
+
+    // ---- RepairStats ----
+
+    #[test]
+    fn stats_default_all_zero() {
+        let s = RepairStats::default();
+        assert_eq!(s.repairs_attempted, 0);
+        assert_eq!(s.repairs_succeeded, 0);
+        assert_eq!(s.repairs_failed, 0);
+        assert_eq!(s.symbols_added, 0);
+        assert_eq!(s.queue_depth, 0);
+        assert_eq!(s.rate_limited, 0);
+    }
+
+    #[test]
+    fn stats_serde_roundtrip() {
+        let s = RepairStats {
+            repairs_attempted: 10,
+            repairs_succeeded: 8,
+            repairs_failed: 2,
+            symbols_added: 500,
+            queue_depth: 3,
+            rate_limited: 1,
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let back: RepairStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.repairs_attempted, 10);
+        assert_eq!(back.repairs_succeeded, 8);
+        assert_eq!(back.symbols_added, 500);
+    }
+
+    #[test]
+    fn stats_debug_clone() {
+        let s = RepairStats::default();
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("RepairStats"));
+        assert_eq!(s.repairs_attempted, 0);
+    }
+
+    // ---- RepairResult ----
+
+    #[test]
+    fn repair_result_json_roundtrip() {
+        let r = RepairResult {
+            object_id: ObjectId::from_bytes([1; 32]),
+            success: true,
+            new_coverage_bps: 10000,
+            symbols_added: 5,
+            error: None,
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        let back: RepairResult = serde_json::from_str(&json).unwrap();
+        assert!(back.success);
+        assert_eq!(back.symbols_added, 5);
+        assert!(back.error.is_none());
+    }
+
+    #[test]
+    fn repair_result_with_error() {
+        let r = RepairResult {
+            object_id: ObjectId::from_bytes([2; 32]),
+            success: false,
+            new_coverage_bps: 5000,
+            symbols_added: 0,
+            error: Some("timeout".into()),
+        };
+        assert!(!r.success);
+        assert_eq!(r.error.as_deref(), Some("timeout"));
+    }
+
+    #[test]
+    fn repair_result_debug_clone() {
+        let r = RepairResult {
+            object_id: ObjectId::from_bytes([3; 32]),
+            success: true,
+            new_coverage_bps: 10000,
+            symbols_added: 1,
+            error: None,
+        };
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("RepairResult"));
+        assert_eq!(r.symbols_added, 1);
+    }
+
+    // ---- TargetedRepairRequest ----
+
+    #[test]
+    fn targeted_repair_request_new() {
+        let r = TargetedRepairRequest::new(ObjectId::from_bytes([4; 32]));
+        assert!(r.esis.is_empty());
+        assert!(r.preferred_sources.is_empty());
+        assert!(r.excluded_sources.is_empty());
+    }
+
+    #[test]
+    fn targeted_repair_request_builder() {
+        let r = TargetedRepairRequest::new(ObjectId::from_bytes([5; 32]))
+            .with_esis(vec![1, 2, 3])
+            .with_preferred_sources(vec![10, 20])
+            .with_excluded_sources(vec![30]);
+        assert_eq!(r.esis, vec![1, 2, 3]);
+        assert_eq!(r.preferred_sources, vec![10, 20]);
+        assert_eq!(r.excluded_sources, vec![30]);
+    }
+
+    #[test]
+    fn targeted_repair_request_json_roundtrip() {
+        let r = TargetedRepairRequest::new(ObjectId::from_bytes([6; 32]))
+            .with_esis(vec![10, 20]);
+        let json = serde_json::to_string(&r).unwrap();
+        let back: TargetedRepairRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.esis, vec![10, 20]);
+    }
+
+    #[test]
+    fn targeted_repair_request_debug_clone() {
+        let r = TargetedRepairRequest::new(ObjectId::from_bytes([7; 32]))
+            .with_esis(vec![42]);
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("TargetedRepairRequest"));
+        assert_eq!(r.esis, vec![42]);
+    }
+
+    // ---- RateLimiter ----
+
+    #[test]
+    fn rate_limiter_starts_full() {
+        let rl = RateLimiter::new(10);
+        assert_eq!(rl.available(), 10);
+    }
+
+    #[test]
+    fn rate_limiter_depletes() {
+        let rl = RateLimiter::new(3);
+        assert!(rl.try_acquire());
+        assert!(rl.try_acquire());
+        assert!(rl.try_acquire());
+        // 4th should fail (no time for refill)
+        assert!(!rl.try_acquire());
+    }
+
+    #[test]
+    fn rate_limiter_zero_max() {
+        let rl = RateLimiter::new(0);
+        assert_eq!(rl.available(), 0);
+        assert!(!rl.try_acquire());
+    }
+
+    // ---- RepairController: queue + dedup + ordering ----
+
+    #[test]
+    fn queue_repair_dedup() {
+        let controller = RepairController::new(RepairControllerConfig::default());
+        let object_id = ObjectId::from_bytes([10; 32]);
+        let coverage = test_coverage(5, 10);
+        let policy = test_policy();
+
+        let req = RepairRequest {
+            object_id,
+            zone_id: "z:test".parse().unwrap(),
+            coverage,
+            policy,
+            priority: 100,
+        };
+        controller.queue_repair(req.clone());
+        controller.queue_repair(req); // duplicate
+        assert_eq!(controller.queue_depth(), 1);
+    }
+
+    #[test]
+    fn queue_repair_priority_ordering() {
+        let controller = RepairController::new(RepairControllerConfig::default());
+        let zone_id: ZoneId = "z:test".parse().unwrap();
+        let policy = test_policy();
+
+        let low = RepairRequest {
+            object_id: ObjectId::from_bytes([0xAA; 32]),
+            zone_id: zone_id.clone(),
+            coverage: test_coverage(9, 10),
+            policy: policy.clone(),
+            priority: 10,
+        };
+        let high = RepairRequest {
+            object_id: ObjectId::from_bytes([0xBB; 32]),
+            zone_id,
+            coverage: test_coverage(5, 10),
+            policy,
+            priority: 100,
+        };
+
+        controller.queue_repair(low);
+        controller.queue_repair(high);
+        assert_eq!(controller.queue_depth(), 2);
+
+        let first = controller.next_repair().unwrap();
+        assert_eq!(first.priority, 100); // higher priority first
+    }
+
+    #[test]
+    fn clear_queue_resets_depth() {
+        let controller = RepairController::new(RepairControllerConfig::default());
+        let req = RepairRequest {
+            object_id: ObjectId::from_bytes([11; 32]),
+            zone_id: "z:test".parse().unwrap(),
+            coverage: test_coverage(5, 10),
+            policy: test_policy(),
+            priority: 50,
+        };
+        controller.queue_repair(req);
+        assert_eq!(controller.queue_depth(), 1);
+        controller.clear_queue();
+        assert_eq!(controller.queue_depth(), 0);
+    }
+
+    #[test]
+    fn next_repair_returns_none_on_empty() {
+        let controller = RepairController::new(RepairControllerConfig::default());
+        assert!(controller.next_repair().is_none());
+    }
+
+    // ---- record_result ----
+
+    #[test]
+    fn record_result_success() {
+        let controller = RepairController::new(RepairControllerConfig::default());
+        controller.record_result(&RepairResult {
+            object_id: ObjectId::from_bytes([12; 32]),
+            success: true,
+            new_coverage_bps: 10000,
+            symbols_added: 5,
+            error: None,
+        });
+        let stats = controller.stats();
+        assert_eq!(stats.repairs_attempted, 1);
+        assert_eq!(stats.repairs_succeeded, 1);
+        assert_eq!(stats.repairs_failed, 0);
+        assert_eq!(stats.symbols_added, 5);
+    }
+
+    #[test]
+    fn record_result_failure() {
+        let controller = RepairController::new(RepairControllerConfig::default());
+        controller.record_result(&RepairResult {
+            object_id: ObjectId::from_bytes([13; 32]),
+            success: false,
+            new_coverage_bps: 5000,
+            symbols_added: 0,
+            error: Some("timeout".into()),
+        });
+        let stats = controller.stats();
+        assert_eq!(stats.repairs_attempted, 1);
+        assert_eq!(stats.repairs_succeeded, 0);
+        assert_eq!(stats.repairs_failed, 1);
+        assert_eq!(stats.symbols_added, 0);
+    }
+
+    // ---- needs_repair / calculate_priority ----
+
+    #[test]
+    fn needs_repair_healthy() {
+        let controller = RepairController::new(RepairControllerConfig::default());
+        let coverage = test_coverage(10, 10); // 100% coverage
+        let policy = test_policy();
+        assert!(!controller.needs_repair(&coverage, &policy));
+    }
+
+    #[test]
+    fn calculate_priority_unavailable() {
+        let controller = RepairController::new(RepairControllerConfig::default());
+        let coverage = test_coverage(5, 10); // 50% = unavailable
+        let policy = test_policy();
+        let priority = controller.calculate_priority(&coverage, &policy);
+        assert!(priority >= 1000); // unavailable range
+    }
+
+    #[test]
+    fn calculate_priority_degraded() {
+        let controller = RepairController::new(RepairControllerConfig::default());
+        // Construct degraded: is_available=true but coverage below target
+        let coverage = CoverageEvaluation {
+            object_id: ObjectId::from_bytes([1; 32]),
+            distinct_nodes: 1,
+            max_node_fraction_bps: 10000,
+            coverage_bps: 9000, // 90%, below target 100%
+            is_available: true,
+            total_symbols: 9,
+            source_symbols: 10,
+        };
+        let policy = test_policy();
+        let priority = controller.calculate_priority(&coverage, &policy);
+        assert!(priority >= 100);
+        assert!(priority < 1000);
+    }
+
+    #[test]
+    fn calculate_priority_healthy() {
+        let controller = RepairController::new(RepairControllerConfig::default());
+        let coverage = test_coverage(10, 10); // 100%
+        let policy = test_policy();
+        let priority = controller.calculate_priority(&coverage, &policy);
+        assert_eq!(priority, 0);
+    }
+
+    // ---- config/stats accessors ----
+
+    #[test]
+    fn controller_config_accessor() {
+        let config = RepairControllerConfig {
+            max_concurrent_repairs: 5,
+            ..Default::default()
+        };
+        let controller = RepairController::new(config);
+        assert_eq!(controller.config().max_concurrent_repairs, 5);
+    }
+
+    #[test]
+    fn controller_stats_initial() {
+        let controller = RepairController::new(RepairControllerConfig::default());
+        let stats = controller.stats();
+        assert_eq!(stats.repairs_attempted, 0);
+        assert_eq!(stats.queue_depth, 0);
+    }
+
+    #[test]
+    fn controller_available_rate_tokens() {
+        let controller = RepairController::new(RepairControllerConfig {
+            max_repairs_per_minute: 50,
+            ..Default::default()
+        });
+        assert_eq!(controller.available_rate_tokens(), 50);
+    }
+
+    // ---- RepairPermit ----
+
+    #[test]
+    fn try_acquire_permit_succeeds() {
+        let controller = RepairController::new(RepairControllerConfig {
+            max_concurrent_repairs: 2,
+            ..Default::default()
+        });
+        let p1 = controller.try_acquire_permit();
+        assert!(p1.is_some());
+        let p2 = controller.try_acquire_permit();
+        assert!(p2.is_some());
+        // 3rd should fail (max_concurrent_repairs = 2)
+        let p3 = controller.try_acquire_permit();
+        assert!(p3.is_none());
+        // Drop one permit
+        drop(p1);
+        let p4 = controller.try_acquire_permit();
+        assert!(p4.is_some());
+    }
+
+    // ---- RepairRequest ----
+
+    #[test]
+    fn repair_request_debug_clone() {
+        let req = RepairRequest {
+            object_id: ObjectId::from_bytes([14; 32]),
+            zone_id: "z:test".parse().unwrap(),
+            coverage: test_coverage(5, 10),
+            policy: test_policy(),
+            priority: 42,
+        };
+        let dbg = format!("{req:?}");
+        assert!(dbg.contains("RepairRequest"));
+        assert_eq!(req.priority, 42);
     }
 }

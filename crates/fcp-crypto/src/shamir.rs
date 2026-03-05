@@ -145,7 +145,7 @@ impl ShamirShare {
     /// # Errors
     /// Returns error if bytes is empty or index is 0.
     pub fn from_bytes(bytes: &[u8]) -> ShamirResult<Self> {
-        if bytes.is_empty() {
+        if bytes.len() <= 1 {
             return Err(ShamirError::EmptySecret);
         }
         let index = bytes[0];

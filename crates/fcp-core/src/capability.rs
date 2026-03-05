@@ -1173,16 +1173,16 @@ impl CapabilityVerifier {
     ) -> FcpResult<()> {
         // Check allow list
         if !constraints.resource_allow.is_empty() {
-            let all_allowed = resource_uris.iter().all(|uri| {
-                constraints
+            for uri in resource_uris {
+                let is_allowed = constraints
                     .resource_allow
                     .iter()
-                    .any(|pattern| uri.starts_with(pattern))
-            });
-            if !all_allowed {
-                return Err(FcpError::ResourceNotAllowed {
-                    resource: resource_uris.first().cloned().unwrap_or_default(),
-                });
+                    .any(|pattern| uri.starts_with(pattern));
+                if !is_allowed {
+                    return Err(FcpError::ResourceNotAllowed {
+                        resource: uri.clone(),
+                    });
+                }
             }
         }
 

@@ -1014,19 +1014,7 @@ impl CurrencyCost {
         }
     }
 
-    /// Create a USD cost.
-    #[must_use]
-    pub const fn usd(amount_cents: u64) -> Self {
-        Self {
-            amount_cents,
-            currency_code: String::new(), // Will be set in constructor
-        }
-    }
-}
-
-/// Convenience constructor for USD costs.
-impl CurrencyCost {
-    /// Create a USD currency cost.
+    /// Create a USD currency cost from an amount in cents.
     #[must_use]
     pub fn usd_cents(amount_cents: u64) -> Self {
         Self::new(amount_cents, "USD")
@@ -2737,11 +2725,11 @@ mod tests {
 
     #[test]
     fn usage_metric_custom() {
-        let m = UsageMetric::custom("gpu_seconds", 42, Some("seconds".into()));
+        let m = UsageMetric::custom("widgets", 99, Some("count".into()));
         assert!(matches!(m.kind, UsageMetricKind::Custom));
-        assert_eq!(m.amount, 42);
-        assert_eq!(m.custom_id, Some("gpu_seconds".into()));
-        assert_eq!(m.unit, Some("seconds".into()));
+        assert_eq!(m.amount, 99);
+        assert_eq!(m.custom_id, Some("widgets".into()));
+        assert_eq!(m.unit, Some("count".into()));
     }
 
     #[test]

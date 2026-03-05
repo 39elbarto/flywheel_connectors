@@ -1177,4 +1177,67 @@ mod tests {
         assert_eq!(last_phase.phase, "Failed");
         assert_eq!(last_phase.reason.as_deref(), Some("timeout"));
     }
+
+    // ── Security regression: rogue-key attack mitigations (f07de35) ──
+
+    #[test]
+    fn add_commitment_rejects_empty_proof() {
+        let mut ceremony = ThresholdCeremony::new(2, 2);
+        ceremony.add_participant(test_participant(1)).unwrap();
+        ceremony.add_participant(test_participant(2)).unwrap();
+
+        // Create a commitment with empty proof-of-knowledge
+        let bad_commitment = FrostCommitment {
+            participant_index: 1,
+            commitment: vec![1u8; 32],
+            proof: vec![], // Empty proof — rogue-key attack vector
+        };
+
+        let result = ceremony.add_commitment(bad_commitment);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().contains("empty proof"),
+            "Error should mention empty proof-of-knowledge"
+        );
+    }
+
+    #[test]
+    fn add_shares_rejects_empty_shares_list() {
+        let mut ceremony = ThresholdCeremony::new(2, 2);
+        ceremony.add_participant(test_participant(1)).unwrap();
+        ceremony.add_participant(test_participant(2)).unwrap();
+        ceremony.add_commitment(test_commitment(1)).unwrap();
+        ceremony.add_commitment(test_commitment(2)).unwrap();
+
+        // Now in Round2Shares phase — submit empty shares list
+        let result = ceremony.add_shares(1, vec![]);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().contains("empty shares"),
+            "Error should mention empty shares list"
+        );
+    }
+
+    #[test]
+    fn add_shares_rejects_empty_ciphertext() {
+        let mut ceremony = ThresholdCeremony::new(2, 2);
+        ceremony.add_participant(test_participant(1)).unwrap();
+        ceremony.add_participant(test_participant(2)).unwrap();
+        ceremony.add_commitment(test_commitment(1)).unwrap();
+        ceremony.add_commitment(test_commitment(2)).unwrap();
+
+        // Submit shares with an empty ciphertext
+        let bad_shares = vec![EncryptedShare {
+            from_index: 1,
+            to_index: 2,
+            ciphertext: vec![], // Empty ciphertext — invalid
+        }];
+
+        let result = ceremony.add_shares(1, bad_shares);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().contains("empty ciphertext"),
+            "Error should mention empty ciphertext"
+        );
+    }
 }

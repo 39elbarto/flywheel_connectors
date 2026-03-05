@@ -45,7 +45,10 @@ fn pseudo_random_jitter(attempt: u32) -> f64 {
         .as_nanos()
         .hash(&mut hasher);
     let h = hasher.finish();
-    (h % 1_000_000) as f64 / 1_000_000.0
+    // Value is at most 999_999 which is exactly representable as f64.
+    #[allow(clippy::cast_precision_loss)]
+    let jitter = (h % 1_000_000) as f64 / 1_000_000.0;
+    jitter
 }
 
 /// High-level retry decision for an operation.
@@ -688,5 +691,33 @@ mod tests {
     #[test]
     fn default_retry_after_is_30s() {
         assert_eq!(DEFAULT_RATE_LIMIT_RETRY_AFTER, Duration::from_secs(30));
+    }
+
+    // ── Security regression: pseudo-random jitter (f07de35) ──
+
+    #[test]
+    fn pseudo_random_jitter_is_bounded() {
+        // Jitter must always be in [0.0, 1.0)
+        for attempt in 0..100 {
+            let j = pseudo_random_jitter(attempt);
+            assert!(j >= 0.0, "jitter must be non-negative, got {j}");
+            assert!(j < 1.0, "jitter must be < 1.0, got {j}");
+        }
+    }
+
+    #[test]
+    fn pseudo_random_jitter_varies_across_attempts() {
+        // Different attempt numbers should (with overwhelming probability)
+        // produce different jitter values on the same thread.
+        let mut deduped: Vec<f64> = (0..20).map(pseudo_random_jitter).collect();
+        deduped.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        deduped.dedup();
+        // At least 10 unique values out of 20 attempts (probability of
+        // fewer than 10 unique from a uniform distribution is negligible).
+        assert!(
+            deduped.len() >= 10,
+            "Expected at least 10 unique jitter values, got {}",
+            deduped.len()
+        );
     }
 }

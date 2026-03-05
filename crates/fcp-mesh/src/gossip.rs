@@ -97,7 +97,7 @@ impl XorFilterPlaceholder {
         while self.bits.len() <= word_idx {
             self.bits.push(0);
         }
-        self.bits[word_idx] |= 1 << bit_idx;
+        self.bits[word_idx] |= 1u64 << bit_idx;
         self.count += 1;
     }
 
@@ -114,7 +114,7 @@ impl XorFilterPlaceholder {
         if word_idx >= self.bits.len() {
             return false;
         }
-        (self.bits[word_idx] & (1 << bit_idx)) != 0
+        (self.bits[word_idx] & (1u64 << bit_idx)) != 0
     }
 
     /// Get the number of elements inserted.
@@ -195,7 +195,11 @@ impl IbltPlaceholder {
 
     /// Record a local change (object added/updated).
     pub fn note_local_change(&mut self, object_id: &ObjectId, esi: Option<u32>) {
-        if self.recent_changes.len() >= self.max_changes {
+        if self.max_changes == 0 {
+            self.change_seq += 1;
+            return;
+        }
+        while self.recent_changes.len() >= self.max_changes {
             // Remove oldest
             self.recent_changes.pop_front();
         }

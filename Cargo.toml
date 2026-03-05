@@ -91,8 +91,19 @@ members = [
     "connectors/docusign",
     "connectors/homeassistant",
     "connectors/bitwarden",
-    "connectors/terraform",
+    "connectors/amplitude",
+    "connectors/segment",
+    "connectors/metabase",
+    "connectors/retool",
+    "connectors/zapier",
+    "connectors/snowflake",
+    "connectors/n8n",
+    "connectors/cron",
+    "connectors/webhook-receiver",
+    "connectors/mcp-bridge",
     "connectors/kubernetes",
+    "connectors/terraform",
+    "connectors/annas-archive",
 ]
 
 # Default to the FCP2 platform core crates (connectors are explicitly targeted).

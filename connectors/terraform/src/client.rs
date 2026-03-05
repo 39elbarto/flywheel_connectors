@@ -1,0 +1,408 @@
+//! Terraform Cloud API client.
+
+use std::fmt;
+use std::time::Duration;
+
+use fcp_core::CredentialId;
+use reqwest::{Client, Response, StatusCode};
+use tracing::{debug, instrument};
+
+use crate::{
+    error::{TerraformError, TerraformResult},
+    types::ApiErrorResponse,
+};
+
+/// Default Terraform Cloud API base URL.
+pub const DEFAULT_BASE_URL: &str = "https://app.terraform.io/api/v2";
+
+/// Authentication mode for the Terraform Cloud API.
+#[derive(Clone)]
+pub enum TerraformAuth {
+    /// Bearer API token (`Authorization: Bearer {token}`).
+    BearerToken(String),
+    /// Secretless credential reference (egress proxy injection).
+    CredentialId(CredentialId),
+}
+
+impl TerraformAuth {
+    #[must_use]
+    pub fn redacted_label(&self) -> String {
+        match self {
+            Self::BearerToken(_) => "bearer_token:redacted".to_string(),
+            Self::CredentialId(id) => format!("credential_id:{id}"),
+        }
+    }
+
+    #[must_use]
+    pub const fn is_secretless(&self) -> bool {
+        matches!(self, Self::CredentialId(_))
+    }
+}
+
+impl fmt::Debug for TerraformAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BearerToken(_) => f.debug_tuple("BearerToken").field(&"<redacted>").finish(),
+            Self::CredentialId(id) => f.debug_tuple("CredentialId").field(id).finish(),
+        }
+    }
+}
+
+/// Terraform Cloud API client.
+pub struct TerraformClient {
+    client: Client,
+    auth: TerraformAuth,
+    base_url: String,
+}
+
+impl fmt::Debug for TerraformClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TerraformClient")
+            .field("auth", &self.auth)
+            .field("base_url", &self.base_url)
+            .finish()
+    }
+}
+
+impl TerraformClient {
+    /// Create a new Terraform Cloud client.
+    pub fn new(auth: TerraformAuth, base_url: Option<&str>) -> TerraformResult<Self> {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(60))
+            .user_agent("fcp-terraform/0.1.0 (FCP connector)")
+            .build()?;
+
+        Ok(Self {
+            client,
+            auth,
+            base_url: base_url
+                .unwrap_or(DEFAULT_BASE_URL)
+                .trim_end_matches('/')
+                .to_string(),
+        })
+    }
+
+    fn add_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.auth {
+            TerraformAuth::BearerToken(token) => {
+                req.header("Authorization", format!("Bearer {token}"))
+            }
+            TerraformAuth::CredentialId(id) => {
+                req.header("X-FCP-Credential-Id", id.to_string())
+            }
+        }
+    }
+
+    async fn handle_response(&self, resp: Response) -> TerraformResult<serde_json::Value> {
+        let status = resp.status();
+        if status.is_success() {
+            let body = resp.text().await?;
+            if body.is_empty() {
+                return Ok(serde_json::json!({}));
+            }
+            Ok(serde_json::from_str(&body)?)
+        } else {
+            self.handle_error(status, resp).await
+        }
+    }
+
+    async fn handle_error(
+        &self,
+        status: StatusCode,
+        resp: Response,
+    ) -> TerraformResult<serde_json::Value> {
+        let retry_after = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok());
+
+        let body = resp.text().await.unwrap_or_default();
+
+        // Terraform Cloud returns {"errors": [{"status": "...", "title": "...", "detail": "..."}]}
+        let detail = serde_json::from_str::<ApiErrorResponse>(&body)
+            .ok()
+            .and_then(|e| e.errors)
+            .and_then(|errs| {
+                errs.first().and_then(|e| {
+                    e.detail
+                        .clone()
+                        .or_else(|| e.title.clone())
+                })
+            })
+            .unwrap_or_else(|| {
+                if body.is_empty() {
+                    format!("HTTP {}", status.as_u16())
+                } else {
+                    body.clone()
+                }
+            });
+
+        match status.as_u16() {
+            401 => Err(TerraformError::Unauthorized),
+            403 => Err(TerraformError::Forbidden),
+            404 => Err(TerraformError::NotFound { resource: detail }),
+            409 => Err(TerraformError::Conflict { message: detail }),
+            429 => Err(TerraformError::RateLimited {
+                retry_after_ms: retry_after.unwrap_or(30) * 1000,
+            }),
+            code => Err(TerraformError::Api { status_code: code, message: detail }),
+        }
+    }
+
+    #[instrument(skip(self), fields(url))]
+    async fn get(&self, path: &str) -> TerraformResult<serde_json::Value> {
+        let url = format!("{}{path}", self.base_url);
+        debug!(url = %url, "GET request");
+        let req = self
+            .add_auth(self.client.get(&url))
+            .header("Accept", "application/vnd.api+json")
+            .header("Content-Type", "application/vnd.api+json");
+        let resp = req.send().await?;
+        self.handle_response(resp).await
+    }
+
+    #[instrument(skip(self, body), fields(url))]
+    async fn post(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> TerraformResult<serde_json::Value> {
+        let url = format!("{}{path}", self.base_url);
+        debug!(url = %url, "POST request");
+        let req = self
+            .add_auth(self.client.post(&url))
+            .header("Accept", "application/vnd.api+json")
+            .header("Content-Type", "application/vnd.api+json")
+            .json(body);
+        let resp = req.send().await?;
+        self.handle_response(resp).await
+    }
+
+    // -- Workspaces --
+
+    /// List workspaces in an organization.
+    pub async fn list_workspaces(
+        &self,
+        org_name: &str,
+    ) -> TerraformResult<serde_json::Value> {
+        self.get(&format!("/organizations/{org_name}/workspaces"))
+            .await
+    }
+
+    /// Get a workspace by ID.
+    pub async fn get_workspace(
+        &self,
+        workspace_id: &str,
+    ) -> TerraformResult<serde_json::Value> {
+        self.get(&format!("/workspaces/{workspace_id}")).await
+    }
+
+    /// Get a workspace by organization name and workspace name.
+    pub async fn get_workspace_by_name(
+        &self,
+        org_name: &str,
+        workspace_name: &str,
+    ) -> TerraformResult<serde_json::Value> {
+        self.get(&format!(
+            "/organizations/{org_name}/workspaces/{workspace_name}"
+        ))
+        .await
+    }
+
+    // -- Runs --
+
+    /// Create a run in a workspace.
+    pub async fn create_run(
+        &self,
+        body: &serde_json::Value,
+    ) -> TerraformResult<serde_json::Value> {
+        self.post("/runs", body).await
+    }
+
+    /// Get a run by ID.
+    pub async fn get_run(&self, run_id: &str) -> TerraformResult<serde_json::Value> {
+        self.get(&format!("/runs/{run_id}")).await
+    }
+
+    /// Apply a run (confirm apply).
+    pub async fn apply_run(
+        &self,
+        run_id: &str,
+        comment: Option<&str>,
+    ) -> TerraformResult<serde_json::Value> {
+        let body = serde_json::json!({
+            "comment": comment.unwrap_or("Applied via FCP Terraform connector")
+        });
+        self.post(&format!("/runs/{run_id}/actions/apply"), &body)
+            .await
+    }
+
+    /// Discard a run.
+    pub async fn discard_run(
+        &self,
+        run_id: &str,
+        comment: Option<&str>,
+    ) -> TerraformResult<serde_json::Value> {
+        let body = serde_json::json!({
+            "comment": comment.unwrap_or("Discarded via FCP Terraform connector")
+        });
+        self.post(&format!("/runs/{run_id}/actions/discard"), &body)
+            .await
+    }
+
+    /// List runs in a workspace.
+    pub async fn list_runs(
+        &self,
+        workspace_id: &str,
+    ) -> TerraformResult<serde_json::Value> {
+        self.get(&format!("/workspaces/{workspace_id}/runs")).await
+    }
+
+    // -- Plans --
+
+    /// Get a plan by ID.
+    pub async fn get_plan(&self, plan_id: &str) -> TerraformResult<serde_json::Value> {
+        self.get(&format!("/plans/{plan_id}")).await
+    }
+
+    /// Get plan JSON output (structured plan output).
+    pub async fn get_plan_json_output(
+        &self,
+        plan_id: &str,
+    ) -> TerraformResult<serde_json::Value> {
+        self.get(&format!("/plans/{plan_id}/json-output")).await
+    }
+
+    // -- State Versions --
+
+    /// Get current state version for a workspace.
+    pub async fn get_current_state_version(
+        &self,
+        workspace_id: &str,
+    ) -> TerraformResult<serde_json::Value> {
+        self.get(&format!(
+            "/workspaces/{workspace_id}/current-state-version"
+        ))
+        .await
+    }
+
+    /// List state version outputs.
+    pub async fn list_state_version_outputs(
+        &self,
+        state_version_id: &str,
+    ) -> TerraformResult<serde_json::Value> {
+        self.get(&format!(
+            "/state-versions/{state_version_id}/outputs"
+        ))
+        .await
+    }
+
+    // -- Configuration Versions --
+
+    /// List configuration versions for a workspace.
+    pub async fn list_configuration_versions(
+        &self,
+        workspace_id: &str,
+    ) -> TerraformResult<serde_json::Value> {
+        self.get(&format!(
+            "/workspaces/{workspace_id}/configuration-versions"
+        ))
+        .await
+    }
+
+    // -- State Version Resources --
+
+    /// List resources in a state version.
+    pub async fn list_state_resources(
+        &self,
+        state_version_id: &str,
+    ) -> TerraformResult<serde_json::Value> {
+        self.get(&format!(
+            "/state-versions/{state_version_id}/resources"
+        ))
+        .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auth_debug_redacts_token() {
+        let auth = TerraformAuth::BearerToken("secret-api-token".into());
+        let dbg = format!("{auth:?}");
+        assert!(!dbg.contains("secret-api-token"));
+        assert!(dbg.contains("redacted"));
+    }
+
+    #[test]
+    fn auth_secretless_detection() {
+        let token = TerraformAuth::BearerToken("tok".into());
+        assert!(!token.is_secretless());
+        let cred = TerraformAuth::CredentialId(CredentialId::new());
+        assert!(cred.is_secretless());
+    }
+
+    #[test]
+    fn auth_redacted_label() {
+        let token = TerraformAuth::BearerToken("tok".into());
+        assert_eq!(token.redacted_label(), "bearer_token:redacted");
+    }
+
+    #[test]
+    fn auth_credential_label() {
+        let cred = TerraformAuth::CredentialId(CredentialId::new());
+        let label = cred.redacted_label();
+        assert!(label.starts_with("credential_id:"));
+    }
+
+    #[test]
+    fn client_new_default_url() {
+        let client =
+            TerraformClient::new(TerraformAuth::BearerToken("tok".into()), None).unwrap();
+        assert_eq!(client.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn client_new_custom_url() {
+        let client = TerraformClient::new(
+            TerraformAuth::BearerToken("tok".into()),
+            Some("https://tfe.example.com/api/v2/"),
+        )
+        .unwrap();
+        assert_eq!(client.base_url, "https://tfe.example.com/api/v2");
+    }
+
+    #[test]
+    fn client_debug_redacts() {
+        let client =
+            TerraformClient::new(TerraformAuth::BearerToken("secret".into()), None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(!dbg.contains("secret"));
+        assert!(dbg.contains("redacted"));
+    }
+
+    #[test]
+    fn auth_bearer_is_not_secretless() {
+        let auth = TerraformAuth::BearerToken("my-token".into());
+        assert!(!auth.is_secretless());
+    }
+
+    #[test]
+    fn auth_credential_is_secretless() {
+        let auth = TerraformAuth::CredentialId(CredentialId::new());
+        assert!(auth.is_secretless());
+    }
+
+    #[test]
+    fn client_strips_trailing_slash() {
+        let client = TerraformClient::new(
+            TerraformAuth::BearerToken("tok".into()),
+            Some("https://tfe.example.com/api/v2///"),
+        )
+        .unwrap();
+        assert!(!client.base_url.ends_with('/'));
+    }
+}

@@ -1087,7 +1087,7 @@ mod tests {
         let a = CandidateNode::new(test_node_id("a"), 100.0);
         let b = CandidateNode::new(test_node_id("b"), 50.0);
         // sort() puts lesser first; Ord is defined so higher score < lower score
-        let mut v = vec![b.clone(), a.clone()];
+        let mut v = [b, a];
         v.sort();
         assert_eq!(v[0].node_id.as_str(), "node-a"); // higher score
         assert_eq!(v[1].node_id.as_str(), "node-b");
@@ -1097,7 +1097,7 @@ mod tests {
     fn candidate_node_ord_tiebreak_by_node_id() {
         let a = CandidateNode::new(test_node_id("alpha"), 50.0);
         let b = CandidateNode::new(test_node_id("beta"), 50.0);
-        let mut v = vec![b.clone(), a.clone()];
+        let mut v = [b, a];
         v.sort();
         // Same score → alphabetical by node_id
         assert_eq!(v[0].node_id.as_str(), "node-alpha");

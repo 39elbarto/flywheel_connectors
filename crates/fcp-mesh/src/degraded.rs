@@ -1017,7 +1017,7 @@ mod tests {
         let cloned = env.clone();
         assert_eq!(cloned.payload, env.payload);
         assert_eq!(cloned.object_id, env.object_id);
-        let s = format!("{:?}", env);
+        let s = format!("{env:?}");
         assert!(s.contains("ControlPlaneEnvelope"));
     }
 
@@ -1028,7 +1028,7 @@ mod tests {
             needed: 10,
         };
         let s = e.to_string();
-        assert!(s.contains("5"));
+        assert!(s.contains('5'));
         assert!(s.contains("10"));
         assert!(s.contains("incomplete"));
     }
@@ -1166,18 +1166,18 @@ mod tests {
 
         let mut result = None;
         for frame in &frames {
-            if let Some(decoded) = decoder
+            if let Some(d) = decoder
                 .process_frame(frame, &zone_id, RetentionClass::Required)
                 .unwrap()
             {
-                result = Some(decoded);
+                result = Some(d);
                 break;
             }
         }
 
-        let decoded = result.expect("should decode");
-        assert_eq!(decoded.zone_key_id, envelope.zone_key_id);
-        assert_eq!(decoded.zone_id, envelope.zone_id);
+        let output = result.expect("should decode");
+        assert_eq!(output.zone_key_id, envelope.zone_key_id);
+        assert_eq!(output.zone_id, envelope.zone_id);
     }
 
     #[test]
@@ -1194,17 +1194,17 @@ mod tests {
 
         let mut result = None;
         for frame in &frames {
-            if let Some(decoded) = decoder
+            if let Some(d) = decoder
                 .process_frame(frame, &zone_id, RetentionClass::Ephemeral)
                 .unwrap()
             {
-                result = Some(decoded);
+                result = Some(d);
                 break;
             }
         }
 
-        let decoded = result.expect("should decode");
-        assert_eq!(decoded.retention, RetentionClass::Ephemeral);
+        let output = result.expect("should decode");
+        assert_eq!(output.retention, RetentionClass::Ephemeral);
     }
 
     #[test]
@@ -1220,17 +1220,17 @@ mod tests {
         let frames = encoder.encode(&envelope, 1).unwrap();
         let mut result = None;
         for frame in &frames {
-            if let Some(decoded) = decoder
+            if let Some(d) = decoder
                 .process_frame(frame, &zone_id, RetentionClass::Required)
                 .unwrap()
             {
-                result = Some(decoded);
+                result = Some(d);
                 break;
             }
         }
 
-        let decoded = result.expect("should decode");
-        assert_eq!(decoded.payload, vec![0xFF; 8]);
+        let output = result.expect("should decode");
+        assert_eq!(output.payload, vec![0xFF; 8]);
     }
 
     #[test]

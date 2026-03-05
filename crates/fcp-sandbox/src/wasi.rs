@@ -1359,8 +1359,10 @@ mod tests {
 
     #[test]
     fn test_wasi_host_state_check_timeout_expired() {
-        let mut config = WasiConfig::default();
-        config.wall_clock_timeout = Duration::from_nanos(1); // Effectively zero
+        let config = WasiConfig {
+            wall_clock_timeout: Duration::from_nanos(1), // Effectively zero
+            ..WasiConfig::default()
+        };
         let wasi_ctx = WasiCtxBuilder::new().build();
         let state = WasiHostState::new(&config, wasi_ctx);
         // Sleep briefly to ensure expiry
@@ -1674,8 +1676,10 @@ mod tests {
 
     #[test]
     fn test_wasi_runtime_new_with_fuel() {
-        let mut config = WasiConfig::default();
-        config.max_fuel = 1_000_000;
+        let config = WasiConfig {
+            max_fuel: 1_000_000,
+            ..WasiConfig::default()
+        };
         let runtime = WasiRuntime::new(config);
         assert!(runtime.is_ok());
     }

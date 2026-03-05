@@ -785,7 +785,7 @@ mod tests {
         let e3 = FormatError::ControlChars;
         assert_ne!(e1, e2);
         assert_ne!(e2, e3);
-        assert_eq!(e1.clone(), FormatError::InvalidHtml);
+        assert_eq!(e1, FormatError::InvalidHtml);
     }
 
     // ---- ErrorClass ----

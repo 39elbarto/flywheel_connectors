@@ -1420,9 +1420,7 @@ mod tests {
             let s = err.to_string();
             assert!(
                 s.contains(expected_substr),
-                "Expected '{}' to contain '{}'",
-                s,
-                expected_substr
+                "Expected '{s}' to contain '{expected_substr}'"
             );
         }
     }
@@ -1521,8 +1519,8 @@ mod tests {
             ),
         ];
         for (err, code, retryable) in &test_cases {
-            assert_eq!(err.error_code(), *code, "Wrong code for {:?}", err);
-            assert_eq!(err.is_retryable(), *retryable, "Wrong retryable for {:?}", err);
+            assert_eq!(err.error_code(), *code, "Wrong code for {err:?}");
+            assert_eq!(err.is_retryable(), *retryable, "Wrong retryable for {err:?}");
         }
     }
 

@@ -515,4 +515,204 @@ mod tests {
                 .is_err()
         );
     }
+
+    // ── Batch: profile generation edge cases ──
+
+    #[test]
+    fn test_generate_profile_no_readonly_paths() {
+        let mut policy = test_policy();
+        policy.readonly_paths = vec![];
+        let profile = MacOsSandbox::generate_profile(&policy);
+        // Should still have system read paths but no extra readonly section
+        assert!(profile.contains("/usr/lib"));
+        // The extra (allow file-read* ...) block for policy paths should not appear
+        // (system paths are always present in a separate block)
+    }
+
+    #[test]
+    fn test_generate_profile_no_writable_paths() {
+        let mut policy = test_policy();
+        policy.writable_paths = vec![];
+        let profile = MacOsSandbox::generate_profile(&policy);
+        // Should not contain file-write for policy writable paths
+        assert!(!profile.contains("file-write*\n  (subpath"));
+    }
+
+    #[test]
+    fn test_generate_profile_ptrace_allowed() {
+        let mut policy = test_policy();
+        policy.deny_ptrace = false;
+        let profile = MacOsSandbox::generate_profile(&policy);
+        // Should not contain the ptrace-deny section
+        assert!(!profile.contains("Debugging denied"));
+        assert!(!profile.contains("(deny system-privilege)"));
+    }
+
+    #[test]
+    fn test_generate_profile_ptrace_denied() {
+        let policy = test_policy();
+        let profile = MacOsSandbox::generate_profile(&policy);
+        assert!(profile.contains("Debugging denied"));
+        assert!(profile.contains("(deny system-privilege)"));
+    }
+
+    #[test]
+    fn test_generate_profile_multiple_readonly_paths() {
+        let mut policy = test_policy();
+        policy.readonly_paths = vec![
+            PathBuf::from("/data/models"),
+            PathBuf::from("/data/config"),
+            PathBuf::from("/data/assets"),
+        ];
+        let profile = MacOsSandbox::generate_profile(&policy);
+        assert!(profile.contains("/data/models"));
+        assert!(profile.contains("/data/config"));
+        assert!(profile.contains("/data/assets"));
+    }
+
+    #[test]
+    fn test_generate_profile_multiple_writable_paths() {
+        let mut policy = test_policy();
+        policy.writable_paths = vec![
+            PathBuf::from("/tmp/cache"),
+            PathBuf::from("/tmp/logs"),
+        ];
+        let profile = MacOsSandbox::generate_profile(&policy);
+        assert!(profile.contains("/tmp/cache"));
+        assert!(profile.contains("/tmp/logs"));
+    }
+
+    #[test]
+    fn test_generate_profile_network_guard_socket() {
+        let policy = test_policy();
+        let profile = MacOsSandbox::generate_profile(&policy);
+        // When network blocked, should allow IPC to network guard socket
+        assert!(profile.contains("fcp-network-guard.sock"));
+    }
+
+    #[test]
+    fn test_generate_profile_resource_limits_comment() {
+        let policy = test_policy();
+        let profile = MacOsSandbox::generate_profile(&policy);
+        assert!(profile.contains("memory=256MB"));
+        assert!(profile.contains("cpu=50%"));
+    }
+
+    #[test]
+    fn test_generate_profile_ipc_always_allowed() {
+        let policy = test_policy();
+        let profile = MacOsSandbox::generate_profile(&policy);
+        assert!(profile.contains("(allow ipc-posix-shm-read-data)"));
+        assert!(profile.contains("(allow ipc-posix-shm-write-data)"));
+    }
+
+    #[test]
+    fn test_generate_profile_system_libraries_always_readable() {
+        let policy = test_policy();
+        let profile = MacOsSandbox::generate_profile(&policy);
+        assert!(profile.contains("/usr/lib"));
+        assert!(profile.contains("/System/Library"));
+        assert!(profile.contains("/Library/Frameworks"));
+        assert!(profile.contains("/dev/null"));
+        assert!(profile.contains("/dev/random"));
+        assert!(profile.contains("/dev/urandom"));
+    }
+
+    #[test]
+    fn test_generate_profile_starts_with_version() {
+        let policy = test_policy();
+        let profile = MacOsSandbox::generate_profile(&policy);
+        assert!(profile.starts_with("(version 1)"));
+    }
+
+    // ── Batch: verify methods ──
+
+    #[test]
+    fn test_verify_exec_allowed_when_denied() {
+        let sandbox = MacOsSandbox::new();
+        let policy = test_policy();
+        assert!(policy.deny_exec);
+        let result = sandbox.verify_exec_allowed(&policy);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("denied"));
+    }
+
+    #[test]
+    fn test_verify_exec_allowed_when_permitted() {
+        let sandbox = MacOsSandbox::new();
+        let mut policy = test_policy();
+        policy.deny_exec = false;
+        assert!(sandbox.verify_exec_allowed(&policy).is_ok());
+    }
+
+    #[test]
+    fn test_verify_network_blocked_when_strict() {
+        let sandbox = MacOsSandbox::new();
+        let policy = test_policy();
+        assert!(policy.block_direct_network);
+        // When network IS blocked, verify_network_blocked returns Ok
+        assert!(sandbox.verify_network_blocked(&policy).is_ok());
+    }
+
+    #[test]
+    fn test_verify_network_blocked_when_permissive() {
+        let sandbox = MacOsSandbox::new();
+        let mut policy = test_policy();
+        policy.block_direct_network = false;
+        // When network is NOT blocked, verify_network_blocked returns Err
+        let result = sandbox.verify_network_blocked(&policy);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verify_file_access_readonly_path_write_denied() {
+        let sandbox = MacOsSandbox::new();
+        let policy = test_policy();
+        // /opt is in readonly_paths, so write should be denied
+        let result = sandbox.verify_file_access(&policy, Path::new("/opt/data.txt"), true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verify_file_access_readonly_path_read_allowed() {
+        let sandbox = MacOsSandbox::new();
+        let policy = test_policy();
+        // /opt is in readonly_paths
+        assert!(
+            sandbox
+                .verify_file_access(&policy, Path::new("/opt/data.txt"), false)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_verify_file_access_library_frameworks() {
+        let sandbox = MacOsSandbox::new();
+        let policy = test_policy();
+        assert!(
+            sandbox
+                .verify_file_access(
+                    &policy,
+                    Path::new("/Library/Frameworks/Python.framework"),
+                    false
+                )
+                .is_ok()
+        );
+    }
+
+    // ── Batch: construction ──
+
+    #[test]
+    fn test_macos_sandbox_default() {
+        let sandbox = MacOsSandbox::default();
+        assert!(sandbox.is_available());
+        assert_eq!(sandbox.platform_name(), "macos");
+    }
+
+    #[test]
+    fn test_macos_sandbox_debug() {
+        let sandbox = MacOsSandbox::new();
+        let debug = format!("{sandbox:?}");
+        assert!(debug.contains("MacOsSandbox"));
+    }
 }

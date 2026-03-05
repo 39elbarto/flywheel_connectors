@@ -1133,32 +1133,36 @@ mod tests {
 
     #[test]
     fn cwt_claim_keys_are_positive() {
-        assert!(cwt_claims::ISS > 0);
-        assert!(cwt_claims::SUB > 0);
-        assert!(cwt_claims::AUD > 0);
-        assert!(cwt_claims::EXP > 0);
-        assert!(cwt_claims::NBF > 0);
-        assert!(cwt_claims::IAT > 0);
-        assert!(cwt_claims::CTI > 0);
+        const _: () = {
+            assert!(cwt_claims::ISS > 0);
+            assert!(cwt_claims::SUB > 0);
+            assert!(cwt_claims::AUD > 0);
+            assert!(cwt_claims::EXP > 0);
+            assert!(cwt_claims::NBF > 0);
+            assert!(cwt_claims::IAT > 0);
+            assert!(cwt_claims::CTI > 0);
+        };
     }
 
     #[test]
     fn fcp2_claim_keys_are_negative() {
-        assert!(fcp2_claims::CAPABILITY_ID < 0);
-        assert!(fcp2_claims::ZONE_ID < 0);
-        assert!(fcp2_claims::OPERATIONS < 0);
-        assert!(fcp2_claims::PRINCIPAL_ID < 0);
-        assert!(fcp2_claims::DELEGATION_DEPTH < 0);
-        assert!(fcp2_claims::PARENT_TOKEN < 0);
-        assert!(fcp2_claims::ISS_NODE < 0);
-        assert!(fcp2_claims::AUD_BINARY < 0);
-        assert!(fcp2_claims::GRANT_OBJECT_IDS < 0);
-        assert!(fcp2_claims::HOLDER_NODE < 0);
-        assert!(fcp2_claims::CHK_ID < 0);
-        assert!(fcp2_claims::CHK_SEQ < 0);
-        assert!(fcp2_claims::CONSTRAINTS < 0);
-        assert!(fcp2_claims::GRANTS < 0);
-        assert!(fcp2_claims::INSTANCE_ID < 0);
+        const _: () = {
+            assert!(fcp2_claims::CAPABILITY_ID < 0);
+            assert!(fcp2_claims::ZONE_ID < 0);
+            assert!(fcp2_claims::OPERATIONS < 0);
+            assert!(fcp2_claims::PRINCIPAL_ID < 0);
+            assert!(fcp2_claims::DELEGATION_DEPTH < 0);
+            assert!(fcp2_claims::PARENT_TOKEN < 0);
+            assert!(fcp2_claims::ISS_NODE < 0);
+            assert!(fcp2_claims::AUD_BINARY < 0);
+            assert!(fcp2_claims::GRANT_OBJECT_IDS < 0);
+            assert!(fcp2_claims::HOLDER_NODE < 0);
+            assert!(fcp2_claims::CHK_ID < 0);
+            assert!(fcp2_claims::CHK_SEQ < 0);
+            assert!(fcp2_claims::CONSTRAINTS < 0);
+            assert!(fcp2_claims::GRANTS < 0);
+            assert!(fcp2_claims::INSTANCE_ID < 0);
+        };
     }
 
     #[test]
@@ -1181,7 +1185,7 @@ mod tests {
             fcp2_claims::INSTANCE_ID,
         ];
         let mut sorted = keys.to_vec();
-        sorted.sort();
+        sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), keys.len(), "duplicate claim keys detected");
     }

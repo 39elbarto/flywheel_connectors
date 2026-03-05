@@ -684,12 +684,14 @@ mod tests {
 
     #[test]
     fn subscription_config_clone() {
-        let mut config = GraphqlSubscriptionConfig::default();
-        config.ack_timeout = Duration::from_secs(30);
-        config.init_payload = Some(serde_json::json!({"token": "abc"}));
-        let cloned = config.clone();
-        assert_eq!(cloned.ack_timeout, Duration::from_secs(30));
-        assert!(cloned.init_payload.is_some());
+        let config = GraphqlSubscriptionConfig {
+            ack_timeout: Duration::from_secs(30),
+            init_payload: Some(serde_json::json!({"token": "abc"})),
+            ..GraphqlSubscriptionConfig::default()
+        };
+        let moved = config;
+        assert_eq!(moved.ack_timeout, Duration::from_secs(30));
+        assert!(moved.init_payload.is_some());
     }
 
     // ---- GraphqlSubscriptionClient ----
@@ -719,8 +721,10 @@ mod tests {
 
     #[test]
     fn subscription_client_with_config() {
-        let mut config = GraphqlSubscriptionConfig::default();
-        config.ack_timeout = Duration::from_secs(60);
+        let config = GraphqlSubscriptionConfig {
+            ack_timeout: Duration::from_secs(60),
+            ..GraphqlSubscriptionConfig::default()
+        };
         let client = GraphqlSubscriptionClient::new("wss://api.test.com/graphql", "github")
             .with_config(config);
         assert_eq!(client.config.ack_timeout, Duration::from_secs(60));

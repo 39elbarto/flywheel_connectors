@@ -589,7 +589,7 @@ mod tests {
         let err = RateLimitError::for_pool(&pool, 8, 3000);
         let msg = err.to_string();
         assert!(msg.contains("api"));
-        assert!(msg.contains("8"));
+        assert!(msg.contains('8'));
         assert!(msg.contains("10"));
     }
 

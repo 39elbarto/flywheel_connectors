@@ -1394,7 +1394,7 @@ mod tests {
     #[test]
     fn self_check_preserves_connector_id() {
         let connector: ConnectorId = "fcp.test:check:v1".parse().unwrap();
-        let checks = simulate_self_checks(&[connector.clone()], DoctorScenario::Healthy);
+        let checks = simulate_self_checks(std::slice::from_ref(&connector), DoctorScenario::Healthy);
         assert_eq!(checks[0].connector_id, connector.to_string());
     }
 
@@ -1408,7 +1408,7 @@ mod tests {
             DoctorScenario::StaleCheckpoint,
             DoctorScenario::StaleRevocation,
         ] {
-            let checks = simulate_self_checks(&[connector.clone()], scenario);
+            let checks = simulate_self_checks(std::slice::from_ref(&connector), scenario);
             assert_eq!(
                 checks[0].report.status,
                 fcp_core::SelfCheckStatus::Degraded,

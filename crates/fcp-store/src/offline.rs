@@ -1418,8 +1418,7 @@ mod tests {
             cap.track(access1);
             cap.track(access2);
 
-            let items: Vec<_> = cap.iter().collect();
-            assert_eq!(items.len(), 2);
+            assert_eq!(cap.iter().count(), 2);
 
             OfflineLogData {
                 details: Some(json!({"iter_count": 2})),

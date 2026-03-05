@@ -194,8 +194,8 @@ mod tests {
                 updated_at: 0,
             }],
         };
-        let cloned = report.clone();
-        assert_eq!(cloned.zones.len(), 1);
-        assert_eq!(cloned.zones[0].zone_id, "z:test");
+        let moved = report;
+        assert_eq!(moved.zones.len(), 1);
+        assert_eq!(moved.zones[0].zone_id, "z:test");
     }
 }

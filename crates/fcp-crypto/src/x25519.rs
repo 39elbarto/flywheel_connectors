@@ -100,7 +100,7 @@ impl std::fmt::Debug for X25519SecretKey {
 #[derive(Clone, Serialize)]
 #[serde(transparent)]
 pub struct X25519PublicKey {
-    #[serde(with = "public_key_serde")]
+    #[serde(serialize_with = "public_key_serde::serialize")]
     inner: PublicKey,
     #[serde(skip)]
     kid: KeyId,
@@ -125,30 +125,14 @@ impl<'de> Deserialize<'de> for X25519PublicKey {
 }
 
 mod public_key_serde {
-    use super::{PublicKey, X25519_PUBLIC_KEY_SIZE};
-    use serde::{Deserialize, Deserializer, Serializer};
+    use super::PublicKey;
+    use serde::Serializer;
 
     pub fn serialize<S>(pk: &PublicKey, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
         serializer.serialize_bytes(pk.as_bytes())
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<PublicKey, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let bytes: Vec<u8> = Deserialize::deserialize(deserializer)?;
-        if bytes.len() != X25519_PUBLIC_KEY_SIZE {
-            return Err(serde::de::Error::custom(format!(
-                "invalid X25519 public key length: expected {X25519_PUBLIC_KEY_SIZE}, got {}",
-                bytes.len()
-            )));
-        }
-        let mut arr = [0u8; X25519_PUBLIC_KEY_SIZE];
-        arr.copy_from_slice(&bytes);
-        Ok(PublicKey::from(arr))
     }
 }
 
@@ -432,5 +416,117 @@ mod tests {
         let pk2 = X25519PublicKey::try_from_slice(&pk_bytes).unwrap();
 
         assert_eq!(pk, pk2);
+    }
+
+    // ── Additional edge case tests ──
+
+    #[test]
+    fn try_from_slice_empty() {
+        let result = X25519PublicKey::try_from_slice(&[]);
+        assert!(matches!(
+            result,
+            Err(CryptoError::InvalidKeyLength {
+                expected: 32,
+                actual: 0
+            })
+        ));
+    }
+
+    #[test]
+    fn try_from_slice_too_long() {
+        let result = X25519PublicKey::try_from_slice(&[0u8; 64]);
+        assert!(matches!(
+            result,
+            Err(CryptoError::InvalidKeyLength {
+                expected: 32,
+                actual: 64
+            })
+        ));
+    }
+
+    #[test]
+    fn try_from_slice_valid() {
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+        let bytes = pk.to_bytes();
+        let pk2 = X25519PublicKey::try_from_slice(&bytes).unwrap();
+        assert_eq!(pk, pk2);
+    }
+
+    #[test]
+    fn shared_secret_size() {
+        let sk1 = X25519SecretKey::generate();
+        let sk2 = X25519SecretKey::generate();
+        let shared = sk1.diffie_hellman(&sk2.public_key());
+        assert_eq!(shared.as_bytes().len(), super::X25519_SHARED_SECRET_SIZE);
+    }
+
+    #[test]
+    fn shared_secret_debug_no_leak() {
+        let sk1 = X25519SecretKey::generate();
+        let sk2 = X25519SecretKey::generate();
+        let shared = sk1.diffie_hellman(&sk2.public_key());
+        let debug = format!("{shared:?}");
+        assert!(debug.contains("X25519SharedSecret"));
+        // Should not contain actual secret bytes
+        assert!(!debug.contains('['));
+    }
+
+    #[test]
+    fn secret_key_debug_no_leak() {
+        let sk = X25519SecretKey::generate();
+        let debug = format!("{sk:?}");
+        assert!(debug.contains("X25519SecretKey"));
+        // Should contain kid but not raw bytes
+        assert!(debug.contains("kid"));
+        assert!(!debug.contains("inner"));
+    }
+
+    #[test]
+    fn public_key_debug_contains_hex() {
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+        let debug = format!("{pk:?}");
+        assert!(debug.contains("X25519PublicKey"));
+        assert!(debug.contains("kid"));
+        // Debug shows hex representation of inner
+        assert!(debug.contains(&pk.to_hex()));
+    }
+
+    #[test]
+    fn public_key_equality() {
+        let sk = X25519SecretKey::from_bytes([42u8; 32]);
+        let pk1 = sk.public_key();
+        let pk2 = sk.public_key();
+        assert_eq!(pk1, pk2);
+
+        let different_sk = X25519SecretKey::from_bytes([43u8; 32]);
+        let different_pub = different_sk.public_key();
+        assert_ne!(pk1, different_pub);
+    }
+
+    #[test]
+    fn public_key_serde_roundtrip() {
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+        let serialized = serde_json::to_string(&pk).unwrap();
+        let deserialized: X25519PublicKey = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(pk, deserialized);
+    }
+
+    #[test]
+    fn constants() {
+        assert_eq!(super::X25519_SECRET_KEY_SIZE, 32);
+        assert_eq!(super::X25519_PUBLIC_KEY_SIZE, 32);
+        assert_eq!(super::X25519_SHARED_SECRET_SIZE, 32);
+    }
+
+    #[test]
+    fn self_dh_produces_same_result() {
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+        let shared1 = sk.diffie_hellman(&pk);
+        let shared2 = sk.diffie_hellman(&pk);
+        assert_eq!(shared1.as_bytes(), shared2.as_bytes());
     }
 }

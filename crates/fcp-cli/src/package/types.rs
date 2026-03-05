@@ -539,7 +539,7 @@ mod tests {
         };
         let dbg = format!("{comp:?}");
         assert!(dbg.contains("SbomComponent"));
-        assert_eq!(comp.clone().name, "lib-a");
+        assert_eq!(comp.name, "lib-a");
     }
 
     // ---- SbomDependency ----
@@ -594,7 +594,7 @@ mod tests {
         };
         let dbg = format!("{dep:?}");
         assert!(dbg.contains("SbomDependency"));
-        assert_eq!(dep.clone().version, "1.0.200");
+        assert_eq!(dep.version, "1.0.200");
     }
 
     // ---- SimpleSbom multiple deps ----
@@ -655,7 +655,7 @@ mod tests {
         };
         let dbg = format!("{sbom:?}");
         assert!(dbg.contains("SimpleSbom"));
-        assert_eq!(sbom.clone().format_version, "1.0");
+        assert_eq!(sbom.format_version, "1.0");
     }
 
     // ---- OutputFormat ----

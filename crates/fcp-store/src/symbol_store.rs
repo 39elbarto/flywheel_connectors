@@ -58,7 +58,7 @@ pub struct ObjectTransmissionInfo {
 impl ObjectTransmissionInfo {
     /// Create from raptorq's `ObjectTransmissionInformation`.
     #[must_use]
-    pub fn from_oti(oti: ObjectTransmissionInformation) -> Self {
+    pub const fn from_oti(oti: ObjectTransmissionInformation) -> Self {
         Self {
             transfer_length: oti.transfer_length(),
             symbol_size: oti.symbol_size(),
@@ -70,7 +70,7 @@ impl ObjectTransmissionInfo {
 
     /// Convert to raptorq's `ObjectTransmissionInformation`.
     #[must_use]
-    pub fn to_oti(self) -> ObjectTransmissionInformation {
+    pub const fn to_oti(self) -> ObjectTransmissionInformation {
         ObjectTransmissionInformation::new(
             self.transfer_length,
             self.symbol_size,
@@ -964,7 +964,7 @@ mod tests {
                 alignment: 8,
             };
             let copied = oti;
-            let cloned = oti.clone();
+            let cloned = oti;
             assert_eq!(copied, cloned);
 
             StoreLogData {

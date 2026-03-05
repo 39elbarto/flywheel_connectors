@@ -773,8 +773,10 @@ mod tests {
 
     #[test]
     fn client_dedup_state_some_when_enabled() {
-        let mut config = GraphqlClientConfig::default();
-        config.dedup_in_flight = true;
+        let config = GraphqlClientConfig {
+            dedup_in_flight: true,
+            ..GraphqlClientConfig::default()
+        };
         let client = GraphqlClient::with_config("https://api.test.com/graphql", config).unwrap();
         assert!(client.dedup_state.is_some());
     }

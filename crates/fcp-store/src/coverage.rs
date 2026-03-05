@@ -268,24 +268,13 @@ mod tests {
 
     use super::*;
 
+    #[derive(Default)]
     struct StoreLogData {
         object_id: Option<ObjectId>,
         symbol_count: Option<u32>,
         coverage_bps: Option<u32>,
         nodes_holding: Option<Vec<String>>,
         details: Option<serde_json::Value>,
-    }
-
-    impl Default for StoreLogData {
-        fn default() -> Self {
-            Self {
-                object_id: None,
-                symbol_count: None,
-                coverage_bps: None,
-                nodes_holding: None,
-                details: None,
-            }
-        }
     }
 
     fn run_store_test<F>(test_name: &str, phase: &str, operation: &str, assertions: u32, f: F)

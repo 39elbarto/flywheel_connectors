@@ -135,9 +135,6 @@ base64 = "0.22"
 bitflags = "2.11"
 percent-encoding = "2.3"
 
-# Fountain codes
-raptorq = "2.0"
-
 # WASI runtime
 wasmtime = { version = "41.0", features = ["component-model"] }
 wasmtime-wasi = "41.0"

@@ -3,25 +3,31 @@
 // Allow truncation casts - symbol counts are bounded by protocol
 #![allow(clippy::cast_possible_truncation)]
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use fcp_async_core::{AsyncError, ExecutionContext};
-use raptorq::{Decoder, EncodingPacket, ObjectTransmissionInformation, PayloadId};
 
+use crate::codec::decoder::{InactivationDecoder, ReceivedSymbol};
 use crate::config::RaptorQConfig;
 use crate::error::DecodeError;
+use crate::oti::ObjectTransmissionInformation;
 
 const COOPERATIVE_YIELD_INTERVAL: usize = 32;
 
 /// `RaptorQ` decoder for reconstructing payload from symbols.
 pub struct RaptorQDecoder {
-    inner: Decoder,
-    config: RaptorQConfig,
-    received: HashSet<u32>,
+    /// Buffered received symbols: ESI -> data.
+    received: HashMap<u32, Vec<u8>>,
+    /// Number of source symbols (K).
     k: u32,
+    /// Transfer length in bytes.
+    transfer_length: u64,
+    /// Symbol size in bytes.
+    symbol_size: u16,
+    config: RaptorQConfig,
     started_at: Instant,
 }
 
@@ -33,10 +39,11 @@ impl RaptorQDecoder {
         let k = (oti.transfer_length() as usize).div_ceil(size);
 
         Self {
-            inner: Decoder::new(oti),
-            config: config.clone(),
-            received: HashSet::new(),
+            received: HashMap::new(),
             k: k as u32,
+            transfer_length: oti.transfer_length(),
+            symbol_size: oti.symbol_size(),
+            config: config.clone(),
             started_at: Instant::now(),
         }
     }
@@ -49,12 +56,12 @@ impl RaptorQDecoder {
         symbol_size: u16,
         config: &RaptorQConfig,
     ) -> Self {
-        let oti = ObjectTransmissionInformation::new(transfer_length, symbol_size, 1, 1, 8);
         Self {
-            inner: Decoder::new(oti),
-            config: config.clone(),
-            received: HashSet::new(),
+            received: HashMap::new(),
             k,
+            transfer_length,
+            symbol_size,
+            config: config.clone(),
             started_at: Instant::now(),
         }
     }
@@ -73,16 +80,104 @@ impl RaptorQDecoder {
         }
 
         // Skip duplicates
-        if self.received.contains(&esi) {
+        if self.received.contains_key(&esi) {
             return Ok(None);
         }
 
-        self.received.insert(esi);
+        self.received.insert(esi, data);
 
-        // Try decode
-        let packet = EncodingPacket::new(PayloadId::new(0, esi), data);
+        // Attempt reconstruction when we have at least K symbols.
+        // The internal codec handles K < K' padding automatically.
+        // We try at K (optimistic) and keep collecting on failure.
+        if self.received_count() >= self.k {
+            match self.try_reconstruct() {
+                Ok(payload) => Ok(Some(payload)),
+                Err(_) => Ok(None), // Not enough yet, keep collecting
+            }
+        } else {
+            Ok(None)
+        }
+    }
 
-        Ok(self.inner.decode(packet))
+    /// Attempt to reconstruct the payload from buffered symbols.
+    fn try_reconstruct(&self) -> Result<Vec<u8>, DecodeError> {
+        let k = self.k as usize;
+        let symbol_size = usize::from(self.symbol_size);
+
+        if k == 0 || symbol_size == 0 {
+            return Err(DecodeError::InsufficientSymbols {
+                received: self.received_count(),
+                needed: self.needed(),
+            });
+        }
+
+        let decoder = InactivationDecoder::new(k, symbol_size, 0);
+        let params = decoder.params();
+        let k_prime = params.k_prime;
+
+        // Build received symbols with proper equations.
+        // The decoder needs at least L = K' + S + H symbols total.
+        // We provide: S+H constraint symbols + received source/repair symbols + K'-K padding zeros.
+        //
+        // RFC 6330 ESI layout:
+        //   0..K-1   : source symbols (original data)
+        //   K..K'-1  : virtual padding (zero data, always added by decoder)
+        //   K'..     : repair symbols (LT/PI equations)
+        let mut symbols = Vec::with_capacity(params.l + self.received.len());
+
+        // Add constraint symbols (LDPC + HDPC): S + H rows with zero RHS
+        symbols.extend(decoder.constraint_symbols());
+
+        // Add received source and repair symbols.
+        // Source: ESI < K → identity equation. Repair: ESI >= K' → LT equation.
+        // ESIs in K..K'-1 are padding (never sent by encoder).
+        for (&esi, data) in &self.received {
+            let sym = if (esi as usize) < k {
+                // Source symbol: identity equation (intermediate[esi] = data)
+                ReceivedSymbol::source(esi, data.clone())
+            } else {
+                // Repair symbol: RFC 6330 LT equation (ESI >= K')
+                let (columns, coefficients) = decoder.repair_equation(esi);
+                ReceivedSymbol {
+                    esi,
+                    is_source: false,
+                    columns,
+                    coefficients,
+                    data: data.clone(),
+                }
+            };
+            symbols.push(sym);
+        }
+
+        // Add zero-padded virtual source symbols for positions K..K'
+        // (same as the encoder does when building the constraint matrix).
+        // These ESIs are never emitted by the encoder so no overlap check needed.
+        for esi in k..k_prime {
+            symbols.push(ReceivedSymbol::source(
+                esi as u32,
+                vec![0u8; symbol_size],
+            ));
+        }
+
+        match decoder.decode(&symbols) {
+            Ok(result) => {
+                // Reconstruct payload from first K source symbols
+                let transfer_len = self.transfer_length as usize;
+                let mut payload = Vec::with_capacity(transfer_len);
+
+                for source_sym in &result.source[..k] {
+                    payload.extend_from_slice(source_sym);
+                }
+
+                // Trim to actual transfer length (last symbol may be zero-padded)
+                payload.truncate(transfer_len);
+                Ok(payload)
+            }
+            Err(_) => Err(DecodeError::InsufficientSymbols {
+                received: self.received_count(),
+                needed: self.needed(),
+            }),
+        }
     }
 
     /// Number of unique symbols received.
@@ -93,7 +188,7 @@ impl RaptorQDecoder {
 
     /// Approximate number needed for reconstruction.
     ///
-    /// K' is approximately K × 1.002.
+    /// K' is approximately K x 1.002.
     #[must_use]
     pub fn needed(&self) -> u32 {
         #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]

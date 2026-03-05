@@ -22,7 +22,6 @@ fcp-protocol = { path = "../fcp-protocol" }
 fcp-raptorq = { path = "../fcp-raptorq" }
 fcp-store = { path = "../fcp-store" }
 fcp-telemetry = { path = "../fcp-telemetry" }
-raptorq.workspace = true
 fcp-tailscale = { path = "../fcp-tailscale" }
 hex.workspace = true
 hkdf = "0.12"

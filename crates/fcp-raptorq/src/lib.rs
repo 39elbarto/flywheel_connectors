@@ -26,6 +26,7 @@
 
 #![forbid(unsafe_code)]
 
+mod codec;
 mod chunk;
 mod config;
 mod decode;
@@ -33,6 +34,7 @@ mod encode;
 mod envelope;
 mod error;
 mod golden;
+mod oti;
 
 pub use chunk::{ChunkedObjectManifest, RawChunk};
 pub use config::{RaptorQConfig, RaptorQPathProfile, RaptorQPreset};
@@ -40,3 +42,4 @@ pub use decode::{DecodeAdmissionController, DecodePermit, RaptorQDecoder};
 pub use encode::{EncodingDecision, RaptorQEncoder};
 pub use envelope::SymbolEnvelope;
 pub use error::{ChunkError, DecodeError, EncodeError};
+pub use oti::ObjectTransmissionInformation;

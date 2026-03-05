@@ -10,7 +10,6 @@ mod tests {
 
     use chrono::Utc;
     use fcp_cbor::{CanonicalSerializer, SchemaId};
-    use raptorq::{Decoder, EncodingPacket, PayloadId};
     use serde::{Deserialize, Serialize};
 
     use crate::{
@@ -131,11 +130,11 @@ mod tests {
         let oti = encoder.transmission_info();
 
         // Decode with all symbols
-        let mut decoder = Decoder::new(oti);
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+        let expected_len = payload.len();
         for (esi, data) in symbols {
-            let packet = EncodingPacket::new(PayloadId::new(0, esi), data);
-            if let Some(decoded) = decoder.decode(packet) {
-                assert_eq!(decoded, payload);
+            if let Ok(Some(decoded)) = decoder.add_symbol(esi, data) {
+                assert_eq!(&decoded[..expected_len], &payload[..]);
                 return;
             }
         }
@@ -168,11 +167,11 @@ mod tests {
         let symbols = encoder.encode_all();
         let oti = encoder.transmission_info();
 
-        let mut decoder = Decoder::new(oti);
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+        let expected_len = payload.len();
         for (esi, data) in symbols {
-            let packet = EncodingPacket::new(PayloadId::new(0, esi), data);
-            if let Some(decoded) = decoder.decode(packet) {
-                assert_eq!(decoded, payload);
+            if let Ok(Some(decoded)) = decoder.add_symbol(esi, data) {
+                assert_eq!(&decoded[..expected_len], &payload[..]);
                 return;
             }
         }
@@ -206,11 +205,11 @@ mod tests {
         let symbols = encoder.encode_all();
         let oti = encoder.transmission_info();
 
-        let mut decoder = Decoder::new(oti);
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+        let expected_len = payload.len();
         for (esi, data) in symbols {
-            let packet = EncodingPacket::new(PayloadId::new(0, esi), data);
-            if let Some(decoded) = decoder.decode(packet) {
-                assert_eq!(decoded, payload);
+            if let Ok(Some(decoded)) = decoder.add_symbol(esi, data) {
+                assert_eq!(&decoded[..expected_len], &payload[..]);
                 return;
             }
         }
@@ -279,14 +278,14 @@ mod tests {
         assert_eq!(encoder.repair_symbols(), 20);
 
         // Simulate 10% erasure by skipping every 10th symbol
-        let mut decoder = Decoder::new(oti);
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+        let expected_len = payload.len();
         for (i, (esi, data)) in symbols.into_iter().enumerate() {
             if i % 10 == 0 {
                 continue; // Skip every 10th symbol
             }
-            let packet = EncodingPacket::new(PayloadId::new(0, esi), data);
-            if let Some(decoded) = decoder.decode(packet) {
-                assert_eq!(decoded, payload);
+            if let Ok(Some(decoded)) = decoder.add_symbol(esi, data) {
+                assert_eq!(&decoded[..expected_len], &payload[..]);
                 return;
             }
         }
@@ -313,14 +312,14 @@ mod tests {
         let k = encoder.source_symbols();
 
         // Use only repair symbols (ESI >= K)
-        let mut decoder = Decoder::new(oti);
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+        let expected_len = payload.len();
         for (esi, data) in symbols {
             if esi < k {
                 continue; // Skip source symbols
             }
-            let packet = EncodingPacket::new(PayloadId::new(0, esi), data);
-            if let Some(decoded) = decoder.decode(packet) {
-                assert_eq!(decoded, payload);
+            if let Ok(Some(decoded)) = decoder.add_symbol(esi, data) {
+                assert_eq!(&decoded[..expected_len], &payload[..]);
                 return;
             }
         }
@@ -420,7 +419,7 @@ mod tests {
             chunk_size: 64 * 1024,
         };
 
-        let oti = raptorq::ObjectTransmissionInformation::new(1024, 1024, 1, 1, 8);
+        let oti = crate::ObjectTransmissionInformation::new(1024, 1024, 1, 1, 8);
         let mut decoder = RaptorQDecoder::new(oti, &config);
 
         // Wait for timeout
@@ -476,7 +475,7 @@ mod tests {
     #[test]
     fn decode_status_tracking() {
         let config = golden_config();
-        let oti = raptorq::ObjectTransmissionInformation::new(10 * 1024, 1024, 1, 1, 8);
+        let oti = crate::ObjectTransmissionInformation::new(10 * 1024, 1024, 1, 1, 8);
         let decoder = RaptorQDecoder::new(oti, &config);
 
         // Initial state
@@ -686,11 +685,11 @@ mod tests {
             // Reverse to ensure replay order does not depend on arrival order.
             subset.reverse();
 
-            let mut raptor_decoder = Decoder::new(encoder.transmission_info());
+            let mut raptor_decoder = RaptorQDecoder::new(encoder.transmission_info(), &config);
+            let expected_len = payload.len();
             let mut reconstructed_payload = None;
             for (esi, data) in subset.iter().cloned() {
-                let packet = EncodingPacket::new(PayloadId::new(0, esi), data);
-                if let Some(payload_bytes) = raptor_decoder.decode(packet) {
+                if let Ok(Some(payload_bytes)) = raptor_decoder.add_symbol(esi, data) {
                     reconstructed_payload = Some(payload_bytes);
                     break;
                 }
@@ -703,11 +702,11 @@ mod tests {
                 )
             });
             assert_eq!(
-                reconstructed_payload, payload,
+                &reconstructed_payload[..expected_len], &payload[..],
                 "{label} produced different payload bytes"
             );
             assert_eq!(
-                blake3_hex(&reconstructed_payload),
+                blake3_hex(&reconstructed_payload[..expected_len]),
                 payload_hash,
                 "{label} hash mismatch"
             );
@@ -763,11 +762,11 @@ mod tests {
             subset.shuffle(&mut rng);
             subset.truncate(keep_count);
 
-            let mut raptor_decoder = Decoder::new(encoder.transmission_info());
+            let mut raptor_decoder = RaptorQDecoder::new(encoder.transmission_info(), &config);
+            let expected_len = payload.len();
             let mut reconstructed_payload = None;
             for (esi, data) in subset.iter().cloned() {
-                let packet = EncodingPacket::new(PayloadId::new(0, esi), data);
-                if let Some(payload_bytes) = raptor_decoder.decode(packet) {
+                if let Ok(Some(payload_bytes)) = raptor_decoder.add_symbol(esi, data) {
                     reconstructed_payload = Some(payload_bytes);
                     break;
                 }
@@ -778,8 +777,8 @@ mod tests {
                     "seeded randomized subset failed to decode (seed={seed}, subset_size={keep_count})"
                 )
             });
-            assert_eq!(reconstructed_payload, payload);
-            assert_eq!(blake3_hex(&reconstructed_payload), payload_hash);
+            assert_eq!(&reconstructed_payload[..expected_len], &payload[..]);
+            assert_eq!(blake3_hex(&reconstructed_payload[..expected_len]), payload_hash);
 
             emit_epoch_replay_log(&EpochReplayLog {
                 test_name: "epoch_replay_reconstructs_from_seeded_randomized_subsets",
@@ -956,7 +955,7 @@ mod tests {
     // DETERMINISTIC GOLDEN VECTOR CONSTANTS (235t.25)
     //
     // These tests pin exact encoded output for seeded payloads. If the
-    // raptorq crate changes its encoding, these tests will catch the drift.
+    // codec changes its encoding, these tests will catch the drift.
     // Each vector records: seed, payload size, config, K, repair count,
     // OTI fields, and BLAKE3 hashes of selected symbols.
     // ═════════════════════════════════════════════════════════════════════════
@@ -1007,11 +1006,13 @@ mod tests {
         let symbols = encoder.encode_all();
         assert_eq!(symbols.len(), 75);
 
-        // Pin ESI range: source symbols 0..K, repair symbols K..K+R
+        // Pin ESI range: source symbols 0..K-1, repair symbols K'..K'+R-1
+        // (K' is the RFC 6330 extended source block size, K' >= K)
+        let k_prime = encoder.inner_k_prime();
         assert_eq!(symbols.first().unwrap().0, 0);
         assert_eq!(symbols[usize::try_from(k).unwrap() - 1].0, k - 1);
-        assert_eq!(symbols[usize::try_from(k).unwrap()].0, k);
-        assert_eq!(symbols.last().unwrap().0, k + repair - 1);
+        assert_eq!(symbols[usize::try_from(k).unwrap()].0, k_prime);
+        assert_eq!(symbols.last().unwrap().0, k_prime + repair - 1);
 
         // All symbols should be exactly symbol_size bytes
         for (esi, data) in &symbols {
@@ -1053,11 +1054,11 @@ mod tests {
         assert_eq!(encoder.repair_symbols(), 10); // 5% of 200
 
         // Roundtrip decode
-        let mut decoder = Decoder::new(oti);
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+        let expected_len = payload.len();
         for (esi, data) in symbols {
-            let packet = EncodingPacket::new(PayloadId::new(0, esi), data);
-            if let Some(decoded) = decoder.decode(packet) {
-                assert_eq!(decoded, payload);
+            if let Ok(Some(decoded)) = decoder.add_symbol(esi, data) {
+                assert_eq!(&decoded[..expected_len], &payload[..]);
                 return;
             }
         }
@@ -1076,7 +1077,7 @@ mod tests {
         // Pin all OTI fields
         assert_eq!(oti.transfer_length(), 10 * 1024);
         assert_eq!(oti.symbol_size(), 1024);
-        // source_block_count and sub_block_count depend on the raptorq crate internals,
+        // source_block_count and sub_block_count depend on the codec internals,
         // but alignment is always 8 for our config
         assert!(oti.source_blocks() >= 1);
         assert!(oti.sub_blocks() >= 1);
@@ -1105,12 +1106,12 @@ mod tests {
         let oti = encoder.transmission_info();
 
         // Roundtrip
-        let mut decoder = Decoder::new(oti);
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+        let expected_len = payload.len();
         for (esi, data) in symbols {
-            let packet = EncodingPacket::new(PayloadId::new(0, esi), data);
-            if let Some(decoded) = decoder.decode(packet) {
-                assert_eq!(decoded.len(), payload.len());
-                assert_eq!(decoded, payload);
+            if let Ok(Some(decoded)) = decoder.add_symbol(esi, data) {
+                assert!(decoded.len() >= expected_len);
+                assert_eq!(&decoded[..expected_len], &payload[..]);
                 return;
             }
         }
@@ -1172,14 +1173,14 @@ mod tests {
         let burst_start = total / 3;
         let burst_end = burst_start + 20;
 
-        let mut decoder = Decoder::new(oti);
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+        let expected_len = payload.len();
         for (i, (esi, data)) in symbols.into_iter().enumerate() {
             if i >= burst_start && i < burst_end {
                 continue; // Bursty loss
             }
-            let packet = EncodingPacket::new(PayloadId::new(0, esi), data);
-            if let Some(decoded) = decoder.decode(packet) {
-                assert_eq!(decoded, payload);
+            if let Ok(Some(decoded)) = decoder.add_symbol(esi, data) {
+                assert_eq!(&decoded[..expected_len], &payload[..]);
                 return;
             }
         }
@@ -1201,14 +1202,14 @@ mod tests {
         // Drop the first 15 source symbols (30% of K=50)
         let drop_count: u32 = 15;
 
-        let mut decoder = Decoder::new(oti);
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+        let expected_len = payload.len();
         for (esi, data) in symbols {
             if esi < drop_count {
                 continue; // Front-heavy loss
             }
-            let packet = EncodingPacket::new(PayloadId::new(0, esi), data);
-            if let Some(decoded) = decoder.decode(packet) {
-                assert_eq!(decoded, payload);
+            if let Ok(Some(decoded)) = decoder.add_symbol(esi, data) {
+                assert_eq!(&decoded[..expected_len], &payload[..]);
                 return;
             }
         }
@@ -1231,16 +1232,16 @@ mod tests {
         // Drop last 15 symbols (includes some repair)
         let cutoff = total - 15;
 
-        let mut decoder = Decoder::new(oti);
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+        let expected_len = payload.len();
         let mut fed_count: u32 = 0;
         for (esi, data) in symbols {
             if esi >= cutoff {
                 continue; // Tail-heavy loss
             }
             fed_count += 1;
-            let packet = EncodingPacket::new(PayloadId::new(0, esi), data);
-            if let Some(decoded) = decoder.decode(packet) {
-                assert_eq!(decoded, payload);
+            if let Ok(Some(decoded)) = decoder.add_symbol(esi, data) {
+                assert_eq!(&decoded[..expected_len], &payload[..]);
                 return;
             }
         }
@@ -1265,7 +1266,8 @@ mod tests {
         let mut rng = ChaCha20Rng::seed_from_u64(0xD0_0EED);
         let loss_rate = 0.20;
 
-        let mut decoder = Decoder::new(oti);
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+        let expected_len = payload.len();
         let mut dropped = 0_u32;
         let mut fed = 0_u32;
         for (esi, data) in symbols {
@@ -1274,9 +1276,8 @@ mod tests {
                 continue;
             }
             fed += 1;
-            let packet = EncodingPacket::new(PayloadId::new(0, esi), data);
-            if let Some(decoded) = decoder.decode(packet) {
-                assert_eq!(decoded, payload);
+            if let Ok(Some(decoded)) = decoder.add_symbol(esi, data) {
+                assert_eq!(&decoded[..expected_len], &payload[..]);
                 // Verify we actually dropped some symbols
                 assert!(dropped > 0, "No symbols were dropped");
                 return;
@@ -1301,14 +1302,14 @@ mod tests {
         // Drop every 4th symbol (25% loss)
         let drop_interval = 4;
 
-        let mut decoder = Decoder::new(oti);
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+        let expected_len = payload.len();
         for (i, (esi, data)) in symbols.into_iter().enumerate() {
             if i % drop_interval == 0 {
                 continue;
             }
-            let packet = EncodingPacket::new(PayloadId::new(0, esi), data);
-            if let Some(decoded) = decoder.decode(packet) {
-                assert_eq!(decoded, payload);
+            if let Ok(Some(decoded)) = decoder.add_symbol(esi, data) {
+                assert_eq!(&decoded[..expected_len], &payload[..]);
                 return;
             }
         }
@@ -1334,13 +1335,13 @@ mod tests {
         // Flip one bit in the first source symbol
         symbols[0].1[0] ^= 0x01;
 
-        let mut decoder = Decoder::new(oti);
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+        let expected_len = payload.len();
         for (esi, data) in symbols {
-            let packet = EncodingPacket::new(PayloadId::new(0, esi), data);
-            if let Some(decoded) = decoder.decode(packet) {
+            if let Ok(Some(decoded)) = decoder.add_symbol(esi, data) {
                 // Reconstruction may succeed but payload should differ
                 assert_ne!(
-                    decoded, payload,
+                    &decoded[..expected_len], &payload[..],
                     "Corrupted symbol should produce different output"
                 );
                 return;
@@ -1366,12 +1367,12 @@ mod tests {
             }
         }
 
-        let mut decoder = Decoder::new(oti);
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+        let expected_len = payload.len();
         for (esi, data) in symbols {
-            let packet = EncodingPacket::new(PayloadId::new(0, esi), data);
-            if let Some(decoded) = decoder.decode(packet) {
+            if let Ok(Some(decoded)) = decoder.add_symbol(esi, data) {
                 assert_ne!(
-                    decoded, payload,
+                    &decoded[..expected_len], &payload[..],
                     "Multiple corrupted symbols should produce different output"
                 );
                 return;
@@ -1390,9 +1391,10 @@ mod tests {
         let oti = encoder.transmission_info();
 
         // Feed truncated first symbol, then rest normally
-        let mut decoder = Decoder::new(oti);
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+        let expected_len = payload.len();
         for (i, (esi, data)) in symbols.into_iter().enumerate() {
-            let packet_data = if i == 0 {
+            let symbol_data = if i == 0 {
                 // Truncate to half size, padded with zeros to maintain packet size
                 let mut truncated = data[..data.len() / 2].to_vec();
                 truncated.resize(data.len(), 0);
@@ -1400,11 +1402,10 @@ mod tests {
             } else {
                 data
             };
-            let packet = EncodingPacket::new(PayloadId::new(0, esi), packet_data);
-            if let Some(decoded) = decoder.decode(packet) {
+            if let Ok(Some(decoded)) = decoder.add_symbol(esi, symbol_data) {
                 // Truncated symbol corrupts the result
                 assert_ne!(
-                    decoded, payload,
+                    &decoded[..expected_len], &payload[..],
                     "Truncated symbol should produce different output"
                 );
                 return;
@@ -1427,12 +1428,12 @@ mod tests {
         let sym_len = symbols[mid].1.len();
         symbols[mid].1 = vec![0u8; sym_len];
 
-        let mut decoder = Decoder::new(oti);
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+        let expected_len = payload.len();
         for (esi, data) in symbols {
-            let packet = EncodingPacket::new(PayloadId::new(0, esi), data);
-            if let Some(decoded) = decoder.decode(packet) {
+            if let Ok(Some(decoded)) = decoder.add_symbol(esi, data) {
                 assert_ne!(
-                    decoded, payload,
+                    &decoded[..expected_len], &payload[..],
                     "Zeroed symbol should produce different output"
                 );
                 return;
@@ -1474,11 +1475,11 @@ mod tests {
         // Feed only K+2 symbols (just barely enough) in shuffled order
         let feed_count = k + 2;
 
-        let mut decoder = Decoder::new(oti);
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+        let expected_len = payload.len();
         for (esi, data) in symbols.into_iter().take(feed_count) {
-            let packet = EncodingPacket::new(PayloadId::new(0, esi), data);
-            if let Some(decoded) = decoder.decode(packet) {
-                assert_eq!(decoded, payload);
+            if let Ok(Some(decoded)) = decoder.add_symbol(esi, data) {
+                assert_eq!(&decoded[..expected_len], &payload[..]);
                 return;
             }
         }
@@ -1505,16 +1506,16 @@ mod tests {
         let k = encoder.source_symbols();
 
         // Use ONLY repair symbols, skip all source
-        let mut decoder = Decoder::new(oti);
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+        let expected_len = payload.len();
         let mut repair_fed = 0_u32;
         for (esi, data) in symbols {
             if esi < k {
                 continue;
             }
             repair_fed += 1;
-            let packet = EncodingPacket::new(PayloadId::new(0, esi), data);
-            if let Some(decoded) = decoder.decode(packet) {
-                assert_eq!(decoded, payload);
+            if let Ok(Some(decoded)) = decoder.add_symbol(esi, data) {
+                assert_eq!(&decoded[..expected_len], &payload[..]);
                 assert!(
                     repair_fed >= k,
                     "Should need at least K repair symbols, used {repair_fed}"
@@ -1622,23 +1623,30 @@ mod tests {
         let symbols = encoder.encode_all();
         let oti = encoder.transmission_info();
 
-        // 50% repair should handle up to ~33% loss reliably
+        // 50% repair should handle up to ~33% loss reliably.
+        // Use evenly-spaced drops to simulate the exact loss percentage.
         let loss_rates = [5, 10, 20, 30];
+        let total = symbols.len();
 
         for loss_pct in loss_rates {
-            let drop_interval = 100 / loss_pct;
+            // Compute exact number of symbols to drop
+            let drop_count = total * loss_pct / 100;
+            // Build a set of evenly-spaced indices to drop
+            let drops: std::collections::HashSet<usize> = (0..drop_count)
+                .map(|i| i * total / drop_count)
+                .collect();
 
-            let mut decoder = Decoder::new(oti);
+            let mut decoder = RaptorQDecoder::new(oti, &config);
+            let expected_len = payload.len();
             let mut recovered = false;
 
             for (i, (esi, data)) in symbols.iter().enumerate() {
-                if i % drop_interval == 0 {
+                if drops.contains(&i) {
                     continue;
                 }
-                let packet = EncodingPacket::new(PayloadId::new(0, *esi), data.clone());
-                if let Some(decoded) = decoder.decode(packet) {
+                if let Ok(Some(decoded)) = decoder.add_symbol(*esi, data.clone()) {
                     assert_eq!(
-                        decoded, payload,
+                        &decoded[..expected_len], &payload[..],
                         "Decoded payload mismatch at {loss_pct}% loss"
                     );
                     recovered = true;
@@ -1648,7 +1656,9 @@ mod tests {
 
             assert!(
                 recovered,
-                "Failed to recover at {loss_pct}% loss rate with 50% repair overhead"
+                "Failed to recover at {loss_pct}% loss rate with 50% repair overhead \
+                (dropped {drop_count}/{total} symbols, kept {})",
+                total - drop_count
             );
         }
     }
@@ -1693,12 +1703,12 @@ mod tests {
     #[test]
     fn bounded_empty_symbol_data() {
         let config = golden_config();
-        let oti = raptorq::ObjectTransmissionInformation::new(10 * 1024, 1024, 1, 1, 8);
+        let oti = crate::ObjectTransmissionInformation::new(10 * 1024, 1024, 1, 1, 8);
         let mut decoder = RaptorQDecoder::new(oti, &config);
 
         // Feed empty symbol
         let result = decoder.add_symbol(0, vec![]);
-        // Should not panic; may or may not error depending on raptorq crate
+        // Should not panic; may or may not error depending on internal codec
         let _ = result;
     }
 

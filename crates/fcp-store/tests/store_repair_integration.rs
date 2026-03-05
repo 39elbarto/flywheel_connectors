@@ -119,7 +119,7 @@ fn encode_payload(
     config: &RaptorQConfig,
 ) -> (
     Vec<(u32, Vec<u8>)>,
-    raptorq::ObjectTransmissionInformation,
+    fcp_raptorq::ObjectTransmissionInformation,
     u32,
 ) {
     let encoder = RaptorQEncoder::new(payload, config).expect("encode");
@@ -133,7 +133,7 @@ fn encode_payload(
 async fn store_symbols(
     store: &MemorySymbolStore,
     object_id: ObjectId,
-    oti: raptorq::ObjectTransmissionInformation,
+    oti: fcp_raptorq::ObjectTransmissionInformation,
     source_k: u32,
     symbols: &[(u32, Vec<u8>)],
     node_id: u64,

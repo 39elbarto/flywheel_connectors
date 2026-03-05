@@ -18,7 +18,6 @@ tracing.workspace = true
 serde = { workspace = true, features = ["derive"] }
 parking_lot.workspace = true
 async-trait.workspace = true
-raptorq.workspace = true
 
 # Internal crates
 fcp-async-core = { path = "../fcp-async-core" }

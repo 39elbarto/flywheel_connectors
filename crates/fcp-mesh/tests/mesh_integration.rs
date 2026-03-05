@@ -92,6 +92,7 @@ mod meshnode {
         DEFAULT_MAX_SYMBOLS_UNAUTHENTICATED, DecodeStatus, SymbolAck, SymbolAckReason,
         SymbolRequest,
     };
+    use fcp_raptorq::ObjectTransmissionInformation;
     use fcp_store::{
         MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore, MemorySymbolStoreConfig,
         ObjectAdmissionPolicy, ObjectSymbolMeta, ObjectTransmissionInfo, QuarantineStore,
@@ -100,7 +101,6 @@ mod meshnode {
     use fcp_telemetry::trace_capture::{
         CapturedTrace, RedactionPolicy, TraceCaptureConfig, TraceEvent, TraceExportFormat,
     };
-    use raptorq::ObjectTransmissionInformation;
     use semver::Version;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -4163,13 +4163,13 @@ mod real_component_integration {
         MeshSessionId, SessionCryptoSuite, SessionKeys, SessionReplayPolicy, TransportLimits,
     };
     use fcp_protocol::{DecodeStatus, SymbolAck, SymbolAckReason, SymbolRequest};
+    use fcp_raptorq::ObjectTransmissionInformation;
     use fcp_store::{
         MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore, MemorySymbolStoreConfig,
         ObjectAdmissionPolicy, ObjectSymbolMeta, ObjectTransmissionInfo, QuarantineStore,
         StoredSymbol, SymbolMeta, SymbolStore,
     };
     use fcp_tailscale::NodeId;
-    use raptorq::ObjectTransmissionInformation;
     use semver::Version;
     use std::collections::HashSet;
     use std::sync::Arc;

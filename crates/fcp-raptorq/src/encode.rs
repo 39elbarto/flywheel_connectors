@@ -1,14 +1,19 @@
 //! `RaptorQ` encoder implementation.
 
-use raptorq::{Encoder, ObjectTransmissionInformation};
+// Allow truncation casts - symbol counts are bounded by protocol
+#![allow(clippy::cast_possible_truncation)]
 
 use crate::chunk::{ChunkedObjectManifest, RawChunk};
+use crate::codec::systematic::SystematicEncoder;
 use crate::config::RaptorQConfig;
 use crate::error::EncodeError;
+use crate::oti::ObjectTransmissionInformation;
 
 /// `RaptorQ` encoder for producing symbols from a payload.
 pub struct RaptorQEncoder {
-    inner: Encoder,
+    inner: SystematicEncoder,
+    /// Original source symbol data (each exactly symbol_size bytes, last may be zero-padded).
+    source_data: Vec<Vec<u8>>,
     config: RaptorQConfig,
     payload_len: usize,
 }
@@ -32,10 +37,28 @@ impl RaptorQEncoder {
             });
         }
 
-        let inner = Encoder::with_defaults(payload, config.symbol_size);
+        let symbol_size = usize::from(config.symbol_size);
+
+        // Split payload into symbol-sized chunks, zero-padding the last one
+        let source_symbols: Vec<Vec<u8>> = payload
+            .chunks(symbol_size)
+            .map(|chunk| {
+                if chunk.len() == symbol_size {
+                    chunk.to_vec()
+                } else {
+                    let mut padded = vec![0u8; symbol_size];
+                    padded[..chunk.len()].copy_from_slice(chunk);
+                    padded
+                }
+            })
+            .collect();
+
+        let inner = SystematicEncoder::new(&source_symbols, symbol_size, 0)
+            .expect("SystematicEncoder::new failed for valid payload");
 
         Ok(Self {
             inner,
+            source_data: source_symbols,
             config: config.clone(),
             payload_len: payload.len(),
         })
@@ -62,41 +85,63 @@ impl RaptorQEncoder {
     /// Generate all source + repair symbols.
     ///
     /// Returns a vector of (ESI, `symbol_data`) tuples.
+    /// Source symbols have ESI 0..K-1, repair symbols have ESI K'..K'+R-1
+    /// (K' is the RFC 6330 extended source block size, always >= K).
     #[must_use]
     pub fn encode_all(&self) -> Vec<(u32, Vec<u8>)> {
-        let packets = self.inner.get_encoded_packets(self.repair_symbols());
-        packets
-            .into_iter()
-            .map(|packet| {
-                let esi = packet.payload_id().encoding_symbol_id();
-                (esi, packet.data().to_vec())
-            })
-            .collect()
+        let repair_count = self.repair_symbols();
+        let k_prime = self.inner.params().k_prime as u32;
+
+        let mut result = Vec::with_capacity(self.source_data.len() + repair_count as usize);
+
+        // Source symbols (ESI 0..K): systematic — original data passed through
+        for (esi, data) in self.source_data.iter().enumerate() {
+            result.push((esi as u32, data.clone()));
+        }
+
+        // Repair symbols (ESI K'..K'+repair): RFC 6330 requires repair ISIs
+        // start at K' (after the virtual padding range K..K').
+        for i in 0..repair_count {
+            let esi = k_prime + i;
+            let data = self.inner.repair_symbol(esi);
+            result.push((esi, data));
+        }
+
+        result
     }
 
     /// Generate source symbols only.
     #[must_use]
     pub fn encode_source(&self) -> Vec<(u32, Vec<u8>)> {
-        let packets = self.inner.get_encoded_packets(0);
-        packets
-            .into_iter()
-            .map(|packet| {
-                let esi = packet.payload_id().encoding_symbol_id();
-                (esi, packet.data().to_vec())
-            })
+        self.source_data
+            .iter()
+            .enumerate()
+            .map(|(esi, data)| (esi as u32, data.clone()))
             .collect()
     }
 
     /// Get the object transmission information for this encoding.
     #[must_use]
     pub fn transmission_info(&self) -> ObjectTransmissionInformation {
-        self.inner.get_config()
+        ObjectTransmissionInformation::new(
+            self.payload_len as u64,
+            self.config.symbol_size,
+            1,
+            1,
+            8,
+        )
     }
 
     /// Get the payload length.
     #[must_use]
     pub const fn payload_len(&self) -> usize {
         self.payload_len
+    }
+
+    /// Get K' (RFC 6330 extended source block size, always >= K).
+    #[must_use]
+    pub fn inner_k_prime(&self) -> u32 {
+        self.inner.params().k_prime as u32
     }
 
     /// Get the symbol size.
@@ -336,8 +381,6 @@ mod tests {
 
     #[test]
     fn encode_decode_roundtrip() {
-        use raptorq::Decoder;
-
         let config = test_config();
         let payload: Vec<u8> = (0..512_u32)
             .map(|i| u8::try_from(i % 256).expect("payload byte fits u8"))
@@ -347,17 +390,15 @@ mod tests {
         let symbols = encoder.encode_all();
         let oti = encoder.transmission_info();
 
-        // Create decoder and feed symbols
-        let mut decoder = Decoder::new(oti);
+        // Create decoder and feed all symbols
+        let mut decoder = crate::RaptorQDecoder::new(oti, &config);
         for (esi, data) in symbols {
-            let packet = raptorq::EncodingPacket::new(raptorq::PayloadId::new(0, esi), data);
-            if let Some(decoded) = decoder.decode(packet) {
-                assert_eq!(decoded, payload);
+            if let Ok(Some(decoded)) = decoder.add_symbol(esi, data) {
+                assert_eq!(&decoded[..payload.len()], &payload[..]);
                 return;
             }
         }
 
-        // Should have decoded by now
         panic!("Failed to decode payload");
     }
 

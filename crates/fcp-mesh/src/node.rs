@@ -530,10 +530,7 @@ impl MeshNode {
     pub fn remove_peer(&mut self, node_id: &NodeId) {
         // Clean up session/admission state before removing peer data,
         // to prevent stale authentication surviving peer removal.
-        let now_ms = self
-            .peers
-            .get(node_id)
-            .map_or(0, |p| p.last_seen_ms);
+        let now_ms = self.peers.get(node_id).map_or(0, |p| p.last_seen_ms);
         if self.sessions.contains_key(node_id) {
             self.remove_session(node_id, now_ms);
         } else {
@@ -1055,7 +1052,10 @@ impl MeshNode {
 
         let response = builder
             .add_from_repair_engine(&engine, validated, already_sent)
-            .build(u32::try_from(available.len()).unwrap_or(u32::MAX), already_sent_count);
+            .build(
+                u32::try_from(available.len()).unwrap_or(u32::MAX),
+                already_sent_count,
+            );
 
         debug!(
             object_id = %response.object_id,
@@ -1394,12 +1394,12 @@ mod tests {
         DEFAULT_MAX_SYMBOLS_UNAUTHENTICATED, DecodeStatus, SymbolAck, SymbolAckReason,
         SymbolRequest,
     };
+    use fcp_raptorq::ObjectTransmissionInformation;
     use fcp_store::{
         MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore, MemorySymbolStoreConfig,
         ObjectAdmissionPolicy, ObjectSymbolMeta, ObjectTransmissionInfo, QuarantineStore,
         QuarantinedObject, StoredSymbol, SymbolMeta,
     };
-    use raptorq::ObjectTransmissionInformation;
 
     fn test_node(name: &str) -> MeshNode {
         let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
@@ -2281,5 +2281,377 @@ mod tests {
         };
         let err = MeshNodeError::SymbolRequest(sym_err);
         assert!(err.to_string().contains("symbol request error"));
+    }
+
+    // ---- MeshNodeError additional variants ----
+
+    #[test]
+    fn mesh_node_error_trace_not_enabled() {
+        let err = MeshNodeError::TraceNotEnabled;
+        assert!(err.to_string().contains("trace capture not enabled"));
+    }
+
+    #[test]
+    fn mesh_node_error_enforcement_variant() {
+        let inner = MeshNodeEnforcementError::MissingTokenJti;
+        let err = MeshNodeError::Enforcement(inner);
+        assert!(err.to_string().contains("enforcement error"));
+        assert!(err.to_string().contains("jti"));
+    }
+
+    // ---- MeshNodeEnforcementError additional ----
+
+    #[test]
+    fn enforcement_error_invoke_validation() {
+        let inner = InvokeValidationError::HolderProofRequired;
+        let err = MeshNodeEnforcementError::InvokeValidation(inner);
+        assert!(err.to_string().contains("invoke validation error"));
+    }
+
+    #[test]
+    fn enforcement_error_receipt_validation() {
+        let inner = fcp_core::OperationValidationError::AlreadyCompleted {
+            idempotency_key: "test-key".to_string(),
+        };
+        let err = MeshNodeEnforcementError::ReceiptValidation(inner);
+        assert!(err.to_string().contains("receipt validation failed"));
+    }
+
+    // ---- Config trace capture builder ----
+
+    #[test]
+    fn config_with_trace_capture_config() {
+        let trace_config = TraceCaptureConfig::new().enabled();
+        let config = MeshNodeConfig::new("node-1").with_trace_capture_config(trace_config);
+        assert!(config.trace_capture.enabled);
+    }
+
+    #[test]
+    fn config_with_trace_capture_zones() {
+        let config = MeshNodeConfig::new("node-1")
+            .with_trace_capture_zones([ZoneId::work(), ZoneId::private()]);
+        assert!(config.trace_capture_zones.is_some());
+        assert_eq!(config.trace_capture_zones.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn config_default_trace_capture_disabled() {
+        let config = MeshNodeConfig::new("node-1");
+        assert!(!config.trace_capture.enabled);
+        assert!(config.trace_capture_zones.is_none());
+    }
+
+    #[test]
+    fn config_debug_format() {
+        let config = MeshNodeConfig::new("node-1");
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("MeshNodeConfig"));
+        assert!(dbg.contains("node-1"));
+    }
+
+    #[test]
+    fn config_clone() {
+        let config = MeshNodeConfig::new("node-1").with_sender_instance_id(42);
+        assert_eq!(config.node_id, "node-1");
+        assert_eq!(config.sender_instance_id, 42);
+    }
+
+    // ---- Multiple session management ----
+
+    #[test]
+    fn register_multiple_sessions() {
+        let mut node = test_node("node-1");
+        let s1 = test_session("peer-1");
+        let s2 = test_session("peer-2");
+        let s3 = test_session("peer-3");
+
+        node.register_session(s1, 1000);
+        node.register_session(s2, 1001);
+        node.register_session(s3, 1002);
+
+        assert!(node.is_peer_authenticated(&NodeId::new("peer-1")));
+        assert!(node.is_peer_authenticated(&NodeId::new("peer-2")));
+        assert!(node.is_peer_authenticated(&NodeId::new("peer-3")));
+    }
+
+    #[test]
+    fn remove_one_session_keeps_others() {
+        let mut node = test_node("node-1");
+        node.register_session(test_session("peer-1"), 1000);
+        node.register_session(test_session("peer-2"), 1001);
+
+        node.remove_session(&NodeId::new("peer-1"), 2000);
+        assert!(!node.is_peer_authenticated(&NodeId::new("peer-1")));
+        assert!(node.is_peer_authenticated(&NodeId::new("peer-2")));
+    }
+
+    #[test]
+    fn remove_session_for_unknown_peer_is_noop() {
+        let mut node = test_node("node-1");
+        node.register_session(test_session("peer-1"), 1000);
+        node.remove_session(&NodeId::new("ghost-peer"), 2000);
+        assert!(node.is_peer_authenticated(&NodeId::new("peer-1")));
+    }
+
+    // ---- Peer state with symbols and leases ----
+
+    #[test]
+    fn peer_state_tracks_symbols() {
+        let mut node = test_node("node-1");
+        let profile = test_device_profile("peer-1");
+        let mut symbols = HashSet::new();
+        symbols.insert(ObjectId::from_bytes([0x11; 32]));
+        symbols.insert(ObjectId::from_bytes([0x22; 32]));
+
+        node.update_peer_state(NodeId::new("peer-1"), profile, symbols, vec![], 1000);
+        assert_eq!(node.peer_count(), 1);
+    }
+
+    #[test]
+    fn peer_state_tracks_leases() {
+        let mut node = test_node("node-1");
+        let profile = test_device_profile("peer-1");
+        let leases = vec![HeldLease {
+            subject_id: ObjectId::from_bytes([0xCC; 32]),
+            purpose: LeasePurpose::SingletonWriter,
+            expires_at: 999_999,
+        }];
+
+        node.update_peer_state(NodeId::new("peer-1"), profile, HashSet::new(), leases, 1000);
+        assert_eq!(node.peer_count(), 1);
+    }
+
+    // ---- Gossip metric accumulation ----
+
+    #[test]
+    fn multiple_gossip_announcements_accumulate() {
+        let mut node = test_node("node-1");
+        let zone_id = ZoneId::work();
+
+        for i in 0..5_u8 {
+            let object_id = ObjectId::from_bytes([i; 32]);
+            node.announce_object(&zone_id, &object_id, ObjectAdmissionClass::Admitted, 1000);
+        }
+        assert_eq!(node.metrics().gossip_announcements, 5);
+    }
+
+    #[test]
+    fn symbol_announcements_accumulate() {
+        let mut node = test_node("node-1");
+        let zone_id = ZoneId::work();
+        let object_id = ObjectId::from_bytes([0xAA; 32]);
+
+        for esi in 0..3_u32 {
+            node.announce_symbol(&zone_id, &object_id, esi, ObjectAdmissionClass::Admitted, 1000);
+        }
+        assert_eq!(node.metrics().gossip_announcements, 3);
+    }
+
+    // ---- Metrics cloning ----
+
+    #[test]
+    fn mesh_node_metrics_default() {
+        let m = MeshNodeMetrics::default();
+        assert_eq!(m.gossip_announcements, 0);
+        assert_eq!(m.gossip_updates, 0);
+        assert_eq!(m.peer_updates, 0);
+    }
+
+    #[test]
+    fn mesh_node_metrics_debug_clone() {
+        let m = MeshNodeMetrics {
+            gossip_announcements: 10,
+            gossip_updates: 5,
+            peer_updates: 3,
+            ..Default::default()
+        };
+        let dbg = format!("{m:?}");
+        assert!(dbg.contains("MeshNodeMetrics"));
+        assert_eq!(m.gossip_announcements, 10);
+        assert_eq!(m.peer_updates, 3);
+    }
+
+    // ---- PeerState ----
+
+    #[test]
+    fn peer_state_debug_clone() {
+        let state = PeerState {
+            profile: test_device_profile("peer-1"),
+            local_symbols: HashSet::new(),
+            held_leases: vec![],
+            last_seen_ms: 5000,
+        };
+        let dbg = format!("{state:?}");
+        assert!(dbg.contains("PeerState"));
+        assert_eq!(state.last_seen_ms, 5000);
+    }
+
+    // ---- Planner input edge cases ----
+
+    #[test]
+    fn build_planner_input_with_only_peers_no_local() {
+        let mut node = test_node("node-1");
+        let peer_profile = test_device_profile("peer-1");
+        node.update_peer_state(
+            NodeId::new("peer-1"),
+            peer_profile,
+            HashSet::new(),
+            vec![],
+            1000,
+        );
+
+        let input = node.build_planner_input(2000);
+        // Only peer included, no local
+        assert_eq!(input.nodes.len(), 1);
+    }
+
+    #[test]
+    fn build_planner_input_with_multiple_peers() {
+        let mut node = test_node("node-1");
+        let local_profile = test_device_profile("node-1");
+        node.update_local_state(local_profile, HashSet::new(), vec![]);
+
+        for i in 0..5 {
+            let name = format!("peer-{i}");
+            let profile = test_device_profile(&name);
+            node.update_peer_state(NodeId::new(&name), profile, HashSet::new(), vec![], 1000);
+        }
+
+        let input = node.build_planner_input(2000);
+        assert_eq!(input.nodes.len(), 6); // 1 local + 5 peers
+    }
+
+    // ---- Transport path selection ----
+
+    #[test]
+    fn rank_transport_all_allowed() {
+        let node = test_node("node-1");
+        let policy = ZoneTransportPolicy {
+            allow_lan: true,
+            allow_derp: true,
+            allow_funnel: true,
+        };
+
+        let paths = vec![
+            TransportPath::new(TransportPathKind::Direct, NodeId::new("p1"), "d", None),
+            TransportPath::new(TransportPathKind::Derp, NodeId::new("p2"), "r", None),
+            TransportPath::new(TransportPathKind::Funnel, NodeId::new("p3"), "f", None),
+        ];
+
+        let ranked = node.rank_transport_paths(&policy, &paths);
+        assert_eq!(ranked.len(), 3);
+        assert!(ranked.iter().all(|r| r.eligible));
+    }
+
+    #[test]
+    fn rank_transport_empty_paths() {
+        let node = test_node("node-1");
+        let policy = ZoneTransportPolicy {
+            allow_lan: true,
+            allow_derp: true,
+            allow_funnel: true,
+        };
+
+        let ranked = node.rank_transport_paths(&policy, &[]);
+        assert!(ranked.is_empty());
+    }
+
+    // ---- Peer signing keys ----
+
+    #[test]
+    fn register_peer_signing_key() {
+        let mut node = test_node("node-1");
+        let key = Ed25519SigningKey::generate();
+        let peer = NodeId::new("peer-1");
+
+        node.register_peer_signing_key(peer, key.verifying_key());
+        // No panic, key registered successfully
+    }
+
+    // ---- Trace snapshot without capture ----
+
+    #[test]
+    fn trace_snapshot_without_capture_returns_none() {
+        let node = test_node("node-1"); // no trace capture
+        assert!(node.trace_snapshot().is_none());
+    }
+
+    #[test]
+    fn trace_snapshot_with_capture_returns_some() {
+        let node = test_node_with_trace("node-1");
+        let snapshot = node.trace_snapshot();
+        assert!(snapshot.is_some());
+        assert!(snapshot.unwrap().events.is_empty());
+    }
+
+    // ---- Local state symbols ----
+
+    #[test]
+    fn update_local_state_with_symbols() {
+        let mut node = test_node("node-1");
+        let profile = test_device_profile("node-1");
+        let mut symbols = HashSet::new();
+        symbols.insert(ObjectId::from_bytes([0xAA; 32]));
+        symbols.insert(ObjectId::from_bytes([0xBB; 32]));
+
+        node.update_local_state(profile, symbols, vec![]);
+        assert!(node.local_profile.is_some());
+    }
+
+    #[test]
+    fn update_local_state_with_leases() {
+        let mut node = test_node("node-1");
+        let profile = test_device_profile("node-1");
+        let leases = vec![
+            HeldLease {
+                subject_id: ObjectId::from_bytes([0xAA; 32]),
+                purpose: LeasePurpose::SingletonWriter,
+                expires_at: 999_999,
+            },
+            HeldLease {
+                subject_id: ObjectId::from_bytes([0xBB; 32]),
+                purpose: LeasePurpose::SingletonWriter,
+                expires_at: 999_999,
+            },
+        ];
+
+        node.update_local_state(profile, HashSet::new(), leases);
+        assert!(node.local_profile.is_some());
+    }
+
+    // ---- Multiple acks accumulate ----
+
+    #[test]
+    fn multiple_acks_accumulate_metric() {
+        let mut node = test_node("node-1");
+        let zone_id = ZoneId::work();
+
+        for i in 0..3_u8 {
+            let object_id = ObjectId::from_bytes([i; 32]);
+            let ack = SymbolAck::new(
+                test_object_header(),
+                object_id,
+                zone_id.clone(),
+                ZoneKeyId::from_bytes([i; 8]),
+                1,
+                SymbolAckReason::Complete,
+                5,
+            );
+            node.handle_symbol_ack(&ack, 1000);
+        }
+        assert_eq!(node.metrics().symbol_requests.acks_received, 3);
+    }
+
+    // ---- Peer update metric accumulation ----
+
+    #[test]
+    fn multiple_peer_updates_accumulate() {
+        let mut node = test_node("node-1");
+        for i in 0..4 {
+            let name = format!("peer-{i}");
+            let profile = test_device_profile(&name);
+            node.update_peer_state(NodeId::new(&name), profile, HashSet::new(), vec![], 1000);
+        }
+        assert_eq!(node.metrics().peer_updates, 4);
     }
 }

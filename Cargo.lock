@@ -2325,7 +2325,6 @@ dependencies = [
  "hmac",
  "proptest",
  "rand 0.8.5",
- "raptorq",
  "semver",
  "serde",
  "serde_json",
@@ -2555,9 +2554,9 @@ dependencies = [
  "fcp-crypto",
  "fcp-tailscale",
  "fcp-testkit",
+ "parking_lot",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
- "raptorq",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -2729,7 +2728,6 @@ dependencies = [
  "fcp-testkit",
  "parking_lot",
  "rand 0.8.5",
- "raptorq",
  "semver",
  "serde",
  "serde_json",
@@ -5609,12 +5607,6 @@ checksum = "f703f4665700daf5512dcca5f43afa6af89f09db47fb56be587f80636bda2d41"
 dependencies = [
  "rand_core 0.9.5",
 ]
-
-[[package]]
-name = "raptorq"
-version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "90b1b1fad69672f0b901b5004863ea4307f03d168a3db5f2bcba4d3dfed88e97"
 
 [[package]]
 name = "raw-cpuid"

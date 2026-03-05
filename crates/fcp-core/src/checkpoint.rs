@@ -294,15 +294,15 @@ pub fn hrw_hash_checkpoint(zone_id: &ZoneId, epoch: &EpochId, node_id: &Tailscal
     hasher.update(b"FCP2-HRW-CHECKPOINT-V1");
     
     let z_bytes = zone_id.as_bytes();
-    hasher.update(&(z_bytes.len() as u32).to_le_bytes());
+    hasher.update(&u32::try_from(z_bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
     hasher.update(z_bytes);
-    
+
     let e_bytes = epoch.as_str().as_bytes();
-    hasher.update(&(e_bytes.len() as u32).to_le_bytes());
+    hasher.update(&u32::try_from(e_bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
     hasher.update(e_bytes);
-    
+
     let n_bytes = node_id.as_str().as_bytes();
-    hasher.update(&(n_bytes.len() as u32).to_le_bytes());
+    hasher.update(&u32::try_from(n_bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
     hasher.update(n_bytes);
 
     let hash = hasher.finalize();
@@ -1145,15 +1145,15 @@ mod tests {
         expected_hasher.update(b"FCP2-HRW-CHECKPOINT-V1");
         
         let z_bytes = zone.as_bytes();
-        expected_hasher.update(&(z_bytes.len() as u32).to_le_bytes());
+        expected_hasher.update(&u32::try_from(z_bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
         expected_hasher.update(z_bytes);
-        
+
         let e_bytes = epoch.as_str().as_bytes();
-        expected_hasher.update(&(e_bytes.len() as u32).to_le_bytes());
+        expected_hasher.update(&u32::try_from(e_bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
         expected_hasher.update(e_bytes);
-        
+
         let n_bytes = node.as_str().as_bytes();
-        expected_hasher.update(&(n_bytes.len() as u32).to_le_bytes());
+        expected_hasher.update(&u32::try_from(n_bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
         expected_hasher.update(n_bytes);
         
         let expected_bytes = expected_hasher.finalize();

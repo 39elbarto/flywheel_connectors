@@ -866,31 +866,32 @@ fn advancement_state_transitions() {
 fn golden_hrw_hash_vectors() {
     let log = TestLogEntry::new("golden_hrw_hash_vectors").execute();
 
-    // These are golden vectors - if they change, the hash algorithm changed
+    // These are golden vectors - if they change, the hash algorithm changed.
+    // Updated 2026-03-04 after length-prefixed HRW hash change (commit f99b69b).
     let test_cases = [
         (
             "z:work",
             "epoch-golden-1",
             "node-test-a",
-            1_456_488_856_143_675_820_u64,
+            4_612_559_044_831_334_750_u64,
         ),
         (
             "z:work",
             "epoch-golden-1",
             "node-test-b",
-            8_857_726_777_098_932_189_u64,
+            5_746_037_411_169_575_254_u64,
         ),
         (
             "z:work",
             "epoch-golden-2",
             "node-test-a",
-            3_703_385_125_701_953_997_u64,
+            10_931_232_107_578_549_484_u64,
         ),
         (
             "z:public",
             "epoch-golden-1",
             "node-test-a",
-            8_982_626_680_850_693_973_u64,
+            17_975_856_165_098_956_092_u64,
         ),
     ];
 
@@ -902,7 +903,7 @@ fn golden_hrw_hash_vectors() {
         let hash = hrw_hash_checkpoint(&zone, &epoch, &node);
         assert_eq!(
             hash, expected_hash,
-            "HRW hash mismatch for ({zone_str}, {epoch_str}, {node_str}): got {hash}, expected {expected_hash}"
+            "HRW hash mismatch for ({zone_str}, {epoch_str}, {node_str})"
         );
     }
 
@@ -925,15 +926,16 @@ fn golden_coordinator_selection_vectors() {
     let coord = select_checkpoint_coordinator(&zone, &epoch, &nodes).unwrap();
     let ranked = rank_checkpoint_coordinators(&zone, &epoch, &nodes);
 
-    // Golden vector: expected coordinator for this input
+    // Golden vector: expected coordinator for this input.
+    // Updated 2026-03-04 after length-prefixed HRW hash change (commit f99b69b).
     assert_eq!(
         coord.as_str(),
-        "node-david",
+        "node-charlie",
         "Coordinator selection golden vector mismatch"
     );
 
     // Golden vector: expected ranking
-    let expected_ranking = ["node-david", "node-alice", "node-charlie", "node-bob"];
+    let expected_ranking = ["node-charlie", "node-david", "node-alice", "node-bob"];
     for (i, expected) in expected_ranking.iter().enumerate() {
         assert_eq!(
             ranked[i].as_str(),
@@ -942,7 +944,7 @@ fn golden_coordinator_selection_vectors() {
         );
     }
 
-    let _log = log.verify().with_coordinator("node-david").pass();
+    let _log = log.verify().with_coordinator("node-charlie").pass();
 }
 
 #[test]

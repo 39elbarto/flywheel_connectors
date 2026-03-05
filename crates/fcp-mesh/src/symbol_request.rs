@@ -644,11 +644,8 @@ impl SymbolResponseBuilder {
             .take(self.max_symbols as usize)
             .collect();
 
-        // Response was bounded if:
-        // 1. The builder truncated the selection, OR
-        // 2. select_symbols hit the max_response_symbols limit (more may exist)
-        self.was_bounded = limited.len() < available_count
-            || (available_count > 0 && available_count as u32 >= request.max_response_symbols);
+        // Response was bounded if the builder truncated the selection
+        self.was_bounded = limited.len() < available_count;
         self.selected_esis = limited;
         self
     }
@@ -661,13 +658,17 @@ impl SymbolResponseBuilder {
         let total_sent = sent_count.saturating_add(already_sent);
         let is_final = total_sent >= total_available || self.selected_esis.is_empty();
 
+        // Response was bounded if we sent fewer new symbols than remain unsent
+        let remaining = total_available.saturating_sub(already_sent);
+        let was_bounded = self.was_bounded || sent_count < remaining;
+
         SymbolResponse {
             object_id: self.object_id,
             zone_id: self.zone_id,
             zone_key_id: self.zone_key_id,
             symbol_esis: self.selected_esis,
             is_final,
-            was_bounded: self.was_bounded,
+            was_bounded,
         }
     }
 }
@@ -1672,7 +1673,7 @@ mod tests {
         };
         let dbg = format!("{vr:?}");
         assert!(dbg.contains("max_response_symbols"));
-        let cloned = vr.clone();
-        assert_eq!(cloned.max_response_symbols, 10);
+        let moved = vr;
+        assert_eq!(moved.max_response_symbols, 10);
     }
 }

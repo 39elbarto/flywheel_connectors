@@ -394,6 +394,10 @@ impl LinuxSandbox {
             EXIT_GROUP,
             // Sched
             SCHED_YIELD,
+            // Process and Thread creation (Threads are required for Rust/Go async runtimes)
+            CLONE,
+            CLONE3,
+            WAIT4,
         ];
 
         // File modification syscalls (if writable paths exist)
@@ -427,7 +431,7 @@ impl LinuxSandbox {
 
         // Process creation syscalls (if exec is allowed)
         if !policy.deny_exec {
-            allowed.extend([CLONE, CLONE3, FORK, VFORK, EXECVE, EXECVEAT, WAIT4]);
+            allowed.extend([FORK, VFORK, EXECVE, EXECVEAT]);
         }
 
         // Ptrace (if allowed)
@@ -457,6 +461,7 @@ impl LinuxSandbox {
             CLOCK_GETTIME,
             GETRANDOM,
             FUTEX,
+            CLONE, // Required for threads
         ];
 
         if !policy.block_direct_network {
@@ -464,7 +469,7 @@ impl LinuxSandbox {
         }
 
         if !policy.deny_exec {
-            allowed.extend([CLONE, EXECVE, EXECVEAT]);
+            allowed.extend([EXECVE, EXECVEAT, FORK, VFORK]);
         }
 
         if !policy.deny_ptrace {
@@ -476,12 +481,12 @@ impl LinuxSandbox {
 
     /// Apply resource limits using rlimit.
     fn apply_rlimits(&self, policy: &CompiledPolicy) -> Result<(), SandboxError> {
-        // Memory limit (RLIMIT_AS - address space)
-        set_rlimit(
-            libc::RLIMIT_AS,
-            policy.memory_limit_bytes,
-            policy.memory_limit_bytes,
-        )?;
+        // Virtual memory limits (RLIMIT_AS) are specifically NOT set here because 
+        // modern runtimes like Go and Rust (with certain allocators) reserve large 
+        // blocks of virtual address space up-front. Limiting RLIMIT_AS will cause 
+        // them to crash immediately on startup, even if their actual physical memory
+        // usage is well within bounds. Memory limits should be enforced via cgroups
+        // or by the runtime itself where possible.
 
         // Data segment limit
         set_rlimit(
@@ -502,7 +507,10 @@ impl LinuxSandbox {
 
         // No new processes if deny_exec
         if policy.deny_exec {
-            set_rlimit(libc::RLIMIT_NPROC, 0, 0)?;
+            // Note: RLIMIT_NPROC limits BOTH threads and processes on Linux (NPTL).
+            // Setting this to 0 prevents multi-threaded connectors (like those using Tokio) 
+            // from spawning worker threads. We rely on the seccomp filter blocking EXECVE/FORK instead.
+            // set_rlimit(libc::RLIMIT_NPROC, 0, 0)?;
         }
 
         info!(

@@ -328,7 +328,11 @@ impl Sandbox for WindowsSandbox {
         Ok(())
     }
 
-    fn apply_to_command(&self, cmd: &mut std::process::Command, _policy: &CompiledPolicy) -> Result<(), SandboxError> {
+    fn apply_to_command(
+        &self,
+        cmd: &mut std::process::Command,
+        _policy: &CompiledPolicy,
+    ) -> Result<(), SandboxError> {
         // On Windows, true AppContainer sandboxing must be applied to the process BEFORE it starts
         // via STARTUPINFOEX attributes. FCP native Windows sandboxing relies on external launch
         // mechanisms or future integration with process creation attributes.

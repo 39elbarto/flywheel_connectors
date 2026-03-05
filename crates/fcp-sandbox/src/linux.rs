@@ -608,24 +608,31 @@ impl Sandbox for LinuxSandbox {
         Ok(())
     }
 
-    fn apply_to_command(&self, cmd: &mut std::process::Command, policy: &CompiledPolicy) -> Result<(), SandboxError> {
+    fn apply_to_command(
+        &self,
+        cmd: &mut std::process::Command,
+        policy: &CompiledPolicy,
+    ) -> Result<(), SandboxError> {
         use std::os::unix::process::CommandExt;
-        
+
         let policy_clone = policy.clone();
-        
+
         unsafe {
             cmd.pre_exec(move || {
                 let sandbox = LinuxSandbox::new();
-                
+
                 // If unshare is available, we unshare user, network, ipc, and mount namespaces.
                 // We cannot use CLONE_NEWPID cleanly in pre_exec without more complex setup.
                 if sandbox.userns_available {
                     // Try to unshare namespaces
-                    let mut flags = libc::CLONE_NEWUSER | libc::CLONE_NEWNS | libc::CLONE_NEWIPC | libc::CLONE_NEWUTS;
+                    let mut flags = libc::CLONE_NEWUSER
+                        | libc::CLONE_NEWNS
+                        | libc::CLONE_NEWIPC
+                        | libc::CLONE_NEWUTS;
                     if policy_clone.block_direct_network {
                         flags |= libc::CLONE_NEWNET;
                     }
-                    
+
                     let ret = libc::unshare(flags);
                     if ret == 0 {
                         // Successfully unshared. We don't remount or map uids here because that requires
@@ -633,17 +640,23 @@ impl Sandbox for LinuxSandbox {
                         // At a minimum, this provides strict network and IPC isolation.
                         tracing::debug!("Successfully unshared namespaces via pre_exec");
                     } else {
-                        tracing::warn!("Failed to unshare namespaces in pre_exec: {}", std::io::Error::last_os_error());
+                        tracing::warn!(
+                            "Failed to unshare namespaces in pre_exec: {}",
+                            std::io::Error::last_os_error()
+                        );
                     }
                 }
-                
+
                 if let Err(e) = sandbox.apply(&policy_clone) {
-                    return Err(std::io::Error::new(std::io::ErrorKind::Other, format!("sandbox apply failed: {e}")));
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("sandbox apply failed: {e}"),
+                    ));
                 }
                 Ok(())
             });
         }
-        
+
         Ok(())
     }
 

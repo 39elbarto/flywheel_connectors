@@ -252,7 +252,11 @@ pub trait Sandbox: Send + Sync {
     /// Default implementation relies on the connector binary to invoke `apply()` itself,
     /// but platform-specific implementations (e.g., Linux namespaces, macOS seatbelt)
     /// may override this to enforce sandboxing immediately from the host.
-    fn apply_to_command(&self, cmd: &mut std::process::Command, policy: &CompiledPolicy) -> Result<(), SandboxError> {
+    fn apply_to_command(
+        &self,
+        cmd: &mut std::process::Command,
+        policy: &CompiledPolicy,
+    ) -> Result<(), SandboxError> {
         let _ = (cmd, policy);
         Ok(())
     }
@@ -326,7 +330,11 @@ impl Sandbox for NoOpSandbox {
         Ok(())
     }
 
-    fn apply_to_command(&self, cmd: &mut std::process::Command, policy: &CompiledPolicy) -> Result<(), SandboxError> {
+    fn apply_to_command(
+        &self,
+        cmd: &mut std::process::Command,
+        policy: &CompiledPolicy,
+    ) -> Result<(), SandboxError> {
         let _ = (cmd, policy);
         Ok(())
     }

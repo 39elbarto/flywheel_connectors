@@ -3610,7 +3610,10 @@ mod tests {
         let mut record = LifecycleRecord::new(test_connector_id(), test_version());
 
         record
-            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
             .unwrap();
         record
             .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
@@ -3644,7 +3647,10 @@ mod tests {
 
         // Install and canary
         record
-            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
             .unwrap();
         record
             .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
@@ -3663,10 +3669,13 @@ mod tests {
 
         // Retry canary
         record
-            .transition(LifecycleState::Canary, TransitionReason::NewVersion {
-                from_version: "1.0.0".into(),
-                to_version: "1.0.1".into(),
-            })
+            .transition(
+                LifecycleState::Canary,
+                TransitionReason::NewVersion {
+                    from_version: "1.0.0".into(),
+                    to_version: "1.0.1".into(),
+                },
+            )
             .unwrap();
 
         // Succeed this time
@@ -3759,7 +3768,10 @@ mod tests {
             );
 
         record
-            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
             .unwrap();
         record.update_health(true, Some(42));
 

@@ -977,4 +977,352 @@ mod tests {
         assert_eq!(message.message_id, 51);
         assert!(message.document.is_some());
     }
+
+    // ---- TelegramError Display / Debug / Error trait tests ----
+
+    #[test]
+    fn test_api_error_display() {
+        let err = TelegramError::Api {
+            code: 403,
+            description: "Forbidden: bot was blocked".into(),
+        };
+        let display = format!("{err}");
+        assert_eq!(display, "Telegram API error (403): Forbidden: bot was blocked");
+    }
+
+    #[test]
+    fn test_invalid_chat_id_display() {
+        let err = TelegramError::InvalidChatId("bad-id".into());
+        let display = format!("{err}");
+        assert_eq!(display, "Invalid chat ID: bad-id");
+    }
+
+    #[test]
+    fn test_api_error_debug() {
+        let err = TelegramError::Api {
+            code: 400,
+            description: "Bad Request".into(),
+        };
+        let debug = format!("{err:?}");
+        assert!(debug.contains("Api"));
+        assert!(debug.contains("400"));
+        assert!(debug.contains("Bad Request"));
+    }
+
+    #[test]
+    fn test_invalid_chat_id_debug() {
+        let err = TelegramError::InvalidChatId("xyz".into());
+        let debug = format!("{err:?}");
+        assert!(debug.contains("InvalidChatId"));
+        assert!(debug.contains("xyz"));
+    }
+
+    #[test]
+    fn test_telegram_error_is_std_error() {
+        let err: Box<dyn std::error::Error> = Box::new(TelegramError::Api {
+            code: 500,
+            description: "Internal".into(),
+        });
+        // source() should be None for Api variant
+        assert!(err.source().is_none());
+
+        let err2: Box<dyn std::error::Error> =
+            Box::new(TelegramError::InvalidChatId("test".into()));
+        assert!(err2.source().is_none());
+    }
+
+    // ---- is_retryable comprehensive tests ----
+
+    #[test]
+    fn test_api_429_is_retryable() {
+        let err = TelegramError::Api {
+            code: 429,
+            description: "Too Many Requests".into(),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn test_api_500_is_retryable() {
+        let err = TelegramError::Api {
+            code: 500,
+            description: "Internal Server Error".into(),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn test_api_503_is_retryable() {
+        let err = TelegramError::Api {
+            code: 503,
+            description: "Service Unavailable".into(),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn test_api_502_is_retryable() {
+        let err = TelegramError::Api {
+            code: 502,
+            description: "Bad Gateway".into(),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn test_api_400_not_retryable() {
+        let err = TelegramError::Api {
+            code: 400,
+            description: "Bad Request".into(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn test_api_401_not_retryable() {
+        let err = TelegramError::Api {
+            code: 401,
+            description: "Unauthorized".into(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn test_api_403_not_retryable() {
+        let err = TelegramError::Api {
+            code: 403,
+            description: "Forbidden".into(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn test_api_404_not_retryable() {
+        let err = TelegramError::Api {
+            code: 404,
+            description: "Not Found".into(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn test_api_499_not_retryable() {
+        // 499 is < 500 and != 429
+        let err = TelegramError::Api {
+            code: 499,
+            description: "Client Closed".into(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn test_invalid_chat_id_not_retryable() {
+        let err = TelegramError::InvalidChatId("bad".into());
+        assert!(!err.is_retryable());
+    }
+
+    // ---- normalize_chat_id comprehensive tests ----
+
+    #[test]
+    fn test_normalize_empty_string() {
+        let result = normalize_chat_id("");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            TelegramError::InvalidChatId(msg) => assert!(msg.contains("Empty")),
+            other => panic!("expected InvalidChatId, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_normalize_whitespace_only() {
+        let result = normalize_chat_id("   ");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            TelegramError::InvalidChatId(msg) => assert!(msg.contains("Empty")),
+            other => panic!("expected InvalidChatId, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_normalize_tab_whitespace() {
+        let result = normalize_chat_id("\t\n ");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_normalize_valid_positive_numeric() {
+        assert_eq!(normalize_chat_id("123456").unwrap(), "123456");
+    }
+
+    #[test]
+    fn test_normalize_valid_negative_numeric() {
+        assert_eq!(normalize_chat_id("-100123456").unwrap(), "-100123456");
+    }
+
+    #[test]
+    fn test_normalize_numeric_with_whitespace_trim() {
+        assert_eq!(normalize_chat_id("  123456  ").unwrap(), "123456");
+    }
+
+    #[test]
+    fn test_normalize_at_username() {
+        assert_eq!(normalize_chat_id("@mybot").unwrap(), "@mybot");
+    }
+
+    #[test]
+    fn test_normalize_bare_username_long_enough() {
+        // >= 5 chars alphanumeric/underscore gets @ prepended
+        assert_eq!(normalize_chat_id("mybot").unwrap(), "@mybot");
+    }
+
+    #[test]
+    fn test_normalize_bare_username_with_underscore() {
+        assert_eq!(normalize_chat_id("my_bot_name").unwrap(), "@my_bot_name");
+    }
+
+    #[test]
+    fn test_normalize_bare_username_too_short() {
+        // < 5 chars, not numeric, not @ => error
+        let result = normalize_chat_id("abc");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_normalize_bare_username_exactly_5() {
+        assert_eq!(normalize_chat_id("abcde").unwrap(), "@abcde");
+    }
+
+    #[test]
+    fn test_normalize_bare_username_4_chars_fails() {
+        let result = normalize_chat_id("abcd");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_normalize_telegram_prefix() {
+        assert_eq!(normalize_chat_id("telegram:123456").unwrap(), "123456");
+    }
+
+    #[test]
+    fn test_normalize_tg_prefix() {
+        assert_eq!(normalize_chat_id("tg:123456").unwrap(), "123456");
+    }
+
+    #[test]
+    fn test_normalize_group_prefix() {
+        assert_eq!(
+            normalize_chat_id("group:-100123456").unwrap(),
+            "-100123456"
+        );
+    }
+
+    #[test]
+    fn test_normalize_tg_group_prefix_combined() {
+        assert_eq!(
+            normalize_chat_id("tg:group:-100123456").unwrap(),
+            "-100123456"
+        );
+    }
+
+    #[test]
+    fn test_normalize_telegram_group_prefix_combined() {
+        assert_eq!(
+            normalize_chat_id("telegram:group:-100123456").unwrap(),
+            "-100123456"
+        );
+    }
+
+    #[test]
+    fn test_normalize_https_tme_link() {
+        assert_eq!(
+            normalize_chat_id("https://t.me/mybot").unwrap(),
+            "@mybot"
+        );
+    }
+
+    #[test]
+    fn test_normalize_http_tme_link() {
+        assert_eq!(
+            normalize_chat_id("http://t.me/mybot").unwrap(),
+            "@mybot"
+        );
+    }
+
+    #[test]
+    fn test_normalize_bare_tme_link() {
+        assert_eq!(normalize_chat_id("t.me/mybot").unwrap(), "@mybot");
+    }
+
+    #[test]
+    fn test_normalize_tme_invite_link_rejected() {
+        let result = normalize_chat_id("https://t.me/+abc123");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            TelegramError::InvalidChatId(msg) => assert!(msg.contains("invite")),
+            other => panic!("expected InvalidChatId about invite links, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_normalize_bare_tme_invite_link_rejected() {
+        let result = normalize_chat_id("t.me/+secret");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_normalize_just_dash_fails() {
+        let result = normalize_chat_id("-");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_normalize_multiple_dashes_fails() {
+        let result = normalize_chat_id("---");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_normalize_mixed_numeric_dashes_fails() {
+        let result = normalize_chat_id("1-2-3");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_normalize_special_chars_fails() {
+        let result = normalize_chat_id("!@#$");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_normalize_username_with_special_chars_fails() {
+        // Has a dot which is not alphanumeric or underscore
+        let result = normalize_chat_id("my.bot");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_normalize_telegram_prefix_with_username() {
+        assert_eq!(
+            normalize_chat_id("telegram:@mybot").unwrap(),
+            "@mybot"
+        );
+    }
+
+    #[test]
+    fn test_normalize_tg_prefix_with_username() {
+        assert_eq!(normalize_chat_id("tg:@mybot").unwrap(), "@mybot");
+    }
+
+    #[test]
+    fn test_normalize_single_digit() {
+        assert_eq!(normalize_chat_id("0").unwrap(), "0");
+    }
+
+    #[test]
+    fn test_normalize_large_numeric() {
+        assert_eq!(
+            normalize_chat_id("9999999999999").unwrap(),
+            "9999999999999"
+        );
+    }
 }

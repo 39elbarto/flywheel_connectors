@@ -393,4 +393,763 @@ mod tests {
         assert_eq!(cb.data.as_deref(), Some("button_clicked"));
         assert_eq!(cb.from.first_name, "Alice");
     }
+
+    // ---- TelegramResponse additional ----
+
+    #[test]
+    fn telegram_response_ok_with_none_result() {
+        let json = r#"{"ok":true}"#;
+        let resp: TelegramResponse<i32> = serde_json::from_str(json).unwrap();
+        assert!(resp.ok);
+        assert!(resp.result.is_none());
+        assert!(resp.description.is_none());
+        assert!(resp.error_code.is_none());
+    }
+
+    // ---- User additional ----
+
+    #[test]
+    fn user_all_optional_fields_none() {
+        let json = json!({
+            "id": 999,
+            "is_bot": false,
+            "first_name": "Alice"
+        });
+        let user: User = serde_json::from_value(json).unwrap();
+        assert_eq!(user.id, 999);
+        assert!(!user.is_bot);
+        assert_eq!(user.first_name, "Alice");
+        assert!(user.last_name.is_none());
+        assert!(user.username.is_none());
+        assert!(user.language_code.is_none());
+    }
+
+    #[test]
+    fn user_clone() {
+        let user = User {
+            id: 1,
+            is_bot: false,
+            first_name: "Bob".into(),
+            last_name: Some("Smith".into()),
+            username: Some("bob_smith".into()),
+            language_code: Some("de".into()),
+        };
+        let cloned = user.clone();
+        assert_eq!(cloned.id, user.id);
+        assert_eq!(cloned.first_name, user.first_name);
+        assert_eq!(cloned.last_name, user.last_name);
+        assert_eq!(cloned.username, user.username);
+        assert_eq!(cloned.language_code, user.language_code);
+    }
+
+    #[test]
+    fn user_debug() {
+        let user = User {
+            id: 42,
+            is_bot: true,
+            first_name: "DebugBot".into(),
+            last_name: None,
+            username: None,
+            language_code: None,
+        };
+        let debug = format!("{user:?}");
+        assert!(debug.contains("User"));
+        assert!(debug.contains("42"));
+        assert!(debug.contains("DebugBot"));
+    }
+
+    // ---- Chat additional ----
+
+    #[test]
+    fn chat_private_type() {
+        let json = json!({
+            "id": 555,
+            "type": "private",
+            "first_name": "Carol"
+        });
+        let chat: Chat = serde_json::from_value(json).unwrap();
+        assert_eq!(chat.id, 555);
+        assert_eq!(chat.chat_type, "private");
+        assert!(chat.title.is_none());
+        assert_eq!(chat.first_name.as_deref(), Some("Carol"));
+    }
+
+    #[test]
+    fn chat_clone() {
+        let chat = Chat {
+            id: -100_999,
+            chat_type: "group".into(),
+            title: Some("My Group".into()),
+            username: None,
+            first_name: None,
+            last_name: None,
+        };
+        let cloned = chat.clone();
+        assert_eq!(cloned.id, chat.id);
+        assert_eq!(cloned.chat_type, chat.chat_type);
+        assert_eq!(cloned.title, chat.title);
+    }
+
+    #[test]
+    fn chat_debug() {
+        let chat = Chat {
+            id: 1,
+            chat_type: "channel".into(),
+            title: Some("Chan".into()),
+            username: Some("chan_user".into()),
+            first_name: None,
+            last_name: None,
+        };
+        let debug = format!("{chat:?}");
+        assert!(debug.contains("Chat"));
+        assert!(debug.contains("channel"));
+    }
+
+    // ---- Message additional ----
+
+    #[test]
+    fn message_with_photo_array() {
+        let json = json!({
+            "message_id": 10,
+            "chat": {"id": 100, "type": "private"},
+            "date": 1_700_000_000,
+            "photo": [
+                {
+                    "file_id": "small",
+                    "file_unique_id": "us",
+                    "width": 90,
+                    "height": 90,
+                    "file_size": 1000
+                },
+                {
+                    "file_id": "large",
+                    "file_unique_id": "ul",
+                    "width": 800,
+                    "height": 600,
+                    "file_size": 50000
+                }
+            ]
+        });
+        let msg: Message = serde_json::from_value(json).unwrap();
+        let photos = msg.photo.unwrap();
+        assert_eq!(photos.len(), 2);
+        assert_eq!(photos[0].file_id, "small");
+        assert_eq!(photos[1].width, 800);
+    }
+
+    #[test]
+    fn message_with_document() {
+        let json = json!({
+            "message_id": 11,
+            "chat": {"id": 100, "type": "private"},
+            "date": 1_700_000_000,
+            "document": {
+                "file_id": "doc_id",
+                "file_unique_id": "doc_uniq",
+                "file_name": "notes.txt",
+                "mime_type": "text/plain",
+                "file_size": 256
+            }
+        });
+        let msg: Message = serde_json::from_value(json).unwrap();
+        let doc = msg.document.unwrap();
+        assert_eq!(doc.file_id, "doc_id");
+        assert_eq!(doc.file_name.as_deref(), Some("notes.txt"));
+    }
+
+    #[test]
+    fn message_with_audio() {
+        let json = json!({
+            "message_id": 12,
+            "chat": {"id": 100, "type": "private"},
+            "date": 1_700_000_000,
+            "audio": {
+                "file_id": "audio_id",
+                "file_unique_id": "audio_uniq",
+                "duration": 180,
+                "title": "Song Title",
+                "mime_type": "audio/mpeg",
+                "file_size": 3_000_000
+            }
+        });
+        let msg: Message = serde_json::from_value(json).unwrap();
+        let audio = msg.audio.unwrap();
+        assert_eq!(audio.duration, 180);
+        assert_eq!(audio.title.as_deref(), Some("Song Title"));
+    }
+
+    #[test]
+    fn message_with_video() {
+        let json = json!({
+            "message_id": 13,
+            "chat": {"id": 100, "type": "private"},
+            "date": 1_700_000_000,
+            "video": {
+                "file_id": "vid_id",
+                "file_unique_id": "vid_uniq",
+                "width": 1920,
+                "height": 1080,
+                "duration": 60,
+                "mime_type": "video/mp4",
+                "file_size": 10_000_000
+            }
+        });
+        let msg: Message = serde_json::from_value(json).unwrap();
+        let video = msg.video.unwrap();
+        assert_eq!(video.width, 1920);
+        assert_eq!(video.height, 1080);
+        assert_eq!(video.duration, 60);
+    }
+
+    #[test]
+    fn message_with_voice() {
+        let json = json!({
+            "message_id": 14,
+            "chat": {"id": 100, "type": "private"},
+            "date": 1_700_000_000,
+            "voice": {
+                "file_id": "voice_id",
+                "file_unique_id": "voice_uniq",
+                "duration": 5,
+                "mime_type": "audio/ogg",
+                "file_size": 8000
+            }
+        });
+        let msg: Message = serde_json::from_value(json).unwrap();
+        let voice = msg.voice.unwrap();
+        assert_eq!(voice.duration, 5);
+        assert_eq!(voice.mime_type.as_deref(), Some("audio/ogg"));
+    }
+
+    #[test]
+    fn message_with_reply_to_message() {
+        let json = json!({
+            "message_id": 20,
+            "chat": {"id": 100, "type": "private"},
+            "date": 1_700_000_001,
+            "text": "This is a reply",
+            "reply_to_message": {
+                "message_id": 19,
+                "chat": {"id": 100, "type": "private"},
+                "date": 1_700_000_000,
+                "text": "Original message"
+            }
+        });
+        let msg: Message = serde_json::from_value(json).unwrap();
+        assert_eq!(msg.text.as_deref(), Some("This is a reply"));
+        let reply = msg.reply_to_message.unwrap();
+        assert_eq!(reply.message_id, 19);
+        assert_eq!(reply.text.as_deref(), Some("Original message"));
+    }
+
+    #[test]
+    fn message_with_message_thread_id() {
+        let json = json!({
+            "message_id": 30,
+            "chat": {"id": -100_555, "type": "supergroup", "title": "Forum"},
+            "date": 1_700_000_000,
+            "message_thread_id": 42,
+            "text": "Topic reply"
+        });
+        let msg: Message = serde_json::from_value(json).unwrap();
+        assert_eq!(msg.message_thread_id, Some(42));
+        assert_eq!(msg.text.as_deref(), Some("Topic reply"));
+    }
+
+    #[test]
+    fn message_with_caption_no_text() {
+        let json = json!({
+            "message_id": 31,
+            "chat": {"id": 100, "type": "private"},
+            "date": 1_700_000_000,
+            "caption": "Photo caption here",
+            "photo": [{
+                "file_id": "p1",
+                "file_unique_id": "pu1",
+                "width": 320,
+                "height": 240
+            }]
+        });
+        let msg: Message = serde_json::from_value(json).unwrap();
+        assert!(msg.text.is_none());
+        assert_eq!(msg.caption.as_deref(), Some("Photo caption here"));
+        assert!(msg.photo.is_some());
+    }
+
+    // ---- PhotoSize additional ----
+
+    #[test]
+    fn photo_size_without_file_size() {
+        let json = json!({
+            "file_id": "ph1",
+            "file_unique_id": "phu1",
+            "width": 160,
+            "height": 120
+        });
+        let photo: PhotoSize = serde_json::from_value(json).unwrap();
+        assert_eq!(photo.width, 160);
+        assert_eq!(photo.height, 120);
+        assert!(photo.file_size.is_none());
+    }
+
+    #[test]
+    fn photo_size_clone() {
+        let photo = PhotoSize {
+            file_id: "ph2".into(),
+            file_unique_id: "phu2".into(),
+            width: 640,
+            height: 480,
+            file_size: Some(25000),
+        };
+        let cloned = photo.clone();
+        assert_eq!(cloned.file_id, photo.file_id);
+        assert_eq!(cloned.width, photo.width);
+        assert_eq!(cloned.file_size, photo.file_size);
+    }
+
+    // ---- Document additional ----
+
+    #[test]
+    fn document_minimal() {
+        let json = json!({
+            "file_id": "doc_min",
+            "file_unique_id": "doc_min_u"
+        });
+        let doc: Document = serde_json::from_value(json).unwrap();
+        assert_eq!(doc.file_id, "doc_min");
+        assert!(doc.file_name.is_none());
+        assert!(doc.mime_type.is_none());
+        assert!(doc.file_size.is_none());
+    }
+
+    #[test]
+    fn document_clone() {
+        let doc = Document {
+            file_id: "d1".into(),
+            file_unique_id: "du1".into(),
+            file_name: Some("data.csv".into()),
+            mime_type: Some("text/csv".into()),
+            file_size: Some(4096),
+        };
+        let cloned = doc.clone();
+        assert_eq!(cloned.file_id, doc.file_id);
+        assert_eq!(cloned.file_name, doc.file_name);
+        assert_eq!(cloned.mime_type, doc.mime_type);
+        assert_eq!(cloned.file_size, doc.file_size);
+    }
+
+    // ---- Audio additional ----
+
+    #[test]
+    fn audio_full_fields() {
+        let json = json!({
+            "file_id": "aud1",
+            "file_unique_id": "audu1",
+            "duration": 240,
+            "title": "My Song",
+            "mime_type": "audio/mpeg",
+            "file_size": 5_000_000
+        });
+        let audio: Audio = serde_json::from_value(json).unwrap();
+        assert_eq!(audio.file_id, "aud1");
+        assert_eq!(audio.duration, 240);
+        assert_eq!(audio.title.as_deref(), Some("My Song"));
+        assert_eq!(audio.mime_type.as_deref(), Some("audio/mpeg"));
+        assert_eq!(audio.file_size, Some(5_000_000));
+    }
+
+    #[test]
+    fn audio_minimal() {
+        let json = json!({
+            "file_id": "aud2",
+            "file_unique_id": "audu2",
+            "duration": 10
+        });
+        let audio: Audio = serde_json::from_value(json).unwrap();
+        assert_eq!(audio.duration, 10);
+        assert!(audio.title.is_none());
+        assert!(audio.mime_type.is_none());
+        assert!(audio.file_size.is_none());
+    }
+
+    #[test]
+    fn audio_clone() {
+        let audio = Audio {
+            file_id: "ac".into(),
+            file_unique_id: "acu".into(),
+            duration: 60,
+            title: Some("Clone Test".into()),
+            mime_type: Some("audio/ogg".into()),
+            file_size: Some(100_000),
+        };
+        let cloned = audio.clone();
+        assert_eq!(cloned.file_id, audio.file_id);
+        assert_eq!(cloned.duration, audio.duration);
+        assert_eq!(cloned.title, audio.title);
+    }
+
+    // ---- Video additional ----
+
+    #[test]
+    fn video_full_fields() {
+        let json = json!({
+            "file_id": "vid1",
+            "file_unique_id": "vidu1",
+            "width": 3840,
+            "height": 2160,
+            "duration": 300,
+            "mime_type": "video/mp4",
+            "file_size": 100_000_000
+        });
+        let video: Video = serde_json::from_value(json).unwrap();
+        assert_eq!(video.width, 3840);
+        assert_eq!(video.height, 2160);
+        assert_eq!(video.duration, 300);
+        assert_eq!(video.mime_type.as_deref(), Some("video/mp4"));
+        assert_eq!(video.file_size, Some(100_000_000));
+    }
+
+    #[test]
+    fn video_clone() {
+        let video = Video {
+            file_id: "vc".into(),
+            file_unique_id: "vcu".into(),
+            width: 1280,
+            height: 720,
+            duration: 30,
+            mime_type: None,
+            file_size: None,
+        };
+        let cloned = video.clone();
+        assert_eq!(cloned.file_id, video.file_id);
+        assert_eq!(cloned.width, video.width);
+        assert_eq!(cloned.height, video.height);
+    }
+
+    // ---- Voice additional ----
+
+    #[test]
+    fn voice_full_fields() {
+        let json = json!({
+            "file_id": "v1",
+            "file_unique_id": "vu1",
+            "duration": 15,
+            "mime_type": "audio/ogg",
+            "file_size": 12000
+        });
+        let voice: Voice = serde_json::from_value(json).unwrap();
+        assert_eq!(voice.duration, 15);
+        assert_eq!(voice.mime_type.as_deref(), Some("audio/ogg"));
+        assert_eq!(voice.file_size, Some(12000));
+    }
+
+    #[test]
+    fn voice_minimal() {
+        let json = json!({
+            "file_id": "v2",
+            "file_unique_id": "vu2",
+            "duration": 1
+        });
+        let voice: Voice = serde_json::from_value(json).unwrap();
+        assert_eq!(voice.duration, 1);
+        assert!(voice.mime_type.is_none());
+        assert!(voice.file_size.is_none());
+    }
+
+    #[test]
+    fn voice_clone() {
+        let voice = Voice {
+            file_id: "vcl".into(),
+            file_unique_id: "vclu".into(),
+            duration: 7,
+            mime_type: Some("audio/ogg".into()),
+            file_size: Some(5000),
+        };
+        let cloned = voice.clone();
+        assert_eq!(cloned.file_id, voice.file_id);
+        assert_eq!(cloned.duration, voice.duration);
+        assert_eq!(cloned.mime_type, voice.mime_type);
+    }
+
+    // ---- CallbackQuery additional ----
+
+    #[test]
+    fn callback_query_without_message_and_data() {
+        let json = json!({
+            "id": "cb_no_msg",
+            "from": {"id": 555, "is_bot": false, "first_name": "Dave"},
+            "chat_instance": "inst2"
+        });
+        let cb: CallbackQuery = serde_json::from_value(json).unwrap();
+        assert_eq!(cb.id, "cb_no_msg");
+        assert!(cb.message.is_none());
+        assert!(cb.data.is_none());
+    }
+
+    #[test]
+    fn callback_query_clone() {
+        let cb = CallbackQuery {
+            id: "cb_clone".into(),
+            from: User {
+                id: 1,
+                is_bot: false,
+                first_name: "Eve".into(),
+                last_name: None,
+                username: None,
+                language_code: None,
+            },
+            message: None,
+            chat_instance: "ci".into(),
+            data: Some("action".into()),
+        };
+        let cloned = cb.clone();
+        assert_eq!(cloned.id, cb.id);
+        assert_eq!(cloned.from.first_name, cb.from.first_name);
+        assert_eq!(cloned.data, cb.data);
+    }
+
+    // ---- File additional ----
+
+    #[test]
+    fn file_minimal() {
+        let json = json!({
+            "file_id": "f_min",
+            "file_unique_id": "fu_min"
+        });
+        let file: File = serde_json::from_value(json).unwrap();
+        assert_eq!(file.file_id, "f_min");
+        assert!(file.file_size.is_none());
+        assert!(file.file_path.is_none());
+    }
+
+    #[test]
+    fn file_clone() {
+        let file = File {
+            file_id: "fc".into(),
+            file_unique_id: "fcu".into(),
+            file_size: Some(2048),
+            file_path: Some("documents/file.pdf".into()),
+        };
+        let cloned = file.clone();
+        assert_eq!(cloned.file_id, file.file_id);
+        assert_eq!(cloned.file_size, file.file_size);
+        assert_eq!(cloned.file_path, file.file_path);
+    }
+
+    // ---- BotInfo additional ----
+
+    #[test]
+    fn bot_info_minimal() {
+        let json = json!({
+            "id": 777,
+            "is_bot": true,
+            "first_name": "MinBot"
+        });
+        let bot: BotInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(bot.id, 777);
+        assert!(bot.is_bot);
+        assert_eq!(bot.first_name, "MinBot");
+        assert!(bot.username.is_none());
+        assert!(bot.can_join_groups.is_none());
+        assert!(bot.can_read_all_group_messages.is_none());
+        assert!(bot.supports_inline_queries.is_none());
+    }
+
+    #[test]
+    fn bot_info_clone() {
+        let bot = BotInfo {
+            id: 888,
+            is_bot: true,
+            first_name: "CloneBot".into(),
+            username: Some("clone_bot".into()),
+            can_join_groups: Some(true),
+            can_read_all_group_messages: Some(false),
+            supports_inline_queries: Some(true),
+        };
+        let cloned = bot.clone();
+        assert_eq!(cloned.id, bot.id);
+        assert_eq!(cloned.first_name, bot.first_name);
+        assert_eq!(cloned.username, bot.username);
+        assert_eq!(cloned.can_join_groups, bot.can_join_groups);
+        assert_eq!(cloned.supports_inline_queries, bot.supports_inline_queries);
+    }
+
+    // ---- SendMessageRequest additional ----
+
+    #[test]
+    fn send_message_request_with_all_fields() {
+        let req = SendMessageRequest {
+            chat_id: "12345".into(),
+            text: "Hi!".into(),
+            parse_mode: Some("MarkdownV2".into()),
+            reply_to_message_id: Some(7),
+            message_thread_id: Some(99),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"chat_id\":\"12345\""));
+        assert!(json.contains("\"text\":\"Hi!\""));
+        assert!(json.contains("\"parse_mode\":\"MarkdownV2\""));
+        assert!(json.contains("\"reply_to_message_id\":7"));
+        assert!(json.contains("\"message_thread_id\":99"));
+    }
+
+    #[test]
+    fn send_message_request_skip_serializing_none_fields() {
+        let req = SendMessageRequest {
+            chat_id: "999".into(),
+            text: "Minimal".into(),
+            parse_mode: None,
+            reply_to_message_id: None,
+            message_thread_id: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"chat_id\""));
+        assert!(json.contains("\"text\""));
+        assert!(!json.contains("parse_mode"));
+        assert!(!json.contains("reply_to_message_id"));
+        assert!(!json.contains("message_thread_id"));
+    }
+
+    // ---- GetUpdatesRequest additional ----
+
+    #[test]
+    fn get_updates_request_with_all_fields() {
+        let req = GetUpdatesRequest {
+            offset: Some(500),
+            limit: Some(100),
+            timeout: Some(30),
+            allowed_updates: Some(vec!["message".into(), "callback_query".into()]),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"offset\":500"));
+        assert!(json.contains("\"limit\":100"));
+        assert!(json.contains("\"timeout\":30"));
+        assert!(json.contains("\"allowed_updates\""));
+        assert!(json.contains("\"message\""));
+        assert!(json.contains("\"callback_query\""));
+    }
+
+    #[test]
+    fn get_updates_request_serialize_with_allowed_updates() {
+        let req = GetUpdatesRequest {
+            offset: None,
+            limit: None,
+            timeout: None,
+            allowed_updates: Some(vec![
+                "message".into(),
+                "edited_message".into(),
+                "channel_post".into(),
+            ]),
+        };
+        let val: serde_json::Value = serde_json::to_value(&req).unwrap();
+        let updates = val["allowed_updates"].as_array().unwrap();
+        assert_eq!(updates.len(), 3);
+        assert_eq!(updates[0], "message");
+        assert_eq!(updates[2], "channel_post");
+    }
+
+    // ---- UpdateKind additional ----
+
+    #[test]
+    fn update_kind_edited_message() {
+        let json = json!({
+            "update_id": 200,
+            "edited_message": {
+                "message_id": 5,
+                "chat": {"id": 100, "type": "private"},
+                "date": 1_700_000_000,
+                "text": "edited text"
+            }
+        });
+        let update: Update = serde_json::from_value(json).unwrap();
+        assert_eq!(update.update_id, 200);
+        match &update.kind {
+            UpdateKind::EditedMessage(msg) => {
+                assert_eq!(msg.message_id, 5);
+                assert_eq!(msg.text.as_deref(), Some("edited text"));
+            }
+            other => panic!("expected EditedMessage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_kind_channel_post() {
+        let json = json!({
+            "update_id": 201,
+            "channel_post": {
+                "message_id": 77,
+                "chat": {"id": -100_222, "type": "channel", "title": "News"},
+                "date": 1_700_000_000,
+                "text": "Channel announcement"
+            }
+        });
+        let update: Update = serde_json::from_value(json).unwrap();
+        match &update.kind {
+            UpdateKind::ChannelPost(msg) => {
+                assert_eq!(msg.message_id, 77);
+                assert_eq!(msg.chat.chat_type, "channel");
+                assert_eq!(msg.text.as_deref(), Some("Channel announcement"));
+            }
+            other => panic!("expected ChannelPost, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_kind_callback_query_variant() {
+        let json = json!({
+            "update_id": 202,
+            "callback_query": {
+                "id": "cq_update",
+                "from": {"id": 42, "is_bot": false, "first_name": "Frank"},
+                "chat_instance": "ci_val",
+                "data": "btn_press"
+            }
+        });
+        let update: Update = serde_json::from_value(json).unwrap();
+        match &update.kind {
+            UpdateKind::CallbackQuery(cq) => {
+                assert_eq!(cq.id, "cq_update");
+                assert_eq!(cq.data.as_deref(), Some("btn_press"));
+            }
+            other => panic!("expected CallbackQuery, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_kind_unknown_for_unrecognized() {
+        // inline_query is not a recognized variant, should map to Unknown
+        let json = json!({
+            "update_id": 203,
+            "inline_query": {
+                "id": "iq1",
+                "from": {"id": 1, "is_bot": false, "first_name": "X"},
+                "query": "test",
+                "offset": ""
+            }
+        });
+        let update: Update = serde_json::from_value(json).unwrap();
+        assert_eq!(update.update_id, 203);
+        assert!(matches!(update.kind, UpdateKind::Unknown));
+    }
+
+    #[test]
+    fn update_kind_edited_channel_post() {
+        let json = json!({
+            "update_id": 204,
+            "edited_channel_post": {
+                "message_id": 88,
+                "chat": {"id": -100_333, "type": "channel", "title": "EditedChan"},
+                "date": 1_700_000_000,
+                "text": "Corrected post"
+            }
+        });
+        let update: Update = serde_json::from_value(json).unwrap();
+        match &update.kind {
+            UpdateKind::EditedChannelPost(msg) => {
+                assert_eq!(msg.message_id, 88);
+                assert_eq!(msg.text.as_deref(), Some("Corrected post"));
+            }
+            other => panic!("expected EditedChannelPost, got {other:?}"),
+        }
+    }
 }

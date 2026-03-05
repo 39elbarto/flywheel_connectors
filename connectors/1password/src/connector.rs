@@ -653,6 +653,7 @@ mod tests {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
+            #[allow(clippy::case_sensitive_file_extension_comparisons)]
             if cap.ends_with(".read") {
                 let st = op["safety_tier"].as_str().unwrap();
                 assert!(
@@ -764,10 +765,9 @@ mod tests {
             let id = op["id"].as_str().unwrap();
             let cap = op["capability"].as_str().unwrap();
             if id.contains("create") || id.contains("delete") {
-                assert!(
-                    cap.ends_with(".write"),
-                    "write op {id} should have .write capability"
-                );
+                #[allow(clippy::case_sensitive_file_extension_comparisons)]
+                let is_write = cap.ends_with(".write");
+                assert!(is_write, "write op {id} should have .write capability");
             }
         }
     }

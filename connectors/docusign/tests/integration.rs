@@ -12,7 +12,7 @@
 )]
 
 use serde_json::json;
-use wiremock::matchers::{header, method, path, path_regex};
+use wiremock::matchers::{header, method, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use fcp_docusign::connector::DocuSignConnector;

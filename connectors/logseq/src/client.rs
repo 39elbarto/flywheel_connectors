@@ -281,6 +281,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::redundant_clone)]
     fn auth_bearer_clone() {
         let auth = LogseqAuth::BearerToken("tok".into());
         let cloned = auth.clone();
@@ -288,6 +289,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::redundant_clone)]
     fn auth_credential_clone() {
         let auth = LogseqAuth::CredentialId(CredentialId::new());
         let cloned = auth.clone();

@@ -432,10 +432,10 @@ mod tests {
     #[test]
     fn arxiv_categories_filter_by_group() {
         let cats = arxiv_categories();
-        let cs_cats: Vec<_> = cats.iter().filter(|c| c.group == "cs").collect();
-        assert!(cs_cats.len() > 30);
-        let math_cats: Vec<_> = cats.iter().filter(|c| c.group == "math").collect();
-        assert!(math_cats.len() > 20);
+        let cs_cats = cats.iter().filter(|c| c.group == "cs").count();
+        assert!(cs_cats > 30);
+        let math_cats = cats.iter().filter(|c| c.group == "math").count();
+        assert!(math_cats > 20);
     }
 
     #[test]

@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:24ddd24911a479a8e1a94f93b64dd108a2af8f73be2ce18f55e91e6c9b1f9841"
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
 
 [connector]
 id = "fcp.cron"
@@ -74,7 +74,7 @@ type = "array"
 
 [provides.operations."cron.executions.list".network_constraints]
 host_allow = ["localhost.localdomain"]
-port_allow = []
+port_allow = [443]
 ip_allow = []
 cidr_deny = []
 deny_localhost = false
@@ -140,7 +140,7 @@ type = "string"
 
 [provides.operations."cron.schedules.create".network_constraints]
 host_allow = ["localhost.localdomain"]
-port_allow = []
+port_allow = [443]
 ip_allow = []
 cidr_deny = []
 deny_localhost = false
@@ -188,7 +188,7 @@ type = "object"
 
 [provides.operations."cron.schedules.delete".network_constraints]
 host_allow = ["localhost.localdomain"]
-port_allow = []
+port_allow = [443]
 ip_allow = []
 cidr_deny = []
 deny_localhost = false
@@ -231,7 +231,7 @@ type = "array"
 
 [provides.operations."cron.schedules.list".network_constraints]
 host_allow = ["localhost.localdomain"]
-port_allow = []
+port_allow = [443]
 ip_allow = []
 cidr_deny = []
 deny_localhost = false
@@ -280,7 +280,7 @@ type = "string"
 
 [provides.operations."cron.trigger".network_constraints]
 host_allow = ["localhost.localdomain"]
-port_allow = []
+port_allow = [443]
 ip_allow = []
 cidr_deny = []
 deny_localhost = false

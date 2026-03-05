@@ -12,7 +12,7 @@
 )]
 
 use serde_json::json;
-use wiremock::matchers::{method, path, path_regex, query_param_contains};
+use wiremock::matchers::{method, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use fcp_arxiv::connector::ArxivConnector;

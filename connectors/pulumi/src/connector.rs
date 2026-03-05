@@ -642,6 +642,7 @@ mod tests {
         let ops = operations_info();
         for op in ops.as_array().unwrap() {
             let cap = op["capability"].as_str().unwrap();
+            #[allow(clippy::case_sensitive_file_extension_comparisons)]
             if cap.ends_with(".read") {
                 assert_eq!(
                     op["safety_tier"].as_str().unwrap(),

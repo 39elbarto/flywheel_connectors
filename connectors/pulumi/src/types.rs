@@ -117,13 +117,13 @@ mod tests {
             "orgName": "myorg",
             "projectName": "myproject",
             "stackName": "dev",
-            "lastUpdate": 1709_280_000,
+            "lastUpdate": 1_709_280_000,
             "resourceCount": 15,
         }))
         .unwrap();
         assert_eq!(ss.org_name, "myorg");
         assert_eq!(ss.stack_name, "dev");
-        assert_eq!(ss.last_update, Some(1709_280_000));
+        assert_eq!(ss.last_update, Some(1_709_280_000));
         assert_eq!(ss.resource_count, Some(15));
         let re = serde_json::to_value(&ss).unwrap();
         assert_eq!(re["stackName"], "dev");
@@ -146,8 +146,8 @@ mod tests {
     fn deployment_update_roundtrip() {
         let du: DeploymentUpdate = serde_json::from_value(json!({
             "version": 3,
-            "startTime": 1709_280_000,
-            "endTime": 1709_280_120,
+            "startTime": 1_709_280_000,
+            "endTime": 1_709_280_120,
             "result": "succeeded",
             "kind": "update",
             "message": "Updating stack",

@@ -1,5 +1,6 @@
 [package]
-name = "terraform"
+name = "fcp-terraform"
+description = "Terraform Cloud/Enterprise connector for the Flywheel Connector Protocol"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,7 +8,31 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
-[dependencies]
+[lib]
+name = "fcp_terraform"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fcp-terraform"
+path = "src/main.rs"
 
 [lints]
 workspace = true
+
+[dependencies]
+fcp-core = { path = "../../crates/fcp-core" }
+fcp-async-core = { path = "../../crates/fcp-async-core" }
+
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+wiremock.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

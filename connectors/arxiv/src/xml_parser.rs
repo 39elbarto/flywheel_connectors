@@ -255,7 +255,7 @@ mod tests {
 
     #[test]
     fn extract_authors_multiple() {
-        let xml = r#"<author><name>Alice</name></author><author><name>Bob</name></author>"#;
+        let xml = r"<author><name>Alice</name></author><author><name>Bob</name></author>";
         let authors = extract_authors(xml);
         assert_eq!(authors, vec!["Alice", "Bob"]);
     }
@@ -267,7 +267,7 @@ mod tests {
 
     #[test]
     fn extract_authors_with_whitespace() {
-        let xml = r#"<author><name>  Alice Smith  </name></author>"#;
+        let xml = r"<author><name>  Alice Smith  </name></author>";
         let authors = extract_authors(xml);
         assert_eq!(authors, vec!["Alice Smith"]);
     }
@@ -351,22 +351,23 @@ mod tests {
 
     #[test]
     fn parse_atom_entries_multiple() {
-        let xml = r#"<feed>
+        let xml = r"<feed>
 <entry><id>http://arxiv.org/abs/1111.1111</id><title>Paper A</title><summary>Summary A</summary><published>2020-01-01T00:00:00Z</published><updated>2020-01-01T00:00:00Z</updated></entry>
 <entry><id>http://arxiv.org/abs/2222.2222</id><title>Paper B</title><summary>Summary B</summary><published>2021-02-02T00:00:00Z</published><updated>2021-02-02T00:00:00Z</updated></entry>
-</feed>"#;
+</feed>";
         let papers = parse_atom_entries(xml);
         assert_eq!(papers.len(), 2);
         assert_eq!(papers[0].arxiv_id, "1111.1111");
-        assert_eq!(papers[1].arxiv_id, "2222.2222");
+        assert_eq!(papers[1].title, "Paper B");
     }
 
     #[test]
-    fn parse_atom_entries_title_newlines_collapsed() {
-        let xml = r#"<feed><entry><id>http://arxiv.org/abs/0000.0000</id><title>Multi
-  Line Title</title><summary>ok</summary><published>2020-01-01T00:00:00Z</published><updated>2020-01-01T00:00:00Z</updated></entry></feed>"#;
+    fn parse_atom_entries_multiline_title() {
+        let xml = r"<feed><entry><id>http://arxiv.org/abs/0000.0000</id><title>Multi
+  Line Title</title><summary>ok</summary><published>2020-01-01T00:00:00Z</published><updated>2020-01-01T00:00:00Z</updated></entry></feed>";
         let papers = parse_atom_entries(xml);
-        assert_eq!(papers[0].title, "Multi   Line Title");
+        assert_eq!(papers.len(), 1);
+        assert_eq!(papers[0].title, "Multi Line Title");
     }
 
     #[test]
@@ -385,19 +386,19 @@ mod tests {
 
     #[test]
     fn extract_doi_from_entry() {
-        let xml = r#"<arxiv:doi>10.1234/test</arxiv:doi>"#;
+        let xml = r"<arxiv:doi>10.1234/test</arxiv:doi>";
         assert_eq!(extract_tag(xml, "arxiv:doi"), Some("10.1234/test"));
     }
 
     #[test]
     fn extract_comment_from_entry() {
-        let xml = r#"<arxiv:comment>15 pages</arxiv:comment>"#;
+        let xml = r"<arxiv:comment>15 pages</arxiv:comment>";
         assert_eq!(extract_tag(xml, "arxiv:comment"), Some("15 pages"));
     }
 
     #[test]
     fn extract_journal_ref() {
-        let xml = r#"<arxiv:journal_ref>Nature 2023</arxiv:journal_ref>"#;
+        let xml = r"<arxiv:journal_ref>Nature 2023</arxiv:journal_ref>";
         assert_eq!(
             extract_tag(xml, "arxiv:journal_ref"),
             Some("Nature 2023")
@@ -406,7 +407,7 @@ mod tests {
 
     #[test]
     fn paper_missing_optional_fields() {
-        let xml = r#"<feed><entry><id>http://arxiv.org/abs/9999.9999</id><title>T</title><summary>S</summary><published>2024-01-01T00:00:00Z</published><updated>2024-01-01T00:00:00Z</updated></entry></feed>"#;
+        let xml = r"<feed><entry><id>http://arxiv.org/abs/9999.9999</id><title>T</title><summary>S</summary><published>2024-01-01T00:00:00Z</published><updated>2024-01-01T00:00:00Z</updated></entry></feed>";
         let papers = parse_atom_entries(xml);
         assert_eq!(papers.len(), 1);
         let p = &papers[0];

@@ -260,3 +260,175 @@ impl BenchmarkResultExt for BenchmarkResult {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── CborTarget::from mapping ────────────────────────────────────────
+
+    #[test]
+    fn cbor_target_from_schema_hash() {
+        let t: CborTarget = super::super::CborTarget::SchemaHash.into();
+        assert_eq!(t, CborTarget::SchemaHash);
+    }
+
+    #[test]
+    fn cbor_target_from_serialize() {
+        let t: CborTarget = super::super::CborTarget::Serialize.into();
+        assert_eq!(t, CborTarget::Serialize);
+    }
+
+    #[test]
+    fn cbor_target_from_deserialize() {
+        let t: CborTarget = super::super::CborTarget::Deserialize.into();
+        assert_eq!(t, CborTarget::Deserialize);
+    }
+
+    #[test]
+    fn cbor_target_from_all() {
+        let t: CborTarget = super::super::CborTarget::All.into();
+        assert_eq!(t, CborTarget::All);
+    }
+
+    // ── Test data generators ────────────────────────────────────────────
+
+    #[test]
+    fn make_test_schema_fields() {
+        let schema = make_test_schema();
+        assert_eq!(schema.namespace, "fcp.bench");
+        assert_eq!(schema.name, "TestObject");
+        assert_eq!(schema.version, Version::new(1, 0, 0));
+    }
+
+    #[test]
+    fn make_small_object_fields() {
+        let obj = make_small_object();
+        assert_eq!(obj.id, 12345);
+        assert_eq!(obj.name, "benchmark-test");
+        assert!(obj.active);
+    }
+
+    #[test]
+    fn make_medium_object_fields() {
+        let obj = make_medium_object();
+        assert_eq!(obj.id, 12345);
+        assert_eq!(obj.tags.len(), 4);
+        assert_eq!(obj.metadata.len(), 3);
+        assert_eq!(obj.version, 42);
+        assert!(obj.active);
+    }
+
+    // ── Schema hash determinism ─────────────────────────────────────────
+
+    #[test]
+    fn schema_hash_deterministic() {
+        let s1 = make_test_schema();
+        let s2 = make_test_schema();
+        assert_eq!(s1.hash(), s2.hash());
+    }
+
+    // ── Serialization roundtrips ────────────────────────────────────────
+
+    #[test]
+    fn small_object_cbor_roundtrip() {
+        let schema = make_test_schema();
+        let obj = make_small_object();
+        let bytes = CanonicalSerializer::serialize(&obj, &schema).unwrap();
+        let back: SmallObject = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert_eq!(back, obj);
+    }
+
+    #[test]
+    fn medium_object_cbor_roundtrip() {
+        let schema = make_test_schema();
+        let obj = make_medium_object();
+        let bytes = CanonicalSerializer::serialize(&obj, &schema).unwrap();
+        let back: MediumObject = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert_eq!(back, obj);
+    }
+
+    #[test]
+    fn small_object_serialization_deterministic() {
+        let schema = make_test_schema();
+        let obj = make_small_object();
+        let bytes1 = CanonicalSerializer::serialize(&obj, &schema).unwrap();
+        let bytes2 = CanonicalSerializer::serialize(&obj, &schema).unwrap();
+        assert_eq!(bytes1, bytes2);
+    }
+
+    #[test]
+    fn medium_object_serialization_deterministic() {
+        let schema = make_test_schema();
+        let obj = make_medium_object();
+        let bytes1 = CanonicalSerializer::serialize(&obj, &schema).unwrap();
+        let bytes2 = CanonicalSerializer::serialize(&obj, &schema).unwrap();
+        assert_eq!(bytes1, bytes2);
+    }
+
+    // ── run_benchmarks dispatch ─────────────────────────────────────────
+
+    #[test]
+    fn run_benchmarks_schema_hash_returns_one() {
+        let results = run_benchmarks(super::super::CborTarget::SchemaHash, 5, 1);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "cbor-schema-hash");
+    }
+
+    #[test]
+    fn run_benchmarks_serialize_returns_two() {
+        let results = run_benchmarks(super::super::CborTarget::Serialize, 5, 1);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].name, "cbor-serialize-small");
+        assert_eq!(results[1].name, "cbor-serialize-medium");
+    }
+
+    #[test]
+    fn run_benchmarks_deserialize_returns_two() {
+        let results = run_benchmarks(super::super::CborTarget::Deserialize, 5, 1);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].name, "cbor-deserialize-small");
+        assert_eq!(results[1].name, "cbor-deserialize-medium");
+    }
+
+    #[test]
+    fn run_benchmarks_all_returns_five() {
+        let results = run_benchmarks(super::super::CborTarget::All, 5, 1);
+        assert_eq!(results.len(), 5);
+    }
+
+    #[test]
+    fn benchmark_results_have_percentiles() {
+        let results = run_benchmarks(super::super::CborTarget::All, 5, 1);
+        for r in &results {
+            assert!(r.percentiles.is_some(), "missing percentiles for {}", r.name);
+        }
+    }
+
+    #[test]
+    fn benchmark_results_have_targets() {
+        let results = run_benchmarks(super::super::CborTarget::All, 5, 1);
+        for r in &results {
+            assert!(r.targets.is_some(), "missing targets for {}", r.name);
+            assert!(r.passed.is_some(), "missing passed for {}", r.name);
+        }
+    }
+
+    // ── Small/medium serde (JSON) ──────────────────────────────────────
+
+    #[test]
+    fn small_object_json_roundtrip() {
+        let obj = make_small_object();
+        let json = serde_json::to_string(&obj).unwrap();
+        let back: SmallObject = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, obj);
+    }
+
+    #[test]
+    fn medium_object_json_roundtrip() {
+        let obj = make_medium_object();
+        let json = serde_json::to_string(&obj).unwrap();
+        let back: MediumObject = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, obj);
+    }
+}

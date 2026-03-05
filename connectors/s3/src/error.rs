@@ -429,4 +429,445 @@ mod tests {
         let err = S3Error::Unauthorized;
         let _: &dyn std::error::Error = &err;
     }
+
+    #[test]
+    fn error_trait_source_json() {
+        let json_err = serde_json::from_str::<serde_json::Value>("{bad}").unwrap_err();
+        let err = S3Error::Json(json_err);
+        // Json variant wraps a serde_json::Error via #[from], so source should be Some
+        assert!(std::error::Error::source(&err).is_some());
+    }
+
+    #[test]
+    fn error_trait_source_none_for_leaf_variants() {
+        // Leaf variants without #[from] should have no source
+        assert!(std::error::Error::source(&S3Error::Unauthorized).is_none());
+        assert!(std::error::Error::source(&S3Error::NotFound { key: "k".into() }).is_none());
+        assert!(
+            std::error::Error::source(&S3Error::BucketNotFound {
+                bucket: "b".into()
+            })
+            .is_none()
+        );
+        assert!(
+            std::error::Error::source(&S3Error::RateLimited {
+                retry_after_ms: 100
+            })
+            .is_none()
+        );
+        assert!(
+            std::error::Error::source(&S3Error::Api {
+                code: "X".into(),
+                message: "Y".into(),
+                status_code: None,
+            })
+            .is_none()
+        );
+    }
+
+    // ---- Debug format ----
+
+    #[test]
+    fn debug_format_api_error() {
+        let err = S3Error::Api {
+            code: "NoSuchKey".into(),
+            message: "key not found".into(),
+            status_code: Some(404),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Api"));
+        assert!(dbg.contains("NoSuchKey"));
+        assert!(dbg.contains("404"));
+    }
+
+    #[test]
+    fn debug_format_rate_limited() {
+        let err = S3Error::RateLimited {
+            retry_after_ms: 7777,
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("RateLimited"));
+        assert!(dbg.contains("7777"));
+    }
+
+    #[test]
+    fn debug_format_unauthorized() {
+        let dbg = format!("{:?}", S3Error::Unauthorized);
+        assert!(dbg.contains("Unauthorized"));
+    }
+
+    #[test]
+    fn debug_format_not_found() {
+        let err = S3Error::NotFound {
+            key: "deep/path/obj".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("NotFound"));
+        assert!(dbg.contains("deep/path/obj"));
+    }
+
+    #[test]
+    fn debug_format_bucket_not_found() {
+        let err = S3Error::BucketNotFound {
+            bucket: "archive-2026".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("BucketNotFound"));
+        assert!(dbg.contains("archive-2026"));
+    }
+
+    #[test]
+    fn debug_format_json_error() {
+        let json_err = serde_json::from_str::<serde_json::Value>("!!!").unwrap_err();
+        let err = S3Error::Json(json_err);
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Json"));
+    }
+
+    // ---- Display completeness ----
+
+    #[test]
+    fn display_http_error_contains_message() {
+        // We cannot easily construct a reqwest::Error, but we can test via
+        // to_string on the Json variant to ensure Display works for all branches.
+        let json_err = serde_json::from_str::<serde_json::Value>("bad").unwrap_err();
+        let err = S3Error::Json(json_err);
+        let s = err.to_string();
+        assert!(s.contains("JSON error"));
+    }
+
+    #[test]
+    fn display_api_error_includes_code_and_message() {
+        let err = S3Error::Api {
+            code: "SlowDown".into(),
+            message: "Please reduce request rate".into(),
+            status_code: Some(503),
+        };
+        let s = err.to_string();
+        assert!(s.contains("SlowDown"));
+        assert!(s.contains("Please reduce request rate"));
+        assert!(s.contains("S3 API error"));
+    }
+
+    // ---- is_retryable edge cases ----
+
+    #[test]
+    fn is_retryable_api_429() {
+        assert!(
+            S3Error::Api {
+                code: "SlowDown".into(),
+                message: "slow".into(),
+                status_code: Some(429),
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn is_retryable_api_502() {
+        assert!(
+            S3Error::Api {
+                code: "BadGateway".into(),
+                message: "bad gateway".into(),
+                status_code: Some(502),
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn is_retryable_api_599() {
+        assert!(
+            S3Error::Api {
+                code: "Weird".into(),
+                message: "edge".into(),
+                status_code: Some(599),
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn not_retryable_api_none_status() {
+        assert!(
+            !S3Error::Api {
+                code: "Unknown".into(),
+                message: "no status".into(),
+                status_code: None,
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn not_retryable_api_200() {
+        // Technically odd, but the logic is clear: 200 is not in 500..=599|429
+        assert!(
+            !S3Error::Api {
+                code: "OK".into(),
+                message: "ok".into(),
+                status_code: Some(200),
+            }
+            .is_retryable()
+        );
+    }
+
+    // ---- retry_after edge cases ----
+
+    #[test]
+    fn retry_after_zero_ms() {
+        let err = S3Error::RateLimited {
+            retry_after_ms: 0,
+        };
+        assert_eq!(err.retry_after(), Some(Duration::from_millis(0)));
+    }
+
+    #[test]
+    fn retry_after_large_value() {
+        let err = S3Error::RateLimited {
+            retry_after_ms: 3_600_000,
+        };
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn retry_after_api_none() {
+        let err = S3Error::Api {
+            code: "X".into(),
+            message: "Y".into(),
+            status_code: Some(500),
+        };
+        assert_eq!(err.retry_after(), None);
+    }
+
+    #[test]
+    fn retry_after_bucket_not_found_none() {
+        let err = S3Error::BucketNotFound {
+            bucket: "b".into(),
+        };
+        assert_eq!(err.retry_after(), None);
+    }
+
+    #[test]
+    fn retry_after_json_none() {
+        let json_err = serde_json::from_str::<serde_json::Value>("x").unwrap_err();
+        assert_eq!(S3Error::Json(json_err).retry_after(), None);
+    }
+
+    // ---- to_fcp_error edge cases ----
+
+    #[test]
+    fn to_fcp_error_api_none_status_external() {
+        let err = S3Error::Api {
+            code: "WeirdError".into(),
+            message: "something happened".into(),
+            status_code: None,
+        };
+        match err.to_fcp_error() {
+            FcpError::External {
+                service,
+                message,
+                status_code,
+                retryable,
+                ..
+            } => {
+                assert_eq!(service, "s3");
+                assert!(message.contains("WeirdError"));
+                assert!(message.contains("something happened"));
+                assert_eq!(status_code, None);
+                assert!(!retryable);
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_api_200_external() {
+        // Non-auth, non-rate-limit, non-404 status → External
+        let err = S3Error::Api {
+            code: "Weird".into(),
+            message: "odd".into(),
+            status_code: Some(200),
+        };
+        match err.to_fcp_error() {
+            FcpError::External {
+                service,
+                retryable,
+                ..
+            } => {
+                assert_eq!(service, "s3");
+                assert!(!retryable);
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_api_500_is_retryable_in_external() {
+        let err = S3Error::Api {
+            code: "InternalError".into(),
+            message: "crash".into(),
+            status_code: Some(500),
+        };
+        match err.to_fcp_error() {
+            FcpError::External {
+                retryable,
+                retry_after,
+                ..
+            } => {
+                assert!(retryable);
+                // retry_after comes from self.retry_after() which is None for Api
+                assert_eq!(retry_after, None);
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_api_503_retryable() {
+        let err = S3Error::Api {
+            code: "ServiceUnavailable".into(),
+            message: "try again".into(),
+            status_code: Some(503),
+        };
+        match err.to_fcp_error() {
+            FcpError::External { retryable, .. } => assert!(retryable),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_not_found_format() {
+        let err = S3Error::NotFound {
+            key: "path/to/deep/file.bin".into(),
+        };
+        match err.to_fcp_error() {
+            FcpError::ResourceNotFound { resource } => {
+                assert_eq!(resource, "object:path/to/deep/file.bin");
+            }
+            other => panic!("expected ResourceNotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_bucket_not_found_format() {
+        let err = S3Error::BucketNotFound {
+            bucket: "prod-assets".into(),
+        };
+        match err.to_fcp_error() {
+            FcpError::ResourceNotFound { resource } => {
+                assert_eq!(resource, "bucket:prod-assets");
+            }
+            other => panic!("expected ResourceNotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_rate_limited_preserves_ms() {
+        let err = S3Error::RateLimited {
+            retry_after_ms: 12_345,
+        };
+        match err.to_fcp_error() {
+            FcpError::RateLimited {
+                retry_after_ms,
+                violation,
+            } => {
+                assert_eq!(retry_after_ms, 12_345);
+                assert!(violation.is_none());
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_json_contains_original_message() {
+        let json_err =
+            serde_json::from_str::<serde_json::Value>("not valid json at all").unwrap_err();
+        let msg = json_err.to_string();
+        let err = S3Error::Json(json_err);
+        match err.to_fcp_error() {
+            FcpError::Internal { message } => {
+                assert!(message.contains("JSON error"));
+                assert!(message.contains(&msg));
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_http_external_service_s3() {
+        // We can't easily construct a reqwest::Error, but we test
+        // the Api fallback branch with a generic status code instead
+        let err = S3Error::Api {
+            code: "Timeout".into(),
+            message: "request timed out".into(),
+            status_code: Some(504),
+        };
+        match err.to_fcp_error() {
+            FcpError::External { service, .. } => {
+                assert_eq!(service, "s3");
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_api_429_rate_limited_has_fixed_retry() {
+        // The API 429 path uses a hard-coded 30_000ms
+        let err = S3Error::Api {
+            code: "SlowDown".into(),
+            message: "reduce rate".into(),
+            status_code: Some(429),
+        };
+        match err.to_fcp_error() {
+            FcpError::RateLimited {
+                retry_after_ms,
+                violation,
+            } => {
+                assert_eq!(retry_after_ms, 30_000);
+                assert!(violation.is_none());
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_unauthorized_code_is_2001() {
+        match S3Error::Unauthorized.to_fcp_error() {
+            FcpError::Unauthorized { code, message } => {
+                assert_eq!(code, 2001);
+                assert!(message.contains("S3"));
+            }
+            other => panic!("expected Unauthorized, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_api_403_code_is_2001() {
+        let err = S3Error::Api {
+            code: "AccessDenied".into(),
+            message: "forbidden".into(),
+            status_code: Some(403),
+        };
+        match err.to_fcp_error() {
+            FcpError::Unauthorized { code, .. } => assert_eq!(code, 2001),
+            other => panic!("expected Unauthorized, got {other:?}"),
+        }
+    }
+
+    // ---- From<reqwest::Error> via #[from] ----
+    // (We can't easily unit-test this without a real reqwest error,
+    //  but the client.rs integration tests cover it via wiremock.)
+
+    // ---- S3Result alias with question mark ----
+
+    #[test]
+    fn s3_result_question_mark_propagation() {
+        fn inner() -> S3Result<u32> {
+            let r: S3Result<u32> = Err(S3Error::Unauthorized);
+            let _val = r?;
+            Ok(0)
+        }
+        assert!(inner().is_err());
+    }
 }

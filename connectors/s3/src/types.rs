@@ -264,4 +264,668 @@ mod tests {
         assert_eq!(err.code, "NoSuchBucket");
         assert_eq!(err.message, "Bucket not found");
     }
+
+    // ---- ObjectInfo edge cases ----
+
+    #[test]
+    fn object_info_roundtrip_all_none() {
+        let obj = ObjectInfo {
+            key: "".into(),
+            size: 0,
+            last_modified: None,
+            etag: None,
+            storage_class: None,
+        };
+        let json_str = serde_json::to_string(&obj).unwrap();
+        let back: ObjectInfo = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(back.key, "");
+        assert_eq!(back.size, 0);
+        assert!(back.last_modified.is_none());
+        assert!(back.etag.is_none());
+        assert!(back.storage_class.is_none());
+    }
+
+    #[test]
+    fn object_info_from_json_missing_optional_fields() {
+        let json = json!({"key": "test.txt", "size": 42});
+        let obj: ObjectInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(obj.key, "test.txt");
+        assert_eq!(obj.size, 42);
+        assert!(obj.last_modified.is_none());
+        assert!(obj.etag.is_none());
+        assert!(obj.storage_class.is_none());
+    }
+
+    #[test]
+    fn object_info_clone() {
+        let obj = ObjectInfo {
+            key: "clone-me.bin".into(),
+            size: 999,
+            last_modified: Some("2026-03-05T12:00:00Z".into()),
+            etag: Some("\"etag1\"".into()),
+            storage_class: Some("GLACIER".into()),
+        };
+        let cloned = obj.clone();
+        assert_eq!(cloned.key, "clone-me.bin");
+        assert_eq!(cloned.size, 999);
+        assert_eq!(cloned.storage_class.as_deref(), Some("GLACIER"));
+    }
+
+    #[test]
+    fn object_info_debug() {
+        let obj = ObjectInfo {
+            key: "debug.txt".into(),
+            size: 1,
+            last_modified: None,
+            etag: None,
+            storage_class: None,
+        };
+        let dbg = format!("{obj:?}");
+        assert!(dbg.contains("ObjectInfo"));
+        assert!(dbg.contains("debug.txt"));
+    }
+
+    #[test]
+    fn object_info_large_size() {
+        let obj = ObjectInfo {
+            key: "huge.bin".into(),
+            size: u64::MAX,
+            last_modified: None,
+            etag: None,
+            storage_class: None,
+        };
+        let json_str = serde_json::to_string(&obj).unwrap();
+        let back: ObjectInfo = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(back.size, u64::MAX);
+    }
+
+    #[test]
+    fn object_info_skip_serializing_partial() {
+        let obj = ObjectInfo {
+            key: "partial.txt".into(),
+            size: 10,
+            last_modified: Some("2026-01-01T00:00:00Z".into()),
+            etag: None,
+            storage_class: Some("STANDARD_IA".into()),
+        };
+        let json_str = serde_json::to_string(&obj).unwrap();
+        assert!(json_str.contains("last_modified"));
+        assert!(!json_str.contains("etag"));
+        assert!(json_str.contains("storage_class"));
+    }
+
+    #[test]
+    fn object_info_special_chars_in_key() {
+        let obj = ObjectInfo {
+            key: "path/to/my file (1).txt".into(),
+            size: 100,
+            last_modified: None,
+            etag: None,
+            storage_class: None,
+        };
+        let json_str = serde_json::to_string(&obj).unwrap();
+        let back: ObjectInfo = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(back.key, "path/to/my file (1).txt");
+    }
+
+    // ---- BucketInfo edge cases ----
+
+    #[test]
+    fn bucket_info_skip_none_creation_date() {
+        let b = BucketInfo {
+            name: "no-date".into(),
+            creation_date: None,
+        };
+        let json_str = serde_json::to_string(&b).unwrap();
+        assert!(!json_str.contains("creation_date"));
+    }
+
+    #[test]
+    fn bucket_info_from_json_no_creation_date() {
+        let json = json!({"name": "minimal"});
+        let b: BucketInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(b.name, "minimal");
+        assert!(b.creation_date.is_none());
+    }
+
+    #[test]
+    fn bucket_info_clone() {
+        let b = BucketInfo {
+            name: "cloned".into(),
+            creation_date: Some("2026-01-01T00:00:00Z".into()),
+        };
+        let c = b.clone();
+        assert_eq!(c.name, "cloned");
+        assert_eq!(c.creation_date.as_deref(), Some("2026-01-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn bucket_info_debug() {
+        let b = BucketInfo {
+            name: "debug-bucket".into(),
+            creation_date: None,
+        };
+        let dbg = format!("{b:?}");
+        assert!(dbg.contains("BucketInfo"));
+        assert!(dbg.contains("debug-bucket"));
+    }
+
+    // ---- PutObjectResponse edge cases ----
+
+    #[test]
+    fn put_object_response_empty_etag() {
+        let resp = PutObjectResponse { etag: "".into() };
+        let json_str = serde_json::to_string(&resp).unwrap();
+        let back: PutObjectResponse = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(back.etag, "");
+    }
+
+    #[test]
+    fn put_object_response_clone() {
+        let resp = PutObjectResponse {
+            etag: "\"abc\"".into(),
+        };
+        let c = resp.clone();
+        assert_eq!(c.etag, "\"abc\"");
+    }
+
+    #[test]
+    fn put_object_response_debug() {
+        let resp = PutObjectResponse {
+            etag: "\"etag\"".into(),
+        };
+        let dbg = format!("{resp:?}");
+        assert!(dbg.contains("PutObjectResponse"));
+    }
+
+    // ---- GetObjectResponse edge cases ----
+
+    #[test]
+    fn get_object_response_empty_body() {
+        let resp = GetObjectResponse {
+            body: "".into(),
+            content_type: "application/octet-stream".into(),
+        };
+        let json_str = serde_json::to_string(&resp).unwrap();
+        let back: GetObjectResponse = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(back.body, "");
+    }
+
+    #[test]
+    fn get_object_response_clone() {
+        let resp = GetObjectResponse {
+            body: "data".into(),
+            content_type: "text/plain".into(),
+        };
+        let c = resp.clone();
+        assert_eq!(c.body, "data");
+        assert_eq!(c.content_type, "text/plain");
+    }
+
+    #[test]
+    fn get_object_response_debug() {
+        let resp = GetObjectResponse {
+            body: "x".into(),
+            content_type: "text/html".into(),
+        };
+        let dbg = format!("{resp:?}");
+        assert!(dbg.contains("GetObjectResponse"));
+    }
+
+    #[test]
+    fn get_object_response_roundtrip_json() {
+        let json = json!({"body": "SGVsbG8=", "content_type": "image/png"});
+        let resp: GetObjectResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.body, "SGVsbG8=");
+        assert_eq!(resp.content_type, "image/png");
+        let re_json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(re_json["body"], "SGVsbG8=");
+    }
+
+    // ---- HeadObjectResponse edge cases ----
+
+    #[test]
+    fn head_object_response_full_roundtrip() {
+        let resp = HeadObjectResponse {
+            content_type: "application/pdf".into(),
+            content_length: 1_048_576,
+            etag: Some("\"xyz789\"".into()),
+            last_modified: Some("2026-03-05T15:30:00Z".into()),
+        };
+        let json_str = serde_json::to_string(&resp).unwrap();
+        assert!(json_str.contains("etag"));
+        assert!(json_str.contains("last_modified"));
+        let back: HeadObjectResponse = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(back.content_length, 1_048_576);
+        assert_eq!(back.etag.as_deref(), Some("\"xyz789\""));
+    }
+
+    #[test]
+    fn head_object_response_from_json_missing_optionals() {
+        let json = json!({"content_type": "text/plain", "content_length": 0});
+        let resp: HeadObjectResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.content_type, "text/plain");
+        assert_eq!(resp.content_length, 0);
+        assert!(resp.etag.is_none());
+        assert!(resp.last_modified.is_none());
+    }
+
+    #[test]
+    fn head_object_response_clone() {
+        let resp = HeadObjectResponse {
+            content_type: "text/csv".into(),
+            content_length: 42,
+            etag: None,
+            last_modified: None,
+        };
+        let c = resp.clone();
+        assert_eq!(c.content_type, "text/csv");
+        assert_eq!(c.content_length, 42);
+    }
+
+    #[test]
+    fn head_object_response_debug() {
+        let resp = HeadObjectResponse {
+            content_type: "application/json".into(),
+            content_length: 100,
+            etag: Some("\"e\"".into()),
+            last_modified: None,
+        };
+        let dbg = format!("{resp:?}");
+        assert!(dbg.contains("HeadObjectResponse"));
+    }
+
+    // ---- ListObjectsResponse edge cases ----
+
+    #[test]
+    fn list_objects_response_empty_contents() {
+        let resp = ListObjectsResponse {
+            contents: vec![],
+            is_truncated: false,
+        };
+        let json_str = serde_json::to_string(&resp).unwrap();
+        let back: ListObjectsResponse = serde_json::from_str(&json_str).unwrap();
+        assert!(back.contents.is_empty());
+        assert!(!back.is_truncated);
+    }
+
+    #[test]
+    fn list_objects_response_truncated() {
+        let resp = ListObjectsResponse {
+            contents: vec![ObjectInfo {
+                key: "a".into(),
+                size: 1,
+                last_modified: None,
+                etag: None,
+                storage_class: None,
+            }],
+            is_truncated: true,
+        };
+        let json_str = serde_json::to_string(&resp).unwrap();
+        let back: ListObjectsResponse = serde_json::from_str(&json_str).unwrap();
+        assert!(back.is_truncated);
+        assert_eq!(back.contents.len(), 1);
+    }
+
+    #[test]
+    fn list_objects_response_from_json_value() {
+        let json = json!({
+            "contents": [
+                {"key": "x", "size": 10},
+                {"key": "y", "size": 20, "etag": "\"e\""}
+            ],
+            "is_truncated": true
+        });
+        let resp: ListObjectsResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.contents.len(), 2);
+        assert!(resp.is_truncated);
+        assert!(resp.contents[0].etag.is_none());
+        assert_eq!(resp.contents[1].etag.as_deref(), Some("\"e\""));
+    }
+
+    #[test]
+    fn list_objects_response_clone() {
+        let resp = ListObjectsResponse {
+            contents: vec![],
+            is_truncated: false,
+        };
+        let c = resp.clone();
+        assert!(c.contents.is_empty());
+    }
+
+    #[test]
+    fn list_objects_response_debug() {
+        let resp = ListObjectsResponse {
+            contents: vec![],
+            is_truncated: false,
+        };
+        let dbg = format!("{resp:?}");
+        assert!(dbg.contains("ListObjectsResponse"));
+    }
+
+    // ---- ListBucketsResponse edge cases ----
+
+    #[test]
+    fn list_buckets_response_empty() {
+        let json = json!({"buckets": []});
+        let resp: ListBucketsResponse = serde_json::from_value(json).unwrap();
+        assert!(resp.buckets.is_empty());
+    }
+
+    #[test]
+    fn list_buckets_response_with_creation_dates() {
+        let json = json!({
+            "buckets": [
+                {"name": "b1", "creation_date": "2026-01-01T00:00:00Z"},
+                {"name": "b2"}
+            ]
+        });
+        let resp: ListBucketsResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.buckets.len(), 2);
+        assert!(resp.buckets[0].creation_date.is_some());
+        assert!(resp.buckets[1].creation_date.is_none());
+    }
+
+    #[test]
+    fn list_buckets_response_clone() {
+        let resp = ListBucketsResponse { buckets: vec![] };
+        let c = resp.clone();
+        assert!(c.buckets.is_empty());
+    }
+
+    #[test]
+    fn list_buckets_response_debug() {
+        let resp = ListBucketsResponse { buckets: vec![] };
+        let dbg = format!("{resp:?}");
+        assert!(dbg.contains("ListBucketsResponse"));
+    }
+
+    // ---- CreateBucketResponse edge cases ----
+
+    #[test]
+    fn create_bucket_response_not_created() {
+        let resp = CreateBucketResponse {
+            bucket: "exists".into(),
+            created: false,
+        };
+        let json_str = serde_json::to_string(&resp).unwrap();
+        let back: CreateBucketResponse = serde_json::from_str(&json_str).unwrap();
+        assert!(!back.created);
+        assert_eq!(back.bucket, "exists");
+    }
+
+    #[test]
+    fn create_bucket_response_clone() {
+        let resp = CreateBucketResponse {
+            bucket: "new".into(),
+            created: true,
+        };
+        let c = resp.clone();
+        assert_eq!(c.bucket, "new");
+        assert!(c.created);
+    }
+
+    #[test]
+    fn create_bucket_response_debug() {
+        let resp = CreateBucketResponse {
+            bucket: "dbg".into(),
+            created: true,
+        };
+        let dbg = format!("{resp:?}");
+        assert!(dbg.contains("CreateBucketResponse"));
+    }
+
+    // ---- DeleteBucketResponse edge cases ----
+
+    #[test]
+    fn delete_bucket_response_not_deleted() {
+        let resp = DeleteBucketResponse {
+            bucket: "still-there".into(),
+            deleted: false,
+        };
+        let json_str = serde_json::to_string(&resp).unwrap();
+        let back: DeleteBucketResponse = serde_json::from_str(&json_str).unwrap();
+        assert!(!back.deleted);
+    }
+
+    #[test]
+    fn delete_bucket_response_clone() {
+        let resp = DeleteBucketResponse {
+            bucket: "gone".into(),
+            deleted: true,
+        };
+        let c = resp.clone();
+        assert_eq!(c.bucket, "gone");
+        assert!(c.deleted);
+    }
+
+    #[test]
+    fn delete_bucket_response_debug() {
+        let resp = DeleteBucketResponse {
+            bucket: "d".into(),
+            deleted: true,
+        };
+        let dbg = format!("{resp:?}");
+        assert!(dbg.contains("DeleteBucketResponse"));
+    }
+
+    // ---- PresignedUrlResponse edge cases ----
+
+    #[test]
+    fn presigned_url_response_empty_url() {
+        let resp = PresignedUrlResponse { url: "".into() };
+        let json_str = serde_json::to_string(&resp).unwrap();
+        let back: PresignedUrlResponse = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(back.url, "");
+    }
+
+    #[test]
+    fn presigned_url_response_clone() {
+        let resp = PresignedUrlResponse {
+            url: "https://example.com/signed".into(),
+        };
+        let c = resp.clone();
+        assert_eq!(c.url, "https://example.com/signed");
+    }
+
+    #[test]
+    fn presigned_url_response_debug() {
+        let resp = PresignedUrlResponse {
+            url: "https://s3.example.com".into(),
+        };
+        let dbg = format!("{resp:?}");
+        assert!(dbg.contains("PresignedUrlResponse"));
+    }
+
+    // ---- ApiErrorResponse edge cases ----
+
+    #[test]
+    fn api_error_response_clone() {
+        let err = ApiErrorResponse {
+            code: "NoSuchKey".into(),
+            message: "not found".into(),
+        };
+        let c = err.clone();
+        assert_eq!(c.code, "NoSuchKey");
+        assert_eq!(c.message, "not found");
+    }
+
+    #[test]
+    fn api_error_response_debug() {
+        let err = ApiErrorResponse {
+            code: "X".into(),
+            message: "Y".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("ApiErrorResponse"));
+        assert!(dbg.contains("X"));
+    }
+
+    #[test]
+    fn api_error_mixed_case() {
+        // Test that both lowercase "code" and uppercase "Code" alias work
+        let json_lower = json!({"code": "A", "message": "B"});
+        let json_upper = json!({"Code": "A", "Message": "B"});
+        let lower: ApiErrorResponse = serde_json::from_value(json_lower).unwrap();
+        let upper: ApiErrorResponse = serde_json::from_value(json_upper).unwrap();
+        assert_eq!(lower.code, upper.code);
+        assert_eq!(lower.message, upper.message);
+    }
+
+    #[test]
+    fn api_error_empty_strings() {
+        let json = json!({"code": "", "message": ""});
+        let err: ApiErrorResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(err.code, "");
+        assert_eq!(err.message, "");
+    }
+
+    // ---- Deserialization failure tests ----
+
+    #[test]
+    fn object_info_missing_required_key_fails() {
+        let json = json!({"size": 100});
+        let result = serde_json::from_value::<ObjectInfo>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn object_info_missing_required_size_fails() {
+        let json = json!({"key": "test"});
+        let result = serde_json::from_value::<ObjectInfo>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn bucket_info_missing_name_fails() {
+        let json = json!({"creation_date": "2026-01-01"});
+        let result = serde_json::from_value::<BucketInfo>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn put_object_response_missing_etag_fails() {
+        let json = json!({});
+        let result = serde_json::from_value::<PutObjectResponse>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn get_object_response_missing_body_fails() {
+        let json = json!({"content_type": "text/plain"});
+        let result = serde_json::from_value::<GetObjectResponse>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn head_object_response_missing_content_type_fails() {
+        let json = json!({"content_length": 100});
+        let result = serde_json::from_value::<HeadObjectResponse>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn list_objects_response_missing_contents_fails() {
+        let json = json!({"is_truncated": false});
+        let result = serde_json::from_value::<ListObjectsResponse>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn create_bucket_response_missing_bucket_fails() {
+        let json = json!({"created": true});
+        let result = serde_json::from_value::<CreateBucketResponse>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn delete_bucket_response_missing_deleted_fails() {
+        let json = json!({"bucket": "b"});
+        let result = serde_json::from_value::<DeleteBucketResponse>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn presigned_url_response_missing_url_fails() {
+        let json = json!({});
+        let result = serde_json::from_value::<PresignedUrlResponse>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn api_error_response_missing_code_fails() {
+        let json = json!({"message": "oops"});
+        let result = serde_json::from_value::<ApiErrorResponse>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn api_error_response_missing_message_fails() {
+        let json = json!({"code": "X"});
+        let result = serde_json::from_value::<ApiErrorResponse>(json);
+        assert!(result.is_err());
+    }
+
+    // ---- Serialize value structure ----
+
+    #[test]
+    fn object_info_serialized_value_structure() {
+        let obj = ObjectInfo {
+            key: "a.txt".into(),
+            size: 50,
+            last_modified: Some("t".into()),
+            etag: Some("e".into()),
+            storage_class: Some("s".into()),
+        };
+        let val = serde_json::to_value(&obj).unwrap();
+        assert!(val.is_object());
+        assert_eq!(val["key"], "a.txt");
+        assert_eq!(val["size"], 50);
+        assert_eq!(val["last_modified"], "t");
+        assert_eq!(val["etag"], "e");
+        assert_eq!(val["storage_class"], "s");
+    }
+
+    #[test]
+    fn list_objects_response_serialized_value_structure() {
+        let resp = ListObjectsResponse {
+            contents: vec![
+                ObjectInfo {
+                    key: "a".into(),
+                    size: 1,
+                    last_modified: None,
+                    etag: None,
+                    storage_class: None,
+                },
+                ObjectInfo {
+                    key: "b".into(),
+                    size: 2,
+                    last_modified: None,
+                    etag: None,
+                    storage_class: None,
+                },
+            ],
+            is_truncated: true,
+        };
+        let val = serde_json::to_value(&resp).unwrap();
+        assert!(val["contents"].is_array());
+        assert_eq!(val["contents"].as_array().unwrap().len(), 2);
+        assert_eq!(val["is_truncated"], true);
+    }
+
+    // ---- Extra field handling (serde default: ignore unknown) ----
+
+    #[test]
+    fn object_info_ignores_extra_fields() {
+        let json = json!({"key": "x", "size": 1, "extra_field": "ignored"});
+        let obj: ObjectInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(obj.key, "x");
+    }
+
+    #[test]
+    fn bucket_info_ignores_extra_fields() {
+        let json = json!({"name": "b", "region": "us-east-1"});
+        let b: BucketInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(b.name, "b");
+    }
 }

@@ -370,4 +370,193 @@ mod tests {
         assert_eq!(json["contexts"].as_array().unwrap().len(), 2);
         assert!(json["contexts"][1]["active"].as_bool().unwrap());
     }
+
+    // ── test_config validation ──────────────────────────────────────────
+
+    #[test]
+    fn test_config_has_three_contexts() {
+        let config = test_config();
+        assert_eq!(config.contexts.len(), 3);
+    }
+
+    #[test]
+    fn test_config_current_is_staging() {
+        let config = test_config();
+        assert_eq!(config.current_context, "staging");
+    }
+
+    #[test]
+    fn test_config_contains_expected_names() {
+        let config = test_config();
+        assert!(config.contexts.contains_key("prod"));
+        assert!(config.contexts.contains_key("staging"));
+        assert!(config.contexts.contains_key("local"));
+    }
+
+    #[test]
+    fn test_config_prod_has_zone() {
+        let config = test_config();
+        let prod = &config.contexts["prod"];
+        assert_eq!(prod.default_zone.as_deref(), Some("z:work"));
+    }
+
+    #[test]
+    fn test_config_staging_no_zone() {
+        let config = test_config();
+        let staging = &config.contexts["staging"];
+        assert!(staging.default_zone.is_none());
+    }
+
+    #[test]
+    fn test_config_local_unix_socket() {
+        let config = test_config();
+        let local = &config.contexts["local"];
+        assert!(local.endpoint.starts_with("unix://"));
+    }
+
+    // ── BTreeMap ordering ───────────────────────────────────────────────
+
+    #[test]
+    fn test_config_contexts_sorted() {
+        let config = test_config();
+        let names: Vec<&String> = config.contexts.keys().collect();
+        assert_eq!(names, vec!["local", "prod", "staging"]);
+    }
+
+    // ── TOML roundtrip preserves all fields ─────────────────────────────
+
+    #[test]
+    fn test_config_toml_roundtrip_preserves_zones() {
+        let config = test_config();
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let back: ContextConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(
+            back.contexts["prod"].default_zone,
+            config.contexts["prod"].default_zone
+        );
+        assert_eq!(
+            back.contexts["local"].default_zone,
+            config.contexts["local"].default_zone
+        );
+        assert!(back.contexts["staging"].default_zone.is_none());
+    }
+
+    #[test]
+    fn test_config_toml_roundtrip_preserves_endpoints() {
+        let config = test_config();
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let back: ContextConfig = toml::from_str(&toml_str).unwrap();
+        for (name, ctx) in &config.contexts {
+            assert_eq!(back.contexts[name].endpoint, ctx.endpoint);
+        }
+    }
+
+    // ── ContextListOutput edge cases ────────────────────────────────────
+
+    #[test]
+    fn context_list_output_empty_contexts() {
+        let output = ContextListOutput {
+            schema_version: "1.0.0".to_string(),
+            current_context: "none".to_string(),
+            contexts: vec![],
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        let back: ContextListOutput = serde_json::from_str(&json).unwrap();
+        assert!(back.contexts.is_empty());
+    }
+
+    #[test]
+    fn context_summary_skip_serializing_none_zone() {
+        let summary = ContextSummary {
+            name: "test".to_string(),
+            active: false,
+            endpoint: "tcp://test:9000".to_string(),
+            default_zone: None,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        assert!(!json.contains("default_zone"));
+    }
+
+    #[test]
+    fn context_summary_includes_zone_when_present() {
+        let summary = ContextSummary {
+            name: "test".to_string(),
+            active: true,
+            endpoint: "tcp://test:9000".to_string(),
+            default_zone: Some("z:work".to_string()),
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        assert!(json.contains("default_zone"));
+        assert!(json.contains("z:work"));
+    }
+
+    // ── CreateContextArgs ───────────────────────────────────────────────
+
+    #[test]
+    fn create_context_args_debug() {
+        let args = CreateContextArgs {
+            name: "test-ctx".to_string(),
+            endpoint: "tcp://127.0.0.1:9000".to_string(),
+            zone: Some("z:dev".to_string()),
+            identity: None,
+            set_current: false,
+            json: false,
+        };
+        let dbg = format!("{args:?}");
+        assert!(dbg.contains("test-ctx"));
+        assert!(dbg.contains("tcp://127.0.0.1:9000"));
+    }
+
+    #[test]
+    fn create_context_args_all_fields() {
+        let args = CreateContextArgs {
+            name: "full".to_string(),
+            endpoint: "unix:///run/fcp.sock".to_string(),
+            zone: Some("z:owner".to_string()),
+            identity: Some(std::path::PathBuf::from("/keys/node.key")),
+            set_current: true,
+            json: true,
+        };
+        assert!(args.set_current);
+        assert!(args.json);
+        assert_eq!(args.zone.as_deref(), Some("z:owner"));
+    }
+
+    // ── ContextCommands debug ───────────────────────────────────────────
+
+    #[test]
+    fn context_commands_list_debug() {
+        let cmd = ContextCommands::List { json: true };
+        let dbg = format!("{cmd:?}");
+        assert!(dbg.contains("List"));
+    }
+
+    #[test]
+    fn context_commands_use_debug() {
+        let cmd = ContextCommands::Use {
+            name: "prod".to_string(),
+        };
+        let dbg = format!("{cmd:?}");
+        assert!(dbg.contains("prod"));
+    }
+
+    #[test]
+    fn context_commands_delete_debug() {
+        let cmd = ContextCommands::Delete {
+            name: "staging".to_string(),
+        };
+        let dbg = format!("{cmd:?}");
+        assert!(dbg.contains("staging"));
+    }
+
+    #[test]
+    fn context_commands_rename_debug() {
+        let cmd = ContextCommands::Rename {
+            old_name: "old".to_string(),
+            new_name: "new".to_string(),
+        };
+        let dbg = format!("{cmd:?}");
+        assert!(dbg.contains("old"));
+        assert!(dbg.contains("new"));
+    }
 }

@@ -26,8 +26,8 @@
 
 #![forbid(unsafe_code)]
 
-mod codec;
 mod chunk;
+mod codec;
 mod config;
 mod decode;
 mod encode;

@@ -1682,8 +1682,7 @@ mod tests {
 
     #[test]
     fn targeted_repair_request_json_roundtrip() {
-        let r = TargetedRepairRequest::new(ObjectId::from_bytes([6; 32]))
-            .with_esis(vec![10, 20]);
+        let r = TargetedRepairRequest::new(ObjectId::from_bytes([6; 32])).with_esis(vec![10, 20]);
         let json = serde_json::to_string(&r).unwrap();
         let back: TargetedRepairRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(back.esis, vec![10, 20]);
@@ -1691,8 +1690,7 @@ mod tests {
 
     #[test]
     fn targeted_repair_request_debug_clone() {
-        let r = TargetedRepairRequest::new(ObjectId::from_bytes([7; 32]))
-            .with_esis(vec![42]);
+        let r = TargetedRepairRequest::new(ObjectId::from_bytes([7; 32])).with_esis(vec![42]);
         let dbg = format!("{r:?}");
         assert!(dbg.contains("TargetedRepairRequest"));
         assert_eq!(r.esis, vec![42]);

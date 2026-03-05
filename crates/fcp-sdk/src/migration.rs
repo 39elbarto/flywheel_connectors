@@ -853,8 +853,8 @@ mod tests {
 
     #[test]
     fn config_clone() {
-        let config = ConnectorRuntimeConfig::default()
-            .with_request_timeout(Duration::from_secs(77));
+        let config =
+            ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(77));
         let moved = config;
         assert_eq!(moved.request_timeout, Duration::from_secs(77));
     }
@@ -1096,10 +1096,7 @@ mod tests {
             TestError::Transient("oops".into()).to_string(),
             "transient: oops"
         );
-        assert_eq!(
-            TestError::Fatal("bad".into()).to_string(),
-            "fatal: bad"
-        );
+        assert_eq!(TestError::Fatal("bad".into()).to_string(), "fatal: bad");
         assert_eq!(
             TestError::DeadlineExceeded("5s".into()).to_string(),
             "deadline: 5s"
@@ -1142,7 +1139,10 @@ mod tests {
     #[test]
     fn test_error_to_fcp_all_variants() {
         let transient = TestError::Transient("net".into());
-        assert!(matches!(transient.to_fcp_error(), FcpError::Internal { .. }));
+        assert!(matches!(
+            transient.to_fcp_error(),
+            FcpError::Internal { .. }
+        ));
 
         let fatal = TestError::Fatal("auth".into());
         assert!(matches!(fatal.to_fcp_error(), FcpError::Internal { .. }));
@@ -1151,7 +1151,10 @@ mod tests {
         assert!(matches!(deadline.to_fcp_error(), FcpError::External { .. }));
 
         let cancelled = TestError::Cancelled;
-        assert!(matches!(cancelled.to_fcp_error(), FcpError::External { .. }));
+        assert!(matches!(
+            cancelled.to_fcp_error(),
+            FcpError::External { .. }
+        ));
     }
 
     #[test]

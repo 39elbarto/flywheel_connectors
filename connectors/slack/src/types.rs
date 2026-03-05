@@ -254,7 +254,6 @@ pub struct DoctorCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     // ---- Message ----
 
@@ -396,7 +395,8 @@ mod tests {
 
     #[test]
     fn slack_api_response_ok() {
-        let json = r#"{"ok":true,"channel":"C1","ts":"123.456","message":{"text":"hi","ts":"123.456"}}"#;
+        let json =
+            r#"{"ok":true,"channel":"C1","ts":"123.456","message":{"text":"hi","ts":"123.456"}}"#;
         let resp: SlackApiResponse<PostMessageData> = serde_json::from_str(json).unwrap();
         assert!(resp.ok);
         assert!(resp.error.is_none());
@@ -466,7 +466,7 @@ mod tests {
 
     #[test]
     fn response_metadata_empty() {
-        let json = r#"{}"#;
+        let json = "{}";
         let meta: ResponseMetadata = serde_json::from_str(json).unwrap();
         assert!(meta.next_cursor.is_none());
     }

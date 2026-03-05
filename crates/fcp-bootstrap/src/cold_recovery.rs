@@ -298,18 +298,32 @@ mod tests {
         let recovery2 = ColdRecovery::from_phrase(&phrase, Some(&expected)).unwrap();
         // No FingerprintNotVerified, only the 4 standard warnings
         assert_eq!(recovery2.warnings.len(), 4);
-        assert!(!recovery2
-            .warnings
-            .contains(&ColdRecoveryWarning::FingerprintNotVerified));
+        assert!(
+            !recovery2
+                .warnings
+                .contains(&ColdRecoveryWarning::FingerprintNotVerified)
+        );
     }
 
     #[test]
     fn cold_recovery_always_has_standard_warnings() {
         let phrase = test_phrase();
         let recovery = ColdRecovery::from_phrase(&phrase, None).unwrap();
-        assert!(recovery.warnings.contains(&ColdRecoveryWarning::NoAuditHistory));
-        assert!(recovery.warnings.contains(&ColdRecoveryWarning::RevocationStateUnknown));
-        assert!(recovery.warnings.contains(&ColdRecoveryWarning::SingleNodeStart));
+        assert!(
+            recovery
+                .warnings
+                .contains(&ColdRecoveryWarning::NoAuditHistory)
+        );
+        assert!(
+            recovery
+                .warnings
+                .contains(&ColdRecoveryWarning::RevocationStateUnknown)
+        );
+        assert!(
+            recovery
+                .warnings
+                .contains(&ColdRecoveryWarning::SingleNodeStart)
+        );
         assert!(recovery.warnings.contains(&ColdRecoveryWarning::DataLoss));
     }
 
@@ -317,11 +331,27 @@ mod tests {
 
     #[test]
     fn cold_recovery_warning_display() {
-        assert!(ColdRecoveryWarning::NoAuditHistory.to_string().contains("audit"));
-        assert!(ColdRecoveryWarning::RevocationStateUnknown.to_string().contains("revocation"));
-        assert!(ColdRecoveryWarning::SingleNodeStart.to_string().contains("single node"));
+        assert!(
+            ColdRecoveryWarning::NoAuditHistory
+                .to_string()
+                .contains("audit")
+        );
+        assert!(
+            ColdRecoveryWarning::RevocationStateUnknown
+                .to_string()
+                .contains("revocation")
+        );
+        assert!(
+            ColdRecoveryWarning::SingleNodeStart
+                .to_string()
+                .contains("single node")
+        );
         assert!(ColdRecoveryWarning::DataLoss.to_string().contains("lost"));
-        assert!(ColdRecoveryWarning::FingerprintNotVerified.to_string().contains("skipped"));
+        assert!(
+            ColdRecoveryWarning::FingerprintNotVerified
+                .to_string()
+                .contains("skipped")
+        );
     }
 
     // ---- ColdRecoveryError Display ----
@@ -351,7 +381,10 @@ mod tests {
         ];
         for variant in &variants {
             let formatted = format_warning(variant);
-            assert!(!formatted.is_empty(), "format_warning should not be empty for {variant}");
+            assert!(
+                !formatted.is_empty(),
+                "format_warning should not be empty for {variant}"
+            );
         }
     }
 

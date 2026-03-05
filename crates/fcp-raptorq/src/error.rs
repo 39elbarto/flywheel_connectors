@@ -222,8 +222,14 @@ mod tests {
     #[test]
     fn all_chunk_errors_implement_error() {
         fn assert_error<E: std::error::Error>(_: &E) {}
-        assert_error(&ChunkError::MissingChunks { expected: 1, got: 0 });
-        assert_error(&ChunkError::LengthMismatch { expected: 1, got: 0 });
+        assert_error(&ChunkError::MissingChunks {
+            expected: 1,
+            got: 0,
+        });
+        assert_error(&ChunkError::LengthMismatch {
+            expected: 1,
+            got: 0,
+        });
         assert_error(&ChunkError::HashMismatch);
         assert_error(&ChunkError::InvalidChunkIndex { index: 0, count: 0 });
     }
@@ -240,9 +246,15 @@ mod tests {
         fn assert_error<E: std::error::Error>(_: &E) {}
         assert_error(&DecodeError::Timeout);
         assert_error(&DecodeError::Cancelled);
-        assert_error(&DecodeError::InsufficientSymbols { received: 0, needed: 1 });
+        assert_error(&DecodeError::InsufficientSymbols {
+            received: 0,
+            needed: 1,
+        });
         assert_error(&DecodeError::AdmissionDenied { reason: "x".into() });
-        assert_error(&DecodeError::SymbolBufferExceeded { buffered: 1, limit: 0 });
+        assert_error(&DecodeError::SymbolBufferExceeded {
+            buffered: 1,
+            limit: 0,
+        });
         assert_error(&DecodeError::MemoryLimitExceeded { used: 1, limit: 0 });
         assert_error(&DecodeError::InvalidSymbol { reason: "x".into() });
         assert_error(&DecodeError::InvalidTransmissionInfo { reason: "x".into() });
@@ -252,8 +264,14 @@ mod tests {
     #[test]
     fn chunk_error_clone_eq_all_variants() {
         let variants: Vec<ChunkError> = vec![
-            ChunkError::MissingChunks { expected: 5, got: 2 },
-            ChunkError::LengthMismatch { expected: 100, got: 50 },
+            ChunkError::MissingChunks {
+                expected: 5,
+                got: 2,
+            },
+            ChunkError::LengthMismatch {
+                expected: 100,
+                got: 50,
+            },
             ChunkError::HashMismatch,
             ChunkError::InvalidChunkIndex { index: 3, count: 2 },
         ];
@@ -278,13 +296,30 @@ mod tests {
         let variants: Vec<DecodeError> = vec![
             DecodeError::Timeout,
             DecodeError::Cancelled,
-            DecodeError::InsufficientSymbols { received: 10, needed: 20 },
-            DecodeError::AdmissionDenied { reason: "test".into() },
-            DecodeError::SymbolBufferExceeded { buffered: 100, limit: 50 },
-            DecodeError::MemoryLimitExceeded { used: 1000, limit: 500 },
-            DecodeError::InvalidSymbol { reason: "bad".into() },
-            DecodeError::InvalidTransmissionInfo { reason: "oops".into() },
-            DecodeError::Runtime { reason: "fail".into() },
+            DecodeError::InsufficientSymbols {
+                received: 10,
+                needed: 20,
+            },
+            DecodeError::AdmissionDenied {
+                reason: "test".into(),
+            },
+            DecodeError::SymbolBufferExceeded {
+                buffered: 100,
+                limit: 50,
+            },
+            DecodeError::MemoryLimitExceeded {
+                used: 1000,
+                limit: 500,
+            },
+            DecodeError::InvalidSymbol {
+                reason: "bad".into(),
+            },
+            DecodeError::InvalidTransmissionInfo {
+                reason: "oops".into(),
+            },
+            DecodeError::Runtime {
+                reason: "fail".into(),
+            },
         ];
         for v in &variants {
             assert_eq!(v, &v.clone());
@@ -293,8 +328,14 @@ mod tests {
 
     #[test]
     fn chunk_error_inequality() {
-        let err1 = ChunkError::MissingChunks { expected: 10, got: 5 };
-        let err2 = ChunkError::MissingChunks { expected: 10, got: 6 };
+        let err1 = ChunkError::MissingChunks {
+            expected: 10,
+            got: 5,
+        };
+        let err2 = ChunkError::MissingChunks {
+            expected: 10,
+            got: 6,
+        };
         assert_ne!(err1, err2);
 
         let err3 = ChunkError::HashMismatch;
@@ -337,13 +378,22 @@ mod tests {
 
     #[test]
     fn chunk_error_boundary_values() {
-        let err = ChunkError::MissingChunks { expected: 0, got: 0 };
+        let err = ChunkError::MissingChunks {
+            expected: 0,
+            got: 0,
+        };
         assert_eq!(err.to_string(), "missing chunks: expected 0, got 0");
 
-        let err = ChunkError::LengthMismatch { expected: u64::MAX, got: 0 };
+        let err = ChunkError::LengthMismatch {
+            expected: u64::MAX,
+            got: 0,
+        };
         assert!(err.to_string().contains(&u64::MAX.to_string()));
 
-        let err = ChunkError::InvalidChunkIndex { index: usize::MAX, count: 0 };
+        let err = ChunkError::InvalidChunkIndex {
+            index: usize::MAX,
+            count: 0,
+        };
         assert!(err.to_string().contains(&usize::MAX.to_string()));
     }
 
@@ -358,13 +408,19 @@ mod tests {
 
     #[test]
     fn decode_error_display_all_remaining() {
-        let err = DecodeError::InsufficientSymbols { received: 0, needed: 0 };
+        let err = DecodeError::InsufficientSymbols {
+            received: 0,
+            needed: 0,
+        };
         assert_eq!(
             err.to_string(),
             "insufficient symbols: received 0, need approximately 0"
         );
 
-        let err = DecodeError::SymbolBufferExceeded { buffered: 0, limit: 0 };
+        let err = DecodeError::SymbolBufferExceeded {
+            buffered: 0,
+            limit: 0,
+        };
         assert_eq!(
             err.to_string(),
             "symbol buffer limit exceeded: 0 symbols, limit 0"

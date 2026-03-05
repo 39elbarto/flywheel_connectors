@@ -122,39 +122,47 @@ mod tests {
 
     #[test]
     fn display_rate_limited() {
-        assert!(StripeError::RateLimited {
-            retry_after_ms: 1000
-        }
-        .to_string()
-        .contains("Rate limited"));
+        assert!(
+            StripeError::RateLimited {
+                retry_after_ms: 1000
+            }
+            .to_string()
+            .contains("Rate limited")
+        );
     }
 
     #[test]
     fn is_retryable_rate_limited() {
-        assert!(StripeError::RateLimited {
-            retry_after_ms: 1000
-        }
-        .is_retryable());
+        assert!(
+            StripeError::RateLimited {
+                retry_after_ms: 1000
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn is_retryable_api_500() {
-        assert!(StripeError::Api {
-            message: "x".into(),
-            status_code: Some(500),
-            error_type: None,
-        }
-        .is_retryable());
+        assert!(
+            StripeError::Api {
+                message: "x".into(),
+                status_code: Some(500),
+                error_type: None,
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn not_retryable_api_400() {
-        assert!(!StripeError::Api {
-            message: "x".into(),
-            status_code: Some(400),
-            error_type: None,
-        }
-        .is_retryable());
+        assert!(
+            !StripeError::Api {
+                message: "x".into(),
+                status_code: Some(400),
+                error_type: None,
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
@@ -164,10 +172,12 @@ mod tests {
 
     #[test]
     fn not_retryable_not_found() {
-        assert!(!StripeError::NotFound {
-            resource: "x".into()
-        }
-        .is_retryable());
+        assert!(
+            !StripeError::NotFound {
+                resource: "x".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
@@ -201,9 +211,7 @@ mod tests {
             error_type: None,
         };
         match err.to_fcp_error() {
-            FcpError::RateLimited {
-                retry_after_ms, ..
-            } => assert_eq!(retry_after_ms, 60_000),
+            FcpError::RateLimited { retry_after_ms, .. } => assert_eq!(retry_after_ms, 60_000),
             other => panic!("expected RateLimited, got {other:?}"),
         }
     }
@@ -232,9 +240,7 @@ mod tests {
             retry_after_ms: 2000,
         };
         match err.to_fcp_error() {
-            FcpError::RateLimited {
-                retry_after_ms, ..
-            } => assert_eq!(retry_after_ms, 2000),
+            FcpError::RateLimited { retry_after_ms, .. } => assert_eq!(retry_after_ms, 2000),
             other => panic!("expected RateLimited, got {other:?}"),
         }
     }

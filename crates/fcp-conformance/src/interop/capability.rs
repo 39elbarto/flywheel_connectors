@@ -486,7 +486,12 @@ mod tests {
     fn checkpoint_valid_max_seq() {
         let chk_id = "cc".repeat(32);
         assert!(is_checkpoint_valid(&chk_id, u64::MAX, &chk_id, u64::MAX));
-        assert!(!is_checkpoint_valid(&chk_id, u64::MAX, &chk_id, u64::MAX - 1));
+        assert!(!is_checkpoint_valid(
+            &chk_id,
+            u64::MAX,
+            &chk_id,
+            u64::MAX - 1
+        ));
     }
 
     // ─── is_token_valid_at edge cases ───

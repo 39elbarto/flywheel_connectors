@@ -179,7 +179,10 @@ mod tests {
     fn rich_text_serde() {
         let rt = RichText {
             text_type: Some("text".into()),
-            text: Some(TextContent { content: "Hello".into(), link: None }),
+            text: Some(TextContent {
+                content: "Hello".into(),
+                link: None,
+            }),
             plain_text: Some("Hello".into()),
             annotations: None,
         };

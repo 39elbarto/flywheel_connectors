@@ -736,9 +736,7 @@ mod tests {
 
     #[test]
     fn test_sse_event_chained_builder() {
-        let event = SseEvent::new("payload")
-            .with_event("update")
-            .with_id("42");
+        let event = SseEvent::new("payload").with_event("update").with_id("42");
         assert_eq!(event.data, "payload");
         assert_eq!(event.event, Some("update".to_string()));
         assert_eq!(event.id, Some("42".to_string()));
@@ -905,10 +903,7 @@ mod tests {
             config.headers.get("Authorization"),
             Some(&"Bearer abc".to_string())
         );
-        assert_eq!(
-            config.headers.get("X-Custom"),
-            Some(&"value".to_string())
-        );
+        assert_eq!(config.headers.get("X-Custom"), Some(&"value".to_string()));
     }
 
     // ── SseClient tests ──

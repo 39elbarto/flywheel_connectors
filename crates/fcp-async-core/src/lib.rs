@@ -1425,7 +1425,10 @@ mod tests {
         let (sender, receiver) = channel::bounded::<u32>("test", 4);
         drop(receiver);
 
-        let err = sender.send(1).await.expect_err("closed channel should fail");
+        let err = sender
+            .send(1)
+            .await
+            .expect_err("closed channel should fail");
         assert_eq!(err, AsyncError::ChannelClosed);
     }
 
@@ -1444,7 +1447,10 @@ mod tests {
         receiver.close();
 
         // Sender should eventually fail
-        let err = sender.send(1).await.expect_err("closed receiver should fail");
+        let err = sender
+            .send(1)
+            .await
+            .expect_err("closed receiver should fail");
         assert_eq!(err, AsyncError::ChannelClosed);
     }
 
@@ -1526,8 +1532,7 @@ mod tests {
     #[runtime::test]
     async fn sleep_or_shutdown_completes_sleep() {
         let (_tx, mut rx) = channel::watch::channel(false);
-        let result =
-            super::shutdown::sleep_or_shutdown(Duration::from_millis(10), &mut rx).await;
+        let result = super::shutdown::sleep_or_shutdown(Duration::from_millis(10), &mut rx).await;
         assert!(result.is_ok());
     }
 
@@ -1540,20 +1545,18 @@ mod tests {
             tx.send_replace(true);
         });
 
-        let err =
-            super::shutdown::sleep_or_shutdown(Duration::from_secs(60), &mut rx)
-                .await
-                .expect_err("shutdown should cancel sleep");
+        let err = super::shutdown::sleep_or_shutdown(Duration::from_secs(60), &mut rx)
+            .await
+            .expect_err("shutdown should cancel sleep");
         assert_eq!(err, AsyncError::Cancelled);
     }
 
     #[runtime::test]
     async fn sleep_or_shutdown_already_shutdown() {
         let (_tx, mut rx) = channel::watch::channel(true);
-        let err =
-            super::shutdown::sleep_or_shutdown(Duration::from_secs(60), &mut rx)
-                .await
-                .expect_err("already-shutdown should return immediately");
+        let err = super::shutdown::sleep_or_shutdown(Duration::from_secs(60), &mut rx)
+            .await
+            .expect_err("already-shutdown should return immediately");
         assert_eq!(err, AsyncError::Cancelled);
     }
 

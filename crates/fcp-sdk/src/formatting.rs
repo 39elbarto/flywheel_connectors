@@ -442,7 +442,10 @@ mod tests {
     #[test]
     fn validate_html_unclosed_tag() {
         // A truly unclosed tag: `<b` without closing `>`
-        assert!(matches!(validate_html("hello <b"), Err(FormatError::InvalidHtml)));
+        assert!(matches!(
+            validate_html("hello <b"),
+            Err(FormatError::InvalidHtml)
+        ));
     }
 
     #[test]
@@ -458,22 +461,34 @@ mod tests {
 
     #[test]
     fn validate_html_invalid_entity_no_semicolon() {
-        assert!(matches!(validate_html("&amp no semicolon"), Err(FormatError::InvalidHtml)));
+        assert!(matches!(
+            validate_html("&amp no semicolon"),
+            Err(FormatError::InvalidHtml)
+        ));
     }
 
     #[test]
     fn validate_html_invalid_entity_name() {
-        assert!(matches!(validate_html("&bogus;"), Err(FormatError::InvalidHtml)));
+        assert!(matches!(
+            validate_html("&bogus;"),
+            Err(FormatError::InvalidHtml)
+        ));
     }
 
     #[test]
     fn validate_html_entity_too_long() {
-        assert!(matches!(validate_html("&verylonginvalidname;"), Err(FormatError::InvalidHtml)));
+        assert!(matches!(
+            validate_html("&verylonginvalidname;"),
+            Err(FormatError::InvalidHtml)
+        ));
     }
 
     #[test]
     fn validate_html_control_chars_rejected() {
-        assert!(matches!(validate_html("hello\x00world"), Err(FormatError::ControlChars)));
+        assert!(matches!(
+            validate_html("hello\x00world"),
+            Err(FormatError::ControlChars)
+        ));
     }
 
     // ---- validate_markdown ----
@@ -487,12 +502,18 @@ mod tests {
 
     #[test]
     fn validate_markdown_trailing_backslash() {
-        assert!(matches!(validate_markdown("trailing \\"), Err(FormatError::InvalidMarkdown)));
+        assert!(matches!(
+            validate_markdown("trailing \\"),
+            Err(FormatError::InvalidMarkdown)
+        ));
     }
 
     #[test]
     fn validate_markdown_control_chars_rejected() {
-        assert!(matches!(validate_markdown("hello\x01world"), Err(FormatError::ControlChars)));
+        assert!(matches!(
+            validate_markdown("hello\x01world"),
+            Err(FormatError::ControlChars)
+        ));
     }
 
     // ---- Formatter::render_with_fallback ----
@@ -639,7 +660,10 @@ mod tests {
     #[test]
     fn is_markdown_control_negative() {
         for ch in "abcABC123 \n\t".chars() {
-            assert!(!is_markdown_control(ch), "expected {ch:?} not to be control");
+            assert!(
+                !is_markdown_control(ch),
+                "expected {ch:?} not to be control"
+            );
         }
     }
 
@@ -647,47 +671,119 @@ mod tests {
 
     #[test]
     fn classify_parse_errors() {
-        assert_eq!(classify_error_message("Can't parse entities"), ErrorClass::ParseError);
-        assert_eq!(classify_error_message("can't find end of the entity"), ErrorClass::ParseError);
-        assert_eq!(classify_error_message("invalid markdown in text"), ErrorClass::ParseError);
-        assert_eq!(classify_error_message("Markdown parse failed"), ErrorClass::ParseError);
+        assert_eq!(
+            classify_error_message("Can't parse entities"),
+            ErrorClass::ParseError
+        );
+        assert_eq!(
+            classify_error_message("can't find end of the entity"),
+            ErrorClass::ParseError
+        );
+        assert_eq!(
+            classify_error_message("invalid markdown in text"),
+            ErrorClass::ParseError
+        );
+        assert_eq!(
+            classify_error_message("Markdown parse failed"),
+            ErrorClass::ParseError
+        );
     }
 
     #[test]
     fn classify_rate_limits() {
-        assert_eq!(classify_error_message("Rate limit exceeded"), ErrorClass::RateLimit);
-        assert_eq!(classify_error_message("rate-limit reached"), ErrorClass::RateLimit);
-        assert_eq!(classify_error_message("Too many requests"), ErrorClass::RateLimit);
-        assert_eq!(classify_error_message("retry after 30s"), ErrorClass::RateLimit);
-        assert_eq!(classify_error_message("HTTP 429 error"), ErrorClass::RateLimit);
+        assert_eq!(
+            classify_error_message("Rate limit exceeded"),
+            ErrorClass::RateLimit
+        );
+        assert_eq!(
+            classify_error_message("rate-limit reached"),
+            ErrorClass::RateLimit
+        );
+        assert_eq!(
+            classify_error_message("Too many requests"),
+            ErrorClass::RateLimit
+        );
+        assert_eq!(
+            classify_error_message("retry after 30s"),
+            ErrorClass::RateLimit
+        );
+        assert_eq!(
+            classify_error_message("HTTP 429 error"),
+            ErrorClass::RateLimit
+        );
     }
 
     #[test]
     fn classify_transient() {
-        assert_eq!(classify_error_message("Connection timeout"), ErrorClass::Transient);
-        assert_eq!(classify_error_message("request timed out"), ErrorClass::Transient);
-        assert_eq!(classify_error_message("temporarily unavailable"), ErrorClass::Transient);
-        assert_eq!(classify_error_message("service unavailable"), ErrorClass::Transient);
-        assert_eq!(classify_error_message("connection reset by peer"), ErrorClass::Transient);
-        assert_eq!(classify_error_message("connection refused"), ErrorClass::Transient);
-        assert_eq!(classify_error_message("network error occurred"), ErrorClass::Transient);
-        assert_eq!(classify_error_message("HTTP 502 Bad Gateway"), ErrorClass::Transient);
-        assert_eq!(classify_error_message("HTTP 503 Service Unavailable"), ErrorClass::Transient);
-        assert_eq!(classify_error_message("HTTP 504 Gateway Timeout"), ErrorClass::Transient);
-        assert_eq!(classify_error_message("temporary failure"), ErrorClass::Transient);
+        assert_eq!(
+            classify_error_message("Connection timeout"),
+            ErrorClass::Transient
+        );
+        assert_eq!(
+            classify_error_message("request timed out"),
+            ErrorClass::Transient
+        );
+        assert_eq!(
+            classify_error_message("temporarily unavailable"),
+            ErrorClass::Transient
+        );
+        assert_eq!(
+            classify_error_message("service unavailable"),
+            ErrorClass::Transient
+        );
+        assert_eq!(
+            classify_error_message("connection reset by peer"),
+            ErrorClass::Transient
+        );
+        assert_eq!(
+            classify_error_message("connection refused"),
+            ErrorClass::Transient
+        );
+        assert_eq!(
+            classify_error_message("network error occurred"),
+            ErrorClass::Transient
+        );
+        assert_eq!(
+            classify_error_message("HTTP 502 Bad Gateway"),
+            ErrorClass::Transient
+        );
+        assert_eq!(
+            classify_error_message("HTTP 503 Service Unavailable"),
+            ErrorClass::Transient
+        );
+        assert_eq!(
+            classify_error_message("HTTP 504 Gateway Timeout"),
+            ErrorClass::Transient
+        );
+        assert_eq!(
+            classify_error_message("temporary failure"),
+            ErrorClass::Transient
+        );
     }
 
     #[test]
     fn classify_terminal() {
         assert_eq!(classify_error_message("not found"), ErrorClass::Terminal);
-        assert_eq!(classify_error_message("access denied"), ErrorClass::Terminal);
-        assert_eq!(classify_error_message("invalid API key"), ErrorClass::Terminal);
+        assert_eq!(
+            classify_error_message("access denied"),
+            ErrorClass::Terminal
+        );
+        assert_eq!(
+            classify_error_message("invalid API key"),
+            ErrorClass::Terminal
+        );
     }
 
     #[test]
     fn classify_case_insensitive() {
-        assert_eq!(classify_error_message("RATE LIMIT EXCEEDED"), ErrorClass::RateLimit);
-        assert_eq!(classify_error_message("CONNECTION TIMEOUT"), ErrorClass::Transient);
+        assert_eq!(
+            classify_error_message("RATE LIMIT EXCEEDED"),
+            ErrorClass::RateLimit
+        );
+        assert_eq!(
+            classify_error_message("CONNECTION TIMEOUT"),
+            ErrorClass::Transient
+        );
     }
 
     // ---- is_parse_error_message ----

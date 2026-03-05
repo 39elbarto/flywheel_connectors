@@ -158,7 +158,11 @@ mod tests {
         let value = json!({});
         match cache.validate(schema, &value) {
             Err(GraphqlClientError::SchemaValidation { errors, .. }) => {
-                assert!(errors.len() >= 2, "expected at least 2 errors, got {}", errors.len());
+                assert!(
+                    errors.len() >= 2,
+                    "expected at least 2 errors, got {}",
+                    errors.len()
+                );
             }
             other => panic!("expected SchemaValidation error, got {other:?}"),
         }

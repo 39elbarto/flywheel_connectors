@@ -860,28 +860,38 @@ mod tests {
 
     #[test]
     fn ceremony_phase_is_terminal_all_variants() {
-        assert!(!CeremonyPhase::Gathering {
-            joined: vec![],
-            target: 3,
-        }
-        .is_terminal());
-        assert!(!CeremonyPhase::Round1Commitments {
-            commitments: HashMap::new(),
-        }
-        .is_terminal());
-        assert!(!CeremonyPhase::Round2Shares {
-            shares: HashMap::new(),
-        }
-        .is_terminal());
-        assert!(CeremonyPhase::Complete {
-            group_public_key: [0; 32],
-        }
-        .is_terminal());
-        assert!(CeremonyPhase::Failed {
-            reason: "test".into(),
-            at_phase: "test".into(),
-        }
-        .is_terminal());
+        assert!(
+            !CeremonyPhase::Gathering {
+                joined: vec![],
+                target: 3,
+            }
+            .is_terminal()
+        );
+        assert!(
+            !CeremonyPhase::Round1Commitments {
+                commitments: HashMap::new(),
+            }
+            .is_terminal()
+        );
+        assert!(
+            !CeremonyPhase::Round2Shares {
+                shares: HashMap::new(),
+            }
+            .is_terminal()
+        );
+        assert!(
+            CeremonyPhase::Complete {
+                group_public_key: [0; 32],
+            }
+            .is_terminal()
+        );
+        assert!(
+            CeremonyPhase::Failed {
+                reason: "test".into(),
+                at_phase: "test".into(),
+            }
+            .is_terminal()
+        );
     }
 
     // ---- Participant errors ----

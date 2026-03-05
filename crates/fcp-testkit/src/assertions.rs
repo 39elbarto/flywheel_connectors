@@ -583,11 +583,7 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_assert_completes_within() {
-        let result = assert_completes_within(
-            async { 42 },
-            std::time::Duration::from_secs(1),
-        )
-        .await;
+        let result = assert_completes_within(async { 42 }, std::time::Duration::from_secs(1)).await;
         assert_eq!(result, 42);
     }
 }

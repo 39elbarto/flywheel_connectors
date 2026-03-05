@@ -346,9 +346,7 @@ mod tests {
             status_code: Some(429),
         };
         match err.to_fcp_error() {
-            FcpError::RateLimited {
-                retry_after_ms, ..
-            } => {
+            FcpError::RateLimited { retry_after_ms, .. } => {
                 assert_eq!(retry_after_ms, 60_000);
             }
             other => panic!("expected RateLimited, got {other:?}"),
@@ -416,9 +414,7 @@ mod tests {
     fn to_fcp_error_quota_exceeded_24h() {
         let err = YouTubeError::QuotaExceeded;
         match err.to_fcp_error() {
-            FcpError::RateLimited {
-                retry_after_ms, ..
-            } => {
+            FcpError::RateLimited { retry_after_ms, .. } => {
                 assert_eq!(retry_after_ms, 86_400_000);
             }
             other => panic!("expected RateLimited, got {other:?}"),

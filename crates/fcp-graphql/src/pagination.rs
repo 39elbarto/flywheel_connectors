@@ -386,10 +386,8 @@ mod tests {
 
     #[tokio::test]
     async fn paginate_cursor_with_limit() {
-        let result: Result<Vec<i32>, _> = paginate_cursor(
-            None,
-            Some(PageLimit::new(2)),
-            |_cursor| async {
+        let result: Result<Vec<i32>, _> =
+            paginate_cursor(None, Some(PageLimit::new(2)), |_cursor| async {
                 Ok(CursorPage {
                     items: vec![1, 2, 3, 4, 5],
                     page_info: CursorPageInfo {
@@ -398,9 +396,8 @@ mod tests {
                         total_count: None,
                     },
                 })
-            },
-        )
-        .await;
+            })
+            .await;
         assert!(matches!(result, Err(PaginationError::LimitExceeded(_))));
     }
 
@@ -453,18 +450,15 @@ mod tests {
 
     #[tokio::test]
     async fn paginate_offset_with_limit() {
-        let result: Result<Vec<i32>, _> = paginate_offset(
-            0,
-            Some(PageLimit::new(2)),
-            |_offset| async {
+        let result: Result<Vec<i32>, _> =
+            paginate_offset(0, Some(PageLimit::new(2)), |_offset| async {
                 Ok(OffsetPage {
                     items: vec![1, 2, 3, 4, 5],
                     next_offset: Some(5),
                     total_count: None,
                 })
-            },
-        )
-        .await;
+            })
+            .await;
         assert!(matches!(result, Err(PaginationError::LimitExceeded(_))));
     }
 
@@ -553,20 +547,16 @@ mod tests {
     #[tokio::test]
     async fn paginate_cursor_limit_exact_fit() {
         // Page returns exactly max_items — should succeed without error
-        let items = paginate_cursor(
-            None,
-            Some(PageLimit::new(3)),
-            |_cursor| async {
-                Ok(CursorPage {
-                    items: vec![1, 2, 3],
-                    page_info: CursorPageInfo {
-                        has_next_page: false,
-                        end_cursor: None,
-                        total_count: None,
-                    },
-                })
-            },
-        )
+        let items = paginate_cursor(None, Some(PageLimit::new(3)), |_cursor| async {
+            Ok(CursorPage {
+                items: vec![1, 2, 3],
+                page_info: CursorPageInfo {
+                    has_next_page: false,
+                    end_cursor: None,
+                    total_count: None,
+                },
+            })
+        })
         .await
         .unwrap();
         assert_eq!(items, vec![1, 2, 3]);
@@ -574,17 +564,13 @@ mod tests {
 
     #[tokio::test]
     async fn paginate_offset_limit_exact_fit() {
-        let items = paginate_offset(
-            0,
-            Some(PageLimit::new(2)),
-            |_offset| async {
-                Ok(OffsetPage {
-                    items: vec![1, 2],
-                    next_offset: None,
-                    total_count: None,
-                })
-            },
-        )
+        let items = paginate_offset(0, Some(PageLimit::new(2)), |_offset| async {
+            Ok(OffsetPage {
+                items: vec![1, 2],
+                next_offset: None,
+                total_count: None,
+            })
+        })
         .await
         .unwrap();
         assert_eq!(items, vec![1, 2]);

@@ -1588,8 +1588,14 @@ mod tests {
     #[test]
     fn symbol_request_policy_default() {
         let policy = SymbolRequestPolicy::default();
-        assert_eq!(policy.max_unauthenticated_response, DEFAULT_RESPONSE_LIMIT_UNAUTHENTICATED);
-        assert_eq!(policy.max_authenticated_response, DEFAULT_RESPONSE_LIMIT_AUTHENTICATED);
+        assert_eq!(
+            policy.max_unauthenticated_response,
+            DEFAULT_RESPONSE_LIMIT_UNAUTHENTICATED
+        );
+        assert_eq!(
+            policy.max_authenticated_response,
+            DEFAULT_RESPONSE_LIMIT_AUTHENTICATED
+        );
         assert_eq!(policy.min_bootstrap_symbols, DEFAULT_MIN_BOOTSTRAP_SYMBOLS);
         assert!(policy.allow_unauthenticated);
     }

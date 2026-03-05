@@ -228,7 +228,10 @@ mod tests {
     fn balance_serde() {
         let bal = Balance {
             object: "balance".to_string(),
-            available: vec![BalanceAmount { amount: 10000, currency: "usd".to_string() }],
+            available: vec![BalanceAmount {
+                amount: 10000,
+                currency: "usd".to_string(),
+            }],
             pending: vec![],
             livemode: Some(false),
         };
@@ -262,7 +265,9 @@ mod tests {
             event_type: "customer.created".to_string(),
             created: 1_700_000_000,
             livemode: Some(false),
-            data: StripeWebhookEventData { object: json!({"id": "cus_123"}) },
+            data: StripeWebhookEventData {
+                object: json!({"id": "cus_123"}),
+            },
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("\"type\":\"customer.created\""));

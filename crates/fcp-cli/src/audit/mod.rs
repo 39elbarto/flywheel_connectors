@@ -934,7 +934,11 @@ mod tests {
             ..Default::default()
         };
         let events = load_audit_events("z:work", None, 10, &filter).unwrap();
-        assert!(events.iter().all(|e| e.connector_id.as_deref() == Some("fcp.telegram:base:v1")));
+        assert!(
+            events
+                .iter()
+                .all(|e| e.connector_id.as_deref() == Some("fcp.telegram:base:v1"))
+        );
     }
 
     #[test]
@@ -944,7 +948,11 @@ mod tests {
             ..Default::default()
         };
         let events = load_audit_events("z:work", None, 10, &filter).unwrap();
-        assert!(events.iter().all(|e| e.operation_id.as_deref() == Some("send_message")));
+        assert!(
+            events
+                .iter()
+                .all(|e| e.operation_id.as_deref() == Some("send_message"))
+        );
     }
 
     #[test]
@@ -983,7 +991,12 @@ mod tests {
     fn parse_audit_head_rejects_array() {
         let result = parse_audit_head("[1,2,3]");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("single JSON object"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("single JSON object")
+        );
     }
 
     // ---- verify_chain ----

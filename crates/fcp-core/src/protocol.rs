@@ -282,18 +282,30 @@ impl HolderProof {
     ) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(128);
         bytes.extend_from_slice(b"FCP2-HOLDER-PROOF-V1");
-        
+
         let req_bytes = request_id.0.as_bytes();
-        bytes.extend_from_slice(&u32::try_from(req_bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
+        bytes.extend_from_slice(
+            &u32::try_from(req_bytes.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
         bytes.extend_from_slice(req_bytes);
 
         let op_bytes = operation_id.as_str().as_bytes();
-        bytes.extend_from_slice(&u32::try_from(op_bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
+        bytes.extend_from_slice(
+            &u32::try_from(op_bytes.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
         bytes.extend_from_slice(op_bytes);
 
-        bytes.extend_from_slice(&u32::try_from(token_jti.len()).unwrap_or(u32::MAX).to_le_bytes());
+        bytes.extend_from_slice(
+            &u32::try_from(token_jti.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
         bytes.extend_from_slice(token_jti);
-        
+
         bytes
     }
 }

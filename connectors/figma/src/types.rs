@@ -307,7 +307,7 @@ mod tests {
 
     #[test]
     fn error_response_minimal() {
-        let json = r#"{}"#;
+        let json = "{}";
         let resp: FigmaErrorResponse = serde_json::from_str(json).unwrap();
         assert!(resp.status.is_none());
         assert!(resp.message.is_none());
@@ -319,7 +319,10 @@ mod tests {
     fn team_projects_response_serde() {
         let resp = TeamProjectsResponse {
             name: "My Team".to_string(),
-            projects: vec![Project { id: 1, name: "Project A".to_string() }],
+            projects: vec![Project {
+                id: 1,
+                name: "Project A".to_string(),
+            }],
         };
         let json = serde_json::to_string(&resp).unwrap();
         let back: TeamProjectsResponse = serde_json::from_str(&json).unwrap();
@@ -367,7 +370,10 @@ mod tests {
             category: "color".to_string(),
             style_type: "FILL".to_string(),
             value: TokenValue::Color {
-                r: 1.0, g: 0.5, b: 0.0, a: 1.0,
+                r: 1.0,
+                g: 0.5,
+                b: 0.0,
+                a: 1.0,
                 hex: "#ff8000ff".to_string(),
             },
             node_id: Some("1:2".to_string()),
@@ -442,7 +448,9 @@ mod tests {
 
     #[test]
     fn design_token_raw_serde() {
-        let value = TokenValue::Raw { data: json!({"custom": true}) };
+        let value = TokenValue::Raw {
+            data: json!({"custom": true}),
+        };
         let json = serde_json::to_string(&value).unwrap();
         let back: TokenValue = serde_json::from_str(&json).unwrap();
         match back {

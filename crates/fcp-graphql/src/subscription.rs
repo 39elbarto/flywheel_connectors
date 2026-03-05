@@ -708,7 +708,10 @@ mod tests {
     fn subscription_client_with_header() {
         let client = GraphqlSubscriptionClient::new("wss://api.test.com/graphql", "github")
             .with_header("Authorization", "Bearer tok123");
-        assert_eq!(client.headers.get("Authorization").unwrap(), "Bearer tok123");
+        assert_eq!(
+            client.headers.get("Authorization").unwrap(),
+            "Bearer tok123"
+        );
     }
 
     #[test]

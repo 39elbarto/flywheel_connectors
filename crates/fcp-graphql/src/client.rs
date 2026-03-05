@@ -559,7 +559,10 @@ mod tests {
             SchemaValidationMode::ResponseOnly,
             SchemaValidationMode::ResponseOnly
         );
-        assert_ne!(SchemaValidationMode::Off, SchemaValidationMode::ResponseOnly);
+        assert_ne!(
+            SchemaValidationMode::Off,
+            SchemaValidationMode::ResponseOnly
+        );
         assert_ne!(
             SchemaValidationMode::ResponseOnly,
             SchemaValidationMode::VariablesAndResponse
@@ -663,8 +666,8 @@ mod tests {
 
     #[test]
     fn builder_with_service_name() {
-        let builder = GraphqlClientBuilder::new("https://api.test.com/graphql")
-            .with_service_name("github");
+        let builder =
+            GraphqlClientBuilder::new("https://api.test.com/graphql").with_service_name("github");
         assert_eq!(builder.config.service_name, "github");
     }
 
@@ -701,15 +704,15 @@ mod tests {
             max_attempts: 5,
             ..RetryPolicy::default()
         };
-        let builder = GraphqlClientBuilder::new("https://api.test.com/graphql")
-            .with_retry_policy(policy);
+        let builder =
+            GraphqlClientBuilder::new("https://api.test.com/graphql").with_retry_policy(policy);
         assert_eq!(builder.config.retry.max_attempts, 5);
     }
 
     #[test]
     fn builder_with_dedup_in_flight() {
-        let builder = GraphqlClientBuilder::new("https://api.test.com/graphql")
-            .with_dedup_in_flight(true);
+        let builder =
+            GraphqlClientBuilder::new("https://api.test.com/graphql").with_dedup_in_flight(true);
         assert!(builder.config.dedup_in_flight);
     }
 

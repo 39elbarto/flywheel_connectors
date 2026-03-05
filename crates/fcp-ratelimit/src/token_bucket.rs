@@ -167,7 +167,9 @@ impl TokenBucket {
                 let adv_secs = u64::try_from(advance_nanos / 1_000_000_000).unwrap_or(u64::MAX);
                 let adv_nanos = (advance_nanos % 1_000_000_000) as u32;
                 if adv_secs < u64::MAX {
-                    if let Some(advanced) = last_refill.checked_add(Duration::new(adv_secs, adv_nanos)) {
+                    if let Some(advanced) =
+                        last_refill.checked_add(Duration::new(adv_secs, adv_nanos))
+                    {
                         *last_refill = advanced;
                     } else {
                         *last_refill = now;

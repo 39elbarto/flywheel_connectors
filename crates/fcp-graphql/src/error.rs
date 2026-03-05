@@ -266,7 +266,10 @@ mod tests {
 
     #[test]
     fn error_location_serde_roundtrip() {
-        let loc = GraphqlErrorLocation { line: 3, column: 12 };
+        let loc = GraphqlErrorLocation {
+            line: 3,
+            column: 12,
+        };
         let json = serde_json::to_string(&loc).unwrap();
         let back: GraphqlErrorLocation = serde_json::from_str(&json).unwrap();
         assert_eq!(loc, back);
@@ -545,9 +548,7 @@ mod tests {
         };
         let fcp = err.to_fcp_error("api");
         match fcp {
-            FcpError::RateLimited {
-                retry_after_ms, ..
-            } => {
+            FcpError::RateLimited { retry_after_ms, .. } => {
                 assert_eq!(retry_after_ms, 30_000);
             }
             other => panic!("expected RateLimited, got {other:?}"),
@@ -563,9 +564,7 @@ mod tests {
         };
         let fcp = err.to_fcp_error("api");
         match fcp {
-            FcpError::RateLimited {
-                retry_after_ms, ..
-            } => {
+            FcpError::RateLimited { retry_after_ms, .. } => {
                 assert_eq!(retry_after_ms, 1000);
             }
             other => panic!("expected RateLimited, got {other:?}"),
@@ -652,9 +651,7 @@ mod tests {
         let fcp = err.to_fcp_error("github");
         match fcp {
             FcpError::External {
-                message,
-                retryable,
-                ..
+                message, retryable, ..
             } => {
                 assert!(message.contains("field not found"));
                 assert!(!retryable);
@@ -712,9 +709,7 @@ mod tests {
         let fcp = err.to_fcp_error("svc");
         match fcp {
             FcpError::External {
-                message,
-                retryable,
-                ..
+                message, retryable, ..
             } => {
                 assert!(message.contains("5 attempts"));
                 assert!(!retryable);

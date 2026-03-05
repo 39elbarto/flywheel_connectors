@@ -471,14 +471,14 @@ mod tests {
             ..UsageTelemetryConfig::default()
         };
         let store = CapabilityUsageStore::new(config);
-        
+
         let first = sample_event(CapabilityUsageOutcome::Allow, 10);
         assert!(store.record(&first));
-        
+
         // Same key, should update even though map is at max_entries
         let second = sample_event(CapabilityUsageOutcome::Allow, 20);
         assert!(store.record(&second));
-        
+
         // Different key, should be rejected because map is full
         let different = event_for(
             ZoneId::private(),
@@ -489,7 +489,7 @@ mod tests {
             30,
         );
         assert!(!store.record(&different));
-        
+
         let snapshot = store.snapshot();
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].total, 2);
@@ -737,11 +737,7 @@ mod tests {
 
     #[test]
     fn empty_aggregates_produces_empty_report() {
-        let report = recommend_capabilities(
-            &[],
-            100,
-            RecommendationConfig::default(),
-        );
+        let report = recommend_capabilities(&[], 100, RecommendationConfig::default());
         assert!(report.recommendations.is_empty());
         assert!(report.risk_summaries.is_empty());
         assert_eq!(report.generated_at, 100);
@@ -783,7 +779,9 @@ mod tests {
         let report = recommend_capabilities(
             &aggregates,
             100,
-            RecommendationConfig { unused_after_secs: 50 },
+            RecommendationConfig {
+                unused_after_secs: 50,
+            },
         );
 
         let kept = report.by_suggestion(CapabilitySuggestionKind::Keep);
@@ -816,7 +814,9 @@ mod tests {
         let report = recommend_capabilities(
             &[aggregate],
             100,
-            RecommendationConfig { unused_after_secs: 50 },
+            RecommendationConfig {
+                unused_after_secs: 50,
+            },
         );
 
         assert_eq!(
@@ -929,13 +929,23 @@ mod tests {
         let report = recommend_capabilities(
             &[work_agg, priv_agg],
             100,
-            RecommendationConfig { unused_after_secs: 50 },
+            RecommendationConfig {
+                unused_after_secs: 50,
+            },
         );
 
         assert_eq!(report.risk_summaries.len(), 2);
-        let work_zone = report.risk_summaries.iter().find(|s| s.zone_id == ZoneId::WORK).unwrap();
+        let work_zone = report
+            .risk_summaries
+            .iter()
+            .find(|s| s.zone_id == ZoneId::WORK)
+            .unwrap();
         assert_eq!(work_zone.safe, 3);
-        let priv_zone = report.risk_summaries.iter().find(|s| s.zone_id == ZoneId::PRIVATE).unwrap();
+        let priv_zone = report
+            .risk_summaries
+            .iter()
+            .find(|s| s.zone_id == ZoneId::PRIVATE)
+            .unwrap();
         assert_eq!(priv_zone.forbidden, 2);
     }
 
@@ -1097,7 +1107,9 @@ mod tests {
         let report = recommend_capabilities(
             &[aggregate],
             100,
-            RecommendationConfig { unused_after_secs: 50 },
+            RecommendationConfig {
+                unused_after_secs: 50,
+            },
         );
         assert_eq!(
             report.recommendations[0].suggestion,
@@ -1127,7 +1139,9 @@ mod tests {
         let report = recommend_capabilities(
             &[aggregate],
             100,
-            RecommendationConfig { unused_after_secs: 50 },
+            RecommendationConfig {
+                unused_after_secs: 50,
+            },
         );
         assert_eq!(
             report.recommendations[0].suggestion,
@@ -1140,9 +1154,21 @@ mod tests {
         let tiers = [
             (SafetyTier::Safe, "fcp.s:request-response:1", "fcp.s.read"),
             (SafetyTier::Risky, "fcp.r:request-response:1", "fcp.r.read"),
-            (SafetyTier::Dangerous, "fcp.d:request-response:1", "fcp.d.read"),
-            (SafetyTier::Critical, "fcp.c:request-response:1", "fcp.c.read"),
-            (SafetyTier::Forbidden, "fcp.f:request-response:1", "fcp.f.read"),
+            (
+                SafetyTier::Dangerous,
+                "fcp.d:request-response:1",
+                "fcp.d.read",
+            ),
+            (
+                SafetyTier::Critical,
+                "fcp.c:request-response:1",
+                "fcp.c.read",
+            ),
+            (
+                SafetyTier::Forbidden,
+                "fcp.f:request-response:1",
+                "fcp.f.read",
+            ),
         ];
 
         let aggregates: Vec<CapabilityUsageAggregate> = tiers
@@ -1166,7 +1192,9 @@ mod tests {
         let report = recommend_capabilities(
             &aggregates,
             100,
-            RecommendationConfig { unused_after_secs: 50 },
+            RecommendationConfig {
+                unused_after_secs: 50,
+            },
         );
 
         assert_eq!(report.risk_summaries.len(), 1);
@@ -1195,23 +1223,27 @@ mod tests {
 
     #[test]
     fn by_suggestion_empty_report() {
-        let report = recommend_capabilities(
-            &[],
-            100,
-            RecommendationConfig::default(),
+        let report = recommend_capabilities(&[], 100, RecommendationConfig::default());
+        assert!(
+            report
+                .by_suggestion(CapabilitySuggestionKind::Keep)
+                .is_empty()
         );
-        assert!(report.by_suggestion(CapabilitySuggestionKind::Keep).is_empty());
-        assert!(report.by_suggestion(CapabilitySuggestionKind::RemoveUnused).is_empty());
-        assert!(report.by_suggestion(CapabilitySuggestionKind::ReviewRisky).is_empty());
+        assert!(
+            report
+                .by_suggestion(CapabilitySuggestionKind::RemoveUnused)
+                .is_empty()
+        );
+        assert!(
+            report
+                .by_suggestion(CapabilitySuggestionKind::ReviewRisky)
+                .is_empty()
+        );
     }
 
     #[test]
     fn empty_report_summary() {
-        let report = recommend_capabilities(
-            &[],
-            100,
-            RecommendationConfig::default(),
-        );
+        let report = recommend_capabilities(&[], 100, RecommendationConfig::default());
         let summary = report.summary();
         assert_eq!(summary.total, 0);
         assert_eq!(summary.keep, 0);

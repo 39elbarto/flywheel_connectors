@@ -122,30 +122,36 @@ mod tests {
 
     #[test]
     fn is_retryable_rate_limit() {
-        assert!(GoogleAiError::RateLimit {
-            retry_after_ms: 1000
-        }
-        .is_retryable());
+        assert!(
+            GoogleAiError::RateLimit {
+                retry_after_ms: 1000
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn is_retryable_api_500() {
-        assert!(GoogleAiError::Api {
-            message: "x".into(),
-            status_code: Some(500),
-            error_type: None,
-        }
-        .is_retryable());
+        assert!(
+            GoogleAiError::Api {
+                message: "x".into(),
+                status_code: Some(500),
+                error_type: None,
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn not_retryable_api_400() {
-        assert!(!GoogleAiError::Api {
-            message: "x".into(),
-            status_code: Some(400),
-            error_type: None,
-        }
-        .is_retryable());
+        assert!(
+            !GoogleAiError::Api {
+                message: "x".into(),
+                status_code: Some(400),
+                error_type: None,
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
@@ -163,10 +169,7 @@ mod tests {
 
     #[test]
     fn retry_after_other_none() {
-        assert_eq!(
-            GoogleAiError::InvalidConfig("x".into()).retry_after(),
-            None
-        );
+        assert_eq!(GoogleAiError::InvalidConfig("x".into()).retry_after(), None);
     }
 
     #[test]
@@ -187,9 +190,7 @@ mod tests {
             error_type: None,
         };
         match err.to_fcp_error() {
-            FcpError::RateLimited {
-                retry_after_ms, ..
-            } => assert_eq!(retry_after_ms, 60_000),
+            FcpError::RateLimited { retry_after_ms, .. } => assert_eq!(retry_after_ms, 60_000),
             other => panic!("expected RateLimited, got {other:?}"),
         }
     }
@@ -230,9 +231,7 @@ mod tests {
             retry_after_ms: 2000,
         };
         match err.to_fcp_error() {
-            FcpError::RateLimited {
-                retry_after_ms, ..
-            } => assert_eq!(retry_after_ms, 2000),
+            FcpError::RateLimited { retry_after_ms, .. } => assert_eq!(retry_after_ms, 2000),
             other => panic!("expected RateLimited, got {other:?}"),
         }
     }

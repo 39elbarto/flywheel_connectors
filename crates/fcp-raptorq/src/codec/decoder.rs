@@ -11,7 +11,7 @@
 //! - Tie-breaking rules are explicit (lowest column index wins)
 //! - Same received symbols in same order produce identical decode results
 
-use super::gf256::{gf256_addmul_slice, gf256_mul_slice, Gf256};
+use super::gf256::{Gf256, gf256_addmul_slice, gf256_mul_slice};
 use super::systematic::{ConstraintMatrix, SystematicParams};
 
 use std::collections::{BTreeSet, VecDeque};
@@ -2515,10 +2515,7 @@ mod tests {
     #[test]
     fn equation_merge_deduplicates_and_sorts() {
         // Two entries for the same column should merge (XOR coefficients)
-        let eq = Equation::new(
-            vec![3, 1, 3],
-            vec![Gf256::ONE, Gf256::new(5), Gf256::ONE],
-        );
+        let eq = Equation::new(vec![3, 1, 3], vec![Gf256::ONE, Gf256::new(5), Gf256::ONE]);
         // col 3: ONE + ONE = ZERO (removed), col 1: 5
         assert_eq!(eq.degree(), 1);
         assert_eq!(eq.terms[0].0, 1);
@@ -2527,7 +2524,10 @@ mod tests {
 
     #[test]
     fn equation_coef_returns_correct_coefficient() {
-        let eq = Equation::new(vec![0, 5, 10], vec![Gf256::ONE, Gf256::new(7), Gf256::new(3)]);
+        let eq = Equation::new(
+            vec![0, 5, 10],
+            vec![Gf256::ONE, Gf256::new(7), Gf256::new(3)],
+        );
         assert_eq!(eq.coef(0), Gf256::ONE);
         assert_eq!(eq.coef(5), Gf256::new(7));
         assert_eq!(eq.coef(10), Gf256::new(3));

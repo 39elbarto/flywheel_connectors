@@ -180,7 +180,10 @@ mod tests {
 
     #[test]
     fn click_result_serde() {
-        let result = ClickResult { clicked: true, navigation_url: None };
+        let result = ClickResult {
+            clicked: true,
+            navigation_url: None,
+        };
         let json = serde_json::to_string(&result).unwrap();
         let back: ClickResult = serde_json::from_str(&json).unwrap();
         assert!(back.clicked);
@@ -188,7 +191,10 @@ mod tests {
 
     #[test]
     fn form_result_serde() {
-        let result = FormResult { filled_count: 3, submitted: Some(true) };
+        let result = FormResult {
+            filled_count: 3,
+            submitted: Some(true),
+        };
         let json = serde_json::to_string(&result).unwrap();
         let back: FormResult = serde_json::from_str(&json).unwrap();
         assert_eq!(back.filled_count, 3);

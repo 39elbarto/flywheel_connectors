@@ -114,7 +114,8 @@ mod tests {
 
     #[test]
     fn oti_max_values() {
-        let oti = ObjectTransmissionInformation::new(u64::MAX, u16::MAX, u8::MAX, u16::MAX, u8::MAX);
+        let oti =
+            ObjectTransmissionInformation::new(u64::MAX, u16::MAX, u8::MAX, u16::MAX, u8::MAX);
         assert_eq!(oti.transfer_length(), u64::MAX);
         assert_eq!(oti.symbol_size(), u16::MAX);
         assert_eq!(oti.source_blocks(), u8::MAX);

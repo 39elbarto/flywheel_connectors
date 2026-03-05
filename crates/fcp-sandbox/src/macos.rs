@@ -573,10 +573,7 @@ mod tests {
     #[test]
     fn test_generate_profile_multiple_writable_paths() {
         let mut policy = test_policy();
-        policy.writable_paths = vec![
-            PathBuf::from("/tmp/cache"),
-            PathBuf::from("/tmp/logs"),
-        ];
+        policy.writable_paths = vec![PathBuf::from("/tmp/cache"), PathBuf::from("/tmp/logs")];
         let profile = MacOsSandbox::generate_profile(&policy);
         assert!(profile.contains("/tmp/cache"));
         assert!(profile.contains("/tmp/logs"));

@@ -694,24 +694,35 @@ mod tests {
         let e = ReplayError::UnknownTopic { topic: "t".into() };
         assert_eq!(e.to_string(), "unknown topic 't'");
 
-        let e = ReplayError::InvalidCursor { cursor: "bad".into() };
+        let e = ReplayError::InvalidCursor {
+            cursor: "bad".into(),
+        };
         assert_eq!(e.to_string(), "invalid cursor 'bad'");
 
-        let e = ReplayError::CursorStale { cursor_seq: 5, oldest_seq: 10 };
+        let e = ReplayError::CursorStale {
+            cursor_seq: 5,
+            oldest_seq: 10,
+        };
         assert!(e.to_string().contains('5'));
         assert!(e.to_string().contains("10"));
     }
 
     #[test]
     fn ack_result_debug() {
-        let result = AckResult { acked: vec![1], missing: vec![2] };
+        let result = AckResult {
+            acked: vec![1],
+            missing: vec![2],
+        };
         let debug = format!("{result:?}");
         assert!(debug.contains("AckResult"));
     }
 
     #[test]
     fn nack_result_debug() {
-        let result = NackResult { redeliver: vec![], missing: vec![1] };
+        let result = NackResult {
+            redeliver: vec![],
+            missing: vec![1],
+        };
         let debug = format!("{result:?}");
         assert!(debug.contains("NackResult"));
     }
@@ -797,8 +808,11 @@ mod tests {
         let nack = EventNack::new("t", vec![0], "retry");
         let result = manager.handle_nack(&nack);
         // seq 0 should be trimmed (no pending ack holding it)
-        assert!(result.redeliver.is_empty() || result.redeliver[0].seq != 0
-            || result.missing.contains(&0));
+        assert!(
+            result.redeliver.is_empty()
+                || result.redeliver[0].seq != 0
+                || result.missing.contains(&0)
+        );
     }
 
     #[test]
@@ -880,7 +894,10 @@ mod tests {
 
     #[test]
     fn replay_error_clone() {
-        let e = ReplayError::CursorStale { cursor_seq: 5, oldest_seq: 10 };
+        let e = ReplayError::CursorStale {
+            cursor_seq: 5,
+            oldest_seq: 10,
+        };
         let cloned = e.clone();
         assert_eq!(cloned.to_string(), e.to_string());
     }

@@ -1180,7 +1180,10 @@ mod tests {
 
     #[test]
     fn referenced_tweet_type_rename() {
-        let rt = ReferencedTweet { ref_type: "quoted".into(), id: "999".into() };
+        let rt = ReferencedTweet {
+            ref_type: "quoted".into(),
+            id: "999".into(),
+        };
         let json_str = serde_json::to_string(&rt).unwrap();
         assert!(json_str.contains("\"type\":\"quoted\""));
         let back: ReferencedTweet = serde_json::from_str(&json_str).unwrap();
@@ -1240,7 +1243,10 @@ mod tests {
 
     #[test]
     fn place_geo_type_rename() {
-        let geo = PlaceGeo { geo_type: "Feature".into(), bbox: vec![-122.5, 37.7, -122.3, 37.8] };
+        let geo = PlaceGeo {
+            geo_type: "Feature".into(),
+            bbox: vec![-122.5, 37.7, -122.3, 37.8],
+        };
         let json_str = serde_json::to_string(&geo).unwrap();
         assert!(json_str.contains("\"type\":\"Feature\""));
     }
@@ -1332,7 +1338,9 @@ mod tests {
         let req = CreateDmConversationRequest {
             conversation_type: "Group".into(),
             participant_ids: vec!["u1".into(), "u2".into()],
-            message: SendDmRequest { text: "Hi group!".into() },
+            message: SendDmRequest {
+                text: "Hi group!".into(),
+            },
         };
         let json_str = serde_json::to_string(&req).unwrap();
         assert!(json_str.contains("\"conversation_type\":\"Group\""));
@@ -1366,7 +1374,11 @@ mod tests {
 
     #[test]
     fn stream_rule_skip_none() {
-        let rule = StreamRule { id: None, value: "rust lang".into(), tag: None };
+        let rule = StreamRule {
+            id: None,
+            value: "rust lang".into(),
+            tag: None,
+        };
         let json_str = serde_json::to_string(&rule).unwrap();
         assert!(!json_str.contains("\"tag\""));
     }

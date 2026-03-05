@@ -1394,8 +1394,14 @@ mod tests {
                 },
                 "amplification violation",
             ),
-            (AdmissionError::AuthenticationRequired, "authentication required"),
-            (AdmissionError::ProofOfNeedRequired, "proof-of-need required"),
+            (
+                AdmissionError::AuthenticationRequired,
+                "authentication required",
+            ),
+            (
+                AdmissionError::ProofOfNeedRequired,
+                "proof-of-need required",
+            ),
             (
                 AdmissionError::ObjectQuarantined {
                     object_id: "abc123".into(),
@@ -1520,7 +1526,11 @@ mod tests {
         ];
         for (err, code, retryable) in &test_cases {
             assert_eq!(err.error_code(), *code, "Wrong code for {err:?}");
-            assert_eq!(err.is_retryable(), *retryable, "Wrong retryable for {err:?}");
+            assert_eq!(
+                err.is_retryable(),
+                *retryable,
+                "Wrong retryable for {err:?}"
+            );
         }
     }
 

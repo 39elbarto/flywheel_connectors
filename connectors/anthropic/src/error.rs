@@ -191,48 +191,58 @@ mod tests {
 
     #[test]
     fn is_retryable_rate_limited() {
-        assert!(AnthropicError::RateLimited {
-            retry_after_ms: 1000
-        }
-        .is_retryable());
+        assert!(
+            AnthropicError::RateLimited {
+                retry_after_ms: 1000
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn is_retryable_overloaded() {
-        assert!(AnthropicError::Overloaded {
-            retry_after_ms: 1000
-        }
-        .is_retryable());
+        assert!(
+            AnthropicError::Overloaded {
+                retry_after_ms: 1000
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn is_retryable_api_500() {
-        assert!(AnthropicError::Api {
-            error_type: "server_error".into(),
-            message: "internal".into(),
-            status_code: Some(500),
-        }
-        .is_retryable());
+        assert!(
+            AnthropicError::Api {
+                error_type: "server_error".into(),
+                message: "internal".into(),
+                status_code: Some(500),
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn is_retryable_api_429() {
-        assert!(AnthropicError::Api {
-            error_type: "rate_limit_error".into(),
-            message: "too many".into(),
-            status_code: Some(429),
-        }
-        .is_retryable());
+        assert!(
+            AnthropicError::Api {
+                error_type: "rate_limit_error".into(),
+                message: "too many".into(),
+                status_code: Some(429),
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn not_retryable_api_400() {
-        assert!(!AnthropicError::Api {
-            error_type: "invalid_request_error".into(),
-            message: "bad".into(),
-            status_code: Some(400),
-        }
-        .is_retryable());
+        assert!(
+            !AnthropicError::Api {
+                error_type: "invalid_request_error".into(),
+                message: "bad".into(),
+                status_code: Some(400),
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
@@ -242,10 +252,12 @@ mod tests {
 
     #[test]
     fn not_retryable_context_length() {
-        assert!(!AnthropicError::ContextLengthExceeded {
-            message: "x".into()
-        }
-        .is_retryable());
+        assert!(
+            !AnthropicError::ContextLengthExceeded {
+                message: "x".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
@@ -312,9 +324,7 @@ mod tests {
             status_code: Some(429),
         };
         match err.to_fcp_error() {
-            FcpError::RateLimited {
-                retry_after_ms, ..
-            } => assert_eq!(retry_after_ms, 30_000),
+            FcpError::RateLimited { retry_after_ms, .. } => assert_eq!(retry_after_ms, 30_000),
             other => panic!("expected RateLimited, got {other:?}"),
         }
     }

@@ -1136,7 +1136,11 @@ mod tests {
         let suite = DynamicSuite::minimal(make_handshake());
         let result = run_dynamic_checks(&mut connector, suite).await;
         for finding in &result.findings {
-            assert!(!finding.message.is_empty(), "finding {} has empty message", finding.check);
+            assert!(
+                !finding.message.is_empty(),
+                "finding {} has empty message",
+                finding.check
+            );
         }
     }
 }

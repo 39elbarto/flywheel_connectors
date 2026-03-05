@@ -1204,8 +1204,14 @@ mod tests {
 
     #[test]
     fn rate_limit_enforcement_labels() {
-        assert_eq!(rate_limit_enforcement_label(RateLimitEnforcement::Hard), "hard");
-        assert_eq!(rate_limit_enforcement_label(RateLimitEnforcement::Soft), "soft");
+        assert_eq!(
+            rate_limit_enforcement_label(RateLimitEnforcement::Hard),
+            "hard"
+        );
+        assert_eq!(
+            rate_limit_enforcement_label(RateLimitEnforcement::Soft),
+            "soft"
+        );
         assert_eq!(
             rate_limit_enforcement_label(RateLimitEnforcement::Advisory),
             "advisory"
@@ -1235,11 +1241,12 @@ mod tests {
     fn list_output_work_zone_has_two_connectors() {
         let output = simulate_list_output(Some("z:work"));
         assert_eq!(output.by_zone[0].connectors.len(), 2);
-        assert!(output
-            .by_zone[0]
-            .connectors
-            .iter()
-            .any(|c| c.id == "fcp.openai:ai:v1"));
+        assert!(
+            output.by_zone[0]
+                .connectors
+                .iter()
+                .any(|c| c.id == "fcp.openai:ai:v1")
+        );
     }
 
     // ---- simulate_connector_info details ----
@@ -1265,7 +1272,11 @@ mod tests {
         let info = simulate_connector_info("fcp.twitter:social:v1").unwrap();
         assert_eq!(info.sandbox.profile, "strict");
         assert!(info.sandbox.network_access);
-        assert!(info.sandbox.allowed_hosts.contains(&"api.twitter.com".to_string()));
+        assert!(
+            info.sandbox
+                .allowed_hosts
+                .contains(&"api.twitter.com".to_string())
+        );
     }
 
     #[test]
@@ -1282,8 +1293,16 @@ mod tests {
     fn introspect_operations_have_schemas() {
         let intro = simulate_introspection("fcp.twitter:social:v1", None).unwrap();
         for op in &intro.operations {
-            assert!(op.input_schema.is_object(), "op {} missing input_schema", op.id);
-            assert!(op.output_schema.is_object(), "op {} missing output_schema", op.id);
+            assert!(
+                op.input_schema.is_object(),
+                "op {} missing input_schema",
+                op.id
+            );
+            assert!(
+                op.output_schema.is_object(),
+                "op {} missing output_schema",
+                op.id
+            );
         }
     }
 
@@ -1291,8 +1310,16 @@ mod tests {
     fn introspect_operations_have_ai_hints() {
         let intro = simulate_introspection("fcp.twitter:social:v1", None).unwrap();
         for op in &intro.operations {
-            assert!(!op.ai_hints.when_to_use.is_empty(), "op {} missing when_to_use", op.id);
-            assert!(!op.ai_hints.common_mistakes.is_empty(), "op {} missing common_mistakes", op.id);
+            assert!(
+                !op.ai_hints.when_to_use.is_empty(),
+                "op {} missing when_to_use",
+                op.id
+            );
+            assert!(
+                !op.ai_hints.common_mistakes.is_empty(),
+                "op {} missing common_mistakes",
+                op.id
+            );
         }
     }
 
@@ -1347,10 +1374,7 @@ mod tests {
     #[test]
     fn health_reason() {
         assert!(ConnectorHealth::healthy().reason().is_none());
-        assert_eq!(
-            ConnectorHealth::degraded("slow").reason(),
-            Some("slow")
-        );
+        assert_eq!(ConnectorHealth::degraded("slow").reason(), Some("slow"));
         assert_eq!(
             ConnectorHealth::unavailable("crash").reason(),
             Some("crash")

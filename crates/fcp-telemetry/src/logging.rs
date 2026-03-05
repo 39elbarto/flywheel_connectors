@@ -80,14 +80,19 @@ fn redact_sensitive_with_depth(
                         serde_json::Value::String("[REDACTED]".to_string()),
                     );
                 } else {
-                    result.insert(key.clone(), redact_sensitive_with_depth(val, fields, depth + 1));
+                    result.insert(
+                        key.clone(),
+                        redact_sensitive_with_depth(val, fields, depth + 1),
+                    );
                 }
             }
             serde_json::Value::Object(result)
         }
-        serde_json::Value::Array(arr) => {
-            serde_json::Value::Array(arr.iter().map(|v| redact_sensitive_with_depth(v, fields, depth + 1)).collect())
-        }
+        serde_json::Value::Array(arr) => serde_json::Value::Array(
+            arr.iter()
+                .map(|v| redact_sensitive_with_depth(v, fields, depth + 1))
+                .collect(),
+        ),
         other => other.clone(),
     }
 }

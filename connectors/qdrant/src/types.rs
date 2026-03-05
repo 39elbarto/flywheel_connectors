@@ -99,7 +99,9 @@ mod tests {
 
     #[test]
     fn collection_serde() {
-        let c = Collection { name: "my_collection".into() };
+        let c = Collection {
+            name: "my_collection".into(),
+        };
         let json_str = serde_json::to_string(&c).unwrap();
         let back: Collection = serde_json::from_str(&json_str).unwrap();
         assert_eq!(back.name, "my_collection");

@@ -1860,10 +1860,9 @@ mod tests {
             limits: vec![],
             tool_pool_map: HashMap::new(),
         };
-        decls.tool_pool_map.insert(
-            "send_msg".into(),
-            vec!["pool_a".into(), "pool_b".into()],
-        );
+        decls
+            .tool_pool_map
+            .insert("send_msg".into(), vec!["pool_a".into(), "pool_b".into()]);
 
         let tool = ToolDescriptor::from_operation(&op, Some(&decls));
         assert_eq!(tool.rate_limits, vec!["pool_a", "pool_b"]);
@@ -2250,7 +2249,12 @@ mod tests {
 
     #[test]
     fn latency_hint_debug() {
-        for hint in [LatencyHint::Fast, LatencyHint::Medium, LatencyHint::Slow, LatencyHint::VerySlow] {
+        for hint in [
+            LatencyHint::Fast,
+            LatencyHint::Medium,
+            LatencyHint::Slow,
+            LatencyHint::VerySlow,
+        ] {
             let debug = format!("{hint:?}");
             assert!(!debug.is_empty());
         }

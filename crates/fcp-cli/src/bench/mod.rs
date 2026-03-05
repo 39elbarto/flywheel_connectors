@@ -1076,10 +1076,7 @@ mod tests {
     fn placeholder_with_dynamic_name() {
         let k = 3;
         let n = 5;
-        let result = BenchmarkResult::placeholder(
-            format!("secrets-{k}-of-{n}"),
-            "not implemented",
-        );
+        let result = BenchmarkResult::placeholder(format!("secrets-{k}-of-{n}"), "not implemented");
         assert_eq!(result.name, "secrets-3-of-5");
     }
 

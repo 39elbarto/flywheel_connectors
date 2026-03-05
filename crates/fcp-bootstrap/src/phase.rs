@@ -345,22 +345,28 @@ mod tests {
         assert!(!BootstrapPhase::Uninitialized.is_resumable());
         assert!(BootstrapPhase::TimeValidation.is_resumable());
         assert!(BootstrapPhase::KeyGeneration.is_resumable());
-        assert!(BootstrapPhase::CeremonySetup {
-            participant_count: 3,
-            threshold: 2,
-        }
-        .is_resumable());
-        assert!(BootstrapPhase::CeremonyRound1 {
-            commitments_collected: 1,
-            commitments_needed: 3,
-        }
-        .is_resumable());
+        assert!(
+            BootstrapPhase::CeremonySetup {
+                participant_count: 3,
+                threshold: 2,
+            }
+            .is_resumable()
+        );
+        assert!(
+            BootstrapPhase::CeremonyRound1 {
+                commitments_collected: 1,
+                commitments_needed: 3,
+            }
+            .is_resumable()
+        );
         // Round2 is NOT resumable
-        assert!(!BootstrapPhase::CeremonyRound2 {
-            shares_distributed: 1,
-            shares_needed: 3,
-        }
-        .is_resumable());
+        assert!(
+            !BootstrapPhase::CeremonyRound2 {
+                shares_distributed: 1,
+                shares_needed: 3,
+            }
+            .is_resumable()
+        );
         assert!(!BootstrapPhase::GenesisCreate.is_resumable());
         assert!(!BootstrapPhase::Enrollment.is_resumable());
     }
@@ -406,7 +412,10 @@ mod tests {
 
     #[test]
     fn test_display_all_variants() {
-        assert_eq!(format!("{}", BootstrapPhase::Uninitialized), "Uninitialized");
+        assert_eq!(
+            format!("{}", BootstrapPhase::Uninitialized),
+            "Uninitialized"
+        );
         assert_eq!(
             format!("{}", BootstrapPhase::TimeValidation),
             "TimeValidation"
@@ -435,24 +444,31 @@ mod tests {
             ),
             "CeremonyRound2(1/5)"
         );
-        assert_eq!(format!("{}", BootstrapPhase::GenesisCreate), "GenesisCreate");
+        assert_eq!(
+            format!("{}", BootstrapPhase::GenesisCreate),
+            "GenesisCreate"
+        );
         assert_eq!(format!("{}", BootstrapPhase::Enrollment), "Enrollment");
-        assert!(format!(
-            "{}",
-            BootstrapPhase::Completed {
-                fingerprint: "fp123".into(),
-                completed_at: Utc::now(),
-            }
-        )
-        .contains("fp123"));
-        assert!(format!(
-            "{}",
-            BootstrapPhase::Failed {
-                reason: "disk full".into(),
-                at_phase: "genesis".into(),
-            }
-        )
-        .contains("disk full"));
+        assert!(
+            format!(
+                "{}",
+                BootstrapPhase::Completed {
+                    fingerprint: "fp123".into(),
+                    completed_at: Utc::now(),
+                }
+            )
+            .contains("fp123")
+        );
+        assert!(
+            format!(
+                "{}",
+                BootstrapPhase::Failed {
+                    reason: "disk full".into(),
+                    at_phase: "genesis".into(),
+                }
+            )
+            .contains("disk full")
+        );
     }
 
     // ---- Serde roundtrip ----
@@ -531,8 +547,16 @@ mod tests {
 
     #[test]
     fn test_init_suggestion_display() {
-        assert!(InitSuggestion::UseExisting.to_string().contains("Use the existing"));
-        assert!(InitSuggestion::ForceOverwrite.to_string().contains("--force"));
+        assert!(
+            InitSuggestion::UseExisting
+                .to_string()
+                .contains("Use the existing")
+        );
+        assert!(
+            InitSuggestion::ForceOverwrite
+                .to_string()
+                .contains("--force")
+        );
         assert!(
             InitSuggestion::UseDifferentPath
                 .to_string()
@@ -544,7 +568,11 @@ mod tests {
 
     #[test]
     fn test_partial_state_suggestion_display() {
-        assert!(PartialStateSuggestion::Resume.to_string().contains("Resume"));
+        assert!(
+            PartialStateSuggestion::Resume
+                .to_string()
+                .contains("Resume")
+        );
         assert!(
             PartialStateSuggestion::CleanAndRetry
                 .to_string()
@@ -558,7 +586,10 @@ mod tests {
     fn test_suggestion_eq() {
         assert_eq!(InitSuggestion::UseExisting, InitSuggestion::UseExisting);
         assert_ne!(InitSuggestion::UseExisting, InitSuggestion::ForceOverwrite);
-        assert_eq!(PartialStateSuggestion::Resume, PartialStateSuggestion::Resume);
+        assert_eq!(
+            PartialStateSuggestion::Resume,
+            PartialStateSuggestion::Resume
+        );
         assert_ne!(
             PartialStateSuggestion::Resume,
             PartialStateSuggestion::CleanAndRetry

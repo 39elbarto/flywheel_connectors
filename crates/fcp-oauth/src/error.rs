@@ -226,7 +226,7 @@ mod tests {
     fn token_expired_zero_duration() {
         let e = OAuthError::TokenExpired(Duration::from_secs(0));
         let display = e.to_string();
-        assert!(display.contains("0"));
+        assert!(display.contains('0'));
     }
 
     #[test]

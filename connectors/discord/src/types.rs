@@ -485,7 +485,9 @@ mod tests {
                 text: "Footer".to_string(),
                 icon_url: None,
             }),
-            image: Some(EmbedImage { url: "https://example.com/img.png".to_string() }),
+            image: Some(EmbedImage {
+                url: "https://example.com/img.png".to_string(),
+            }),
             thumbnail: None,
             author: Some(EmbedAuthor {
                 name: "Author".to_string(),
@@ -552,7 +554,9 @@ mod tests {
 
     #[test]
     fn gateway_hello_serde() {
-        let hello = GatewayHello { heartbeat_interval: 41250 };
+        let hello = GatewayHello {
+            heartbeat_interval: 41250,
+        };
         let json = serde_json::to_string(&hello).unwrap();
         let back: GatewayHello = serde_json::from_str(&json).unwrap();
         assert_eq!(back.heartbeat_interval, 41250);

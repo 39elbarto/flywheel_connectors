@@ -292,17 +292,29 @@ impl ForkEvidence {
 pub fn hrw_hash_checkpoint(zone_id: &ZoneId, epoch: &EpochId, node_id: &TailscaleNodeId) -> u64 {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"FCP2-HRW-CHECKPOINT-V1");
-    
+
     let z_bytes = zone_id.as_bytes();
-    hasher.update(&u32::try_from(z_bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
+    hasher.update(
+        &u32::try_from(z_bytes.len())
+            .unwrap_or(u32::MAX)
+            .to_le_bytes(),
+    );
     hasher.update(z_bytes);
 
     let e_bytes = epoch.as_str().as_bytes();
-    hasher.update(&u32::try_from(e_bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
+    hasher.update(
+        &u32::try_from(e_bytes.len())
+            .unwrap_or(u32::MAX)
+            .to_le_bytes(),
+    );
     hasher.update(e_bytes);
 
     let n_bytes = node_id.as_str().as_bytes();
-    hasher.update(&u32::try_from(n_bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
+    hasher.update(
+        &u32::try_from(n_bytes.len())
+            .unwrap_or(u32::MAX)
+            .to_le_bytes(),
+    );
     hasher.update(n_bytes);
 
     let hash = hasher.finalize();
@@ -1143,19 +1155,31 @@ mod tests {
         // This is a golden vector - if it changes, the hash algorithm changed
         let mut expected_hasher = blake3::Hasher::new();
         expected_hasher.update(b"FCP2-HRW-CHECKPOINT-V1");
-        
+
         let z_bytes = zone.as_bytes();
-        expected_hasher.update(&u32::try_from(z_bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
+        expected_hasher.update(
+            &u32::try_from(z_bytes.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
         expected_hasher.update(z_bytes);
 
         let e_bytes = epoch.as_str().as_bytes();
-        expected_hasher.update(&u32::try_from(e_bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
+        expected_hasher.update(
+            &u32::try_from(e_bytes.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
         expected_hasher.update(e_bytes);
 
         let n_bytes = node.as_str().as_bytes();
-        expected_hasher.update(&u32::try_from(n_bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
+        expected_hasher.update(
+            &u32::try_from(n_bytes.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
         expected_hasher.update(n_bytes);
-        
+
         let expected_bytes = expected_hasher.finalize();
         let expected_u64 = u64::from_le_bytes(expected_bytes.as_bytes()[0..8].try_into().unwrap());
 

@@ -634,7 +634,10 @@ impl ReplayWindow {
 
         if seq > self.highest_seq {
             let shift = (seq - self.highest_seq).min(128);
-            self.bitmap = self.bitmap.checked_shl(u32::try_from(shift).unwrap_or(u32::MAX)).unwrap_or(0);
+            self.bitmap = self
+                .bitmap
+                .checked_shl(u32::try_from(shift).unwrap_or(u32::MAX))
+                .unwrap_or(0);
             self.bitmap |= 1;
             self.highest_seq = seq;
             true
@@ -728,15 +731,23 @@ pub fn derive_session_keys(
 ) -> Result<SessionKeys, SessionError> {
     let mut info = Vec::new();
     info.extend_from_slice(b"FCP2-SESSION-V1");
-    
+
     let init_bytes = initiator_node_id.as_str().as_bytes();
-    info.extend_from_slice(&u32::try_from(init_bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
+    info.extend_from_slice(
+        &u32::try_from(init_bytes.len())
+            .unwrap_or(u32::MAX)
+            .to_le_bytes(),
+    );
     info.extend_from_slice(init_bytes);
-    
+
     let resp_bytes = responder_node_id.as_str().as_bytes();
-    info.extend_from_slice(&u32::try_from(resp_bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
+    info.extend_from_slice(
+        &u32::try_from(resp_bytes.len())
+            .unwrap_or(u32::MAX)
+            .to_le_bytes(),
+    );
     info.extend_from_slice(resp_bytes);
-    
+
     info.extend_from_slice(hello_nonce.as_bytes());
     info.extend_from_slice(ack_nonce.as_bytes());
 

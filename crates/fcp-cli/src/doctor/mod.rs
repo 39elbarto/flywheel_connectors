@@ -1394,7 +1394,8 @@ mod tests {
     #[test]
     fn self_check_preserves_connector_id() {
         let connector: ConnectorId = "fcp.test:check:v1".parse().unwrap();
-        let checks = simulate_self_checks(std::slice::from_ref(&connector), DoctorScenario::Healthy);
+        let checks =
+            simulate_self_checks(std::slice::from_ref(&connector), DoctorScenario::Healthy);
         assert_eq!(checks[0].connector_id, connector.to_string());
     }
 

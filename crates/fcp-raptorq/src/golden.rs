@@ -702,7 +702,8 @@ mod tests {
                 )
             });
             assert_eq!(
-                &reconstructed_payload[..expected_len], &payload[..],
+                &reconstructed_payload[..expected_len],
+                &payload[..],
                 "{label} produced different payload bytes"
             );
             assert_eq!(
@@ -778,7 +779,10 @@ mod tests {
                 )
             });
             assert_eq!(&reconstructed_payload[..expected_len], &payload[..]);
-            assert_eq!(blake3_hex(&reconstructed_payload[..expected_len]), payload_hash);
+            assert_eq!(
+                blake3_hex(&reconstructed_payload[..expected_len]),
+                payload_hash
+            );
 
             emit_epoch_replay_log(&EpochReplayLog {
                 test_name: "epoch_replay_reconstructs_from_seeded_randomized_subsets",
@@ -1341,7 +1345,8 @@ mod tests {
             if let Ok(Some(decoded)) = decoder.add_symbol(esi, data) {
                 // Reconstruction may succeed but payload should differ
                 assert_ne!(
-                    &decoded[..expected_len], &payload[..],
+                    &decoded[..expected_len],
+                    &payload[..],
                     "Corrupted symbol should produce different output"
                 );
                 return;
@@ -1372,7 +1377,8 @@ mod tests {
         for (esi, data) in symbols {
             if let Ok(Some(decoded)) = decoder.add_symbol(esi, data) {
                 assert_ne!(
-                    &decoded[..expected_len], &payload[..],
+                    &decoded[..expected_len],
+                    &payload[..],
                     "Multiple corrupted symbols should produce different output"
                 );
                 return;
@@ -1405,7 +1411,8 @@ mod tests {
             if let Ok(Some(decoded)) = decoder.add_symbol(esi, symbol_data) {
                 // Truncated symbol corrupts the result
                 assert_ne!(
-                    &decoded[..expected_len], &payload[..],
+                    &decoded[..expected_len],
+                    &payload[..],
                     "Truncated symbol should produce different output"
                 );
                 return;
@@ -1433,7 +1440,8 @@ mod tests {
         for (esi, data) in symbols {
             if let Ok(Some(decoded)) = decoder.add_symbol(esi, data) {
                 assert_ne!(
-                    &decoded[..expected_len], &payload[..],
+                    &decoded[..expected_len],
+                    &payload[..],
                     "Zeroed symbol should produce different output"
                 );
                 return;
@@ -1632,9 +1640,8 @@ mod tests {
             // Compute exact number of symbols to drop
             let drop_count = total * loss_pct / 100;
             // Build a set of evenly-spaced indices to drop
-            let drops: std::collections::HashSet<usize> = (0..drop_count)
-                .map(|i| i * total / drop_count)
-                .collect();
+            let drops: std::collections::HashSet<usize> =
+                (0..drop_count).map(|i| i * total / drop_count).collect();
 
             let mut decoder = RaptorQDecoder::new(oti, &config);
             let expected_len = payload.len();
@@ -1646,7 +1653,8 @@ mod tests {
                 }
                 if let Ok(Some(decoded)) = decoder.add_symbol(*esi, data.clone()) {
                     assert_eq!(
-                        &decoded[..expected_len], &payload[..],
+                        &decoded[..expected_len],
+                        &payload[..],
                         "Decoded payload mismatch at {loss_pct}% loss"
                     );
                     recovered = true;

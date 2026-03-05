@@ -337,7 +337,10 @@ fn canonicalize_value_in_place(v: &mut Value, depth: usize) -> Result<(), Serial
     Ok(())
 }
 
-fn canonicalize_map(entries: &mut Vec<(Value, Value)>, depth: usize) -> Result<(), SerializationError> {
+fn canonicalize_map(
+    entries: &mut Vec<(Value, Value)>,
+    depth: usize,
+) -> Result<(), SerializationError> {
     use std::cmp::Ordering;
 
     let mut with_keys = Vec::with_capacity(entries.len());

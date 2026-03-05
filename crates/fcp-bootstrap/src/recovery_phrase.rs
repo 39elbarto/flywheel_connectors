@@ -377,8 +377,20 @@ mod tests {
 
     #[test]
     fn test_error_display() {
-        assert!(RecoveryPhraseError::WrongWordCount(12).to_string().contains("12"));
-        assert!(RecoveryPhraseError::InvalidMnemonic("bad".into()).to_string().contains("bad"));
-        assert!(RecoveryPhraseError::DerivationFailed("failed".into()).to_string().contains("failed"));
+        assert!(
+            RecoveryPhraseError::WrongWordCount(12)
+                .to_string()
+                .contains("12")
+        );
+        assert!(
+            RecoveryPhraseError::InvalidMnemonic("bad".into())
+                .to_string()
+                .contains("bad")
+        );
+        assert!(
+            RecoveryPhraseError::DerivationFailed("failed".into())
+                .to_string()
+                .contains("failed")
+        );
     }
 }

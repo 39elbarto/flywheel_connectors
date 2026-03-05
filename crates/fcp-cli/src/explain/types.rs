@@ -426,8 +426,14 @@ mod tests {
 
     #[test]
     fn decision_outcome_serde_values() {
-        assert_eq!(serde_json::to_string(&DecisionOutcome::Allow).unwrap(), "\"allow\"");
-        assert_eq!(serde_json::to_string(&DecisionOutcome::Deny).unwrap(), "\"deny\"");
+        assert_eq!(
+            serde_json::to_string(&DecisionOutcome::Allow).unwrap(),
+            "\"allow\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DecisionOutcome::Deny).unwrap(),
+            "\"deny\""
+        );
     }
 
     #[test]
@@ -600,7 +606,10 @@ mod tests {
             evidence: vec![],
             explanation: None,
             zone_id: "z:x".into(),
-            signed_by: SignerInfo { node_id: "n".into(), signed_at: 0 },
+            signed_by: SignerInfo {
+                node_id: "n".into(),
+                signed_at: 0,
+            },
         };
         let cloned = report.clone();
         assert_eq!(cloned.reason_code, "FCP-9001");

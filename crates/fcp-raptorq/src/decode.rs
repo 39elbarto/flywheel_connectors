@@ -151,10 +151,7 @@ impl RaptorQDecoder {
         // (same as the encoder does when building the constraint matrix).
         // These ESIs are never emitted by the encoder so no overlap check needed.
         for esi in k..k_prime {
-            symbols.push(ReceivedSymbol::source(
-                esi as u32,
-                vec![0u8; symbol_size],
-            ));
+            symbols.push(ReceivedSymbol::source(esi as u32, vec![0u8; symbol_size]));
         }
 
         match decoder.decode(&symbols) {
@@ -1052,9 +1049,8 @@ mod tests {
 
     #[test]
     fn map_async_error_timeout() {
-        let err = DecodeAdmissionController::map_async_error(AsyncError::Timeout {
-            timeout_ms: 5000,
-        });
+        let err =
+            DecodeAdmissionController::map_async_error(AsyncError::Timeout { timeout_ms: 5000 });
         assert!(matches!(err, DecodeError::Timeout));
     }
 

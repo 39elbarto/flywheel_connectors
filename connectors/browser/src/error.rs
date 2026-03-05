@@ -127,37 +127,45 @@ mod tests {
 
     #[test]
     fn is_retryable_timeout() {
-        assert!(BrowserError::Timeout {
-            message: "x".into()
-        }
-        .is_retryable());
+        assert!(
+            BrowserError::Timeout {
+                message: "x".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn is_retryable_api_500() {
-        assert!(BrowserError::Api {
-            message: "x".into(),
-            status_code: Some(500),
-        }
-        .is_retryable());
+        assert!(
+            BrowserError::Api {
+                message: "x".into(),
+                status_code: Some(500),
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn is_retryable_api_429() {
-        assert!(BrowserError::Api {
-            message: "x".into(),
-            status_code: Some(429),
-        }
-        .is_retryable());
+        assert!(
+            BrowserError::Api {
+                message: "x".into(),
+                status_code: Some(429),
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn not_retryable_api_400() {
-        assert!(!BrowserError::Api {
-            message: "x".into(),
-            status_code: Some(400),
-        }
-        .is_retryable());
+        assert!(
+            !BrowserError::Api {
+                message: "x".into(),
+                status_code: Some(400),
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
@@ -194,9 +202,7 @@ mod tests {
             status_code: Some(429),
         };
         match err.to_fcp_error() {
-            FcpError::RateLimited {
-                retry_after_ms, ..
-            } => assert_eq!(retry_after_ms, 5_000),
+            FcpError::RateLimited { retry_after_ms, .. } => assert_eq!(retry_after_ms, 5_000),
             other => panic!("expected RateLimited, got {other:?}"),
         }
     }

@@ -430,10 +430,7 @@ mod tests {
         let parsed = RateLimitHeaders::parse_github(&headers);
         assert_eq!(parsed.limit, Some(5000));
         assert_eq!(parsed.remaining, Some(4999));
-        assert_eq!(
-            parsed.provider_info.get("used"),
-            Some(&"1".to_string())
-        );
+        assert_eq!(parsed.provider_info.get("used"), Some(&"1".to_string()));
         assert_eq!(
             parsed.provider_info.get("resource"),
             Some(&"core".to_string())
@@ -582,10 +579,7 @@ mod tests {
             "x-ratelimit-remaining-tokens".to_string(),
             "180000".to_string(),
         );
-        headers.insert(
-            "x-ratelimit-limit-requests".to_string(),
-            "3500".to_string(),
-        );
+        headers.insert("x-ratelimit-limit-requests".to_string(), "3500".to_string());
         headers.insert(
             "x-ratelimit-remaining-requests".to_string(),
             "3499".to_string(),

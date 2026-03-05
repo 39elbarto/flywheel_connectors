@@ -480,17 +480,27 @@ mod tests {
             manifest_path: PathBuf::from("/build/out/manifest.toml"),
             sbom_path: Some(PathBuf::from("/build/out/sbom.json")),
             build_metadata_path: PathBuf::from("/build/out/build-meta.json"),
-            binary_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(),
+            binary_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                .to_string(),
             connector_id: "acme-storage:s3:2.1.0".to_string(),
             version: "2.1.0".to_string(),
         };
         let json = serde_json::to_string(&output).unwrap();
         let back: PackageOutput = serde_json::from_str(&json).unwrap();
         assert_eq!(back.output_dir, PathBuf::from("/build/out"));
-        assert_eq!(back.binary_path, PathBuf::from("/build/out/my-connector.wasm"));
-        assert_eq!(back.manifest_path, PathBuf::from("/build/out/manifest.toml"));
+        assert_eq!(
+            back.binary_path,
+            PathBuf::from("/build/out/my-connector.wasm")
+        );
+        assert_eq!(
+            back.manifest_path,
+            PathBuf::from("/build/out/manifest.toml")
+        );
         assert_eq!(back.sbom_path, Some(PathBuf::from("/build/out/sbom.json")));
-        assert_eq!(back.build_metadata_path, PathBuf::from("/build/out/build-meta.json"));
+        assert_eq!(
+            back.build_metadata_path,
+            PathBuf::from("/build/out/build-meta.json")
+        );
         assert_eq!(back.binary_sha256.len(), 64);
     }
 
@@ -636,7 +646,11 @@ mod tests {
         let back: SimpleSbom = serde_json::from_str(&json).unwrap();
         assert_eq!(back.dependencies.len(), 3);
         assert!(back.dependencies.iter().any(|d| d.name == "tokio"));
-        assert!(back.dependencies.iter().any(|d| d.source.starts_with("path+")));
+        assert!(
+            back.dependencies
+                .iter()
+                .any(|d| d.source.starts_with("path+"))
+        );
     }
 
     #[test]

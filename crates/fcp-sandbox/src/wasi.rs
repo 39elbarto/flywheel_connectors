@@ -1664,7 +1664,10 @@ mod tests {
         }
         // Should see at least 200 distinct values from a good xorshift
         let distinct = seen.iter().filter(|&&s| s).count();
-        assert!(distinct > 200, "only {distinct} distinct byte values in 10k samples");
+        assert!(
+            distinct > 200,
+            "only {distinct} distinct byte values in 10k samples"
+        );
     }
 
     #[test]

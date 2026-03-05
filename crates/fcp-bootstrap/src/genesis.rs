@@ -444,10 +444,17 @@ mod tests {
     fn genesis_zone_integrity_levels_are_descending() {
         let signing_key = Ed25519SigningKey::generate();
         let genesis = GenesisState::create(&signing_key.verifying_key());
-        let levels: Vec<u8> = genesis.initial_zones.iter().map(|z| z.integrity_level).collect();
+        let levels: Vec<u8> = genesis
+            .initial_zones
+            .iter()
+            .map(|z| z.integrity_level)
+            .collect();
         // z:owner=255, z:private=200, z:work=150, z:community=100, z:public=50
         for w in levels.windows(2) {
-            assert!(w[0] > w[1], "integrity levels should be strictly descending");
+            assert!(
+                w[0] > w[1],
+                "integrity levels should be strictly descending"
+            );
         }
     }
 
@@ -464,10 +471,7 @@ mod tests {
     fn genesis_deterministic_has_epoch_timestamp() {
         let signing_key = Ed25519SigningKey::generate();
         let genesis = GenesisState::create_deterministic(&signing_key.verifying_key());
-        assert_eq!(
-            genesis.created_at,
-            DateTime::from_timestamp(0, 0).unwrap()
-        );
+        assert_eq!(genesis.created_at, DateTime::from_timestamp(0, 0).unwrap());
     }
 
     // ---- owner_verifying_key ----

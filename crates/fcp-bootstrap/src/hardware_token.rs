@@ -473,12 +473,31 @@ mod tests {
 
     #[test]
     fn token_error_display() {
-        assert_eq!(TokenError::NoTokens.to_string(), "no hardware tokens detected");
-        assert!(TokenError::TokenNotFound("yubikey".into()).to_string().contains("yubikey"));
+        assert_eq!(
+            TokenError::NoTokens.to_string(),
+            "no hardware tokens detected"
+        );
+        assert!(
+            TokenError::TokenNotFound("yubikey".into())
+                .to_string()
+                .contains("yubikey")
+        );
         assert_eq!(TokenError::InvalidPin.to_string(), "invalid PIN");
-        assert!(TokenError::KeyNotFound("owner".into()).to_string().contains("owner"));
-        assert!(TokenError::UnsupportedMechanism("RSA".into()).to_string().contains("RSA"));
-        assert!(TokenError::Pkcs11("init failed".into()).to_string().contains("init failed"));
+        assert!(
+            TokenError::KeyNotFound("owner".into())
+                .to_string()
+                .contains("owner")
+        );
+        assert!(
+            TokenError::UnsupportedMechanism("RSA".into())
+                .to_string()
+                .contains("RSA")
+        );
+        assert!(
+            TokenError::Pkcs11("init failed".into())
+                .to_string()
+                .contains("init failed")
+        );
         assert_eq!(TokenError::Disconnected.to_string(), "token disconnected");
     }
 }

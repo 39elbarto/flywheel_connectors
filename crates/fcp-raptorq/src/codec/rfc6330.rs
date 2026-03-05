@@ -713,20 +713,16 @@ mod tests {
         // The degree table has 30 entries, covering degrees 1..=30
         // Test representative values from each bucket
         let thresholds: [(u32, usize); 6] = [
-            (0, 1),           // v < 5243 → degree 1
-            (5_243, 2),       // v < 529531 → degree 2
-            (529_531, 3),     // v < 704294 → degree 3
-            (998_630, 19),    // v < 998631 → degree 19
-            (1_017_661, 29),  // v < 1017662 → degree 29
-            (1_048_575, 30),  // v < 1048576 → degree 30
+            (0, 1),          // v < 5243 → degree 1
+            (5_243, 2),      // v < 529531 → degree 2
+            (529_531, 3),    // v < 704294 → degree 3
+            (998_630, 19),   // v < 998631 → degree 19
+            (1_017_661, 29), // v < 1017662 → degree 29
+            (1_048_575, 30), // v < 1048576 → degree 30
         ];
 
         for (v, expected_deg) in thresholds {
-            assert_eq!(
-                deg(v),
-                expected_deg,
-                "deg({v}) should be {expected_deg}"
-            );
+            assert_eq!(deg(v), expected_deg, "deg({v}) should be {expected_deg}");
         }
     }
 
@@ -826,11 +822,7 @@ mod tests {
                 "repair_indices_for_esi({j}, {w}, {p}, {esi}) should be non-empty"
             );
             for &idx in &indices {
-                assert!(
-                    idx < w + p,
-                    "index {idx} >= W+P={} for ESI {esi}",
-                    w + p
-                );
+                assert!(idx < w + p, "index {idx} >= W+P={} for ESI {esi}", w + p);
             }
         }
     }
@@ -897,7 +889,11 @@ mod tests {
         }
         // All PI indices in [w, w+p)
         for &idx in &indices[10..] {
-            assert!(idx >= w && idx < w + p, "PI index {idx} not in [{w}, {})", w + p);
+            assert!(
+                idx >= w && idx < w + p,
+                "PI index {idx} not in [{w}, {})",
+                w + p
+            );
         }
     }
 

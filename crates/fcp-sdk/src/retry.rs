@@ -475,7 +475,10 @@ mod tests {
             .with_max_attempts(None)
             .with_jitter_enabled(false);
         for attempt in [0, 10, 100, 1000] {
-            assert!(p.next_delay(attempt, RetryDecision::Backoff, None).is_some());
+            assert!(
+                p.next_delay(attempt, RetryDecision::Backoff, None)
+                    .is_some()
+            );
         }
     }
 
@@ -517,18 +520,12 @@ mod tests {
 
     #[test]
     fn http_408_returns_backoff() {
-        assert_eq!(
-            decision_from_http_status(408, None),
-            RetryDecision::Backoff
-        );
+        assert_eq!(decision_from_http_status(408, None), RetryDecision::Backoff);
     }
 
     #[test]
     fn http_425_returns_backoff() {
-        assert_eq!(
-            decision_from_http_status(425, None),
-            RetryDecision::Backoff
-        );
+        assert_eq!(decision_from_http_status(425, None), RetryDecision::Backoff);
     }
 
     #[test]
@@ -600,14 +597,16 @@ mod tests {
     #[test]
     fn map_external_error_429_produces_rate_limited() {
         let (decision, error) = map_external_error("api", Some(429), "Too Many Requests", None);
-        assert_eq!(decision, RetryDecision::After(DEFAULT_RATE_LIMIT_RETRY_AFTER));
+        assert_eq!(
+            decision,
+            RetryDecision::After(DEFAULT_RATE_LIMIT_RETRY_AFTER)
+        );
         assert!(matches!(error, FcpError::RateLimited { .. }));
     }
 
     #[test]
     fn map_external_error_503_produces_external_retryable() {
-        let (decision, error) =
-            map_external_error("api", Some(503), "Service Unavailable", None);
+        let (decision, error) = map_external_error("api", Some(503), "Service Unavailable", None);
         assert_eq!(decision, RetryDecision::Backoff);
         match error {
             FcpError::External { retryable, .. } => assert!(retryable),
@@ -627,27 +626,22 @@ mod tests {
 
     #[test]
     fn map_external_error_no_status_uses_message() {
-        let (decision, _error) =
-            map_external_error("api", None, "connection timeout", None);
+        let (decision, _error) = map_external_error("api", None, "connection timeout", None);
         assert_eq!(decision, RetryDecision::Backoff);
     }
 
     #[test]
     fn map_external_error_no_status_terminal_message() {
-        let (decision, _error) =
-            map_external_error("api", None, "invalid token format", None);
+        let (decision, _error) = map_external_error("api", None, "invalid token format", None);
         assert_eq!(decision, RetryDecision::Terminal);
     }
 
     #[test]
     fn map_external_error_429_with_custom_retry_after() {
         let hint = Duration::from_secs(60);
-        let (_decision, error) =
-            map_external_error("api", Some(429), "rate limited", Some(hint));
+        let (_decision, error) = map_external_error("api", Some(429), "rate limited", Some(hint));
         match error {
-            FcpError::RateLimited {
-                retry_after_ms, ..
-            } => assert_eq!(retry_after_ms, 60_000),
+            FcpError::RateLimited { retry_after_ms, .. } => assert_eq!(retry_after_ms, 60_000),
             other => panic!("expected RateLimited, got {other:?}"),
         }
     }

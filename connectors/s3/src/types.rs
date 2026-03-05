@@ -161,7 +161,9 @@ mod tests {
 
     #[test]
     fn put_object_response_serde() {
-        let resp = PutObjectResponse { etag: "\"def456\"".into() };
+        let resp = PutObjectResponse {
+            etag: "\"def456\"".into(),
+        };
         let json_str = serde_json::to_string(&resp).unwrap();
         let back: PutObjectResponse = serde_json::from_str(&json_str).unwrap();
         assert_eq!(back.etag, "\"def456\"");
@@ -218,7 +220,10 @@ mod tests {
 
     #[test]
     fn create_bucket_response_serde() {
-        let resp = CreateBucketResponse { bucket: "new-bucket".into(), created: true };
+        let resp = CreateBucketResponse {
+            bucket: "new-bucket".into(),
+            created: true,
+        };
         let json_str = serde_json::to_string(&resp).unwrap();
         let back: CreateBucketResponse = serde_json::from_str(&json_str).unwrap();
         assert!(back.created);
@@ -226,7 +231,10 @@ mod tests {
 
     #[test]
     fn delete_bucket_response_serde() {
-        let resp = DeleteBucketResponse { bucket: "old-bucket".into(), deleted: true };
+        let resp = DeleteBucketResponse {
+            bucket: "old-bucket".into(),
+            deleted: true,
+        };
         let json_str = serde_json::to_string(&resp).unwrap();
         let back: DeleteBucketResponse = serde_json::from_str(&json_str).unwrap();
         assert!(back.deleted);
@@ -234,7 +242,9 @@ mod tests {
 
     #[test]
     fn presigned_url_response_serde() {
-        let resp = PresignedUrlResponse { url: "https://s3.example.com/signed".into() };
+        let resp = PresignedUrlResponse {
+            url: "https://s3.example.com/signed".into(),
+        };
         let json_str = serde_json::to_string(&resp).unwrap();
         let back: PresignedUrlResponse = serde_json::from_str(&json_str).unwrap();
         assert!(back.url.starts_with("https://"));

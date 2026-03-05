@@ -2442,7 +2442,13 @@ mod tests {
         let object_id = ObjectId::from_bytes([0xAA; 32]);
 
         for esi in 0..3_u32 {
-            node.announce_symbol(&zone_id, &object_id, esi, ObjectAdmissionClass::Admitted, 1000);
+            node.announce_symbol(
+                &zone_id,
+                &object_id,
+                esi,
+                ObjectAdmissionClass::Admitted,
+                1000,
+            );
         }
         assert_eq!(node.metrics().gossip_announcements, 3);
     }

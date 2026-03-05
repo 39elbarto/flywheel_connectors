@@ -481,9 +481,9 @@ impl LinuxSandbox {
 
     /// Apply resource limits using rlimit.
     fn apply_rlimits(&self, policy: &CompiledPolicy) -> Result<(), SandboxError> {
-        // Virtual memory limits (RLIMIT_AS) are specifically NOT set here because 
-        // modern runtimes like Go and Rust (with certain allocators) reserve large 
-        // blocks of virtual address space up-front. Limiting RLIMIT_AS will cause 
+        // Virtual memory limits (RLIMIT_AS) are specifically NOT set here because
+        // modern runtimes like Go and Rust (with certain allocators) reserve large
+        // blocks of virtual address space up-front. Limiting RLIMIT_AS will cause
         // them to crash immediately on startup, even if their actual physical memory
         // usage is well within bounds. Memory limits should be enforced via cgroups
         // or by the runtime itself where possible.
@@ -508,7 +508,7 @@ impl LinuxSandbox {
         // No new processes if deny_exec
         if policy.deny_exec {
             // Note: RLIMIT_NPROC limits BOTH threads and processes on Linux (NPTL).
-            // Setting this to 0 prevents multi-threaded connectors (like those using Tokio) 
+            // Setting this to 0 prevents multi-threaded connectors (like those using Tokio)
             // from spawning worker threads. We rely on the seccomp filter blocking EXECVE/FORK instead.
             // set_rlimit(libc::RLIMIT_NPROC, 0, 0)?;
         }

@@ -121,7 +121,10 @@ mod tests {
             dimension: 1536,
             metric: "cosine".into(),
             host: Some("my-index-abc.svc.pinecone.io".into()),
-            status: Some(IndexStatus { ready: Some(true), state: Some("Ready".into()) }),
+            status: Some(IndexStatus {
+                ready: Some(true),
+                state: Some("Ready".into()),
+            }),
             spec: None,
         };
         let json_str = serde_json::to_string(&idx).unwrap();

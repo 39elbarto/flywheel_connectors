@@ -2101,89 +2101,121 @@ mod tests {
     #[test]
     fn invalid_transition_pending_to_canary() {
         let mut record = LifecycleRecord::new(test_connector_id(), test_version());
-        assert!(record
-            .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
-            .is_err());
+        assert!(
+            record
+                .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
+                .is_err()
+        );
     }
 
     #[test]
     fn invalid_transition_pending_to_production() {
         let mut record = LifecycleRecord::new(test_connector_id(), test_version());
-        assert!(record
-            .transition(LifecycleState::Production, TransitionReason::ManualPromotion)
-            .is_err());
+        assert!(
+            record
+                .transition(
+                    LifecycleState::Production,
+                    TransitionReason::ManualPromotion
+                )
+                .is_err()
+        );
     }
 
     #[test]
     fn invalid_transition_pending_to_rolled_back() {
         let mut record = LifecycleRecord::new(test_connector_id(), test_version());
-        assert!(record
-            .transition(
-                LifecycleState::RolledBack,
-                TransitionReason::ManualRollback { reason: None },
-            )
-            .is_err());
+        assert!(
+            record
+                .transition(
+                    LifecycleState::RolledBack,
+                    TransitionReason::ManualRollback { reason: None },
+                )
+                .is_err()
+        );
     }
 
     #[test]
     fn invalid_transition_pending_to_disabled() {
         let mut record = LifecycleRecord::new(test_connector_id(), test_version());
-        assert!(record
-            .transition(
-                LifecycleState::Disabled,
-                TransitionReason::Disabled {
-                    reason: "test".into(),
-                },
-            )
-            .is_err());
+        assert!(
+            record
+                .transition(
+                    LifecycleState::Disabled,
+                    TransitionReason::Disabled {
+                        reason: "test".into(),
+                    },
+                )
+                .is_err()
+        );
     }
 
     #[test]
     fn invalid_transition_installing_to_production() {
         let mut record = LifecycleRecord::new(test_connector_id(), test_version());
         record
-            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
             .unwrap();
-        assert!(record
-            .transition(LifecycleState::Production, TransitionReason::ManualPromotion)
-            .is_err());
+        assert!(
+            record
+                .transition(
+                    LifecycleState::Production,
+                    TransitionReason::ManualPromotion
+                )
+                .is_err()
+        );
     }
 
     #[test]
     fn invalid_transition_installing_to_rolled_back() {
         let mut record = LifecycleRecord::new(test_connector_id(), test_version());
         record
-            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
-            .unwrap();
-        assert!(record
             .transition(
-                LifecycleState::RolledBack,
-                TransitionReason::ManualRollback { reason: None },
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
             )
-            .is_err());
+            .unwrap();
+        assert!(
+            record
+                .transition(
+                    LifecycleState::RolledBack,
+                    TransitionReason::ManualRollback { reason: None },
+                )
+                .is_err()
+        );
     }
 
     #[test]
     fn invalid_transition_installing_to_disabled() {
         let mut record = LifecycleRecord::new(test_connector_id(), test_version());
         record
-            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
-            .unwrap();
-        assert!(record
             .transition(
-                LifecycleState::Disabled,
-                TransitionReason::Disabled {
-                    reason: "test".into(),
-                },
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
             )
-            .is_err());
+            .unwrap();
+        assert!(
+            record
+                .transition(
+                    LifecycleState::Disabled,
+                    TransitionReason::Disabled {
+                        reason: "test".into(),
+                    },
+                )
+                .is_err()
+        );
     }
 
     #[test]
     fn invalid_transition_production_to_installing() {
         let mut record = LifecycleRecord::new(test_connector_id(), test_version());
         record
-            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
             .unwrap();
         record
             .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
@@ -2194,16 +2226,24 @@ mod tests {
                 TransitionReason::ManualPromotion,
             )
             .unwrap();
-        assert!(record
-            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
-            .is_err());
+        assert!(
+            record
+                .transition(
+                    LifecycleState::Installing,
+                    TransitionReason::InstallComplete
+                )
+                .is_err()
+        );
     }
 
     #[test]
     fn invalid_transition_production_to_pending() {
         let mut record = LifecycleRecord::new(test_connector_id(), test_version());
         record
-            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
             .unwrap();
         record
             .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
@@ -2214,16 +2254,21 @@ mod tests {
                 TransitionReason::ManualPromotion,
             )
             .unwrap();
-        assert!(record
-            .transition(LifecycleState::Pending, TransitionReason::InstallComplete)
-            .is_err());
+        assert!(
+            record
+                .transition(LifecycleState::Pending, TransitionReason::InstallComplete)
+                .is_err()
+        );
     }
 
     #[test]
     fn invalid_transition_rolled_back_to_production() {
         let mut record = LifecycleRecord::new(test_connector_id(), test_version());
         record
-            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
             .unwrap();
         record
             .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
@@ -2234,16 +2279,24 @@ mod tests {
                 TransitionReason::ManualRollback { reason: None },
             )
             .unwrap();
-        assert!(record
-            .transition(LifecycleState::Production, TransitionReason::ManualPromotion)
-            .is_err());
+        assert!(
+            record
+                .transition(
+                    LifecycleState::Production,
+                    TransitionReason::ManualPromotion
+                )
+                .is_err()
+        );
     }
 
     #[test]
     fn invalid_transition_rolled_back_to_installing() {
         let mut record = LifecycleRecord::new(test_connector_id(), test_version());
         record
-            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
             .unwrap();
         record
             .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
@@ -2254,16 +2307,24 @@ mod tests {
                 TransitionReason::ManualRollback { reason: None },
             )
             .unwrap();
-        assert!(record
-            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
-            .is_err());
+        assert!(
+            record
+                .transition(
+                    LifecycleState::Installing,
+                    TransitionReason::InstallComplete
+                )
+                .is_err()
+        );
     }
 
     #[test]
     fn invalid_transition_disabled_to_production() {
         let mut record = LifecycleRecord::new(test_connector_id(), test_version());
         record
-            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
             .unwrap();
         record
             .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
@@ -2276,16 +2337,24 @@ mod tests {
                 },
             )
             .unwrap();
-        assert!(record
-            .transition(LifecycleState::Production, TransitionReason::ManualPromotion)
-            .is_err());
+        assert!(
+            record
+                .transition(
+                    LifecycleState::Production,
+                    TransitionReason::ManualPromotion
+                )
+                .is_err()
+        );
     }
 
     #[test]
     fn invalid_transition_disabled_to_rolled_back() {
         let mut record = LifecycleRecord::new(test_connector_id(), test_version());
         record
-            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
             .unwrap();
         record
             .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
@@ -2298,12 +2367,14 @@ mod tests {
                 },
             )
             .unwrap();
-        assert!(record
-            .transition(
-                LifecycleState::RolledBack,
-                TransitionReason::ManualRollback { reason: None },
-            )
-            .is_err());
+        assert!(
+            record
+                .transition(
+                    LifecycleState::RolledBack,
+                    TransitionReason::ManualRollback { reason: None },
+                )
+                .is_err()
+        );
     }
 
     #[test]
@@ -2338,7 +2409,10 @@ mod tests {
     fn valid_transition_production_to_canary_on_new_version() {
         let mut record = LifecycleRecord::new(test_connector_id(), test_version());
         record
-            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
             .unwrap();
         record
             .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
@@ -2365,7 +2439,10 @@ mod tests {
     fn valid_transition_disabled_to_canary_reenable() {
         let mut record = LifecycleRecord::new(test_connector_id(), test_version());
         record
-            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
             .unwrap();
         record
             .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
@@ -2603,7 +2680,10 @@ mod tests {
         let mut record = LifecycleRecord::new(test_connector_id(), test_version())
             .with_previous_version(prev.clone());
         record
-            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
             .unwrap();
         record
             .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
@@ -2630,7 +2710,10 @@ mod tests {
     fn crash_and_maybe_rollback_needs_previous_version() {
         let mut record = LifecycleRecord::new(test_connector_id(), test_version());
         record
-            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
             .unwrap();
         record
             .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
@@ -2651,7 +2734,10 @@ mod tests {
         let mut record = LifecycleRecord::new(test_connector_id(), test_version())
             .with_previous_version(semver::Version::new(0, 9, 0));
         record
-            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
             .unwrap();
         record
             .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
@@ -2671,7 +2757,10 @@ mod tests {
         let mut record = LifecycleRecord::new(test_connector_id(), test_version())
             .with_previous_version(semver::Version::new(0, 9, 0));
         record
-            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
             .unwrap();
         record
             .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
@@ -2696,7 +2785,10 @@ mod tests {
     fn health_metrics_all_failures() {
         let mut record = LifecycleRecord::new(test_connector_id(), test_version());
         record
-            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
             .unwrap();
         record
             .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
@@ -2798,7 +2890,10 @@ mod tests {
                     .with_min_canary_duration(600), // 10 minutes
             );
         record
-            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
             .unwrap();
         record
             .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
@@ -2820,7 +2915,10 @@ mod tests {
                     .with_min_canary_duration(60),
             );
         record
-            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
             .unwrap();
         record
             .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
@@ -2844,7 +2942,10 @@ mod tests {
         let mut record = LifecycleRecord::new(test_connector_id(), test_version())
             .with_canary_policy(CanaryPolicy::new());
         record
-            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
             .unwrap();
         record
             .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
@@ -2861,7 +2962,10 @@ mod tests {
         let mut record = LifecycleRecord::new(test_connector_id(), test_version())
             .with_canary_policy(CanaryPolicy::new());
         record
-            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
             .unwrap();
         record
             .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
@@ -2884,7 +2988,10 @@ mod tests {
                     .with_min_samples(100),
             );
         record
-            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
             .unwrap();
         record
             .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
@@ -2894,7 +3001,10 @@ mod tests {
             record.update_health(false, Some(500));
         }
         assert_eq!(record.health.success_rate, 0);
-        assert!(!record.should_auto_rollback(), "should not rollback before min_samples");
+        assert!(
+            !record.should_auto_rollback(),
+            "should not rollback before min_samples"
+        );
     }
 
     #[test]
@@ -2906,7 +3016,10 @@ mod tests {
                     .with_min_samples(10),
             );
         record
-            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
             .unwrap();
         record
             .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
@@ -2931,7 +3044,10 @@ mod tests {
                     .with_min_samples(10),
             );
         record
-            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
             .unwrap();
         record
             .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
@@ -2962,7 +3078,10 @@ mod tests {
             )
             .with_previous_version(semver::Version::new(0, 9, 0));
         record
-            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
             .unwrap();
         record
             .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
@@ -2989,7 +3108,10 @@ mod tests {
                     .with_min_samples(10),
             );
         record
-            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
             .unwrap();
         record
             .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
@@ -3011,7 +3133,10 @@ mod tests {
                     .with_min_samples(1000),
             );
         record
-            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
             .unwrap();
         record
             .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
@@ -3029,7 +3154,10 @@ mod tests {
     fn lifecycle_status_in_production_no_canary_expiry() {
         let mut record = LifecycleRecord::new(test_connector_id(), test_version());
         record
-            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
             .unwrap();
         record
             .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
@@ -3091,7 +3219,10 @@ mod tests {
     fn transition_records_correct_from_and_to() {
         let mut record = LifecycleRecord::new(test_connector_id(), test_version());
         record
-            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
             .unwrap();
         let t = &record.transitions[0];
         assert_eq!(t.from, LifecycleState::Pending);
@@ -3102,7 +3233,10 @@ mod tests {
     fn transition_records_correct_reason() {
         let mut record = LifecycleRecord::new(test_connector_id(), test_version());
         record
-            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
             .unwrap();
         record
             .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
@@ -3122,7 +3256,10 @@ mod tests {
     #[test]
     fn failed_transition_does_not_add_to_audit_trail() {
         let mut record = LifecycleRecord::new(test_connector_id(), test_version());
-        let _ = record.transition(LifecycleState::Production, TransitionReason::ManualPromotion);
+        let _ = record.transition(
+            LifecycleState::Production,
+            TransitionReason::ManualPromotion,
+        );
         assert!(record.transitions.is_empty());
         assert_eq!(record.state, LifecycleState::Pending);
     }
@@ -3133,7 +3270,10 @@ mod tests {
         let before = record.state_changed_at;
         std::thread::sleep(std::time::Duration::from_millis(10));
         record
-            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
             .unwrap();
         assert!(record.state_changed_at >= before);
     }

@@ -3584,31 +3584,25 @@ sig = "base64:{sig_b64}"
 
     #[test]
     fn connector_target_eq() {
-        run_registry_test(
-            "connector_target_eq",
-            "unit",
-            "target",
-            1,
-            || async {
-                let t1 = ConnectorTarget {
-                    os: "linux".to_string(),
-                    arch: "amd64".to_string(),
-                };
-                let t2 = t1.clone();
-                assert_eq!(t1, t2);
+        run_registry_test("connector_target_eq", "unit", "target", 1, || async {
+            let t1 = ConnectorTarget {
+                os: "linux".to_string(),
+                arch: "amd64".to_string(),
+            };
+            let t2 = t1.clone();
+            assert_eq!(t1, t2);
 
-                let t3 = ConnectorTarget {
-                    os: "darwin".to_string(),
-                    arch: "arm64".to_string(),
-                };
-                assert_ne!(t1, t3);
+            let t3 = ConnectorTarget {
+                os: "darwin".to_string(),
+                arch: "arm64".to_string(),
+            };
+            assert_ne!(t1, t3);
 
-                RegistryLogData {
-                    reason_code: Some("target_eq_ok".to_string()),
-                    ..RegistryLogData::default()
-                }
-            },
-        );
+            RegistryLogData {
+                reason_code: Some("target_eq_ok".to_string()),
+                ..RegistryLogData::default()
+            }
+        });
     }
 
     // ── SupplyChainVerificationError display ─────────────────────────────
@@ -3643,10 +3637,7 @@ sig = "base64:{sig_b64}"
                 };
                 assert!(err.to_string().contains("fcp.test"));
 
-                let err = SupplyChainVerificationError::TufRollback {
-                    current: 5,
-                    got: 3,
-                };
+                let err = SupplyChainVerificationError::TufRollback { current: 5, got: 3 };
                 let msg = err.to_string();
                 assert!(msg.contains("5"));
                 assert!(msg.contains("3"));
@@ -3763,67 +3754,49 @@ sig = "base64:{sig_b64}"
 
     #[test]
     fn hash_bytes_sha256_prefix() {
-        run_registry_test(
-            "hash_bytes_sha256_prefix",
-            "unit",
-            "hash",
-            2,
-            || async {
-                let h = hash_bytes(b"test data");
-                assert!(h.starts_with("sha256:"));
-                // SHA256 hex is 64 chars
-                assert_eq!(h.len(), 7 + 64);
+        run_registry_test("hash_bytes_sha256_prefix", "unit", "hash", 2, || async {
+            let h = hash_bytes(b"test data");
+            assert!(h.starts_with("sha256:"));
+            // SHA256 hex is 64 chars
+            assert_eq!(h.len(), 7 + 64);
 
-                RegistryLogData {
-                    reason_code: Some("hash_bytes_prefix_ok".to_string()),
-                    ..RegistryLogData::default()
-                }
-            },
-        );
+            RegistryLogData {
+                reason_code: Some("hash_bytes_prefix_ok".to_string()),
+                ..RegistryLogData::default()
+            }
+        });
     }
 
     #[test]
     fn hash_bytes_deterministic() {
-        run_registry_test(
-            "hash_bytes_deterministic",
-            "unit",
-            "hash",
-            1,
-            || async {
-                let a = hash_bytes(b"identical");
-                let b = hash_bytes(b"identical");
-                assert_eq!(a, b);
+        run_registry_test("hash_bytes_deterministic", "unit", "hash", 1, || async {
+            let a = hash_bytes(b"identical");
+            let b = hash_bytes(b"identical");
+            assert_eq!(a, b);
 
-                let c = hash_bytes(b"different");
-                assert_ne!(a, c);
+            let c = hash_bytes(b"different");
+            assert_ne!(a, c);
 
-                RegistryLogData {
-                    reason_code: Some("hash_bytes_deterministic".to_string()),
-                    ..RegistryLogData::default()
-                }
-            },
-        );
+            RegistryLogData {
+                reason_code: Some("hash_bytes_deterministic".to_string()),
+                ..RegistryLogData::default()
+            }
+        });
     }
 
     #[test]
     fn hash_bytes_empty() {
-        run_registry_test(
-            "hash_bytes_empty",
-            "unit",
-            "hash",
-            1,
-            || async {
-                let h = hash_bytes(b"");
-                assert!(h.starts_with("sha256:"));
-                // SHA256 of empty is e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
-                assert!(h.contains("e3b0c44298fc1c149afbf4c8996fb924"));
+        run_registry_test("hash_bytes_empty", "unit", "hash", 1, || async {
+            let h = hash_bytes(b"");
+            assert!(h.starts_with("sha256:"));
+            // SHA256 of empty is e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+            assert!(h.contains("e3b0c44298fc1c149afbf4c8996fb924"));
 
-                RegistryLogData {
-                    reason_code: Some("hash_bytes_empty_ok".to_string()),
-                    ..RegistryLogData::default()
-                }
-            },
-        );
+            RegistryLogData {
+                reason_code: Some("hash_bytes_empty_ok".to_string()),
+                ..RegistryLogData::default()
+            }
+        });
     }
 
     // ── manifest_signing_bytes ────────────────────────────────────────────
@@ -3842,8 +3815,7 @@ sig = "base64:{sig_b64}"
                 assert!(!bytes.is_empty());
 
                 // Converting to JSON and checking signatures is removed
-                let value =
-                    serde_json::to_value(&manifest).expect("json");
+                let value = serde_json::to_value(&manifest).expect("json");
                 let signing_view = {
                     let mut v = value;
                     v.as_object_mut().unwrap().remove("signatures");
@@ -3877,7 +3849,10 @@ sig = "base64:{sig_b64}"
                     attestation_label(AttestationType::ReproducibleBuild),
                     "reproducible-build"
                 );
-                assert_eq!(attestation_label(AttestationType::CodeReview), "code-review");
+                assert_eq!(
+                    attestation_label(AttestationType::CodeReview),
+                    "code-review"
+                );
 
                 RegistryLogData {
                     reason_code: Some("attestation_labels_ok".to_string()),
@@ -3899,7 +3874,8 @@ sig = "base64:{sig_b64}"
             || async {
                 let manifest = minimal_manifest();
                 let policy = test_zone_policy(vec![]); // empty ceiling
-                enforce_capability_ceiling(Some(&policy), &manifest).expect("empty ceiling allows all");
+                enforce_capability_ceiling(Some(&policy), &manifest)
+                    .expect("empty ceiling allows all");
 
                 RegistryLogData {
                     reason_code: Some("empty_ceiling_ok".to_string()),
@@ -4087,9 +4063,8 @@ sig = "base64:{sig_b64}"
                 };
                 let trust = RegistryTrustPolicy::default();
                 let signing_bytes = b"data";
-                let result =
-                    verify_publishers(&trust, &sigs, signing_bytes, "sha256:hash")
-                        .expect("no error");
+                let result = verify_publishers(&trust, &sigs, signing_bytes, "sha256:hash")
+                    .expect("no error");
                 assert!(!result);
 
                 RegistryLogData {
@@ -4116,8 +4091,7 @@ sig = "base64:{sig_b64}"
                 };
                 let trust = RegistryTrustPolicy::default();
                 let result =
-                    verify_registry(&trust, &sigs, b"data", "sha256:hash")
-                        .expect("no error");
+                    verify_registry(&trust, &sigs, b"data", "sha256:hash").expect("no error");
                 assert!(!result);
 
                 RegistryLogData {
@@ -4161,8 +4135,12 @@ sig = "base64:{sig_b64}"
                 };
 
                 let mut trust = RegistryTrustPolicy::default();
-                trust.publisher_keys.insert("pub1".to_string(), pub_key.verifying_key());
-                trust.registry_keys.insert("reg1".to_string(), reg_key.verifying_key());
+                trust
+                    .publisher_keys
+                    .insert("pub1".to_string(), pub_key.verifying_key());
+                trust
+                    .registry_keys
+                    .insert("reg1".to_string(), reg_key.verifying_key());
                 trust.require_registry_signature = true;
 
                 let verifier = RegistryVerifier::new(trust);
@@ -4207,7 +4185,9 @@ sig = "base64:{sig_b64}"
                 };
 
                 let mut trust = RegistryTrustPolicy::default();
-                trust.publisher_keys.insert("pub1".to_string(), verifying_key);
+                trust
+                    .publisher_keys
+                    .insert("pub1".to_string(), verifying_key);
 
                 let verifier = RegistryVerifier::new(trust);
                 let verified = verifier
@@ -4299,60 +4279,54 @@ sig = "base64:{sig_b64}"
 
     #[test]
     fn type_debug_coverage() {
-        run_registry_test(
-            "type_debug_coverage",
-            "unit",
-            "traits",
-            4,
-            || async {
-                let entry = TransparencyLogEntry {
-                    log_index: 1,
-                    entry_hash: "sha256:a".to_string(),
-                    inclusion_proof: InclusionProof {
-                        root_hash: "sha256:r".to_string(),
-                        tree_size: 100,
-                        hashes: vec!["sha256:h".to_string()],
-                        leaf_index: 0,
-                    },
-                    signed_entry_timestamp: vec![1],
-                    log_id: "log1".to_string(),
-                };
-                let _ = format!("{entry:?}");
-                let cloned = entry.clone();
-                assert_eq!(cloned.log_index, 1);
+        run_registry_test("type_debug_coverage", "unit", "traits", 4, || async {
+            let entry = TransparencyLogEntry {
+                log_index: 1,
+                entry_hash: "sha256:a".to_string(),
+                inclusion_proof: InclusionProof {
+                    root_hash: "sha256:r".to_string(),
+                    tree_size: 100,
+                    hashes: vec!["sha256:h".to_string()],
+                    leaf_index: 0,
+                },
+                signed_entry_timestamp: vec![1],
+                log_id: "log1".to_string(),
+            };
+            let _ = format!("{entry:?}");
+            let cloned = entry.clone();
+            assert_eq!(cloned.log_index, 1);
 
-                let tuf = TufRootMetadata {
-                    version: 1,
-                    root_hash: "hash".to_string(),
-                    expires: 0,
-                    key_ids: vec![],
-                    threshold: 1,
-                };
-                let _ = format!("{tuf:?}");
+            let tuf = TufRootMetadata {
+                version: 1,
+                root_hash: "hash".to_string(),
+                expires: 0,
+                key_ids: vec![],
+                threshold: 1,
+            };
+            let _ = format!("{tuf:?}");
 
-                let target = TufTargetInfo {
-                    target_path: "p".to_string(),
-                    hash: "h".to_string(),
-                    length: 0,
-                    delegations: vec![],
-                };
-                let _ = format!("{target:?}");
+            let target = TufTargetInfo {
+                target_path: "p".to_string(),
+                hash: "h".to_string(),
+                length: 0,
+                delegations: vec![],
+            };
+            let _ = format!("{target:?}");
 
-                let bundle = SigstoreBundle {
-                    signature: "s".to_string(),
-                    certificate: "c".to_string(),
-                    rekor_entry: None,
-                    identity: "i".to_string(),
-                    issuer: "is".to_string(),
-                };
-                let _ = format!("{bundle:?}");
+            let bundle = SigstoreBundle {
+                signature: "s".to_string(),
+                certificate: "c".to_string(),
+                rekor_entry: None,
+                identity: "i".to_string(),
+                issuer: "is".to_string(),
+            };
+            let _ = format!("{bundle:?}");
 
-                RegistryLogData {
-                    reason_code: Some("debug_coverage_ok".to_string()),
-                    ..RegistryLogData::default()
-                }
-            },
-        );
+            RegistryLogData {
+                reason_code: Some("debug_coverage_ok".to_string()),
+                ..RegistryLogData::default()
+            }
+        });
     }
 
     #[test]
@@ -4429,8 +4403,7 @@ sig = "base64:{sig_b64}"
                     outcome: "accepted".to_string(),
                 };
                 let json = serde_json::to_string(&report).unwrap();
-                let parsed: RegistryVerificationReport =
-                    serde_json::from_str(&json).unwrap();
+                let parsed: RegistryVerificationReport = serde_json::from_str(&json).unwrap();
                 assert_eq!(parsed.connector_id, "fcp.test");
                 assert_eq!(parsed.outcome, "accepted");
 
@@ -4456,8 +4429,8 @@ sig = "base64:{sig_b64}"
             "error-source",
             1,
             || async {
-                let manifest_err = ConnectorManifest::parse_str("invalid toml %%%")
-                    .expect_err("parse fails");
+                let manifest_err =
+                    ConnectorManifest::parse_str("invalid toml %%%").expect_err("parse fails");
                 let registry_err: RegistryError = manifest_err.into();
                 assert!(matches!(registry_err, RegistryError::ManifestParse(_)));
                 let source = std::error::Error::source(&registry_err);
@@ -4567,31 +4540,67 @@ sig = "base64:{sig_b64}"
             13,
             || async {
                 let variants: Vec<(&str, SupplyChainVerificationError)> = vec![
-                    ("TransparencyEntryNotFound", SupplyChainVerificationError::TransparencyEntryNotFound),
-                    ("TransparencyProofInvalid", SupplyChainVerificationError::TransparencyProofInvalid),
-                    ("TransparencySignatureInvalid", SupplyChainVerificationError::TransparencySignatureInvalid),
-                    ("TufRootMismatch", SupplyChainVerificationError::TufRootMismatch {
-                        expected: "a".into(), actual: "b".into(),
-                    }),
+                    (
+                        "TransparencyEntryNotFound",
+                        SupplyChainVerificationError::TransparencyEntryNotFound,
+                    ),
+                    (
+                        "TransparencyProofInvalid",
+                        SupplyChainVerificationError::TransparencyProofInvalid,
+                    ),
+                    (
+                        "TransparencySignatureInvalid",
+                        SupplyChainVerificationError::TransparencySignatureInvalid,
+                    ),
+                    (
+                        "TufRootMismatch",
+                        SupplyChainVerificationError::TufRootMismatch {
+                            expected: "a".into(),
+                            actual: "b".into(),
+                        },
+                    ),
                     ("TufExpired", SupplyChainVerificationError::TufExpired),
-                    ("TufTargetNotFound", SupplyChainVerificationError::TufTargetNotFound {
-                        target: "t".into(),
-                    }),
-                    ("TufRollback", SupplyChainVerificationError::TufRollback { current: 1, got: 0 }),
+                    (
+                        "TufTargetNotFound",
+                        SupplyChainVerificationError::TufTargetNotFound { target: "t".into() },
+                    ),
+                    (
+                        "TufRollback",
+                        SupplyChainVerificationError::TufRollback { current: 1, got: 0 },
+                    ),
                     ("TufFreeze", SupplyChainVerificationError::TufFreeze),
-                    ("SigstoreSignatureInvalid", SupplyChainVerificationError::SigstoreSignatureInvalid),
-                    ("SigstoreCertificateInvalid", SupplyChainVerificationError::SigstoreCertificateInvalid),
-                    ("SigstoreIdentityMismatch", SupplyChainVerificationError::SigstoreIdentityMismatch {
-                        expected: "a".into(), actual: "b".into(),
-                    }),
-                    ("SigstoreIssuerUntrusted", SupplyChainVerificationError::SigstoreIssuerUntrusted {
-                        issuer: "evil".into(),
-                    }),
-                    ("Network", SupplyChainVerificationError::Network("timeout".into())),
+                    (
+                        "SigstoreSignatureInvalid",
+                        SupplyChainVerificationError::SigstoreSignatureInvalid,
+                    ),
+                    (
+                        "SigstoreCertificateInvalid",
+                        SupplyChainVerificationError::SigstoreCertificateInvalid,
+                    ),
+                    (
+                        "SigstoreIdentityMismatch",
+                        SupplyChainVerificationError::SigstoreIdentityMismatch {
+                            expected: "a".into(),
+                            actual: "b".into(),
+                        },
+                    ),
+                    (
+                        "SigstoreIssuerUntrusted",
+                        SupplyChainVerificationError::SigstoreIssuerUntrusted {
+                            issuer: "evil".into(),
+                        },
+                    ),
+                    (
+                        "Network",
+                        SupplyChainVerificationError::Network("timeout".into()),
+                    ),
                 ];
                 for (name, err) in &variants {
                     let debug = format!("{err:?}");
-                    assert!(debug.contains(name), "Debug of {name} should contain variant name, got: {debug}");
+                    assert!(
+                        debug.contains(name),
+                        "Debug of {name} should contain variant name, got: {debug}"
+                    );
                 }
 
                 RegistryLogData {
@@ -4615,25 +4624,62 @@ sig = "base64:{sig_b64}"
                 let variants: Vec<(&str, RegistryError)> = vec![
                     ("MissingSignatures", RegistryError::MissingSignatures),
                     ("UnknownKid", RegistryError::UnknownKid { kid: "k".into() }),
-                    ("SignatureInvalid", RegistryError::SignatureInvalid { kid: "k".into() }),
-                    ("PublisherThresholdUnmet", RegistryError::PublisherThresholdUnmet {
-                        required: 2, valid: 1,
-                    }),
-                    ("RegistrySignatureRequired", RegistryError::RegistrySignatureRequired),
-                    ("TargetMismatch", RegistryError::TargetMismatch {
-                        expected: "a".into(), found: "b".into(),
-                    }),
-                    ("CapabilityCeilingViolation", RegistryError::CapabilityCeilingViolation {
-                        capability: "c".into(),
-                    }),
-                    ("TransparencyLogMissing", RegistryError::TransparencyLogMissing),
-                    ("TransparencyEvidenceMissing", RegistryError::TransparencyEvidenceMissing),
-                    ("RequiredAttestationMissing", RegistryError::RequiredAttestationMissing {
-                        attestation: "a".into(),
-                    }),
-                    ("AttestationEvidenceMissing", RegistryError::AttestationEvidenceMissing),
-                    ("SlsaLevelInsufficient", RegistryError::SlsaLevelInsufficient { required: 3 }),
-                    ("UntrustedBuilder", RegistryError::UntrustedBuilder { builder: "b".into() }),
+                    (
+                        "SignatureInvalid",
+                        RegistryError::SignatureInvalid { kid: "k".into() },
+                    ),
+                    (
+                        "PublisherThresholdUnmet",
+                        RegistryError::PublisherThresholdUnmet {
+                            required: 2,
+                            valid: 1,
+                        },
+                    ),
+                    (
+                        "RegistrySignatureRequired",
+                        RegistryError::RegistrySignatureRequired,
+                    ),
+                    (
+                        "TargetMismatch",
+                        RegistryError::TargetMismatch {
+                            expected: "a".into(),
+                            found: "b".into(),
+                        },
+                    ),
+                    (
+                        "CapabilityCeilingViolation",
+                        RegistryError::CapabilityCeilingViolation {
+                            capability: "c".into(),
+                        },
+                    ),
+                    (
+                        "TransparencyLogMissing",
+                        RegistryError::TransparencyLogMissing,
+                    ),
+                    (
+                        "TransparencyEvidenceMissing",
+                        RegistryError::TransparencyEvidenceMissing,
+                    ),
+                    (
+                        "RequiredAttestationMissing",
+                        RegistryError::RequiredAttestationMissing {
+                            attestation: "a".into(),
+                        },
+                    ),
+                    (
+                        "AttestationEvidenceMissing",
+                        RegistryError::AttestationEvidenceMissing,
+                    ),
+                    (
+                        "SlsaLevelInsufficient",
+                        RegistryError::SlsaLevelInsufficient { required: 3 },
+                    ),
+                    (
+                        "UntrustedBuilder",
+                        RegistryError::UntrustedBuilder {
+                            builder: "b".into(),
+                        },
+                    ),
                     ("SignatureBytes", RegistryError::SignatureBytes),
                 ];
                 for (name, err) in &variants {
@@ -4829,7 +4875,8 @@ sig = "base64:{sig_b64}"
             || async {
                 let bundle = SigstoreBundle {
                     signature: "base64sig".into(),
-                    certificate: "-----BEGIN CERTIFICATE-----\ndata\n-----END CERTIFICATE-----".into(),
+                    certificate: "-----BEGIN CERTIFICATE-----\ndata\n-----END CERTIFICATE-----"
+                        .into(),
                     rekor_entry: Some(TransparencyLogEntry {
                         log_index: 100,
                         entry_hash: "sha256:entry".into(),
@@ -4900,11 +4947,7 @@ sig = "base64:{sig_b64}"
                 let proof = InclusionProof {
                     root_hash: "sha256:rootabc".into(),
                     tree_size: 10_000,
-                    hashes: vec![
-                        "sha256:h1".into(),
-                        "sha256:h2".into(),
-                        "sha256:h3".into(),
-                    ],
+                    hashes: vec!["sha256:h1".into(), "sha256:h2".into(), "sha256:h3".into()],
                     leaf_index: 42,
                 };
                 let json = serde_json::to_string(&proof).unwrap();
@@ -5142,67 +5185,55 @@ sig = "base64:{sig_b64}"
 
     #[test]
     fn noop_verifiers_debug() {
-        run_registry_test(
-            "noop_verifiers_debug",
-            "unit",
-            "traits",
-            3,
-            || async {
-                let t = NoOpTransparencyVerifier;
-                let debug = format!("{t:?}");
-                assert!(debug.contains("NoOpTransparencyVerifier"));
+        run_registry_test("noop_verifiers_debug", "unit", "traits", 3, || async {
+            let t = NoOpTransparencyVerifier;
+            let debug = format!("{t:?}");
+            assert!(debug.contains("NoOpTransparencyVerifier"));
 
-                let tuf = NoOpTufVerifier;
-                let debug = format!("{tuf:?}");
-                assert!(debug.contains("NoOpTufVerifier"));
+            let tuf = NoOpTufVerifier;
+            let debug = format!("{tuf:?}");
+            assert!(debug.contains("NoOpTufVerifier"));
 
-                let sig = NoOpSigstoreVerifier;
-                let debug = format!("{sig:?}");
-                assert!(debug.contains("NoOpSigstoreVerifier"));
+            let sig = NoOpSigstoreVerifier;
+            let debug = format!("{sig:?}");
+            assert!(debug.contains("NoOpSigstoreVerifier"));
 
-                RegistryLogData {
-                    reason_code: Some("noop_debug_ok".to_string()),
-                    ..RegistryLogData::default()
-                }
-            },
-        );
+            RegistryLogData {
+                reason_code: Some("noop_debug_ok".to_string()),
+                ..RegistryLogData::default()
+            }
+        });
     }
 
     // ── MockVerifier Debug coverage ──────────────────────────────────────
 
     #[test]
     fn mock_verifiers_debug() {
-        run_registry_test(
-            "mock_verifiers_debug",
-            "unit",
-            "traits",
-            3,
-            || async {
-                let mt = MockTransparencyVerifier::new();
-                let debug = format!("{mt:?}");
-                assert!(debug.contains("MockTransparencyVerifier"));
+        run_registry_test("mock_verifiers_debug", "unit", "traits", 3, || async {
+            let mt = MockTransparencyVerifier::new();
+            let debug = format!("{mt:?}");
+            assert!(debug.contains("MockTransparencyVerifier"));
 
-                let root = TufRootMetadata {
-                    version: 1,
-                    root_hash: String::new(),
-                    expires: 0,
-                    key_ids: vec![],
-                    threshold: 1,
-                };
-                let tuf = MockTufVerifier::new(root);
-                let debug = format!("{tuf:?}");
-                assert!(debug.contains("MockTufVerifier"));
+            let root = TufRootMetadata {
+                version: 1,
+                root_hash: String::new(),
+                expires: 0,
+                key_ids: vec![],
+                threshold: 1,
+            };
+            let tuf = MockTufVerifier::new(root);
+            let debug = format!("{tuf:?}");
+            assert!(debug.contains("MockTufVerifier"));
 
-                let sig = MockSigstoreVerifier::new();
-                let debug = format!("{sig:?}");
-                assert!(debug.contains("MockSigstoreVerifier"));
+            let sig = MockSigstoreVerifier::new();
+            let debug = format!("{sig:?}");
+            assert!(debug.contains("MockSigstoreVerifier"));
 
-                RegistryLogData {
-                    reason_code: Some("mock_debug_ok".to_string()),
-                    ..RegistryLogData::default()
-                }
-            },
-        );
+            RegistryLogData {
+                reason_code: Some("mock_debug_ok".to_string()),
+                ..RegistryLogData::default()
+            }
+        });
     }
 
     // ── SupplyChainVerificationConfig with values ────────────────────────
@@ -5224,7 +5255,9 @@ sig = "base64:{sig_b64}"
                         threshold: 1,
                     }),
                     trusted_sigstore_identities: vec!["github-actions".into()],
-                    trusted_sigstore_issuers: vec!["https://token.actions.githubusercontent.com".into()],
+                    trusted_sigstore_issuers: vec![
+                        "https://token.actions.githubusercontent.com".into(),
+                    ],
                     require_transparency: true,
                     require_tuf: true,
                     require_sigstore: true,
@@ -5250,24 +5283,18 @@ sig = "base64:{sig_b64}"
 
     #[test]
     fn hash_bytes_large_input() {
-        run_registry_test(
-            "hash_bytes_large_input",
-            "unit",
-            "hash",
-            2,
-            || async {
-                let large = vec![0xABu8; 1_000_000];
-                let h1 = hash_bytes(&large);
-                let h2 = hash_bytes(&large);
-                assert_eq!(h1, h2);
-                assert!(h1.starts_with("sha256:"));
+        run_registry_test("hash_bytes_large_input", "unit", "hash", 2, || async {
+            let large = vec![0xABu8; 1_000_000];
+            let h1 = hash_bytes(&large);
+            let h2 = hash_bytes(&large);
+            assert_eq!(h1, h2);
+            assert!(h1.starts_with("sha256:"));
 
-                RegistryLogData {
-                    reason_code: Some("hash_large_ok".to_string()),
-                    ..RegistryLogData::default()
-                }
-            },
-        );
+            RegistryLogData {
+                reason_code: Some("hash_large_ok".to_string()),
+                ..RegistryLogData::default()
+            }
+        });
     }
 
     // ── signature_message non-collision ───────────────────────────────────
@@ -5299,30 +5326,24 @@ sig = "base64:{sig_b64}"
 
     #[test]
     fn mirror_result_debug_clone() {
-        run_registry_test(
-            "mirror_result_debug_clone",
-            "unit",
-            "traits",
-            3,
-            || async {
-                let result = MirrorResult {
-                    manifest_object_id: ObjectId::from_bytes([1u8; 32]),
-                    binary_object_id: ObjectId::from_bytes([2u8; 32]),
-                    manifest_hash: "sha256:manifest".into(),
-                    binary_hash: "sha256:binary".into(),
-                };
-                let debug = format!("{result:?}");
-                assert!(debug.contains("MirrorResult"));
-                let cloned = result.clone();
-                assert_eq!(cloned.manifest_hash, "sha256:manifest");
-                assert_eq!(cloned.binary_hash, "sha256:binary");
+        run_registry_test("mirror_result_debug_clone", "unit", "traits", 3, || async {
+            let result = MirrorResult {
+                manifest_object_id: ObjectId::from_bytes([1u8; 32]),
+                binary_object_id: ObjectId::from_bytes([2u8; 32]),
+                manifest_hash: "sha256:manifest".into(),
+                binary_hash: "sha256:binary".into(),
+            };
+            let debug = format!("{result:?}");
+            assert!(debug.contains("MirrorResult"));
+            let cloned = result.clone();
+            assert_eq!(cloned.manifest_hash, "sha256:manifest");
+            assert_eq!(cloned.binary_hash, "sha256:binary");
 
-                RegistryLogData {
-                    reason_code: Some("mirror_result_traits_ok".to_string()),
-                    ..RegistryLogData::default()
-                }
-            },
-        );
+            RegistryLogData {
+                reason_code: Some("mirror_result_traits_ok".to_string()),
+                ..RegistryLogData::default()
+            }
+        });
     }
 
     // ── VerifiedConnectorBundle Debug/Clone ───────────────────────────────

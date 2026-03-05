@@ -983,10 +983,7 @@ fn test_multi_rollback_retry_cycle() {
         test_version(),
     );
 
-    ctx.log_phase(
-        "setup",
-        Some(json!({"scenario": "multi_rollback_retry"})),
-    );
+    ctx.log_phase("setup", Some(json!({"scenario": "multi_rollback_retry"})));
 
     let mut record = LifecycleRecord::new(test_connector_id(), test_version())
         .with_canary_policy(
@@ -1108,10 +1105,7 @@ fn test_full_lifecycle_with_version_upgrade() {
         semver::Version::new(1, 0, 0),
     );
 
-    ctx.log_phase(
-        "setup",
-        Some(json!({"scenario": "full_lifecycle_upgrade"})),
-    );
+    ctx.log_phase("setup", Some(json!({"scenario": "full_lifecycle_upgrade"})));
 
     let mut record = LifecycleRecord::new(test_connector_id(), semver::Version::new(1, 0, 0))
         .with_canary_policy(
@@ -1206,10 +1200,7 @@ fn test_crash_loop_triggers_auto_rollback() {
         test_version(),
     );
 
-    ctx.log_phase(
-        "setup",
-        Some(json!({"scenario": "crash_loop_rollback"})),
-    );
+    ctx.log_phase("setup", Some(json!({"scenario": "crash_loop_rollback"})));
 
     let mut record = LifecycleRecord::new(test_connector_id(), test_version())
         .with_previous_version(semver::Version::new(0, 9, 0));
@@ -1269,10 +1260,7 @@ fn test_crash_loop_no_rollback_target() {
         test_version(),
     );
 
-    ctx.log_phase(
-        "setup",
-        Some(json!({"scenario": "crash_loop_no_target"})),
-    );
+    ctx.log_phase("setup", Some(json!({"scenario": "crash_loop_no_target"})));
 
     let mut record = LifecycleRecord::new(test_connector_id(), test_version());
     // No previous_version set
@@ -1328,10 +1316,7 @@ fn test_health_recovery_from_failures() {
         test_version(),
     );
 
-    ctx.log_phase(
-        "setup",
-        Some(json!({"scenario": "health_recovery"})),
-    );
+    ctx.log_phase("setup", Some(json!({"scenario": "health_recovery"})));
 
     let mut record = create_canary_record(
         CanaryPolicy::new()
@@ -1425,10 +1410,7 @@ fn test_auto_promotion_requires_min_samples() {
         test_version(),
     );
 
-    ctx.log_phase(
-        "setup",
-        Some(json!({"scenario": "promotion_min_samples"})),
-    );
+    ctx.log_phase("setup", Some(json!({"scenario": "promotion_min_samples"})));
 
     let mut record = create_canary_record(
         CanaryPolicy::new()
@@ -1473,10 +1455,7 @@ fn test_activation_full_sequence() {
         test_version(),
     );
 
-    ctx.log_phase(
-        "setup",
-        Some(json!({"scenario": "full_activation"})),
-    );
+    ctx.log_phase("setup", Some(json!({"scenario": "full_activation"})));
 
     let mut record = LifecycleRecord::new(test_connector_id(), test_version()).with_canary_policy(
         CanaryPolicy::new()
@@ -1505,11 +1484,7 @@ fn test_activation_full_sequence() {
     record
         .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
         .expect("canary");
-    ctx.assert_eq(
-        &record.state,
-        &LifecycleState::Canary,
-        "Phase 2: Canary",
-    );
+    ctx.assert_eq(&record.state, &LifecycleState::Canary, "Phase 2: Canary");
     ctx.assert_true(record.state.is_active(), "Canary should be active");
 
     // Phase 3: Health monitoring
@@ -1521,24 +1496,15 @@ fn test_activation_full_sequence() {
     ctx.log_health_update(&record.health);
 
     // Not at promotion threshold yet (90% < 95%)
-    ctx.assert_true(
-        !record.should_auto_promote(),
-        "Should not promote at 90%",
-    );
-    ctx.assert_true(
-        !record.should_auto_rollback(),
-        "Should not rollback at 90%",
-    );
+    ctx.assert_true(!record.should_auto_promote(), "Should not promote at 90%");
+    ctx.assert_true(!record.should_auto_rollback(), "Should not rollback at 90%");
 
     // Phase 4: More successes push above threshold
     record.reset_health();
     for _ in 0..10 {
         record.update_health(true, Some(30));
     }
-    ctx.assert_true(
-        record.should_auto_promote(),
-        "Should promote at 100%",
-    );
+    ctx.assert_true(record.should_auto_promote(), "Should promote at 100%");
 
     // Phase 5: Promote to production
     ctx.log_phase("promote", Some(json!({"phase": "production_promotion"})));
@@ -1573,10 +1539,7 @@ fn test_activation_failure_during_canary() {
         test_version(),
     );
 
-    ctx.log_phase(
-        "setup",
-        Some(json!({"scenario": "activation_failure"})),
-    );
+    ctx.log_phase("setup", Some(json!({"scenario": "activation_failure"})));
 
     let mut record = LifecycleRecord::new(test_connector_id(), test_version())
         .with_canary_policy(
@@ -1636,11 +1599,7 @@ fn test_activation_failure_during_canary() {
 
     // Verify the rollback transition has the right reason
     let last = record.transitions.last().unwrap();
-    ctx.assert_eq(
-        &last.from,
-        &LifecycleState::Canary,
-        "Rollback from Canary",
-    );
+    ctx.assert_eq(&last.from, &LifecycleState::Canary, "Rollback from Canary");
     ctx.assert_eq(
         &last.to,
         &LifecycleState::RolledBack,
@@ -1755,16 +1714,9 @@ fn test_disable_after_repeated_activation_failures() {
 /// Simulate saving and loading a lifecycle record (persistence).
 #[test]
 fn test_lifecycle_record_persistence_roundtrip() {
-    let mut ctx = TestContext::new(
-        "persistence_roundtrip",
-        test_connector_id(),
-        test_version(),
-    );
+    let mut ctx = TestContext::new("persistence_roundtrip", test_connector_id(), test_version());
 
-    ctx.log_phase(
-        "setup",
-        Some(json!({"scenario": "persistence"})),
-    );
+    ctx.log_phase("setup", Some(json!({"scenario": "persistence"})));
 
     // Create record with state
     let mut record = LifecycleRecord::new(test_connector_id(), test_version())
@@ -1790,35 +1742,20 @@ fn test_lifecycle_record_persistence_roundtrip() {
 
     // Serialize (simulate save)
     let json_str = serde_json::to_string(&record).expect("serialize");
-    ctx.log_phase(
-        "serialize",
-        Some(json!({"json_length": json_str.len()})),
-    );
+    ctx.log_phase("serialize", Some(json!({"json_length": json_str.len()})));
 
     // Deserialize (simulate load)
     let loaded: LifecycleRecord = serde_json::from_str(&json_str).expect("deserialize");
 
     // Verify all state is preserved
-    ctx.assert_eq(
-        &loaded.state,
-        &LifecycleState::Canary,
-        "State preserved",
-    );
+    ctx.assert_eq(&loaded.state, &LifecycleState::Canary, "State preserved");
     ctx.assert_eq(
         &loaded.version,
         &semver::Version::new(1, 0, 0),
         "Version preserved",
     );
-    ctx.assert_eq(
-        &loaded.transitions.len(),
-        &2,
-        "Transitions preserved",
-    );
-    ctx.assert_eq(
-        &loaded.health.samples,
-        &10,
-        "Health samples preserved",
-    );
+    ctx.assert_eq(&loaded.transitions.len(), &2, "Transitions preserved");
+    ctx.assert_eq(&loaded.health.samples, &10, "Health samples preserved");
     ctx.assert_eq(
         &loaded.health.success_rate,
         &100u8,
@@ -1847,16 +1784,9 @@ fn test_lifecycle_record_persistence_roundtrip() {
 fn test_lifecycle_status_api_response_format() {
     use fcp_core::{CrashLoopDetector, LifecycleStatus};
 
-    let mut ctx = TestContext::new(
-        "status_api_response",
-        test_connector_id(),
-        test_version(),
-    );
+    let mut ctx = TestContext::new("status_api_response", test_connector_id(), test_version());
 
-    ctx.log_phase(
-        "setup",
-        Some(json!({"scenario": "status_api"})),
-    );
+    ctx.log_phase("setup", Some(json!({"scenario": "status_api"})));
 
     let mut record = LifecycleRecord::new(test_connector_id(), test_version())
         .with_canary_policy(
@@ -1960,10 +1890,7 @@ fn test_production_rollback_reason_in_audit() {
     // Verify reason is captured in the last transition
     let last = record.transitions.last().unwrap();
     if let TransitionReason::ManualRollback { reason } = &last.reason {
-        ctx.assert_true(
-            reason.is_some(),
-            "Rollback reason should be present",
-        );
+        ctx.assert_true(reason.is_some(), "Rollback reason should be present");
         ctx.assert_eq(
             reason.as_ref().unwrap(),
             &rollback_reason.to_string(),
@@ -1985,10 +1912,7 @@ fn test_uninstall_preserves_full_history() {
         test_version(),
     );
 
-    ctx.log_phase(
-        "setup",
-        Some(json!({"scenario": "uninstall_audit"})),
-    );
+    ctx.log_phase("setup", Some(json!({"scenario": "uninstall_audit"})));
 
     let mut record = create_canary_record(CanaryPolicy::new());
     record

@@ -229,15 +229,23 @@ impl SessionGoldenVector {
 
         let mut info = Vec::new();
         info.extend_from_slice(b"FCP2-SESSION-V1");
-        
+
         let init_bytes = self.initiator_id.as_bytes();
-        info.extend_from_slice(&u32::try_from(init_bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
+        info.extend_from_slice(
+            &u32::try_from(init_bytes.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
         info.extend_from_slice(init_bytes);
 
         let resp_bytes = self.responder_id.as_bytes();
-        info.extend_from_slice(&u32::try_from(resp_bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
+        info.extend_from_slice(
+            &u32::try_from(resp_bytes.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
         info.extend_from_slice(resp_bytes);
-        
+
         info.extend_from_slice(&hello_nonce);
         info.extend_from_slice(&ack_nonce);
 
@@ -393,15 +401,23 @@ mod tests {
 
         let mut info = Vec::new();
         info.extend_from_slice(b"FCP2-SESSION-V1");
-        
+
         let init_bytes = b"node.initiator.ts.net";
-        info.extend_from_slice(&u32::try_from(init_bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
+        info.extend_from_slice(
+            &u32::try_from(init_bytes.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
         info.extend_from_slice(init_bytes);
 
         let resp_bytes = b"node.responder.ts.net";
-        info.extend_from_slice(&u32::try_from(resp_bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
+        info.extend_from_slice(
+            &u32::try_from(resp_bytes.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
         info.extend_from_slice(resp_bytes);
-        
+
         info.extend_from_slice(&hello_nonce);
         info.extend_from_slice(&ack_nonce);
 

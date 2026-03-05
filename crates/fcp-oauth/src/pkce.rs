@@ -253,9 +253,11 @@ mod tests {
         // S256 challenge: SHA-256(verifier) → base64url no padding
         // Should be 43 chars (32 bytes → base64url = ceil(32*4/3) = 43)
         assert_eq!(challenge.len(), 43);
-        assert!(challenge
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        assert!(
+            challenge
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        );
     }
 
     #[test]
@@ -267,10 +269,11 @@ mod tests {
     #[test]
     fn test_pkce_verifier_is_valid_base64url() {
         let pkce = Pkce::new();
-        assert!(pkce
-            .verifier()
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        assert!(
+            pkce.verifier()
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        );
     }
 
     // ── Batch: from_verifier boundary validation ──

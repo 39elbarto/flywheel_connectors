@@ -1062,7 +1062,10 @@ mod tests {
 
     #[test]
     fn lease_purpose_display() {
-        assert_eq!(LeasePurpose::SingletonWriter.to_string(), "singleton_writer");
+        assert_eq!(
+            LeasePurpose::SingletonWriter.to_string(),
+            "singleton_writer"
+        );
         assert_eq!(
             LeasePurpose::OperationExecution.to_string(),
             "operation_execution"
@@ -1218,7 +1221,9 @@ mod tests {
 
     #[test]
     fn planner_context_with_gpu_tpu() {
-        let ctx = PlannerContext::new(test_connector_id()).with_gpu().with_tpu();
+        let ctx = PlannerContext::new(test_connector_id())
+            .with_gpu()
+            .with_tpu();
         assert!(ctx.requires_gpu);
         assert!(ctx.requires_tpu);
     }
@@ -1363,10 +1368,12 @@ mod tests {
         let candidates = planner.plan(&input, &context);
         assert_eq!(candidates.len(), 2);
         // First candidate has SelectedAsBest
-        assert!(candidates[0].decision_reasons.iter().any(|r| matches!(
-            r,
-            DecisionReason::SelectedAsBest { rank: 1 }
-        )));
+        assert!(
+            candidates[0]
+                .decision_reasons
+                .iter()
+                .any(|r| matches!(r, DecisionReason::SelectedAsBest { rank: 1 }))
+        );
         // Second has EligibleNotSelected
         assert!(candidates[1].decision_reasons.iter().any(|r| matches!(
             r,

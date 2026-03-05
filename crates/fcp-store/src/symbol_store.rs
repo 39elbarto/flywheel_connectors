@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use bytes::Bytes;
 use fcp_core::{ObjectId, ZoneId};
-use parking_lot::RwLock;
 use fcp_raptorq::ObjectTransmissionInformation;
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
 use crate::coverage::SymbolDistribution;

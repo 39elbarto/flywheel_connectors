@@ -181,55 +181,67 @@ mod tests {
 
     #[test]
     fn is_retryable_rate_limited() {
-        assert!(FigmaError::RateLimited {
-            retry_after_secs: 1
-        }
-        .is_retryable());
+        assert!(
+            FigmaError::RateLimited {
+                retry_after_secs: 1
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn is_retryable_api_500() {
-        assert!(FigmaError::Api {
-            status: 500,
-            message: "internal".into(),
-        }
-        .is_retryable());
+        assert!(
+            FigmaError::Api {
+                status: 500,
+                message: "internal".into(),
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn is_retryable_api_429() {
-        assert!(FigmaError::Api {
-            status: 429,
-            message: "rate limited".into(),
-        }
-        .is_retryable());
+        assert!(
+            FigmaError::Api {
+                status: 429,
+                message: "rate limited".into(),
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn is_retryable_api_timeout_message() {
-        assert!(FigmaError::Api {
-            status: 200,
-            message: "timeout occurred".into(),
-        }
-        .is_retryable());
+        assert!(
+            FigmaError::Api {
+                status: 200,
+                message: "timeout occurred".into(),
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn is_retryable_api_temporarily_unavailable() {
-        assert!(FigmaError::Api {
-            status: 200,
-            message: "service temporarily unavailable".into(),
-        }
-        .is_retryable());
+        assert!(
+            FigmaError::Api {
+                status: 200,
+                message: "service temporarily unavailable".into(),
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn not_retryable_api_400() {
-        assert!(!FigmaError::Api {
-            status: 400,
-            message: "bad request".into(),
-        }
-        .is_retryable());
+        assert!(
+            !FigmaError::Api {
+                status: 400,
+                message: "bad request".into(),
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
@@ -239,10 +251,12 @@ mod tests {
 
     #[test]
     fn not_retryable_file_not_found() {
-        assert!(!FigmaError::FileNotFound {
-            file_key: "x".into()
-        }
-        .is_retryable());
+        assert!(
+            !FigmaError::FileNotFound {
+                file_key: "x".into()
+            }
+            .is_retryable()
+        );
     }
 
     // ---- retry_after ----
@@ -287,9 +301,7 @@ mod tests {
             message: "rate limited".into(),
         };
         match err.to_fcp_error() {
-            FcpError::RateLimited {
-                retry_after_ms, ..
-            } => assert_eq!(retry_after_ms, 60_000),
+            FcpError::RateLimited { retry_after_ms, .. } => assert_eq!(retry_after_ms, 60_000),
             other => panic!("expected RateLimited, got {other:?}"),
         }
     }
@@ -329,9 +341,7 @@ mod tests {
             retry_after_secs: 10,
         };
         match err.to_fcp_error() {
-            FcpError::RateLimited {
-                retry_after_ms, ..
-            } => assert_eq!(retry_after_ms, 10_000),
+            FcpError::RateLimited { retry_after_ms, .. } => assert_eq!(retry_after_ms, 10_000),
             other => panic!("expected RateLimited, got {other:?}"),
         }
     }

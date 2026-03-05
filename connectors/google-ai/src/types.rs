@@ -179,7 +179,9 @@ mod tests {
     fn content_text_serde() {
         let content = Content {
             role: Some("user".to_string()),
-            parts: vec![Part::Text { text: "Hello!".to_string() }],
+            parts: vec![Part::Text {
+                text: "Hello!".to_string(),
+            }],
         };
         let json = serde_json::to_string(&content).unwrap();
         let back: Content = serde_json::from_str(&json).unwrap();

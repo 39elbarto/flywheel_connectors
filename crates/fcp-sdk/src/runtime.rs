@@ -315,9 +315,9 @@ pub trait StreamingSession: Send + Sync {
             // But if `heartbeat_seq()` is large enough that we should have timed out...
             // Or we just rely on `sent.elapsed() > timeout` assuming it's the *only* send,
             // which is flawed if we send multiple.
-            // Best heuristic with available state: if we've sent heartbeats and 
+            // Best heuristic with available state: if we've sent heartbeats and
             // haven't gotten an ack in `timeout`, and `sent.elapsed() > timeout`
-            // (meaning even the *last* one is old), we timeout. 
+            // (meaning even the *last* one is old), we timeout.
             // To be safe against overwrites, if we haven't gotten an ack, we really should track first_sent.
             // But since we can't change the state struct easily, we'll check `ack.elapsed() > timeout`.
             (Some(sent), None) => {
@@ -326,11 +326,11 @@ pub trait StreamingSession: Send + Sync {
                     return true;
                 }
                 // If we've sent multiple heartbeats but no acks, we might be dead.
-                // Not perfectly determinable without first_sent, so we return false and wait for `sent.elapsed() > timeout` 
+                // Not perfectly determinable without first_sent, so we return false and wait for `sent.elapsed() > timeout`
                 // if sends stop, or the caller needs to track first_sent.
                 // Actually, if we just check `ack.elapsed() > timeout` it covers steady state.
                 false
-            },
+            }
             _ => false,
         }
     }
@@ -2927,10 +2927,7 @@ mod tests {
     #[test]
     fn supervisor_config_heartbeat_interval_enabled() {
         let config = SupervisorConfig::default();
-        assert_eq!(
-            config.heartbeat_interval(),
-            Some(Duration::from_secs(30))
-        );
+        assert_eq!(config.heartbeat_interval(), Some(Duration::from_secs(30)));
     }
 
     #[test]
@@ -2980,7 +2977,11 @@ mod tests {
             ..Default::default()
         };
         let errors = config.validate().unwrap_err();
-        assert!(errors.iter().any(|e| e.contains("max_consecutive_failures")));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("max_consecutive_failures"))
+        );
     }
 
     #[test]
@@ -2990,9 +2991,11 @@ mod tests {
             ..Default::default()
         };
         let errors = config.validate().unwrap_err();
-        assert!(errors
-            .iter()
-            .any(|e| e.contains("heartbeat_timeout_multiplier")));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("heartbeat_timeout_multiplier"))
+        );
     }
 
     #[test]
@@ -3192,24 +3195,16 @@ mod tests {
         // Starting → anything is valid
         let tracker = HealthTracker::new();
         assert!(tracker.is_valid_transition(&HealthTransition::ToHealthy));
-        assert!(tracker.is_valid_transition(&HealthTransition::ToDegraded {
-            reason: "x".into()
-        }));
-        assert!(tracker.is_valid_transition(&HealthTransition::ToUnhealthy {
-            reason: "x".into()
-        }));
+        assert!(tracker.is_valid_transition(&HealthTransition::ToDegraded { reason: "x".into() }));
+        assert!(tracker.is_valid_transition(&HealthTransition::ToUnhealthy { reason: "x".into() }));
         assert!(tracker.is_valid_transition(&HealthTransition::ToStarting));
 
         // Ready → can degrade or fail, NOT go to healthy again
         let mut tracker = HealthTracker::new();
         tracker.transition(HealthTransition::ToHealthy);
         assert!(!tracker.is_valid_transition(&HealthTransition::ToHealthy));
-        assert!(tracker.is_valid_transition(&HealthTransition::ToDegraded {
-            reason: "x".into()
-        }));
-        assert!(tracker.is_valid_transition(&HealthTransition::ToUnhealthy {
-            reason: "x".into()
-        }));
+        assert!(tracker.is_valid_transition(&HealthTransition::ToDegraded { reason: "x".into() }));
+        assert!(tracker.is_valid_transition(&HealthTransition::ToUnhealthy { reason: "x".into() }));
         assert!(tracker.is_valid_transition(&HealthTransition::ToStarting));
 
         // Degraded → can recover or fail
@@ -3218,12 +3213,8 @@ mod tests {
             reason: "slow".into(),
         });
         assert!(tracker.is_valid_transition(&HealthTransition::ToHealthy));
-        assert!(!tracker.is_valid_transition(&HealthTransition::ToDegraded {
-            reason: "x".into()
-        }));
-        assert!(tracker.is_valid_transition(&HealthTransition::ToUnhealthy {
-            reason: "x".into()
-        }));
+        assert!(!tracker.is_valid_transition(&HealthTransition::ToDegraded { reason: "x".into() }));
+        assert!(tracker.is_valid_transition(&HealthTransition::ToUnhealthy { reason: "x".into() }));
 
         // Error → can recover (fully or partially)
         let mut tracker = HealthTracker::new();
@@ -3231,12 +3222,10 @@ mod tests {
             reason: "bad".into(),
         });
         assert!(tracker.is_valid_transition(&HealthTransition::ToHealthy));
-        assert!(tracker.is_valid_transition(&HealthTransition::ToDegraded {
-            reason: "x".into()
-        }));
-        assert!(!tracker.is_valid_transition(&HealthTransition::ToUnhealthy {
-            reason: "x".into()
-        }));
+        assert!(tracker.is_valid_transition(&HealthTransition::ToDegraded { reason: "x".into() }));
+        assert!(
+            !tracker.is_valid_transition(&HealthTransition::ToUnhealthy { reason: "x".into() })
+        );
     }
 
     #[test]
@@ -3424,9 +3413,9 @@ mod tests {
         let outcome = SupervisorOutcome::FatalError {
             message: "test".into(),
         };
-        let cloned = outcome.clone();
+        let moved = outcome;
         assert!(matches!(
-            cloned,
+            moved,
             SupervisorOutcome::FatalError { message } if message == "test"
         ));
     }
@@ -3602,11 +3591,7 @@ mod tests {
     #[test]
     fn cursor_store_commit_and_load() {
         let backend = Arc::new(InMemoryCursorStoreBackend::new());
-        let mut store = CursorStore::new(
-            Arc::clone(&backend),
-            test_connector_id(),
-            test_zone_id(),
-        );
+        let mut store = CursorStore::new(Arc::clone(&backend), test_connector_id(), test_zone_id());
 
         let cursor = test_cursor_state(100, 50);
         let header = test_object_header();
@@ -3618,11 +3603,8 @@ mod tests {
         assert_eq!(store.head(), Some(object_id));
 
         // Load from a fresh store using same backend
-        let mut store2 = CursorStore::new(
-            Arc::clone(&backend),
-            test_connector_id(),
-            test_zone_id(),
-        );
+        let mut store2 =
+            CursorStore::new(Arc::clone(&backend), test_connector_id(), test_zone_id());
         let loaded = store2.load_cursor().unwrap().unwrap();
         assert_eq!(loaded.offset, Some(100));
         assert_eq!(loaded.watermark, Some(50));
@@ -3638,9 +3620,7 @@ mod tests {
         let header = test_object_header();
         let lease = test_lease(5);
         let sig = Signature::from_bytes([0u8; 64]);
-        store
-            .commit_cursor(cursor, header, lease, sig)
-            .unwrap();
+        store.commit_cursor(cursor, header, lease, sig).unwrap();
 
         // Second commit with stale lease_seq=3
         let cursor2 = test_cursor_state(200, 100);
@@ -3669,9 +3649,7 @@ mod tests {
         let header = test_object_header();
         let lease = test_lease(1);
         let sig = Signature::from_bytes([0u8; 64]);
-        store
-            .commit_cursor(cursor, header, lease, sig)
-            .unwrap();
+        store.commit_cursor(cursor, header, lease, sig).unwrap();
 
         // Second commit with lower offset=50
         let cursor2 = test_cursor_state(50, 100);
@@ -3700,9 +3678,7 @@ mod tests {
         let header = test_object_header();
         let lease = test_lease(1);
         let sig = Signature::from_bytes([0u8; 64]);
-        store
-            .commit_cursor(cursor, header, lease, sig)
-            .unwrap();
+        store.commit_cursor(cursor, header, lease, sig).unwrap();
 
         // Second commit with lower watermark=100
         let cursor2 = test_cursor_state(200, 100);
@@ -3730,18 +3706,14 @@ mod tests {
         let header = test_object_header();
         let lease = test_lease(5);
         let sig = Signature::from_bytes([0u8; 64]);
-        store
-            .commit_cursor(cursor, header, lease, sig)
-            .unwrap();
+        store.commit_cursor(cursor, header, lease, sig).unwrap();
 
         // Same lease_seq=5 is allowed (not stale)
         let cursor2 = test_cursor_state(200, 100);
         let header2 = test_object_header();
         let lease2 = test_lease(5);
         let sig2 = Signature::from_bytes([0u8; 64]);
-        store
-            .commit_cursor(cursor2, header2, lease2, sig2)
-            .unwrap();
+        store.commit_cursor(cursor2, header2, lease2, sig2).unwrap();
     }
 
     #[test]
@@ -3756,42 +3728,35 @@ mod tests {
     #[test]
     fn cursor_store_commit_adds_lease_ref() {
         let backend = Arc::new(InMemoryCursorStoreBackend::new());
-        let mut store = CursorStore::new(
-            Arc::clone(&backend),
-            test_connector_id(),
-            test_zone_id(),
-        );
+        let mut store = CursorStore::new(Arc::clone(&backend), test_connector_id(), test_zone_id());
 
         let cursor = test_cursor_state(100, 50);
         let header = test_object_header();
         let lease = test_lease(1);
         let sig = Signature::from_bytes([0u8; 64]);
-        store
-            .commit_cursor(cursor, header, lease, sig)
-            .unwrap();
+        store.commit_cursor(cursor, header, lease, sig).unwrap();
 
         // Verify the stored object has the lease ref
         let (_, stored_obj) = backend.load_head().unwrap().unwrap();
-        assert!(stored_obj.header.refs.contains(&ObjectId::from_bytes([99; 32])));
+        assert!(
+            stored_obj
+                .header
+                .refs
+                .contains(&ObjectId::from_bytes([99; 32]))
+        );
     }
 
     #[test]
     fn cursor_store_sequential_commits_increment_seq() {
         let backend = Arc::new(InMemoryCursorStoreBackend::new());
-        let mut store = CursorStore::new(
-            Arc::clone(&backend),
-            test_connector_id(),
-            test_zone_id(),
-        );
+        let mut store = CursorStore::new(Arc::clone(&backend), test_connector_id(), test_zone_id());
 
         // First commit: seq=0
         let cursor = test_cursor_state(100, 50);
         let header = test_object_header();
         let lease = test_lease(1);
         let sig = Signature::from_bytes([0u8; 64]);
-        store
-            .commit_cursor(cursor, header, lease, sig)
-            .unwrap();
+        store.commit_cursor(cursor, header, lease, sig).unwrap();
 
         let (_, obj1) = backend.load_head().unwrap().unwrap();
         assert_eq!(obj1.seq, 0);
@@ -3801,9 +3766,7 @@ mod tests {
         let header2 = test_object_header();
         let lease2 = test_lease(2);
         let sig2 = Signature::from_bytes([0u8; 64]);
-        store
-            .commit_cursor(cursor2, header2, lease2, sig2)
-            .unwrap();
+        store.commit_cursor(cursor2, header2, lease2, sig2).unwrap();
 
         let (_, obj2) = backend.load_head().unwrap().unwrap();
         assert_eq!(obj2.seq, 1);
@@ -3862,9 +3825,9 @@ mod tests {
             items_processed: 50,
             backoff_time_ms: 300,
         };
-        let cloned = stats.clone();
-        assert_eq!(cloned.total_polls, 10);
-        assert_eq!(cloned.items_processed, 50);
+        let moved = stats;
+        assert_eq!(moved.total_polls, 10);
+        assert_eq!(moved.items_processed, 50);
     }
 
     // ─────────────────────────────────────────────────────────────────────────

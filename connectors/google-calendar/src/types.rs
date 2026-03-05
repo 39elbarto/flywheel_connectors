@@ -231,7 +231,9 @@ mod tests {
         let req = FreeBusyRequest {
             time_min: "2026-03-03T00:00:00Z".to_string(),
             time_max: "2026-03-04T00:00:00Z".to_string(),
-            items: vec![FreeBusyRequestItem { id: "primary".to_string() }],
+            items: vec![FreeBusyRequestItem {
+                id: "primary".to_string(),
+            }],
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("timeMin"));

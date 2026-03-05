@@ -497,7 +497,8 @@ async fn telegram_send_message_returns_message_id() {
 
     // Handshake
     let signing_key = Ed25519SigningKey::generate();
-    let zone_dir = std::env::temp_dir().join(format!("fcp-telegram-e2e-send-{}", std::process::id()));
+    let zone_dir =
+        std::env::temp_dir().join(format!("fcp-telegram-e2e-send-{}", std::process::id()));
     connector
         .handle_handshake(json!({
             "protocol_version": "2.0",

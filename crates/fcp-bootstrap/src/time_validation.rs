@@ -381,10 +381,7 @@ mod tests {
     #[test]
     fn display_cannot_validate() {
         let result = TimeValidationResult::CannotValidate;
-        assert_eq!(
-            result.to_string(),
-            "Could not validate time (no network)"
-        );
+        assert_eq!(result.to_string(), "Could not validate time (no network)");
     }
 
     #[test]
@@ -423,10 +420,15 @@ mod tests {
 
     #[test]
     fn result_inequality() {
-        assert_ne!(TimeValidationResult::Valid, TimeValidationResult::CannotValidate);
         assert_ne!(
             TimeValidationResult::Valid,
-            TimeValidationResult::DriftWarning { drift: Duration::from_secs(30) }
+            TimeValidationResult::CannotValidate
+        );
+        assert_ne!(
+            TimeValidationResult::Valid,
+            TimeValidationResult::DriftWarning {
+                drift: Duration::from_secs(30)
+            }
         );
     }
 

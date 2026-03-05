@@ -435,7 +435,11 @@ impl SignatureSet {
         let mut out = Vec::new();
         for sig in &self.signatures {
             let node_bytes = sig.node_id.as_str().as_bytes();
-            out.extend_from_slice(&u32::try_from(node_bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
+            out.extend_from_slice(
+                &u32::try_from(node_bytes.len())
+                    .unwrap_or(u32::MAX)
+                    .to_le_bytes(),
+            );
             out.extend_from_slice(node_bytes);
             out.extend_from_slice(&sig.signature);
         }

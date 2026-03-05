@@ -423,10 +423,7 @@ mod tests {
             TransportPathKind::Direct.transport_mode(),
             TransportMode::Lan
         );
-        assert_eq!(
-            TransportPathKind::Mesh.transport_mode(),
-            TransportMode::Lan
-        );
+        assert_eq!(TransportPathKind::Mesh.transport_mode(), TransportMode::Lan);
         assert_eq!(
             TransportPathKind::Derp.transport_mode(),
             TransportMode::Derp

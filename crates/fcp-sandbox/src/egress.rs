@@ -1938,13 +1938,7 @@ mod tests {
         };
 
         let decision = guard
-            .authorize_http(
-                &mut req,
-                &constraints,
-                &injector,
-                "op",
-                &["cred-1".into()],
-            )
+            .authorize_http(&mut req, &constraints, &injector, "op", &["cred-1".into()])
             .unwrap();
         assert!(decision.credential_injected);
         assert!(req.headers.iter().any(|h| h.name == "Authorization"));
@@ -2067,8 +2061,7 @@ mod tests {
             credential_id: Some("cred-1".into()),
         };
 
-        let result =
-            guard.authorize_tcp(&req, &constraints, &injector, "op", &["cred-1".into()]);
+        let result = guard.authorize_tcp(&req, &constraints, &injector, "op", &["cred-1".into()]);
         assert!(result.is_err());
     }
 }

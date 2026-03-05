@@ -183,40 +183,48 @@ mod tests {
 
     #[test]
     fn is_retryable_rate_limited() {
-        assert!(S3Error::RateLimited {
-            retry_after_ms: 1000
-        }
-        .is_retryable());
+        assert!(
+            S3Error::RateLimited {
+                retry_after_ms: 1000
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn is_retryable_api_500() {
-        assert!(S3Error::Api {
-            code: "InternalError".into(),
-            message: "internal".into(),
-            status_code: Some(500),
-        }
-        .is_retryable());
+        assert!(
+            S3Error::Api {
+                code: "InternalError".into(),
+                message: "internal".into(),
+                status_code: Some(500),
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn is_retryable_api_503() {
-        assert!(S3Error::Api {
-            code: "SlowDown".into(),
-            message: "slow down".into(),
-            status_code: Some(503),
-        }
-        .is_retryable());
+        assert!(
+            S3Error::Api {
+                code: "SlowDown".into(),
+                message: "slow down".into(),
+                status_code: Some(503),
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
     fn not_retryable_api_400() {
-        assert!(!S3Error::Api {
-            code: "InvalidArgument".into(),
-            message: "bad".into(),
-            status_code: Some(400),
-        }
-        .is_retryable());
+        assert!(
+            !S3Error::Api {
+                code: "InvalidArgument".into(),
+                message: "bad".into(),
+                status_code: Some(400),
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
@@ -226,18 +234,12 @@ mod tests {
 
     #[test]
     fn not_retryable_not_found() {
-        assert!(!S3Error::NotFound {
-            key: "x".into()
-        }
-        .is_retryable());
+        assert!(!S3Error::NotFound { key: "x".into() }.is_retryable());
     }
 
     #[test]
     fn not_retryable_bucket_not_found() {
-        assert!(!S3Error::BucketNotFound {
-            bucket: "x".into()
-        }
-        .is_retryable());
+        assert!(!S3Error::BucketNotFound { bucket: "x".into() }.is_retryable());
     }
 
     #[test]
@@ -259,13 +261,7 @@ mod tests {
     #[test]
     fn retry_after_other_none() {
         assert_eq!(S3Error::Unauthorized.retry_after(), None);
-        assert_eq!(
-            S3Error::NotFound {
-                key: "x".into()
-            }
-            .retry_after(),
-            None
-        );
+        assert_eq!(S3Error::NotFound { key: "x".into() }.retry_after(), None);
     }
 
     // ---- to_fcp_error ----
@@ -304,9 +300,7 @@ mod tests {
             status_code: Some(429),
         };
         match err.to_fcp_error() {
-            FcpError::RateLimited {
-                retry_after_ms, ..
-            } => assert_eq!(retry_after_ms, 30_000),
+            FcpError::RateLimited { retry_after_ms, .. } => assert_eq!(retry_after_ms, 30_000),
             other => panic!("expected RateLimited, got {other:?}"),
         }
     }
@@ -335,9 +329,7 @@ mod tests {
         };
         match err.to_fcp_error() {
             FcpError::External {
-                service,
-                retryable,
-                ..
+                service, retryable, ..
             } => {
                 assert_eq!(service, "s3");
                 assert!(retryable);

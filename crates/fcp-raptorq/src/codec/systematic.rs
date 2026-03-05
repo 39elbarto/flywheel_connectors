@@ -27,7 +27,7 @@
 
 #![allow(clippy::many_single_char_names)]
 
-use super::gf256::{gf256_addmul_slice, gf256_mul_slice, Gf256};
+use super::gf256::{Gf256, gf256_addmul_slice, gf256_mul_slice};
 use super::rfc6330::repair_indices_for_esi;
 
 // ============================================================================

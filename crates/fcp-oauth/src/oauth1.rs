@@ -284,10 +284,8 @@ impl OAuth1Client {
         );
 
         // Collect all parameters (OAuth + query string)
-        let mut all_params: Vec<(String, String)> = params
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
+        let mut all_params: Vec<(String, String)> =
+            params.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         for (k, v) in parsed_url.query_pairs() {
             all_params.push((k.into_owned(), v.into_owned()));
         }
@@ -648,9 +646,10 @@ mod tests {
         let sig = result.unwrap();
         assert!(!sig.is_empty());
         // Base64 output should end with = or contain only base64 chars
-        assert!(sig
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '='));
+        assert!(
+            sig.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
+        );
     }
 
     #[test]
@@ -679,7 +678,12 @@ mod tests {
             .calculate_signature("GET", "https://api.example.com/resource", &params, "secret")
             .unwrap();
         let sig_post = client
-            .calculate_signature("POST", "https://api.example.com/resource", &params, "secret")
+            .calculate_signature(
+                "POST",
+                "https://api.example.com/resource",
+                &params,
+                "secret",
+            )
             .unwrap();
 
         assert_ne!(sig_get, sig_post);
@@ -709,8 +713,7 @@ mod tests {
         let client = OAuth1Client::new(config);
         let params: BTreeMap<String, String> = BTreeMap::new();
 
-        let result =
-            client.calculate_signature("GET", "https://api.example.com/r", &params, "");
+        let result = client.calculate_signature("GET", "https://api.example.com/r", &params, "");
         assert!(result.is_ok());
     }
 
@@ -730,12 +733,8 @@ mod tests {
         let client = OAuth1Client::new(config);
         let params: BTreeMap<String, String> = BTreeMap::new();
 
-        let result = client.calculate_signature(
-            "GET",
-            "https://api.example.com:8443/resource",
-            &params,
-            "",
-        );
+        let result =
+            client.calculate_signature("GET", "https://api.example.com:8443/resource", &params, "");
         assert!(result.is_ok());
     }
 
@@ -857,9 +856,11 @@ mod tests {
     #[test]
     fn test_generate_nonce_base64url_chars() {
         let nonce = generate_nonce();
-        assert!(nonce
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        assert!(
+            nonce
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        );
     }
 
     // ── Batch: parse edge cases ──

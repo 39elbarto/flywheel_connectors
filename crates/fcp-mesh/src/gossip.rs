@@ -2021,10 +2021,19 @@ mod tests {
     #[test]
     fn gossip_config_defaults() {
         let config = GossipConfig::default();
-        assert_eq!(config.max_objects_per_summary, DEFAULT_MAX_OBJECTS_PER_SUMMARY);
-        assert_eq!(config.max_symbols_per_summary, DEFAULT_MAX_SYMBOLS_PER_SUMMARY);
+        assert_eq!(
+            config.max_objects_per_summary,
+            DEFAULT_MAX_OBJECTS_PER_SUMMARY
+        );
+        assert_eq!(
+            config.max_symbols_per_summary,
+            DEFAULT_MAX_SYMBOLS_PER_SUMMARY
+        );
         assert_eq!(config.summary_ttl_secs, DEFAULT_SUMMARY_TTL_SECS);
-        assert_eq!(config.reconciliation_batch_size, DEFAULT_RECONCILIATION_BATCH_SIZE);
+        assert_eq!(
+            config.reconciliation_batch_size,
+            DEFAULT_RECONCILIATION_BATCH_SIZE
+        );
     }
 
     #[test]

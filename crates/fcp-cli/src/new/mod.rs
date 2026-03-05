@@ -2887,10 +2887,7 @@ members = [
             manifest_archetype(ConnectorArchetype::Streaming),
             "streaming"
         );
-        assert_eq!(
-            manifest_archetype(ConnectorArchetype::Webhook),
-            "streaming"
-        );
+        assert_eq!(manifest_archetype(ConnectorArchetype::Webhook), "streaming");
     }
 
     #[test]
@@ -2908,10 +2905,7 @@ members = [
     #[test]
     fn manifest_archetype_storage() {
         assert_eq!(manifest_archetype(ConnectorArchetype::File), "storage");
-        assert_eq!(
-            manifest_archetype(ConnectorArchetype::Database),
-            "storage"
-        );
+        assert_eq!(manifest_archetype(ConnectorArchetype::Database), "storage");
     }
 
     // ---- archetype_arg_conversion ----
@@ -2919,9 +2913,15 @@ members = [
     #[test]
     fn archetype_arg_all_variants_convert() {
         let variants = [
-            (ArchetypeArg::RequestResponse, ConnectorArchetype::RequestResponse),
+            (
+                ArchetypeArg::RequestResponse,
+                ConnectorArchetype::RequestResponse,
+            ),
             (ArchetypeArg::Streaming, ConnectorArchetype::Streaming),
-            (ArchetypeArg::Bidirectional, ConnectorArchetype::Bidirectional),
+            (
+                ArchetypeArg::Bidirectional,
+                ConnectorArchetype::Bidirectional,
+            ),
             (ArchetypeArg::Polling, ConnectorArchetype::Polling),
             (ArchetypeArg::Webhook, ConnectorArchetype::Webhook),
             (ArchetypeArg::Queue, ConnectorArchetype::Queue),
@@ -3197,8 +3197,8 @@ members = [
                 "fcp.test",
                 archetype,
                 "z:project:test",
-                true,  // no_e2e (faster)
-                true,  // dry_run
+                true, // no_e2e (faster)
+                true, // dry_run
             )
             .unwrap_or_else(|e| panic!("scaffold failed for {archetype:?}: {e}"));
             assert!(
@@ -3255,11 +3255,7 @@ members = [
 
     #[test]
     fn generate_connector_rs_has_basic_structure() {
-        let output = generate_connector_rs(
-            "fcp.test",
-            "test",
-            ConnectorArchetype::RequestResponse,
-        );
+        let output = generate_connector_rs("fcp.test", "test", ConnectorArchetype::RequestResponse);
         assert!(output.contains("pub struct TestConnector"));
         assert!(output.contains("impl FcpConnector for TestConnector"));
         assert!(output.contains("MANIFEST_TOML"));
@@ -3268,33 +3264,21 @@ members = [
 
     #[test]
     fn generate_connector_rs_streaming_has_stream_field() {
-        let output = generate_connector_rs(
-            "fcp.test",
-            "test",
-            ConnectorArchetype::Streaming,
-        );
+        let output = generate_connector_rs("fcp.test", "test", ConnectorArchetype::Streaming);
         assert!(output.contains("stream: Mutex<StreamSupervisor>"));
         assert!(output.contains("impl Streaming for TestConnector"));
     }
 
     #[test]
     fn generate_connector_rs_polling_has_polling_field() {
-        let output = generate_connector_rs(
-            "fcp.test",
-            "test",
-            ConnectorArchetype::Polling,
-        );
+        let output = generate_connector_rs("fcp.test", "test", ConnectorArchetype::Polling);
         assert!(output.contains("polling: Mutex<PollingSupervisor>"));
         assert!(output.contains("impl Polling for TestConnector"));
     }
 
     #[test]
     fn generate_connector_rs_bidirectional_has_send() {
-        let output = generate_connector_rs(
-            "fcp.test",
-            "test",
-            ConnectorArchetype::Bidirectional,
-        );
+        let output = generate_connector_rs("fcp.test", "test", ConnectorArchetype::Bidirectional);
         assert!(output.contains("impl Bidirectional for TestConnector"));
         assert!(output.contains("impl Streaming for TestConnector"));
     }

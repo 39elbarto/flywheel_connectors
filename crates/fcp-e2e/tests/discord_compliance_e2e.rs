@@ -572,7 +572,8 @@ async fn discord_subscribe_confirms_topics() {
         .expect("configure for handshake");
 
     let signing_key = Ed25519SigningKey::generate();
-    let zone_dir = std::env::temp_dir().join(format!("fcp-discord-e2e-subscribe-{}", std::process::id()));
+    let zone_dir =
+        std::env::temp_dir().join(format!("fcp-discord-e2e-subscribe-{}", std::process::id()));
     let response = handshake_connector
         .handle_handshake(json!({
             "protocol_version": "2.0",
@@ -629,7 +630,8 @@ async fn discord_rate_limit_surfaces_correctly() {
 
     // Handshake
     let signing_key = Ed25519SigningKey::generate();
-    let zone_dir = std::env::temp_dir().join(format!("fcp-discord-e2e-ratelimit-{}", std::process::id()));
+    let zone_dir =
+        std::env::temp_dir().join(format!("fcp-discord-e2e-ratelimit-{}", std::process::id()));
     connector
         .handle_handshake(json!({
             "protocol_version": "2.0",

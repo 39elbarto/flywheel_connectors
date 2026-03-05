@@ -395,7 +395,10 @@ mod tests {
         assert_eq!(Model::ClaudeOpus4_5.as_str(), "claude-opus-4-5-20251101");
         assert_eq!(Model::ClaudeSonnet4.as_str(), "claude-sonnet-4-20250514");
         assert_eq!(Model::Claude3_5Haiku.as_str(), "claude-3-5-haiku-20241022");
-        assert_eq!(Model::Claude3_5Sonnet.as_str(), "claude-3-5-sonnet-20241022");
+        assert_eq!(
+            Model::Claude3_5Sonnet.as_str(),
+            "claude-3-5-sonnet-20241022"
+        );
     }
 
     #[test]
@@ -414,8 +417,14 @@ mod tests {
 
     #[test]
     fn model_pricing() {
-        assert!(Model::ClaudeOpus4_5.input_price_per_million() > Model::ClaudeSonnet4.input_price_per_million());
-        assert!(Model::Claude3_5Haiku.input_price_per_million() < Model::ClaudeSonnet4.input_price_per_million());
+        assert!(
+            Model::ClaudeOpus4_5.input_price_per_million()
+                > Model::ClaudeSonnet4.input_price_per_million()
+        );
+        assert!(
+            Model::Claude3_5Haiku.input_price_per_million()
+                < Model::ClaudeSonnet4.input_price_per_million()
+        );
         assert!(Model::ClaudeOpus4_5.output_price_per_million() > 0.0);
     }
 
@@ -446,7 +455,7 @@ mod tests {
         let content: MessageContent = "hello".into();
         match content {
             MessageContent::Text(s) => assert_eq!(s, "hello"),
-            _ => panic!("expected Text variant"),
+            MessageContent::Blocks(_) => panic!("expected Text variant"),
         }
     }
 
@@ -455,7 +464,7 @@ mod tests {
         let content: MessageContent = String::from("world").into();
         match content {
             MessageContent::Text(s) => assert_eq!(s, "world"),
-            _ => panic!("expected Text variant"),
+            MessageContent::Blocks(_) => panic!("expected Text variant"),
         }
     }
 
@@ -463,7 +472,9 @@ mod tests {
 
     #[test]
     fn content_block_text_serde() {
-        let block = ContentBlock::Text { text: "hello".to_string() };
+        let block = ContentBlock::Text {
+            text: "hello".to_string(),
+        };
         let json = serde_json::to_string(&block).unwrap();
         assert!(json.contains("\"type\":\"text\""));
         let back: ContentBlock = serde_json::from_str(&json).unwrap();
@@ -502,7 +513,11 @@ mod tests {
         let json = serde_json::to_string(&block).unwrap();
         let back: ContentBlock = serde_json::from_str(&json).unwrap();
         match back {
-            ContentBlock::ToolResult { tool_use_id, content, is_error } => {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
                 assert_eq!(tool_use_id, "t1");
                 assert_eq!(content, "42");
                 assert_eq!(is_error, Some(false));
@@ -515,7 +530,9 @@ mod tests {
 
     #[test]
     fn response_content_block_as_text() {
-        let block = ResponseContentBlock::Text { text: "hello".to_string() };
+        let block = ResponseContentBlock::Text {
+            text: "hello".to_string(),
+        };
         assert_eq!(block.as_text(), Some("hello"));
 
         let tool_block = ResponseContentBlock::ToolUse {
@@ -534,7 +551,9 @@ mod tests {
         let json = serde_json::to_string(&auto).unwrap();
         assert!(json.contains("\"type\":\"auto\""));
 
-        let specific = ToolChoice::Tool { name: "calc".to_string() };
+        let specific = ToolChoice::Tool {
+            name: "calc".to_string(),
+        };
         let json = serde_json::to_string(&specific).unwrap();
         assert!(json.contains("\"calc\""));
     }
@@ -601,7 +620,9 @@ mod tests {
 
     #[test]
     fn image_source_url_serde() {
-        let src = ImageSource::Url { url: "https://example.com/img.png".to_string() };
+        let src = ImageSource::Url {
+            url: "https://example.com/img.png".to_string(),
+        };
         let json = serde_json::to_string(&src).unwrap();
         assert!(json.contains("\"type\":\"url\""));
     }

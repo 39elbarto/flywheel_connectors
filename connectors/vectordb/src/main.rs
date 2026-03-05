@@ -4,10 +4,10 @@
 
 #![forbid(unsafe_code)]
 
-use fcp_vectordb::VectorDbConnector;
-use tracing_subscriber::{EnvFilter, fmt, prelude::*};
-use std::io::{BufRead, Write};
 use anyhow::Result;
+use fcp_vectordb::VectorDbConnector;
+use std::io::{BufRead, Write};
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 fn main() -> Result<()> {
     // Initialize tracing
@@ -29,7 +29,9 @@ fn run_fcp_loop() -> Result<()> {
     let mut stdout = std::io::stdout();
     let mut connector = VectorDbConnector::new();
 
-    let runtime = fcp_async_core::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let runtime = fcp_async_core::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
 
     for line in stdin.lock().lines() {
         let line = line?;
@@ -66,13 +68,16 @@ async fn handle_message(connector: &mut VectorDbConnector, message: &str) -> ser
     let params = request
         .get("params")
         .cloned()
-        .unwrap_or(serde_json::json!({}));
+        .unwrap_or_else(|| serde_json::json!({}));
 
     let result = match method {
         "configure" => connector.handle_configure(params).await,
         "handshake" => connector.handle_handshake(params).await,
         "health" => Ok(connector.handle_health()),
-        "doctor" => connector.handle_doctor().await.map(|d| serde_json::to_value(d).unwrap_or_default()),
+        "doctor" => connector
+            .handle_doctor()
+            .await
+            .map(|d| serde_json::to_value(d).unwrap_or_default()),
         "introspect" => Ok(serde_json::to_value(connector.handle_introspect()).unwrap_or_default()),
         "invoke" => connector.handle_invoke(params).await,
         _ => Err(fcp_core::FcpError::InvalidRequest {

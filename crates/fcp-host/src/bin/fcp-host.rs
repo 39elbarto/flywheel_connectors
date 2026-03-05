@@ -261,7 +261,12 @@ impl ConnectorProcessRunner {
                 line.clear();
                 match reader.read_line(&mut line).await {
                     Ok(0) | Err(_) => break,
-                    Ok(_) => {}
+                    Ok(_) => {
+                        let trimmed = line.trim_end();
+                        if !trimmed.is_empty() {
+                            tracing::warn!(connector_stderr = %trimmed, "connector log");
+                        }
+                    }
                 }
             }
         });

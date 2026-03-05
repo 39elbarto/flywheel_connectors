@@ -80,6 +80,12 @@ where
                         .next_element()?
                         .ok_or_else(|| serde::de::Error::invalid_length(i, &self))?;
                 }
+
+                // Enforce exactly N elements, otherwise it's a silent truncation
+                if seq.next_element::<u8>()?.is_some() {
+                    return Err(serde::de::Error::invalid_length(N + 1, &self));
+                }
+
                 Ok(arr)
             }
         }

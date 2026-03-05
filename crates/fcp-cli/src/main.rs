@@ -260,6 +260,10 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let _pager = PagerConfig::from_cli(&cli);
 
+    if cli.input_stdin && !matches!(cli.command, Commands::Doctor(_)) {
+        anyhow::bail!("--input-stdin is currently supported only for `fcp doctor`");
+    }
+
     let stdin_input = if cli.input_stdin {
         Some(read_stdin_input(cli.input_format)?)
     } else {
@@ -269,73 +273,18 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Audit(args) => audit::run(args),
         Commands::Bench(args) => bench::run(args),
-        Commands::Budget(args) => {
-            if cli.input_stdin {
-                anyhow::bail!("--input-stdin is currently supported only for `fcp doctor`");
-            }
-            budget::run(&args)
-        }
+        Commands::Budget(args) => budget::run(&args),
         Commands::Connector(args) => connector::run(&args),
-        Commands::Context(args) => {
-            if cli.input_stdin {
-                anyhow::bail!("--input-stdin is not supported for `fcp context`");
-            }
-            context::run(&args)
-        }
+        Commands::Context(args) => context::run(&args),
         Commands::Doctor(args) => doctor::run(&args, stdin_input.as_ref()),
-        Commands::Explain(args) => {
-            if cli.input_stdin {
-                anyhow::bail!("--input-stdin is currently supported only for `fcp doctor`");
-            }
-            explain::run(&args)
-        }
-        Commands::Install(args) => {
-            if cli.input_stdin {
-                anyhow::bail!("--input-stdin is currently supported only for `fcp doctor`");
-            }
-            install::run(args)
-        }
-        Commands::Manifest(args) => {
-            if cli.input_stdin {
-                anyhow::bail!("--input-stdin is currently supported only for `fcp doctor`");
-            }
-            manifest::run(args)
-        }
-        Commands::New(args) => {
-            if cli.input_stdin {
-                anyhow::bail!("--input-stdin is currently supported only for `fcp doctor`");
-            }
-            new::run(&args)
-        }
-        Commands::Net(args) => {
-            if cli.input_stdin {
-                anyhow::bail!("--input-stdin is currently supported only for `fcp doctor`");
-            }
-            net::run(args)
-        }
-        Commands::Package(args) => {
-            if cli.input_stdin {
-                anyhow::bail!("--input-stdin is currently supported only for `fcp doctor`");
-            }
-            package::run(&args)
-        }
-        Commands::Policy(args) => {
-            if cli.input_stdin {
-                anyhow::bail!("--input-stdin is currently supported only for `fcp doctor`");
-            }
-            policy::run(&args)
-        }
-        Commands::Repair(args) => {
-            if cli.input_stdin {
-                anyhow::bail!("--input-stdin is currently supported only for `fcp doctor`");
-            }
-            repair::run(args)
-        }
-        Commands::Trace(args) => {
-            if cli.input_stdin {
-                anyhow::bail!("--input-stdin is currently supported only for `fcp doctor`");
-            }
-            trace::run(args)
-        }
+        Commands::Explain(args) => explain::run(&args),
+        Commands::Install(args) => install::run(args),
+        Commands::Manifest(args) => manifest::run(args),
+        Commands::New(args) => new::run(&args),
+        Commands::Net(args) => net::run(args),
+        Commands::Package(args) => package::run(&args),
+        Commands::Policy(args) => policy::run(&args),
+        Commands::Repair(args) => repair::run(args),
+        Commands::Trace(args) => trace::run(args),
     }
 }

@@ -196,14 +196,23 @@ mod tests {
     }
 
     #[test]
-    fn retry_after_none_for_other_errors() {
+    fn retry_after_none_for_unauthorized() {
         assert_eq!(ElasticsearchError::Unauthorized.retry_after(), None);
+    }
+
+    #[test]
+    fn retry_after_none_for_forbidden() {
         assert_eq!(ElasticsearchError::Forbidden.retry_after(), None);
-        let api = ElasticsearchError::Api {
-            status_code: 500,
-            message: "err".into(),
-        };
-        assert_eq!(api.retry_after(), None);
+    }
+
+    #[test]
+    fn retry_after_none_for_api_error() {
+        assert_eq!(ElasticsearchError::Api { status_code: 500, message: "err".into() }.retry_after(), None);
+    }
+
+    #[test]
+    fn retry_after_none_for_not_found() {
+        assert_eq!(ElasticsearchError::NotFound { resource: "idx".into() }.retry_after(), None);
     }
 
     // ── to_fcp_error ─────────────────────────────────────────────────
@@ -319,35 +328,41 @@ mod tests {
         }
     }
 
+    #[test]
+    fn api_error_non_retryable_to_fcp_error() {
+        match (ElasticsearchError::Api { status_code: 400, message: "bad".into() }).to_fcp_error() {
+            FcpError::External { status_code, retryable, .. } => {
+                assert_eq!(status_code, Some(400));
+                assert!(!retryable);
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
     // ── Display ──────────────────────────────────────────────────────
 
     #[test]
-    fn error_display_messages() {
-        assert_eq!(
-            ElasticsearchError::Unauthorized.to_string(),
-            "Authentication failed: invalid or expired API key"
-        );
-        assert_eq!(
-            ElasticsearchError::Forbidden.to_string(),
-            "Forbidden: insufficient permissions"
-        );
-        let nf = ElasticsearchError::NotFound {
-            resource: "my-index".into(),
-        };
-        assert_eq!(nf.to_string(), "Not found: my-index");
+    fn error_display_unauthorized() {
+        assert_eq!(ElasticsearchError::Unauthorized.to_string(), "Authentication failed: invalid or expired API key");
+    }
 
-        let rl = ElasticsearchError::RateLimited {
-            retry_after_ms: 1000,
-        };
-        assert_eq!(rl.to_string(), "Rate limited, retry after 1000ms");
+    #[test]
+    fn error_display_forbidden() {
+        assert_eq!(ElasticsearchError::Forbidden.to_string(), "Forbidden: insufficient permissions");
+    }
 
-        let api = ElasticsearchError::Api {
-            status_code: 500,
-            message: "Internal".into(),
-        };
-        assert_eq!(
-            api.to_string(),
-            "Elasticsearch API error (500): Internal"
-        );
+    #[test]
+    fn error_display_not_found() {
+        assert_eq!(ElasticsearchError::NotFound { resource: "my-index".into() }.to_string(), "Not found: my-index");
+    }
+
+    #[test]
+    fn error_display_rate_limited() {
+        assert_eq!(ElasticsearchError::RateLimited { retry_after_ms: 1000 }.to_string(), "Rate limited, retry after 1000ms");
+    }
+
+    #[test]
+    fn error_display_api() {
+        assert_eq!(ElasticsearchError::Api { status_code: 500, message: "Internal".into() }.to_string(), "Elasticsearch API error (500): Internal");
     }
 }

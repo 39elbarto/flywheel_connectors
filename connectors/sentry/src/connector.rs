@@ -985,6 +985,52 @@ mod tests {
         assert!(v["checks"][0]["message"].is_null());
     }
 
+    #[test]
+    fn operations_all_have_idempotency() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            assert!(op.get("idempotency").is_some(), "op {:?} missing idempotency", op["id"]);
+        }
+    }
+
+    #[test]
+    fn operations_safety_tiers_valid() {
+        let valid = ["safe", "risky", "dangerous"];
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let tier = op["safety_tier"].as_str().unwrap();
+            assert!(valid.contains(&tier), "invalid safety_tier: {tier} for op {:?}", op["id"]);
+        }
+    }
+
+    #[test]
+    fn config_trims_auth_token() {
+        let config = SentryConfig::from_params(&json!({ "auth_token": "  sntrys_test  " })).unwrap();
+        match &config.auth {
+            SentryAuth::BearerToken(t) => assert_eq!(t, "sntrys_test"),
+            SentryAuth::CredentialId(_) => panic!("expected BearerToken"),
+        }
+    }
+
+    // ── DoctorResult edge cases ─────────────────────────────────────
+
+    #[test]
+    fn doctor_result_empty_checks() {
+        let r = DoctorResult::from_checks(vec![]);
+        assert_eq!(r.status, DoctorStatus::Healthy);
+    }
+
+    #[test]
+    fn doctor_result_multiple_critical_failures() {
+        let checks = vec![
+            DoctorCheck { name: "a".into(), passed: false, message: Some("fail".into()), critical: true },
+            DoctorCheck { name: "b".into(), passed: false, message: Some("fail".into()), critical: true },
+        ];
+        let r = DoctorResult::from_checks(checks);
+        assert_eq!(r.status, DoctorStatus::Unhealthy);
+        assert_eq!(r.checks.len(), 2);
+    }
+
     // ── SentryConnector ──────────────────────────────────────────────
 
     #[test]
@@ -993,5 +1039,12 @@ mod tests {
         assert!(c.config.is_none());
         assert!(c.client.is_none());
         assert!(c.session_id.is_none());
+    }
+
+    #[test]
+    fn connector_new_counters_zero() {
+        let c = SentryConnector::new();
+        assert_eq!(c.request_count.load(Ordering::Relaxed), 0);
+        assert_eq!(c.error_count.load(Ordering::Relaxed), 0);
     }
 }

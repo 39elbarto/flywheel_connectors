@@ -179,6 +179,11 @@ mod tests {
         assert_eq!(RedditError::Api { status_code: 500, message: "err".into() }.retry_after(), None);
     }
 
+    #[test]
+    fn retry_after_none_for_not_found() {
+        assert_eq!(RedditError::NotFound { resource: "x".into() }.retry_after(), None);
+    }
+
     // ── to_fcp_error ─────────────────────────────────────────────────
 
     #[test]
@@ -248,6 +253,17 @@ mod tests {
         match RedditError::Json(bad.unwrap_err()).to_fcp_error() {
             FcpError::Internal { message } => assert!(message.starts_with("JSON error:")),
             other => panic!("expected Internal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_error_non_retryable_to_fcp_error() {
+        match (RedditError::Api { status_code: 400, message: "bad".into() }).to_fcp_error() {
+            FcpError::External { status_code, retryable, .. } => {
+                assert_eq!(status_code, Some(400));
+                assert!(!retryable);
+            }
+            other => panic!("expected External, got {other:?}"),
         }
     }
 

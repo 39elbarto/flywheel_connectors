@@ -316,8 +316,29 @@ impl Sandbox for MacOsSandbox {
         Ok(())
     }
 
+    fn apply_to_command(&self, cmd: &mut std::process::Command, policy: &CompiledPolicy) -> Result<(), SandboxError> {
+        // For macOS, we could use `sandbox-exec` via `Command::new("sandbox-exec")`,
+        // but since we rely on `mac_syscall::sandbox_init` in our process,
+        // we can apply it `pre_exec` exactly like Linux seccomp.
+        use std::os::unix::process::CommandExt;
+        
+        let policy_clone = policy.clone();
+        
+        unsafe {
+            cmd.pre_exec(move || {
+                let sandbox = MacOsSandbox::new();
+                if let Err(e) = sandbox.apply(&policy_clone) {
+                    return Err(std::io::Error::new(std::io::ErrorKind::Other, format!("sandbox apply failed: {e}")));
+                }
+                Ok(())
+            });
+        }
+        
+        Ok(())
+    }
+
     fn is_available(&self) -> bool {
-        // Sandbox is available on all macOS versions we support (10.5+)
+        // Seatbelt is available on all modern macOS versions
         true
     }
 

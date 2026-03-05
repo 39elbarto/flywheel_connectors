@@ -786,6 +786,96 @@ mod tests {
     }
 
     #[test]
+    fn config_trims_token() {
+        let config = HubSpotConfig::from_params(&json!({ "access_token": "  pat-na1-test  " })).unwrap();
+        match &config.auth {
+            HubSpotAuth::BearerToken(t) => assert_eq!(t, "pat-na1-test"),
+            HubSpotAuth::CredentialId(_) => panic!("expected BearerToken"),
+        }
+    }
+
+    #[test]
+    fn config_rejects_invalid_credential_id() {
+        let result = HubSpotConfig::from_params(&json!({ "credential_id": "not-a-uuid" }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_rejects_non_string_credential_id() {
+        let result = HubSpotConfig::from_params(&json!({ "credential_id": 12345 }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn require_str_wrong_type() {
+        let input = json!({"field": 42});
+        assert!(require_str(&input, "field").is_err());
+    }
+
+    #[test]
+    fn require_str_null_value() {
+        let input = json!({"field": null});
+        assert!(require_str(&input, "field").is_err());
+    }
+
+    #[test]
+    fn extract_string_array_filters_non_strings() {
+        let input = json!({"tags": ["a", 1, "b", null]});
+        let arr = extract_string_array(&input, "tags").unwrap();
+        assert_eq!(arr, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn extract_string_array_empty() {
+        let input = json!({"tags": []});
+        let arr = extract_string_array(&input, "tags").unwrap();
+        assert!(arr.is_empty());
+    }
+
+    #[test]
+    fn operations_all_have_idempotency() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            assert!(op.get("idempotency").is_some(), "op {:?} missing idempotency", op["id"]);
+        }
+    }
+
+    #[test]
+    fn operations_ids_all_prefixed_hubspot() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let id = op["id"].as_str().unwrap();
+            assert!(id.starts_with("hubspot."), "op {id} missing hubspot. prefix");
+        }
+    }
+
+    #[test]
+    fn doctor_result_degraded() {
+        let checks = vec![
+            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
+            DoctorCheck { name: "b".into(), passed: false, message: Some("warn".into()), critical: false },
+        ];
+        let r = DoctorResult::from_checks(checks);
+        assert_eq!(r.status, DoctorStatus::Degraded);
+    }
+
+    #[test]
+    fn doctor_result_all_pass() {
+        let checks = vec![
+            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
+            DoctorCheck { name: "b".into(), passed: true, message: None, critical: false },
+        ];
+        let r = DoctorResult::from_checks(checks);
+        assert_eq!(r.status, DoctorStatus::Healthy);
+    }
+
+    #[test]
+    fn doctor_result_empty_checks() {
+        let r = DoctorResult::from_checks(vec![]);
+        assert_eq!(r.status, DoctorStatus::Healthy);
+    }
+
+    #[test]
     fn connector_default() {
         let c = HubSpotConnector::default();
         assert!(c.config.is_none());

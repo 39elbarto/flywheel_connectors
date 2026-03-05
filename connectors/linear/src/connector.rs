@@ -1211,4 +1211,102 @@ mod tests {
             .expect("compute interface hash");
         assert_eq!(computed, computed2);
     }
+
+    // ── Sync unit tests: config, helpers ──────────────────────────
+
+    #[test]
+    fn config_from_api_key() {
+        let cfg = LinearConfig::from_params(&json!({ "api_key": "lin_api_test" })).unwrap();
+        assert!(!cfg.auth.is_secretless());
+        assert_eq!(cfg.api_url, DEFAULT_API_URL);
+    }
+
+    #[test]
+    fn config_from_credential_id() {
+        let cfg = LinearConfig::from_params(&json!({
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+        })).unwrap();
+        assert!(cfg.auth.is_secretless());
+    }
+
+    #[test]
+    fn config_custom_api_url() {
+        let cfg = LinearConfig::from_params(&json!({
+            "api_key": "test",
+            "api_url": "https://linear.example.com/graphql"
+        })).unwrap();
+        assert_eq!(cfg.api_url, "https://linear.example.com/graphql");
+    }
+
+    #[test]
+    fn config_trims_api_key() {
+        let cfg = LinearConfig::from_params(&json!({ "api_key": "  lin_api_test  " })).unwrap();
+        match &cfg.auth {
+            LinearAuth::ApiKey(k) => assert_eq!(k, "lin_api_test"),
+            LinearAuth::CredentialId(_) => panic!("expected ApiKey"),
+        }
+    }
+
+    #[test]
+    fn config_rejects_empty_api_key() {
+        assert!(LinearConfig::from_params(&json!({ "api_key": "" })).is_err());
+    }
+
+    #[test]
+    fn config_rejects_whitespace_api_key() {
+        assert!(LinearConfig::from_params(&json!({ "api_key": "   " })).is_err());
+    }
+
+    #[test]
+    fn config_rejects_both_auth() {
+        let result = LinearConfig::from_params(&json!({
+            "api_key": "test",
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_rejects_no_auth() {
+        assert!(LinearConfig::from_params(&json!({})).is_err());
+    }
+
+    #[test]
+    fn config_rejects_invalid_credential_id() {
+        assert!(LinearConfig::from_params(&json!({ "credential_id": "bad" })).is_err());
+    }
+
+    #[test]
+    fn config_rejects_non_string_credential_id() {
+        assert!(LinearConfig::from_params(&json!({ "credential_id": 12345 })).is_err());
+    }
+
+    #[test]
+    fn require_str_extracts_value() {
+        let input = json!({"issue_id": "LIN-1"});
+        assert_eq!(require_str(&input, "issue_id").unwrap(), "LIN-1");
+    }
+
+    #[test]
+    fn require_str_missing() {
+        assert!(require_str(&json!({}), "x").is_err());
+    }
+
+    #[test]
+    fn require_str_non_string() {
+        assert!(require_str(&json!({"x": 42}), "x").is_err());
+    }
+
+    #[test]
+    fn require_str_null() {
+        assert!(require_str(&json!({"x": null}), "x").is_err());
+    }
+
+    #[test]
+    fn connector_default() {
+        let c = LinearConnector::default();
+        assert!(c.config.is_none());
+        assert!(c.client.is_none());
+        assert!(c.session_id.is_none());
+    }
 }

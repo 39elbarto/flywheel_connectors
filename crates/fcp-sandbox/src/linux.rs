@@ -276,7 +276,7 @@ impl LinuxSandbox {
         filter.push(SockFilter::stmt(0x20, 0));
 
         // Build allowlist based on policy
-        let allowed_syscalls = self.build_syscall_allowlist(policy);
+        let (allowed_syscalls, graceful_error_syscalls) = self.build_syscall_allowlist(policy);
 
         // Add jump table for allowed syscalls
         for &syscall in &allowed_syscalls {
@@ -286,6 +286,13 @@ impl LinuxSandbox {
             filter.push(SockFilter::stmt(0x06, SECCOMP_RET_ALLOW));
         }
 
+        // Add jump table for graceful errors (instead of killing)
+        for &syscall in &graceful_error_syscalls {
+            filter.push(SockFilter::jump(0x15, syscall, 0, 1));
+            // Return EPERM (1)
+            filter.push(SockFilter::stmt(0x06, SECCOMP_RET_ERRNO | 1));
+        }
+
         // Default: kill process for unallowed syscalls
         filter.push(SockFilter::stmt(0x06, SECCOMP_RET_KILL_PROCESS));
 
@@ -293,8 +300,9 @@ impl LinuxSandbox {
     }
 
     /// Build the syscall allowlist based on policy.
+    /// Returns (allowed_syscalls, graceful_error_syscalls).
     #[cfg(target_arch = "x86_64")]
-    fn build_syscall_allowlist(&self, policy: &CompiledPolicy) -> Vec<u32> {
+    fn build_syscall_allowlist(&self, policy: &CompiledPolicy) -> (Vec<u32>, Vec<u32>) {
         use syscall_nr::*;
 
         let mut allowed = vec![
@@ -344,7 +352,7 @@ impl LinuxSandbox {
             PIPE,
             PIPE2,
             FCNTL,
-            IOCTL,
+            // IOCTL is handled in graceful errors
             // Synchronization
             FUTEX,
             FLOCK,
@@ -382,13 +390,13 @@ impl LinuxSandbox {
             EPOLL_WAIT,
             // Signals
             TGKILL,
-            KILL, // Limited to own process
+            // KILL is dropped to prevent sending signals outside the process
             // Thread support
             SET_TID_ADDRESS,
             SET_ROBUST_LIST,
             RSEQ,
             ARCH_PRCTL,
-            PRCTL, // Limited flags
+            // PRCTL is handled in graceful errors
             // Exit
             EXIT,
             EXIT_GROUP,
@@ -439,11 +447,13 @@ impl LinuxSandbox {
             allowed.push(PTRACE);
         }
 
-        allowed
+        let graceful = vec![IOCTL, PRCTL];
+
+        (allowed, graceful)
     }
 
     #[cfg(target_arch = "aarch64")]
-    fn build_syscall_allowlist(&self, policy: &CompiledPolicy) -> Vec<u32> {
+    fn build_syscall_allowlist(&self, policy: &CompiledPolicy) -> (Vec<u32>, Vec<u32>) {
         use syscall_nr::*;
 
         let mut allowed = vec![
@@ -461,22 +471,23 @@ impl LinuxSandbox {
             CLOCK_GETTIME,
             GETRANDOM,
             FUTEX,
-            CLONE, // Required for threads
         ];
 
-        if !policy.block_direct_network {
-            allowed.extend([SOCKET, CONNECT]);
-        }
-
+        // Process creation syscalls (if exec is allowed)
         if !policy.deny_exec {
-            allowed.extend([EXECVE, EXECVEAT, FORK, VFORK]);
+            allowed.extend([FORK, VFORK, EXECVE, EXECVEAT]);
         }
 
+        // Ptrace (if allowed)
         if !policy.deny_ptrace {
             allowed.push(PTRACE);
         }
 
-        allowed
+        // AArch64 does not have a separate IOCTL/PRCTL defined in our subset yet,
+        // so we return an empty graceful list for now.
+        let graceful = vec![];
+
+        (allowed, graceful)
     }
 
     /// Apply resource limits using rlimit.
@@ -594,6 +605,45 @@ impl Sandbox for LinuxSandbox {
         self.apply_seccomp(policy)?;
 
         info!("Linux sandbox applied successfully");
+        Ok(())
+    }
+
+    fn apply_to_command(&self, cmd: &mut std::process::Command, policy: &CompiledPolicy) -> Result<(), SandboxError> {
+        use std::os::unix::process::CommandExt;
+        
+        let policy_clone = policy.clone();
+        
+        unsafe {
+            cmd.pre_exec(move || {
+                let sandbox = LinuxSandbox::new();
+                
+                // If unshare is available, we unshare user, network, ipc, and mount namespaces.
+                // We cannot use CLONE_NEWPID cleanly in pre_exec without more complex setup.
+                if sandbox.userns_available {
+                    // Try to unshare namespaces
+                    let mut flags = libc::CLONE_NEWUSER | libc::CLONE_NEWNS | libc::CLONE_NEWIPC | libc::CLONE_NEWUTS;
+                    if policy_clone.block_direct_network {
+                        flags |= libc::CLONE_NEWNET;
+                    }
+                    
+                    let ret = libc::unshare(flags);
+                    if ret == 0 {
+                        // Successfully unshared. We don't remount or map uids here because that requires
+                        // elevated capabilities or writing to /proc/self/uid_map, which might fail.
+                        // At a minimum, this provides strict network and IPC isolation.
+                        tracing::debug!("Successfully unshared namespaces via pre_exec");
+                    } else {
+                        tracing::warn!("Failed to unshare namespaces in pre_exec: {}", std::io::Error::last_os_error());
+                    }
+                }
+                
+                if let Err(e) = sandbox.apply(&policy_clone) {
+                    return Err(std::io::Error::new(std::io::ErrorKind::Other, format!("sandbox apply failed: {e}")));
+                }
+                Ok(())
+            });
+        }
+        
         Ok(())
     }
 

@@ -250,12 +250,14 @@ impl WasiConfig {
     /// Convert CPU percentage to wasmtime fuel.
     ///
     /// This is a heuristic mapping. In practice, fuel consumption varies
-    /// by instruction type.
+    /// wildly between components, but this provides a deterministic upper bound.
     fn cpu_percent_to_fuel(cpu_percent: u8) -> u64 {
         if cpu_percent == 0 {
             1 // Minimal fuel: effectively prevents meaningful execution
         } else if cpu_percent >= 100 {
-            0 // Unlimited
+            // Even at 100% CPU, we should provide a very large finite bound to prevent infinite loops (DoS).
+            // 1 trillion instructions should be enough for a single request, but finite.
+            1_000_000_000_000
         } else {
             // Base fuel per "time slice" scaled by percentage
             let base_fuel: u64 = 10_000_000_000; // 10B instructions base
@@ -608,11 +610,12 @@ impl wasmtime::ResourceLimiter for WasiHostState {
     fn table_growing(
         &mut self,
         _current: usize,
-        _desired: usize,
+        desired: usize,
         _maximum: Option<usize>,
     ) -> Result<bool, anyhow::Error> {
-        // Tables are allowed to grow per default bounds
-        Ok(true)
+        // Tables are allowed to grow up to a sane limit to prevent OOM via unbounded growth
+        const MAX_TABLE_ELEMENTS: usize = 100_000;
+        Ok(desired <= MAX_TABLE_ELEMENTS)
     }
 }
 
@@ -1048,7 +1051,7 @@ mod tests {
 
     #[test]
     fn test_cpu_percent_to_fuel() {
-        assert_eq!(WasiConfig::cpu_percent_to_fuel(100), 0); // Unlimited
+        assert_eq!(WasiConfig::cpu_percent_to_fuel(100), 1_000_000_000_000); // Very large finite bound
         assert_eq!(WasiConfig::cpu_percent_to_fuel(50), 5_000_000_000);
         assert_eq!(WasiConfig::cpu_percent_to_fuel(10), 1_000_000_000);
     }
@@ -1256,8 +1259,8 @@ mod tests {
 
     #[test]
     fn test_cpu_percent_to_fuel_above_100() {
-        // 200% → unlimited (0)
-        assert_eq!(WasiConfig::cpu_percent_to_fuel(200), 0);
+        // Should clamp or treat as 100%. The current code checks >= 100.
+        assert_eq!(WasiConfig::cpu_percent_to_fuel(200), 1_000_000_000_000);
     }
 
     #[test]
@@ -1451,9 +1454,11 @@ mod tests {
         let wasi_ctx = WasiCtxBuilder::new().build();
         let mut state = WasiHostState::new(&config, wasi_ctx);
 
-        // Tables always allowed to grow
+        // Tables allowed to grow up to MAX_TABLE_ELEMENTS
         assert!(state.table_growing(0, 1000, None).unwrap());
-        assert!(state.table_growing(0, 1_000_000, None).unwrap());
+        assert!(state.table_growing(0, 100_000, None).unwrap());
+        assert!(!state.table_growing(0, 100_001, None).unwrap());
+        assert!(!state.table_growing(0, 1_000_000, None).unwrap());
     }
 
     #[test]

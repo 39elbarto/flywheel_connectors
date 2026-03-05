@@ -248,6 +248,10 @@ fn canonicalize_host_pattern(pattern: &str) -> Option<String> {
     if pattern.is_empty() {
         return None;
     }
+    
+    if pattern == "*" {
+        return Some("*".to_string());
+    }
 
     let (wildcard, raw) = pattern
         .strip_prefix("*.")
@@ -622,6 +626,11 @@ impl EgressGuard {
             let Some(canonical_pattern) = canonicalize_host_pattern(pattern) else {
                 continue;
             };
+            
+            if canonical_pattern == "*" {
+                return true;
+            }
+            
             if canonical_pattern.starts_with("*.") {
                 // Wildcard match: *.example.com matches sub.example.com
                 let suffix = &canonical_pattern[1..]; // ".example.com"

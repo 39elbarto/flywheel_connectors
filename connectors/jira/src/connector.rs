@@ -1597,4 +1597,120 @@ mod tests {
         assert_eq!(result["status"], "degraded");
         assert_eq!(result["reason_code"], "credential_injection_required");
     }
+
+    // ── Sync unit tests: config, helpers, operations ─────────────────
+
+    #[test]
+    fn config_from_email_and_token() {
+        let cfg = JiraConfig::from_params(&json!({
+            "domain": "mycompany",
+            "email": "user@example.com",
+            "api_token": "secret"
+        })).unwrap();
+        assert!(!cfg.auth.is_secretless());
+        assert!(cfg.base_url.is_none());
+    }
+
+    #[test]
+    fn config_from_credential_id() {
+        let cfg = JiraConfig::from_params(&json!({
+            "domain": "mycompany",
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+        })).unwrap();
+        assert!(cfg.auth.is_secretless());
+    }
+
+    #[test]
+    fn config_custom_urls() {
+        let cfg = JiraConfig::from_params(&json!({
+            "domain": "corp",
+            "email": "u@e.com",
+            "api_token": "t",
+            "base_url": "https://jira.example.com",
+            "agile_url": "https://jira.example.com/agile"
+        })).unwrap();
+        assert_eq!(cfg.base_url.as_deref(), Some("https://jira.example.com"));
+        assert_eq!(cfg.agile_url.as_deref(), Some("https://jira.example.com/agile"));
+    }
+
+    #[test]
+    fn config_rejects_no_domain() {
+        let result = JiraConfig::from_params(&json!({
+            "email": "u@e.com", "api_token": "t"
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_rejects_email_without_token() {
+        let result = JiraConfig::from_params(&json!({
+            "domain": "x", "email": "u@e.com"
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_rejects_token_without_email() {
+        let result = JiraConfig::from_params(&json!({
+            "domain": "x", "api_token": "t"
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_rejects_all_three_auth_methods() {
+        let result = JiraConfig::from_params(&json!({
+            "domain": "x",
+            "email": "u@e.com",
+            "api_token": "t",
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_rejects_invalid_credential_id() {
+        let result = JiraConfig::from_params(&json!({
+            "domain": "x", "credential_id": "not-a-uuid"
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_rejects_no_auth() {
+        let result = JiraConfig::from_params(&json!({ "domain": "x" }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn require_str_extracts_value() {
+        let input = json!({"issue_key": "PROJ-1"});
+        assert_eq!(require_str(&input, "issue_key").unwrap(), "PROJ-1");
+    }
+
+    #[test]
+    fn require_str_missing_field() {
+        let input = json!({});
+        assert!(require_str(&input, "issue_key").is_err());
+    }
+
+    #[test]
+    fn require_str_non_string() {
+        let input = json!({"field": 42});
+        assert!(require_str(&input, "field").is_err());
+    }
+
+    #[test]
+    fn require_str_null() {
+        let input = json!({"field": null});
+        assert!(require_str(&input, "field").is_err());
+    }
+
+    #[test]
+    fn connector_default() {
+        let c = JiraConnector::default();
+        assert!(c.config.is_none());
+        assert!(c.client.is_none());
+        assert!(c.session_id.is_none());
+    }
 }

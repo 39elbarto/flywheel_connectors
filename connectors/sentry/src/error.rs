@@ -205,18 +205,23 @@ mod tests {
     }
 
     #[test]
-    fn retry_after_none_for_other_errors() {
+    fn retry_after_none_for_unauthorized() {
         assert_eq!(SentryError::Unauthorized.retry_after(), None);
+    }
+
+    #[test]
+    fn retry_after_none_for_forbidden() {
         assert_eq!(SentryError::Forbidden.retry_after(), None);
-        let api = SentryError::Api {
-            status_code: 500,
-            message: "err".into(),
-        };
-        assert_eq!(api.retry_after(), None);
-        let nf = SentryError::NotFound {
-            resource: "x".into(),
-        };
-        assert_eq!(nf.retry_after(), None);
+    }
+
+    #[test]
+    fn retry_after_none_for_api_error() {
+        assert_eq!(SentryError::Api { status_code: 500, message: "err".into() }.retry_after(), None);
+    }
+
+    #[test]
+    fn retry_after_none_for_not_found() {
+        assert_eq!(SentryError::NotFound { resource: "x".into() }.retry_after(), None);
     }
 
     // ── to_fcp_error ─────────────────────────────────────────────────
@@ -332,32 +337,41 @@ mod tests {
         }
     }
 
+    #[test]
+    fn api_error_non_retryable_to_fcp_error() {
+        match (SentryError::Api { status_code: 400, message: "bad".into() }).to_fcp_error() {
+            FcpError::External { status_code, retryable, .. } => {
+                assert_eq!(status_code, Some(400));
+                assert!(!retryable);
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
     // ── Display ──────────────────────────────────────────────────────
 
     #[test]
-    fn error_display_messages() {
-        assert_eq!(
-            SentryError::Unauthorized.to_string(),
-            "Authentication failed: invalid or expired auth token"
-        );
-        assert_eq!(
-            SentryError::Forbidden.to_string(),
-            "Forbidden: insufficient permissions"
-        );
-        let nf = SentryError::NotFound {
-            resource: "project".into(),
-        };
-        assert_eq!(nf.to_string(), "Not found: project");
+    fn error_display_unauthorized() {
+        assert_eq!(SentryError::Unauthorized.to_string(), "Authentication failed: invalid or expired auth token");
+    }
 
-        let rl = SentryError::RateLimited {
-            retry_after_ms: 1000,
-        };
-        assert_eq!(rl.to_string(), "Rate limited, retry after 1000ms");
+    #[test]
+    fn error_display_forbidden() {
+        assert_eq!(SentryError::Forbidden.to_string(), "Forbidden: insufficient permissions");
+    }
 
-        let api = SentryError::Api {
-            status_code: 500,
-            message: "Internal".into(),
-        };
-        assert_eq!(api.to_string(), "Sentry API error (500): Internal");
+    #[test]
+    fn error_display_not_found() {
+        assert_eq!(SentryError::NotFound { resource: "project".into() }.to_string(), "Not found: project");
+    }
+
+    #[test]
+    fn error_display_rate_limited() {
+        assert_eq!(SentryError::RateLimited { retry_after_ms: 1000 }.to_string(), "Rate limited, retry after 1000ms");
+    }
+
+    #[test]
+    fn error_display_api() {
+        assert_eq!(SentryError::Api { status_code: 500, message: "Internal".into() }.to_string(), "Sentry API error (500): Internal");
     }
 }

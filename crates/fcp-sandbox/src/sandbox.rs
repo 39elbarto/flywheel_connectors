@@ -245,6 +245,18 @@ pub trait Sandbox: Send + Sync {
     /// Returns an error if the sandbox cannot be applied.
     fn apply(&self, policy: &CompiledPolicy) -> Result<(), SandboxError>;
 
+    /// Apply the sandbox to a child process being spawned via `std::process::Command`.
+    ///
+    /// This should hook into the command setup (e.g., using `pre_exec` on Unix) to
+    /// ensure the child process is fully sandboxed before executing the payload.
+    /// Default implementation relies on the connector binary to invoke `apply()` itself,
+    /// but platform-specific implementations (e.g., Linux namespaces, macOS seatbelt)
+    /// may override this to enforce sandboxing immediately from the host.
+    fn apply_to_command(&self, cmd: &mut std::process::Command, policy: &CompiledPolicy) -> Result<(), SandboxError> {
+        let _ = (cmd, policy);
+        Ok(())
+    }
+
     /// Check if the sandbox can be applied on this platform.
     ///
     /// Returns `true` if all required kernel/OS features are available.
@@ -311,6 +323,11 @@ pub struct NoOpSandbox;
 
 impl Sandbox for NoOpSandbox {
     fn apply(&self, _policy: &CompiledPolicy) -> Result<(), SandboxError> {
+        Ok(())
+    }
+
+    fn apply_to_command(&self, cmd: &mut std::process::Command, policy: &CompiledPolicy) -> Result<(), SandboxError> {
+        let _ = (cmd, policy);
         Ok(())
     }
 

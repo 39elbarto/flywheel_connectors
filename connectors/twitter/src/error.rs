@@ -394,4 +394,76 @@ mod tests {
         let fcp = err.to_fcp_error();
         assert!(matches!(fcp, FcpError::Internal { message } if message.contains("JSON error")));
     }
+
+    // ── Display ──────────────────────────────────────────────────────
+
+    #[test]
+    fn display_api_error() {
+        let err = TwitterError::Api {
+            status: 500,
+            message: "Internal".into(),
+            error_code: Some(131),
+            retry_after: None,
+        };
+        assert_eq!(err.to_string(), "Twitter API error 500: Internal");
+    }
+
+    #[test]
+    fn display_rate_limited() {
+        let err = TwitterError::RateLimited { retry_after: 60 };
+        assert_eq!(err.to_string(), "Rate limited, retry after 60 seconds");
+    }
+
+    #[test]
+    fn display_oauth() {
+        let err = TwitterError::OAuth("bad signature".into());
+        assert_eq!(err.to_string(), "OAuth error: bad signature");
+    }
+
+    #[test]
+    fn display_stream() {
+        let err = TwitterError::Stream("connection lost".into());
+        assert_eq!(err.to_string(), "Stream error: connection lost");
+    }
+
+    #[test]
+    fn display_config() {
+        let err = TwitterError::Config("missing key".into());
+        assert_eq!(err.to_string(), "Configuration error: missing key");
+    }
+
+    #[test]
+    fn display_not_configured() {
+        assert_eq!(TwitterError::NotConfigured.to_string(), "Connector not configured");
+    }
+
+    // ── Edge cases ──────────────────────────────────────────────────
+
+    #[test]
+    fn api_retry_after_propagates_to_fcp() {
+        let err = TwitterError::Api {
+            status: 500,
+            message: "overloaded".into(),
+            error_code: None,
+            retry_after: Some(10),
+        };
+        let fcp = err.to_fcp_error();
+        match fcp {
+            FcpError::External { retry_after, .. } => {
+                assert_eq!(retry_after, Some(Duration::from_secs(10)));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_no_retry_after_none_in_fcp() {
+        let err = TwitterError::Api {
+            status: 500,
+            message: "error".into(),
+            error_code: None,
+            retry_after: None,
+        };
+        assert_eq!(err.retry_after(), None);
+    }
 }

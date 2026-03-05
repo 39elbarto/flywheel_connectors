@@ -296,7 +296,7 @@ pub fn hrw_hash_checkpoint(zone_id: &ZoneId, epoch: &EpochId, node_id: &Tailscal
     let z_bytes = zone_id.as_bytes();
     hasher.update(
         &u32::try_from(z_bytes.len())
-            .unwrap_or(u32::MAX)
+            .expect("zone_id length exceeds u32::MAX")
             .to_le_bytes(),
     );
     hasher.update(z_bytes);
@@ -304,7 +304,7 @@ pub fn hrw_hash_checkpoint(zone_id: &ZoneId, epoch: &EpochId, node_id: &Tailscal
     let e_bytes = epoch.as_str().as_bytes();
     hasher.update(
         &u32::try_from(e_bytes.len())
-            .unwrap_or(u32::MAX)
+            .expect("epoch_id length exceeds u32::MAX")
             .to_le_bytes(),
     );
     hasher.update(e_bytes);
@@ -312,7 +312,7 @@ pub fn hrw_hash_checkpoint(zone_id: &ZoneId, epoch: &EpochId, node_id: &Tailscal
     let n_bytes = node_id.as_str().as_bytes();
     hasher.update(
         &u32::try_from(n_bytes.len())
-            .unwrap_or(u32::MAX)
+            .expect("node_id length exceeds u32::MAX")
             .to_le_bytes(),
     );
     hasher.update(n_bytes);

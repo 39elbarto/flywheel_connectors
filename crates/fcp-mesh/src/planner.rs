@@ -705,7 +705,7 @@ impl ExecutionPlan {
         } else {
             Vec::new()
         };
-        let nodes_excluded = total_nodes - candidates.len();
+        let nodes_excluded = total_nodes.saturating_sub(candidates.len());
 
         Self {
             selected,

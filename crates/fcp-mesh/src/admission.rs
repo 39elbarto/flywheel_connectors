@@ -832,6 +832,11 @@ impl AdmissionController {
     /// 2. Byte budget
     /// 3. Symbol budget
     ///
+    /// **Important:** This method only _checks_ whether the request would be
+    /// admitted. After processing, callers must debit the budget via
+    /// [`record_bytes`](Self::record_bytes) and
+    /// [`record_symbols`](Self::record_symbols).
+    ///
     /// # Errors
     ///
     /// Returns the first admission error encountered, if any.

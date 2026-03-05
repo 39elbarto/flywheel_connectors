@@ -520,7 +520,12 @@ fn truncate_body(bytes: &[u8]) -> String {
     const MAX_LEN: usize = 4096;
     let mut body = String::from_utf8_lossy(bytes).to_string();
     if body.len() > MAX_LEN {
-        body.truncate(MAX_LEN);
+        // Find a valid UTF-8 char boundary at or before MAX_LEN
+        let mut end = MAX_LEN;
+        while !body.is_char_boundary(end) {
+            end -= 1;
+        }
+        body.truncate(end);
         body.push('…');
     }
     body

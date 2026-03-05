@@ -30,6 +30,8 @@
 //! }
 //! ```
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -44,6 +46,25 @@ use fcp_core::{
 };
 #[cfg(feature = "cursor-store-object-store")]
 use fcp_core::{ObjectIdKey, RetentionClass, StorageMeta, StoredObject};
+
+/// Produce a pseudo-random jitter factor in [0.0, 1.0) using stdlib hashing.
+///
+/// Mixes the attempt number with the current thread ID and wall-clock time so
+/// that different threads at different instants produce different values, which
+/// prevents thundering-herd convergence that a purely deterministic formula
+/// would cause.
+fn pseudo_random_jitter(attempt: u32) -> f64 {
+    let mut hasher = DefaultHasher::new();
+    attempt.hash(&mut hasher);
+    std::thread::current().id().hash(&mut hasher);
+    std::time::SystemTime::UNIX_EPOCH
+        .elapsed()
+        .unwrap_or_default()
+        .as_nanos()
+        .hash(&mut hasher);
+    let h = hasher.finish();
+    (h % 1_000_000) as f64 / 1_000_000.0
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SupervisorConfig
@@ -697,7 +718,13 @@ impl<B: CursorStoreBackend> CursorStore<B> {
             .to_cbor()
             .map_err(|err| CursorStoreError::CursorEncoding(err.to_string()))?;
 
-        let next_seq = if self.head.is_some() { self.seq + 1 } else { 0 };
+        let next_seq = if self.head.is_some() {
+            self.seq.checked_add(1).ok_or_else(|| {
+                CursorStoreError::CursorEncoding("sequence number overflow".to_string())
+            })?
+        } else {
+            0
+        };
         let prev = self.head;
 
         let updated_at = header.created_at;
@@ -1370,7 +1397,7 @@ impl<S: StreamingSession> StreamingSupervisor<S> {
     }
 
     fn compute_backoff_delay(&self, attempt: u32) -> Duration {
-        let jitter = (f64::from(attempt) * 0.1).fract();
+        let jitter = pseudo_random_jitter(attempt);
         let backoff = self.config.compute_backoff_with_jitter(attempt, jitter);
         Duration::from_millis(backoff)
     }

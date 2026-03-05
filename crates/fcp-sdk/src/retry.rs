@@ -22,10 +22,31 @@
 //! }
 //! ```
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
 use crate::FcpError;
 use crate::formatting::{ErrorClass, classify_error_message};
+
+/// Produce a pseudo-random jitter factor in [0.0, 1.0) using stdlib hashing.
+///
+/// Mixes the attempt number with the current thread ID and wall-clock time so
+/// that different threads at different instants produce different values, which
+/// prevents thundering-herd convergence that a purely deterministic formula
+/// would cause.
+fn pseudo_random_jitter(attempt: u32) -> f64 {
+    let mut hasher = DefaultHasher::new();
+    attempt.hash(&mut hasher);
+    std::thread::current().id().hash(&mut hasher);
+    std::time::SystemTime::UNIX_EPOCH
+        .elapsed()
+        .unwrap_or_default()
+        .as_nanos()
+        .hash(&mut hasher);
+    let h = hasher.finish();
+    (h % 1_000_000) as f64 / 1_000_000.0
+}
 
 /// High-level retry decision for an operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,7 +181,7 @@ impl RetryPolicy {
             RetryDecision::Immediate => Some(Duration::from_millis(0)),
             RetryDecision::After(delay) => Some(delay),
             RetryDecision::Backoff => {
-                let jitter = (f64::from(attempt) * 0.1).fract();
+                let jitter = pseudo_random_jitter(attempt);
                 let mut delay_ms = self.compute_backoff_with_jitter_ms(attempt, jitter);
 
                 if let Some(hint) = retry_after_hint {

@@ -454,10 +454,10 @@ impl LifecycleRecord {
             self.health.failures += 1;
         }
 
-        // Update success rate (safe: result is 0-100)
+        // Update success rate (clamped to 0-100)
         if self.health.samples > 0 {
-            self.health.success_rate =
-                (self.health.successes as f64 / self.health.samples as f64 * 100.0) as u8;
+            let rate = (self.health.successes as f64 / self.health.samples as f64 * 100.0).min(100.0);
+            self.health.success_rate = rate as u8;
         }
 
         // Update latency tracking
@@ -572,7 +572,7 @@ impl HealthMetrics {
     pub fn avg_latency_ms(&self) -> Option<u32> {
         self.total_latency_ms
             .checked_div(self.latency_samples)
-            .map(|avg| avg as u32)
+            .map(|avg| u32::try_from(avg).unwrap_or(u32::MAX))
     }
 }
 

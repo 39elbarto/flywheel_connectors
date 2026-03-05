@@ -432,6 +432,14 @@ impl ThresholdCeremony {
                 timestamp: Utc::now(),
             });
 
+            // Validate proof-of-knowledge is not empty (rogue-key attack mitigation)
+            if commitment.proof.is_empty() {
+                return Err(format!(
+                    "Participant {} submitted empty proof-of-knowledge",
+                    commitment.participant_index
+                ));
+            }
+
             commitments.insert(commitment.participant_index, commitment);
 
             // Transition to Round2 if all commitments received
@@ -477,6 +485,21 @@ impl ThresholdCeremony {
                 ));
             }
 
+            // Validate shares are not empty and have non-empty ciphertext
+            if shares.is_empty() {
+                return Err(format!(
+                    "Participant {from_index} submitted empty shares list"
+                ));
+            }
+            for share in &shares {
+                if share.ciphertext.is_empty() {
+                    return Err(format!(
+                        "Participant {from_index} submitted empty ciphertext for recipient {}",
+                        share.to_index
+                    ));
+                }
+            }
+
             for share in &shares {
                 self.transcript.messages.push(MessageRecord {
                     from: from_index,
@@ -499,12 +522,19 @@ impl ThresholdCeremony {
         }
     }
 
-    /// Complete the ceremony (placeholder - actual FROST aggregation would go here).
+    /// Complete the ceremony (placeholder — actual FROST aggregation would go here).
+    ///
+    /// # Safety
+    ///
+    /// The returned group public key is a **placeholder zero key** and MUST NOT
+    /// be used for real cryptographic operations. Replace this with actual FROST
+    /// share aggregation before production use.
     fn complete_ceremony(&mut self) {
         let now = Utc::now();
-        // In a real implementation, this would aggregate the shares to derive
-        // the group public key using FROST protocol.
-        let group_public_key = [0u8; 32]; // Placeholder
+        // TODO(FROST): Replace with actual share aggregation to derive group key.
+        // The zero placeholder is intentionally invalid so any downstream
+        // Ed25519 verification using it will fail.
+        let group_public_key = [0u8; 32]; // Placeholder — not a valid Ed25519 point
 
         self.phase = CeremonyPhase::Complete { group_public_key };
         self.transcript.phases.push(PhaseRecord {

@@ -1181,7 +1181,9 @@ mod tests {
         expected_hasher.update(n_bytes);
 
         let expected_bytes = expected_hasher.finalize();
-        let expected_u64 = u64::from_le_bytes(expected_bytes.as_bytes()[0..8].try_into().unwrap());
+        let mut expected_buf = [0u8; 8];
+        expected_buf.copy_from_slice(&expected_bytes.as_bytes()[0..8]);
+        let expected_u64 = u64::from_le_bytes(expected_buf);
 
         assert_eq!(
             hash, expected_u64,

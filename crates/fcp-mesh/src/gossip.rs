@@ -147,7 +147,9 @@ impl XorFilterPlaceholder {
         hasher.update(&self.seed.to_le_bytes());
         hasher.update(item);
         let hash = hasher.finalize();
-        u64::from_le_bytes(hash.as_bytes()[0..8].try_into().unwrap())
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&hash.as_bytes()[0..8]);
+        u64::from_le_bytes(buf)
     }
 
     const fn bit_capacity(&self) -> usize {

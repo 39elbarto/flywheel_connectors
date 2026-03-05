@@ -434,8 +434,12 @@ impl BloomFilter {
     fn hash_item(item: &[u8]) -> (u64, u64) {
         let hash = blake3::hash(item);
         let bytes = hash.as_bytes();
-        let h1 = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
-        let h2 = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+        let mut buf1 = [0u8; 8];
+        let mut buf2 = [0u8; 8];
+        buf1.copy_from_slice(&bytes[0..8]);
+        buf2.copy_from_slice(&bytes[8..16]);
+        let h1 = u64::from_le_bytes(buf1);
+        let h2 = u64::from_le_bytes(buf2);
 
         (h1, h2)
     }

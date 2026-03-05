@@ -1,0 +1,398 @@
+//! Datadog API client.
+
+use std::fmt;
+use std::time::Duration;
+
+use fcp_core::CredentialId;
+use reqwest::{Client, Response, StatusCode};
+use tracing::{debug, instrument};
+
+use crate::{
+    error::{DatadogError, DatadogResult},
+    types::ApiErrorResponse,
+};
+
+/// Datadog region configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatadogRegion {
+    Us1,
+    Us3,
+    Us5,
+    Eu1,
+    Ap1,
+}
+
+impl DatadogRegion {
+    /// Parse a region string.
+    pub fn parse_region(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "us1" | "us" => Some(Self::Us1),
+            "us3" => Some(Self::Us3),
+            "us5" => Some(Self::Us5),
+            "eu1" | "eu" => Some(Self::Eu1),
+            "ap1" => Some(Self::Ap1),
+            _ => None,
+        }
+    }
+
+    /// Get the API base URL for this region.
+    #[must_use]
+    pub const fn api_base_url(&self) -> &str {
+        match self {
+            Self::Us1 => "https://api.datadoghq.com/api/v1",
+            Self::Us3 => "https://api.us3.datadoghq.com/api/v1",
+            Self::Us5 => "https://api.us5.datadoghq.com/api/v1",
+            Self::Eu1 => "https://api.datadoghq.eu/api/v1",
+            Self::Ap1 => "https://api.ap1.datadoghq.com/api/v1",
+        }
+    }
+}
+
+/// Default API base URL (US1).
+pub const DEFAULT_BASE_URL: &str = "https://api.datadoghq.com/api/v1";
+
+/// Authentication mode for the Datadog API.
+#[derive(Clone)]
+pub enum DatadogAuth {
+    /// API key + Application key pair.
+    ApiKeys { api_key: String, app_key: String },
+    /// Secretless credential reference (egress proxy injection).
+    CredentialId(CredentialId),
+}
+
+impl DatadogAuth {
+    /// Render a redacted label suitable for logs/diagnostics.
+    #[must_use]
+    pub fn redacted_label(&self) -> String {
+        match self {
+            Self::ApiKeys { .. } => "api_keys:redacted".to_string(),
+            Self::CredentialId(id) => format!("credential_id:{id}"),
+        }
+    }
+
+    /// Whether this auth mode requires egress proxy credential injection.
+    #[must_use]
+    pub const fn is_secretless(&self) -> bool {
+        matches!(self, Self::CredentialId(_))
+    }
+}
+
+impl fmt::Debug for DatadogAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ApiKeys { .. } => f.debug_struct("ApiKeys").field("api_key", &"<redacted>").field("app_key", &"<redacted>").finish(),
+            Self::CredentialId(id) => f.debug_tuple("CredentialId").field(id).finish(),
+        }
+    }
+}
+
+/// Datadog API client.
+pub struct DatadogClient {
+    client: Client,
+    auth: DatadogAuth,
+    base_url: String,
+}
+
+impl fmt::Debug for DatadogClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DatadogClient")
+            .field("auth", &self.auth)
+            .field("base_url", &self.base_url)
+            .finish()
+    }
+}
+
+impl DatadogClient {
+    /// Create a new Datadog client.
+    pub fn new(auth: DatadogAuth, base_url: Option<&str>) -> DatadogResult<Self> {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(30))
+            .user_agent("fcp-datadog/0.1.0")
+            .build()?;
+
+        Ok(Self {
+            client,
+            auth,
+            base_url: base_url
+                .unwrap_or(DEFAULT_BASE_URL)
+                .trim_end_matches('/')
+                .to_string(),
+        })
+    }
+
+    /// Create a new client with a custom reqwest client (for testing).
+    pub fn with_client(client: Client, auth: DatadogAuth, base_url: &str) -> Self {
+        Self {
+            client,
+            auth,
+            base_url: base_url.trim_end_matches('/').to_string(),
+        }
+    }
+
+    fn add_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.auth {
+            DatadogAuth::ApiKeys { api_key, app_key } => req
+                .header("DD-API-KEY", api_key)
+                .header("DD-APPLICATION-KEY", app_key),
+            DatadogAuth::CredentialId(id) => req.header("X-FCP-Credential-Id", id.to_string()),
+        }
+    }
+
+    async fn handle_response(&self, resp: Response) -> DatadogResult<serde_json::Value> {
+        let status = resp.status();
+
+        if status.is_success() {
+            let body = resp.text().await?;
+            if body.is_empty() {
+                return Ok(serde_json::json!({}));
+            }
+            Ok(serde_json::from_str(&body)?)
+        } else {
+            self.handle_error(status, resp).await
+        }
+    }
+
+    async fn handle_error(
+        &self,
+        status: StatusCode,
+        resp: Response,
+    ) -> DatadogResult<serde_json::Value> {
+        let retry_after = resp
+            .headers()
+            .get("x-ratelimit-reset")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok());
+
+        let body = resp.text().await.unwrap_or_default();
+        let detail = serde_json::from_str::<ApiErrorResponse>(&body)
+            .ok()
+            .and_then(|e| e.errors.first().cloned())
+            .unwrap_or_else(|| body.clone());
+
+        match status.as_u16() {
+            401 => Err(DatadogError::Unauthorized),
+            403 => Err(DatadogError::Forbidden),
+            404 => Err(DatadogError::NotFound { resource: detail }),
+            429 => Err(DatadogError::RateLimited {
+                retry_after_ms: retry_after.unwrap_or(60) * 1000,
+            }),
+            code => Err(DatadogError::Api {
+                status_code: code,
+                message: detail,
+            }),
+        }
+    }
+
+    #[instrument(skip(self), fields(url))]
+    async fn get(&self, path: &str) -> DatadogResult<serde_json::Value> {
+        let url = format!("{}{path}", self.base_url);
+        debug!(url = %url, "GET request");
+
+        let req = self.client.get(&url);
+        let req = self.add_auth(req);
+        let resp = req.send().await?;
+        self.handle_response(resp).await
+    }
+
+    #[instrument(skip(self, body), fields(url))]
+    async fn post(&self, path: &str, body: &serde_json::Value) -> DatadogResult<serde_json::Value> {
+        let url = format!("{}{path}", self.base_url);
+        debug!(url = %url, "POST request");
+
+        let req = self.client.post(&url).json(body);
+        let req = self.add_auth(req);
+        let resp = req.send().await?;
+        self.handle_response(resp).await
+    }
+
+    #[instrument(skip(self), fields(url))]
+    async fn delete(&self, path: &str) -> DatadogResult<serde_json::Value> {
+        let url = format!("{}{path}", self.base_url);
+        debug!(url = %url, "DELETE request");
+
+        let req = self.client.delete(&url);
+        let req = self.add_auth(req);
+        let resp = req.send().await?;
+        self.handle_response(resp).await
+    }
+
+    // -- Events --
+
+    /// Create an event.
+    pub async fn create_event(
+        &self,
+        body: &serde_json::Value,
+    ) -> DatadogResult<serde_json::Value> {
+        self.post("/events", body).await
+    }
+
+    /// List events in a time range.
+    pub async fn list_events(
+        &self,
+        start: i64,
+        end: i64,
+        priority: Option<&str>,
+        sources: Option<&str>,
+        tags: Option<&str>,
+    ) -> DatadogResult<serde_json::Value> {
+        let mut params = vec![
+            format!("start={start}"),
+            format!("end={end}"),
+        ];
+        if let Some(p) = priority {
+            params.push(format!("priority={p}"));
+        }
+        if let Some(s) = sources {
+            params.push(format!("sources={s}"));
+        }
+        if let Some(t) = tags {
+            params.push(format!("tags={t}"));
+        }
+        let qs = params.join("&");
+        self.get(&format!("/events?{qs}")).await
+    }
+
+    // -- Metrics --
+
+    /// Query time-series metrics.
+    pub async fn query_metrics(
+        &self,
+        query: &str,
+        from_ts: i64,
+        to_ts: i64,
+    ) -> DatadogResult<serde_json::Value> {
+        self.get(&format!("/query?query={query}&from={from_ts}&to={to_ts}"))
+            .await
+    }
+
+    /// Submit custom metrics.
+    pub async fn submit_metrics(
+        &self,
+        body: &serde_json::Value,
+    ) -> DatadogResult<serde_json::Value> {
+        self.post("/series", body).await
+    }
+
+    // -- Monitors --
+
+    /// List monitors.
+    pub async fn list_monitors(
+        &self,
+        tags: Option<&str>,
+        monitor_tags: Option<&str>,
+    ) -> DatadogResult<serde_json::Value> {
+        let mut params = Vec::new();
+        if let Some(t) = tags {
+            params.push(format!("tags={t}"));
+        }
+        if let Some(mt) = monitor_tags {
+            params.push(format!("monitor_tags={mt}"));
+        }
+        let qs = if params.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", params.join("&"))
+        };
+        self.get(&format!("/monitor{qs}")).await
+    }
+
+    /// Create a monitor.
+    pub async fn create_monitor(
+        &self,
+        body: &serde_json::Value,
+    ) -> DatadogResult<serde_json::Value> {
+        self.post("/monitor", body).await
+    }
+
+    /// Delete a monitor.
+    pub async fn delete_monitor(&self, monitor_id: i64) -> DatadogResult<serde_json::Value> {
+        self.delete(&format!("/monitor/{monitor_id}")).await
+    }
+
+    // -- Logs --
+
+    /// Search logs.
+    pub async fn search_logs(
+        &self,
+        body: &serde_json::Value,
+    ) -> DatadogResult<serde_json::Value> {
+        self.post("/logs-queries/list", body).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn region_from_str() {
+        assert_eq!(DatadogRegion::parse_region("us1"), Some(DatadogRegion::Us1));
+        assert_eq!(DatadogRegion::parse_region("US"), Some(DatadogRegion::Us1));
+        assert_eq!(DatadogRegion::parse_region("eu1"), Some(DatadogRegion::Eu1));
+        assert_eq!(DatadogRegion::parse_region("EU"), Some(DatadogRegion::Eu1));
+        assert_eq!(DatadogRegion::parse_region("us3"), Some(DatadogRegion::Us3));
+        assert_eq!(DatadogRegion::parse_region("us5"), Some(DatadogRegion::Us5));
+        assert_eq!(DatadogRegion::parse_region("ap1"), Some(DatadogRegion::Ap1));
+        assert_eq!(DatadogRegion::parse_region("invalid"), None);
+    }
+
+    #[test]
+    fn region_api_urls() {
+        assert_eq!(
+            DatadogRegion::Us1.api_base_url(),
+            "https://api.datadoghq.com/api/v1"
+        );
+        assert_eq!(
+            DatadogRegion::Eu1.api_base_url(),
+            "https://api.datadoghq.eu/api/v1"
+        );
+        assert_eq!(
+            DatadogRegion::Us3.api_base_url(),
+            "https://api.us3.datadoghq.com/api/v1"
+        );
+        assert_eq!(
+            DatadogRegion::Us5.api_base_url(),
+            "https://api.us5.datadoghq.com/api/v1"
+        );
+        assert_eq!(
+            DatadogRegion::Ap1.api_base_url(),
+            "https://api.ap1.datadoghq.com/api/v1"
+        );
+    }
+
+    #[test]
+    fn auth_debug_redacts_keys() {
+        let auth = DatadogAuth::ApiKeys {
+            api_key: "supersecret_api".into(),
+            app_key: "supersecret_app".into(),
+        };
+        let dbg = format!("{auth:?}");
+        assert!(!dbg.contains("supersecret_api"));
+        assert!(!dbg.contains("supersecret_app"));
+        assert!(dbg.contains("redacted"));
+    }
+
+    #[test]
+    fn auth_secretless_detection() {
+        let keys = DatadogAuth::ApiKeys {
+            api_key: "k".into(),
+            app_key: "a".into(),
+        };
+        assert!(!keys.is_secretless());
+
+        let cred = DatadogAuth::CredentialId(CredentialId::new());
+        assert!(cred.is_secretless());
+    }
+
+    #[test]
+    fn auth_redacted_label() {
+        let keys = DatadogAuth::ApiKeys {
+            api_key: "k".into(),
+            app_key: "a".into(),
+        };
+        assert_eq!(keys.redacted_label(), "api_keys:redacted");
+
+        let cred = DatadogAuth::CredentialId(CredentialId::new());
+        assert!(cred.redacted_label().starts_with("credential_id:"));
+    }
+}

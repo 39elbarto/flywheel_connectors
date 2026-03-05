@@ -351,10 +351,10 @@ mod tests {
             reset_after: Duration::from_millis(500),
             is_limited: true,
         };
-        let cloned = state.clone();
-        assert_eq!(cloned.limit, 10);
-        assert_eq!(cloned.remaining, 3);
-        assert!(cloned.is_limited);
+        let moved = state;
+        assert_eq!(moved.limit, 10);
+        assert_eq!(moved.remaining, 3);
+        assert!(moved.is_limited);
     }
 
     // ---- RateLimitError ----

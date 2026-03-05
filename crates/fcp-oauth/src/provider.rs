@@ -469,7 +469,10 @@ mod tests {
         let config = OAuthProvider::Google.oauth2_config("id", "sec").unwrap();
         // Google config should have access_type=offline
         assert!(config.extra_auth_params.contains_key("access_type"));
-        assert_eq!(config.extra_auth_params.get("access_type").unwrap(), "offline");
+        assert_eq!(
+            config.extra_auth_params.get("access_type").unwrap(),
+            "offline"
+        );
     }
 
     // ── Batch: OAuthProvider trait impls ──
@@ -529,6 +532,7 @@ mod tests {
     // ── Batch: ProviderEndpoints ──
 
     #[test]
+    #[allow(clippy::redundant_clone)]
     fn test_provider_endpoints_clone() {
         let endpoints = ProviderEndpoints::new("https://a.com/auth", "https://a.com/token")
             .with_revocation_url("https://a.com/revoke")

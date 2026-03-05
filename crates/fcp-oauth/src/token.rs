@@ -732,6 +732,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::redundant_clone)]
     fn test_token_store_clone() {
         let store = TokenStore::new();
         store.store(

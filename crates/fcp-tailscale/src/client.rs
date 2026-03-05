@@ -698,4 +698,377 @@ mod tests {
         let status = client.status().await.unwrap();
         assert!(status.peer.is_empty());
     }
+
+    // ── Serde roundtrip tests ────────────────────────────────────────
+
+    #[test]
+    fn tailscale_status_serde_roundtrip() {
+        let status = TailscaleStatus {
+            backend_state: "Running".into(),
+            self_node: SelfNode {
+                id: "self-1".into(),
+                public_key: "pubkey:self".into(),
+                host_name: "myhost".into(),
+                dns_name: "myhost.ts.net".into(),
+                tailscale_ips: vec!["100.64.0.1".parse().unwrap()],
+                tags: vec!["tag:fcp-work".into()],
+                online: true,
+            },
+            peer: HashMap::new(),
+            user: Some(UserInfo {
+                id: 42,
+                login_name: "user@example.com".into(),
+                display_name: "Test User".into(),
+            }),
+            tailnet: Some(TailnetInfo {
+                name: "example.com".into(),
+                is_personal: Some(false),
+            }),
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        let deserialized: TailscaleStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.backend_state, "Running");
+        assert_eq!(deserialized.self_node.id, "self-1");
+        assert!(deserialized.user.is_some());
+        assert_eq!(deserialized.user.as_ref().unwrap().id, 42);
+        assert!(deserialized.tailnet.is_some());
+    }
+
+    #[test]
+    fn peer_info_serde_roundtrip() {
+        let peer = PeerInfo {
+            id: "node-42".into(),
+            public_key: "pubkey:42".into(),
+            host_name: "worker".into(),
+            dns_name: "worker.ts.net".into(),
+            tailscale_ips: vec![
+                "100.64.0.2".parse().unwrap(),
+                "fd7a:115c:a1e0::2".parse().unwrap(),
+            ],
+            tags: vec!["tag:fcp-work".into(), "tag:server".into()],
+            online: true,
+            os: Some("linux".into()),
+            last_seen: Some("2026-03-05T12:00:00Z".into()),
+        };
+        let json = serde_json::to_string(&peer).unwrap();
+        let deserialized: PeerInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.id, "node-42");
+        assert_eq!(deserialized.tailscale_ips.len(), 2);
+        assert_eq!(deserialized.tags.len(), 2);
+        assert_eq!(deserialized.os.as_deref(), Some("linux"));
+        assert!(deserialized.last_seen.is_some());
+    }
+
+    #[test]
+    fn peer_info_serde_minimal() {
+        // Test with optional fields absent
+        let json = r#"{
+            "ID": "n1",
+            "PublicKey": "pk",
+            "HostName": "h",
+            "DNSName": "d.ts.net",
+            "TailscaleIPs": ["100.64.0.1"],
+            "Online": false
+        }"#;
+        let peer: PeerInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(peer.id, "n1");
+        assert!(!peer.online);
+        assert!(peer.os.is_none());
+        assert!(peer.last_seen.is_none());
+        assert!(peer.tags.is_empty()); // default
+    }
+
+    #[test]
+    fn self_node_serde_roundtrip() {
+        let node = SelfNode {
+            id: "self-1".into(),
+            public_key: "pk:self".into(),
+            host_name: "myhost".into(),
+            dns_name: "myhost.ts.net".into(),
+            tailscale_ips: vec!["100.64.0.1".parse().unwrap()],
+            tags: vec![],
+            online: true,
+        };
+        let json = serde_json::to_string(&node).unwrap();
+        let deserialized: SelfNode = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.id, "self-1");
+        assert!(deserialized.tags.is_empty());
+    }
+
+    #[test]
+    fn user_info_serde_roundtrip() {
+        let user = UserInfo {
+            id: 100,
+            login_name: "user@example.com".into(),
+            display_name: "Test User".into(),
+        };
+        let json = serde_json::to_string(&user).unwrap();
+        let deserialized: UserInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.id, 100);
+        assert_eq!(deserialized.login_name, "user@example.com");
+    }
+
+    #[test]
+    fn tailnet_info_serde_roundtrip() {
+        let info = TailnetInfo {
+            name: "example.com".into(),
+            is_personal: Some(true),
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let deserialized: TailnetInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.name, "example.com");
+        assert_eq!(deserialized.is_personal, Some(true));
+    }
+
+    #[test]
+    fn tailnet_info_serde_without_personal() {
+        let info = TailnetInfo {
+            name: "corp.com".into(),
+            is_personal: None,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let deserialized: TailnetInfo = serde_json::from_str(&json).unwrap();
+        assert!(deserialized.is_personal.is_none());
+    }
+
+    // ── PeerInfo method edge cases ───────────────────────────────────
+
+    #[test]
+    fn peer_info_fcp_tags_filters_non_fcp() {
+        let peer = MockTailscaleClient::mock_peer(
+            "n1",
+            "h",
+            "100.64.0.1".parse().unwrap(),
+            &["tag:server", "tag:fcp-work", "tag:fcp-owner", "tag:infra"],
+        );
+        let fcp = peer.fcp_tags();
+        assert_eq!(fcp.len(), 2);
+        let names: Vec<_> = fcp.iter().map(|t| t.as_str().to_string()).collect();
+        assert!(names.contains(&"tag:fcp-work".to_string()));
+        assert!(names.contains(&"tag:fcp-owner".to_string()));
+    }
+
+    #[test]
+    fn peer_info_tailscale_tags_invalid_filtered() {
+        let peer = PeerInfo {
+            id: "n1".into(),
+            public_key: "pk".into(),
+            host_name: "h".into(),
+            dns_name: "d.ts.net".into(),
+            tailscale_ips: vec!["100.64.0.1".parse().unwrap()],
+            tags: vec!["not-a-valid-tag".into(), "tag:valid".into()],
+            online: true,
+            os: None,
+            last_seen: None,
+        };
+        let tags = peer.tailscale_tags();
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].as_str(), "tag:valid");
+    }
+
+    // ── TailscaleStatus peers() ──────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn status_peers_converts_keys_to_node_id() {
+        let client = MockTailscaleClient::new();
+        let p1 = MockTailscaleClient::mock_peer(
+            "node-aaa",
+            "h1",
+            "100.64.0.2".parse().unwrap(),
+            &[],
+        );
+        let p2 = MockTailscaleClient::mock_peer(
+            "node-bbb",
+            "h2",
+            "100.64.0.3".parse().unwrap(),
+            &[],
+        );
+        client.add_peer(p1).await;
+        client.add_peer(p2).await;
+
+        let status = client.status().await.unwrap();
+        let peers = status.peers();
+        assert_eq!(peers.len(), 2);
+        assert!(peers.contains_key(&NodeId::new("node-aaa")));
+        assert!(peers.contains_key(&NodeId::new("node-bbb")));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn status_peers_empty_when_no_peers() {
+        let client = MockTailscaleClient::new();
+        let status = client.status().await.unwrap();
+        let peers = status.peers();
+        assert!(peers.is_empty());
+    }
+
+    // ── MockTailscaleClient state transitions ────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn mock_client_backend_state_cycle() {
+        let client = MockTailscaleClient::new();
+
+        // Running -> Stopped -> NeedsLogin -> Running
+        assert!(client.is_connected().await.unwrap());
+
+        client.set_backend_state("Stopped").await;
+        assert!(client.status().await.is_err());
+
+        client.set_backend_state("NeedsLogin").await;
+        assert!(client.status().await.is_err());
+
+        client.set_backend_state("Running").await;
+        let status = client.status().await.unwrap();
+        assert_eq!(status.backend_state, "Running");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn mock_client_default_self_node() {
+        let client = MockTailscaleClient::new();
+        let status = client.status().await.unwrap();
+        // Default self_node has id "mock-self"
+        assert_eq!(status.self_node.id, "mock-self");
+        assert_eq!(status.self_node.host_name, "mock-host");
+        assert!(status.self_node.online);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn mock_client_multiple_peers_same_operations() {
+        let client = MockTailscaleClient::new();
+
+        for i in 0..5 {
+            let ip: IpAddr = format!("100.64.0.{}", 10 + i).parse().unwrap();
+            let peer = MockTailscaleClient::mock_peer(
+                &format!("node-{i}"),
+                &format!("host-{i}"),
+                ip,
+                &[],
+            );
+            client.add_peer(peer).await;
+        }
+
+        let status = client.status().await.unwrap();
+        assert_eq!(status.peer.len(), 5);
+
+        // Remove two
+        client.remove_peer("node-0").await;
+        client.remove_peer("node-4").await;
+        let status = client.status().await.unwrap();
+        assert_eq!(status.peer.len(), 3);
+
+        // Whois should find remaining
+        let found = client.whois("100.64.0.12".parse().unwrap()).await;
+        assert!(found.is_ok());
+        assert_eq!(found.unwrap().id, "node-2");
+    }
+
+    // ── Debug/Clone traits ───────────────────────────────────────────
+
+    #[test]
+    fn mock_tailscale_client_debug() {
+        let client = MockTailscaleClient::new();
+        let debug = format!("{client:?}");
+        assert!(debug.contains("MockTailscaleClient"));
+    }
+
+    #[test]
+    fn mock_tailscale_client_clone() {
+        let client = MockTailscaleClient::new();
+        let _cloned = client.clone();
+        // Clone should work without panic
+    }
+
+    #[test]
+    fn mock_tailscale_client_default() {
+        let client = MockTailscaleClient::default();
+        // Default is disconnected (backend_state is empty)
+        let debug = format!("{client:?}");
+        assert!(debug.contains("MockTailscaleClient"));
+    }
+
+    // ── LocalApiClient URL normalization ─────────────────────────────
+
+    #[test]
+    fn local_api_client_strips_trailing_slash() {
+        let client = LocalApiClient::with_http("http://127.0.0.1:8080/").unwrap();
+        assert_eq!(client.base_url, "http://127.0.0.1:8080");
+    }
+
+    #[test]
+    fn local_api_client_no_trailing_slash() {
+        let client = LocalApiClient::with_http("http://127.0.0.1:8080").unwrap();
+        assert_eq!(client.base_url, "http://127.0.0.1:8080");
+    }
+
+    #[test]
+    fn local_api_client_custom_socket_returns_error() {
+        let result = LocalApiClient::with_socket("/tmp/test.sock");
+        assert!(result.is_err());
+        match result {
+            Err(e) => assert!(e.to_string().contains("Unix socket")),
+            Ok(_) => panic!("expected error"),
+        }
+    }
+
+    // ── TailscaleStatus from JSON ────────────────────────────────────
+
+    #[test]
+    fn tailscale_status_from_realistic_json() {
+        let json = r#"{
+            "BackendState": "Running",
+            "Self": {
+                "ID": "n12345",
+                "PublicKey": "nodekey:abc123",
+                "HostName": "fcp-node",
+                "DNSName": "fcp-node.tailnet.ts.net.",
+                "TailscaleIPs": ["100.64.0.1", "fd7a:115c:a1e0::1"],
+                "Tags": ["tag:fcp-work", "tag:fcp-owner"],
+                "Online": true
+            },
+            "Peer": {
+                "node-peer1": {
+                    "ID": "node-peer1",
+                    "PublicKey": "nodekey:peer1",
+                    "HostName": "peer1",
+                    "DNSName": "peer1.tailnet.ts.net.",
+                    "TailscaleIPs": ["100.64.0.2"],
+                    "Tags": ["tag:fcp-work"],
+                    "Online": true,
+                    "OS": "linux",
+                    "LastSeen": "2026-03-05T10:00:00Z"
+                }
+            },
+            "CurrentTailnet": {
+                "Name": "example.com",
+                "IsPersonal": false
+            }
+        }"#;
+        let status: TailscaleStatus = serde_json::from_str(json).unwrap();
+        assert_eq!(status.backend_state, "Running");
+        assert_eq!(status.self_node.tailscale_ips.len(), 2);
+        assert_eq!(status.self_node.tags.len(), 2);
+        assert_eq!(status.peer.len(), 1);
+        let peer = &status.peer["node-peer1"];
+        assert_eq!(peer.os.as_deref(), Some("linux"));
+        assert!(status.tailnet.is_some());
+    }
+
+    #[test]
+    fn tailscale_status_from_minimal_json() {
+        let json = r#"{
+            "BackendState": "Stopped",
+            "Self": {
+                "ID": "n1",
+                "PublicKey": "pk",
+                "HostName": "h",
+                "DNSName": "h.ts.net",
+                "TailscaleIPs": [],
+                "Online": false
+            }
+        }"#;
+        let status: TailscaleStatus = serde_json::from_str(json).unwrap();
+        assert_eq!(status.backend_state, "Stopped");
+        assert!(status.peer.is_empty());
+        assert!(status.user.is_none());
+        assert!(status.tailnet.is_none());
+    }
 }

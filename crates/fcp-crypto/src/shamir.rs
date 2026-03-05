@@ -51,6 +51,10 @@ pub enum ShamirError {
         total: u8,
     },
 
+    /// Total shares n must be at least 1.
+    #[error("total shares must be at least 1")]
+    TooFewShares,
+
     /// Total shares cannot exceed 255 (GF(2^8) constraint).
     #[error("total shares cannot exceed 255")]
     TooManyShares,
@@ -393,7 +397,7 @@ pub fn split_secret_with_rng<R: RngCore + CryptoRng>(
         });
     }
     if n == 0 {
-        return Err(ShamirError::TooManyShares);
+        return Err(ShamirError::TooFewShares);
     }
     if secret.is_empty() {
         return Err(ShamirError::EmptySecret);

@@ -3,7 +3,10 @@
 //! Bead: bd-219o
 
 use std::collections::HashMap;
+use std::net::TcpListener as StdTcpListener;
+use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
+use std::time::Duration;
 
 use fcp_async_core::sync::Mutex;
 use fcp_core::{
@@ -13,8 +16,9 @@ use fcp_core::{
 };
 use fcp_e2e::{AssertionsSummary, ConnectorProcessRunner, E2eLogEntry, E2eLogger};
 use fcp_host::{
-    ConnectorArchetype, ConnectorRegistry, ConnectorSummary, DiscoveryEndpoint, PolicyEngine,
-    PreflightRequest, PreflightResponse,
+    ConnectorArchetype, ConnectorRegistry, ConnectorSummary, DiscoveryEndpoint, DiscoveryResponse,
+    HostHealthResponse, HostHealthStatus, IntrospectionResponse, PolicyEngine, PreflightRequest,
+    PreflightResponse,
 };
 use fcp_testkit::LogCapture;
 use serde_json::json;
@@ -324,6 +328,189 @@ async fn host_discovery_with_subprocess_connectors() -> Result<(), Box<dyn std::
     }
 
     registry.terminate_all().await?;
+
+    Ok(())
+}
+
+struct HttpHostProcess {
+    child: Child,
+    client: reqwest::Client,
+    base_url: String,
+}
+
+impl HttpHostProcess {
+    async fn spawn(
+        connector_configs: Vec<serde_json::Value>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let bind_listener = StdTcpListener::bind("127.0.0.1:0")?;
+        let bind_addr = bind_listener.local_addr()?;
+        drop(bind_listener);
+
+        let base_url = format!("http://{bind_addr}");
+        let mut child = Command::new(env!("CARGO_BIN_EXE_fcp-host"))
+            .env("FCP_HOST_BIND", bind_addr.to_string())
+            .env(
+                "FCP_HOST_CONNECTORS",
+                serde_json::to_string(&connector_configs)?,
+            )
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()?;
+
+        let client = reqwest::Client::new();
+
+        for _ in 0..80 {
+            if let Some(status) = child.try_wait()? {
+                let output = child.wait_with_output()?;
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(format!("fcp-host exited early with {status}: {stderr}").into());
+            }
+
+            match client.get(format!("{base_url}/rpc/health")).send().await {
+                Ok(response) if response.status().is_success() => {
+                    return Ok(Self {
+                        child,
+                        client,
+                        base_url,
+                    });
+                }
+                Ok(_) | Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+            }
+        }
+
+        let _ = child.kill();
+        let output = child.wait_with_output()?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!("timed out waiting for fcp-host readiness: {stderr}").into())
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("{}{path}", self.base_url)
+    }
+}
+
+impl Drop for HttpHostProcess {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn test_connector_config(
+    connector_id: &ConnectorId,
+    name: &str,
+    categories: &[&str],
+) -> serde_json::Value {
+    json!({
+        "id": connector_id.as_str(),
+        "binary": env!("CARGO_BIN_EXE_fcp-test-connector"),
+        "name": name,
+        "description": "Binary-level host integration test connector",
+        "config": {},
+        "categories": categories,
+        "env": {
+            "FCP_TEST_CONNECTOR_ID": connector_id.as_str(),
+        },
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fcp_host_binary_exposes_discovery_routes() -> Result<(), Box<dyn std::error::Error>> {
+    let connector_a_id = ConnectorId::from_static("fcp.test.http-echo:utility:1.0.0");
+    let connector_b_id = ConnectorId::from_static("fcp.test.http-ping:utility:1.0.0");
+
+    let host = HttpHostProcess::spawn(vec![
+        test_connector_config(&connector_a_id, "HTTP Echo", &["test", "primary"]),
+        test_connector_config(&connector_b_id, "HTTP Ping", &["test", "secondary"]),
+    ])
+    .await?;
+
+    let health = host
+        .client
+        .get(host.url("/rpc/health"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<HostHealthResponse>()
+        .await?;
+    assert_eq!(health.status, HostHealthStatus::Healthy);
+    assert_eq!(health.connectors.len(), 2);
+    assert!(health.connectors.contains_key(&connector_a_id));
+    assert!(health.connectors.contains_key(&connector_b_id));
+
+    let discover_all = host
+        .client
+        .post(host.url("/rpc/discover"))
+        .json(&json!({}))
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<DiscoveryResponse>()
+        .await?;
+    assert_eq!(discover_all.connectors.len(), 2);
+
+    let discover_filtered = host
+        .client
+        .post(host.url("/rpc/discover"))
+        .json(&json!({ "category": "primary" }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<DiscoveryResponse>()
+        .await?;
+    assert_eq!(discover_filtered.connectors.len(), 1);
+    assert_eq!(discover_filtered.connectors[0].id, connector_a_id);
+
+    let introspection = host
+        .client
+        .get(host.url(&format!("/rpc/introspect/{}", connector_a_id.as_str())))
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<IntrospectionResponse>()
+        .await?;
+    assert_eq!(introspection.connector.id, connector_a_id);
+    assert_eq!(introspection.tools.len(), 1);
+    assert_eq!(introspection.tools[0].name, "test.echo");
+
+    let preflight = host
+        .client
+        .post(host.url("/rpc/preflight"))
+        .json(&PreflightRequest {
+            connector_id: connector_a_id,
+            operation: "test.echo".to_string(),
+            params: Some(json!({ "message": "hello" })),
+            principal: Some("agent:test".to_string()),
+            zone_id: Some(ZoneId::work()),
+        })
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<PreflightResponse>()
+        .await?;
+    assert!(preflight.allowed);
+    assert!(preflight.reason.is_none());
+
+    let doctor = host
+        .client
+        .post(host.url("/doctor"))
+        .json(&json!({
+            "zone_id": "z:work",
+            "connectors": [connector_b_id.as_str()],
+            "self_check": true,
+        }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<serde_json::Value>()
+        .await?;
+    assert_eq!(doctor["overall_status"], "OK");
+    assert_eq!(
+        doctor["connector_self_checks"]
+            .as_array()
+            .map_or(0, Vec::len),
+        1
+    );
 
     Ok(())
 }

@@ -4090,16 +4090,19 @@ fn spotify_full_manifest_parses_with_all_operations() {
 
     let ops = &parsed.provides.operations;
     let expected_ops = [
-        "spotify.albums.get",
-        "spotify.artists.get",
-        "spotify.player.recently_played",
-        "spotify.playlists.get",
-        "spotify.playlists.list",
-        "spotify.profile.get",
-        "spotify.recommendations.get",
+        "spotify.album.get",
+        "spotify.artist.get",
+        "spotify.library.list_saved_tracks",
+        "spotify.library.remove_track",
+        "spotify.library.save_track",
+        "spotify.media.download_cover",
+        "spotify.playback.get_state",
+        "spotify.playback.pause",
+        "spotify.playback.play",
+        "spotify.player.stream",
+        "spotify.playlist.get",
         "spotify.search",
-        "spotify.top_items",
-        "spotify.tracks.get",
+        "spotify.track.get"
     ];
     for op_name in &expected_ops {
         assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
@@ -4107,7 +4110,7 @@ fn spotify_full_manifest_parses_with_all_operations() {
     assert_eq!(ops.len(), expected_ops.len());
 
     let pools = parsed.rate_limits.as_ref().expect("rate_limits");
-    assert_eq!(pools.pools.len(), 1);
+    assert_eq!(pools.pools.len(), 5);
 }
 
 // =============================================================================
@@ -4223,14 +4226,11 @@ fn mongodb_full_manifest_parses_with_all_operations() {
     let ops = &parsed.provides.operations;
     let expected_ops = [
         "mongodb.aggregate",
-        "mongodb.delete_many",
-        "mongodb.delete_one",
-        "mongodb.find",
-        "mongodb.find_one",
-        "mongodb.insert_many",
-        "mongodb.insert_one",
-        "mongodb.update_many",
-        "mongodb.update_one",
+        "mongodb.collections.list",
+        "mongodb.databases.list",
+        "mongodb.documents.delete",
+        "mongodb.documents.find",
+        "mongodb.documents.insert"
     ];
     for op_name in &expected_ops {
         assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
@@ -4238,7 +4238,7 @@ fn mongodb_full_manifest_parses_with_all_operations() {
     assert_eq!(ops.len(), expected_ops.len());
 
     let pools = parsed.rate_limits.as_ref().expect("rate_limits");
-    assert_eq!(pools.pools.len(), 2);
+    assert_eq!(pools.pools.len(), 3);
 }
 
 // =============================================================================
@@ -4304,16 +4304,10 @@ fn dropbox_full_manifest_parses_with_all_operations() {
 
     let ops = &parsed.provides.operations;
     let expected_ops = [
-        "dropbox.account.get_current",
-        "dropbox.account.get_space_usage",
-        "dropbox.files.copy",
-        "dropbox.files.create_folder",
         "dropbox.files.delete",
         "dropbox.files.get_metadata",
         "dropbox.files.list",
-        "dropbox.files.list_continue",
-        "dropbox.files.move",
-        "dropbox.files.search",
+        "dropbox.sharing.list"
     ];
     for op_name in &expected_ops {
         assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
@@ -5156,16 +5150,11 @@ fn asana_full_manifest_parses_with_all_operations() {
 
     let ops = &parsed.provides.operations;
     let expected_ops = [
-        "asana.projects.get",
         "asana.projects.list",
-        "asana.sections.list",
         "asana.tasks.create",
         "asana.tasks.delete",
-        "asana.tasks.get",
         "asana.tasks.list",
-        "asana.tasks.search",
-        "asana.tasks.update",
-        "asana.workspaces.list",
+        "asana.workspaces.list"
     ];
     for op_name in &expected_ops {
         assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
@@ -5173,7 +5162,7 @@ fn asana_full_manifest_parses_with_all_operations() {
     assert_eq!(ops.len(), expected_ops.len());
 
     let pools = parsed.rate_limits.as_ref().expect("rate_limits");
-    assert_eq!(pools.pools.len(), 2);
+    assert_eq!(pools.pools.len(), 4);
 }
 
 // =============================================================================
@@ -5200,16 +5189,11 @@ fn trello_full_manifest_parses_with_all_operations() {
 
     let ops = &parsed.provides.operations;
     let expected_ops = [
-        "trello.boards.get",
         "trello.boards.list",
         "trello.cards.create",
         "trello.cards.delete",
-        "trello.cards.get",
         "trello.cards.list",
-        "trello.cards.update",
-        "trello.labels.list",
-        "trello.lists.list",
-        "trello.members.list",
+        "trello.lists.get"
     ];
     for op_name in &expected_ops {
         assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
@@ -5217,7 +5201,7 @@ fn trello_full_manifest_parses_with_all_operations() {
     assert_eq!(ops.len(), expected_ops.len());
 
     let pools = parsed.rate_limits.as_ref().expect("rate_limits");
-    assert_eq!(pools.pools.len(), 2);
+    assert_eq!(pools.pools.len(), 3);
 }
 
 // =============================================================================
@@ -5244,16 +5228,11 @@ fn sendgrid_full_manifest_parses_with_all_operations() {
 
     let ops = &parsed.provides.operations;
     let expected_ops = [
-        "sendgrid.contacts.get",
+        "sendgrid.contacts.delete",
         "sendgrid.contacts.list",
-        "sendgrid.contacts.search",
-        "sendgrid.lists.create",
-        "sendgrid.lists.delete",
-        "sendgrid.lists.list",
         "sendgrid.mail.send",
         "sendgrid.stats.get",
-        "sendgrid.templates.get",
-        "sendgrid.templates.list",
+        "sendgrid.templates.list"
     ];
     for op_name in &expected_ops {
         assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
@@ -5261,7 +5240,7 @@ fn sendgrid_full_manifest_parses_with_all_operations() {
     assert_eq!(ops.len(), expected_ops.len());
 
     let pools = parsed.rate_limits.as_ref().expect("rate_limits");
-    assert_eq!(pools.pools.len(), 2);
+    assert_eq!(pools.pools.len(), 5);
 }
 
 // =============================================================================
@@ -5440,16 +5419,11 @@ fn bitbucket_full_manifest_parses_with_all_operations() {
 
     let ops = &parsed.provides.operations;
     let expected_ops = [
-        "bitbucket.branches.list",
-        "bitbucket.commits.list",
+        "bitbucket.issues.list",
         "bitbucket.pipelines.list",
         "bitbucket.pull_requests.create",
-        "bitbucket.pull_requests.get",
         "bitbucket.pull_requests.list",
-        "bitbucket.repositories.get",
-        "bitbucket.repositories.list",
-        "bitbucket.user.get",
-        "bitbucket.workspaces.list",
+        "bitbucket.repos.list"
     ];
     for op_name in &expected_ops {
         assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
@@ -5457,7 +5431,7 @@ fn bitbucket_full_manifest_parses_with_all_operations() {
     assert_eq!(ops.len(), expected_ops.len());
 
     let pools = parsed.rate_limits.as_ref().expect("rate_limits");
-    assert_eq!(pools.pools.len(), 2);
+    assert_eq!(pools.pools.len(), 5);
 }
 
 // =============================================================================
@@ -5562,15 +5536,9 @@ fn duckdb_full_manifest_parses_with_all_operations() {
 
     let ops = &parsed.provides.operations;
     let expected_ops = [
-        "duckdb.databases.get",
-        "duckdb.databases.list",
-        "duckdb.queries.status",
-        "duckdb.query.execute",
-        "duckdb.schemas.list",
-        "duckdb.shares.create",
-        "duckdb.shares.list",
-        "duckdb.tables.get",
-        "duckdb.tables.list",
+        "duckdb.execute",
+        "duckdb.query",
+        "duckdb.tables.list"
     ];
     for op_name in &expected_ops {
         assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
@@ -5578,7 +5546,7 @@ fn duckdb_full_manifest_parses_with_all_operations() {
     assert_eq!(ops.len(), expected_ops.len());
 
     let pools = parsed.rate_limits.as_ref().expect("rate_limits");
-    assert_eq!(pools.pools.len(), 2);
+    assert_eq!(pools.pools.len(), 3);
 }
 
 // =============================================================================
@@ -5870,13 +5838,10 @@ fn monday_full_manifest_parses_with_all_operations() {
 
     let ops = &parsed.provides.operations;
     let expected_ops = [
-        "monday.boards.get",
         "monday.boards.list",
         "monday.items.create",
         "monday.items.delete",
-        "monday.items.list",
-        "monday.updates.create",
-        "monday.updates.list",
+        "monday.items.list"
     ];
     for op_name in &expected_ops {
         assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
@@ -5884,7 +5849,7 @@ fn monday_full_manifest_parses_with_all_operations() {
     assert_eq!(ops.len(), expected_ops.len());
 
     let pools = parsed.rate_limits.as_ref().expect("rate_limits");
-    assert_eq!(pools.pools.len(), 5);
+    assert_eq!(pools.pools.len(), 3);
 }
 
 // =============================================================================
@@ -6180,6 +6145,42 @@ fn zapier_full_manifest_parses_with_all_operations() {
     let expected_ops = [
         "zapier.zaps.execute",
         "zapier.zaps.list",
+    ];
+    for op_name in &expected_ops {
+        assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
+    }
+    assert_eq!(ops.len(), expected_ops.len());
+
+    let pools = parsed.rate_limits.as_ref().expect("rate_limits");
+    assert_eq!(pools.pools.len(), 2);
+}
+
+
+#[test]
+fn annas_archive_full_manifest_parses_with_all_operations() {
+    let _log = TestLog::new(
+        "annas_archive_full_manifest_parses_with_all_operations",
+        "fcp-manifest",
+        Some("fcp.annas-archive"),
+        Some("0.1.0"),
+        Some(3),
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("../../connectors/annas-archive/manifest.toml");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read annas-archive manifest: {err}"));
+    let with_hash = with_computed_hash(&raw);
+    let parsed =
+        ConnectorManifest::parse_str(&with_hash).expect("valid full annas-archive manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.annas-archive");
+
+    let ops = &parsed.provides.operations;
+    let expected_ops = [
+        "annas.lookup.isbn",
+        "annas.lookup.md5",
+        "annas.metadata",
+        "annas.search",
     ];
     for op_name in &expected_ops {
         assert!(ops.contains_key(*op_name), "missing operation: {op_name}");

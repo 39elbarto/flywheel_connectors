@@ -1,11 +1,16 @@
-//! Minimal fcp-host HTTP server (doctor endpoint).
+//! Minimal fcp-host HTTP server with discovery and doctor endpoints.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
+use axum::{
+    Json, Router,
+    extract::{Path, State},
+    http::StatusCode,
+    routing::{get, post},
+};
 use fcp_async_core::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use fcp_async_core::net::TcpListener;
 use fcp_async_core::process::{Child, ChildStdin, ChildStdout, Command};
@@ -16,8 +21,10 @@ use fcp_core::{
     SelfCheckReport,
 };
 use fcp_host::{
-    ConnectorArchetype, ConnectorRegistry, ConnectorSummary, DoctorReport, DoctorRequest,
-    DoctorService,
+    BudgetPolicyEngine, ConnectorArchetype, ConnectorRegistry, ConnectorSummary, DiscoveryEndpoint,
+    DiscoveryFilter, DiscoveryResponse, DoctorReport, DoctorRequest, DoctorService,
+    HostHealthResponse, HostHealthStatus, IntrospectionResponse, PreflightRequest,
+    PreflightResponse,
 };
 use fcp_host::{HostError, HostResult};
 use serde::Deserialize;
@@ -307,6 +314,14 @@ impl ConnectorProcessRunner {
     }
 }
 
+#[derive(Clone)]
+struct AppState {
+    registry: Arc<SubprocessRegistry>,
+    doctor: DoctorService<SubprocessRegistry>,
+    discovery: Arc<DiscoveryEndpoint<SubprocessRegistry, BudgetPolicyEngine>>,
+    started_at: Instant,
+}
+
 fn load_connector_configs() -> HostResult<Vec<ConnectorConfig>> {
     let payload = if let Ok(path) = std::env::var("FCP_HOST_CONNECTORS_FILE") {
         if path.trim().is_empty() {
@@ -366,14 +381,28 @@ async fn async_main() -> HostResult<()> {
     }
 
     let registry = Arc::new(SubprocessRegistry::from_configs(configs).await?);
-    let service = match resolve_self_check_timeout()? {
+    let doctor = match resolve_self_check_timeout()? {
         Some(timeout) => DoctorService::with_timeout(Arc::clone(&registry), timeout),
         None => DoctorService::new(Arc::clone(&registry)),
     };
+    let discovery = Arc::new(DiscoveryEndpoint::new(
+        Arc::clone(&registry),
+        Arc::new(BudgetPolicyEngine::new()),
+    ));
+    let state = Arc::new(AppState {
+        registry,
+        doctor,
+        discovery,
+        started_at: Instant::now(),
+    });
 
     let app = Router::new()
-        .route("/doctor", post(doctor_handler::<SubprocessRegistry>))
-        .with_state(service);
+        .route("/doctor", post(doctor_handler))
+        .route("/rpc/discover", post(discover_handler))
+        .route("/rpc/introspect/{connector_id}", get(introspect_handler))
+        .route("/rpc/preflight", post(preflight_handler))
+        .route("/rpc/health", get(health_handler))
+        .with_state(state);
 
     let listener = TcpListener::bind(addr)
         .await
@@ -387,20 +416,172 @@ async fn async_main() -> HostResult<()> {
     Ok(())
 }
 
-async fn doctor_handler<R: ConnectorRegistry + 'static>(
-    State(service): State<DoctorService<R>>,
+async fn doctor_handler(
+    State(state): State<Arc<AppState>>,
     Json(request): Json<DoctorRequest>,
 ) -> Result<Json<DoctorReport>, (StatusCode, String)> {
-    match service.handle(request).await {
-        Ok(report) => Ok(Json(report)),
-        Err(err) => Err(map_host_error(err)),
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "doctor_request",
+        zone_id = %request.zone_id,
+        connector_count = request.connectors.len(),
+        self_check = request.self_check,
+        "processing doctor request"
+    );
+    match state.doctor.handle(request).await {
+        Ok(report) => {
+            tracing::debug!(
+                event = "doctor_response",
+                overall_status = ?report.overall_status,
+                duration_ms = started_at.elapsed().as_millis() as u64,
+                "doctor request complete"
+            );
+            Ok(Json(report))
+        }
+        Err(err) => {
+            tracing::warn!(
+                event = "doctor_error",
+                error = %err,
+                duration_ms = started_at.elapsed().as_millis() as u64,
+                "doctor request failed"
+            );
+            Err(map_host_error(err))
+        }
     }
+}
+
+async fn discover_handler(
+    State(state): State<Arc<AppState>>,
+    Json(filter): Json<Option<DiscoveryFilter>>,
+) -> Json<DiscoveryResponse> {
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "discover_request",
+        filter = ?filter,
+        "processing discovery request"
+    );
+    let response = state.discovery.discover(filter).await;
+    tracing::debug!(
+        event = "discover_response",
+        connector_count = response.connectors.len(),
+        registry_version = response.registry_version,
+        duration_ms = started_at.elapsed().as_millis() as u64,
+        "discovery request complete"
+    );
+    Json(response)
+}
+
+async fn introspect_handler(
+    State(state): State<Arc<AppState>>,
+    Path(connector_id): Path<String>,
+) -> Result<Json<IntrospectionResponse>, (StatusCode, String)> {
+    let connector_id = parse_connector_id(&connector_id)?;
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "introspect_request",
+        connector_id = %connector_id,
+        "processing introspection request"
+    );
+    match state.discovery.introspect(&connector_id).await {
+        Ok(response) => {
+            tracing::debug!(
+                event = "introspect_response",
+                connector_id = %connector_id,
+                tool_count = response.tools.len(),
+                duration_ms = started_at.elapsed().as_millis() as u64,
+                "introspection request complete"
+            );
+            Ok(Json(response))
+        }
+        Err(err) => {
+            tracing::warn!(
+                event = "introspect_error",
+                connector_id = %connector_id,
+                error = %err,
+                duration_ms = started_at.elapsed().as_millis() as u64,
+                "introspection request failed"
+            );
+            Err(map_host_error(err))
+        }
+    }
+}
+
+async fn preflight_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<PreflightRequest>,
+) -> Json<PreflightResponse> {
+    let connector_id = request.connector_id.clone();
+    let operation = request.operation.clone();
+    let started_at = Instant::now();
+    let response = state.discovery.preflight(request).await;
+    tracing::info!(
+        event = "preflight_check",
+        connector_id = %connector_id,
+        operation = %operation,
+        allowed = response.allowed,
+        reason = ?response.reason,
+        duration_ms = started_at.elapsed().as_millis() as u64,
+        "preflight request complete"
+    );
+    Json(response)
+}
+
+async fn health_handler(State(state): State<Arc<AppState>>) -> Json<HostHealthResponse> {
+    let started_at = Instant::now();
+    let summaries = state.registry.list().await;
+    let mut connectors = HashMap::with_capacity(summaries.len());
+    let mut status = HostHealthStatus::Healthy;
+
+    for summary in summaries {
+        let connector_id = summary.id;
+        let connector_health = summary.health;
+        match &connector_health {
+            ConnectorHealth::Healthy => {}
+            ConnectorHealth::Degraded { .. } => {
+                if !matches!(status, HostHealthStatus::Unhealthy) {
+                    status = HostHealthStatus::Degraded;
+                }
+            }
+            ConnectorHealth::Unavailable { .. } => {
+                status = HostHealthStatus::Unhealthy;
+            }
+        }
+        connectors.insert(connector_id, connector_health);
+    }
+
+    let response = HostHealthResponse {
+        status,
+        connectors,
+        uptime_seconds: state.started_at.elapsed().as_secs(),
+        active_connections: 0,
+        timestamp: chrono::Utc::now(),
+    };
+    tracing::debug!(
+        event = "health_response",
+        status = ?response.status,
+        connector_count = response.connectors.len(),
+        duration_ms = started_at.elapsed().as_millis() as u64,
+        "health request complete"
+    );
+    Json(response)
+}
+
+fn parse_connector_id(raw: &str) -> Result<ConnectorId, (StatusCode, String)> {
+    raw.parse().map_err(|err| {
+        map_host_error(HostError::InvalidFilter(format!(
+            "invalid connector id '{raw}': {err}"
+        )))
+    })
 }
 
 fn map_host_error(err: HostError) -> (StatusCode, String) {
     match err {
         HostError::ConnectorNotFound(_) => (StatusCode::NOT_FOUND, err.to_string()),
         HostError::InvalidFilter(_) => (StatusCode::BAD_REQUEST, err.to_string()),
-        _ => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+        HostError::PreflightFailed(_) => (StatusCode::FORBIDDEN, err.to_string()),
+        HostError::CacheError(_) => (StatusCode::SERVICE_UNAVAILABLE, err.to_string()),
+        HostError::RegistryError(_) | HostError::Internal(_) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
+        }
     }
 }

@@ -43,4 +43,5 @@ fcp-sandbox = { version = "0.1.0", path = "../fcp-sandbox" }
 fcp-conformance = { path = "../fcp-conformance" }
 fcp-e2e = { path = "../fcp-e2e" }
 fcp-testkit = { path = "../fcp-testkit" }
-tokio = { version = "1.49", features = ["rt-multi-thread", "macros", "test-util"] }
+reqwest.workspace = true
+tokio = { version = "1.49", features = ["rt-multi-thread", "macros", "test-util", "time"] }

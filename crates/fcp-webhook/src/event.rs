@@ -635,4 +635,185 @@ mod tests {
         // but get returns the Value
         assert_eq!(event.get("active").unwrap(), &serde_json::json!(true));
     }
+
+    // ── Path traversal edge cases ────────────────────────────────────
+
+    #[test]
+    fn test_event_get_double_dot_path() {
+        let event = WebhookEvent::new("e1", "push", "github")
+            .with_payload(serde_json::json!({"a": {"": {"b": 42}}}));
+        // "a..b" splits into ["a", "", "b"] — the empty segment tries to index with ""
+        let result = event.get("a..b");
+        assert_eq!(result.and_then(serde_json::Value::as_i64), Some(42));
+    }
+
+    #[test]
+    fn test_event_get_null_intermediate() {
+        let event = WebhookEvent::new("e1", "push", "github")
+            .with_payload(serde_json::json!({"a": null}));
+        // Traversing through null returns None
+        assert!(event.get("a.b").is_none());
+    }
+
+    // ── Header case-insensitivity ────────────────────────────────────
+
+    #[test]
+    fn test_header_case_insensitive_mixed() {
+        let mut headers = HashMap::new();
+        headers.insert("Content-Type".into(), "application/json".into());
+        headers.insert("X-Custom-HEADER".into(), "custom-value".into());
+        let event = WebhookEvent::new("e1", "push", "github").with_headers(headers);
+
+        assert_eq!(event.header("content-type"), Some("application/json"));
+        assert_eq!(event.header("CONTENT-TYPE"), Some("application/json"));
+        assert_eq!(event.header("x-custom-header"), Some("custom-value"));
+        assert_eq!(event.header("X-CUSTOM-HEADER"), Some("custom-value"));
+        assert!(event.header("nonexistent").is_none());
+    }
+
+    // ── get_i64 edge cases ───────────────────────────────────────────
+
+    #[test]
+    fn test_event_get_i64_large_values() {
+        let event = WebhookEvent::new("e1", "push", "github")
+            .with_payload(serde_json::json!({
+                "max": i64::MAX,
+                "min": i64::MIN,
+                "zero": 0
+            }));
+        assert_eq!(event.get_i64("max"), Some(i64::MAX));
+        assert_eq!(event.get_i64("min"), Some(i64::MIN));
+        assert_eq!(event.get_i64("zero"), Some(0));
+    }
+
+    // ── matches_type edge cases ──────────────────────────────────────
+
+    #[test]
+    fn test_matches_type_prefix_wildcard() {
+        let event = WebhookEvent::new("e1", "issue.opened", "github");
+        assert!(event.matches_type("issue.*"));
+        assert!(event.matches_type("issue.opened"));
+        assert!(!event.matches_type("pull_request.*"));
+    }
+
+    #[test]
+    fn test_matches_type_empty_prefix_wildcard() {
+        let event = WebhookEvent::new("e1", "push", "github");
+        // "*" at end with empty prefix matches everything
+        assert!(event.matches_type("*"));
+    }
+
+    #[test]
+    fn test_matches_type_no_wildcard_exact() {
+        let event = WebhookEvent::new("e1", "push", "github");
+        assert!(event.matches_type("push"));
+        assert!(!event.matches_type("push."));
+        assert!(!event.matches_type("pus"));
+    }
+
+    // ── Serde roundtrip edge cases ───────────────────────────────────
+
+    #[test]
+    fn test_event_serde_null_payload() {
+        let event = WebhookEvent::new("e1", "test", "provider");
+        let json = serde_json::to_string(&event).unwrap();
+        let deserialized: WebhookEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.payload, serde_json::Value::Null);
+    }
+
+    #[test]
+    fn test_event_serde_complex_payload() {
+        let payload = serde_json::json!({
+            "array": [1, "two", null, {"nested": true}],
+            "object": {"deep": {"deeper": []}},
+            "null_val": null
+        });
+        let event = WebhookEvent::new("e1", "test", "provider").with_payload(payload.clone());
+        let json = serde_json::to_string(&event).unwrap();
+        let deserialized: WebhookEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.payload, payload);
+    }
+
+    // ── DeliveryStatus serde ─────────────────────────────────────────
+
+    #[test]
+    fn test_delivery_status_all_variants_serde() {
+        for status in [
+            DeliveryStatus::Pending,
+            DeliveryStatus::Delivered,
+            DeliveryStatus::Failed,
+            DeliveryStatus::DeadLettered,
+        ] {
+            let json = serde_json::to_string(&status).unwrap();
+            let deserialized: DeliveryStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(deserialized, status);
+        }
+    }
+
+    #[test]
+    fn test_delivery_status_default() {
+        assert_eq!(DeliveryStatus::default(), DeliveryStatus::Pending);
+    }
+
+    // ── with_taint_flag accumulation ─────────────────────────────────
+
+    #[test]
+    fn test_taint_flags_accumulate() {
+        let event = WebhookEvent::new("e1", "push", "github")
+            .with_taint_flag(TaintFlag::WebhookInjected)
+            .with_taint_flag(TaintFlag::PublicInput);
+        assert!(
+            event
+                .metadata
+                .taint_flags
+                .contains(TaintFlag::WebhookInjected)
+        );
+        assert!(event.metadata.taint_flags.contains(TaintFlag::PublicInput));
+    }
+
+    #[test]
+    fn test_taint_flag_idempotent() {
+        let event = WebhookEvent::new("e1", "push", "github")
+            .with_taint_flag(TaintFlag::WebhookInjected)
+            .with_taint_flag(TaintFlag::WebhookInjected);
+        assert!(
+            event
+                .metadata
+                .taint_flags
+                .contains(TaintFlag::WebhookInjected)
+        );
+    }
+
+    // ── EventSubscription edge cases ─────────────────────────────────
+
+    #[test]
+    fn test_subscription_empty_types() {
+        let sub = EventSubscription {
+            event_types: vec![],
+            provider: None,
+        };
+        // Empty event_types matches nothing
+        assert!(!sub.matches(&WebhookEvent::new("e1", "push", "github")));
+    }
+
+    #[test]
+    fn test_subscription_provider_filter() {
+        let sub = EventSubscription {
+            event_types: vec!["*".into()],
+            provider: Some("github".into()),
+        };
+        assert!(sub.matches(&WebhookEvent::new("e1", "push", "github")));
+        assert!(!sub.matches(&WebhookEvent::new("e1", "push", "stripe")));
+    }
+
+    #[test]
+    fn test_subscription_no_provider_filter() {
+        let sub = EventSubscription {
+            event_types: vec!["push".into()],
+            provider: None,
+        };
+        // No provider filter → matches any provider
+        assert!(sub.matches(&WebhookEvent::new("e1", "push", "github")));
+        assert!(sub.matches(&WebhookEvent::new("e1", "push", "stripe")));
+    }
 }

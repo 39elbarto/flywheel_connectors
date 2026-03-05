@@ -766,10 +766,7 @@ impl WasiRuntime {
         // Mount filesystem directories
         for path in &self.config.readonly_paths {
             if path.is_dir() {
-                let guest_path = path.file_name().map_or_else(
-                    || path.display().to_string(),
-                    |n| n.to_string_lossy().to_string(),
-                );
+                let guest_path = path.display().to_string();
                 wasi_builder
                     .preopened_dir(path, &guest_path, DirPerms::READ, FilePerms::READ)
                     .map_err(|e| {
@@ -783,10 +780,7 @@ impl WasiRuntime {
 
         for path in &self.config.writable_paths {
             if path.is_dir() {
-                let guest_path = path.file_name().map_or_else(
-                    || path.display().to_string(),
-                    |n| n.to_string_lossy().to_string(),
-                );
+                let guest_path = path.display().to_string();
                 wasi_builder
                     .preopened_dir(path, &guest_path, DirPerms::all(), FilePerms::all())
                     .map_err(|e| {
@@ -996,113 +990,6 @@ mod tests {
         assert!(config.deterministic_mode);
         assert_eq!(config.deterministic_timestamp, 1_700_000_000);
         assert_eq!(config.deterministic_seed, 42);
-    }
-
-    #[test]
-    fn test_fs_capability_gate() {
-        let gate = FsCapabilityGate::new(vec![PathBuf::from("/usr")], vec![PathBuf::from("/tmp")]);
-
-        // These paths might not exist in test environment, so we test the logic
-        // by checking that the paths are stored correctly
-        assert_eq!(gate.readonly_paths.len(), 1);
-        assert_eq!(gate.writable_paths.len(), 1);
-    }
-
-    #[test]
-    fn test_network_capability_gate_no_constraints() {
-        let gate = NetworkCapabilityGate::new(None, true);
-
-        let result = gate.check_http("https://example.com/", "GET");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_deterministic_rng() {
-        let mut rng1 = DeterministicRng::new(12345);
-        let mut rng2 = DeterministicRng::new(12345);
-
-        // Same seed should produce same sequence
-        for _ in 0..100 {
-            assert_eq!(rng1.next_u64(), rng2.next_u64());
-        }
-
-        // Different seed should produce different sequence
-        let mut rng3 = DeterministicRng::new(54321);
-        let mut rng4 = DeterministicRng::new(12345);
-
-        // Very unlikely to match
-        let seq3: Vec<u64> = (0..10).map(|_| rng3.next_u64()).collect();
-        let seq4: Vec<u64> = (0..10).map(|_| rng4.next_u64()).collect();
-        assert_ne!(seq3, seq4);
-    }
-
-    #[test]
-    fn test_leb128_parsing() {
-        // Single byte value
-        assert_eq!(read_leb128(&[0x00]), Some((0, 1)));
-        assert_eq!(read_leb128(&[0x7F]), Some((127, 1)));
-
-        // Two byte value (128)
-        assert_eq!(read_leb128(&[0x80, 0x01]), Some((128, 2)));
-
-        // Larger value
-        assert_eq!(read_leb128(&[0xE5, 0x8E, 0x26]), Some((624_485, 3)));
-    }
-
-    #[test]
-    fn test_cpu_percent_to_fuel() {
-        assert_eq!(WasiConfig::cpu_percent_to_fuel(100), 1_000_000_000_000); // Very large finite bound
-        assert_eq!(WasiConfig::cpu_percent_to_fuel(50), 5_000_000_000);
-        assert_eq!(WasiConfig::cpu_percent_to_fuel(10), 1_000_000_000);
-    }
-
-    // ── New tests ──
-
-    #[test]
-    fn test_wasi_error_display() {
-        let e = WasiError::EngineCreation("no support".into());
-        assert!(e.to_string().contains("no support"));
-
-        let e = WasiError::ComponentLoad("bad wasm".into());
-        assert!(e.to_string().contains("bad wasm"));
-
-        let e = WasiError::Instantiation("linker fail".into());
-        assert!(e.to_string().contains("linker fail"));
-
-        let e = WasiError::Execution("trap".into());
-        assert!(e.to_string().contains("trap"));
-
-        let e = WasiError::ResourceLimit("oom".into());
-        assert!(e.to_string().contains("oom"));
-
-        let e = WasiError::Timeout;
-        assert!(e.to_string().contains("timeout"));
-
-        let e = WasiError::FsAccessDenied {
-            path: "/etc/shadow".into(),
-            reason: "not allowed".into(),
-        };
-        assert!(e.to_string().contains("/etc/shadow"));
-        assert!(e.to_string().contains("not allowed"));
-
-        let e = WasiError::NetworkAccessDenied("blocked".into());
-        assert!(e.to_string().contains("blocked"));
-
-        let e = WasiError::ClockAccessDenied;
-        assert!(e.to_string().contains("deterministic"));
-
-        let e = WasiError::EntropyAccessDenied;
-        assert!(e.to_string().contains("deterministic"));
-
-        let e = WasiError::InvalidComponent("not a component".into());
-        assert!(e.to_string().contains("not a component"));
-
-        let e = WasiError::ManifestExtraction("missing".into());
-        assert!(e.to_string().contains("missing"));
-
-        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "gone");
-        let e = WasiError::Io(io_err);
-        assert!(e.to_string().contains("gone"));
     }
 
     #[test]

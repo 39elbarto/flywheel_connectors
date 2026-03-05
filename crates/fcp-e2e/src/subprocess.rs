@@ -134,3 +134,165 @@ impl ConnectorProcessRunner {
         std::mem::take(&mut *buffer)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // Use `cat` as a JSONL echo subprocess (reads stdin, writes to stdout).
+
+    #[fcp_async_core::runtime::test]
+    async fn spawn_and_terminate() {
+        let mut runner = ConnectorProcessRunner::spawn("cat", &[], &[])
+            .await
+            .expect("cat should spawn");
+        runner.terminate().await.expect("should terminate");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn send_and_read_json_roundtrip() {
+        let mut runner = ConnectorProcessRunner::spawn("cat", &[], &[])
+            .await
+            .unwrap();
+        let msg = json!({"method": "ping", "id": 1});
+        runner.send_json(&msg).await.unwrap();
+        let response = runner.read_json().await.unwrap();
+        assert_eq!(response, msg);
+        runner.terminate().await.unwrap();
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn request_roundtrip() {
+        let mut runner = ConnectorProcessRunner::spawn("cat", &[], &[])
+            .await
+            .unwrap();
+        let msg = json!({"jsonrpc": "2.0", "method": "test", "params": [1, 2, 3]});
+        let response = runner.request(&msg).await.unwrap();
+        assert_eq!(response, msg);
+        runner.terminate().await.unwrap();
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn multiple_requests() {
+        let mut runner = ConnectorProcessRunner::spawn("cat", &[], &[])
+            .await
+            .unwrap();
+        for i in 0..5 {
+            let msg = json!({"id": i, "data": format!("msg-{i}")});
+            let response = runner.request(&msg).await.unwrap();
+            assert_eq!(response["id"], i);
+        }
+        runner.terminate().await.unwrap();
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn read_json_after_eof_returns_error() {
+        let mut runner = ConnectorProcessRunner::spawn("echo", &[], &[])
+            .await
+            .unwrap();
+        // echo writes nothing to stdout (no args) and exits immediately.
+        // Wait for exit, then read should get EOF.
+        // Give it a moment to finish.
+        fcp_async_core::time::sleep(std::time::Duration::from_millis(50)).await;
+        let result = runner.read_json().await;
+        assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn spawn_nonexistent_binary_fails() {
+        let result =
+            ConnectorProcessRunner::spawn("__nonexistent_binary_xyz_42__", &[], &[]).await;
+        assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn spawn_with_env_vars() {
+        // Use `sh -c 'echo ...'` to echo a JSON object containing an env var.
+        let mut runner = ConnectorProcessRunner::spawn(
+            "sh",
+            &["-c", r#"echo "{\"var\":\"$FCP_TEST_VAR\"}""#],
+            &[("FCP_TEST_VAR", "hello_42")],
+        )
+        .await
+        .unwrap();
+        let response = runner.read_json().await.unwrap();
+        assert_eq!(response["var"], "hello_42");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn drain_stderr_lines_initially_empty() {
+        let runner = ConnectorProcessRunner::spawn("cat", &[], &[])
+            .await
+            .unwrap();
+        let lines = runner.drain_stderr_lines().await;
+        assert!(lines.is_empty());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn drain_stderr_captures_output() {
+        // Use sh -c to write to stderr
+        let mut runner = ConnectorProcessRunner::spawn(
+            "sh",
+            &["-c", "echo 'error line 1' >&2; echo 'error line 2' >&2; cat"],
+            &[],
+        )
+        .await
+        .unwrap();
+        // Give stderr time to be captured
+        fcp_async_core::time::sleep(std::time::Duration::from_millis(100)).await;
+        let lines = runner.drain_stderr_lines().await;
+        assert!(lines.len() >= 2, "expected at least 2 stderr lines, got {}", lines.len());
+        assert!(lines[0].contains("error line 1"));
+        assert!(lines[1].contains("error line 2"));
+        runner.terminate().await.unwrap();
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn drain_stderr_clears_buffer() {
+        let mut runner = ConnectorProcessRunner::spawn(
+            "sh",
+            &["-c", "echo 'msg' >&2; cat"],
+            &[],
+        )
+        .await
+        .unwrap();
+        fcp_async_core::time::sleep(std::time::Duration::from_millis(100)).await;
+        let first = runner.drain_stderr_lines().await;
+        assert!(!first.is_empty());
+        let second = runner.drain_stderr_lines().await;
+        assert!(second.is_empty(), "drain should clear buffer");
+        runner.terminate().await.unwrap();
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn send_json_complex_value() {
+        let mut runner = ConnectorProcessRunner::spawn("cat", &[], &[])
+            .await
+            .unwrap();
+        let msg = json!({
+            "method": "invoke",
+            "params": {
+                "connector": "test",
+                "operation": "get",
+                "zone": "z:work",
+                "nested": {"a": [1, 2, 3], "b": null, "c": true}
+            }
+        });
+        let response = runner.request(&msg).await.unwrap();
+        assert_eq!(response["params"]["nested"]["a"], json!([1, 2, 3]));
+        assert!(response["params"]["nested"]["b"].is_null());
+        runner.terminate().await.unwrap();
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn send_json_empty_object() {
+        let mut runner = ConnectorProcessRunner::spawn("cat", &[], &[])
+            .await
+            .unwrap();
+        let msg = json!({});
+        let response = runner.request(&msg).await.unwrap();
+        assert!(response.as_object().unwrap().is_empty());
+        runner.terminate().await.unwrap();
+    }
+}

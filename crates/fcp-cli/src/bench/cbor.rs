@@ -401,7 +401,11 @@ mod tests {
     fn benchmark_results_have_percentiles() {
         let results = run_benchmarks(super::super::CborTarget::All, 5, 1);
         for r in &results {
-            assert!(r.percentiles.is_some(), "missing percentiles for {}", r.name);
+            assert!(
+                r.percentiles.is_some(),
+                "missing percentiles for {}",
+                r.name
+            );
         }
     }
 

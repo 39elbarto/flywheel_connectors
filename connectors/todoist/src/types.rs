@@ -1,0 +1,220 @@
+//! `Todoist` API types.
+
+use serde::{Deserialize, Serialize};
+
+/// A `Todoist` project.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Project {
+    pub id: String,
+    pub name: Option<String>,
+    pub color: Option<String>,
+    pub comment_count: Option<u64>,
+    pub is_shared: Option<bool>,
+    pub is_favorite: Option<bool>,
+    pub order: Option<i64>,
+    pub url: Option<String>,
+    pub view_style: Option<String>,
+}
+
+/// A `Todoist` task.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Task {
+    pub id: String,
+    pub content: Option<String>,
+    pub description: Option<String>,
+    pub project_id: Option<String>,
+    pub is_completed: Option<bool>,
+    pub priority: Option<u8>,
+    pub due: Option<Due>,
+    pub url: Option<String>,
+    pub comment_count: Option<u64>,
+    pub order: Option<i64>,
+}
+
+/// Due date information for a `Todoist` task.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Due {
+    pub date: Option<String>,
+    pub string: Option<String>,
+    pub datetime: Option<String>,
+    pub timezone: Option<String>,
+    pub is_recurring: Option<bool>,
+}
+
+/// `Todoist` API error response body.
+///
+/// `Todoist` returns plain text or empty body on errors, so fields are optional.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApiErrorResponse {
+    #[serde(rename = "error")]
+    pub error_message: Option<String>,
+    pub error_code: Option<u16>,
+    pub http_code: Option<u16>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn project_roundtrip() {
+        let p: Project = serde_json::from_value(json!({
+            "id": "proj_abc123",
+            "name": "Work",
+            "color": "blue",
+            "comment_count": 5,
+            "is_shared": false,
+            "is_favorite": true,
+            "order": 1,
+            "url": "https://todoist.com/showProject?id=proj_abc123",
+            "view_style": "list",
+        }))
+        .unwrap();
+        assert_eq!(p.id, "proj_abc123");
+        assert_eq!(p.name, Some("Work".into()));
+        assert_eq!(p.color, Some("blue".into()));
+        assert_eq!(p.comment_count, Some(5));
+        assert_eq!(p.is_shared, Some(false));
+        assert_eq!(p.is_favorite, Some(true));
+        let re = serde_json::to_value(&p).unwrap();
+        assert_eq!(re["name"], "Work");
+    }
+
+    #[test]
+    fn project_minimal() {
+        let p: Project = serde_json::from_value(json!({"id": "x"})).unwrap();
+        assert_eq!(p.id, "x");
+        assert!(p.name.is_none());
+        assert!(p.color.is_none());
+    }
+
+    #[test]
+    fn task_roundtrip() {
+        let t: Task = serde_json::from_value(json!({
+            "id": "task_abc123",
+            "content": "Review PR #42",
+            "description": "Important PR review",
+            "project_id": "proj_abc",
+            "is_completed": false,
+            "priority": 4,
+            "due": {
+                "date": "2026-03-10",
+                "string": "tomorrow",
+                "is_recurring": false,
+            },
+            "url": "https://todoist.com/showTask?id=task_abc123",
+            "comment_count": 3,
+            "order": 2,
+        }))
+        .unwrap();
+        assert_eq!(t.id, "task_abc123");
+        assert_eq!(t.content, Some("Review PR #42".into()));
+        assert_eq!(t.project_id, Some("proj_abc".into()));
+        assert_eq!(t.is_completed, Some(false));
+        assert_eq!(t.priority, Some(4));
+        assert!(t.due.is_some());
+        let due = t.due.unwrap();
+        assert_eq!(due.date, Some("2026-03-10".into()));
+        assert_eq!(due.string, Some("tomorrow".into()));
+        assert_eq!(due.is_recurring, Some(false));
+    }
+
+    #[test]
+    fn task_minimal() {
+        let t: Task = serde_json::from_value(json!({"id": "x"})).unwrap();
+        assert_eq!(t.id, "x");
+        assert!(t.content.is_none());
+        assert!(t.due.is_none());
+    }
+
+    #[test]
+    fn task_serialize_roundtrip() {
+        let t = Task {
+            id: "t1".into(),
+            content: Some("Do thing".into()),
+            description: None,
+            project_id: Some("p1".into()),
+            is_completed: Some(false),
+            priority: Some(1),
+            due: None,
+            url: None,
+            comment_count: None,
+            order: None,
+        };
+        let v = serde_json::to_value(&t).unwrap();
+        assert_eq!(v["id"], "t1");
+        assert_eq!(v["content"], "Do thing");
+        assert_eq!(v["project_id"], "p1");
+    }
+
+    #[test]
+    fn due_roundtrip() {
+        let d: Due = serde_json::from_value(json!({
+            "date": "2026-03-15",
+            "string": "next Monday",
+            "datetime": "2026-03-15T09:00:00Z",
+            "timezone": "America/New_York",
+            "is_recurring": true,
+        }))
+        .unwrap();
+        assert_eq!(d.date, Some("2026-03-15".into()));
+        assert_eq!(d.string, Some("next Monday".into()));
+        assert_eq!(d.datetime, Some("2026-03-15T09:00:00Z".into()));
+        assert_eq!(d.timezone, Some("America/New_York".into()));
+        assert_eq!(d.is_recurring, Some(true));
+    }
+
+    #[test]
+    fn due_minimal() {
+        let d: Due = serde_json::from_value(json!({})).unwrap();
+        assert!(d.date.is_none());
+        assert!(d.string.is_none());
+        assert!(d.is_recurring.is_none());
+    }
+
+    #[test]
+    fn api_error_response_with_fields() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({
+            "error": "Invalid token",
+            "error_code": 401,
+            "http_code": 401,
+        }))
+        .unwrap();
+        assert_eq!(e.error_message, Some("Invalid token".into()));
+        assert_eq!(e.error_code, Some(401));
+        assert_eq!(e.http_code, Some(401));
+    }
+
+    #[test]
+    fn api_error_response_empty() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({})).unwrap();
+        assert!(e.error_message.is_none());
+        assert!(e.error_code.is_none());
+        assert!(e.http_code.is_none());
+    }
+
+    #[test]
+    fn project_extra_fields_ignored() {
+        let p: Project = serde_json::from_value(json!({
+            "id": "p1",
+            "name": "Test",
+            "unknown_field": "should be ignored",
+        }))
+        .unwrap();
+        assert_eq!(p.id, "p1");
+        assert_eq!(p.name, Some("Test".into()));
+    }
+
+    #[test]
+    fn task_extra_fields_ignored() {
+        let t: Task = serde_json::from_value(json!({
+            "id": "t1",
+            "content": "Test",
+            "unknown_field": 42,
+        }))
+        .unwrap();
+        assert_eq!(t.id, "t1");
+        assert_eq!(t.content, Some("Test".into()));
+    }
+}

@@ -62,6 +62,11 @@ members = [
     "connectors/gitlab",
     "connectors/salesforce",
     "connectors/reddit",
+    "connectors/intercom",
+    "connectors/pandadoc",
+    "connectors/pulumi",
+    "connectors/todoist",
+    "connectors/clickup",
 ]
 
 # Default to the FCP2 platform core crates (connectors are explicitly targeted).

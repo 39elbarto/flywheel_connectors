@@ -748,6 +748,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::case_sensitive_file_extension_comparisons)]
     fn read_ops_are_safe() {
         for op in operations_info().as_array().unwrap() {
             if op["capability"].as_str().unwrap().ends_with(".read") {

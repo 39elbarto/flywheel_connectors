@@ -1127,7 +1127,7 @@ mod tests {
         // on 64-bit systems where usize > u32.
         let oti = ObjectTransmissionInformation::new(
             u64::from(u32::MAX) + 1000, // transfer_length > u32::MAX bytes
-            1,                           // symbol_size = 1 byte
+            1,                          // symbol_size = 1 byte
             1,
             1,
             1,

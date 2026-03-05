@@ -274,6 +274,10 @@ impl HolderProof {
     /// Compute the signable bytes for holder proof.
     ///
     /// Format: `"FCP2-HOLDER-PROOF-V1" || len(request_id) || request_id || len(operation_id) || operation_id || len(token_jti) || token_jti`
+    ///
+    /// # Panics
+    ///
+    /// Panics if any input byte length exceeds `u32::MAX`.
     #[must_use]
     pub fn signable_bytes(
         request_id: &RequestId,

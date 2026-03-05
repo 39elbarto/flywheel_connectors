@@ -471,7 +471,10 @@ mod tests {
         let msg: Message = serde_json::from_value(json).unwrap();
         assert_eq!(msg.id.as_deref(), Some("camel-1"));
         assert_eq!(msg.body_preview.as_deref(), Some("Thanks for the update"));
-        assert_eq!(msg.received_date_time.as_deref(), Some("2026-03-05T14:30:00Z"));
+        assert_eq!(
+            msg.received_date_time.as_deref(),
+            Some("2026-03-05T14:30:00Z")
+        );
         assert_eq!(msg.is_read, Some(true));
         let body = msg.body.unwrap();
         assert_eq!(body.content_type.as_deref(), Some("html"));
@@ -991,10 +994,7 @@ mod tests {
         let task: TodoTask = serde_json::from_value(json).unwrap();
         assert_eq!(task.status.as_deref(), Some("completed"));
         let completed = task.completed_date_time.unwrap();
-        assert_eq!(
-            completed.date_time.as_deref(),
-            Some("2026-03-04T16:00:00")
-        );
+        assert_eq!(completed.date_time.as_deref(), Some("2026-03-04T16:00:00"));
         assert_eq!(completed.time_zone.as_deref(), Some("UTC"));
     }
 

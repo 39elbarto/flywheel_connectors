@@ -255,8 +255,8 @@ mod tests {
     #[test]
     fn error_trait_invalid_tag() {
         let err = TailscaleError::InvalidTag("x".into());
-        let _dyn_err: &dyn std::error::Error = &err;
-        assert!(_dyn_err.to_string().contains("x"));
+        let dyn_err: &dyn std::error::Error = &err;
+        assert!(dyn_err.to_string().contains('x'));
     }
 
     #[test]
@@ -293,14 +293,19 @@ mod tests {
     #[test]
     fn tailscale_result_ok() {
         let result: TailscaleResult<u32> = Ok(42);
-        assert_eq!(result.unwrap(), 42);
+        let Ok(val) = result else {
+            panic!("expected Ok")
+        };
+        assert_eq!(val, 42);
     }
 
     #[test]
     fn tailscale_result_err() {
         let result: TailscaleResult<u32> = Err(TailscaleError::NotConnected);
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), TailscaleError::NotConnected));
+        let Err(err) = result else {
+            panic!("expected Err")
+        };
+        assert!(matches!(err, TailscaleError::NotConnected));
     }
 
     // --- From<std::io::Error> with different ErrorKind values ---
@@ -368,18 +373,14 @@ mod tests {
             TailscaleError::AttestationExpired,
         ];
         for v in &variants {
-            assert!(
-                v.source().is_none(),
-                "expected source() == None for {:?}",
-                v
-            );
+            assert!(v.source().is_none(), "expected source() == None for {v:?}",);
         }
     }
 
     #[test]
     fn source_some_for_io() {
         use std::error::Error;
-        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "inner");
+        let io_err = std::io::Error::other("inner");
         let err = TailscaleError::Io(io_err);
         assert!(err.source().is_some());
     }

@@ -192,7 +192,7 @@ mod tests {
         let err = DatadogError::RateLimited {
             retry_after_ms: 30_000,
         };
-        assert_eq!(err.retry_after(), Some(Duration::from_millis(30_000)));
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(30)));
     }
 
     #[test]
@@ -278,7 +278,7 @@ mod tests {
             } => {
                 assert_eq!(*status_code, Some(429));
                 assert!(retryable);
-                assert_eq!(*retry_after, Some(Duration::from_millis(60_000)));
+                assert_eq!(*retry_after, Some(Duration::from_secs(60)));
             }
             other => panic!("expected External, got {other:?}"),
         }

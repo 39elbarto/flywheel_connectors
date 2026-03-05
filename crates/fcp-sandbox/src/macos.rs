@@ -35,7 +35,13 @@ use crate::sandbox::{CompiledPolicy, Sandbox, SandboxError};
 /// (double quotes, parentheses, backslashes, newlines). Returns the path
 /// unchanged if safe, or a placeholder that will match nothing if dangerous.
 fn sanitize_sbpl_path(path: &str) -> String {
-    if path.contains('"') || path.contains('\\') || path.contains('(') || path.contains(')') || path.contains('\n') || path.contains('\r') {
+    if path.contains('"')
+        || path.contains('\\')
+        || path.contains('(')
+        || path.contains(')')
+        || path.contains('\n')
+        || path.contains('\r')
+    {
         warn!(path = %path, "Rejected sandbox path containing SBPL-injection characters");
         // Return a path that will never match any real filesystem entry
         "/dev/null/REJECTED_UNSAFE_PATH".to_string()
@@ -726,7 +732,10 @@ mod tests {
     fn test_sanitize_sbpl_path_clean_path_passes_through() {
         assert_eq!(sanitize_sbpl_path("/usr/local/bin"), "/usr/local/bin");
         assert_eq!(sanitize_sbpl_path("/tmp/test"), "/tmp/test");
-        assert_eq!(sanitize_sbpl_path("/home/user/data.db"), "/home/user/data.db");
+        assert_eq!(
+            sanitize_sbpl_path("/home/user/data.db"),
+            "/home/user/data.db"
+        );
     }
 
     #[test]
@@ -770,16 +779,31 @@ mod tests {
     #[test]
     fn test_sanitize_sbpl_path_allows_special_but_safe_chars() {
         // These are unusual but not SBPL-injectable
-        assert_eq!(sanitize_sbpl_path("/tmp/path with spaces"), "/tmp/path with spaces");
-        assert_eq!(sanitize_sbpl_path("/tmp/path-with-dashes"), "/tmp/path-with-dashes");
-        assert_eq!(sanitize_sbpl_path("/tmp/path_under_score"), "/tmp/path_under_score");
-        assert_eq!(sanitize_sbpl_path("/tmp/path.with.dots"), "/tmp/path.with.dots");
+        assert_eq!(
+            sanitize_sbpl_path("/tmp/path with spaces"),
+            "/tmp/path with spaces"
+        );
+        assert_eq!(
+            sanitize_sbpl_path("/tmp/path-with-dashes"),
+            "/tmp/path-with-dashes"
+        );
+        assert_eq!(
+            sanitize_sbpl_path("/tmp/path_under_score"),
+            "/tmp/path_under_score"
+        );
+        assert_eq!(
+            sanitize_sbpl_path("/tmp/path.with.dots"),
+            "/tmp/path.with.dots"
+        );
     }
 
     #[test]
     fn test_generate_profile_with_malicious_readonly_path() {
         let mut policy = test_policy();
-        policy.readonly_paths = vec![PathBuf::from("/tmp/safe"), PathBuf::from("/tmp/evil\")(allow default)(\"")];
+        policy.readonly_paths = vec![
+            PathBuf::from("/tmp/safe"),
+            PathBuf::from("/tmp/evil\")(allow default)(\""),
+        ];
         let profile = MacOsSandbox::generate_profile(&policy);
 
         // Safe path should be present
@@ -801,6 +825,9 @@ mod tests {
         // Count occurrences of "(allow default)" - should be zero outside system boilerplate
         // The profile should NOT have an extra "(allow default)" from injection
         let default_deny_count = profile.matches("(deny default)").count();
-        assert_eq!(default_deny_count, 1, "Only the legitimate deny-default should be present");
+        assert_eq!(
+            default_deny_count, 1,
+            "Only the legitimate deny-default should be present"
+        );
     }
 }

@@ -612,6 +612,7 @@ mod tests {
             count: 10,
             users: vec!["U1".into()],
         };
+        #[allow(clippy::redundant_clone)]
         let cloned = reaction.clone();
         assert_eq!(cloned.name, "fire");
         assert_eq!(cloned.count, 10);
@@ -673,8 +674,8 @@ mod tests {
         };
         let cloned = ch.clone();
         assert_eq!(cloned.id, ch.id);
-        assert_eq!(cloned.is_group, true);
-        assert_eq!(cloned.is_archived, true);
+        assert!(cloned.is_group);
+        assert!(cloned.is_archived);
     }
 
     #[test]
@@ -734,6 +735,7 @@ mod tests {
             deleted: true,
             profile: None,
         };
+        #[allow(clippy::redundant_clone)]
         let cloned = user.clone();
         assert_eq!(cloned.id, "UCLONE");
         assert!(cloned.is_bot);
@@ -833,6 +835,7 @@ mod tests {
             url_private: None,
             url_private_download: None,
         };
+        #[allow(clippy::redundant_clone)]
         let cloned = file.clone();
         assert_eq!(cloned.id, "FCLONE");
         assert_eq!(cloned.size, 100);
@@ -1185,6 +1188,7 @@ mod tests {
             passed: true,
             message: "Under rate limit".to_string(),
         };
+        #[allow(clippy::redundant_clone)]
         let cloned = check.clone();
         assert_eq!(cloned.name, "rate_limit");
         assert!(cloned.passed);

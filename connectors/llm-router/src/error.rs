@@ -208,19 +208,13 @@ mod tests {
         let err = RouterError::AllProvidersFailed {
             message: "exhausted retries".into(),
         };
-        assert_eq!(
-            err.to_string(),
-            "All providers failed: exhausted retries"
-        );
+        assert_eq!(err.to_string(), "All providers failed: exhausted retries");
     }
 
     #[test]
     fn display_invalid_strategy() {
         let err = RouterError::InvalidStrategy("round_robin".into());
-        assert_eq!(
-            err.to_string(),
-            "Invalid routing strategy: round_robin"
-        );
+        assert_eq!(err.to_string(), "Invalid routing strategy: round_robin");
     }
 
     #[test]
@@ -253,8 +247,14 @@ mod tests {
             budget_usd: 5.0,
         };
         let msg = err.to_string();
-        assert!(msg.contains("10.1235"), "expected 4 decimal precision, got: {msg}");
-        assert!(msg.contains("5.0000"), "budget should show 4 decimals, got: {msg}");
+        assert!(
+            msg.contains("10.1235"),
+            "expected 4 decimal precision, got: {msg}"
+        );
+        assert!(
+            msg.contains("5.0000"),
+            "budget should show 4 decimals, got: {msg}"
+        );
     }
 
     #[test]
@@ -281,12 +281,15 @@ mod tests {
     #[test]
     fn budget_exceeded_large_values() {
         let err = RouterError::BudgetExceeded {
-            spent_usd: 999_999.9999,
+            spent_usd: 999_999.999_9,
             budget_usd: 500_000.0,
         };
         let msg = err.to_string();
         assert!(msg.contains("999999.9999"), "large spent not in msg: {msg}");
-        assert!(msg.contains("500000.0000"), "large budget not in msg: {msg}");
+        assert!(
+            msg.contains("500000.0000"),
+            "large budget not in msg: {msg}"
+        );
     }
 
     // ---- Debug formatting for each variant ----
@@ -314,7 +317,7 @@ mod tests {
         let dbg = format!(
             "{:?}",
             RouterError::BudgetExceeded {
-                spent_usd: 3.14,
+                spent_usd: std::f64::consts::PI,
                 budget_usd: 2.0
             }
         );
@@ -366,14 +369,19 @@ mod tests {
     #[test]
     fn router_result_ok() {
         let result: RouterResult<u32> = Ok(42);
-        assert_eq!(result.unwrap(), 42);
+        let Ok(val) = result else {
+            panic!("expected Ok")
+        };
+        assert_eq!(val, 42);
     }
 
     #[test]
     fn router_result_err() {
         let result: RouterResult<u32> = Err(RouterError::NoProviders);
         assert!(result.is_err());
-        let err = result.unwrap_err();
+        let Err(err) = result else {
+            panic!("expected Err")
+        };
         assert_eq!(err.to_string(), "No providers configured");
     }
 
@@ -407,10 +415,7 @@ mod tests {
         match fcp_err {
             FcpError::InvalidRequest { code, message } => {
                 assert_eq!(code, 1004);
-                assert_eq!(
-                    message,
-                    "No provider available for request: rate limited"
-                );
+                assert_eq!(message, "No provider available for request: rate limited");
             }
             other => panic!("Expected InvalidRequest, got {other:?}"),
         }
@@ -428,10 +433,7 @@ mod tests {
                 capability, reason, ..
             } => {
                 assert_eq!(capability, "llm-router.route");
-                assert_eq!(
-                    reason,
-                    "Budget exceeded: spent 20.0000 of 15.0000 USD"
-                );
+                assert_eq!(reason, "Budget exceeded: spent 20.0000 of 15.0000 USD");
             }
             other => panic!("Expected CapabilityDenied, got {other:?}"),
         }
@@ -451,15 +453,11 @@ mod tests {
 
     #[test]
     fn from_capability_not_available_exact_fields() {
-        let fcp_err: FcpError =
-            RouterError::CapabilityNotAvailable("tool_use".into()).into();
+        let fcp_err: FcpError = RouterError::CapabilityNotAvailable("tool_use".into()).into();
         match fcp_err {
             FcpError::InvalidRequest { code, message } => {
                 assert_eq!(code, 1004);
-                assert_eq!(
-                    message,
-                    "Required capability not available: tool_use"
-                );
+                assert_eq!(message, "Required capability not available: tool_use");
             }
             other => panic!("Expected InvalidRequest, got {other:?}"),
         }
@@ -501,10 +499,7 @@ mod tests {
         let err = RouterError::NoProviderAvailable {
             reason: String::new(),
         };
-        assert_eq!(
-            err.to_string(),
-            "No provider available for request: "
-        );
+        assert_eq!(err.to_string(), "No provider available for request: ");
     }
 
     #[test]
@@ -533,18 +528,14 @@ mod tests {
     #[test]
     fn empty_capability_not_available() {
         let err = RouterError::CapabilityNotAvailable(String::new());
-        assert_eq!(
-            err.to_string(),
-            "Required capability not available: "
-        );
+        assert_eq!(err.to_string(), "Required capability not available: ");
     }
 
     // ---- Error trait (dyn std::error::Error) ----
 
     #[test]
     fn router_error_is_std_error() {
-        let err: Box<dyn std::error::Error> =
-            Box::new(RouterError::NoProviders);
+        let err: Box<dyn std::error::Error> = Box::new(RouterError::NoProviders);
         assert_eq!(err.to_string(), "No providers configured");
     }
 

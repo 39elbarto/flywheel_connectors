@@ -460,6 +460,10 @@ impl GossipSummary {
     }
 
     /// Get bytes for signing.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any field byte length exceeds `u32::MAX`.
     #[must_use]
     pub fn signing_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();

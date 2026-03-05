@@ -435,7 +435,10 @@ mod tests {
             ok: false,
         };
         let msg = err.to_string();
-        assert!(msg.contains("channel_not_found"), "should contain error string");
+        assert!(
+            msg.contains("channel_not_found"),
+            "should contain error string"
+        );
         assert!(msg.contains("404"), "should contain code value");
     }
 
@@ -611,9 +614,7 @@ mod tests {
     #[test]
     fn error_source_user_not_found_is_none() {
         use std::error::Error;
-        let err = SlackError::UserNotFound {
-            user: "U1".into(),
-        };
+        let err = SlackError::UserNotFound { user: "U1".into() };
         assert!(err.source().is_none());
     }
 
@@ -622,7 +623,8 @@ mod tests {
     #[test]
     fn slack_result_ok() {
         let result: SlackResult<u32> = Ok(42);
-        assert_eq!(result.unwrap(), 42);
+        let Ok(val) = result else { panic!("expected Ok") };
+        assert_eq!(val, 42);
     }
 
     #[test]
@@ -706,7 +708,9 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("Channel not found:"));
         let fcp = err.to_fcp_error();
-        assert!(matches!(fcp, FcpError::ResourceNotFound { resource } if resource.contains("channel:")));
+        assert!(
+            matches!(fcp, FcpError::ResourceNotFound { resource } if resource.contains("channel:"))
+        );
     }
 
     // ---- Edge: UserNotFound with empty string ----
@@ -719,7 +723,9 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("User not found:"));
         let fcp = err.to_fcp_error();
-        assert!(matches!(fcp, FcpError::ResourceNotFound { resource } if resource.contains("user:")));
+        assert!(
+            matches!(fcp, FcpError::ResourceNotFound { resource } if resource.contains("user:"))
+        );
     }
 
     // ---- Json variant is not retryable ----

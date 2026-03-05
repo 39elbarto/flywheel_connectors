@@ -1500,9 +1500,9 @@ mod tests {
         assert!(debug.contains("fcp.mesh"));
         assert!(debug.contains("Gossip"));
         // Version Debug may wrap the value; just check the components are present.
-        assert!(debug.contains("3"));
-        assert!(debug.contains("1"));
-        assert!(debug.contains("4"));
+        assert!(debug.contains('3'));
+        assert!(debug.contains('1'));
+        assert!(debug.contains('4'));
     }
 
     #[test]
@@ -1666,15 +1666,11 @@ mod tests {
     #[test]
     fn error_implements_std_error_trait() {
         // Verify std::error::Error is implemented.
-        let err: Box<dyn std::error::Error> =
-            Box::new(SerializationError::MissingSchemaHashPrefix);
+        let err: Box<dyn std::error::Error> = Box::new(SerializationError::MissingSchemaHashPrefix);
         // source() should be None for non-wrapping variants.
         assert!(err.source().is_none());
         // Display should work through the Error trait.
-        assert_eq!(
-            err.to_string(),
-            "payload missing schema hash prefix"
-        );
+        assert_eq!(err.to_string(), "payload missing schema hash prefix");
     }
 
     #[test]
@@ -1864,10 +1860,7 @@ mod tests {
                 id: 1,
                 label: Some("first".to_string()),
             },
-            Item {
-                id: 2,
-                label: None,
-            },
+            Item { id: 2, label: None },
             Item {
                 id: 3,
                 label: Some("third".to_string()),
@@ -1955,11 +1948,7 @@ mod tests {
 
     #[test]
     fn schema_id_as_bytes_encodes_prerelease_version() {
-        let schema = SchemaId::new(
-            "fcp.store",
-            "Repair",
-            Version::parse("0.5.2-rc.1").unwrap(),
-        );
+        let schema = SchemaId::new("fcp.store", "Repair", Version::parse("0.5.2-rc.1").unwrap());
         let canonical = String::from_utf8(schema.as_bytes()).unwrap();
         assert_eq!(canonical, "fcp.store:Repair@0.5.2-rc.1");
     }

@@ -1,13 +1,8 @@
 //! Integration tests for the FCP Datadog connector.
 
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
-
-use fcp_datadog::client::{DatadogAuth, DatadogClient};
 use fcp_datadog::connector::DatadogConnector;
-use fcp_datadog::error::DatadogError;
 use serde_json::json;
-use wiremock::matchers::{header, method, path, path_regex};
+use wiremock::matchers::{method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 // -- Helper --
@@ -25,18 +20,6 @@ async fn configured_connector(mock_url: &str) -> DatadogConnector {
         .await
         .unwrap();
     connector
-}
-
-fn test_client(mock_url: &str) -> DatadogClient {
-    let client = reqwest::Client::new();
-    DatadogClient::with_client(
-        client,
-        DatadogAuth::ApiKeys {
-            api_key: "test-api".into(),
-            app_key: "test-app".into(),
-        },
-        mock_url,
-    )
 }
 
 // -- Lifecycle tests --
@@ -253,7 +236,7 @@ async fn invoke_events_list() {
     let result = connector
         .handle_invoke(json!({
             "operation_id": "datadog.events.list",
-            "input": {"start": 1709251200, "end": 1709337600}
+            "input": {"start": 1_709_251_200, "end": 1_709_337_600}
         }))
         .await
         .unwrap();
@@ -268,7 +251,7 @@ async fn invoke_events_list_missing_start_fails() {
     let result = connector
         .handle_invoke(json!({
             "operation_id": "datadog.events.list",
-            "input": {"end": 1709337600}
+            "input": {"end": 1_709_337_600}
         }))
         .await;
     assert!(result.is_err());
@@ -296,8 +279,8 @@ async fn invoke_metrics_query() {
             "operation_id": "datadog.metrics.query",
             "input": {
                 "query": "avg:system.cpu.user{*}",
-                "from_ts": 1709251200,
-                "to_ts": 1709337600
+                "from_ts": 1_709_251_200,
+                "to_ts": 1_709_337_600
             }
         }))
         .await
@@ -320,7 +303,7 @@ async fn invoke_metrics_submit() {
         .handle_invoke(json!({
             "operation_id": "datadog.metrics.submit",
             "input": {
-                "series": [{"metric": "custom.latency", "points": [[1709251200.0, 42.0]], "type": "gauge"}]
+                "series": [{"metric": "custom.latency", "points": [[1_709_251_200.0, 42.0]], "type": "gauge"}]
             }
         }))
         .await

@@ -33,15 +33,12 @@ impl SlidingWindow {
         Self {
             limit,
             window,
-            timestamps: Mutex::new(VecDeque::with_capacity(limit as usize)),
+            timestamps: Mutex::new(VecDeque::with_capacity((limit as usize).min(100_000))),
         }
     }
 
-    /// Remove expired timestamps.
-    fn cleanup(&self) {
-        let now = Instant::now();
-        let mut timestamps = self.timestamps.lock();
-
+    /// Remove expired timestamps from the locked deque.
+    fn cleanup_locked(&self, timestamps: &mut VecDeque<Instant>, now: Instant) {
         while let Some(front) = timestamps.front() {
             if now.saturating_duration_since(*front) > self.window {
                 timestamps.pop_front();
@@ -49,14 +46,15 @@ impl SlidingWindow {
                 break;
             }
         }
-        drop(timestamps);
     }
 
     /// Calculate remaining capacity.
     fn calculate_remaining(&self) -> u32 {
-        self.cleanup();
-        let len = self.timestamps.lock().len();
-        let len_u32 = u32::try_from(len).unwrap_or(u32::MAX);
+        let now = Instant::now();
+        let mut timestamps = self.timestamps.lock();
+        self.cleanup_locked(&mut timestamps, now);
+        let len_u32 = u32::try_from(timestamps.len()).unwrap_or(u32::MAX);
+        drop(timestamps);
         self.limit.saturating_sub(len_u32)
     }
 }
@@ -64,12 +62,12 @@ impl SlidingWindow {
 #[async_trait]
 impl RateLimiter for SlidingWindow {
     async fn try_acquire(&self) -> bool {
-        self.cleanup();
-
+        let now = Instant::now();
         let mut timestamps = self.timestamps.lock();
+        self.cleanup_locked(&mut timestamps, now);
 
         if timestamps.len() < self.limit as usize {
-            timestamps.push_back(Instant::now());
+            timestamps.push_back(now);
             true
         } else {
             false
@@ -108,24 +106,26 @@ impl RateLimiter for SlidingWindow {
             return Duration::MAX;
         }
 
-        self.cleanup();
-
-        let timestamps = self.timestamps.lock();
+        let now = Instant::now();
+        let mut timestamps = self.timestamps.lock();
+        self.cleanup_locked(&mut timestamps, now);
 
         if timestamps.len() < self.limit as usize {
             return Duration::ZERO;
         }
 
         // Wait until the oldest request expires
-        if let Some(oldest) = timestamps.front() {
-            let elapsed = Instant::now().saturating_duration_since(*oldest);
+        let result = timestamps.front().map_or(Duration::ZERO, |oldest| {
+            let elapsed = now.saturating_duration_since(*oldest);
             if elapsed < self.window {
-                return self.window.checked_sub(elapsed).unwrap_or(Duration::ZERO);
+                self.window.checked_sub(elapsed).unwrap_or(Duration::ZERO)
+            } else {
+                Duration::ZERO
             }
-        }
+        });
         drop(timestamps);
 
-        Duration::ZERO
+        result
     }
 
     async fn reset(&self) {
@@ -133,14 +133,15 @@ impl RateLimiter for SlidingWindow {
     }
 
     fn state(&self) -> RateLimitState {
-        self.cleanup();
+        let now = Instant::now();
+        let mut timestamps = self.timestamps.lock();
+        self.cleanup_locked(&mut timestamps, now);
 
-        let timestamps = self.timestamps.lock();
         let len = u32::try_from(timestamps.len()).unwrap_or(u32::MAX);
         let remaining = self.limit.saturating_sub(len);
 
         let reset_after = timestamps.front().map_or(self.window, |oldest| {
-            let elapsed = Instant::now().saturating_duration_since(*oldest);
+            let elapsed = now.saturating_duration_since(*oldest);
             self.window.checked_sub(elapsed).unwrap_or(Duration::ZERO)
         });
         drop(timestamps);

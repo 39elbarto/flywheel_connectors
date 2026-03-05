@@ -731,7 +731,8 @@ mod tests {
 
     #[test]
     fn thumbnail_roundtrip_full() {
-        let json = json!({"url": "https://i.ytimg.com/vi/abc/default.jpg", "width": 120, "height": 90});
+        let json =
+            json!({"url": "https://i.ytimg.com/vi/abc/default.jpg", "width": 120, "height": 90});
         let t: Thumbnail = serde_json::from_value(json).unwrap();
         assert_eq!(t.url, "https://i.ytimg.com/vi/abc/default.jpg");
         assert_eq!(t.width, Some(120));
@@ -753,7 +754,11 @@ mod tests {
 
     #[test]
     fn thumbnail_clone_debug() {
-        let t = Thumbnail { url: "https://x.com/t.jpg".into(), width: Some(320), height: Some(180) };
+        let t = Thumbnail {
+            url: "https://x.com/t.jpg".into(),
+            width: Some(320),
+            height: Some(180),
+        };
         let t2 = t.clone();
         assert_eq!(t2.url, t.url);
         assert_eq!(t2.width, t.width);
@@ -798,8 +803,15 @@ mod tests {
     #[test]
     fn thumbnail_set_clone_debug() {
         let ts = ThumbnailSet {
-            default: Some(Thumbnail { url: "u".into(), width: None, height: None }),
-            medium: None, high: None, standard: None, maxres: None,
+            default: Some(Thumbnail {
+                url: "u".into(),
+                width: None,
+                height: None,
+            }),
+            medium: None,
+            high: None,
+            standard: None,
+            maxres: None,
         };
         let ts2 = ts.clone();
         assert_eq!(ts2.default.as_ref().unwrap().url, "u");
@@ -810,8 +822,15 @@ mod tests {
     #[test]
     fn thumbnail_set_roundtrip_json() {
         let ts = ThumbnailSet {
-            default: Some(Thumbnail { url: "a".into(), width: Some(120), height: Some(90) }),
-            medium: None, high: None, standard: None, maxres: None,
+            default: Some(Thumbnail {
+                url: "a".into(),
+                width: Some(120),
+                height: Some(90),
+            }),
+            medium: None,
+            high: None,
+            standard: None,
+            maxres: None,
         };
         let v = serde_json::to_value(&ts).unwrap();
         let ts2: ThumbnailSet = serde_json::from_value(v).unwrap();
@@ -881,11 +900,17 @@ mod tests {
     #[test]
     fn video_snippet_clone_debug() {
         let vs = VideoSnippet {
-            published_at: None, channel_id: None,
-            title: "Title".into(), description: "Desc".into(),
-            thumbnails: None, channel_title: None, tags: None,
-            category_id: None, live_broadcast_content: None,
-            default_language: None, default_audio_language: None,
+            published_at: None,
+            channel_id: None,
+            title: "Title".into(),
+            description: "Desc".into(),
+            thumbnails: None,
+            channel_title: None,
+            tags: None,
+            category_id: None,
+            live_broadcast_content: None,
+            default_language: None,
+            default_audio_language: None,
         };
         let vs2 = vs.clone();
         assert_eq!(vs2.title, "Title");
@@ -936,9 +961,12 @@ mod tests {
     #[test]
     fn content_details_clone_debug() {
         let cd = ContentDetails {
-            duration: Some("PT1H".into()), dimension: None,
-            definition: None, caption: None,
-            licensed_content: None, projection: None,
+            duration: Some("PT1H".into()),
+            dimension: None,
+            definition: None,
+            caption: None,
+            licensed_content: None,
+            projection: None,
         };
         let cd2 = cd.clone();
         assert_eq!(cd2.duration, Some("PT1H".into()));
@@ -989,8 +1017,11 @@ mod tests {
     #[test]
     fn video_statistics_clone_debug() {
         let vs = VideoStatistics {
-            view_count: Some("100".into()), like_count: None,
-            dislike_count: None, favorite_count: None, comment_count: None,
+            view_count: Some("100".into()),
+            like_count: None,
+            dislike_count: None,
+            favorite_count: None,
+            comment_count: None,
         };
         let vs2 = vs.clone();
         assert_eq!(vs2.view_count, Some("100".into()));
@@ -1039,7 +1070,10 @@ mod tests {
         let resp = VideoListResponse {
             kind: "youtube#videoListResponse".into(),
             etag: "e".into(),
-            page_info: Some(PageInfo { total_results: 1, results_per_page: 10 }),
+            page_info: Some(PageInfo {
+                total_results: 1,
+                results_per_page: 10,
+            }),
             items: vec![],
         };
         let v = serde_json::to_value(&resp).unwrap();
@@ -1091,9 +1125,12 @@ mod tests {
     #[test]
     fn channel_snippet_clone_debug() {
         let cs = ChannelSnippet {
-            title: "T".into(), description: "D".into(),
-            custom_url: None, published_at: None,
-            thumbnails: None, country: None,
+            title: "T".into(),
+            description: "D".into(),
+            custom_url: None,
+            published_at: None,
+            thumbnails: None,
+            country: None,
         };
         let cs2 = cs.clone();
         assert_eq!(cs2.title, "T");
@@ -1139,8 +1176,10 @@ mod tests {
     #[test]
     fn channel_statistics_clone_debug() {
         let cs = ChannelStatistics {
-            view_count: Some("1".into()), subscriber_count: None,
-            hidden_subscriber_count: None, video_count: None,
+            view_count: Some("1".into()),
+            subscriber_count: None,
+            hidden_subscriber_count: None,
+            video_count: None,
         };
         let cs2 = cs.clone();
         assert_eq!(cs2.view_count, Some("1".into()));
@@ -1189,7 +1228,10 @@ mod tests {
 
     #[test]
     fn related_playlists_roundtrip() {
-        let rp = RelatedPlaylists { likes: Some("LL".into()), uploads: Some("UU".into()) };
+        let rp = RelatedPlaylists {
+            likes: Some("LL".into()),
+            uploads: Some("UU".into()),
+        };
         let v = serde_json::to_value(&rp).unwrap();
         let rp2: RelatedPlaylists = serde_json::from_value(v).unwrap();
         assert_eq!(rp2.likes, Some("LL".into()));
@@ -1206,7 +1248,10 @@ mod tests {
 
     #[test]
     fn related_playlists_clone_debug() {
-        let rp = RelatedPlaylists { likes: Some("LL".into()), uploads: None };
+        let rp = RelatedPlaylists {
+            likes: Some("LL".into()),
+            uploads: None,
+        };
         let rp2 = rp.clone();
         assert_eq!(rp2.likes, Some("LL".into()));
         let dbg = format!("{rp:?}");
@@ -1253,7 +1298,10 @@ mod tests {
         let resp = ChannelListResponse {
             kind: "youtube#channelListResponse".into(),
             etag: "e".into(),
-            page_info: Some(PageInfo { total_results: 2, results_per_page: 10 }),
+            page_info: Some(PageInfo {
+                total_results: 2,
+                results_per_page: 10,
+            }),
             items: vec![],
         };
         let v = serde_json::to_value(&resp).unwrap();
@@ -1301,9 +1349,12 @@ mod tests {
     #[test]
     fn playlist_snippet_clone_debug() {
         let ps = PlaylistSnippet {
-            published_at: None, channel_id: None,
-            title: "PL".into(), description: "".into(),
-            thumbnails: None, channel_title: None,
+            published_at: None,
+            channel_id: None,
+            title: "PL".into(),
+            description: String::new(),
+            thumbnails: None,
+            channel_title: None,
         };
         let ps2 = ps.clone();
         assert_eq!(ps2.title, "PL");
@@ -1380,7 +1431,10 @@ mod tests {
             etag: "e".into(),
             next_page_token: Some("NXT".into()),
             prev_page_token: None,
-            page_info: Some(PageInfo { total_results: 5, results_per_page: 5 }),
+            page_info: Some(PageInfo {
+                total_results: 5,
+                results_per_page: 5,
+            }),
             items: vec![],
         };
         let v = serde_json::to_value(&resp).unwrap();
@@ -1459,7 +1513,10 @@ mod tests {
 
     #[test]
     fn resource_id_clone_debug() {
-        let rid = ResourceId { kind: "youtube#video".into(), video_id: Some("v".into()) };
+        let rid = ResourceId {
+            kind: "youtube#video".into(),
+            video_id: Some("v".into()),
+        };
         let rid2 = rid.clone();
         assert_eq!(rid2.kind, "youtube#video");
         let dbg = format!("{rid:?}");
@@ -1541,7 +1598,10 @@ mod tests {
             etag: "e".into(),
             next_page_token: Some("N".into()),
             prev_page_token: Some("P".into()),
-            page_info: Some(PageInfo { total_results: 10, results_per_page: 5 }),
+            page_info: Some(PageInfo {
+                total_results: 10,
+                results_per_page: 5,
+            }),
             items: vec![],
         };
         let v = serde_json::to_value(&resp).unwrap();
@@ -1647,7 +1707,9 @@ mod tests {
     fn comment_clone_debug() {
         let c = Comment {
             kind: Some("youtube#comment".into()),
-            etag: None, id: "c1".into(), snippet: None,
+            etag: None,
+            id: "c1".into(),
+            snippet: None,
         };
         let c2 = c.clone();
         assert_eq!(c2.id, "c1");
@@ -1676,8 +1738,14 @@ mod tests {
         });
         let cs: CommentSnippet = serde_json::from_value(json).unwrap();
         assert_eq!(cs.author_display_name, Some("Bob".into()));
-        assert_eq!(cs.author_profile_image_url, Some("https://profile.jpg".into()));
-        assert_eq!(cs.author_channel_url, Some("https://youtube.com/channel/UCxyz".into()));
+        assert_eq!(
+            cs.author_profile_image_url,
+            Some("https://profile.jpg".into())
+        );
+        assert_eq!(
+            cs.author_channel_url,
+            Some("https://youtube.com/channel/UCxyz".into())
+        );
         assert_eq!(cs.text_display, Some("<b>Wow!</b>".into()));
         assert_eq!(cs.text_original, Some("Wow!".into()));
         assert_eq!(cs.parent_id, Some("c100".into()));
@@ -1766,7 +1834,10 @@ mod tests {
             kind: "youtube#commentThreadListResponse".into(),
             etag: "e".into(),
             next_page_token: Some("NK".into()),
-            page_info: Some(PageInfo { total_results: 50, results_per_page: 20 }),
+            page_info: Some(PageInfo {
+                total_results: 50,
+                results_per_page: 20,
+            }),
             items: vec![],
         };
         let v = serde_json::to_value(&resp).unwrap();
@@ -1927,7 +1998,11 @@ mod tests {
 
     #[test]
     fn api_error_clone_debug() {
-        let ae = ApiError { code: Some(403), message: Some("Forbidden".into()), errors: None };
+        let ae = ApiError {
+            code: Some(403),
+            message: Some("Forbidden".into()),
+            errors: None,
+        };
         let ae2 = ae.clone();
         assert_eq!(ae2.code, Some(403));
         let dbg = format!("{ae:?}");
@@ -1969,7 +2044,9 @@ mod tests {
     #[test]
     fn api_error_detail_clone_debug() {
         let d = ApiErrorDetail {
-            message: Some("m".into()), domain: Some("d".into()), reason: Some("r".into()),
+            message: Some("m".into()),
+            domain: Some("d".into()),
+            reason: Some("r".into()),
         };
         let d2 = d.clone();
         assert_eq!(d2.reason, Some("r".into()));
@@ -2026,7 +2103,8 @@ mod tests {
         let sri = SearchResultId {
             kind: "youtube#video".into(),
             video_id: Some("v1".into()),
-            channel_id: None, playlist_id: None,
+            channel_id: None,
+            playlist_id: None,
         };
         let sri2 = sri.clone();
         assert_eq!(sri2.video_id, Some("v1".into()));
@@ -2091,9 +2169,12 @@ mod tests {
     #[test]
     fn search_snippet_clone_debug() {
         let ss = SearchSnippet {
-            published_at: None, channel_id: None,
-            title: "Title".into(), description: "Desc".into(),
-            thumbnails: None, channel_title: None,
+            published_at: None,
+            channel_id: None,
+            title: "Title".into(),
+            description: "Desc".into(),
+            thumbnails: None,
+            channel_title: None,
             live_broadcast_content: None,
         };
         let ss2 = ss.clone();
@@ -2108,7 +2189,10 @@ mod tests {
 
     #[test]
     fn page_info_clone_debug() {
-        let pi = PageInfo { total_results: 10, results_per_page: 5 };
+        let pi = PageInfo {
+            total_results: 10,
+            results_per_page: 5,
+        };
         let pi2 = pi.clone();
         assert_eq!(pi2.total_results, 10);
         let dbg = format!("{pi:?}");
@@ -2123,7 +2207,8 @@ mod tests {
             id: SearchResultId {
                 kind: "youtube#video".into(),
                 video_id: Some("v1".into()),
-                channel_id: None, playlist_id: None,
+                channel_id: None,
+                playlist_id: None,
             },
             snippet: None,
         };
@@ -2140,7 +2225,10 @@ mod tests {
             etag: "e".into(),
             next_page_token: Some("NT".into()),
             prev_page_token: Some("PT".into()),
-            page_info: Some(PageInfo { total_results: 100, results_per_page: 10 }),
+            page_info: Some(PageInfo {
+                total_results: 100,
+                results_per_page: 10,
+            }),
             items: vec![],
         };
         let v = serde_json::to_value(&resp).unwrap();
@@ -2175,13 +2263,19 @@ mod tests {
             id: "vid1".into(),
             snippet: None,
             content_details: Some(ContentDetails {
-                duration: Some("PT5M".into()), dimension: None,
-                definition: None, caption: None,
-                licensed_content: Some(false), projection: None,
+                duration: Some("PT5M".into()),
+                dimension: None,
+                definition: None,
+                caption: None,
+                licensed_content: Some(false),
+                projection: None,
             }),
             statistics: Some(VideoStatistics {
-                view_count: Some("100".into()), like_count: None,
-                dislike_count: None, favorite_count: None, comment_count: None,
+                view_count: Some("100".into()),
+                like_count: None,
+                dislike_count: None,
+                favorite_count: None,
+                comment_count: None,
             }),
         };
         let out = serde_json::to_value(&v).unwrap();
@@ -2281,7 +2375,10 @@ mod tests {
         let resp2: ApiErrorResponse = serde_json::from_value(v).unwrap();
         let err = resp2.error.unwrap();
         assert_eq!(err.code, Some(429));
-        assert_eq!(err.errors.unwrap()[0].reason, Some("rateLimitExceeded".into()));
+        assert_eq!(
+            err.errors.unwrap()[0].reason,
+            Some("rateLimitExceeded".into())
+        );
     }
 
     #[test]

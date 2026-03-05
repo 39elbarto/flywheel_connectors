@@ -63,7 +63,10 @@ fn pseudo_random_jitter(attempt: u32) -> f64 {
         .as_nanos()
         .hash(&mut hasher);
     let h = hasher.finish();
-    (h % 1_000_000) as f64 / 1_000_000.0
+    // Value is at most 999_999 which is exactly representable as f64.
+    #[allow(clippy::cast_precision_loss)]
+    let jitter = (h % 1_000_000) as f64 / 1_000_000.0;
+    jitter
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

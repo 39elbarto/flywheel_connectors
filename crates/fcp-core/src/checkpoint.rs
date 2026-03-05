@@ -288,6 +288,10 @@ impl ForkEvidence {
 ///
 /// Uses BLAKE3 hash of (`zone_id`, "checkpoint", epoch, `node_id`) to produce
 /// a deterministic ordering of nodes. The highest hash value wins.
+///
+/// # Panics
+///
+/// Panics if any input byte length exceeds `u32::MAX`.
 #[must_use]
 pub fn hrw_hash_checkpoint(zone_id: &ZoneId, epoch: &EpochId, node_id: &TailscaleNodeId) -> u64 {
     let mut hasher = blake3::Hasher::new();

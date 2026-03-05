@@ -615,6 +615,7 @@ mod tests {
     #[test]
     fn test_zone_acl_generator_clone() {
         let acl_gen = ZoneAclGenerator::new(1000, 2000);
+        #[allow(clippy::redundant_clone)]
         let cloned = acl_gen.clone();
         assert_eq!(cloned.symbol_port, 1000);
         assert_eq!(cloned.control_port, 2000);

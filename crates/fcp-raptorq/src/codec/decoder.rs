@@ -185,7 +185,9 @@ pub enum DecodeError {
         actual: usize,
     },
     /// Received symbol has mismatched equation vectors.
-    #[error("symbol equation arity mismatch for ESI {esi}: {columns} columns vs {coefficients} coefficients")]
+    #[error(
+        "symbol equation arity mismatch for ESI {esi}: {columns} columns vs {coefficients} coefficients"
+    )]
     SymbolEquationArityMismatch {
         /// ESI of the malformed symbol.
         esi: u32,
@@ -206,7 +208,9 @@ pub enum DecodeError {
     },
     /// Internal corruption guard: reconstructed output does not satisfy an
     /// input equation and is therefore unsafe to return as success.
-    #[error("corrupt decoded output for ESI {esi} at byte {byte_index}: expected {expected:#04x}, actual {actual:#04x}")]
+    #[error(
+        "corrupt decoded output for ESI {esi} at byte {byte_index}: expected {expected:#04x}, actual {actual:#04x}"
+    )]
     CorruptDecodedOutput {
         /// ESI of the mismatched equation row.
         esi: u32,
@@ -1842,10 +1846,12 @@ impl InactivationDecoder {
         // Flat layout avoids per-row heap allocation and improves cache locality.
         // Move (take) RHS data from state instead of cloning to avoid O(n_rows * symbol_size)
         // heap allocation in this hot path.
-        let dense_size = n_rows.checked_mul(n_cols).ok_or(DecodeError::InsufficientSymbols {
-            received: n_rows,
-            required: n_cols,
-        })?;
+        let dense_size = n_rows
+            .checked_mul(n_cols)
+            .ok_or(DecodeError::InsufficientSymbols {
+                received: n_rows,
+                required: n_cols,
+            })?;
         let mut a = vec![Gf256::ZERO; dense_size];
         let mut dense_nonzeros = 0usize;
         let mut dense_col_support = vec![0usize; n_cols];

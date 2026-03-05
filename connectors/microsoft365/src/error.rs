@@ -403,9 +403,7 @@ mod tests {
         let debug = format!("{err:?}");
         assert!(debug.contains("InvalidConfig"), "got: {debug}");
 
-        let err2 = M365Error::RateLimit {
-            retry_after_ms: 42,
-        };
+        let err2 = M365Error::RateLimit { retry_after_ms: 42 };
         let debug2 = format!("{err2:?}");
         assert!(debug2.contains("RateLimit"), "got: {debug2}");
         assert!(debug2.contains("42"), "got: {debug2}");
@@ -426,21 +424,23 @@ mod tests {
     #[test]
     fn m365result_ok_unwraps() {
         let result: M365Result<u32> = Ok(42);
-        assert_eq!(result.unwrap(), 42);
+        let Ok(val) = result else { panic!("expected Ok") };
+        assert_eq!(val, 42);
     }
 
     #[test]
     fn m365result_err_is_err() {
         let result: M365Result<u32> = Err(M365Error::InvalidConfig("bad".into()));
         assert!(result.is_err());
-        let err = result.unwrap_err();
+        let Err(err) = result else { panic!("expected Err") };
         assert!(!err.is_retryable());
     }
 
     #[test]
     fn m365result_with_complex_type() {
         let result: M365Result<Vec<String>> = Ok(vec!["hello".into()]);
-        assert_eq!(result.unwrap().len(), 1);
+        let Ok(val) = result else { panic!("expected Ok") };
+        assert_eq!(val.len(), 1);
     }
 
     // ---- From serde_json::Error conversion ----
@@ -582,9 +582,7 @@ mod tests {
 
     #[test]
     fn rate_limit_zero_retry_after() {
-        let err = M365Error::RateLimit {
-            retry_after_ms: 0,
-        };
+        let err = M365Error::RateLimit { retry_after_ms: 0 };
         assert!(err.is_retryable());
         assert_eq!(err.retry_after(), Some(Duration::from_millis(0)));
         match err.to_fcp_error() {
@@ -667,9 +665,7 @@ mod tests {
             retry_after_ms: u64::MAX,
         };
         match err.to_fcp_error() {
-            FcpError::RateLimited {
-                retry_after_ms, ..
-            } => {
+            FcpError::RateLimited { retry_after_ms, .. } => {
                 assert_eq!(retry_after_ms, u64::MAX);
             }
             other => panic!("Expected RateLimited, got {other:?}"),

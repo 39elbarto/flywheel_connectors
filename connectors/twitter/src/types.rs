@@ -1486,10 +1486,11 @@ mod tests {
             bookmark_count: Some(3),
             impression_count: Some(50000),
         };
+        #[allow(clippy::redundant_clone)]
         let cloned = m.clone();
         assert_eq!(cloned.retweet_count, 10);
         assert_eq!(cloned.impression_count, Some(50000));
-        let dbg = format!("{:?}", cloned);
+        let dbg = format!("{cloned:?}");
         assert!(dbg.contains("impression_count"));
     }
 
@@ -1573,7 +1574,10 @@ mod tests {
             "description": "The Rust programming language"
         });
         let e: ContextAnnotationEntity = serde_json::from_value(json).unwrap();
-        assert_eq!(e.description.as_deref(), Some("The Rust programming language"));
+        assert_eq!(
+            e.description.as_deref(),
+            Some("The Rust programming language")
+        );
     }
 
     #[test]
@@ -1596,6 +1600,7 @@ mod tests {
             listed_count: 50,
             like_count: Some(12000),
         };
+        #[allow(clippy::redundant_clone)]
         let cloned = m.clone();
         assert_eq!(cloned.followers_count, 1000);
         assert_eq!(cloned.like_count, Some(12000));
@@ -1660,20 +1665,18 @@ mod tests {
     #[test]
     fn entity_urls_roundtrip() {
         let eu = EntityUrls {
-            urls: vec![
-                UrlEntity {
-                    url: "https://t.co/a".into(),
-                    expanded_url: Some("https://example.com".into()),
-                    display_url: Some("example.com".into()),
-                    unwound_url: None,
-                    start: 0,
-                    end: 23,
-                    status: None,
-                    title: None,
-                    description: None,
-                    media_key: None,
-                },
-            ],
+            urls: vec![UrlEntity {
+                url: "https://t.co/a".into(),
+                expanded_url: Some("https://example.com".into()),
+                display_url: Some("example.com".into()),
+                unwound_url: None,
+                start: 0,
+                end: 23,
+                status: None,
+                title: None,
+                description: None,
+                media_key: None,
+            }],
         };
         let json_str = serde_json::to_string(&eu).unwrap();
         let back: EntityUrls = serde_json::from_str(&json_str).unwrap();
@@ -1713,6 +1716,7 @@ mod tests {
             start: 5,
             end: 10,
         };
+        #[allow(clippy::redundant_clone)]
         let cloned = h.clone();
         assert_eq!(cloned.tag, "test");
         assert_eq!(cloned.start, 5);
@@ -1767,9 +1771,15 @@ mod tests {
         });
         let u: UrlEntity = serde_json::from_value(json).unwrap();
         assert_eq!(u.url, "https://t.co/xyz");
-        assert_eq!(u.expanded_url.as_deref(), Some("https://example.com/article"));
+        assert_eq!(
+            u.expanded_url.as_deref(),
+            Some("https://example.com/article")
+        );
         assert_eq!(u.display_url.as_deref(), Some("example.com/article"));
-        assert_eq!(u.unwound_url.as_deref(), Some("https://example.com/article?final=true"));
+        assert_eq!(
+            u.unwound_url.as_deref(),
+            Some("https://example.com/article?final=true")
+        );
         assert_eq!(u.status, Some(200));
         assert_eq!(u.title.as_deref(), Some("An Article"));
         assert_eq!(u.description.as_deref(), Some("A great article about Rust"));
@@ -1885,6 +1895,7 @@ mod tests {
             place_type: None,
             geo: None,
         };
+        #[allow(clippy::redundant_clone)]
         let cloned = p.clone();
         assert_eq!(cloned.id, "p1");
         assert_eq!(cloned.name.as_deref(), Some("NYC"));
@@ -2126,12 +2137,12 @@ mod tests {
     fn trend_location_roundtrip() {
         let tl = TrendLocation {
             name: "San Francisco".into(),
-            woeid: 2487956,
+            woeid: 2_487_956,
         };
         let json_str = serde_json::to_string(&tl).unwrap();
         let back: TrendLocation = serde_json::from_str(&json_str).unwrap();
         assert_eq!(back.name, "San Francisco");
-        assert_eq!(back.woeid, 2487956);
+        assert_eq!(back.woeid, 2_487_956);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -2375,10 +2386,11 @@ mod tests {
             author_id: Some("456".into()),
             ..Default::default()
         };
+        #[allow(clippy::redundant_clone)]
         let cloned = tweet.clone();
         assert_eq!(cloned.id, "123");
         assert_eq!(cloned.author_id.as_deref(), Some("456"));
-        let dbg = format!("{:?}", cloned);
+        let dbg = format!("{cloned:?}");
         assert!(dbg.contains("Hello world"));
     }
 
@@ -2468,9 +2480,10 @@ mod tests {
             description: Some("Rustacean".into()),
             ..Default::default()
         };
+        #[allow(clippy::redundant_clone)]
         let cloned = user.clone();
         assert_eq!(cloned.username, "alice");
-        let dbg = format!("{:?}", cloned);
+        let dbg = format!("{cloned:?}");
         assert!(dbg.contains("Rustacean"));
     }
 
@@ -2503,7 +2516,10 @@ mod tests {
         });
         let user: User = serde_json::from_value(json).unwrap();
         assert_eq!(user.description.as_deref(), Some("Developer"));
-        assert_eq!(user.profile_image_url.as_deref(), Some("https://pbs.twimg.com/profile/alice.jpg"));
+        assert_eq!(
+            user.profile_image_url.as_deref(),
+            Some("https://pbs.twimg.com/profile/alice.jpg")
+        );
         assert_eq!(user.location.as_deref(), Some("San Francisco, CA"));
         assert_eq!(user.url.as_deref(), Some("https://alice.dev"));
         assert_eq!(user.verified, Some(true));

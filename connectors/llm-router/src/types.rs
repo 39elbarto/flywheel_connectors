@@ -484,7 +484,7 @@ mod tests {
     #[test]
     fn routing_strategy_clone() {
         let original = RoutingStrategy::Latency;
-        let cloned = original.clone();
+        let cloned = original; // Copy
         assert_eq!(original, cloned);
     }
 
@@ -518,7 +518,7 @@ mod tests {
     #[test]
     fn provider_status_clone() {
         let original = ProviderStatus::Degraded;
-        let cloned = original.clone();
+        let cloned = original; // Copy
         assert_eq!(original, cloned);
     }
 
@@ -540,10 +540,7 @@ mod tests {
     fn provider_status_debug() {
         assert_eq!(format!("{:?}", ProviderStatus::Healthy), "Healthy");
         assert_eq!(format!("{:?}", ProviderStatus::Degraded), "Degraded");
-        assert_eq!(
-            format!("{:?}", ProviderStatus::Unavailable),
-            "Unavailable"
-        );
+        assert_eq!(format!("{:?}", ProviderStatus::Unavailable), "Unavailable");
     }
 
     #[test]
@@ -561,7 +558,7 @@ mod tests {
     #[test]
     fn model_capability_clone() {
         let original = ModelCapability::Vision;
-        let cloned = original.clone();
+        let cloned = original; // Copy
         assert_eq!(original, cloned);
     }
 
@@ -589,10 +586,7 @@ mod tests {
     fn model_capability_debug() {
         assert_eq!(format!("{:?}", ModelCapability::Vision), "Vision");
         assert_eq!(format!("{:?}", ModelCapability::ToolUse), "ToolUse");
-        assert_eq!(
-            format!("{:?}", ModelCapability::LongContext),
-            "LongContext"
-        );
+        assert_eq!(format!("{:?}", ModelCapability::LongContext), "LongContext");
         assert_eq!(format!("{:?}", ModelCapability::Streaming), "Streaming");
     }
 
@@ -606,8 +600,7 @@ mod tests {
     fn model_capability_deserialize_snake_case() {
         let tu: ModelCapability = serde_json::from_str("\"tool_use\"").unwrap();
         assert_eq!(tu, ModelCapability::ToolUse);
-        let lc: ModelCapability =
-            serde_json::from_str("\"long_context\"").unwrap();
+        let lc: ModelCapability = serde_json::from_str("\"long_context\"").unwrap();
         assert_eq!(lc, ModelCapability::LongContext);
         let v: ModelCapability = serde_json::from_str("\"vision\"").unwrap();
         assert_eq!(v, ModelCapability::Vision);
@@ -618,7 +611,7 @@ mod tests {
     #[test]
     fn budget_enforcement_clone() {
         let original = BudgetEnforcement::Hard;
-        let cloned = original.clone();
+        let cloned = original; // Copy
         assert_eq!(original, cloned);
     }
 
@@ -698,6 +691,7 @@ mod tests {
     // ---- ProviderConfig: Clone, Debug, empty models ----
 
     #[test]
+    #[allow(clippy::redundant_clone)]
     fn provider_config_clone() {
         let config = ProviderConfig {
             name: "openai".into(),
@@ -742,6 +736,7 @@ mod tests {
     // ---- ProviderReadiness: Clone, Debug, all-false ----
 
     #[test]
+    #[allow(clippy::redundant_clone)]
     fn provider_readiness_clone() {
         let readiness = ProviderReadiness {
             name: "test".into(),
@@ -791,6 +786,7 @@ mod tests {
     // ---- ModelInfo: Clone, Debug, empty capabilities, zero costs ----
 
     #[test]
+    #[allow(clippy::redundant_clone)]
     fn model_info_clone() {
         let model = ModelInfo {
             id: "claude-3".into(),
@@ -847,6 +843,7 @@ mod tests {
     // ---- BudgetConfig: Clone, Debug, custom values ----
 
     #[test]
+    #[allow(clippy::redundant_clone)]
     fn budget_config_clone() {
         let config = BudgetConfig {
             budget_usd: 50.0,
@@ -882,6 +879,7 @@ mod tests {
     // ---- RoutingDecision: Clone, Debug, fallback_used true ----
 
     #[test]
+    #[allow(clippy::redundant_clone)]
     fn routing_decision_clone() {
         let decision = RoutingDecision {
             strategy_used: "latency".into(),
@@ -925,10 +923,13 @@ mod tests {
     // ---- ProviderUsage: Clone, Debug, accumulation ----
 
     #[test]
+    #[allow(clippy::redundant_clone)]
     fn provider_usage_clone() {
-        let mut usage = ProviderUsage::default();
-        usage.requests = 10;
-        usage.cost_usd = 0.5;
+        let usage = ProviderUsage {
+            requests: 10,
+            cost_usd: 0.5,
+            ..Default::default()
+        };
         let cloned = usage.clone();
         assert_eq!(cloned.requests, 10);
         assert_eq!(cloned.cost_usd, 0.5);

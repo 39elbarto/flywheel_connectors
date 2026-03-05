@@ -122,7 +122,9 @@ impl RateLimiter for LeakyBucket {
         let capacity = f64::from(self.capacity);
         let amount = f64::from(permits);
 
-        if *level + amount <= capacity {
+        // Use a tiny epsilon to prevent floating-point inaccuracies
+        // from incorrectly rejecting requests exactly on the boundary.
+        if *level + amount <= capacity + 1e-9 {
             *level += amount;
             true
         } else {

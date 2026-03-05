@@ -828,8 +828,7 @@ mod tests {
 
         // With 0 hours, expires_at == issued_at, so it is already expired
         assert!(attestation.is_expired());
-        let result =
-            attestation.verify(&owner_key.verifying_key(), &node_id, &node_keys, &tags);
+        let result = attestation.verify(&owner_key.verifying_key(), &node_id, &node_keys, &tags);
         assert!(result.is_err());
     }
 

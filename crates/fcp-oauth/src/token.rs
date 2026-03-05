@@ -67,7 +67,10 @@ impl std::fmt::Debug for OAuthTokens {
             .field("access_token", &"[REDACTED]")
             .field("token_type", &self.token_type)
             .field("expires_at", &self.expires_at)
-            .field("refresh_token", &self.refresh_token.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("scopes", &self.scopes)
             .field("id_token", &self.id_token.as_ref().map(|_| "[REDACTED]"))
             .field("issued_at", &self.issued_at)
@@ -674,16 +677,25 @@ mod tests {
         let tokens = OAuthTokens::from_response(mock_token_response(Some(3600)));
         let debug = format!("{tokens:?}");
         // The actual token value must NOT appear in debug output
-        assert!(!debug.contains("test_access_token"), "access_token leaked in Debug output");
+        assert!(
+            !debug.contains("test_access_token"),
+            "access_token leaked in Debug output"
+        );
         // Instead, [REDACTED] should appear
-        assert!(debug.contains("[REDACTED]"), "Debug output missing [REDACTED] placeholder");
+        assert!(
+            debug.contains("[REDACTED]"),
+            "Debug output missing [REDACTED] placeholder"
+        );
     }
 
     #[test]
     fn test_token_debug_redacts_refresh_token() {
         let tokens = OAuthTokens::from_response(mock_token_response(Some(3600)));
         let debug = format!("{tokens:?}");
-        assert!(!debug.contains("test_refresh_token"), "refresh_token leaked in Debug output");
+        assert!(
+            !debug.contains("test_refresh_token"),
+            "refresh_token leaked in Debug output"
+        );
     }
 
     #[test]
@@ -692,7 +704,10 @@ mod tests {
         resp.id_token = Some("super_secret_id_token_jwt".into());
         let tokens = OAuthTokens::from_response(resp);
         let debug = format!("{tokens:?}");
-        assert!(!debug.contains("super_secret_id_token_jwt"), "id_token leaked in Debug output");
+        assert!(
+            !debug.contains("super_secret_id_token_jwt"),
+            "id_token leaked in Debug output"
+        );
     }
 
     #[test]
@@ -700,9 +715,18 @@ mod tests {
         let tokens = OAuthTokens::from_response(mock_token_response(Some(3600)));
         let debug = format!("{tokens:?}");
         // Non-sensitive fields should still be visible
-        assert!(debug.contains("Bearer"), "token_type should be visible in Debug");
-        assert!(debug.contains("scopes"), "scopes field should be visible in Debug");
-        assert!(debug.contains("issued_at"), "issued_at field should be visible in Debug");
+        assert!(
+            debug.contains("Bearer"),
+            "token_type should be visible in Debug"
+        );
+        assert!(
+            debug.contains("scopes"),
+            "scopes field should be visible in Debug"
+        );
+        assert!(
+            debug.contains("issued_at"),
+            "issued_at field should be visible in Debug"
+        );
     }
 
     // ── Batch: TokenStore advanced ──

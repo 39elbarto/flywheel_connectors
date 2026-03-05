@@ -456,7 +456,8 @@ impl LifecycleRecord {
 
         // Update success rate (clamped to 0-100)
         if self.health.samples > 0 {
-            let rate = (self.health.successes as f64 / self.health.samples as f64 * 100.0).min(100.0);
+            let rate =
+                (self.health.successes as f64 / self.health.samples as f64 * 100.0).min(100.0);
             self.health.success_rate = rate as u8;
         }
 
@@ -3276,5 +3277,519 @@ mod tests {
             )
             .unwrap();
         assert!(record.state_changed_at >= before);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Exhaustive State Transition Matrix
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// All 7 lifecycle states for exhaustive enumeration.
+    const ALL_STATES: [LifecycleState; 7] = [
+        LifecycleState::Pending,
+        LifecycleState::Installing,
+        LifecycleState::Canary,
+        LifecycleState::Production,
+        LifecycleState::RolledBack,
+        LifecycleState::Disabled,
+        LifecycleState::Uninstalled,
+    ];
+
+    /// Valid transitions as defined by the state machine.
+    const VALID_TRANSITIONS: &[(LifecycleState, LifecycleState)] = &[
+        // Pending -> Installing/Uninstalled
+        (LifecycleState::Pending, LifecycleState::Installing),
+        (LifecycleState::Pending, LifecycleState::Uninstalled),
+        // Installing -> Canary/Uninstalled
+        (LifecycleState::Installing, LifecycleState::Canary),
+        (LifecycleState::Installing, LifecycleState::Uninstalled),
+        // Canary -> Production/RolledBack/Disabled/Uninstalled
+        (LifecycleState::Canary, LifecycleState::Production),
+        (LifecycleState::Canary, LifecycleState::RolledBack),
+        (LifecycleState::Canary, LifecycleState::Disabled),
+        (LifecycleState::Canary, LifecycleState::Uninstalled),
+        // Production -> Canary/RolledBack/Disabled/Uninstalled
+        (LifecycleState::Production, LifecycleState::Canary),
+        (LifecycleState::Production, LifecycleState::RolledBack),
+        (LifecycleState::Production, LifecycleState::Disabled),
+        (LifecycleState::Production, LifecycleState::Uninstalled),
+        // RolledBack -> Canary/Disabled/Uninstalled
+        (LifecycleState::RolledBack, LifecycleState::Canary),
+        (LifecycleState::RolledBack, LifecycleState::Disabled),
+        (LifecycleState::RolledBack, LifecycleState::Uninstalled),
+        // Disabled -> Canary/Uninstalled
+        (LifecycleState::Disabled, LifecycleState::Canary),
+        (LifecycleState::Disabled, LifecycleState::Uninstalled),
+    ];
+
+    fn is_valid_transition(from: LifecycleState, to: LifecycleState) -> bool {
+        VALID_TRANSITIONS.iter().any(|&(f, t)| f == from && t == to)
+    }
+
+    #[test]
+    fn exhaustive_transition_matrix_valid_pairs_succeed() {
+        for &(from, to) in VALID_TRANSITIONS {
+            let mut record = LifecycleRecord::new(test_connector_id(), test_version());
+            // Force state to `from` (bypass validation for test setup)
+            record.state = from;
+            let result = record.transition(to, TransitionReason::InstallComplete);
+            assert!(
+                result.is_ok(),
+                "expected {from} -> {to} to succeed, but got {result:?}",
+            );
+            assert_eq!(record.state, to);
+        }
+    }
+
+    #[test]
+    fn exhaustive_transition_matrix_invalid_pairs_rejected() {
+        let mut rejected_count = 0;
+        for &from in &ALL_STATES {
+            for &to in &ALL_STATES {
+                if from == to || is_valid_transition(from, to) {
+                    continue;
+                }
+                let mut record = LifecycleRecord::new(test_connector_id(), test_version());
+                record.state = from;
+                let result = record.transition(to, TransitionReason::InstallComplete);
+                assert!(
+                    result.is_err(),
+                    "expected {from} -> {to} to be rejected, but it succeeded",
+                );
+                assert_eq!(
+                    record.state, from,
+                    "state should not change after rejected transition"
+                );
+                rejected_count += 1;
+            }
+        }
+        // 7*7=49 pairs, minus 7 self-transitions, minus 17 valid = 25 invalid
+        assert!(
+            rejected_count >= 25,
+            "expected at least 25 rejected pairs, got {rejected_count}"
+        );
+    }
+
+    #[test]
+    fn self_transitions_all_rejected() {
+        for &state in &ALL_STATES {
+            let mut record = LifecycleRecord::new(test_connector_id(), test_version());
+            record.state = state;
+            let result = record.transition(state, TransitionReason::InstallComplete);
+            assert!(
+                result.is_err(),
+                "self-transition {state} -> {state} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn uninstalled_is_terminal_state() {
+        let mut record = LifecycleRecord::new(test_connector_id(), test_version());
+        record.state = LifecycleState::Uninstalled;
+        for &to in &ALL_STATES {
+            let result = record.transition(to, TransitionReason::InstallComplete);
+            assert!(
+                result.is_err(),
+                "uninstalled -> {to} should be rejected (terminal state)"
+            );
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Crash Loop + Rollback Integration
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn crash_loop_detector_default_values() {
+        let detector = CrashLoopDetector::default();
+        assert_eq!(detector.max_crashes, 5);
+        assert_eq!(detector.window_secs, 300);
+    }
+
+    #[test]
+    fn crash_loop_detector_negative_window_clears_crashes() {
+        let mut detector = CrashLoopDetector::new(3, -1);
+        let now = Utc::now();
+        detector.record_crash(now);
+        detector.record_crash(now);
+        detector.record_crash(now);
+        // Negative window clears all crashes
+        assert!(!detector.is_crash_loop(now));
+    }
+
+    #[test]
+    fn crash_loop_detector_zero_threshold() {
+        let mut detector = CrashLoopDetector::new(0, 300);
+        let now = Utc::now();
+        // 0 threshold means any crash triggers loop
+        assert!(detector.is_crash_loop(now));
+    }
+
+    #[test]
+    fn record_crash_rollback_clears_detector() {
+        let base = Utc::now();
+        let mut detector = CrashLoopDetector::new(2, 300);
+        let mut record = LifecycleRecord::new(test_connector_id(), test_version())
+            .with_previous_version(semver::Version::new(0, 9, 0));
+        record.state = LifecycleState::Canary;
+
+        detector.record_crash(base);
+        let result = record.record_crash_and_maybe_rollback(
+            &mut detector,
+            base + chrono::Duration::seconds(1),
+            "crash 2",
+        );
+        assert!(result.unwrap());
+        assert_eq!(record.state, LifecycleState::RolledBack);
+
+        // After rollback, detector should be cleared
+        assert!(!detector.is_crash_loop(base + chrono::Duration::seconds(2)));
+    }
+
+    #[test]
+    fn record_crash_rollback_from_production_succeeds() {
+        let base = Utc::now();
+        let mut detector = CrashLoopDetector::new(2, 300);
+        let mut record = LifecycleRecord::new(test_connector_id(), test_version())
+            .with_previous_version(semver::Version::new(0, 9, 0));
+        record.state = LifecycleState::Production;
+
+        detector.record_crash(base);
+        let result = record.record_crash_and_maybe_rollback(
+            &mut detector,
+            base + chrono::Duration::seconds(1),
+            "production crash",
+        );
+        assert!(result.unwrap());
+        assert_eq!(record.state, LifecycleState::RolledBack);
+    }
+
+    #[test]
+    fn record_crash_rollback_from_pending_fails() {
+        let base = Utc::now();
+        let mut detector = CrashLoopDetector::new(2, 300);
+        let mut record = LifecycleRecord::new(test_connector_id(), test_version())
+            .with_previous_version(semver::Version::new(0, 9, 0));
+        // state is Pending (default)
+
+        detector.record_crash(base);
+        let result = record.record_crash_and_maybe_rollback(
+            &mut detector,
+            base + chrono::Duration::seconds(1),
+            "pending crash",
+        );
+        assert!(result.is_err());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Canary Auto-Promotion / Rollback Decision Logic
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn auto_promote_requires_canary_state() {
+        let mut record = LifecycleRecord::new(test_connector_id(), test_version());
+        record.state = LifecycleState::Production;
+        record.health.success_rate = 100;
+        record.health.samples = 1000;
+        assert!(!record.should_auto_promote());
+    }
+
+    #[test]
+    fn auto_promote_requires_min_samples() {
+        let mut record = LifecycleRecord::new(test_connector_id(), test_version());
+        record.state = LifecycleState::Canary;
+        record.canary_policy.min_samples = 100;
+        record.health.success_rate = 100;
+        record.health.samples = 50; // below minimum
+        let far_future = Utc::now() + chrono::Duration::hours(2);
+        assert!(!record.should_auto_promote_at(far_future));
+    }
+
+    #[test]
+    fn auto_promote_requires_success_rate_above_threshold() {
+        let mut record = LifecycleRecord::new(test_connector_id(), test_version());
+        record.state = LifecycleState::Canary;
+        record.canary_policy.promotion_threshold = 95;
+        record.canary_policy.min_samples = 10;
+        record.canary_policy.min_canary_duration_secs = 0;
+        record.health.success_rate = 90; // below 95
+        record.health.samples = 100;
+        assert!(!record.should_auto_promote());
+    }
+
+    #[test]
+    fn auto_rollback_requires_canary_state() {
+        let mut record = LifecycleRecord::new(test_connector_id(), test_version());
+        record.state = LifecycleState::Production;
+        record.health.success_rate = 0;
+        record.health.samples = 1000;
+        assert!(!record.should_auto_rollback());
+    }
+
+    #[test]
+    fn auto_rollback_requires_min_samples() {
+        let mut record = LifecycleRecord::new(test_connector_id(), test_version());
+        record.state = LifecycleState::Canary;
+        record.canary_policy.min_samples = 100;
+        record.health.success_rate = 0;
+        record.health.samples = 50; // below minimum
+        assert!(!record.should_auto_rollback());
+    }
+
+    #[test]
+    fn auto_rollback_triggers_when_below_threshold() {
+        let mut record = LifecycleRecord::new(test_connector_id(), test_version());
+        record.state = LifecycleState::Canary;
+        record.canary_policy.rollback_threshold = 80;
+        record.canary_policy.min_samples = 10;
+        record.health.success_rate = 70; // below 80
+        record.health.samples = 100;
+        assert!(record.should_auto_rollback());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // LifecycleStatus Construction
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn lifecycle_status_from_record_basic() {
+        let record = LifecycleRecord::new(test_connector_id(), test_version());
+        let status = LifecycleStatus::from_record(&record, Utc::now(), false);
+        assert_eq!(status.state, LifecycleState::Pending);
+        assert_eq!(status.version, test_version());
+        assert!(!status.crash_loop_detected);
+        assert!(!status.auto_promote_pending);
+        assert!(!status.auto_rollback_pending);
+        assert!(status.canary_expires_in_secs.is_none());
+        assert!(status.rollback_target_version.is_none());
+    }
+
+    #[test]
+    fn lifecycle_status_reflects_crash_loop_flag() {
+        let record = LifecycleRecord::new(test_connector_id(), test_version());
+        let status = LifecycleStatus::from_record(&record, Utc::now(), true);
+        assert!(status.crash_loop_detected);
+        assert!(status.auto_rollback_pending); // crash loop sets rollback pending
+    }
+
+    #[test]
+    fn lifecycle_status_with_rollback_target() {
+        let record = LifecycleRecord::new(test_connector_id(), test_version())
+            .with_previous_version(semver::Version::new(0, 9, 0));
+        let status = LifecycleStatus::from_record(&record, Utc::now(), false);
+        assert_eq!(
+            status.rollback_target_version,
+            Some(semver::Version::new(0, 9, 0))
+        );
+    }
+
+    #[test]
+    fn lifecycle_status_canary_expires_in_secs() {
+        let mut record = LifecycleRecord::new(test_connector_id(), test_version());
+        record.state = LifecycleState::Canary;
+        record.canary_policy.max_canary_duration_secs = 3600;
+        let now = Utc::now();
+        let status = LifecycleStatus::from_record(&record, now, false);
+        assert!(status.canary_expires_in_secs.is_some());
+    }
+
+    #[test]
+    fn lifecycle_status_not_in_canary_no_expiry() {
+        let mut record = LifecycleRecord::new(test_connector_id(), test_version());
+        record.state = LifecycleState::Production;
+        let status = LifecycleStatus::from_record(&record, Utc::now(), false);
+        assert!(status.canary_expires_in_secs.is_none());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Transition Chain Integrity
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn full_lifecycle_chain_pending_to_production_to_uninstalled() {
+        let mut record = LifecycleRecord::new(test_connector_id(), test_version());
+
+        record
+            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+            .unwrap();
+        record
+            .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
+            .unwrap();
+        record
+            .transition(
+                LifecycleState::Production,
+                TransitionReason::AutoPromotion { health_score: 98 },
+            )
+            .unwrap();
+        record
+            .transition(LifecycleState::Uninstalled, TransitionReason::Uninstalled)
+            .unwrap();
+
+        assert_eq!(record.state, LifecycleState::Uninstalled);
+        assert_eq!(record.transitions.len(), 4);
+
+        // Verify chain integrity: each transition.from matches previous transition.to
+        for window in record.transitions.windows(2) {
+            assert_eq!(
+                window[0].to, window[1].from,
+                "broken chain: {:?} -> {:?}",
+                window[0], window[1]
+            );
+        }
+    }
+
+    #[test]
+    fn rollback_and_retry_cycle() {
+        let mut record = LifecycleRecord::new(test_connector_id(), test_version());
+
+        // Install and canary
+        record
+            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+            .unwrap();
+        record
+            .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
+            .unwrap();
+
+        // Rollback
+        record
+            .transition(
+                LifecycleState::RolledBack,
+                TransitionReason::AutoRollback {
+                    health_score: 50,
+                    failure_reason: "high error rate".into(),
+                },
+            )
+            .unwrap();
+
+        // Retry canary
+        record
+            .transition(LifecycleState::Canary, TransitionReason::NewVersion {
+                from_version: "1.0.0".into(),
+                to_version: "1.0.1".into(),
+            })
+            .unwrap();
+
+        // Succeed this time
+        record
+            .transition(
+                LifecycleState::Production,
+                TransitionReason::ManualPromotion,
+            )
+            .unwrap();
+
+        assert_eq!(record.state, LifecycleState::Production);
+        assert_eq!(record.transitions.len(), 5);
+    }
+
+    #[test]
+    fn disable_and_re_enable_cycle() {
+        let mut record = LifecycleRecord::new(test_connector_id(), test_version());
+        record.state = LifecycleState::Production;
+
+        // Disable
+        record
+            .transition(
+                LifecycleState::Disabled,
+                TransitionReason::Disabled {
+                    reason: "maintenance".into(),
+                },
+            )
+            .unwrap();
+
+        // Re-enable via canary
+        record
+            .transition(LifecycleState::Canary, TransitionReason::ManualPromotion)
+            .unwrap();
+
+        // Promote
+        record
+            .transition(
+                LifecycleState::Production,
+                TransitionReason::ManualPromotion,
+            )
+            .unwrap();
+
+        assert_eq!(record.state, LifecycleState::Production);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // LifecycleError Display + Equality
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn lifecycle_error_no_rollback_target_display_message() {
+        let err = LifecycleError::NoRollbackTarget;
+        let msg = err.to_string();
+        assert!(msg.contains("rollback"), "expected rollback in: {msg}");
+    }
+
+    #[test]
+    fn lifecycle_error_not_found_display_includes_id() {
+        let err = LifecycleError::NotFound {
+            connector_id: test_connector_id(),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("test:lifecycle:v1"),
+            "expected connector id in: {msg}"
+        );
+    }
+
+    #[test]
+    fn lifecycle_error_invalid_policy_display_includes_reason() {
+        let err = LifecycleError::InvalidPolicy {
+            reason: "bad config".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("bad config"), "expected reason in: {msg}");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // LifecycleRecord Serde Roundtrip
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn lifecycle_record_serde_roundtrip_with_health() {
+        let mut record = LifecycleRecord::new(test_connector_id(), test_version())
+            .with_previous_version(semver::Version::new(0, 9, 0))
+            .with_canary_policy(
+                CanaryPolicy::new()
+                    .with_promotion_threshold(90)
+                    .with_rollback_threshold(70),
+            );
+
+        record
+            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+            .unwrap();
+        record.update_health(true, Some(42));
+
+        let json = serde_json::to_string(&record).unwrap();
+        let decoded: LifecycleRecord = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded.state, LifecycleState::Installing);
+        assert_eq!(decoded.version, test_version());
+        assert_eq!(decoded.transitions.len(), 1);
+        assert_eq!(decoded.health.samples, 1);
+        assert_eq!(
+            decoded.previous_version,
+            Some(semver::Version::new(0, 9, 0))
+        );
+    }
+
+    #[test]
+    fn lifecycle_status_serde_roundtrip_with_crash_loop() {
+        let record = LifecycleRecord::new(test_connector_id(), test_version())
+            .with_previous_version(semver::Version::new(0, 9, 0));
+        let status = LifecycleStatus::from_record(&record, Utc::now(), true);
+
+        let json = serde_json::to_string(&status).unwrap();
+        let decoded: LifecycleStatus = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded.state, LifecycleState::Pending);
+        assert!(decoded.crash_loop_detected);
+        assert_eq!(
+            decoded.rollback_target_version,
+            Some(semver::Version::new(0, 9, 0))
+        );
     }
 }

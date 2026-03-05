@@ -201,8 +201,7 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn spawn_nonexistent_binary_fails() {
-        let result =
-            ConnectorProcessRunner::spawn("__nonexistent_binary_xyz_42__", &[], &[]).await;
+        let result = ConnectorProcessRunner::spawn("__nonexistent_binary_xyz_42__", &[], &[]).await;
         assert!(result.is_err());
     }
 
@@ -234,7 +233,10 @@ mod tests {
         // Use sh -c to write to stderr
         let mut runner = ConnectorProcessRunner::spawn(
             "sh",
-            &["-c", "echo 'error line 1' >&2; echo 'error line 2' >&2; cat"],
+            &[
+                "-c",
+                "echo 'error line 1' >&2; echo 'error line 2' >&2; cat",
+            ],
             &[],
         )
         .await
@@ -242,7 +244,11 @@ mod tests {
         // Give stderr time to be captured
         fcp_async_core::time::sleep(std::time::Duration::from_millis(100)).await;
         let lines = runner.drain_stderr_lines().await;
-        assert!(lines.len() >= 2, "expected at least 2 stderr lines, got {}", lines.len());
+        assert!(
+            lines.len() >= 2,
+            "expected at least 2 stderr lines, got {}",
+            lines.len()
+        );
         assert!(lines[0].contains("error line 1"));
         assert!(lines[1].contains("error line 2"));
         runner.terminate().await.unwrap();
@@ -250,13 +256,9 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn drain_stderr_clears_buffer() {
-        let mut runner = ConnectorProcessRunner::spawn(
-            "sh",
-            &["-c", "echo 'msg' >&2; cat"],
-            &[],
-        )
-        .await
-        .unwrap();
+        let mut runner = ConnectorProcessRunner::spawn("sh", &["-c", "echo 'msg' >&2; cat"], &[])
+            .await
+            .unwrap();
         fcp_async_core::time::sleep(std::time::Duration::from_millis(100)).await;
         let first = runner.drain_stderr_lines().await;
         assert!(!first.is_empty());

@@ -1,0 +1,477 @@
+//! Sentry API client.
+
+use std::fmt;
+use std::time::Duration;
+
+use fcp_core::CredentialId;
+use reqwest::{Client, Response, StatusCode};
+use tracing::{debug, instrument};
+
+use crate::{
+    error::{SentryError, SentryResult},
+    types::ApiErrorResponse,
+};
+
+/// Default Sentry API base URL.
+pub const DEFAULT_BASE_URL: &str = "https://sentry.io/api/0";
+
+/// Authentication mode for the Sentry API.
+#[derive(Clone)]
+pub enum SentryAuth {
+    /// Bearer token (auth token or internal integration token).
+    BearerToken(String),
+    /// Secretless credential reference (egress proxy injection).
+    CredentialId(CredentialId),
+}
+
+impl SentryAuth {
+    /// Render a redacted label suitable for logs/diagnostics.
+    #[must_use]
+    pub fn redacted_label(&self) -> String {
+        match self {
+            Self::BearerToken(_) => "bearer_token:redacted".to_string(),
+            Self::CredentialId(id) => format!("credential_id:{id}"),
+        }
+    }
+
+    /// Whether this auth mode requires egress proxy credential injection.
+    #[must_use]
+    pub const fn is_secretless(&self) -> bool {
+        matches!(self, Self::CredentialId(_))
+    }
+}
+
+impl fmt::Debug for SentryAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BearerToken(_) => f.debug_tuple("BearerToken").field(&"<redacted>").finish(),
+            Self::CredentialId(id) => f.debug_tuple("CredentialId").field(id).finish(),
+        }
+    }
+}
+
+/// Sentry API client with retry support.
+pub struct SentryClient {
+    client: Client,
+    auth: SentryAuth,
+    base_url: String,
+    max_retries: u32,
+    initial_delay_ms: u64,
+}
+
+impl fmt::Debug for SentryClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SentryClient")
+            .field("auth", &self.auth)
+            .field("base_url", &self.base_url)
+            .finish()
+    }
+}
+
+impl SentryClient {
+    /// Create a new Sentry client.
+    pub fn new(auth: SentryAuth, base_url: Option<&str>) -> SentryResult<Self> {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(30))
+            .user_agent("fcp-sentry/0.1.0")
+            .build()?;
+
+        Ok(Self {
+            client,
+            auth,
+            base_url: base_url
+                .unwrap_or(DEFAULT_BASE_URL)
+                .trim_end_matches('/')
+                .to_string(),
+            max_retries: 3,
+            initial_delay_ms: 500,
+        })
+    }
+
+    /// Create a new client with a custom reqwest client (for testing).
+    pub fn with_client(client: Client, auth: SentryAuth, base_url: &str) -> Self {
+        Self {
+            client,
+            auth,
+            base_url: base_url.trim_end_matches('/').to_string(),
+            max_retries: 0,
+            initial_delay_ms: 0,
+        }
+    }
+
+    fn add_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.auth {
+            SentryAuth::BearerToken(token) => req.bearer_auth(token),
+            SentryAuth::CredentialId(id) => req.header("X-FCP-Credential-Id", id.to_string()),
+        }
+    }
+
+    async fn handle_response(&self, resp: Response) -> SentryResult<serde_json::Value> {
+        let status = resp.status();
+
+        if status.is_success() {
+            let body = resp.text().await?;
+            if body.is_empty() {
+                return Ok(serde_json::json!({}));
+            }
+            Ok(serde_json::from_str(&body)?)
+        } else {
+            self.handle_error(status, resp).await
+        }
+    }
+
+    async fn handle_error(
+        &self,
+        status: StatusCode,
+        resp: Response,
+    ) -> SentryResult<serde_json::Value> {
+        let retry_after = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok());
+
+        let body = resp.text().await.unwrap_or_default();
+        let detail = serde_json::from_str::<ApiErrorResponse>(&body)
+            .ok()
+            .and_then(|e| e.detail)
+            .unwrap_or_else(|| body.clone());
+
+        match status.as_u16() {
+            401 => Err(SentryError::Unauthorized),
+            403 => Err(SentryError::Forbidden),
+            404 => Err(SentryError::NotFound { resource: detail }),
+            429 => Err(SentryError::RateLimited {
+                retry_after_ms: retry_after.unwrap_or(60) * 1000,
+            }),
+            code => Err(SentryError::Api {
+                status_code: code,
+                message: detail,
+            }),
+        }
+    }
+
+    #[instrument(skip(self), fields(url))]
+    async fn get(&self, path: &str) -> SentryResult<serde_json::Value> {
+        let url = format!("{}{path}", self.base_url);
+        debug!(url = %url, "GET request");
+
+        let req = self.client.get(&url);
+        let req = self.add_auth(req);
+        let resp = req.send().await?;
+        self.handle_response(resp).await
+    }
+
+    #[instrument(skip(self, body), fields(url))]
+    async fn post(&self, path: &str, body: &serde_json::Value) -> SentryResult<serde_json::Value> {
+        let url = format!("{}{path}", self.base_url);
+        debug!(url = %url, "POST request");
+
+        let req = self.client.post(&url).json(body);
+        let req = self.add_auth(req);
+        let resp = req.send().await?;
+        self.handle_response(resp).await
+    }
+
+    #[instrument(skip(self, body), fields(url))]
+    async fn put(&self, path: &str, body: &serde_json::Value) -> SentryResult<serde_json::Value> {
+        let url = format!("{}{path}", self.base_url);
+        debug!(url = %url, "PUT request");
+
+        let req = self.client.put(&url).json(body);
+        let req = self.add_auth(req);
+        let resp = req.send().await?;
+        self.handle_response(resp).await
+    }
+
+    #[instrument(skip(self), fields(url))]
+    async fn delete(&self, path: &str) -> SentryResult<serde_json::Value> {
+        let url = format!("{}{path}", self.base_url);
+        debug!(url = %url, "DELETE request");
+
+        let req = self.client.delete(&url);
+        let req = self.add_auth(req);
+        let resp = req.send().await?;
+        self.handle_response(resp).await
+    }
+
+    // ── Projects ──────────────────────────────────────────────────────
+
+    /// List projects in an organization.
+    pub async fn list_projects(
+        &self,
+        org: &str,
+        cursor: Option<&str>,
+    ) -> SentryResult<serde_json::Value> {
+        let path = if let Some(cursor) = cursor {
+            format!("/organizations/{org}/projects/?cursor={cursor}")
+        } else {
+            format!("/organizations/{org}/projects/")
+        };
+        self.get(&path).await
+    }
+
+    // ── Issues ────────────────────────────────────────────────────────
+
+    /// List issues in a project.
+    pub async fn list_issues(
+        &self,
+        org: &str,
+        project: &str,
+        query: Option<&str>,
+        sort: Option<&str>,
+        cursor: Option<&str>,
+    ) -> SentryResult<serde_json::Value> {
+        let mut params = Vec::new();
+        params.push(format!("project={project}"));
+        if let Some(q) = query {
+            params.push(format!("query={q}"));
+        }
+        if let Some(s) = sort {
+            params.push(format!("sort={s}"));
+        }
+        if let Some(c) = cursor {
+            params.push(format!("cursor={c}"));
+        }
+        let qs = params.join("&");
+        self.get(&format!("/projects/{org}/{project}/issues/?{qs}"))
+            .await
+    }
+
+    /// Get a single issue by ID.
+    pub async fn get_issue(&self, issue_id: &str) -> SentryResult<serde_json::Value> {
+        self.get(&format!("/issues/{issue_id}/")).await
+    }
+
+    /// Update an issue (status, assignment, etc.).
+    pub async fn update_issue(
+        &self,
+        issue_id: &str,
+        update: &serde_json::Value,
+    ) -> SentryResult<serde_json::Value> {
+        self.put(&format!("/issues/{issue_id}/"), update).await
+    }
+
+    /// Delete an issue permanently.
+    pub async fn delete_issue(&self, issue_id: &str) -> SentryResult<serde_json::Value> {
+        self.delete(&format!("/issues/{issue_id}/")).await
+    }
+
+    // ── Events ────────────────────────────────────────────────────────
+
+    /// List events for an issue.
+    pub async fn list_issue_events(
+        &self,
+        issue_id: &str,
+        full: bool,
+        cursor: Option<&str>,
+    ) -> SentryResult<serde_json::Value> {
+        let mut params = Vec::new();
+        if full {
+            params.push("full=true".to_string());
+        }
+        if let Some(c) = cursor {
+            params.push(format!("cursor={c}"));
+        }
+        let qs = if params.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", params.join("&"))
+        };
+        self.get(&format!("/issues/{issue_id}/events/{qs}")).await
+    }
+
+    /// Get a single event.
+    pub async fn get_event(
+        &self,
+        org: &str,
+        project: &str,
+        event_id: &str,
+    ) -> SentryResult<serde_json::Value> {
+        self.get(&format!("/projects/{org}/{project}/events/{event_id}/"))
+            .await
+    }
+
+    // ── Releases ──────────────────────────────────────────────────────
+
+    /// List releases.
+    pub async fn list_releases(
+        &self,
+        org: &str,
+        project: Option<&str>,
+        query: Option<&str>,
+        cursor: Option<&str>,
+    ) -> SentryResult<serde_json::Value> {
+        let mut params = Vec::new();
+        if let Some(p) = project {
+            params.push(format!("project={p}"));
+        }
+        if let Some(q) = query {
+            params.push(format!("query={q}"));
+        }
+        if let Some(c) = cursor {
+            params.push(format!("cursor={c}"));
+        }
+        let qs = if params.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", params.join("&"))
+        };
+        self.get(&format!("/organizations/{org}/releases/{qs}"))
+            .await
+    }
+
+    /// Get a single release.
+    pub async fn get_release(&self, org: &str, version: &str) -> SentryResult<serde_json::Value> {
+        let encoded_version = urlencoded(version);
+        self.get(&format!("/organizations/{org}/releases/{encoded_version}/"))
+            .await
+    }
+
+    /// List deploys for a release.
+    pub async fn list_release_deploys(
+        &self,
+        org: &str,
+        version: &str,
+    ) -> SentryResult<serde_json::Value> {
+        let encoded_version = urlencoded(version);
+        self.get(&format!(
+            "/organizations/{org}/releases/{encoded_version}/deploys/"
+        ))
+        .await
+    }
+
+    // ── Discover ──────────────────────────────────────────────────────
+
+    /// Run a Discover query.
+    pub async fn discover_query(
+        &self,
+        org: &str,
+        query: &str,
+        fields: &[String],
+        stats_period: Option<&str>,
+        start: Option<&str>,
+        end: Option<&str>,
+        sort: Option<&str>,
+        per_page: Option<u32>,
+    ) -> SentryResult<serde_json::Value> {
+        let mut params = Vec::new();
+        params.push(format!("query={query}"));
+        for f in fields {
+            params.push(format!("field={f}"));
+        }
+        if let Some(sp) = stats_period {
+            params.push(format!("statsPeriod={sp}"));
+        }
+        if let Some(s) = start {
+            params.push(format!("start={s}"));
+        }
+        if let Some(e) = end {
+            params.push(format!("end={e}"));
+        }
+        if let Some(s) = sort {
+            params.push(format!("sort={s}"));
+        }
+        if let Some(pp) = per_page {
+            params.push(format!("per_page={pp}"));
+        }
+        let qs = params.join("&");
+        self.get(&format!("/organizations/{org}/events/?{qs}"))
+            .await
+    }
+
+    // ── Transactions ──────────────────────────────────────────────────
+
+    /// Get a transaction event.
+    pub async fn get_transaction(
+        &self,
+        org: &str,
+        project: &str,
+        event_id: &str,
+    ) -> SentryResult<serde_json::Value> {
+        self.get(&format!("/projects/{org}/{project}/events/{event_id}/"))
+            .await
+    }
+
+    // ── Alert Rules ───────────────────────────────────────────────────
+
+    /// List alert rules for a project.
+    pub async fn list_alert_rules(
+        &self,
+        org: &str,
+        project: &str,
+    ) -> SentryResult<serde_json::Value> {
+        self.get(&format!("/projects/{org}/{project}/rules/")).await
+    }
+
+    /// Create an alert rule.
+    pub async fn create_alert_rule(
+        &self,
+        org: &str,
+        project: &str,
+        rule: &serde_json::Value,
+    ) -> SentryResult<serde_json::Value> {
+        self.post(&format!("/projects/{org}/{project}/rules/"), rule)
+            .await
+    }
+
+    /// Update an alert rule.
+    pub async fn update_alert_rule(
+        &self,
+        org: &str,
+        project: &str,
+        rule_id: &str,
+        rule: &serde_json::Value,
+    ) -> SentryResult<serde_json::Value> {
+        self.put(&format!("/projects/{org}/{project}/rules/{rule_id}/"), rule)
+            .await
+    }
+
+    /// Delete an alert rule.
+    pub async fn delete_alert_rule(
+        &self,
+        org: &str,
+        project: &str,
+        rule_id: &str,
+    ) -> SentryResult<serde_json::Value> {
+        self.delete(&format!("/projects/{org}/{project}/rules/{rule_id}/"))
+            .await
+    }
+}
+
+/// Minimal URL encoding for version strings.
+fn urlencoded(s: &str) -> String {
+    s.replace('%', "%25")
+        .replace('+', "%2B")
+        .replace(' ', "%20")
+        .replace('@', "%40")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn url_encode_version_strings() {
+        assert_eq!(urlencoded("backend@1.2.3"), "backend%401.2.3");
+        assert_eq!(urlencoded("v1.0+build42"), "v1.0%2Bbuild42");
+        assert_eq!(urlencoded("simple"), "simple");
+    }
+
+    #[test]
+    fn auth_debug_redacts_token() {
+        let auth = SentryAuth::BearerToken("supersecret".into());
+        let dbg = format!("{auth:?}");
+        assert!(!dbg.contains("supersecret"));
+        assert!(dbg.contains("redacted"));
+    }
+
+    #[test]
+    fn auth_secretless_detection() {
+        let bearer = SentryAuth::BearerToken("tok".into());
+        assert!(!bearer.is_secretless());
+
+        let cred = SentryAuth::CredentialId(CredentialId::new());
+        assert!(cred.is_secretless());
+    }
+}

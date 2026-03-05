@@ -444,10 +444,7 @@ mod tests {
         assert!(std::error::Error::source(&S3Error::Unauthorized).is_none());
         assert!(std::error::Error::source(&S3Error::NotFound { key: "k".into() }).is_none());
         assert!(
-            std::error::Error::source(&S3Error::BucketNotFound {
-                bucket: "b".into()
-            })
-            .is_none()
+            std::error::Error::source(&S3Error::BucketNotFound { bucket: "b".into() }).is_none()
         );
         assert!(
             std::error::Error::source(&S3Error::RateLimited {
@@ -616,9 +613,7 @@ mod tests {
 
     #[test]
     fn retry_after_zero_ms() {
-        let err = S3Error::RateLimited {
-            retry_after_ms: 0,
-        };
+        let err = S3Error::RateLimited { retry_after_ms: 0 };
         assert_eq!(err.retry_after(), Some(Duration::from_millis(0)));
     }
 
@@ -642,9 +637,7 @@ mod tests {
 
     #[test]
     fn retry_after_bucket_not_found_none() {
-        let err = S3Error::BucketNotFound {
-            bucket: "b".into(),
-        };
+        let err = S3Error::BucketNotFound { bucket: "b".into() };
         assert_eq!(err.retry_after(), None);
     }
 
@@ -691,9 +684,7 @@ mod tests {
         };
         match err.to_fcp_error() {
             FcpError::External {
-                service,
-                retryable,
-                ..
+                service, retryable, ..
             } => {
                 assert_eq!(service, "s3");
                 assert!(!retryable);

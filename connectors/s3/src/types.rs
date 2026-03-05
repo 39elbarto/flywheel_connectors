@@ -270,7 +270,7 @@ mod tests {
     #[test]
     fn object_info_roundtrip_all_none() {
         let obj = ObjectInfo {
-            key: "".into(),
+            key: String::new(),
             size: 0,
             last_modified: None,
             etag: None,
@@ -309,6 +309,7 @@ mod tests {
         assert_eq!(cloned.key, "clone-me.bin");
         assert_eq!(cloned.size, 999);
         assert_eq!(cloned.storage_class.as_deref(), Some("GLACIER"));
+        assert_eq!(obj.key, "clone-me.bin");
     }
 
     #[test]
@@ -397,6 +398,7 @@ mod tests {
         let c = b.clone();
         assert_eq!(c.name, "cloned");
         assert_eq!(c.creation_date.as_deref(), Some("2026-01-01T00:00:00Z"));
+        assert_eq!(b.name, "cloned");
     }
 
     #[test]
@@ -414,7 +416,9 @@ mod tests {
 
     #[test]
     fn put_object_response_empty_etag() {
-        let resp = PutObjectResponse { etag: "".into() };
+        let resp = PutObjectResponse {
+            etag: String::new(),
+        };
         let json_str = serde_json::to_string(&resp).unwrap();
         let back: PutObjectResponse = serde_json::from_str(&json_str).unwrap();
         assert_eq!(back.etag, "");
@@ -427,6 +431,7 @@ mod tests {
         };
         let c = resp.clone();
         assert_eq!(c.etag, "\"abc\"");
+        assert_eq!(resp.etag, "\"abc\"");
     }
 
     #[test]
@@ -443,7 +448,7 @@ mod tests {
     #[test]
     fn get_object_response_empty_body() {
         let resp = GetObjectResponse {
-            body: "".into(),
+            body: String::new(),
             content_type: "application/octet-stream".into(),
         };
         let json_str = serde_json::to_string(&resp).unwrap();
@@ -460,6 +465,7 @@ mod tests {
         let c = resp.clone();
         assert_eq!(c.body, "data");
         assert_eq!(c.content_type, "text/plain");
+        assert_eq!(resp.body, "data");
     }
 
     #[test]
@@ -521,6 +527,7 @@ mod tests {
         let c = resp.clone();
         assert_eq!(c.content_type, "text/csv");
         assert_eq!(c.content_length, 42);
+        assert_eq!(resp.content_type, "text/csv");
     }
 
     #[test]
@@ -591,6 +598,7 @@ mod tests {
         };
         let c = resp.clone();
         assert!(c.contents.is_empty());
+        assert!(resp.contents.is_empty());
     }
 
     #[test]
@@ -631,6 +639,7 @@ mod tests {
         let resp = ListBucketsResponse { buckets: vec![] };
         let c = resp.clone();
         assert!(c.buckets.is_empty());
+        assert!(resp.buckets.is_empty());
     }
 
     #[test]
@@ -663,6 +672,7 @@ mod tests {
         let c = resp.clone();
         assert_eq!(c.bucket, "new");
         assert!(c.created);
+        assert_eq!(resp.bucket, "new");
     }
 
     #[test]
@@ -697,6 +707,7 @@ mod tests {
         let c = resp.clone();
         assert_eq!(c.bucket, "gone");
         assert!(c.deleted);
+        assert_eq!(resp.bucket, "gone");
     }
 
     #[test]
@@ -713,7 +724,7 @@ mod tests {
 
     #[test]
     fn presigned_url_response_empty_url() {
-        let resp = PresignedUrlResponse { url: "".into() };
+        let resp = PresignedUrlResponse { url: String::new() };
         let json_str = serde_json::to_string(&resp).unwrap();
         let back: PresignedUrlResponse = serde_json::from_str(&json_str).unwrap();
         assert_eq!(back.url, "");
@@ -726,6 +737,7 @@ mod tests {
         };
         let c = resp.clone();
         assert_eq!(c.url, "https://example.com/signed");
+        assert_eq!(resp.url, "https://example.com/signed");
     }
 
     #[test]
@@ -748,6 +760,7 @@ mod tests {
         let c = err.clone();
         assert_eq!(c.code, "NoSuchKey");
         assert_eq!(c.message, "not found");
+        assert_eq!(err.code, "NoSuchKey");
     }
 
     #[test]
@@ -758,7 +771,7 @@ mod tests {
         };
         let dbg = format!("{err:?}");
         assert!(dbg.contains("ApiErrorResponse"));
-        assert!(dbg.contains("X"));
+        assert!(dbg.contains('X'));
     }
 
     #[test]

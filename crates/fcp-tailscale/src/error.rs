@@ -151,4 +151,252 @@ mod tests {
         let err: TailscaleError = json_err.into();
         assert!(err.to_string().starts_with("JSON error:"));
     }
+
+    // --- Debug formatting for all 13 variants ---
+
+    #[test]
+    fn debug_invalid_tag() {
+        let err = TailscaleError::InvalidTag("bad".to_string());
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("InvalidTag"));
+        assert!(dbg.contains("bad"));
+    }
+
+    #[test]
+    fn debug_invalid_zone_id() {
+        let err = TailscaleError::InvalidZoneId("nope".to_string());
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("InvalidZoneId"));
+        assert!(dbg.contains("nope"));
+    }
+
+    #[test]
+    fn debug_not_fcp_tag() {
+        let err = TailscaleError::NotFcpTag("tag:server".to_string());
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("NotFcpTag"));
+    }
+
+    #[test]
+    fn debug_local_api_request() {
+        let err = TailscaleError::LocalApiRequest("timeout".to_string());
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("LocalApiRequest"));
+    }
+
+    #[test]
+    fn debug_local_api_error() {
+        let err = TailscaleError::LocalApiError("403".to_string());
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("LocalApiError"));
+    }
+
+    #[test]
+    fn debug_parse_error() {
+        let err = TailscaleError::ParseError("bad json".to_string());
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("ParseError"));
+    }
+
+    #[test]
+    fn debug_not_connected() {
+        let err = TailscaleError::NotConnected;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("NotConnected"));
+    }
+
+    #[test]
+    fn debug_peer_not_found() {
+        let err = TailscaleError::PeerNotFound("10.0.0.1".to_string());
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("PeerNotFound"));
+    }
+
+    #[test]
+    fn debug_invalid_attestation() {
+        let err = TailscaleError::InvalidAttestation;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("InvalidAttestation"));
+    }
+
+    #[test]
+    fn debug_attestation_expired() {
+        let err = TailscaleError::AttestationExpired;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("AttestationExpired"));
+    }
+
+    #[test]
+    fn debug_io_variant() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe broken");
+        let err = TailscaleError::Io(io_err);
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Io"));
+    }
+
+    #[test]
+    fn debug_json_variant() {
+        let json_err = serde_json::from_str::<String>("{{bad").unwrap_err();
+        let err = TailscaleError::Json(json_err);
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Json"));
+    }
+
+    #[test]
+    fn debug_crypto_variant() {
+        let crypto_err = fcp_crypto::CryptoError::SignatureVerificationFailed;
+        let err = TailscaleError::Crypto(crypto_err);
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Crypto"));
+    }
+
+    // --- Error trait (dyn std::error::Error) for all variants ---
+
+    #[test]
+    fn error_trait_invalid_tag() {
+        let err = TailscaleError::InvalidTag("x".into());
+        let _dyn_err: &dyn std::error::Error = &err;
+        assert!(_dyn_err.to_string().contains("x"));
+    }
+
+    #[test]
+    fn error_trait_unit_variants() {
+        let variants: Vec<TailscaleError> = vec![
+            TailscaleError::NotConnected,
+            TailscaleError::InvalidAttestation,
+            TailscaleError::AttestationExpired,
+        ];
+        for v in &variants {
+            let dyn_err: &dyn std::error::Error = v;
+            assert!(!dyn_err.to_string().is_empty());
+        }
+    }
+
+    #[test]
+    fn error_trait_string_variants() {
+        let variants: Vec<TailscaleError> = vec![
+            TailscaleError::InvalidZoneId("z".into()),
+            TailscaleError::NotFcpTag("t".into()),
+            TailscaleError::LocalApiRequest("r".into()),
+            TailscaleError::LocalApiError("e".into()),
+            TailscaleError::ParseError("p".into()),
+            TailscaleError::PeerNotFound("peer".into()),
+        ];
+        for v in &variants {
+            let dyn_err: &dyn std::error::Error = v;
+            assert!(!dyn_err.to_string().is_empty());
+        }
+    }
+
+    // --- TailscaleResult Ok and Err ---
+
+    #[test]
+    fn tailscale_result_ok() {
+        let result: TailscaleResult<u32> = Ok(42);
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    #[test]
+    fn tailscale_result_err() {
+        let result: TailscaleResult<u32> = Err(TailscaleError::NotConnected);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), TailscaleError::NotConnected));
+    }
+
+    // --- From<std::io::Error> with different ErrorKind values ---
+
+    #[test]
+    fn from_io_permission_denied() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let err: TailscaleError = io_err.into();
+        assert!(matches!(err, TailscaleError::Io(_)));
+        assert!(err.to_string().contains("denied"));
+    }
+
+    #[test]
+    fn from_io_connection_refused() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "refused");
+        let err: TailscaleError = io_err.into();
+        assert!(matches!(err, TailscaleError::Io(_)));
+        assert!(err.to_string().contains("refused"));
+    }
+
+    #[test]
+    fn from_io_timed_out() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::TimedOut, "timed out");
+        let err: TailscaleError = io_err.into();
+        assert!(matches!(err, TailscaleError::Io(_)));
+    }
+
+    // --- From<serde_json::Error> verify matches! pattern ---
+
+    #[test]
+    fn from_json_matches_pattern() {
+        let json_err = serde_json::from_str::<Vec<u8>>("not json").unwrap_err();
+        let err: TailscaleError = json_err.into();
+        assert!(matches!(err, TailscaleError::Json(_)));
+    }
+
+    // --- From<CryptoError> ---
+
+    #[test]
+    fn from_crypto_error() {
+        let crypto_err = fcp_crypto::CryptoError::InvalidKeyLength {
+            expected: 32,
+            actual: 16,
+        };
+        let err: TailscaleError = crypto_err.into();
+        assert!(matches!(err, TailscaleError::Crypto(_)));
+        assert!(err.to_string().contains("crypto error"));
+    }
+
+    // --- source() returns Some for wrapper variants, None for unit variants ---
+
+    #[test]
+    fn source_none_for_unit_variants() {
+        use std::error::Error;
+        let variants: Vec<TailscaleError> = vec![
+            TailscaleError::InvalidTag("x".into()),
+            TailscaleError::InvalidZoneId("x".into()),
+            TailscaleError::NotFcpTag("x".into()),
+            TailscaleError::LocalApiRequest("x".into()),
+            TailscaleError::LocalApiError("x".into()),
+            TailscaleError::ParseError("x".into()),
+            TailscaleError::NotConnected,
+            TailscaleError::PeerNotFound("x".into()),
+            TailscaleError::InvalidAttestation,
+            TailscaleError::AttestationExpired,
+        ];
+        for v in &variants {
+            assert!(
+                v.source().is_none(),
+                "expected source() == None for {:?}",
+                v
+            );
+        }
+    }
+
+    #[test]
+    fn source_some_for_io() {
+        use std::error::Error;
+        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "inner");
+        let err = TailscaleError::Io(io_err);
+        assert!(err.source().is_some());
+    }
+
+    #[test]
+    fn source_some_for_json() {
+        use std::error::Error;
+        let json_err = serde_json::from_str::<String>("bad").unwrap_err();
+        let err = TailscaleError::Json(json_err);
+        assert!(err.source().is_some());
+    }
+
+    #[test]
+    fn source_some_for_crypto() {
+        use std::error::Error;
+        let crypto_err = fcp_crypto::CryptoError::AeadEncryptFailed;
+        let err = TailscaleError::Crypto(crypto_err);
+        assert!(err.source().is_some());
+    }
 }

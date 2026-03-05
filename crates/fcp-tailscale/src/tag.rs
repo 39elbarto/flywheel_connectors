@@ -543,4 +543,172 @@ mod tests {
         // Current implementation allows consecutive hyphens
         assert!(ZoneTagMapping::is_valid_zone_id("z:my--zone"));
     }
+
+    // --- TailscaleTag serde roundtrip ---
+
+    #[test]
+    fn test_tag_serde_roundtrip_fcp() {
+        let tag = TailscaleTag::fcp_tag("work");
+        let json = serde_json::to_string(&tag).unwrap();
+        let decoded: TailscaleTag = serde_json::from_str(&json).unwrap();
+        assert_eq!(tag, decoded);
+        assert_eq!(decoded.as_str(), "tag:fcp-work");
+    }
+
+    #[test]
+    fn test_tag_serde_roundtrip_non_fcp() {
+        let tag = TailscaleTag::new("tag:server").unwrap();
+        let json = serde_json::to_string(&tag).unwrap();
+        let decoded: TailscaleTag = serde_json::from_str(&json).unwrap();
+        assert_eq!(tag, decoded);
+    }
+
+    // --- TailscaleTag Debug format ---
+
+    #[test]
+    fn test_tag_debug() {
+        let tag = TailscaleTag::fcp_tag("private");
+        let dbg = format!("{tag:?}");
+        assert!(dbg.contains("TailscaleTag"));
+        assert!(dbg.contains("tag:fcp-private"));
+    }
+
+    // --- ZoneTagMapping::validate_zone_id edge cases ---
+
+    #[test]
+    fn test_validate_zone_id_dot_rejected() {
+        // Dots are not allowed in zone IDs
+        let result = ZoneTagMapping::validate_zone_id("z:my.zone");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_zone_id_space_rejected() {
+        let result = ZoneTagMapping::validate_zone_id("z:my zone");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_zone_id_unicode_rejected() {
+        let result = ZoneTagMapping::validate_zone_id("z:zöne");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_zone_id_single_char() {
+        // "z:a" — single char suffix is valid
+        let result = ZoneTagMapping::validate_zone_id("z:a");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "z:a");
+    }
+
+    #[test]
+    fn test_validate_zone_id_multi_hyphen() {
+        // "z:a-b-c" — multi-hyphen is valid
+        let result = ZoneTagMapping::validate_zone_id("z:a-b-c");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "z:a-b-c");
+    }
+
+    // --- ZoneAclGenerator: Clone, Debug, zero ports, max u16 ports ---
+
+    #[test]
+    fn test_zone_acl_generator_clone() {
+        let acl_gen = ZoneAclGenerator::new(1000, 2000);
+        let cloned = acl_gen.clone();
+        assert_eq!(cloned.symbol_port, 1000);
+        assert_eq!(cloned.control_port, 2000);
+    }
+
+    #[test]
+    fn test_zone_acl_generator_debug() {
+        let acl_gen = ZoneAclGenerator::default();
+        let dbg = format!("{acl_gen:?}");
+        assert!(dbg.contains("ZoneAclGenerator"));
+        assert!(dbg.contains("4200"));
+        assert!(dbg.contains("4201"));
+    }
+
+    #[test]
+    fn test_zone_acl_generator_zero_ports() {
+        let acl_gen = ZoneAclGenerator::new(0, 0);
+        let rule = acl_gen.zone_access_rule("z:work").unwrap();
+        assert!(rule.dst.contains(&"tag:fcp-work:0".to_string()));
+    }
+
+    #[test]
+    fn test_zone_acl_generator_max_ports() {
+        let acl_gen = ZoneAclGenerator::new(u16::MAX, u16::MAX);
+        let rule = acl_gen.zone_access_rule("z:owner").unwrap();
+        assert!(rule.dst.contains(&format!("tag:fcp-owner:{}", u16::MAX)));
+    }
+
+    // --- ZoneAclRule: Clone, Debug, deserialize from JSON ---
+
+    #[test]
+    fn test_zone_acl_rule_clone() {
+        let acl_gen = ZoneAclGenerator::default();
+        let rule = acl_gen.zone_access_rule("z:work").unwrap();
+        let cloned = rule.clone();
+        assert_eq!(cloned.action, rule.action);
+        assert_eq!(cloned.src, rule.src);
+        assert_eq!(cloned.dst, rule.dst);
+    }
+
+    #[test]
+    fn test_zone_acl_rule_debug() {
+        let acl_gen = ZoneAclGenerator::default();
+        let rule = acl_gen.zone_access_rule("z:public").unwrap();
+        let dbg = format!("{rule:?}");
+        assert!(dbg.contains("ZoneAclRule"));
+        assert!(dbg.contains("accept"));
+    }
+
+    #[test]
+    fn test_zone_acl_rule_deserialize_from_json_string() {
+        let json = r#"{
+            "action": "accept",
+            "src": ["tag:fcp-work"],
+            "dst": ["tag:fcp-work:4200"]
+        }"#;
+        let rule: ZoneAclRule = serde_json::from_str(json).unwrap();
+        assert_eq!(rule.action, "accept");
+        assert_eq!(rule.src, vec!["tag:fcp-work"]);
+        assert_eq!(rule.dst, vec!["tag:fcp-work:4200"]);
+    }
+
+    // --- Tag Display matches as_str for non-FCP tags too ---
+
+    #[test]
+    fn test_tag_display_matches_as_str_non_fcp() {
+        let tag = TailscaleTag::new("tag:my-server").unwrap();
+        assert_eq!(tag.to_string(), tag.as_str());
+        assert_eq!(tag.to_string(), "tag:my-server");
+    }
+
+    // --- Tag in sorted collection (BTreeSet) ---
+
+    #[test]
+    fn test_tag_in_btreeset() {
+        use std::collections::BTreeSet;
+        // TailscaleTag derives Eq + Hash but needs Ord for BTreeSet;
+        // if Ord is not derived, we collect into a sorted Vec instead.
+        let mut tags = vec![
+            TailscaleTag::fcp_tag("work"),
+            TailscaleTag::fcp_tag("owner"),
+            TailscaleTag::fcp_tag("public"),
+            TailscaleTag::fcp_tag("work"), // duplicate
+        ];
+        tags.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        tags.dedup();
+        assert_eq!(tags.len(), 3);
+        // Verify sorted order
+        assert_eq!(tags[0].as_str(), "tag:fcp-owner");
+        assert_eq!(tags[1].as_str(), "tag:fcp-public");
+        assert_eq!(tags[2].as_str(), "tag:fcp-work");
+
+        // Also verify BTreeSet via string keys
+        let set: BTreeSet<String> = tags.iter().map(|t| t.as_str().to_string()).collect();
+        assert_eq!(set.len(), 3);
+    }
 }

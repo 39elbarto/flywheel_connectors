@@ -550,8 +550,7 @@ mod tests {
     #[test]
     fn stripe_result_err() {
         let r: StripeResult<u32> = Err(StripeError::Unauthorized);
-        assert!(r.is_err());
-        assert!(matches!(r.unwrap_err(), StripeError::Unauthorized));
+        assert!(matches!(r, Err(StripeError::Unauthorized)));
     }
 
     // --- Api with error_type preserved ---
@@ -591,9 +590,7 @@ mod tests {
 
     #[test]
     fn retry_after_zero_ms() {
-        let err = StripeError::RateLimited {
-            retry_after_ms: 0,
-        };
+        let err = StripeError::RateLimited { retry_after_ms: 0 };
         assert_eq!(err.retry_after(), Some(Duration::from_millis(0)));
     }
 

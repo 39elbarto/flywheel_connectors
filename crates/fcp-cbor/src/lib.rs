@@ -1474,4 +1474,551 @@ mod tests {
             CanonicalSerializer::deserialize::<HashMap<String, u8>>(&bytes, &schema).unwrap_err();
         assert!(matches!(err, SerializationError::NonCanonicalEncoding));
     }
+
+    // ============================================================================
+    // NEW TESTS: SchemaId derive-trait and edge-case coverage
+    // ============================================================================
+
+    #[test]
+    fn schema_id_hash_in_hashset() {
+        use std::collections::HashSet;
+        let s1 = SchemaId::new("fcp.core", "Token", Version::new(1, 0, 0));
+        let s2 = SchemaId::new("fcp.core", "Token", Version::new(1, 0, 0));
+        let s3 = SchemaId::new("fcp.core", "Token", Version::new(2, 0, 0));
+
+        let mut set = HashSet::new();
+        set.insert(s1);
+        set.insert(s2); // duplicate, should not increase size
+        set.insert(s3);
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn schema_id_debug_contains_fields() {
+        let schema = SchemaId::new("fcp.mesh", "Gossip", Version::new(3, 1, 4));
+        let debug = format!("{schema:?}");
+        assert!(debug.contains("fcp.mesh"));
+        assert!(debug.contains("Gossip"));
+        // Version Debug may wrap the value; just check the components are present.
+        assert!(debug.contains("3"));
+        assert!(debug.contains("1"));
+        assert!(debug.contains("4"));
+    }
+
+    #[test]
+    fn schema_id_display_canonical_format() {
+        let schema = SchemaId::new("fcp.core", "Capability", Version::new(1, 0, 0));
+        // SchemaId does not impl Display, but as_bytes encodes the canonical string.
+        let canonical = String::from_utf8(schema.as_bytes()).unwrap();
+        assert_eq!(canonical, "fcp.core:Capability@1.0.0");
+    }
+
+    #[test]
+    fn schema_id_as_bytes_with_unicode() {
+        let schema = SchemaId::new("名前空間", "タイプ", Version::new(0, 0, 1));
+        let bytes = schema.as_bytes();
+        let s = String::from_utf8(bytes).unwrap();
+        assert_eq!(s, "名前空間:タイプ@0.0.1");
+        // Hash should still be 32 bytes and deterministic.
+        let h1 = schema.hash();
+        let h2 = schema.hash();
+        assert_eq!(h1, h2);
+        assert_eq!(h1.as_bytes().len(), 32);
+    }
+
+    #[test]
+    fn schema_id_as_bytes_with_special_chars() {
+        let schema = SchemaId::new("ns/with.dots-and_stuff", "Type<T>", Version::new(0, 0, 0));
+        let canonical = String::from_utf8(schema.as_bytes()).unwrap();
+        assert_eq!(canonical, "ns/with.dots-and_stuff:Type<T>@0.0.0");
+    }
+
+    #[test]
+    fn schema_id_serde_cbor_roundtrip() {
+        let schema = SchemaId::new("fcp.protocol", "Envelope", Version::new(2, 3, 0));
+        let cbor_bytes = to_canonical_cbor(&schema).unwrap();
+        let decoded: SchemaId = ciborium::de::from_reader(cbor_bytes.as_slice()).unwrap();
+        assert_eq!(decoded, schema);
+    }
+
+    #[test]
+    fn schema_id_hash_determinism_across_clones() {
+        let original = SchemaId::new("fcp.sdk", "Runtime", Version::new(1, 0, 0));
+        let cloned = original.clone();
+        // Hash of original and clone must be identical.
+        assert_eq!(original.hash(), cloned.hash());
+        // And the raw bytes must match too.
+        assert_eq!(original.hash().as_bytes(), cloned.hash().as_bytes());
+    }
+
+    // ============================================================================
+    // NEW TESTS: SchemaHash derive-trait and edge-case coverage
+    // ============================================================================
+
+    #[test]
+    fn schema_hash_copy_trait() {
+        let hash = SchemaHash::from_bytes([0xAB; 32]);
+        let copied = hash; // Copy, not move
+        // Both should still be usable (Copy semantics).
+        assert_eq!(hash, copied);
+        assert_eq!(hash.as_bytes(), copied.as_bytes());
+    }
+
+    #[test]
+    fn schema_hash_from_bytes_all_zeros() {
+        let hash = SchemaHash::from_bytes([0x00; 32]);
+        assert_eq!(hash.as_bytes(), &[0x00; 32]);
+        assert_eq!(
+            hash.to_string(),
+            "0000000000000000000000000000000000000000000000000000000000000000"
+        );
+    }
+
+    #[test]
+    fn schema_hash_from_bytes_all_ff() {
+        let hash = SchemaHash::from_bytes([0xFF; 32]);
+        assert_eq!(hash.as_bytes(), &[0xFF; 32]);
+        assert_eq!(
+            hash.to_string(),
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        );
+    }
+
+    #[test]
+    fn schema_hash_display_is_lowercase_hex() {
+        let mut bytes = [0u8; 32];
+        bytes[0] = 0xDE;
+        bytes[1] = 0xAD;
+        bytes[30] = 0xBE;
+        bytes[31] = 0xEF;
+        let hash = SchemaHash::from_bytes(bytes);
+        let display = hash.to_string();
+        assert_eq!(display.len(), 64);
+        assert!(display.starts_with("dead"));
+        assert!(display.ends_with("beef"));
+        // Must be lowercase hex only.
+        assert!(display.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(!display.chars().any(|c| c.is_ascii_uppercase()));
+    }
+
+    #[test]
+    fn schema_hash_serde_json_roundtrip() {
+        let schema = SchemaId::new("fcp.test", "SerdeHash", Version::new(1, 0, 0));
+        let hash = schema.hash();
+        let json = serde_json::to_string(&hash).unwrap();
+        let decoded: SchemaHash = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, hash);
+    }
+
+    #[test]
+    fn schema_hash_eq_reflexive_and_symmetric() {
+        let a = SchemaHash::from_bytes([0x42; 32]);
+        let b = SchemaHash::from_bytes([0x42; 32]);
+        let c = SchemaHash::from_bytes([0x43; 32]);
+        // Reflexive.
+        assert_eq!(a, a);
+        // Symmetric.
+        assert_eq!(a, b);
+        assert_eq!(b, a);
+        // Not equal to different.
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn schema_hash_in_hashset() {
+        use std::collections::HashSet;
+        let h1 = SchemaHash::from_bytes([0x01; 32]);
+        let h2 = SchemaHash::from_bytes([0x01; 32]);
+        let h3 = SchemaHash::from_bytes([0x02; 32]);
+        let mut set = HashSet::new();
+        set.insert(h1);
+        set.insert(h2); // duplicate
+        set.insert(h3);
+        assert_eq!(set.len(), 2);
+    }
+
+    // ============================================================================
+    // NEW TESTS: SerializationError trait coverage
+    // ============================================================================
+
+    #[test]
+    fn error_debug_all_variants() {
+        // Verify Debug is implemented for all variants.
+        let errors: Vec<SerializationError> = vec![
+            SerializationError::MissingSchemaHashPrefix,
+            SerializationError::SchemaMismatch {
+                expected: SchemaHash::from_bytes([0; 32]),
+                got: SchemaHash::from_bytes([1; 32]),
+            },
+            SerializationError::PayloadTooLarge { len: 100, max: 50 },
+            SerializationError::TrailingBytes,
+            SerializationError::NonCanonicalEncoding,
+            SerializationError::DuplicateMapKey {
+                key_hex: "deadbeef".to_string(),
+            },
+        ];
+        for err in &errors {
+            let debug = format!("{err:?}");
+            assert!(!debug.is_empty());
+        }
+    }
+
+    #[test]
+    fn error_implements_std_error_trait() {
+        // Verify std::error::Error is implemented.
+        let err: Box<dyn std::error::Error> =
+            Box::new(SerializationError::MissingSchemaHashPrefix);
+        // source() should be None for non-wrapping variants.
+        assert!(err.source().is_none());
+        // Display should work through the Error trait.
+        assert_eq!(
+            err.to_string(),
+            "payload missing schema hash prefix"
+        );
+    }
+
+    #[test]
+    fn error_schema_mismatch_display_shows_both_hashes() {
+        let expected = SchemaHash::from_bytes([0x11; 32]);
+        let got = SchemaHash::from_bytes([0x22; 32]);
+        let err = SerializationError::SchemaMismatch { expected, got };
+        let msg = err.to_string();
+        // Both hex strings should appear in the message.
+        assert!(msg.contains(&expected.to_string()));
+        assert!(msg.contains(&got.to_string()));
+    }
+
+    #[test]
+    fn error_from_cbor_serialize() {
+        // Trigger a CborSerialize error via the From impl.
+        // A cyclic/infinite structure isn't easy, but we can verify the variant exists
+        // by constructing the error path: serialize something that exceeds depth.
+        // Instead, just check the Display of PayloadTooLarge with boundary values.
+        let err = SerializationError::PayloadTooLarge {
+            len: MAX_CANONICAL_OBJECT_BYTES + 1,
+            max: MAX_CANONICAL_OBJECT_BYTES,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("67108865")); // MAX + 1
+        assert!(msg.contains("67108864")); // MAX
+    }
+
+    // ============================================================================
+    // NEW TESTS: Constants verification
+    // ============================================================================
+
+    #[test]
+    fn max_canonical_object_bytes_is_64_mib() {
+        assert_eq!(MAX_CANONICAL_OBJECT_BYTES, 64 * 1024 * 1024);
+        assert_eq!(MAX_CANONICAL_OBJECT_BYTES, 67_108_864);
+    }
+
+    #[test]
+    fn schema_hash_len_is_32() {
+        assert_eq!(SCHEMA_HASH_LEN, 32);
+    }
+
+    // ============================================================================
+    // NEW TESTS: to_canonical_cbor with various types
+    // ============================================================================
+
+    #[test]
+    fn to_canonical_cbor_with_empty_struct() {
+        #[derive(Serialize)]
+        struct Unit;
+
+        let bytes = to_canonical_cbor(&Unit).unwrap();
+        // CBOR null = 0xF6.
+        assert_eq!(bytes, vec![0xF6]);
+    }
+
+    #[test]
+    fn to_canonical_cbor_with_nested_structs() {
+        #[derive(Serialize)]
+        struct Inner {
+            x: u32,
+        }
+        #[derive(Serialize)]
+        struct Middle {
+            inner: Inner,
+            tag: String,
+        }
+        #[derive(Serialize)]
+        struct Outer {
+            middle: Middle,
+            count: u64,
+        }
+
+        let val = Outer {
+            middle: Middle {
+                inner: Inner { x: 99 },
+                tag: "deep".to_string(),
+            },
+            count: 7,
+        };
+
+        let bytes1 = to_canonical_cbor(&val).unwrap();
+        let bytes2 = to_canonical_cbor(&val).unwrap();
+        assert_eq!(bytes1, bytes2);
+        // Should decode as a CBOR map.
+        let raw: Value = ciborium::de::from_reader(bytes1.as_slice()).unwrap();
+        assert!(matches!(raw, Value::Map(_)));
+    }
+
+    #[test]
+    fn to_canonical_cbor_with_option_some_and_none() {
+        let some_val: Option<u32> = Some(42);
+        let none_val: Option<u32> = None;
+
+        let some_bytes = to_canonical_cbor(&some_val).unwrap();
+        let none_bytes = to_canonical_cbor(&none_val).unwrap();
+
+        // They should be different.
+        assert_ne!(some_bytes, none_bytes);
+        // None encodes as CBOR null.
+        assert_eq!(none_bytes, vec![0xF6]);
+    }
+
+    #[test]
+    fn to_canonical_cbor_with_vec_of_strings() {
+        let data = vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()];
+        let bytes = to_canonical_cbor(&data).unwrap();
+        let decoded: Vec<String> = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn to_canonical_cbor_btreemap_deterministic_key_order() {
+        use std::collections::BTreeMap;
+
+        let mut map = BTreeMap::new();
+        map.insert("zebra".to_string(), 1);
+        map.insert("ant".to_string(), 2);
+        map.insert("bee".to_string(), 3);
+        map.insert("caterpillar".to_string(), 4);
+
+        let bytes = to_canonical_cbor(&map).unwrap();
+
+        // Decode raw CBOR and check key order: length-first, then lexicographic.
+        let raw: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        if let Value::Map(entries) = raw {
+            let keys: Vec<&str> = entries
+                .iter()
+                .filter_map(|(k, _)| {
+                    if let Value::Text(s) = k {
+                        Some(s.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            // "ant" (3), "bee" (3), "zebra" (5), "caterpillar" (11)
+            // Within same length: lexicographic.
+            assert_eq!(keys, vec!["ant", "bee", "zebra", "caterpillar"]);
+        } else {
+            panic!("Expected map");
+        }
+    }
+
+    // ============================================================================
+    // NEW TESTS: CanonicalSerializer roundtrip with complex types
+    // ============================================================================
+
+    #[test]
+    fn roundtrip_struct_with_btreemap() {
+        use std::collections::BTreeMap;
+
+        #[derive(Debug, PartialEq, Serialize, Deserialize)]
+        struct Config {
+            settings: BTreeMap<String, String>,
+            version: u32,
+        }
+
+        let schema = SchemaId::new("fcp.test", "Config", Version::new(0, 1, 0));
+        let mut settings = BTreeMap::new();
+        settings.insert("key_z".to_string(), "value_z".to_string());
+        settings.insert("key_a".to_string(), "value_a".to_string());
+        settings.insert("key_m".to_string(), "value_m".to_string());
+
+        let value = Config {
+            settings,
+            version: 42,
+        };
+
+        let bytes = CanonicalSerializer::serialize(&value, &schema).unwrap();
+        let decoded: Config = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert_eq!(decoded, value);
+    }
+
+    #[test]
+    fn roundtrip_vec_of_optional_structs() {
+        #[derive(Debug, PartialEq, Serialize, Deserialize)]
+        struct Item {
+            id: u32,
+            label: Option<String>,
+        }
+
+        let schema = SchemaId::new("fcp.test", "Items", Version::new(0, 1, 0));
+        let items = vec![
+            Item {
+                id: 1,
+                label: Some("first".to_string()),
+            },
+            Item {
+                id: 2,
+                label: None,
+            },
+            Item {
+                id: 3,
+                label: Some("third".to_string()),
+            },
+        ];
+
+        let bytes = CanonicalSerializer::serialize(&items, &schema).unwrap();
+        let decoded: Vec<Item> = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert_eq!(decoded, items);
+    }
+
+    #[test]
+    fn roundtrip_enum_with_tuple_variant() {
+        #[derive(Debug, PartialEq, Serialize, Deserialize)]
+        enum Message {
+            Text(String),
+            Binary(Vec<u8>),
+            Pair(u32, u32),
+        }
+
+        let schema = SchemaId::new("fcp.test", "Message", Version::new(0, 1, 0));
+
+        let variants = vec![
+            Message::Text("hello".to_string()),
+            Message::Binary(vec![0xDE, 0xAD]),
+            Message::Pair(10, 20),
+        ];
+
+        for msg in &variants {
+            let bytes = CanonicalSerializer::serialize(msg, &schema).unwrap();
+            let decoded: Message = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+            assert_eq!(&decoded, msg);
+        }
+    }
+
+    #[test]
+    fn schema_hash_consistency_across_serializations() {
+        // The schema hash prefix in serialized output must always be the same
+        // for the same SchemaId, regardless of payload content.
+        let schema = SchemaId::new("fcp.test", "Consistency", Version::new(1, 0, 0));
+        let expected_hash = schema.hash();
+
+        let bytes_a = CanonicalSerializer::serialize(&42_u64, &schema).unwrap();
+        let bytes_b = CanonicalSerializer::serialize(&"hello", &schema).unwrap();
+        let bytes_c = CanonicalSerializer::serialize(&true, &schema).unwrap();
+
+        assert_eq!(&bytes_a[..SCHEMA_HASH_LEN], expected_hash.as_bytes());
+        assert_eq!(&bytes_b[..SCHEMA_HASH_LEN], expected_hash.as_bytes());
+        assert_eq!(&bytes_c[..SCHEMA_HASH_LEN], expected_hash.as_bytes());
+    }
+
+    #[test]
+    fn roundtrip_nested_maps() {
+        let schema = SchemaId::new("fcp.test", "NestedMap", Version::new(0, 1, 0));
+
+        let mut inner1 = HashMap::new();
+        inner1.insert("x".to_string(), 1_i32);
+        inner1.insert("y".to_string(), 2);
+
+        let mut inner2 = HashMap::new();
+        inner2.insert("a".to_string(), 10);
+
+        let mut outer = HashMap::new();
+        outer.insert("first".to_string(), inner1);
+        outer.insert("second".to_string(), inner2);
+
+        let bytes = CanonicalSerializer::serialize(&outer, &schema).unwrap();
+        let decoded: HashMap<String, HashMap<String, i32>> =
+            CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert_eq!(decoded, outer);
+    }
+
+    #[test]
+    fn roundtrip_large_array() {
+        let schema = SchemaId::new("fcp.test", "LargeArray", Version::new(0, 1, 0));
+        let data: Vec<u32> = (0..1000).collect();
+        let bytes = CanonicalSerializer::serialize(&data, &schema).unwrap();
+        let decoded: Vec<u32> = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert_eq!(decoded, data);
+    }
+
+    // ============================================================================
+    // NEW TESTS: SchemaId Display impl
+    // ============================================================================
+
+    #[test]
+    fn schema_id_as_bytes_encodes_prerelease_version() {
+        let schema = SchemaId::new(
+            "fcp.store",
+            "Repair",
+            Version::parse("0.5.2-rc.1").unwrap(),
+        );
+        let canonical = String::from_utf8(schema.as_bytes()).unwrap();
+        assert_eq!(canonical, "fcp.store:Repair@0.5.2-rc.1");
+    }
+
+    // ============================================================================
+    // NEW TESTS: to_canonical_cbor oversized rejection
+    // ============================================================================
+
+    #[test]
+    fn to_canonical_cbor_rejects_oversized() {
+        let huge: Vec<u8> = vec![0u8; MAX_CANONICAL_OBJECT_BYTES + 1];
+        let err = to_canonical_cbor(&huge).unwrap_err();
+        assert!(matches!(err, SerializationError::PayloadTooLarge { .. }));
+    }
+
+    // ============================================================================
+    // NEW TESTS: Canonical encoding — map with mixed-length keys
+    // ============================================================================
+
+    #[test]
+    fn canonical_cbor_map_mixed_key_lengths() {
+        use std::collections::BTreeMap;
+
+        let mut map = BTreeMap::new();
+        map.insert("a".to_string(), 1);
+        map.insert("bb".to_string(), 2);
+        map.insert("c".to_string(), 3);
+        map.insert("dd".to_string(), 4);
+
+        let bytes = to_canonical_cbor(&map).unwrap();
+        let raw: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        if let Value::Map(entries) = raw {
+            let keys: Vec<&str> = entries
+                .iter()
+                .filter_map(|(k, _)| {
+                    if let Value::Text(s) = k {
+                        Some(s.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            // Length 1: "a", "c" (lex order); Length 2: "bb", "dd" (lex order).
+            assert_eq!(keys, vec!["a", "c", "bb", "dd"]);
+        } else {
+            panic!("Expected map");
+        }
+    }
+
+    #[test]
+    fn schema_hash_from_to_bytes_identity() {
+        // Arbitrary non-trivial bytes.
+        let original: [u8; 32] = [
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54,
+            0x32, 0x10, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB,
+            0xCC, 0xDD, 0xEE, 0xFF,
+        ];
+        let hash = SchemaHash::from_bytes(original);
+        let extracted = *hash.as_bytes();
+        assert_eq!(extracted, original);
+    }
 }

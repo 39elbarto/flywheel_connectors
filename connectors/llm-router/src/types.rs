@@ -478,4 +478,499 @@ mod tests {
         assert_eq!(json["auth_ok"], true);
         assert_eq!(json["model_count"], 2);
     }
+
+    // ---- RoutingStrategy: Clone, Copy, PartialEq, Eq, Debug ----
+
+    #[test]
+    fn routing_strategy_clone() {
+        let original = RoutingStrategy::Latency;
+        let cloned = original.clone();
+        assert_eq!(original, cloned);
+    }
+
+    #[test]
+    fn routing_strategy_copy() {
+        let a = RoutingStrategy::Capability;
+        let b = a; // Copy, not move
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn routing_strategy_eq_all_variants() {
+        assert_eq!(RoutingStrategy::Cost, RoutingStrategy::Cost);
+        assert_eq!(RoutingStrategy::Latency, RoutingStrategy::Latency);
+        assert_eq!(RoutingStrategy::Capability, RoutingStrategy::Capability);
+        assert_eq!(RoutingStrategy::Fallback, RoutingStrategy::Fallback);
+        assert_ne!(RoutingStrategy::Cost, RoutingStrategy::Latency);
+        assert_ne!(RoutingStrategy::Capability, RoutingStrategy::Fallback);
+    }
+
+    #[test]
+    fn routing_strategy_debug() {
+        assert_eq!(format!("{:?}", RoutingStrategy::Cost), "Cost");
+        assert_eq!(format!("{:?}", RoutingStrategy::Latency), "Latency");
+        assert_eq!(format!("{:?}", RoutingStrategy::Capability), "Capability");
+        assert_eq!(format!("{:?}", RoutingStrategy::Fallback), "Fallback");
+    }
+
+    // ---- ProviderStatus: Clone, Copy, PartialEq, Eq, Debug, deserialize ----
+
+    #[test]
+    fn provider_status_clone() {
+        let original = ProviderStatus::Degraded;
+        let cloned = original.clone();
+        assert_eq!(original, cloned);
+    }
+
+    #[test]
+    fn provider_status_copy() {
+        let a = ProviderStatus::Healthy;
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn provider_status_eq_and_ne() {
+        assert_eq!(ProviderStatus::Healthy, ProviderStatus::Healthy);
+        assert_ne!(ProviderStatus::Healthy, ProviderStatus::Degraded);
+        assert_ne!(ProviderStatus::Degraded, ProviderStatus::Unavailable);
+    }
+
+    #[test]
+    fn provider_status_debug() {
+        assert_eq!(format!("{:?}", ProviderStatus::Healthy), "Healthy");
+        assert_eq!(format!("{:?}", ProviderStatus::Degraded), "Degraded");
+        assert_eq!(
+            format!("{:?}", ProviderStatus::Unavailable),
+            "Unavailable"
+        );
+    }
+
+    #[test]
+    fn provider_status_deserialize_from_lowercase() {
+        let h: ProviderStatus = serde_json::from_str("\"healthy\"").unwrap();
+        assert_eq!(h, ProviderStatus::Healthy);
+        let d: ProviderStatus = serde_json::from_str("\"degraded\"").unwrap();
+        assert_eq!(d, ProviderStatus::Degraded);
+        let u: ProviderStatus = serde_json::from_str("\"unavailable\"").unwrap();
+        assert_eq!(u, ProviderStatus::Unavailable);
+    }
+
+    // ---- ModelCapability: Clone, Copy, Hash, Debug, Eq, deserialize ----
+
+    #[test]
+    fn model_capability_clone() {
+        let original = ModelCapability::Vision;
+        let cloned = original.clone();
+        assert_eq!(original, cloned);
+    }
+
+    #[test]
+    fn model_capability_copy() {
+        let a = ModelCapability::Code;
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn model_capability_hash_in_hashset() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(ModelCapability::Vision);
+        set.insert(ModelCapability::Code);
+        set.insert(ModelCapability::Vision); // duplicate
+        assert_eq!(set.len(), 2);
+        assert!(set.contains(&ModelCapability::Vision));
+        assert!(set.contains(&ModelCapability::Code));
+        assert!(!set.contains(&ModelCapability::Math));
+    }
+
+    #[test]
+    fn model_capability_debug() {
+        assert_eq!(format!("{:?}", ModelCapability::Vision), "Vision");
+        assert_eq!(format!("{:?}", ModelCapability::ToolUse), "ToolUse");
+        assert_eq!(
+            format!("{:?}", ModelCapability::LongContext),
+            "LongContext"
+        );
+        assert_eq!(format!("{:?}", ModelCapability::Streaming), "Streaming");
+    }
+
+    #[test]
+    fn model_capability_eq() {
+        assert_eq!(ModelCapability::Math, ModelCapability::Math);
+        assert_ne!(ModelCapability::Math, ModelCapability::Code);
+    }
+
+    #[test]
+    fn model_capability_deserialize_snake_case() {
+        let tu: ModelCapability = serde_json::from_str("\"tool_use\"").unwrap();
+        assert_eq!(tu, ModelCapability::ToolUse);
+        let lc: ModelCapability =
+            serde_json::from_str("\"long_context\"").unwrap();
+        assert_eq!(lc, ModelCapability::LongContext);
+        let v: ModelCapability = serde_json::from_str("\"vision\"").unwrap();
+        assert_eq!(v, ModelCapability::Vision);
+    }
+
+    // ---- BudgetEnforcement: Clone, Copy, serialize lowercase, Debug ----
+
+    #[test]
+    fn budget_enforcement_clone() {
+        let original = BudgetEnforcement::Hard;
+        let cloned = original.clone();
+        assert_eq!(original, cloned);
+    }
+
+    #[test]
+    fn budget_enforcement_copy() {
+        let a = BudgetEnforcement::Soft;
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn budget_enforcement_serialize_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&BudgetEnforcement::Hard).unwrap(),
+            "\"hard\""
+        );
+        assert_eq!(
+            serde_json::to_string(&BudgetEnforcement::Soft).unwrap(),
+            "\"soft\""
+        );
+        assert_eq!(
+            serde_json::to_string(&BudgetEnforcement::None).unwrap(),
+            "\"none\""
+        );
+    }
+
+    #[test]
+    fn budget_enforcement_debug() {
+        assert_eq!(format!("{:?}", BudgetEnforcement::Hard), "Hard");
+        assert_eq!(format!("{:?}", BudgetEnforcement::Soft), "Soft");
+        assert_eq!(format!("{:?}", BudgetEnforcement::None), "None");
+    }
+
+    // ---- ProviderAuth: Clone, Debug, edge cases ----
+
+    #[test]
+    fn provider_auth_clone() {
+        let auth = ProviderAuth::ApiKey("sk-secret".into());
+        let cloned = auth.clone();
+        assert_eq!(cloned.redacted_label(), auth.redacted_label());
+    }
+
+    #[test]
+    fn provider_auth_debug_does_not_hide_key() {
+        // Debug derive shows internal data (not redacted)
+        let auth = ProviderAuth::ApiKey("sk-mysecretkey".into());
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("ApiKey"));
+    }
+
+    #[test]
+    fn provider_auth_redacted_label_exact_8_char_key() {
+        // Exactly 8 chars: not > 8, so should be masked
+        let auth = ProviderAuth::ApiKey("12345678".into());
+        assert_eq!(auth.redacted_label(), "api_key:****");
+    }
+
+    #[test]
+    fn provider_auth_redacted_label_9_char_key() {
+        // 9 chars: > 8, so should show first 4 and last 4
+        let auth = ProviderAuth::ApiKey("123456789".into());
+        assert_eq!(auth.redacted_label(), "api_key:1234...6789");
+    }
+
+    #[test]
+    fn provider_auth_redacted_label_empty_key() {
+        let auth = ProviderAuth::ApiKey(String::new());
+        assert_eq!(auth.redacted_label(), "api_key:****");
+    }
+
+    #[test]
+    fn provider_auth_redacted_label_empty_credential_id() {
+        let auth = ProviderAuth::CredentialId(String::new());
+        assert_eq!(auth.redacted_label(), "credential_id:");
+    }
+
+    // ---- ProviderConfig: Clone, Debug, empty models ----
+
+    #[test]
+    fn provider_config_clone() {
+        let config = ProviderConfig {
+            name: "openai".into(),
+            base_url: "https://api.openai.com".into(),
+            auth: ProviderAuth::ApiKey("sk-test-123456789".into()),
+            models: vec![],
+            priority: 1,
+        };
+        let cloned = config.clone();
+        assert_eq!(cloned.name, "openai");
+        assert_eq!(cloned.priority, 1);
+    }
+
+    #[test]
+    fn provider_config_debug() {
+        let config = ProviderConfig {
+            name: "anthropic".into(),
+            base_url: "https://api.anthropic.com".into(),
+            auth: ProviderAuth::CredentialId("cred-1".into()),
+            models: vec![],
+            priority: 2,
+        };
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("ProviderConfig"));
+        assert!(dbg.contains("anthropic"));
+        assert!(dbg.contains("priority: 2"));
+    }
+
+    #[test]
+    fn provider_config_empty_models() {
+        let config = ProviderConfig {
+            name: "test".into(),
+            base_url: "http://localhost".into(),
+            auth: ProviderAuth::ApiKey("key123456789".into()),
+            models: vec![],
+            priority: 0,
+        };
+        assert!(config.models.is_empty());
+        assert_eq!(config.priority, 0);
+    }
+
+    // ---- ProviderReadiness: Clone, Debug, all-false ----
+
+    #[test]
+    fn provider_readiness_clone() {
+        let readiness = ProviderReadiness {
+            name: "test".into(),
+            auth_ok: true,
+            auth_mode: "credential_id".into(),
+            network_ok: true,
+            models_ok: true,
+            model_count: 5,
+        };
+        let cloned = readiness.clone();
+        assert_eq!(cloned.name, "test");
+        assert_eq!(cloned.model_count, 5);
+    }
+
+    #[test]
+    fn provider_readiness_debug() {
+        let readiness = ProviderReadiness {
+            name: "openai".into(),
+            auth_ok: false,
+            auth_mode: "api_key".into(),
+            network_ok: true,
+            models_ok: false,
+            model_count: 0,
+        };
+        let dbg = format!("{readiness:?}");
+        assert!(dbg.contains("ProviderReadiness"));
+        assert!(dbg.contains("openai"));
+    }
+
+    #[test]
+    fn provider_readiness_all_false() {
+        let readiness = ProviderReadiness {
+            name: "broken".into(),
+            auth_ok: false,
+            auth_mode: "none".into(),
+            network_ok: false,
+            models_ok: false,
+            model_count: 0,
+        };
+        let json = serde_json::to_value(&readiness).unwrap();
+        assert_eq!(json["auth_ok"], false);
+        assert_eq!(json["network_ok"], false);
+        assert_eq!(json["models_ok"], false);
+        assert_eq!(json["model_count"], 0);
+    }
+
+    // ---- ModelInfo: Clone, Debug, empty capabilities, zero costs ----
+
+    #[test]
+    fn model_info_clone() {
+        let model = ModelInfo {
+            id: "claude-3".into(),
+            capabilities: vec![ModelCapability::Vision],
+            context_window: 200_000,
+            cost_per_input_token: 0.000003,
+            cost_per_output_token: 0.000015,
+        };
+        let cloned = model.clone();
+        assert_eq!(cloned.id, "claude-3");
+        assert_eq!(cloned.capabilities.len(), 1);
+    }
+
+    #[test]
+    fn model_info_debug() {
+        let model = ModelInfo {
+            id: "gpt-4".into(),
+            capabilities: vec![],
+            context_window: 8192,
+            cost_per_input_token: 0.00003,
+            cost_per_output_token: 0.00006,
+        };
+        let dbg = format!("{model:?}");
+        assert!(dbg.contains("ModelInfo"));
+        assert!(dbg.contains("gpt-4"));
+    }
+
+    #[test]
+    fn model_info_empty_capabilities() {
+        let model = ModelInfo {
+            id: "basic-model".into(),
+            capabilities: vec![],
+            context_window: 4096,
+            cost_per_input_token: 0.0001,
+            cost_per_output_token: 0.0002,
+        };
+        let json = serde_json::to_value(&model).unwrap();
+        assert_eq!(json["capabilities"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn model_info_zero_costs() {
+        let model = ModelInfo {
+            id: "free-model".into(),
+            capabilities: vec![ModelCapability::Code],
+            context_window: 2048,
+            cost_per_input_token: 0.0,
+            cost_per_output_token: 0.0,
+        };
+        assert_eq!(model.cost_per_input_token, 0.0);
+        assert_eq!(model.cost_per_output_token, 0.0);
+    }
+
+    // ---- BudgetConfig: Clone, Debug, custom values ----
+
+    #[test]
+    fn budget_config_clone() {
+        let config = BudgetConfig {
+            budget_usd: 50.0,
+            enforcement: BudgetEnforcement::Hard,
+            period: "monthly".into(),
+        };
+        let cloned = config.clone();
+        assert_eq!(cloned.budget_usd, 50.0);
+        assert_eq!(cloned.enforcement, BudgetEnforcement::Hard);
+        assert_eq!(cloned.period, "monthly");
+    }
+
+    #[test]
+    fn budget_config_debug() {
+        let config = BudgetConfig::default();
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("BudgetConfig"));
+        assert!(dbg.contains("session"));
+    }
+
+    #[test]
+    fn budget_config_custom_values() {
+        let config = BudgetConfig {
+            budget_usd: 1000.0,
+            enforcement: BudgetEnforcement::Soft,
+            period: "daily".into(),
+        };
+        assert_eq!(config.budget_usd, 1000.0);
+        assert_eq!(config.enforcement, BudgetEnforcement::Soft);
+        assert_eq!(config.period, "daily");
+    }
+
+    // ---- RoutingDecision: Clone, Debug, fallback_used true ----
+
+    #[test]
+    fn routing_decision_clone() {
+        let decision = RoutingDecision {
+            strategy_used: "latency".into(),
+            candidates_evaluated: 5,
+            fallback_used: false,
+            reason: "lowest p50".into(),
+        };
+        let cloned = decision.clone();
+        assert_eq!(cloned.strategy_used, "latency");
+        assert_eq!(cloned.candidates_evaluated, 5);
+    }
+
+    #[test]
+    fn routing_decision_debug() {
+        let decision = RoutingDecision {
+            strategy_used: "cost".into(),
+            candidates_evaluated: 2,
+            fallback_used: true,
+            reason: "primary failed".into(),
+        };
+        let dbg = format!("{decision:?}");
+        assert!(dbg.contains("RoutingDecision"));
+        assert!(dbg.contains("cost"));
+        assert!(dbg.contains("primary failed"));
+    }
+
+    #[test]
+    fn routing_decision_fallback_used_true() {
+        let decision = RoutingDecision {
+            strategy_used: "fallback".into(),
+            candidates_evaluated: 3,
+            fallback_used: true,
+            reason: "primary and secondary unavailable".into(),
+        };
+        let json = serde_json::to_value(&decision).unwrap();
+        assert_eq!(json["fallback_used"], true);
+        assert_eq!(json["strategy_used"], "fallback");
+        assert_eq!(json["candidates_evaluated"], 3);
+    }
+
+    // ---- ProviderUsage: Clone, Debug, accumulation ----
+
+    #[test]
+    fn provider_usage_clone() {
+        let mut usage = ProviderUsage::default();
+        usage.requests = 10;
+        usage.cost_usd = 0.5;
+        let cloned = usage.clone();
+        assert_eq!(cloned.requests, 10);
+        assert_eq!(cloned.cost_usd, 0.5);
+    }
+
+    #[test]
+    fn provider_usage_debug() {
+        let usage = ProviderUsage::default();
+        let dbg = format!("{usage:?}");
+        assert!(dbg.contains("ProviderUsage"));
+        assert!(dbg.contains("input_tokens: 0"));
+    }
+
+    #[test]
+    fn provider_usage_accumulation() {
+        let mut usage = ProviderUsage::default();
+
+        // Simulate 3 requests
+        usage.input_tokens += 1000;
+        usage.output_tokens += 500;
+        usage.cost_usd += 0.01;
+        usage.requests += 1;
+        usage.total_latency_ms += 200;
+
+        usage.input_tokens += 2000;
+        usage.output_tokens += 1000;
+        usage.cost_usd += 0.02;
+        usage.requests += 1;
+        usage.total_latency_ms += 150;
+
+        usage.input_tokens += 500;
+        usage.output_tokens += 250;
+        usage.cost_usd += 0.005;
+        usage.requests += 1;
+        usage.errors += 1;
+        usage.total_latency_ms += 5000; // slow/errored
+
+        assert_eq!(usage.input_tokens, 3500);
+        assert_eq!(usage.output_tokens, 1750);
+        assert!((usage.cost_usd - 0.035).abs() < 1e-10);
+        assert_eq!(usage.requests, 3);
+        assert_eq!(usage.errors, 1);
+        assert_eq!(usage.total_latency_ms, 5350);
+    }
 }

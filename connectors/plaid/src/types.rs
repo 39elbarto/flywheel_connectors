@@ -554,7 +554,10 @@ mod tests {
         // Deserialize back and verify
         let deserialized: Account = serde_json::from_value(serialized).unwrap();
         assert_eq!(deserialized.account_type, Some("depository".into()));
-        assert_eq!(deserialized.balances.unofficial_currency_code, Some("CRYPTO".into()));
+        assert_eq!(
+            deserialized.balances.unofficial_currency_code,
+            Some("CRYPTO".into())
+        );
     }
 
     #[test]
@@ -1118,7 +1121,10 @@ mod tests {
         let val = serde_json::to_value(&item).unwrap();
         let back: PlaidItem = serde_json::from_value(val).unwrap();
         assert_eq!(back.item_id, "item_rt");
-        assert_eq!(back.consent_expiration_time, Some("2028-01-01T00:00:00Z".into()));
+        assert_eq!(
+            back.consent_expiration_time,
+            Some("2028-01-01T00:00:00Z".into())
+        );
     }
 
     // ---- LinkTokenResponse edge cases ----

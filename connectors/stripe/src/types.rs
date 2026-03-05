@@ -303,6 +303,7 @@ mod tests {
             livemode: Some(true),
         };
         let cloned = cust.clone();
+        assert_eq!(cust.id, "cus_clone");
         assert_eq!(cloned.id, "cus_clone");
         assert_eq!(cloned.email.as_deref(), Some("clone@test.com"));
         assert_eq!(cloned.name.as_deref(), Some("Clone Test"));
@@ -372,6 +373,7 @@ mod tests {
             created: Some(1_700_000_000),
         };
         let cloned = pi.clone();
+        assert_eq!(pi.id, "pi_cl");
         assert_eq!(cloned.id, "pi_cl");
         assert_eq!(cloned.amount, 9999);
         assert_eq!(cloned.currency, "gbp");
@@ -454,6 +456,7 @@ mod tests {
             deleted: true,
         };
         let cloned = del.clone();
+        assert_eq!(del.id, "cus_del_cl");
         assert_eq!(cloned.id, "cus_del_cl");
         assert!(cloned.deleted);
     }
@@ -523,6 +526,7 @@ mod tests {
             currency: "jpy".into(),
         };
         let cloned = amt.clone();
+        assert_eq!(amt.amount, 42);
         assert_eq!(cloned.amount, 42);
         assert_eq!(cloned.currency, "jpy");
     }
@@ -595,6 +599,7 @@ mod tests {
         });
         let detail: ApiErrorDetail = serde_json::from_value(json).unwrap();
         let cloned = detail.clone();
+        assert_eq!(detail.message.as_deref(), Some("expired card"));
         assert_eq!(cloned.message.as_deref(), Some("expired card"));
         assert_eq!(cloned.error_type.as_deref(), Some("card_error"));
         assert_eq!(cloned.code.as_deref(), Some("expired_card"));
@@ -640,6 +645,7 @@ mod tests {
             object: json!({"id": "cus_clone", "balance": 0}),
         };
         let cloned = data.clone();
+        assert_eq!(data.object["id"], "cus_clone");
         assert_eq!(cloned.object["id"], "cus_clone");
         assert_eq!(cloned.object["balance"], 0);
     }

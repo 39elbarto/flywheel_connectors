@@ -341,9 +341,7 @@ mod tests {
         };
         let fcp = err.to_fcp_error();
         match fcp {
-            FcpError::RateLimited {
-                retry_after_ms, ..
-            } => {
+            FcpError::RateLimited { retry_after_ms, .. } => {
                 assert_eq!(retry_after_ms, 5000);
             }
             other => panic!("expected RateLimited, got {other:?}"),
@@ -359,9 +357,7 @@ mod tests {
         };
         let fcp = err.to_fcp_error();
         match fcp {
-            FcpError::RateLimited {
-                retry_after_ms, ..
-            } => {
+            FcpError::RateLimited { retry_after_ms, .. } => {
                 assert_eq!(retry_after_ms, 30_000);
             }
             other => panic!("expected RateLimited, got {other:?}"),
@@ -465,9 +461,7 @@ mod tests {
         };
         let fcp = err.to_fcp_error();
         match fcp {
-            FcpError::RateLimited {
-                retry_after_ms, ..
-            } => {
+            FcpError::RateLimited { retry_after_ms, .. } => {
                 // Clamped to 3600s = 3_600_000ms
                 assert_eq!(retry_after_ms, 3_600_000);
             }
@@ -484,9 +478,7 @@ mod tests {
         };
         let fcp = err.to_fcp_error();
         match fcp {
-            FcpError::RateLimited {
-                retry_after_ms, ..
-            } => {
+            FcpError::RateLimited { retry_after_ms, .. } => {
                 assert_eq!(retry_after_ms, 3_600_000);
             }
             other => panic!("expected RateLimited, got {other:?}"),
@@ -495,14 +487,10 @@ mod tests {
 
     #[test]
     fn to_fcp_error_rate_limited_clamps_negative_to_zero() {
-        let err = DiscordError::RateLimited {
-            retry_after: -5.0,
-        };
+        let err = DiscordError::RateLimited { retry_after: -5.0 };
         let fcp = err.to_fcp_error();
         match fcp {
-            FcpError::RateLimited {
-                retry_after_ms, ..
-            } => {
+            FcpError::RateLimited { retry_after_ms, .. } => {
                 assert_eq!(retry_after_ms, 0);
             }
             other => panic!("expected RateLimited, got {other:?}"),
@@ -568,24 +556,23 @@ mod tests {
     #[test]
     fn discord_result_ok() {
         let r: DiscordResult<u32> = Ok(42);
-        assert_eq!(r.unwrap(), 42);
+        assert!(matches!(r, Ok(42)));
     }
 
     #[test]
     fn discord_result_err() {
         let r: DiscordResult<u32> = Err(DiscordError::Gateway("fail".into()));
         assert!(r.is_err());
-        assert!(r.unwrap_err().to_string().contains("fail"));
+        assert!(matches!(r, Err(DiscordError::Gateway(msg)) if msg.contains("fail")));
     }
 
     // ---- ConnectorErrorMapping::from_async_error ----
 
     #[test]
     fn from_async_error_timeout() {
-        let err =
-            <DiscordError as ConnectorErrorMapping>::from_async_error(AsyncError::Timeout {
-                timeout_ms: 5000,
-            });
+        let err = <DiscordError as ConnectorErrorMapping>::from_async_error(AsyncError::Timeout {
+            timeout_ms: 5000,
+        });
         match err {
             DiscordError::Api {
                 code,
@@ -602,8 +589,7 @@ mod tests {
 
     #[test]
     fn from_async_error_cancelled() {
-        let err =
-            <DiscordError as ConnectorErrorMapping>::from_async_error(AsyncError::Cancelled);
+        let err = <DiscordError as ConnectorErrorMapping>::from_async_error(AsyncError::Cancelled);
         match err {
             DiscordError::Api {
                 code,
@@ -658,10 +644,9 @@ mod tests {
 
     #[test]
     fn from_async_error_runtime() {
-        let err =
-            <DiscordError as ConnectorErrorMapping>::from_async_error(AsyncError::Runtime {
-                message: "panic in task".into(),
-            });
+        let err = <DiscordError as ConnectorErrorMapping>::from_async_error(AsyncError::Runtime {
+            message: "panic in task".into(),
+        });
         match err {
             DiscordError::Gateway(msg) => {
                 assert!(msg.contains("panic in task"));
@@ -698,10 +683,7 @@ mod tests {
     #[test]
     fn trait_retry_after_matches_inherent() {
         let err = DiscordError::RateLimited { retry_after: 7.0 };
-        assert_eq!(
-            err.retry_after(),
-            ConnectorErrorMapping::retry_after(&err)
-        );
+        assert_eq!(err.retry_after(), ConnectorErrorMapping::retry_after(&err));
     }
 
     #[test]

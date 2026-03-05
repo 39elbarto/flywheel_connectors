@@ -621,9 +621,7 @@ mod tests {
 
     #[test]
     fn retry_after_rate_limit_zero_ms() {
-        let err = PlaidError::RateLimit {
-            retry_after_ms: 0,
-        };
+        let err = PlaidError::RateLimit { retry_after_ms: 0 };
         assert_eq!(err.retry_after(), Some(Duration::from_millis(0)));
     }
 
@@ -706,9 +704,7 @@ mod tests {
 
     #[test]
     fn to_fcp_error_rate_limit_zero_ms() {
-        let err = PlaidError::RateLimit {
-            retry_after_ms: 0,
-        };
+        let err = PlaidError::RateLimit { retry_after_ms: 0 };
         match err.to_fcp_error() {
             FcpError::RateLimited {
                 retry_after_ms,
@@ -727,9 +723,7 @@ mod tests {
             retry_after_ms: 300_000,
         };
         match err.to_fcp_error() {
-            FcpError::RateLimited {
-                retry_after_ms, ..
-            } => {
+            FcpError::RateLimited { retry_after_ms, .. } => {
                 assert_eq!(retry_after_ms, 300_000);
             }
             other => panic!("expected RateLimited, got {other:?}"),

@@ -331,8 +331,7 @@ mod tests {
 
     #[test]
     fn error_response_message_only() {
-        let resp: FigmaErrorResponse =
-            serde_json::from_str(r#"{"err":"quota exceeded"}"#).unwrap();
+        let resp: FigmaErrorResponse = serde_json::from_str(r#"{"err":"quota exceeded"}"#).unwrap();
         assert!(resp.status.is_none());
         assert_eq!(resp.message.as_deref(), Some("quota exceeded"));
     }
@@ -1335,10 +1334,7 @@ mod tests {
         let json = json!({"handle": "alice", "img_url": "https://img.com/a.png", "id": "u1"});
         let user: FigmaUser = serde_json::from_value(json).unwrap();
         assert_eq!(user.handle.as_deref(), Some("alice"));
-        assert_eq!(
-            user.img_url.as_deref(),
-            Some("https://img.com/a.png")
-        );
+        assert_eq!(user.img_url.as_deref(), Some("https://img.com/a.png"));
         assert_eq!(user.id.as_deref(), Some("u1"));
     }
 
@@ -1383,6 +1379,7 @@ mod tests {
         };
         let c = user.clone();
         assert_eq!(c.handle.as_deref(), Some("clone"));
+        assert_eq!(user.handle.as_deref(), Some("clone"));
     }
 
     #[test]
@@ -1475,6 +1472,7 @@ mod tests {
         let c = comment.clone();
         assert_eq!(c.id, "c4");
         assert_eq!(c.message, "clone me");
+        assert_eq!(comment.id, "c4");
     }
 
     #[test]
@@ -1530,6 +1528,7 @@ mod tests {
         let c = resp.clone();
         let dbg = format!("{c:?}");
         assert!(dbg.contains("CommentsResponse"));
+        assert!(resp.comments.is_empty());
     }
 
     // ================================================================
@@ -1597,6 +1596,7 @@ mod tests {
         };
         let c = req.clone();
         assert_eq!(c.message, "clone");
+        assert_eq!(req.message, "clone");
     }
 
     #[test]
@@ -1683,6 +1683,7 @@ mod tests {
         };
         let c = w.clone();
         assert_eq!(c.id, "wc");
+        assert_eq!(w.id, "wc");
     }
 
     #[test]
@@ -1739,6 +1740,7 @@ mod tests {
         let dbg = format!("{c:?}");
         assert!(dbg.contains("WebhooksListResponse"));
         assert!(c.webhooks.is_empty());
+        assert!(resp.webhooks.is_empty());
     }
 
     // ================================================================
@@ -1788,6 +1790,7 @@ mod tests {
         let c = req.clone();
         assert_eq!(c.team_id, "t");
         assert_eq!(c.description.as_deref(), Some("d"));
+        assert_eq!(req.team_id, "t");
     }
 
     #[test]
@@ -1900,6 +1903,7 @@ mod tests {
         let serialized = serde_json::to_value(&resp).unwrap();
         assert_eq!(serialized["name"], "RT");
         assert_eq!(serialized["version"], "1");
+        assert_eq!(val["name"], "RT");
     }
 
     #[test]

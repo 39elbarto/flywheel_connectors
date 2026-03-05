@@ -844,10 +844,7 @@ mod tests {
         assert!(json.contains("thumbnail"));
         assert!(json.contains("thumb.png"));
         let back: Embed = serde_json::from_str(&json).unwrap();
-        assert_eq!(
-            back.thumbnail.unwrap().url,
-            "https://example.com/thumb.png"
-        );
+        assert_eq!(back.thumbnail.unwrap().url, "https://example.com/thumb.png");
     }
 
     #[test]
@@ -931,7 +928,10 @@ mod tests {
         let json = serde_json::to_string(&footer).unwrap();
         assert!(json.contains("icon_url"));
         let back: EmbedFooter = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.icon_url.as_deref(), Some("https://example.com/icon.png"));
+        assert_eq!(
+            back.icon_url.as_deref(),
+            Some("https://example.com/icon.png")
+        );
     }
 
     #[test]
@@ -1425,7 +1425,10 @@ mod tests {
         assert_eq!(back.fields.len(), 2);
         assert!(!back.fields[0].inline);
         assert!(back.fields[1].inline);
-        assert_eq!(back.footer.unwrap().icon_url.as_deref(), Some("https://foot.icon"));
+        assert_eq!(
+            back.footer.unwrap().icon_url.as_deref(),
+            Some("https://foot.icon")
+        );
         assert_eq!(back.thumbnail.unwrap().url, "https://thumb");
         assert_eq!(back.author.unwrap().url.as_deref(), Some("https://auth"));
     }
@@ -1438,7 +1441,9 @@ mod tests {
             size: 999_999,
             url: "https://cdn.example.com/report.xlsx".into(),
             proxy_url: Some("https://proxy.example.com/report.xlsx".into()),
-            content_type: Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".into()),
+            content_type: Some(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".into(),
+            ),
         };
         let json = serde_json::to_string(&att).unwrap();
         let back: Attachment = serde_json::from_str(&json).unwrap();

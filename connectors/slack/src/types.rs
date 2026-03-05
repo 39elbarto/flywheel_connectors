@@ -501,4 +501,780 @@ mod tests {
         assert!(json.contains("\"ready\":true"));
         assert!(json.contains("\"passed\":true"));
     }
+
+    // ---- Message with all optional fields ----
+
+    #[test]
+    fn message_with_reactions_and_files() {
+        let msg = Message {
+            message_type: "message".to_string(),
+            user: Some("U123".to_string()),
+            text: "Check this out".to_string(),
+            ts: "1700000000.000001".to_string(),
+            thread_ts: Some("1700000000.000000".to_string()),
+            reply_count: Some(5),
+            reactions: Some(vec![
+                Reaction {
+                    name: "thumbsup".to_string(),
+                    count: 3,
+                    users: vec!["U1".into(), "U2".into(), "U3".into()],
+                },
+                Reaction {
+                    name: "heart".to_string(),
+                    count: 1,
+                    users: vec!["U4".into()],
+                },
+            ]),
+            files: Some(vec![SlackFile {
+                id: "F001".to_string(),
+                name: Some("doc.pdf".to_string()),
+                title: None,
+                mimetype: Some("application/pdf".to_string()),
+                filetype: Some("pdf".to_string()),
+                size: 2048,
+                url_private: None,
+                url_private_download: None,
+            }]),
+            bot_id: Some("B999".to_string()),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: Message = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.thread_ts, Some("1700000000.000000".to_string()));
+        assert_eq!(back.reply_count, Some(5));
+        assert_eq!(back.reactions.as_ref().unwrap().len(), 2);
+        assert_eq!(back.files.as_ref().unwrap().len(), 1);
+        assert_eq!(back.bot_id, Some("B999".to_string()));
+    }
+
+    #[test]
+    fn message_clone() {
+        let msg = Message {
+            message_type: "message".to_string(),
+            user: Some("U1".to_string()),
+            text: "clone me".to_string(),
+            ts: "100.001".to_string(),
+            thread_ts: None,
+            reply_count: None,
+            reactions: None,
+            files: None,
+            bot_id: None,
+        };
+        let cloned = msg.clone();
+        assert_eq!(cloned.text, msg.text);
+        assert_eq!(cloned.ts, msg.ts);
+    }
+
+    #[test]
+    fn message_debug() {
+        let msg = Message {
+            message_type: "message".to_string(),
+            user: None,
+            text: "debug test".to_string(),
+            ts: "1.0".to_string(),
+            thread_ts: None,
+            reply_count: None,
+            reactions: None,
+            files: None,
+            bot_id: None,
+        };
+        let dbg = format!("{msg:?}");
+        assert!(dbg.contains("Message"));
+        assert!(dbg.contains("debug test"));
+    }
+
+    #[test]
+    fn message_with_bot_id_no_user() {
+        let json = r#"{"text":"bot msg","ts":"1.0","bot_id":"B001"}"#;
+        let msg: Message = serde_json::from_str(json).unwrap();
+        assert!(msg.user.is_none());
+        assert_eq!(msg.bot_id, Some("B001".to_string()));
+    }
+
+    // ---- Reaction edge cases ----
+
+    #[test]
+    fn reaction_empty_users() {
+        let reaction = Reaction {
+            name: "wave".to_string(),
+            count: 0,
+            users: vec![],
+        };
+        let json = serde_json::to_string(&reaction).unwrap();
+        let back: Reaction = serde_json::from_str(&json).unwrap();
+        assert!(back.users.is_empty());
+        assert_eq!(back.count, 0);
+    }
+
+    #[test]
+    fn reaction_clone() {
+        let reaction = Reaction {
+            name: "fire".to_string(),
+            count: 10,
+            users: vec!["U1".into()],
+        };
+        let cloned = reaction.clone();
+        assert_eq!(cloned.name, "fire");
+        assert_eq!(cloned.count, 10);
+        assert_eq!(cloned.users, vec!["U1".to_string()]);
+    }
+
+    #[test]
+    fn reaction_deserialize_default_users() {
+        let json = r#"{"name":"smile","count":2}"#;
+        let r: Reaction = serde_json::from_str(json).unwrap();
+        assert!(r.users.is_empty());
+    }
+
+    // ---- Channel with purpose ----
+
+    #[test]
+    fn channel_with_both_topic_and_purpose() {
+        let ch = Channel {
+            id: "C200".to_string(),
+            name: "design".to_string(),
+            is_channel: true,
+            is_group: false,
+            is_im: false,
+            is_archived: false,
+            is_private: true,
+            num_members: 7,
+            topic: Some(TopicPurpose {
+                value: "Design discussions".to_string(),
+                creator: "U001".to_string(),
+                last_set: 1_700_000_000,
+            }),
+            purpose: Some(TopicPurpose {
+                value: "For all design work".to_string(),
+                creator: "U002".to_string(),
+                last_set: 1_600_000_000,
+            }),
+        };
+        let json = serde_json::to_string(&ch).unwrap();
+        let back: Channel = serde_json::from_str(&json).unwrap();
+        assert!(back.topic.is_some());
+        assert!(back.purpose.is_some());
+        assert_eq!(back.purpose.unwrap().value, "For all design work");
+        assert!(back.is_private);
+    }
+
+    #[test]
+    fn channel_clone() {
+        let ch = Channel {
+            id: "C1".to_string(),
+            name: "test".to_string(),
+            is_channel: false,
+            is_group: true,
+            is_im: false,
+            is_archived: true,
+            is_private: false,
+            num_members: 3,
+            topic: None,
+            purpose: None,
+        };
+        let cloned = ch.clone();
+        assert_eq!(cloned.id, ch.id);
+        assert_eq!(cloned.is_group, true);
+        assert_eq!(cloned.is_archived, true);
+    }
+
+    #[test]
+    fn channel_debug() {
+        let ch = Channel {
+            id: "CDBG".to_string(),
+            name: "dbg-chan".to_string(),
+            is_channel: false,
+            is_group: false,
+            is_im: false,
+            is_archived: false,
+            is_private: false,
+            num_members: 0,
+            topic: None,
+            purpose: None,
+        };
+        let dbg = format!("{ch:?}");
+        assert!(dbg.contains("Channel"));
+        assert!(dbg.contains("CDBG"));
+    }
+
+    // ---- TopicPurpose ----
+
+    #[test]
+    fn topic_purpose_roundtrip() {
+        let tp = TopicPurpose {
+            value: "Our topic".to_string(),
+            creator: "U100".to_string(),
+            last_set: 1_234_567_890,
+        };
+        let json = serde_json::to_string(&tp).unwrap();
+        let back: TopicPurpose = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.value, "Our topic");
+        assert_eq!(back.creator, "U100");
+        assert_eq!(back.last_set, 1_234_567_890);
+    }
+
+    #[test]
+    fn topic_purpose_defaults() {
+        let json = r#"{"value":"minimal"}"#;
+        let tp: TopicPurpose = serde_json::from_str(json).unwrap();
+        assert_eq!(tp.value, "minimal");
+        assert_eq!(tp.creator, "");
+        assert_eq!(tp.last_set, 0);
+    }
+
+    // ---- User clone/debug ----
+
+    #[test]
+    fn user_clone() {
+        let user = User {
+            id: "UCLONE".to_string(),
+            name: "cloneuser".to_string(),
+            real_name: Some("Clone User".to_string()),
+            is_bot: true,
+            is_admin: false,
+            deleted: true,
+            profile: None,
+        };
+        let cloned = user.clone();
+        assert_eq!(cloned.id, "UCLONE");
+        assert!(cloned.is_bot);
+        assert!(cloned.deleted);
+    }
+
+    #[test]
+    fn user_debug() {
+        let user = User {
+            id: "UDBG".to_string(),
+            name: "dbguser".to_string(),
+            real_name: None,
+            is_bot: false,
+            is_admin: false,
+            deleted: false,
+            profile: None,
+        };
+        let dbg = format!("{user:?}");
+        assert!(dbg.contains("User"));
+        assert!(dbg.contains("UDBG"));
+    }
+
+    // ---- UserProfile ----
+
+    #[test]
+    fn user_profile_all_fields_populated() {
+        let profile = UserProfile {
+            display_name: "Display Name".to_string(),
+            email: Some("user@example.com".to_string()),
+            image_48: Some("https://avatars.slack.com/img48.png".to_string()),
+            status_text: Some("On vacation".to_string()),
+            status_emoji: Some(":palm_tree:".to_string()),
+        };
+        let json = serde_json::to_string(&profile).unwrap();
+        let back: UserProfile = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.display_name, "Display Name");
+        assert_eq!(back.email, Some("user@example.com".to_string()));
+        assert_eq!(
+            back.image_48,
+            Some("https://avatars.slack.com/img48.png".to_string())
+        );
+        assert_eq!(back.status_text, Some("On vacation".to_string()));
+        assert_eq!(back.status_emoji, Some(":palm_tree:".to_string()));
+    }
+
+    #[test]
+    fn user_profile_all_defaults() {
+        let json = "{}";
+        let profile: UserProfile = serde_json::from_str(json).unwrap();
+        assert_eq!(profile.display_name, "");
+        assert!(profile.email.is_none());
+        assert!(profile.image_48.is_none());
+        assert!(profile.status_text.is_none());
+        assert!(profile.status_emoji.is_none());
+    }
+
+    #[test]
+    fn user_profile_roundtrip() {
+        let profile = UserProfile {
+            display_name: "Test".to_string(),
+            email: None,
+            image_48: None,
+            status_text: Some("busy".to_string()),
+            status_emoji: None,
+        };
+        let json = serde_json::to_string(&profile).unwrap();
+        let back: UserProfile = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.display_name, "Test");
+        assert_eq!(back.status_text, Some("busy".to_string()));
+    }
+
+    // ---- SlackFile minimal ----
+
+    #[test]
+    fn slack_file_minimal() {
+        let json = r#"{"id":"F_ONLY"}"#;
+        let file: SlackFile = serde_json::from_str(json).unwrap();
+        assert_eq!(file.id, "F_ONLY");
+        assert!(file.name.is_none());
+        assert!(file.title.is_none());
+        assert!(file.mimetype.is_none());
+        assert!(file.filetype.is_none());
+        assert_eq!(file.size, 0);
+        assert!(file.url_private.is_none());
+        assert!(file.url_private_download.is_none());
+    }
+
+    #[test]
+    fn slack_file_clone() {
+        let file = SlackFile {
+            id: "FCLONE".to_string(),
+            name: Some("file.txt".to_string()),
+            title: None,
+            mimetype: None,
+            filetype: None,
+            size: 100,
+            url_private: None,
+            url_private_download: None,
+        };
+        let cloned = file.clone();
+        assert_eq!(cloned.id, "FCLONE");
+        assert_eq!(cloned.size, 100);
+    }
+
+    #[test]
+    fn slack_file_debug() {
+        let file = SlackFile {
+            id: "FDBG".to_string(),
+            name: None,
+            title: None,
+            mimetype: None,
+            filetype: None,
+            size: 0,
+            url_private: None,
+            url_private_download: None,
+        };
+        let dbg = format!("{file:?}");
+        assert!(dbg.contains("SlackFile"));
+        assert!(dbg.contains("FDBG"));
+    }
+
+    // ---- SlackApiResponse with HistoryData ----
+
+    #[test]
+    fn slack_api_response_with_history_data() {
+        let json = r#"{
+            "ok": true,
+            "messages": [
+                {"text": "hello", "ts": "1.0"},
+                {"text": "world", "ts": "2.0"}
+            ],
+            "has_more": true,
+            "response_metadata": {"next_cursor": "cursor_abc"}
+        }"#;
+        let resp: SlackApiResponse<HistoryData> = serde_json::from_str(json).unwrap();
+        assert!(resp.ok);
+        let data = resp.data.unwrap();
+        assert_eq!(data.messages.len(), 2);
+        assert!(data.has_more);
+        assert_eq!(
+            data.response_metadata.unwrap().next_cursor.as_deref(),
+            Some("cursor_abc")
+        );
+    }
+
+    // ---- HistoryData ----
+
+    #[test]
+    fn history_data_with_messages_and_pagination() {
+        let json = r#"{
+            "messages": [
+                {"text": "msg1", "ts": "100.0"},
+                {"text": "msg2", "ts": "101.0"},
+                {"text": "msg3", "ts": "102.0"}
+            ],
+            "has_more": true,
+            "response_metadata": {"next_cursor": "next_page_token"}
+        }"#;
+        let data: HistoryData = serde_json::from_str(json).unwrap();
+        assert_eq!(data.messages.len(), 3);
+        assert!(data.has_more);
+        assert_eq!(
+            data.response_metadata.unwrap().next_cursor.as_deref(),
+            Some("next_page_token")
+        );
+    }
+
+    #[test]
+    fn history_data_no_pagination() {
+        let json = r#"{"messages": [{"text": "only", "ts": "1.0"}], "has_more": false}"#;
+        let data: HistoryData = serde_json::from_str(json).unwrap();
+        assert_eq!(data.messages.len(), 1);
+        assert!(!data.has_more);
+        assert!(data.response_metadata.is_none());
+    }
+
+    // ---- ChannelListData ----
+
+    #[test]
+    fn channel_list_data_with_channels() {
+        let json = r#"{
+            "channels": [
+                {"id": "C1", "name": "general"},
+                {"id": "C2", "name": "random"}
+            ],
+            "response_metadata": {"next_cursor": "pg2"}
+        }"#;
+        let data: ChannelListData = serde_json::from_str(json).unwrap();
+        assert_eq!(data.channels.len(), 2);
+        assert_eq!(data.channels[0].name, "general");
+        assert_eq!(data.channels[1].name, "random");
+        assert_eq!(
+            data.response_metadata.unwrap().next_cursor.as_deref(),
+            Some("pg2")
+        );
+    }
+
+    #[test]
+    fn channel_list_data_empty() {
+        let json = r#"{"channels": []}"#;
+        let data: ChannelListData = serde_json::from_str(json).unwrap();
+        assert!(data.channels.is_empty());
+        assert!(data.response_metadata.is_none());
+    }
+
+    // ---- UserInfoData ----
+
+    #[test]
+    fn user_info_data_roundtrip() {
+        let json = r#"{
+            "user": {
+                "id": "U555",
+                "name": "infouser",
+                "is_bot": false,
+                "is_admin": true,
+                "deleted": false
+            }
+        }"#;
+        let data: UserInfoData = serde_json::from_str(json).unwrap();
+        assert_eq!(data.user.id, "U555");
+        assert_eq!(data.user.name, "infouser");
+        assert!(data.user.is_admin);
+    }
+
+    // ---- FileUploadData ----
+
+    #[test]
+    fn file_upload_data_roundtrip() {
+        let json = r#"{
+            "file": {
+                "id": "F_UPLOAD",
+                "name": "upload.txt",
+                "size": 512
+            }
+        }"#;
+        let data: FileUploadData = serde_json::from_str(json).unwrap();
+        assert_eq!(data.file.id, "F_UPLOAD");
+        assert_eq!(data.file.name, Some("upload.txt".to_string()));
+        assert_eq!(data.file.size, 512);
+    }
+
+    // ---- TopicSetData ----
+
+    #[test]
+    fn topic_set_data_roundtrip() {
+        let json = r#"{"topic": "New channel topic"}"#;
+        let data: TopicSetData = serde_json::from_str(json).unwrap();
+        assert_eq!(data.topic, "New channel topic");
+    }
+
+    // ---- PostMessageData ----
+
+    #[test]
+    fn post_message_data_roundtrip() {
+        let json = r#"{
+            "channel": "C_POST",
+            "ts": "999.001",
+            "message": {
+                "text": "posted!",
+                "ts": "999.001",
+                "user": "U_POST"
+            }
+        }"#;
+        let data: PostMessageData = serde_json::from_str(json).unwrap();
+        assert_eq!(data.channel, "C_POST");
+        assert_eq!(data.ts, "999.001");
+        assert_eq!(data.message.text, "posted!");
+        assert_eq!(data.message.user, Some("U_POST".to_string()));
+    }
+
+    // ---- AuthTestInfo without bot_id ----
+
+    #[test]
+    fn auth_test_info_no_bot_id() {
+        let info = AuthTestInfo {
+            url: "https://t.slack.com/".to_string(),
+            team: "Team".to_string(),
+            user: "user".to_string(),
+            team_id: "T1".to_string(),
+            user_id: "U1".to_string(),
+            bot_id: None,
+            is_enterprise_install: false,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let back: AuthTestInfo = serde_json::from_str(&json).unwrap();
+        assert!(back.bot_id.is_none());
+        assert!(!back.is_enterprise_install);
+    }
+
+    #[test]
+    fn auth_test_info_clone() {
+        let info = AuthTestInfo {
+            url: "https://x.slack.com/".to_string(),
+            team: "X".to_string(),
+            user: "u".to_string(),
+            team_id: "T0".to_string(),
+            user_id: "U0".to_string(),
+            bot_id: Some("B0".to_string()),
+            is_enterprise_install: true,
+        };
+        let cloned = info.clone();
+        assert_eq!(cloned.url, info.url);
+        assert_eq!(cloned.bot_id, Some("B0".to_string()));
+        assert!(cloned.is_enterprise_install);
+    }
+
+    #[test]
+    fn auth_test_info_debug() {
+        let info = AuthTestInfo {
+            url: "https://dbg.slack.com/".to_string(),
+            team: "DBG".to_string(),
+            user: "dbg".to_string(),
+            team_id: "TDBG".to_string(),
+            user_id: "UDBG".to_string(),
+            bot_id: None,
+            is_enterprise_install: false,
+        };
+        let dbg = format!("{info:?}");
+        assert!(dbg.contains("AuthTestInfo"));
+        assert!(dbg.contains("TDBG"));
+    }
+
+    // ---- AuthTestData ----
+
+    #[test]
+    fn auth_test_data_roundtrip() {
+        let json = r#"{
+            "url": "https://auth.slack.com/",
+            "team": "AuthTeam",
+            "user": "authuser",
+            "team_id": "T_AUTH",
+            "user_id": "U_AUTH",
+            "bot_id": "B_AUTH",
+            "is_enterprise_install": true
+        }"#;
+        let data: AuthTestData = serde_json::from_str(json).unwrap();
+        assert_eq!(data.url, "https://auth.slack.com/");
+        assert_eq!(data.team, "AuthTeam");
+        assert_eq!(data.user, "authuser");
+        assert_eq!(data.team_id, "T_AUTH");
+        assert_eq!(data.user_id, "U_AUTH");
+        assert_eq!(data.bot_id, Some("B_AUTH".to_string()));
+        assert!(data.is_enterprise_install);
+    }
+
+    #[test]
+    fn auth_test_data_minimal() {
+        let json = r#"{
+            "url": "https://min.slack.com/",
+            "team": "Min",
+            "user": "min",
+            "team_id": "T_MIN",
+            "user_id": "U_MIN"
+        }"#;
+        let data: AuthTestData = serde_json::from_str(json).unwrap();
+        assert!(data.bot_id.is_none());
+        assert!(!data.is_enterprise_install);
+    }
+
+    // ---- SocketModeOpenData ----
+
+    #[test]
+    fn socket_mode_open_data_roundtrip() {
+        let json = r#"{"url": "wss://wss-primary.slack.com/link/?ticket=abc123"}"#;
+        let data: SocketModeOpenData = serde_json::from_str(json).unwrap();
+        assert!(data.url.starts_with("wss://"));
+        assert!(data.url.contains("abc123"));
+    }
+
+    // ---- OperationReceipt clone/debug ----
+
+    #[test]
+    fn operation_receipt_clone() {
+        let receipt = OperationReceipt {
+            operation: "delete_message".to_string(),
+            effect: "deleted".to_string(),
+            resource: "message".to_string(),
+            timestamp: "2026-03-05T10:00:00Z".to_string(),
+        };
+        let cloned = receipt.clone();
+        assert_eq!(cloned.operation, "delete_message");
+        assert_eq!(cloned.effect, "deleted");
+        assert_eq!(cloned.resource, "message");
+        assert_eq!(cloned.timestamp, receipt.timestamp);
+    }
+
+    #[test]
+    fn operation_receipt_debug() {
+        let receipt = OperationReceipt {
+            operation: "set_topic".to_string(),
+            effect: "updated".to_string(),
+            resource: "channel".to_string(),
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+        };
+        let dbg = format!("{receipt:?}");
+        assert!(dbg.contains("OperationReceipt"));
+        assert!(dbg.contains("set_topic"));
+    }
+
+    // ---- DoctorReport with multiple checks ----
+
+    #[test]
+    fn doctor_report_multiple_checks() {
+        let report = DoctorReport {
+            ready: false,
+            checks: vec![
+                DoctorCheck {
+                    name: "auth".to_string(),
+                    passed: true,
+                    message: "Token valid".to_string(),
+                },
+                DoctorCheck {
+                    name: "scopes".to_string(),
+                    passed: true,
+                    message: "All required scopes present".to_string(),
+                },
+                DoctorCheck {
+                    name: "connectivity".to_string(),
+                    passed: false,
+                    message: "Cannot reach Slack API".to_string(),
+                },
+            ],
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(json.contains("\"ready\":false"));
+        assert!(json.contains("connectivity"));
+        // One check failed, so not ready
+        let failing: Vec<_> = report.checks.iter().filter(|c| !c.passed).collect();
+        assert_eq!(failing.len(), 1);
+        assert_eq!(failing[0].name, "connectivity");
+    }
+
+    #[test]
+    fn doctor_report_empty_checks() {
+        let report = DoctorReport {
+            ready: true,
+            checks: vec![],
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(json.contains("\"checks\":[]"));
+    }
+
+    // ---- DoctorCheck clone/debug ----
+
+    #[test]
+    fn doctor_check_clone() {
+        let check = DoctorCheck {
+            name: "rate_limit".to_string(),
+            passed: true,
+            message: "Under rate limit".to_string(),
+        };
+        let cloned = check.clone();
+        assert_eq!(cloned.name, "rate_limit");
+        assert!(cloned.passed);
+        assert_eq!(cloned.message, "Under rate limit");
+    }
+
+    #[test]
+    fn doctor_check_debug() {
+        let check = DoctorCheck {
+            name: "token_expiry".to_string(),
+            passed: false,
+            message: "Token expires in 5 minutes".to_string(),
+        };
+        let dbg = format!("{check:?}");
+        assert!(dbg.contains("DoctorCheck"));
+        assert!(dbg.contains("token_expiry"));
+        assert!(dbg.contains("false"));
+    }
+
+    // ---- SearchData additional ----
+
+    #[test]
+    fn search_data_empty_matches() {
+        let data = SearchData {
+            messages: SearchMatches {
+                total: 0,
+                matches: vec![],
+            },
+        };
+        let json = serde_json::to_string(&data).unwrap();
+        let back: SearchData = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.messages.total, 0);
+        assert!(back.messages.matches.is_empty());
+    }
+
+    // ---- SlackApiResponse error with no data ----
+
+    #[test]
+    fn slack_api_response_error_has_no_data() {
+        let json = r#"{"ok":false,"error":"invalid_auth"}"#;
+        let resp: SlackApiResponse<HistoryData> = serde_json::from_str(json).unwrap();
+        assert!(!resp.ok);
+        assert_eq!(resp.error.as_deref(), Some("invalid_auth"));
+        // data field should fail to deserialize into HistoryData (no messages), so None
+        assert!(resp.data.is_none());
+    }
+
+    // ---- Message type field rename ----
+
+    #[test]
+    fn message_type_field_renamed_from_type() {
+        let json = r#"{"type":"message","text":"typed","ts":"1.0"}"#;
+        let msg: Message = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.message_type, "message");
+    }
+
+    #[test]
+    fn message_type_field_defaults_to_empty() {
+        let json = r#"{"text":"no type","ts":"1.0"}"#;
+        let msg: Message = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.message_type, "");
+    }
+
+    // ---- SlackFile with all URLs ----
+
+    #[test]
+    fn slack_file_all_urls() {
+        let file = SlackFile {
+            id: "F_ALL".to_string(),
+            name: Some("image.png".to_string()),
+            title: Some("Screenshot".to_string()),
+            mimetype: Some("image/png".to_string()),
+            filetype: Some("png".to_string()),
+            size: 4_194_304,
+            url_private: Some("https://files.slack.com/private/img.png".to_string()),
+            url_private_download: Some("https://files.slack.com/download/img.png".to_string()),
+        };
+        let json = serde_json::to_string(&file).unwrap();
+        let back: SlackFile = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.size, 4_194_304);
+        assert!(back.url_private.is_some());
+        assert!(back.url_private_download.is_some());
+    }
+
+    // ---- ResponseMetadata with empty cursor ----
+
+    #[test]
+    fn response_metadata_empty_cursor_string() {
+        let json = r#"{"next_cursor":""}"#;
+        let meta: ResponseMetadata = serde_json::from_str(json).unwrap();
+        assert_eq!(meta.next_cursor.as_deref(), Some(""));
+    }
 }

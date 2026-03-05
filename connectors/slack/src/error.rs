@@ -424,4 +424,312 @@ mod tests {
             );
         }
     }
+
+    // ---- Display messages ----
+
+    #[test]
+    fn display_api_with_code_some() {
+        let err = SlackError::Api {
+            error: "channel_not_found".into(),
+            code: Some("404".into()),
+            ok: false,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("channel_not_found"), "should contain error string");
+        assert!(msg.contains("404"), "should contain code value");
+    }
+
+    #[test]
+    fn display_api_with_code_none() {
+        let err = SlackError::Api {
+            error: "not_authed".into(),
+            code: None,
+            ok: false,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("not_authed"));
+        assert!(msg.contains("None"), "code None should appear in display");
+    }
+
+    #[test]
+    fn display_rate_limited() {
+        let err = SlackError::RateLimited {
+            retry_after_secs: 45,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("45"), "should contain retry seconds");
+        assert!(msg.contains("Rate limited"));
+    }
+
+    #[test]
+    fn display_unauthorized() {
+        let err = SlackError::Unauthorized;
+        let msg = err.to_string();
+        assert!(msg.contains("Invalid or expired"));
+    }
+
+    #[test]
+    fn display_channel_not_found() {
+        let err = SlackError::ChannelNotFound {
+            channel: "C99999".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("C99999"));
+        assert!(msg.contains("Channel not found"));
+    }
+
+    #[test]
+    fn display_user_not_found() {
+        let err = SlackError::UserNotFound {
+            user: "UFOO".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("UFOO"));
+        assert!(msg.contains("User not found"));
+    }
+
+    #[test]
+    fn display_json_error() {
+        let json_err: serde_json::Error =
+            serde_json::from_str::<serde_json::Value>("{{bad").unwrap_err();
+        let err = SlackError::Json(json_err);
+        let msg = err.to_string();
+        assert!(msg.contains("JSON error"));
+    }
+
+    // ---- Debug format ----
+
+    #[test]
+    fn debug_api_variant() {
+        let err = SlackError::Api {
+            error: "test_err".into(),
+            code: Some("500".into()),
+            ok: false,
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Api"));
+        assert!(dbg.contains("test_err"));
+        assert!(dbg.contains("500"));
+    }
+
+    #[test]
+    fn debug_rate_limited_variant() {
+        let err = SlackError::RateLimited {
+            retry_after_secs: 10,
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("RateLimited"));
+        assert!(dbg.contains("10"));
+    }
+
+    #[test]
+    fn debug_unauthorized_variant() {
+        let err = SlackError::Unauthorized;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Unauthorized"));
+    }
+
+    #[test]
+    fn debug_channel_not_found_variant() {
+        let err = SlackError::ChannelNotFound {
+            channel: "C_DBG".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("ChannelNotFound"));
+        assert!(dbg.contains("C_DBG"));
+    }
+
+    #[test]
+    fn debug_user_not_found_variant() {
+        let err = SlackError::UserNotFound {
+            user: "U_DBG".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("UserNotFound"));
+        assert!(dbg.contains("U_DBG"));
+    }
+
+    #[test]
+    fn debug_json_variant() {
+        let json_err: serde_json::Error =
+            serde_json::from_str::<serde_json::Value>("nope").unwrap_err();
+        let err = SlackError::Json(json_err);
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Json"));
+    }
+
+    // ---- std::error::Error source chain ----
+
+    #[test]
+    fn error_source_json_has_source() {
+        use std::error::Error;
+        let json_err: serde_json::Error =
+            serde_json::from_str::<serde_json::Value>("[invalid").unwrap_err();
+        let err = SlackError::Json(json_err);
+        assert!(
+            err.source().is_some(),
+            "Json variant should have a source error"
+        );
+    }
+
+    #[test]
+    fn error_source_api_is_none() {
+        use std::error::Error;
+        let err = SlackError::Api {
+            error: "test".into(),
+            code: None,
+            ok: false,
+        };
+        assert!(err.source().is_none());
+    }
+
+    #[test]
+    fn error_source_unauthorized_is_none() {
+        use std::error::Error;
+        let err = SlackError::Unauthorized;
+        assert!(err.source().is_none());
+    }
+
+    #[test]
+    fn error_source_rate_limited_is_none() {
+        use std::error::Error;
+        let err = SlackError::RateLimited {
+            retry_after_secs: 5,
+        };
+        assert!(err.source().is_none());
+    }
+
+    #[test]
+    fn error_source_channel_not_found_is_none() {
+        use std::error::Error;
+        let err = SlackError::ChannelNotFound {
+            channel: "C1".into(),
+        };
+        assert!(err.source().is_none());
+    }
+
+    #[test]
+    fn error_source_user_not_found_is_none() {
+        use std::error::Error;
+        let err = SlackError::UserNotFound {
+            user: "U1".into(),
+        };
+        assert!(err.source().is_none());
+    }
+
+    // ---- SlackResult type alias ----
+
+    #[test]
+    fn slack_result_ok() {
+        let result: SlackResult<u32> = Ok(42);
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    #[test]
+    fn slack_result_err() {
+        let result: SlackResult<u32> = Err(SlackError::Unauthorized);
+        assert!(result.is_err());
+    }
+
+    // ---- From<serde_json::Error> conversion ----
+
+    #[test]
+    fn from_serde_json_error() {
+        let json_err: serde_json::Error =
+            serde_json::from_str::<serde_json::Value>("!!!").unwrap_err();
+        let slack_err: SlackError = json_err.into();
+        assert!(matches!(slack_err, SlackError::Json(_)));
+    }
+
+    // ---- Api with ok=true (structurally valid but unusual) ----
+
+    #[test]
+    fn api_with_ok_true_still_maps_to_external() {
+        let err = SlackError::Api {
+            error: "some_error".into(),
+            code: None,
+            ok: true,
+        };
+        // Even with ok=true, the error string drives mapping
+        let fcp = err.to_fcp_error();
+        assert!(matches!(fcp, FcpError::External { .. }));
+    }
+
+    #[test]
+    fn api_with_ok_true_display_still_works() {
+        let err = SlackError::Api {
+            error: "weird".into(),
+            code: Some("200".into()),
+            ok: true,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("weird"));
+    }
+
+    // ---- retry_after Duration values ----
+
+    #[test]
+    fn retry_after_returns_correct_duration() {
+        let err = SlackError::RateLimited {
+            retry_after_secs: 120,
+        };
+        let dur = err.retry_after().unwrap();
+        assert_eq!(dur, Duration::from_secs(120));
+    }
+
+    #[test]
+    fn retry_after_zero_seconds() {
+        let err = SlackError::RateLimited {
+            retry_after_secs: 0,
+        };
+        let dur = err.retry_after().unwrap();
+        assert_eq!(dur, Duration::from_secs(0));
+        assert!(err.is_retryable());
+        // FCP mapping should have 0 ms
+        let fcp = err.to_fcp_error();
+        assert!(matches!(
+            fcp,
+            FcpError::RateLimited {
+                retry_after_ms: 0,
+                ..
+            }
+        ));
+    }
+
+    // ---- Edge: ChannelNotFound with empty string ----
+
+    #[test]
+    fn channel_not_found_empty_channel_string() {
+        let err = SlackError::ChannelNotFound {
+            channel: String::new(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("Channel not found:"));
+        let fcp = err.to_fcp_error();
+        assert!(matches!(fcp, FcpError::ResourceNotFound { resource } if resource.contains("channel:")));
+    }
+
+    // ---- Edge: UserNotFound with empty string ----
+
+    #[test]
+    fn user_not_found_empty_user_string() {
+        let err = SlackError::UserNotFound {
+            user: String::new(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("User not found:"));
+        let fcp = err.to_fcp_error();
+        assert!(matches!(fcp, FcpError::ResourceNotFound { resource } if resource.contains("user:")));
+    }
+
+    // ---- Json variant is not retryable ----
+
+    #[test]
+    fn json_error_is_not_retryable() {
+        let json_err: serde_json::Error =
+            serde_json::from_str::<serde_json::Value>("bad").unwrap_err();
+        let err = SlackError::Json(json_err);
+        assert!(!err.is_retryable());
+        assert!(err.retry_after().is_none());
+    }
 }

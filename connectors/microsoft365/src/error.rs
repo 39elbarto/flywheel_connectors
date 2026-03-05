@@ -353,4 +353,381 @@ mod tests {
         };
         assert!(api_err.to_string().contains("test error"));
     }
+
+    // ---- Display for all variants (content verification) ----
+
+    #[test]
+    fn display_invalid_config_contains_inner_message() {
+        let err = M365Error::InvalidConfig("tenant_id missing".into());
+        let display = err.to_string();
+        assert_eq!(display, "Invalid configuration: tenant_id missing");
+    }
+
+    #[test]
+    fn display_api_contains_message_field() {
+        let err = M365Error::Api {
+            message: "Request_BadRequest".into(),
+            status_code: Some(400),
+            error_code: Some("BadRequest".into()),
+        };
+        let display = err.to_string();
+        assert_eq!(display, "Graph API error: Request_BadRequest");
+    }
+
+    #[test]
+    fn display_rate_limit_is_static() {
+        let err = M365Error::RateLimit {
+            retry_after_ms: 999_999,
+        };
+        assert_eq!(err.to_string(), "Rate limited");
+    }
+
+    #[test]
+    fn display_serialization_contains_serde_message() {
+        let inner = serde_json::from_str::<serde_json::Value>("{bad}").unwrap_err();
+        let inner_msg = inner.to_string();
+        let err = M365Error::Serialization(inner);
+        let display = err.to_string();
+        assert!(
+            display.contains(&inner_msg),
+            "Expected display '{display}' to contain serde message '{inner_msg}'"
+        );
+        assert!(display.starts_with("Serialization error: "));
+    }
+
+    // ---- Debug formatting ----
+
+    #[test]
+    fn debug_format_contains_variant_name() {
+        let err = M365Error::InvalidConfig("x".into());
+        let debug = format!("{err:?}");
+        assert!(debug.contains("InvalidConfig"), "got: {debug}");
+
+        let err2 = M365Error::RateLimit {
+            retry_after_ms: 42,
+        };
+        let debug2 = format!("{err2:?}");
+        assert!(debug2.contains("RateLimit"), "got: {debug2}");
+        assert!(debug2.contains("42"), "got: {debug2}");
+
+        let err3 = M365Error::Api {
+            message: "boom".into(),
+            status_code: Some(500),
+            error_code: Some("InternalError".into()),
+        };
+        let debug3 = format!("{err3:?}");
+        assert!(debug3.contains("Api"), "got: {debug3}");
+        assert!(debug3.contains("boom"), "got: {debug3}");
+        assert!(debug3.contains("InternalError"), "got: {debug3}");
+    }
+
+    // ---- M365Result Ok and Err usage ----
+
+    #[test]
+    fn m365result_ok_unwraps() {
+        let result: M365Result<u32> = Ok(42);
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    #[test]
+    fn m365result_err_is_err() {
+        let result: M365Result<u32> = Err(M365Error::InvalidConfig("bad".into()));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn m365result_with_complex_type() {
+        let result: M365Result<Vec<String>> = Ok(vec!["hello".into()]);
+        assert_eq!(result.unwrap().len(), 1);
+    }
+
+    // ---- From serde_json::Error conversion ----
+
+    #[test]
+    fn from_serde_json_error() {
+        let serde_err = serde_json::from_str::<bool>("not_bool").unwrap_err();
+        let err: M365Error = serde_err.into();
+        match &err {
+            M365Error::Serialization(_) => {}
+            other => panic!("Expected Serialization, got {other:?}"),
+        }
+        assert!(!err.is_retryable());
+        assert!(err.retry_after().is_none());
+    }
+
+    // ---- Error trait (dyn std::error::Error) ----
+
+    #[test]
+    fn error_trait_is_object_safe() {
+        let err = M365Error::InvalidConfig("oops".into());
+        let boxed: Box<dyn std::error::Error> = Box::new(err);
+        assert!(boxed.to_string().contains("oops"));
+    }
+
+    #[test]
+    fn error_trait_source_for_serialization() {
+        let inner = serde_json::from_str::<u32>("null").unwrap_err();
+        let err = M365Error::Serialization(inner);
+        let dyn_err: &dyn std::error::Error = &err;
+        // Serialization variant wraps a serde error, so source should be Some
+        assert!(dyn_err.source().is_some());
+    }
+
+    #[test]
+    fn error_trait_source_for_non_wrapping_variants() {
+        let err = M365Error::InvalidConfig("test".into());
+        let dyn_err: &dyn std::error::Error = &err;
+        // InvalidConfig doesn't wrap another error
+        assert!(dyn_err.source().is_none());
+
+        let err2 = M365Error::RateLimit {
+            retry_after_ms: 100,
+        };
+        let dyn_err2: &dyn std::error::Error = &err2;
+        assert!(dyn_err2.source().is_none());
+    }
+
+    // ---- to_fcp_error: Api with error_code set ----
+
+    #[test]
+    fn to_fcp_error_api_with_error_code_passes_message() {
+        let err = M365Error::Api {
+            message: "insufficient permissions".into(),
+            status_code: Some(403),
+            error_code: Some("Authorization_RequestDenied".into()),
+        };
+        match err.to_fcp_error() {
+            FcpError::Unauthorized { code, message } => {
+                assert_eq!(code, 2001);
+                assert_eq!(message, "insufficient permissions");
+            }
+            other => panic!("Expected Unauthorized, got {other:?}"),
+        }
+    }
+
+    // ---- to_fcp_error: Api with no status_code maps to External ----
+
+    #[test]
+    fn to_fcp_error_api_no_status_code_maps_to_external() {
+        let err = M365Error::Api {
+            message: "connection lost".into(),
+            status_code: None,
+            error_code: None,
+        };
+        match err.to_fcp_error() {
+            FcpError::External {
+                service,
+                message,
+                status_code,
+                retryable,
+                retry_after,
+            } => {
+                assert_eq!(service, "microsoft365");
+                assert_eq!(message, "connection lost");
+                assert!(status_code.is_none());
+                assert!(!retryable);
+                assert!(retry_after.is_none());
+            }
+            other => panic!("Expected External, got {other:?}"),
+        }
+    }
+
+    // ---- Api edge status codes ----
+
+    #[test]
+    fn api_200_as_error_maps_to_external_not_retryable() {
+        let err = M365Error::Api {
+            message: "unexpected success status as error".into(),
+            status_code: Some(200),
+            error_code: None,
+        };
+        assert!(!err.is_retryable());
+        match err.to_fcp_error() {
+            FcpError::External {
+                retryable,
+                status_code,
+                ..
+            } => {
+                assert!(!retryable);
+                assert_eq!(status_code, Some(200));
+            }
+            other => panic!("Expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_502_is_retryable_maps_to_external() {
+        let err = M365Error::Api {
+            message: "bad gateway".into(),
+            status_code: Some(502),
+            error_code: None,
+        };
+        assert!(err.is_retryable());
+        match err.to_fcp_error() {
+            FcpError::External {
+                retryable,
+                status_code,
+                ..
+            } => {
+                assert!(retryable);
+                assert_eq!(status_code, Some(502));
+            }
+            other => panic!("Expected External, got {other:?}"),
+        }
+    }
+
+    // ---- RateLimit with retry_after_ms = 0 ----
+
+    #[test]
+    fn rate_limit_zero_retry_after() {
+        let err = M365Error::RateLimit {
+            retry_after_ms: 0,
+        };
+        assert!(err.is_retryable());
+        assert_eq!(err.retry_after(), Some(Duration::from_millis(0)));
+        match err.to_fcp_error() {
+            FcpError::RateLimited {
+                retry_after_ms,
+                violation,
+            } => {
+                assert_eq!(retry_after_ms, 0);
+                assert!(violation.is_none());
+            }
+            other => panic!("Expected RateLimited, got {other:?}"),
+        }
+    }
+
+    // ---- InvalidConfig with empty string ----
+
+    #[test]
+    fn invalid_config_empty_string() {
+        let err = M365Error::InvalidConfig(String::new());
+        assert_eq!(err.to_string(), "Invalid configuration: ");
+        assert!(!err.is_retryable());
+        match err.to_fcp_error() {
+            FcpError::InvalidRequest { code, message } => {
+                assert_eq!(code, 1003);
+                assert_eq!(message, "");
+            }
+            other => panic!("Expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    // ---- is_retryable boundary: Api 599 ----
+
+    #[test]
+    fn api_599_is_retryable() {
+        let err = M365Error::Api {
+            message: "edge of 5xx range".into(),
+            status_code: Some(599),
+            error_code: None,
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn api_600_not_retryable() {
+        let err = M365Error::Api {
+            message: "above 5xx range".into(),
+            status_code: Some(600),
+            error_code: None,
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn api_499_not_retryable() {
+        let err = M365Error::Api {
+            message: "below 5xx range (not 429)".into(),
+            status_code: Some(499),
+            error_code: None,
+        };
+        assert!(!err.is_retryable());
+    }
+
+    // ---- Verify all to_fcp_error branches ----
+
+    #[test]
+    fn to_fcp_error_serialization_is_internal() {
+        let inner = serde_json::from_str::<serde_json::Value>("[}").unwrap_err();
+        let err = M365Error::Serialization(inner);
+        match err.to_fcp_error() {
+            FcpError::Internal { message } => {
+                assert!(message.starts_with("Serialization error: "));
+            }
+            other => panic!("Expected Internal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_rate_limit_large_value() {
+        let err = M365Error::RateLimit {
+            retry_after_ms: u64::MAX,
+        };
+        match err.to_fcp_error() {
+            FcpError::RateLimited {
+                retry_after_ms, ..
+            } => {
+                assert_eq!(retry_after_ms, u64::MAX);
+            }
+            other => panic!("Expected RateLimited, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_api_401_message_preserved() {
+        let err = M365Error::Api {
+            message: "CompactToken validation failed".into(),
+            status_code: Some(401),
+            error_code: Some("InvalidAuthenticationToken".into()),
+        };
+        match err.to_fcp_error() {
+            FcpError::Unauthorized { message, .. } => {
+                assert_eq!(message, "CompactToken validation failed");
+            }
+            other => panic!("Expected Unauthorized, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_api_404_message_preserved() {
+        let err = M365Error::Api {
+            message: "User 'abc' not found".into(),
+            status_code: Some(404),
+            error_code: Some("Request_ResourceNotFound".into()),
+        };
+        match err.to_fcp_error() {
+            FcpError::ResourceNotFound { resource } => {
+                assert_eq!(resource, "User 'abc' not found");
+            }
+            other => panic!("Expected ResourceNotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_api_500_external_details() {
+        let err = M365Error::Api {
+            message: "UnknownError".into(),
+            status_code: Some(500),
+            error_code: Some("InternalServerError".into()),
+        };
+        match err.to_fcp_error() {
+            FcpError::External {
+                service,
+                message,
+                status_code,
+                retryable,
+                retry_after,
+            } => {
+                assert_eq!(service, "microsoft365");
+                assert_eq!(message, "UnknownError");
+                assert_eq!(status_code, Some(500));
+                assert!(retryable);
+                assert!(retry_after.is_none());
+            }
+            other => panic!("Expected External, got {other:?}"),
+        }
+    }
 }

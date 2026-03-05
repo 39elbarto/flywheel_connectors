@@ -987,7 +987,10 @@ mod tests {
             description: "Forbidden: bot was blocked".into(),
         };
         let display = format!("{err}");
-        assert_eq!(display, "Telegram API error (403): Forbidden: bot was blocked");
+        assert_eq!(
+            display,
+            "Telegram API error (403): Forbidden: bot was blocked"
+        );
     }
 
     #[test]
@@ -1210,10 +1213,7 @@ mod tests {
 
     #[test]
     fn test_normalize_group_prefix() {
-        assert_eq!(
-            normalize_chat_id("group:-100123456").unwrap(),
-            "-100123456"
-        );
+        assert_eq!(normalize_chat_id("group:-100123456").unwrap(), "-100123456");
     }
 
     #[test]
@@ -1234,18 +1234,12 @@ mod tests {
 
     #[test]
     fn test_normalize_https_tme_link() {
-        assert_eq!(
-            normalize_chat_id("https://t.me/mybot").unwrap(),
-            "@mybot"
-        );
+        assert_eq!(normalize_chat_id("https://t.me/mybot").unwrap(), "@mybot");
     }
 
     #[test]
     fn test_normalize_http_tme_link() {
-        assert_eq!(
-            normalize_chat_id("http://t.me/mybot").unwrap(),
-            "@mybot"
-        );
+        assert_eq!(normalize_chat_id("http://t.me/mybot").unwrap(), "@mybot");
     }
 
     #[test]
@@ -1302,10 +1296,7 @@ mod tests {
 
     #[test]
     fn test_normalize_telegram_prefix_with_username() {
-        assert_eq!(
-            normalize_chat_id("telegram:@mybot").unwrap(),
-            "@mybot"
-        );
+        assert_eq!(normalize_chat_id("telegram:@mybot").unwrap(), "@mybot");
     }
 
     #[test]
@@ -1320,9 +1311,6 @@ mod tests {
 
     #[test]
     fn test_normalize_large_numeric() {
-        assert_eq!(
-            normalize_chat_id("9999999999999").unwrap(),
-            "9999999999999"
-        );
+        assert_eq!(normalize_chat_id("9999999999999").unwrap(), "9999999999999");
     }
 }

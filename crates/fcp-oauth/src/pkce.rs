@@ -234,4 +234,152 @@ mod tests {
         let pkce = Pkce::from_verifier(verifier, PkceMethod::Plain).unwrap();
         assert_eq!(pkce.verifier(), pkce.challenge());
     }
+
+    // ── Batch: uniqueness + format ──
+
+    #[test]
+    fn test_pkce_multiple_generations_produce_different_verifiers() {
+        let p1 = Pkce::new();
+        let p2 = Pkce::new();
+        let p3 = Pkce::new();
+        assert_ne!(p1.verifier(), p2.verifier());
+        assert_ne!(p2.verifier(), p3.verifier());
+    }
+
+    #[test]
+    fn test_pkce_s256_challenge_is_base64url() {
+        let pkce = Pkce::new();
+        let challenge = pkce.challenge();
+        // S256 challenge: SHA-256(verifier) → base64url no padding
+        // Should be 43 chars (32 bytes → base64url = ceil(32*4/3) = 43)
+        assert_eq!(challenge.len(), 43);
+        assert!(challenge
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+    }
+
+    #[test]
+    fn test_pkce_s256_challenge_no_padding() {
+        let pkce = Pkce::new();
+        assert!(!pkce.challenge().contains('='));
+    }
+
+    #[test]
+    fn test_pkce_verifier_is_valid_base64url() {
+        let pkce = Pkce::new();
+        assert!(pkce
+            .verifier()
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+    }
+
+    // ── Batch: from_verifier boundary validation ──
+
+    #[test]
+    fn test_pkce_from_verifier_exactly_42_chars_rejected() {
+        let too_short = "a".repeat(42);
+        let result = Pkce::from_verifier(&too_short, PkceMethod::S256);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("43-128"));
+    }
+
+    #[test]
+    fn test_pkce_from_verifier_exactly_129_chars_rejected() {
+        let too_long = "a".repeat(129);
+        let result = Pkce::from_verifier(&too_long, PkceMethod::S256);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_pkce_from_verifier_all_valid_unreserved_chars() {
+        // RFC 7636: verifier can contain [A-Z] / [a-z] / [0-9] / "-" / "." / "_" / "~"
+        let verifier = "abcdefghijklmnopqrstuvwxyz-._~ABCDEFGHIJ01234";
+        assert_eq!(verifier.len(), 45); // > 43
+        let result = Pkce::from_verifier(verifier, PkceMethod::S256);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_pkce_from_verifier_rejects_plus() {
+        let verifier = "a".repeat(42) + "+";
+        let result = Pkce::from_verifier(&verifier, PkceMethod::S256);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("invalid characters"));
+    }
+
+    #[test]
+    fn test_pkce_from_verifier_rejects_slash() {
+        let verifier = "a".repeat(42) + "/";
+        let result = Pkce::from_verifier(&verifier, PkceMethod::S256);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_pkce_from_verifier_rejects_space() {
+        let verifier = "a".repeat(42) + " ";
+        let result = Pkce::from_verifier(&verifier, PkceMethod::S256);
+        assert!(result.is_err());
+    }
+
+    // ── Batch: clone + debug ──
+
+    #[test]
+    fn test_pkce_clone() {
+        let pkce = Pkce::new();
+        let cloned = pkce.clone();
+        assert_eq!(pkce.verifier(), cloned.verifier());
+        assert_eq!(pkce.challenge(), cloned.challenge());
+        assert_eq!(pkce.method(), cloned.method());
+    }
+
+    #[test]
+    fn test_pkce_debug() {
+        let pkce = Pkce::new();
+        let debug = format!("{pkce:?}");
+        assert!(debug.contains("Pkce"));
+    }
+
+    #[test]
+    fn test_pkce_method_copy() {
+        let method = PkceMethod::S256;
+        let copied = method;
+        assert_eq!(method, copied);
+    }
+
+    #[test]
+    fn test_pkce_method_eq() {
+        assert_eq!(PkceMethod::S256, PkceMethod::S256);
+        assert_eq!(PkceMethod::Plain, PkceMethod::Plain);
+        assert_ne!(PkceMethod::S256, PkceMethod::Plain);
+    }
+
+    // ── Batch: known test vectors ──
+
+    #[test]
+    fn test_pkce_rfc7636_appendix_b_vector() {
+        // RFC 7636 Appendix B test vector
+        let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+        let expected_challenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+
+        let pkce = Pkce::from_verifier(verifier, PkceMethod::S256).unwrap();
+        assert_eq!(pkce.challenge(), expected_challenge);
+    }
+
+    #[test]
+    fn test_pkce_s256_deterministic() {
+        // Same verifier → same challenge
+        let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+        let p1 = Pkce::from_verifier(verifier, PkceMethod::S256).unwrap();
+        let p2 = Pkce::from_verifier(verifier, PkceMethod::S256).unwrap();
+        assert_eq!(p1.challenge(), p2.challenge());
+    }
+
+    #[test]
+    fn test_pkce_plain_from_verifier_deterministic() {
+        let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+        let pkce = Pkce::from_verifier(verifier, PkceMethod::Plain).unwrap();
+        assert_eq!(pkce.challenge(), verifier);
+    }
 }

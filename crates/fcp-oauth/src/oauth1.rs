@@ -570,4 +570,495 @@ mod tests {
         assert_eq!(percent_encode("/path"), "%2Fpath");
         assert_eq!(percent_encode("100%"), "100%25");
     }
+
+    // ── Batch: percent_encode edge cases ──
+
+    #[test]
+    fn test_percent_encode_empty() {
+        assert_eq!(percent_encode(""), "");
+    }
+
+    #[test]
+    fn test_percent_encode_unreserved_chars_passthrough() {
+        // RFC 3986 unreserved = ALPHA / DIGIT / "-" / "." / "_" / "~"
+        let unreserved = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~";
+        assert_eq!(percent_encode(unreserved), unreserved);
+    }
+
+    #[test]
+    fn test_percent_encode_all_reserved_chars() {
+        // All RFC 3986 reserved characters must be encoded
+        assert_eq!(percent_encode(":"), "%3A");
+        assert_eq!(percent_encode("@"), "%40");
+        assert_eq!(percent_encode("!"), "%21");
+        assert_eq!(percent_encode("$"), "%24");
+        assert_eq!(percent_encode("'"), "%27");
+        assert_eq!(percent_encode("("), "%28");
+        assert_eq!(percent_encode(")"), "%29");
+        assert_eq!(percent_encode("*"), "%2A");
+        assert_eq!(percent_encode(","), "%2C");
+        assert_eq!(percent_encode(";"), "%3B");
+        assert_eq!(percent_encode("["), "%5B");
+        assert_eq!(percent_encode("]"), "%5D");
+        assert_eq!(percent_encode("#"), "%23");
+    }
+
+    #[test]
+    fn test_percent_encode_space_variants() {
+        assert_eq!(percent_encode(" "), "%20");
+        assert_eq!(percent_encode("\t"), "%09");
+        assert_eq!(percent_encode("\n"), "%0A");
+    }
+
+    #[test]
+    fn test_percent_encode_multibyte_utf8() {
+        // Each byte of multi-byte UTF-8 must be individually percent-encoded
+        let encoded = percent_encode("é");
+        assert_eq!(encoded, "%C3%A9"); // é = 0xC3 0xA9
+    }
+
+    #[test]
+    fn test_percent_encode_mixed() {
+        assert_eq!(
+            percent_encode("Hello World! foo=bar&baz"),
+            "Hello%20World%21%20foo%3Dbar%26baz"
+        );
+    }
+
+    // ── Batch: signature calculation ──
+
+    #[test]
+    fn test_signature_with_extra_params() {
+        let config = test_config();
+        let client = OAuth1Client::new(config);
+
+        let mut params: BTreeMap<String, String> = BTreeMap::new();
+        params.insert("status".to_string(), "Hello World".to_string());
+        params.insert("include_entities".to_string(), "true".to_string());
+
+        let result = client.calculate_signature(
+            "POST",
+            "https://api.twitter.com/1/statuses/update.json",
+            &params,
+            "token_secret_value",
+        );
+
+        assert!(result.is_ok());
+        // Signature should be non-empty base64
+        let sig = result.unwrap();
+        assert!(!sig.is_empty());
+        // Base64 output should end with = or contain only base64 chars
+        assert!(sig
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '='));
+    }
+
+    #[test]
+    fn test_signature_with_query_params_in_url() {
+        let config = test_config();
+        let client = OAuth1Client::new(config);
+
+        let params: BTreeMap<String, String> = BTreeMap::new();
+        // URL with query parameters — these should be included in signature
+        let result = client.calculate_signature(
+            "GET",
+            "https://api.twitter.com/1/statuses/show.json?id=12345&trim_user=true",
+            &params,
+            "",
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_signature_different_methods_produce_different_sigs() {
+        let config = test_config();
+        let client = OAuth1Client::new(config);
+        let params: BTreeMap<String, String> = BTreeMap::new();
+
+        let sig_get = client
+            .calculate_signature("GET", "https://api.example.com/resource", &params, "secret")
+            .unwrap();
+        let sig_post = client
+            .calculate_signature("POST", "https://api.example.com/resource", &params, "secret")
+            .unwrap();
+
+        assert_ne!(sig_get, sig_post);
+    }
+
+    #[test]
+    fn test_signature_method_case_insensitive() {
+        // Per OAuth spec, method is uppercased in base string
+        let config = test_config();
+        let client = OAuth1Client::new(config);
+        let params: BTreeMap<String, String> = BTreeMap::new();
+
+        let sig_upper = client
+            .calculate_signature("GET", "https://api.example.com/r", &params, "s")
+            .unwrap();
+        let sig_lower = client
+            .calculate_signature("get", "https://api.example.com/r", &params, "s")
+            .unwrap();
+
+        // Both should produce same signature since method is uppercased
+        assert_eq!(sig_upper, sig_lower);
+    }
+
+    #[test]
+    fn test_signature_empty_token_secret() {
+        let config = test_config();
+        let client = OAuth1Client::new(config);
+        let params: BTreeMap<String, String> = BTreeMap::new();
+
+        let result =
+            client.calculate_signature("GET", "https://api.example.com/r", &params, "");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_signature_invalid_url() {
+        let config = test_config();
+        let client = OAuth1Client::new(config);
+        let params: BTreeMap<String, String> = BTreeMap::new();
+
+        let result = client.calculate_signature("GET", "not-a-url", &params, "secret");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_signature_url_with_port() {
+        let config = test_config();
+        let client = OAuth1Client::new(config);
+        let params: BTreeMap<String, String> = BTreeMap::new();
+
+        let result = client.calculate_signature(
+            "GET",
+            "https://api.example.com:8443/resource",
+            &params,
+            "",
+        );
+        assert!(result.is_ok());
+    }
+
+    // ── Batch: auth header format ──
+
+    #[test]
+    fn test_auth_header_starts_with_oauth() {
+        let config = test_config();
+        let client = OAuth1Client::new(config);
+        let params: BTreeMap<&str, &str> = BTreeMap::new();
+
+        let header = client
+            .build_auth_header("GET", "https://api.example.com/r", &params, None, None)
+            .unwrap();
+        assert!(header.starts_with("OAuth "));
+    }
+
+    #[test]
+    fn test_auth_header_contains_required_oauth_params() {
+        let config = test_config();
+        let client = OAuth1Client::new(config);
+        let params: BTreeMap<&str, &str> = BTreeMap::new();
+
+        let header = client
+            .build_auth_header("GET", "https://api.example.com/r", &params, None, None)
+            .unwrap();
+
+        assert!(header.contains("oauth_consumer_key="));
+        assert!(header.contains("oauth_nonce="));
+        assert!(header.contains("oauth_signature_method="));
+        assert!(header.contains("oauth_timestamp="));
+        assert!(header.contains("oauth_version="));
+        assert!(header.contains("oauth_signature="));
+    }
+
+    #[test]
+    fn test_auth_header_with_token() {
+        let config = test_config();
+        let client = OAuth1Client::new(config);
+        let params: BTreeMap<&str, &str> = BTreeMap::new();
+
+        let header = client
+            .build_auth_header(
+                "GET",
+                "https://api.example.com/r",
+                &params,
+                Some("my_token"),
+                Some("my_secret"),
+            )
+            .unwrap();
+
+        assert!(header.contains("oauth_token="));
+    }
+
+    #[test]
+    fn test_auth_header_without_token() {
+        let config = test_config();
+        let client = OAuth1Client::new(config);
+        let params: BTreeMap<&str, &str> = BTreeMap::new();
+
+        let header = client
+            .build_auth_header("GET", "https://api.example.com/r", &params, None, None)
+            .unwrap();
+
+        // Should NOT contain oauth_token when no token is provided
+        assert!(!header.contains("oauth_token="));
+    }
+
+    #[test]
+    fn test_auth_header_excludes_non_oauth_params() {
+        let config = test_config();
+        let client = OAuth1Client::new(config);
+        let mut params: BTreeMap<&str, &str> = BTreeMap::new();
+        params.insert("status", "Hello");
+
+        let header = client
+            .build_auth_header("GET", "https://api.example.com/r", &params, None, None)
+            .unwrap();
+
+        // Non-oauth params should be used for signature but NOT appear in header
+        assert!(!header.contains("status="));
+    }
+
+    #[test]
+    fn test_auth_header_values_are_quoted() {
+        let config = test_config();
+        let client = OAuth1Client::new(config);
+        let params: BTreeMap<&str, &str> = BTreeMap::new();
+
+        let header = client
+            .build_auth_header("GET", "https://api.example.com/r", &params, None, None)
+            .unwrap();
+
+        // Each param should be key="value"
+        for part in header.strip_prefix("OAuth ").unwrap().split(", ") {
+            let parts: Vec<&str> = part.splitn(2, '=').collect();
+            assert_eq!(parts.len(), 2, "expected key=value: {part}");
+            assert!(parts[1].starts_with('"'), "value not quoted: {part}");
+            assert!(parts[1].ends_with('"'), "value not quoted: {part}");
+        }
+    }
+
+    // ── Batch: nonce generation ──
+
+    #[test]
+    fn test_generate_nonce_uniqueness() {
+        let nonce1 = generate_nonce();
+        let nonce2 = generate_nonce();
+        assert_ne!(nonce1, nonce2);
+    }
+
+    #[test]
+    fn test_generate_nonce_length() {
+        let nonce = generate_nonce();
+        // 32 bytes → base64url (no padding) = 43 chars
+        assert_eq!(nonce.len(), 43);
+    }
+
+    #[test]
+    fn test_generate_nonce_base64url_chars() {
+        let nonce = generate_nonce();
+        assert!(nonce
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+    }
+
+    // ── Batch: parse edge cases ──
+
+    #[test]
+    fn test_parse_request_token_empty_body() {
+        let result = parse_request_token("");
+        // Empty body should fail (missing required fields)
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_request_token_no_callback_confirmed_field() {
+        let body = "oauth_token=abc&oauth_token_secret=def";
+        let token = parse_request_token(body).unwrap();
+        assert!(!token.callback_confirmed);
+    }
+
+    #[test]
+    fn test_parse_request_token_callback_confirmed_missing_value() {
+        // Presence of field with non-"true" value
+        let body = "oauth_token=abc&oauth_token_secret=def&oauth_callback_confirmed=yes";
+        let token = parse_request_token(body).unwrap();
+        assert!(!token.callback_confirmed);
+    }
+
+    #[test]
+    fn test_parse_access_token_empty_body() {
+        let result = parse_access_token("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_access_token_url_encoded_values() {
+        let body = "oauth_token=tok%20en&oauth_token_secret=se%26cret";
+        let tokens = parse_access_token(body).unwrap();
+        assert_eq!(tokens.token, "tok en");
+        assert_eq!(tokens.token_secret, "se&cret");
+    }
+
+    #[test]
+    fn test_parse_access_token_extra_fields_ignored() {
+        let body = "oauth_token=t&oauth_token_secret=s&extra_field=extra_value";
+        let tokens = parse_access_token(body).unwrap();
+        assert_eq!(tokens.token, "t");
+        assert_eq!(tokens.token_secret, "s");
+    }
+
+    #[test]
+    fn test_parse_request_token_malformed_encoding() {
+        // Invalid percent encoding — serde_urlencoded may or may not handle this
+        let body = "oauth_token=%ZZ&oauth_token_secret=valid";
+        let result = parse_request_token(body);
+        // Should either succeed (lenient) or fail (strict) — not panic
+        let _ = result;
+    }
+
+    // ── Batch: OAuth1Client construction ──
+
+    #[test]
+    fn test_oauth1_client_with_custom_http_client() {
+        let config = test_config();
+        let http_client = Client::new();
+        let client = OAuth1Client::with_http_client(config, http_client);
+        assert_eq!(client.config().consumer_key, "consumer_key");
+    }
+
+    #[test]
+    fn test_oauth1_config_clone() {
+        let config = test_config();
+        let cloned = config.clone();
+        assert_eq!(config.consumer_key, cloned.consumer_key);
+        assert_eq!(config.consumer_secret, cloned.consumer_secret);
+        assert_eq!(config.callback_url, cloned.callback_url);
+    }
+
+    #[test]
+    fn test_oauth1_tokens_clone() {
+        let tokens = OAuth1Tokens {
+            token: "tok".to_string(),
+            token_secret: "sec".to_string(),
+            user_id: Some("uid".to_string()),
+            screen_name: Some("sn".to_string()),
+        };
+        let cloned = tokens.clone();
+        assert_eq!(tokens.token, cloned.token);
+        assert_eq!(tokens.token_secret, cloned.token_secret);
+        assert_eq!(tokens.user_id, cloned.user_id);
+        assert_eq!(tokens.screen_name, cloned.screen_name);
+    }
+
+    #[test]
+    fn test_request_token_clone() {
+        let rt = RequestToken {
+            token: "t".to_string(),
+            token_secret: "s".to_string(),
+            callback_confirmed: true,
+        };
+        let cloned = rt.clone();
+        assert_eq!(rt.token, cloned.token);
+        assert!(cloned.callback_confirmed);
+    }
+
+    #[test]
+    fn test_oauth1_config_debug() {
+        let config = test_config();
+        let debug = format!("{config:?}");
+        assert!(debug.contains("consumer_key"));
+        assert!(debug.contains("OAuth1Config"));
+    }
+
+    #[test]
+    fn test_oauth1_tokens_debug() {
+        let tokens = OAuth1Tokens {
+            token: "t".to_string(),
+            token_secret: "s".to_string(),
+            user_id: None,
+            screen_name: None,
+        };
+        let debug = format!("{tokens:?}");
+        assert!(debug.contains("OAuth1Tokens"));
+    }
+
+    // ── Batch: sign_request ──
+
+    #[test]
+    fn test_sign_request_produces_valid_header() {
+        let config = test_config();
+        let client = OAuth1Client::new(config);
+        let tokens = OAuth1Tokens {
+            token: "access_token".to_string(),
+            token_secret: "access_secret".to_string(),
+            user_id: None,
+            screen_name: None,
+        };
+        let extra = BTreeMap::new();
+
+        let header = client
+            .sign_request("GET", "https://api.example.com/resource", &tokens, &extra)
+            .unwrap();
+
+        assert!(header.starts_with("OAuth "));
+        assert!(header.contains("oauth_token="));
+    }
+
+    #[test]
+    fn test_sign_request_with_extra_params() {
+        let config = test_config();
+        let client = OAuth1Client::new(config);
+        let tokens = OAuth1Tokens {
+            token: "t".to_string(),
+            token_secret: "s".to_string(),
+            user_id: None,
+            screen_name: None,
+        };
+        let mut extra = BTreeMap::new();
+        extra.insert("count", "25");
+        extra.insert("since_id", "12345");
+
+        let header = client
+            .sign_request("GET", "https://api.example.com/timeline", &tokens, &extra)
+            .unwrap();
+
+        // Extra params should not appear in header (they're for signature only)
+        assert!(!header.contains("count="));
+        assert!(!header.contains("since_id="));
+    }
+
+    // ── Batch: authorization_url construction ──
+
+    #[test]
+    fn test_authorization_url_format() {
+        let config = test_config();
+        let client = OAuth1Client::new(config);
+        let rt = RequestToken {
+            token: "my_request_token".to_string(),
+            token_secret: "secret".to_string(),
+            callback_confirmed: true,
+        };
+
+        let url = client.authorization_url(&rt);
+        assert_eq!(
+            url,
+            "https://api.twitter.com/oauth/authorize?oauth_token=my_request_token"
+        );
+    }
+
+    #[test]
+    fn test_authorization_url_special_chars_in_token() {
+        let config = test_config();
+        let client = OAuth1Client::new(config);
+        let rt = RequestToken {
+            token: "token with spaces".to_string(),
+            token_secret: "s".to_string(),
+            callback_confirmed: true,
+        };
+
+        let url = client.authorization_url(&rt);
+        // Token is included as-is (caller should URL-encode if needed)
+        assert!(url.contains("oauth_token=token with spaces"));
+    }
 }

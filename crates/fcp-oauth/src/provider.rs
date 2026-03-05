@@ -402,4 +402,174 @@ mod tests {
         assert!(!OAuthProvider::GitHub.requires_pkce());
         assert!(!OAuthProvider::Slack.requires_pkce());
     }
+
+    // ── Batch: provider configuration details ──
+
+    #[test]
+    fn test_slack_config_urls() {
+        let config = OAuthProvider::Slack.oauth2_config("id", "sec").unwrap();
+        assert!(config.authorization_url.contains("slack.com"));
+        assert!(config.token_url.contains("slack.com"));
+        assert!(!config.use_pkce);
+    }
+
+    #[test]
+    fn test_notion_config_urls() {
+        let config = OAuthProvider::Notion.oauth2_config("id", "sec").unwrap();
+        assert!(config.authorization_url.contains("notion.com"));
+        assert!(config.token_url.contains("notion.com"));
+    }
+
+    #[test]
+    fn test_linear_config_urls() {
+        let config = OAuthProvider::Linear.oauth2_config("id", "sec").unwrap();
+        assert!(config.authorization_url.contains("linear.app"));
+        assert!(config.token_url.contains("linear.app"));
+    }
+
+    #[test]
+    fn test_discord_config_urls() {
+        let config = OAuthProvider::Discord.oauth2_config("id", "sec").unwrap();
+        assert!(config.authorization_url.contains("discord.com"));
+        assert!(config.token_url.contains("discord.com"));
+    }
+
+    #[test]
+    fn test_spotify_config_pkce() {
+        let config = OAuthProvider::Spotify.oauth2_config("id", "sec").unwrap();
+        assert!(config.use_pkce);
+        assert_eq!(config.pkce_method, PkceMethod::S256);
+    }
+
+    #[test]
+    fn test_microsoft_config_pkce() {
+        let config = OAuthProvider::Microsoft.oauth2_config("id", "sec").unwrap();
+        assert!(config.use_pkce);
+        assert_eq!(config.pkce_method, PkceMethod::S256);
+        assert!(config.authorization_url.contains("microsoftonline.com"));
+    }
+
+    #[test]
+    fn test_dropbox_config_pkce() {
+        let config = OAuthProvider::Dropbox.oauth2_config("id", "sec").unwrap();
+        assert!(config.use_pkce);
+        assert!(config.authorization_url.contains("dropbox.com"));
+    }
+
+    #[test]
+    fn test_twitter_oauth2_config_pkce() {
+        let config = OAuthProvider::Twitter.oauth2_config("id", "sec").unwrap();
+        assert!(config.use_pkce);
+        assert_eq!(config.pkce_method, PkceMethod::S256);
+        assert!(config.authorization_url.contains("twitter.com"));
+    }
+
+    #[test]
+    fn test_google_config_has_offline_access_param() {
+        let config = OAuthProvider::Google.oauth2_config("id", "sec").unwrap();
+        // Google config should have access_type=offline
+        assert!(config.extra_auth_params.contains_key("access_type"));
+        assert_eq!(config.extra_auth_params.get("access_type").unwrap(), "offline");
+    }
+
+    // ── Batch: OAuthProvider trait impls ──
+
+    #[test]
+    fn test_provider_clone() {
+        let p = OAuthProvider::Google;
+        let cloned = p;
+        assert_eq!(p, cloned);
+    }
+
+    #[test]
+    fn test_provider_debug() {
+        let debug = format!("{:?}", OAuthProvider::Google);
+        assert_eq!(debug, "Google");
+    }
+
+    #[test]
+    fn test_provider_eq() {
+        assert_eq!(OAuthProvider::Google, OAuthProvider::Google);
+        assert_ne!(OAuthProvider::Google, OAuthProvider::GitHub);
+    }
+
+    #[test]
+    fn test_all_providers_exhaustive_oauth2_support() {
+        // Non-legacy providers should support OAuth2
+        for provider in [
+            OAuthProvider::Google,
+            OAuthProvider::GitHub,
+            OAuthProvider::Twitter,
+            OAuthProvider::Slack,
+            OAuthProvider::Notion,
+            OAuthProvider::Linear,
+            OAuthProvider::Discord,
+            OAuthProvider::Spotify,
+            OAuthProvider::Microsoft,
+            OAuthProvider::Dropbox,
+        ] {
+            assert!(
+                provider.supports_oauth2(),
+                "{provider:?} should support oauth2"
+            );
+            assert!(
+                !provider.supports_oauth1(),
+                "{provider:?} should not support oauth1"
+            );
+        }
+    }
+
+    #[test]
+    fn test_twitter_legacy_only_oauth1() {
+        assert!(OAuthProvider::TwitterLegacy.supports_oauth1());
+        assert!(!OAuthProvider::TwitterLegacy.supports_oauth2());
+        assert!(!OAuthProvider::TwitterLegacy.requires_pkce());
+    }
+
+    // ── Batch: ProviderEndpoints ──
+
+    #[test]
+    fn test_provider_endpoints_clone() {
+        let endpoints = ProviderEndpoints::new("https://a.com/auth", "https://a.com/token")
+            .with_revocation_url("https://a.com/revoke")
+            .with_userinfo_url("https://a.com/userinfo");
+        let cloned = endpoints.clone();
+        assert_eq!(cloned.authorization_url, "https://a.com/auth");
+        assert_eq!(cloned.token_url, "https://a.com/token");
+        assert_eq!(
+            cloned.revocation_url,
+            Some("https://a.com/revoke".to_string())
+        );
+        assert_eq!(
+            cloned.userinfo_url,
+            Some("https://a.com/userinfo".to_string())
+        );
+    }
+
+    #[test]
+    fn test_provider_endpoints_debug() {
+        let endpoints = ProviderEndpoints::new("https://a.com/auth", "https://a.com/token");
+        let debug = format!("{endpoints:?}");
+        assert!(debug.contains("ProviderEndpoints"));
+    }
+
+    #[test]
+    fn test_provider_endpoints_to_oauth2_config_propagates_client_info() {
+        let endpoints = ProviderEndpoints::new("https://a.com/auth", "https://a.com/token");
+        let config = endpoints.to_oauth2_config("my_id", "my_secret");
+        assert_eq!(config.client_id, "my_id");
+        assert_eq!(config.client_secret, Some("my_secret".to_string()));
+    }
+
+    #[test]
+    fn test_twitter_oauth1_config_fields() {
+        let config = OAuthProvider::TwitterLegacy
+            .oauth1_config("my_key", "my_secret")
+            .unwrap();
+        assert_eq!(config.consumer_key, "my_key");
+        assert_eq!(config.consumer_secret, "my_secret");
+        assert!(config.request_token_url.contains("request_token"));
+        assert!(config.authorization_url.contains("authorize"));
+        assert!(config.access_token_url.contains("access_token"));
+    }
 }

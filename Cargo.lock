@@ -1957,6 +1957,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-datadog"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-manifest",
+ "fcp-testkit",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "wiremock",
+]
+
+[[package]]
 name = "fcp-discord"
 version = "0.1.0"
 dependencies = [
@@ -2036,6 +2059,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-elasticsearch"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-manifest",
+ "fcp-testkit",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "wiremock",
+]
+
+[[package]]
 name = "fcp-figma"
 version = "0.1.0"
 dependencies = [
@@ -2074,6 +2120,29 @@ dependencies = [
  "fcp-manifest",
  "fcp-testkit",
  "futures-util",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "wiremock",
+]
+
+[[package]]
+name = "fcp-gitlab"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-manifest",
+ "fcp-testkit",
  "reqwest 0.13.2",
  "serde",
  "serde_json",
@@ -2165,6 +2234,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-grafana"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-manifest",
+ "fcp-testkit",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "wiremock",
+]
+
+[[package]]
 name = "fcp-graphql"
 version = "0.1.0"
 dependencies = [
@@ -2206,6 +2298,29 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "fcp-hubspot"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-manifest",
+ "fcp-testkit",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "wiremock",
 ]
 
 [[package]]
@@ -2582,6 +2697,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-reddit"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-manifest",
+ "fcp-testkit",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "wiremock",
+]
+
+[[package]]
 name = "fcp-registry"
 version = "0.1.0"
 dependencies = [
@@ -2637,6 +2775,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-salesforce"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-manifest",
+ "fcp-testkit",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "wiremock",
+]
+
+[[package]]
 name = "fcp-sandbox"
 version = "0.1.0"
 dependencies = [
@@ -2679,6 +2840,29 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "wiremock",
+]
+
+[[package]]
+name = "fcp-sentry"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-manifest",
+ "fcp-testkit",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
  "tracing",
  "tracing-subscriber",
  "uuid",

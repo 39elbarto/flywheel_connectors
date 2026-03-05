@@ -104,6 +104,7 @@ run_test.rs
 test_expand
 test_expand.rs
 test_ip.rs
+/test_*.rs
 
 # Build/test artifacts directory
 artifacts/

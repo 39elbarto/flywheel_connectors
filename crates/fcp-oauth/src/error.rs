@@ -180,4 +180,59 @@ mod tests {
         let e: OAuthError = url_err.into();
         assert!(matches!(e, OAuthError::UrlError(_)));
     }
+
+    // ── Batch: std::error::Error impls ──
+
+    #[test]
+    fn all_variants_implement_error() {
+        fn assert_error<E: std::error::Error>(_: &E) {}
+        assert_error(&OAuthError::InvalidConfig("x".into()));
+        assert_error(&OAuthError::StateMismatch {
+            expected: "a".into(),
+            actual: "b".into(),
+        });
+        assert_error(&OAuthError::AuthorizationError {
+            error: "e".into(),
+            description: "d".into(),
+            error_uri: None,
+        });
+        assert_error(&OAuthError::TokenExchangeFailed("x".into()));
+        assert_error(&OAuthError::RefreshFailed("x".into()));
+        assert_error(&OAuthError::TokenExpired(Duration::from_secs(1)));
+        assert_error(&OAuthError::NoRefreshToken);
+        assert_error(&OAuthError::InvalidTokenResponse("x".into()));
+        assert_error(&OAuthError::SignatureError("x".into()));
+        assert_error(&OAuthError::UnsupportedProvider("x".into()));
+        assert_error(&OAuthError::TokenNotFound("x".into()));
+        assert_error(&OAuthError::PkceError("x".into()));
+    }
+
+    #[test]
+    fn authorization_error_with_uri() {
+        let e = OAuthError::AuthorizationError {
+            error: "access_denied".into(),
+            description: "desc".into(),
+            error_uri: Some("https://example.com/error".into()),
+        };
+        // error_uri doesn't appear in Display but should be stored
+        let display = e.to_string();
+        assert!(display.contains("access_denied"));
+        if let OAuthError::AuthorizationError { error_uri, .. } = e {
+            assert_eq!(error_uri, Some("https://example.com/error".to_string()));
+        }
+    }
+
+    #[test]
+    fn token_expired_zero_duration() {
+        let e = OAuthError::TokenExpired(Duration::from_secs(0));
+        let display = e.to_string();
+        assert!(display.contains("0"));
+    }
+
+    #[test]
+    fn debug_format_contains_variant_name() {
+        let e = OAuthError::NoRefreshToken;
+        let debug = format!("{e:?}");
+        assert!(debug.contains("NoRefreshToken"));
+    }
 }

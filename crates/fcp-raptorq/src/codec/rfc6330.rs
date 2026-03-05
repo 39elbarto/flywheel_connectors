@@ -667,4 +667,260 @@ mod tests {
         let dbg = format!("{a:?}");
         assert!(dbg.contains("LtTuple"));
     }
+
+    // ── rand edge cases ─────────────────────────────────────────────────
+
+    #[test]
+    fn rand_modulus_one_always_zero() {
+        for y in [0, 1, 100, 0xFFFF_FFFF] {
+            for i in 0..5u8 {
+                assert_eq!(rand(y, i, 1), 0, "rand({y}, {i}, 1) must be 0");
+            }
+        }
+    }
+
+    #[test]
+    fn rand_wrapping_high_y_and_i() {
+        // Ensure no panic with max values
+        let r = rand(0xFFFF_FFFF, 255, 1000);
+        assert!(r < 1000);
+    }
+
+    #[test]
+    fn rand_different_i_produces_different_results() {
+        let r0 = rand(42, 0, 1_000_000);
+        let r1 = rand(42, 1, 1_000_000);
+        // Different i with same y should usually differ (not guaranteed, but extremely unlikely)
+        // We test multiple to ensure at least one differs
+        let any_differ = (0..10u8).any(|i| rand(42, i, 1_000_000) != rand(42, 0, 1_000_000));
+        assert!(any_differ, "varying i should produce different outputs");
+        let _ = (r0, r1);
+    }
+
+    #[test]
+    fn rand_modulus_two_binary() {
+        // All results should be 0 or 1
+        for y in [0u32, 1, 255, 256, 65535, 0xDEAD_BEEF] {
+            let r = rand(y, 0, 2);
+            assert!(r < 2, "rand({y}, 0, 2) = {r}, expected 0 or 1");
+        }
+    }
+
+    // ── deg coverage for each degree bucket ──────────────────────────────
+
+    #[test]
+    fn deg_all_30_degrees_reachable() {
+        // The degree table has 30 entries, covering degrees 1..=30
+        // Test representative values from each bucket
+        let thresholds: [(u32, usize); 6] = [
+            (0, 1),           // v < 5243 → degree 1
+            (5_243, 2),       // v < 529531 → degree 2
+            (529_531, 3),     // v < 704294 → degree 3
+            (998_630, 19),    // v < 998631 → degree 19
+            (1_017_661, 29),  // v < 1017662 → degree 29
+            (1_048_575, 30),  // v < 1048576 → degree 30
+        ];
+
+        for (v, expected_deg) in thresholds {
+            assert_eq!(
+                deg(v),
+                expected_deg,
+                "deg({v}) should be {expected_deg}"
+            );
+        }
+    }
+
+    #[test]
+    fn deg_range_always_1_to_30() {
+        // Sweep many values to verify range
+        for v in (0..1_048_576u32).step_by(1000) {
+            let d = deg(v);
+            assert!(
+                (1..=30).contains(&d),
+                "deg({v}) = {d} is out of range [1, 30]"
+            );
+        }
+    }
+
+    #[test]
+    fn deg_boundary_between_1_and_2() {
+        assert_eq!(deg(5_242), 1);
+        assert_eq!(deg(5_243), 2);
+    }
+
+    #[test]
+    fn deg_boundary_between_29_and_30() {
+        assert_eq!(deg(1_017_661), 29);
+        assert_eq!(deg(1_017_662), 30);
+    }
+
+    // ── next_prime_ge edge cases ─────────────────────────────────────────
+
+    #[test]
+    fn next_prime_ge_zero_and_one() {
+        assert_eq!(next_prime_ge(0), 2);
+        assert_eq!(next_prime_ge(1), 2);
+    }
+
+    #[test]
+    fn next_prime_ge_primes_are_fixed_points() {
+        let primes = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 97, 101, 127, 131];
+        for p in primes {
+            assert_eq!(
+                next_prime_ge(p),
+                p,
+                "next_prime_ge({p}) should return {p} itself"
+            );
+        }
+    }
+
+    #[test]
+    fn next_prime_ge_composites() {
+        assert_eq!(next_prime_ge(4), 5);
+        assert_eq!(next_prime_ge(6), 7);
+        assert_eq!(next_prime_ge(8), 11);
+        assert_eq!(next_prime_ge(9), 11);
+        assert_eq!(next_prime_ge(10), 11);
+        assert_eq!(next_prime_ge(14), 17);
+        assert_eq!(next_prime_ge(15), 17);
+        assert_eq!(next_prime_ge(16), 17);
+        assert_eq!(next_prime_ge(100), 101);
+    }
+
+    #[test]
+    fn next_prime_ge_larger_values() {
+        // 1009 is prime
+        assert_eq!(next_prime_ge(1009), 1009);
+        // 1010 → 1013
+        assert_eq!(next_prime_ge(1010), 1013);
+    }
+
+    // ── tuple_with_prime_p1 ──────────────────────────────────────────────
+
+    #[test]
+    fn tuple_with_prime_p1_matches_manual() {
+        let j = 5;
+        let w = 101;
+        let p = 17;
+        let x = 1234;
+
+        let p1 = next_prime_ge(p);
+        let expected = tuple(j, w, p, p1, x);
+        let actual = tuple_with_prime_p1(j, w, p, x);
+
+        assert_eq!(actual, expected);
+    }
+
+    // ── repair_indices_for_esi ────────────────────────────────────────────
+
+    #[test]
+    fn repair_indices_for_esi_bounded() {
+        let j = 3;
+        let w = 257;
+        let p = 29;
+
+        for esi in [0, 1, 100, 1000, 50000] {
+            let indices = repair_indices_for_esi(j, w, p, esi);
+            assert!(
+                !indices.is_empty(),
+                "repair_indices_for_esi({j}, {w}, {p}, {esi}) should be non-empty"
+            );
+            for &idx in &indices {
+                assert!(
+                    idx < w + p,
+                    "index {idx} >= W+P={} for ESI {esi}",
+                    w + p
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn repair_indices_for_esi_deterministic() {
+        let a = repair_indices_for_esi(5, 101, 17, 42);
+        let b = repair_indices_for_esi(5, 101, 17, 42);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn repair_indices_for_esi_different_esi_differ() {
+        let a = repair_indices_for_esi(5, 101, 17, 0);
+        let b = repair_indices_for_esi(5, 101, 17, 1);
+        // Very likely to differ
+        assert_ne!(a, b);
+    }
+
+    // ── tuple_indices edge cases ─────────────────────────────────────────
+
+    #[test]
+    fn tuple_indices_min_degree() {
+        let t = LtTuple {
+            d: 1,
+            a: 1,
+            b: 0,
+            d1: 2,
+            a1: 1,
+            b1: 0,
+        };
+        let w = 10;
+        let p = 5;
+        let p1 = next_prime_ge(p);
+        let indices = tuple_indices(t, w, p, p1);
+        // 1 LT + 2 PI = 3 indices
+        assert_eq!(indices.len(), 3);
+        // First index is LT (in 0..W)
+        assert!(indices[0] < w);
+        // Last two are PI (in W..W+P)
+        assert!(indices[1] >= w && indices[1] < w + p);
+        assert!(indices[2] >= w && indices[2] < w + p);
+    }
+
+    #[test]
+    fn tuple_indices_high_degree() {
+        // Create a tuple with high degree
+        let t = LtTuple {
+            d: 10,
+            a: 3,
+            b: 0,
+            d1: 3,
+            a1: 2,
+            b1: 0,
+        };
+        let w = 100;
+        let p = 20;
+        let p1 = next_prime_ge(p);
+        let indices = tuple_indices(t, w, p, p1);
+        assert_eq!(indices.len(), 13); // 10 + 3
+        // All LT indices < w
+        for &idx in &indices[..10] {
+            assert!(idx < w, "LT index {idx} >= W={w}");
+        }
+        // All PI indices in [w, w+p)
+        for &idx in &indices[10..] {
+            assert!(idx >= w && idx < w + p, "PI index {idx} not in [{w}, {})", w + p);
+        }
+    }
+
+    // ── V0-V3 lookup table sanity ────────────────────────────────────────
+
+    #[test]
+    fn lookup_tables_length() {
+        assert_eq!(V0.len(), 256);
+        assert_eq!(V1.len(), 256);
+        assert_eq!(V2.len(), 256);
+        assert_eq!(V3.len(), 256);
+    }
+
+    #[test]
+    fn lookup_tables_first_last_values() {
+        // Spot-check first and last values match RFC 6330 tables
+        assert_eq!(V0[0], 251_291_136);
+        assert_eq!(V0[255], 1_358_307_511);
+        assert_eq!(V1[0], 807_385_413);
+        assert_eq!(V1[255], 4_135_048_896);
+        assert_eq!(V2[0], 1_629_829_892);
+        assert_eq!(V2[255], 3_497_665_928);
+        assert_eq!(V3[0], 1_191_369_816);
+        assert_eq!(V3[255], 3_432_275_192);
+    }
 }

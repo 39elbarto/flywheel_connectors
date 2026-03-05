@@ -436,4 +436,145 @@ mod tests {
         capture.assert_valid();
         assert!(findings.is_empty());
     }
+
+    #[test]
+    fn allowlist_suppresses_by_substring() {
+        let mut allowlist = LogScanAllowlist::new();
+        allowlist.allow_substring("sk-abc");
+        let scanner = LogRedactionScanner::with_allowlist(allowlist);
+        let input = r#"{"token":"sk-abc123def456ghi789jkl012mno345pqr"}"#;
+        let findings = scanner.scan_jsonl(input);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn empty_input_no_findings() {
+        let scanner = LogRedactionScanner::new();
+        assert!(scanner.scan_jsonl("").is_empty());
+        assert!(scanner.scan_jsonl("   \n  \n").is_empty());
+    }
+
+    #[test]
+    fn multi_line_finds_on_correct_lines() {
+        let scanner = LogRedactionScanner::new();
+        let input = r#"{"ok":"safe data"}
+{"email":"leak@test.com"}
+{"count":42}"#;
+        let findings = scanner.scan_jsonl(input);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].line, 2);
+        assert_eq!(findings[0].rule_id, "EMAIL");
+    }
+
+    #[test]
+    fn base64_without_special_chars_not_flagged() {
+        let scanner = LogRedactionScanner::new();
+        // Pure alphanumeric string without +/= should NOT trigger BASE64_BLOB
+        let input = r#"{"data":"abcdefghijklmnopqrstuvwxyz012345678901234"}"#;
+        let findings = scanner.scan_jsonl(input);
+        assert!(!findings.iter().any(|f| f.rule_id == "BASE64_BLOB"));
+    }
+
+    #[test]
+    fn scan_nested_json_values() {
+        let scanner = LogRedactionScanner::new();
+        let input = r#"{"outer":{"inner":{"deep":"user@nested.example.com"}}}"#;
+        let findings = scanner.scan_jsonl(input);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule_id, "EMAIL");
+        assert!(findings[0].json_path.as_ref().unwrap().contains("deep"));
+    }
+
+    #[test]
+    fn scan_json_array_values() {
+        let scanner = LogRedactionScanner::new();
+        let input = r#"{"emails":["a@example.com","b@example.com"]}"#;
+        let findings = scanner.scan_jsonl(input);
+        assert_eq!(findings.iter().filter(|f| f.rule_id == "EMAIL").count(), 2);
+    }
+
+    #[test]
+    fn default_scanner_same_as_new() {
+        let a = LogRedactionScanner::new();
+        let b = LogRedactionScanner::default();
+        assert_eq!(a.rules.len(), b.rules.len());
+    }
+
+    #[test]
+    fn scan_severity_debug() {
+        assert!(format!("{:?}", ScanSeverity::Error).contains("Error"));
+        assert!(format!("{:?}", ScanSeverity::Warn).contains("Warn"));
+    }
+
+    #[test]
+    fn scan_severity_eq() {
+        assert_eq!(ScanSeverity::Error, ScanSeverity::Error);
+        assert_eq!(ScanSeverity::Warn, ScanSeverity::Warn);
+        assert_ne!(ScanSeverity::Error, ScanSeverity::Warn);
+    }
+
+    #[test]
+    fn scan_finding_clone_eq() {
+        let finding = super::ScanFinding {
+            line: 1,
+            rule_id: "TEST".into(),
+            severity: ScanSeverity::Error,
+            message: "test".into(),
+            snippet: "snippet".into(),
+            json_path: Some("$.field".into()),
+        };
+        let cloned = finding.clone();
+        assert_eq!(finding, cloned);
+    }
+
+    #[test]
+    fn allowlist_multiple_mechanisms() {
+        let mut allowlist = LogScanAllowlist::new();
+        allowlist.allow_rule_id("EMAIL");
+        allowlist.allow_line(2);
+        allowlist.allow_substring("safe-key");
+        allowlist.allow_path_substring("$.allowed");
+
+        let scanner = LogRedactionScanner::with_allowlist(allowlist);
+
+        // Line 1: EMAIL suppressed by rule_id
+        let input1 = r#"{"email":"user@example.com"}"#;
+        assert!(scanner.scan_jsonl(input1).is_empty());
+    }
+
+    #[test]
+    fn allowlist_mut_access() {
+        let mut scanner = LogRedactionScanner::new();
+        scanner.allowlist_mut().allow_rule_id("EMAIL");
+        let input = r#"{"email":"user@example.com"}"#;
+        assert!(scanner.scan_jsonl(input).is_empty());
+    }
+
+    #[test]
+    fn github_token_variants() {
+        let scanner = LogRedactionScanner::new();
+        for prefix in &["ghp_", "gho_", "ghu_", "ghs_"] {
+            let token = format!("{prefix}{}", "a".repeat(36));
+            let input = format!(r#"{{"token":"{token}"}}"#);
+            let findings = scanner.scan_jsonl(&input);
+            assert!(
+                findings.iter().any(|f| f.rule_id == "GITHUB_TOKEN"),
+                "expected GITHUB_TOKEN for prefix {prefix}"
+            );
+        }
+    }
+
+    #[test]
+    fn slack_token_variants() {
+        let scanner = LogRedactionScanner::new();
+        for prefix in &["xoxb-", "xoxa-", "xoxp-", "xoxr-", "xoxs-"] {
+            let token = format!("{prefix}{}", "a".repeat(15));
+            let input = format!(r#"{{"token":"{token}"}}"#);
+            let findings = scanner.scan_jsonl(&input);
+            assert!(
+                findings.iter().any(|f| f.rule_id == "SLACK_TOKEN"),
+                "expected SLACK_TOKEN for prefix {prefix}"
+            );
+        }
+    }
 }

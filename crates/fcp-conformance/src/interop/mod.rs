@@ -109,3 +109,148 @@ pub struct TestFailure {
     /// Error message.
     pub message: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interop_test_summary_default() {
+        let summary = InteropTestSummary::default();
+        assert_eq!(summary.total, 0);
+        assert_eq!(summary.passed, 0);
+        assert_eq!(summary.failed, 0);
+        assert!(summary.failures.is_empty());
+        assert!(summary.all_passed());
+    }
+
+    #[test]
+    fn interop_test_summary_all_passed_with_zero_failed() {
+        let summary = InteropTestSummary {
+            total: 10,
+            passed: 10,
+            failed: 0,
+            failures: vec![],
+        };
+        assert!(summary.all_passed());
+    }
+
+    #[test]
+    fn interop_test_summary_not_all_passed() {
+        let summary = InteropTestSummary {
+            total: 10,
+            passed: 9,
+            failed: 1,
+            failures: vec![TestFailure {
+                name: "test1".to_string(),
+                category: "cat".to_string(),
+                message: "fail".to_string(),
+            }],
+        };
+        assert!(!summary.all_passed());
+    }
+
+    #[test]
+    fn interop_test_summary_merge() {
+        let mut a = InteropTestSummary {
+            total: 5,
+            passed: 4,
+            failed: 1,
+            failures: vec![TestFailure {
+                name: "a1".to_string(),
+                category: "cat-a".to_string(),
+                message: "err-a".to_string(),
+            }],
+        };
+        let b = InteropTestSummary {
+            total: 3,
+            passed: 2,
+            failed: 1,
+            failures: vec![TestFailure {
+                name: "b1".to_string(),
+                category: "cat-b".to_string(),
+                message: "err-b".to_string(),
+            }],
+        };
+        a.merge(b);
+        assert_eq!(a.total, 8);
+        assert_eq!(a.passed, 6);
+        assert_eq!(a.failed, 2);
+        assert_eq!(a.failures.len(), 2);
+    }
+
+    #[test]
+    fn interop_test_summary_merge_empty() {
+        let mut a = InteropTestSummary {
+            total: 5,
+            passed: 5,
+            failed: 0,
+            failures: vec![],
+        };
+        let b = InteropTestSummary::default();
+        a.merge(b);
+        assert_eq!(a.total, 5);
+        assert!(a.all_passed());
+    }
+
+    #[test]
+    fn interop_test_summary_clone() {
+        let summary = InteropTestSummary {
+            total: 3,
+            passed: 2,
+            failed: 1,
+            failures: vec![TestFailure {
+                name: "t".to_string(),
+                category: "c".to_string(),
+                message: "m".to_string(),
+            }],
+        };
+        let moved = summary;
+        assert_eq!(moved.total, 3);
+        assert_eq!(moved.failures.len(), 1);
+    }
+
+    #[test]
+    fn test_failure_debug() {
+        let failure = TestFailure {
+            name: "test_name".to_string(),
+            category: "session".to_string(),
+            message: "expected X got Y".to_string(),
+        };
+        let dbg = format!("{failure:?}");
+        assert!(dbg.contains("test_name"));
+        assert!(dbg.contains("session"));
+    }
+
+    #[test]
+    fn test_failure_clone() {
+        let failure = TestFailure {
+            name: "f1".to_string(),
+            category: "c1".to_string(),
+            message: "m1".to_string(),
+        };
+        let moved = failure;
+        assert_eq!(moved.name, "f1");
+        assert_eq!(moved.category, "c1");
+        assert_eq!(moved.message, "m1");
+    }
+
+    #[test]
+    fn run_all_interop_tests_pass() {
+        let summary = run_all();
+        for failure in &summary.failures {
+            eprintln!(
+                "FAIL [{}]: {} - {}",
+                failure.category, failure.name, failure.message
+            );
+        }
+        assert!(
+            summary.all_passed(),
+            "All interop tests should pass: {}/{} passed",
+            summary.passed,
+            summary.total
+        );
+        // Should have tests from all 5 categories
+        assert!(summary.total >= 36);
+    }
+}

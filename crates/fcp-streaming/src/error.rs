@@ -170,4 +170,159 @@ mod tests {
         assert!(matches!(stream_err, StreamError::IoError(_)));
         assert!(stream_err.to_string().contains("broken"));
     }
+
+    // ── std::error::Error trait tests ──
+
+    #[test]
+    fn connection_failed_is_std_error() {
+        let e: Box<dyn std::error::Error> =
+            Box::new(StreamError::ConnectionFailed("refused".into()));
+        assert!(e.to_string().contains("refused"));
+    }
+
+    #[test]
+    fn io_error_source_is_inner() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "missing");
+        let stream_err = StreamError::IoError(io_err);
+        let source = std::error::Error::source(&stream_err);
+        assert!(source.is_some(), "IoError variant should expose source");
+    }
+
+    #[test]
+    fn connection_failed_source_is_none() {
+        let e = StreamError::ConnectionFailed("no source".into());
+        let source = std::error::Error::source(&e);
+        assert!(source.is_none());
+    }
+
+    // ── Debug tests ──
+
+    #[test]
+    fn connection_failed_debug() {
+        let e = StreamError::ConnectionFailed("refused".into());
+        let debug = format!("{e:?}");
+        assert!(debug.contains("ConnectionFailed"));
+    }
+
+    #[test]
+    fn connection_closed_debug() {
+        let e = StreamError::ConnectionClosed {
+            reason: "gone".into(),
+            code: Some(1001),
+        };
+        let debug = format!("{e:?}");
+        assert!(debug.contains("ConnectionClosed"));
+        assert!(debug.contains("1001"));
+    }
+
+    #[test]
+    fn http_error_debug() {
+        let e = StreamError::HttpError {
+            status: 503,
+            message: "Service Unavailable".into(),
+        };
+        let debug = format!("{e:?}");
+        assert!(debug.contains("503"));
+    }
+
+    #[test]
+    fn timeout_debug() {
+        let e = StreamError::Timeout(Duration::from_millis(2500));
+        let debug = format!("{e:?}");
+        assert!(debug.contains("Timeout"));
+    }
+
+    #[test]
+    fn buffer_overflow_debug() {
+        let e = StreamError::BufferOverflow {
+            size: 4096,
+            limit: 2048,
+        };
+        let debug = format!("{e:?}");
+        assert!(debug.contains("4096"));
+        assert!(debug.contains("2048"));
+    }
+
+    #[test]
+    fn reconnect_limit_debug() {
+        let e = StreamError::ReconnectLimitExceeded { attempts: 5 };
+        let debug = format!("{e:?}");
+        assert!(debug.contains('5'));
+    }
+
+    #[test]
+    fn websocket_error_debug() {
+        let e = StreamError::WebSocketError("protocol".into());
+        let debug = format!("{e:?}");
+        assert!(debug.contains("WebSocketError"));
+    }
+
+    #[test]
+    fn sse_error_debug() {
+        let e = StreamError::SseError("invalid".into());
+        let debug = format!("{e:?}");
+        assert!(debug.contains("SseError"));
+    }
+
+    #[test]
+    fn io_error_debug() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::TimedOut, "timed out");
+        let e = StreamError::IoError(io_err);
+        let debug = format!("{e:?}");
+        assert!(debug.contains("IoError"));
+    }
+
+    // ── Display boundary tests ──
+
+    #[test]
+    fn connection_closed_empty_reason() {
+        let e = StreamError::ConnectionClosed {
+            reason: String::new(),
+            code: None,
+        };
+        assert_eq!(e.to_string(), "Connection closed: ");
+    }
+
+    #[test]
+    fn http_error_boundary_status() {
+        let e = StreamError::HttpError {
+            status: 0,
+            message: "zero".into(),
+        };
+        assert_eq!(e.to_string(), "HTTP error: 0 - zero");
+    }
+
+    #[test]
+    fn timeout_zero_duration() {
+        let e = StreamError::Timeout(Duration::ZERO);
+        let display = e.to_string();
+        assert!(display.contains('0'));
+    }
+
+    #[test]
+    fn buffer_overflow_equal_size_and_limit() {
+        let e = StreamError::BufferOverflow {
+            size: 1024,
+            limit: 1024,
+        };
+        assert!(e.to_string().contains("1024"));
+    }
+
+    #[test]
+    fn reconnect_zero_attempts() {
+        let e = StreamError::ReconnectLimitExceeded { attempts: 0 };
+        assert!(e.to_string().contains("0 attempts"));
+    }
+
+    #[test]
+    fn parse_error_empty_message() {
+        let e = StreamError::ParseError(String::new());
+        assert_eq!(e.to_string(), "Parse error: ");
+    }
+
+    #[test]
+    fn invalid_state_empty_message() {
+        let e = StreamError::InvalidState(String::new());
+        assert_eq!(e.to_string(), "Invalid state: ");
+    }
 }

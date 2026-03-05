@@ -453,4 +453,358 @@ mod tests {
             Err(SymbolEnvelopeError::ZoneKeyIdMismatch { .. })
         ));
     }
+
+    #[test]
+    fn wrong_zone_key_fails_decryption() {
+        let zone_key = ZoneKey::from_bytes([0xAA; 32]);
+        let wrong_key = ZoneKey::from_bytes([0xBB; 32]);
+        let mut envelope = test_envelope();
+        let plaintext = b"secret data";
+
+        let (ciphertext, auth_tag) = encrypt_symbol_payload(
+            &zone_key,
+            ZoneKeyAlgorithm::ChaCha20Poly1305,
+            &envelope,
+            plaintext,
+        )
+        .unwrap();
+
+        envelope.data = ciphertext;
+        envelope.auth_tag = auth_tag;
+
+        let result = envelope.decrypt(
+            &wrong_key,
+            ZoneKeyAlgorithm::ChaCha20Poly1305,
+            envelope.zone_key_id,
+        );
+        assert!(matches!(result, Err(SymbolEnvelopeError::DecryptFailed)));
+    }
+
+    #[test]
+    fn tampered_ciphertext_fails() {
+        let zone_key = ZoneKey::from_bytes([0xAA; 32]);
+        let mut envelope = test_envelope();
+        let plaintext = b"secret data";
+
+        let (mut ciphertext, auth_tag) = encrypt_symbol_payload(
+            &zone_key,
+            ZoneKeyAlgorithm::ChaCha20Poly1305,
+            &envelope,
+            plaintext,
+        )
+        .unwrap();
+
+        ciphertext[0] ^= 0xFF; // flip bits
+        envelope.data = ciphertext;
+        envelope.auth_tag = auth_tag;
+
+        let result = envelope.decrypt(
+            &zone_key,
+            ZoneKeyAlgorithm::ChaCha20Poly1305,
+            envelope.zone_key_id,
+        );
+        assert!(matches!(result, Err(SymbolEnvelopeError::DecryptFailed)));
+    }
+
+    #[test]
+    fn tampered_auth_tag_fails() {
+        let zone_key = ZoneKey::from_bytes([0xAA; 32]);
+        let mut envelope = test_envelope();
+        let plaintext = b"secret data";
+
+        let (ciphertext, mut auth_tag) = encrypt_symbol_payload(
+            &zone_key,
+            ZoneKeyAlgorithm::ChaCha20Poly1305,
+            &envelope,
+            plaintext,
+        )
+        .unwrap();
+
+        auth_tag[0] ^= 0xFF;
+        envelope.data = ciphertext;
+        envelope.auth_tag = auth_tag;
+
+        let result = envelope.decrypt(
+            &zone_key,
+            ZoneKeyAlgorithm::ChaCha20Poly1305,
+            envelope.zone_key_id,
+        );
+        assert!(matches!(result, Err(SymbolEnvelopeError::DecryptFailed)));
+    }
+
+    #[test]
+    fn empty_plaintext_roundtrip() {
+        let zone_key = ZoneKey::from_bytes([0xCC; 32]);
+        let envelope = test_envelope();
+        let plaintext = b"";
+
+        let encrypted = SymbolEnvelope::encrypt(
+            envelope.object_id,
+            envelope.esi,
+            envelope.k,
+            plaintext,
+            envelope.zone_id.clone(),
+            envelope.zone_key_id,
+            envelope.epoch_id,
+            envelope.source_id.clone(),
+            envelope.sender_instance_id,
+            envelope.frame_seq,
+            &zone_key,
+            ZoneKeyAlgorithm::ChaCha20Poly1305,
+        )
+        .unwrap();
+
+        let decrypted = encrypted
+            .decrypt(&zone_key, ZoneKeyAlgorithm::ChaCha20Poly1305, encrypted.zone_key_id)
+            .unwrap();
+        assert!(decrypted.is_empty());
+    }
+
+    #[test]
+    fn large_plaintext_roundtrip() {
+        let zone_key = ZoneKey::from_bytes([0xDD; 32]);
+        let envelope = test_envelope();
+        let plaintext = vec![0x42u8; 65536]; // 64 KiB
+
+        let encrypted = SymbolEnvelope::encrypt(
+            envelope.object_id,
+            envelope.esi,
+            envelope.k,
+            &plaintext,
+            envelope.zone_id.clone(),
+            envelope.zone_key_id,
+            envelope.epoch_id,
+            envelope.source_id.clone(),
+            envelope.sender_instance_id,
+            envelope.frame_seq,
+            &zone_key,
+            ZoneKeyAlgorithm::XChaCha20Poly1305,
+        )
+        .unwrap();
+
+        let decrypted = encrypted
+            .decrypt(&zone_key, ZoneKeyAlgorithm::XChaCha20Poly1305, encrypted.zone_key_id)
+            .unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn nonce12_zero_inputs() {
+        let nonce = derive_nonce12(0, 0);
+        assert_eq!(nonce, [0u8; 12]);
+    }
+
+    #[test]
+    fn nonce24_zero_inputs() {
+        let nonce = derive_nonce24(0, 0, 0);
+        assert_eq!(nonce, [0u8; 24]);
+    }
+
+    #[test]
+    fn nonce12_different_frame_seq() {
+        let n1 = derive_nonce12(1, 42);
+        let n2 = derive_nonce12(2, 42);
+        assert_ne!(n1, n2);
+    }
+
+    #[test]
+    fn nonce12_different_esi() {
+        let n1 = derive_nonce12(100, 1);
+        let n2 = derive_nonce12(100, 2);
+        assert_ne!(n1, n2);
+    }
+
+    #[test]
+    fn nonce24_different_sender_instance() {
+        let n1 = derive_nonce24(1, 100, 42);
+        let n2 = derive_nonce24(2, 100, 42);
+        assert_ne!(n1, n2);
+    }
+
+    #[test]
+    fn sender_subkey_deterministic() {
+        let zone_key = ZoneKey::from_bytes([0xAA; 32]);
+        let zone_key_id = ZoneKeyId::from_bytes([0x33; 8]);
+        let node_id = NodeId::new("node-test");
+        let instance = 0xDEAD;
+
+        let k1 = derive_sender_subkey(&zone_key, &zone_key_id, &node_id, instance);
+        let k2 = derive_sender_subkey(&zone_key, &zone_key_id, &node_id, instance);
+        assert_eq!(k1.as_bytes(), k2.as_bytes());
+    }
+
+    #[test]
+    fn sender_subkey_differs_by_node() {
+        let zone_key = ZoneKey::from_bytes([0xAA; 32]);
+        let zone_key_id = ZoneKeyId::from_bytes([0x33; 8]);
+        let n1 = NodeId::new("node-a");
+        let n2 = NodeId::new("node-b");
+
+        let k1 = derive_sender_subkey(&zone_key, &zone_key_id, &n1, 1);
+        let k2 = derive_sender_subkey(&zone_key, &zone_key_id, &n2, 1);
+        assert_ne!(k1.as_bytes(), k2.as_bytes());
+    }
+
+    #[test]
+    fn sender_subkey_differs_by_instance() {
+        let zone_key = ZoneKey::from_bytes([0xAA; 32]);
+        let zone_key_id = ZoneKeyId::from_bytes([0x33; 8]);
+        let node_id = NodeId::new("node-test");
+
+        let k1 = derive_sender_subkey(&zone_key, &zone_key_id, &node_id, 1);
+        let k2 = derive_sender_subkey(&zone_key, &zone_key_id, &node_id, 2);
+        assert_ne!(k1.as_bytes(), k2.as_bytes());
+    }
+
+    #[test]
+    fn aad_deterministic() {
+        let envelope = test_envelope();
+        let aad1 = build_symbol_aad(&envelope);
+        let aad2 = build_symbol_aad(&envelope);
+        assert_eq!(aad1, aad2);
+    }
+
+    #[test]
+    fn constants_correct() {
+        assert_eq!(AUTH_TAG_SIZE, 16);
+        assert_eq!(SYMBOL_AAD_SIZE, 86);
+    }
+
+    #[test]
+    fn envelope_error_display() {
+        let e = SymbolEnvelopeError::EncryptFailed;
+        assert_eq!(e.to_string(), "AEAD encryption failed");
+
+        let e = SymbolEnvelopeError::DecryptFailed;
+        assert_eq!(e.to_string(), "AEAD decryption failed (authentication or key mismatch)");
+
+        let e = SymbolEnvelopeError::ZoneKeyIdMismatch {
+            expected: ZoneKeyId::from_bytes([1; 8]),
+            found: ZoneKeyId::from_bytes([2; 8]),
+        };
+        assert!(e.to_string().contains("zone_key_id mismatch"));
+    }
+
+    #[test]
+    fn envelope_clone() {
+        let envelope = test_envelope();
+        let cloned = envelope.clone();
+        assert_eq!(cloned.esi, envelope.esi);
+        assert_eq!(cloned.k, envelope.k);
+        assert_eq!(cloned.epoch_id, envelope.epoch_id);
+        assert_eq!(cloned.frame_seq, envelope.frame_seq);
+        assert_eq!(cloned.auth_tag, envelope.auth_tag);
+    }
+
+    #[test]
+    fn envelope_debug() {
+        let envelope = test_envelope();
+        let debug = format!("{envelope:?}");
+        assert!(debug.contains("SymbolEnvelope"));
+    }
+
+    #[test]
+    fn encrypt_api_roundtrip() {
+        let zone_key = ZoneKey::from_bytes([0xEE; 32]);
+        let base = test_envelope();
+        let plaintext = b"encrypt API test";
+
+        let encrypted = SymbolEnvelope::encrypt(
+            base.object_id,
+            base.esi,
+            base.k,
+            plaintext,
+            base.zone_id.clone(),
+            base.zone_key_id,
+            base.epoch_id,
+            base.source_id.clone(),
+            base.sender_instance_id,
+            base.frame_seq,
+            &zone_key,
+            ZoneKeyAlgorithm::ChaCha20Poly1305,
+        )
+        .unwrap();
+
+        assert_eq!(encrypted.esi, base.esi);
+        assert_eq!(encrypted.k, base.k);
+        assert!(!encrypted.data.is_empty());
+        assert_ne!(encrypted.auth_tag, [0u8; 16]);
+
+        let decrypted = encrypted
+            .decrypt(&zone_key, ZoneKeyAlgorithm::ChaCha20Poly1305, encrypted.zone_key_id)
+            .unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn cross_algorithm_decrypt_fails() {
+        let zone_key = ZoneKey::from_bytes([0xFF; 32]);
+        let base = test_envelope();
+        let plaintext = b"cross algo test";
+
+        let encrypted = SymbolEnvelope::encrypt(
+            base.object_id,
+            base.esi,
+            base.k,
+            plaintext,
+            base.zone_id.clone(),
+            base.zone_key_id,
+            base.epoch_id,
+            base.source_id.clone(),
+            base.sender_instance_id,
+            base.frame_seq,
+            &zone_key,
+            ZoneKeyAlgorithm::ChaCha20Poly1305,
+        )
+        .unwrap();
+
+        // Try decrypting with XChaCha20 instead of ChaCha20
+        let result = encrypted.decrypt(
+            &zone_key,
+            ZoneKeyAlgorithm::XChaCha20Poly1305,
+            encrypted.zone_key_id,
+        );
+        assert!(matches!(result, Err(SymbolEnvelopeError::DecryptFailed)));
+    }
+
+    #[test]
+    fn xchacha20_encrypt_api_roundtrip() {
+        let zone_key = ZoneKey::from_bytes([0x77; 32]);
+        let base = test_envelope();
+        let plaintext = b"xchacha20 api test";
+
+        let encrypted = SymbolEnvelope::encrypt(
+            base.object_id,
+            base.esi,
+            base.k,
+            plaintext,
+            base.zone_id.clone(),
+            base.zone_key_id,
+            base.epoch_id,
+            base.source_id.clone(),
+            base.sender_instance_id,
+            base.frame_seq,
+            &zone_key,
+            ZoneKeyAlgorithm::XChaCha20Poly1305,
+        )
+        .unwrap();
+
+        let decrypted = encrypted
+            .decrypt(&zone_key, ZoneKeyAlgorithm::XChaCha20Poly1305, encrypted.zone_key_id)
+            .unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn zone_key_id_mismatch_contains_ids() {
+        let expected = ZoneKeyId::from_bytes([0x11; 8]);
+        let found = ZoneKeyId::from_bytes([0x22; 8]);
+        let e = SymbolEnvelopeError::ZoneKeyIdMismatch { expected, found };
+        if let SymbolEnvelopeError::ZoneKeyIdMismatch { expected: e, found: f } = e {
+            assert_eq!(e.as_bytes(), &[0x11; 8]);
+            assert_eq!(f.as_bytes(), &[0x22; 8]);
+        } else {
+            panic!("wrong variant");
+        }
+    }
 }

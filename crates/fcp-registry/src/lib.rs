@@ -4445,4 +4445,987 @@ sig = "base64:{sig_b64}"
             },
         );
     }
+
+    // ── Error source chain tests ─────────────────────────────────────────
+
+    #[test]
+    fn registry_error_manifest_parse_has_source() {
+        run_registry_test(
+            "registry_error_manifest_parse_has_source",
+            "unit",
+            "error-source",
+            1,
+            || async {
+                let manifest_err = ConnectorManifest::parse_str("invalid toml %%%")
+                    .expect_err("parse fails");
+                let registry_err: RegistryError = manifest_err.into();
+                assert!(matches!(registry_err, RegistryError::ManifestParse(_)));
+                let source = std::error::Error::source(&registry_err);
+                assert!(source.is_some(), "ManifestParse should expose source");
+
+                RegistryLogData {
+                    reason_code: Some("manifest_parse_source_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn registry_error_signing_bytes_has_source() {
+        run_registry_test(
+            "registry_error_signing_bytes_has_source",
+            "unit",
+            "error-source",
+            1,
+            || async {
+                // SerializationError can be constructed via CanonicalSerializer failure
+                // but we can test the From impl directly
+                let err = RegistryError::SignatureBytes;
+                let source = std::error::Error::source(&err);
+                assert!(source.is_none(), "SignatureBytes has no inner source");
+
+                RegistryLogData {
+                    reason_code: Some("signature_bytes_no_source".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn registry_error_no_source_variants() {
+        run_registry_test(
+            "registry_error_no_source_variants",
+            "unit",
+            "error-source",
+            5,
+            || async {
+                let cases: Vec<RegistryError> = vec![
+                    RegistryError::MissingSignatures,
+                    RegistryError::RegistrySignatureRequired,
+                    RegistryError::TransparencyLogMissing,
+                    RegistryError::TransparencyEvidenceMissing,
+                    RegistryError::AttestationEvidenceMissing,
+                ];
+                for err in &cases {
+                    assert!(
+                        std::error::Error::source(err).is_none(),
+                        "{err} should have no source"
+                    );
+                }
+
+                RegistryLogData {
+                    reason_code: Some("no_source_variants_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn supply_chain_error_no_source_all_variants() {
+        run_registry_test(
+            "supply_chain_error_no_source_all_variants",
+            "unit",
+            "error-source",
+            1,
+            || async {
+                let cases: Vec<SupplyChainVerificationError> = vec![
+                    SupplyChainVerificationError::TransparencyEntryNotFound,
+                    SupplyChainVerificationError::TransparencyProofInvalid,
+                    SupplyChainVerificationError::TransparencySignatureInvalid,
+                    SupplyChainVerificationError::TufExpired,
+                    SupplyChainVerificationError::TufFreeze,
+                    SupplyChainVerificationError::SigstoreSignatureInvalid,
+                    SupplyChainVerificationError::SigstoreCertificateInvalid,
+                    SupplyChainVerificationError::NotConfigured,
+                ];
+                for err in &cases {
+                    assert!(
+                        std::error::Error::source(err).is_none(),
+                        "{err} should have no source"
+                    );
+                }
+
+                RegistryLogData {
+                    reason_code: Some("sc_no_source_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ── SupplyChainVerificationError Debug coverage ──────────────────────
+
+    #[test]
+    fn supply_chain_error_debug_all_variants() {
+        run_registry_test(
+            "supply_chain_error_debug_all_variants",
+            "unit",
+            "error-debug",
+            13,
+            || async {
+                let variants: Vec<(&str, SupplyChainVerificationError)> = vec![
+                    ("TransparencyEntryNotFound", SupplyChainVerificationError::TransparencyEntryNotFound),
+                    ("TransparencyProofInvalid", SupplyChainVerificationError::TransparencyProofInvalid),
+                    ("TransparencySignatureInvalid", SupplyChainVerificationError::TransparencySignatureInvalid),
+                    ("TufRootMismatch", SupplyChainVerificationError::TufRootMismatch {
+                        expected: "a".into(), actual: "b".into(),
+                    }),
+                    ("TufExpired", SupplyChainVerificationError::TufExpired),
+                    ("TufTargetNotFound", SupplyChainVerificationError::TufTargetNotFound {
+                        target: "t".into(),
+                    }),
+                    ("TufRollback", SupplyChainVerificationError::TufRollback { current: 1, got: 0 }),
+                    ("TufFreeze", SupplyChainVerificationError::TufFreeze),
+                    ("SigstoreSignatureInvalid", SupplyChainVerificationError::SigstoreSignatureInvalid),
+                    ("SigstoreCertificateInvalid", SupplyChainVerificationError::SigstoreCertificateInvalid),
+                    ("SigstoreIdentityMismatch", SupplyChainVerificationError::SigstoreIdentityMismatch {
+                        expected: "a".into(), actual: "b".into(),
+                    }),
+                    ("SigstoreIssuerUntrusted", SupplyChainVerificationError::SigstoreIssuerUntrusted {
+                        issuer: "evil".into(),
+                    }),
+                    ("Network", SupplyChainVerificationError::Network("timeout".into())),
+                ];
+                for (name, err) in &variants {
+                    let debug = format!("{err:?}");
+                    assert!(debug.contains(name), "Debug of {name} should contain variant name, got: {debug}");
+                }
+
+                RegistryLogData {
+                    reason_code: Some("sc_error_debug_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ── RegistryError Debug coverage ─────────────────────────────────────
+
+    #[test]
+    fn registry_error_debug_all_variants() {
+        run_registry_test(
+            "registry_error_debug_all_variants",
+            "unit",
+            "error-debug",
+            14,
+            || async {
+                let variants: Vec<(&str, RegistryError)> = vec![
+                    ("MissingSignatures", RegistryError::MissingSignatures),
+                    ("UnknownKid", RegistryError::UnknownKid { kid: "k".into() }),
+                    ("SignatureInvalid", RegistryError::SignatureInvalid { kid: "k".into() }),
+                    ("PublisherThresholdUnmet", RegistryError::PublisherThresholdUnmet {
+                        required: 2, valid: 1,
+                    }),
+                    ("RegistrySignatureRequired", RegistryError::RegistrySignatureRequired),
+                    ("TargetMismatch", RegistryError::TargetMismatch {
+                        expected: "a".into(), found: "b".into(),
+                    }),
+                    ("CapabilityCeilingViolation", RegistryError::CapabilityCeilingViolation {
+                        capability: "c".into(),
+                    }),
+                    ("TransparencyLogMissing", RegistryError::TransparencyLogMissing),
+                    ("TransparencyEvidenceMissing", RegistryError::TransparencyEvidenceMissing),
+                    ("RequiredAttestationMissing", RegistryError::RequiredAttestationMissing {
+                        attestation: "a".into(),
+                    }),
+                    ("AttestationEvidenceMissing", RegistryError::AttestationEvidenceMissing),
+                    ("SlsaLevelInsufficient", RegistryError::SlsaLevelInsufficient { required: 3 }),
+                    ("UntrustedBuilder", RegistryError::UntrustedBuilder { builder: "b".into() }),
+                    ("SignatureBytes", RegistryError::SignatureBytes),
+                ];
+                for (name, err) in &variants {
+                    let debug = format!("{err:?}");
+                    assert!(debug.contains(name), "Debug of {name}: {debug}");
+                }
+
+                RegistryLogData {
+                    reason_code: Some("reg_error_debug_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ── Result type Debug/Clone coverage ─────────────────────────────────
+
+    #[test]
+    fn transparency_verification_result_debug_clone() {
+        run_registry_test(
+            "transparency_verification_result_debug_clone",
+            "unit",
+            "traits",
+            3,
+            || async {
+                let result = TransparencyVerificationResult {
+                    verified: true,
+                    log_index: Some(42),
+                    logged_at: Some(1_700_000_000),
+                };
+                let debug = format!("{result:?}");
+                assert!(debug.contains("42"));
+                let moved = result;
+                assert!(moved.verified);
+                assert_eq!(moved.log_index, Some(42));
+
+                RegistryLogData {
+                    reason_code: Some("transparency_result_traits_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn tuf_verification_result_debug_clone() {
+        run_registry_test(
+            "tuf_verification_result_debug_clone",
+            "unit",
+            "traits",
+            3,
+            || async {
+                let result = TufVerificationResult {
+                    verified: true,
+                    root_version: 5,
+                    target: Some(TufTargetInfo {
+                        target_path: "p".into(),
+                        hash: "h".into(),
+                        length: 100,
+                        delegations: vec!["d".into()],
+                    }),
+                };
+                let debug = format!("{result:?}");
+                assert!(debug.contains("TufVerificationResult"));
+                let cloned = result.clone();
+                assert_eq!(cloned.root_version, 5);
+                assert!(cloned.target.is_some());
+
+                RegistryLogData {
+                    reason_code: Some("tuf_result_traits_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn sigstore_verification_result_debug_clone() {
+        run_registry_test(
+            "sigstore_verification_result_debug_clone",
+            "unit",
+            "traits",
+            3,
+            || async {
+                let result = SigstoreVerificationResult {
+                    verified: true,
+                    identity: Some("gh-actions".into()),
+                    issuer: Some("https://token.actions.githubusercontent.com".into()),
+                    rekor_log_index: Some(99),
+                };
+                let debug = format!("{result:?}");
+                assert!(debug.contains("gh-actions"));
+                let cloned = result.clone();
+                assert_eq!(cloned.rekor_log_index, Some(99));
+                assert!(cloned.verified);
+
+                RegistryLogData {
+                    reason_code: Some("sigstore_result_traits_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ── ConnectorBundle / RegistryVerifier trait coverage ─────────────────
+
+    #[test]
+    fn connector_bundle_debug_clone() {
+        run_registry_test(
+            "connector_bundle_debug_clone",
+            "unit",
+            "traits",
+            3,
+            || async {
+                let bundle = ConnectorBundle {
+                    manifest_toml: "toml content".into(),
+                    binary: vec![1, 2, 3],
+                    target: test_target(),
+                };
+                let debug = format!("{bundle:?}");
+                assert!(debug.contains("ConnectorBundle"));
+                let cloned = bundle.clone();
+                assert_eq!(cloned.binary, vec![1, 2, 3]);
+                assert_eq!(cloned.target.os, "linux");
+
+                RegistryLogData {
+                    reason_code: Some("bundle_traits_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn registry_verifier_debug_clone() {
+        run_registry_test(
+            "registry_verifier_debug_clone",
+            "unit",
+            "traits",
+            2,
+            || async {
+                let trust = RegistryTrustPolicy::default();
+                let verifier = RegistryVerifier::new(trust);
+                let debug = format!("{verifier:?}");
+                assert!(debug.contains("RegistryVerifier"));
+                let cloned = verifier.clone();
+                let _ = format!("{cloned:?}");
+
+                RegistryLogData {
+                    reason_code: Some("verifier_traits_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn attestation_evidence_debug_clone() {
+        run_registry_test(
+            "attestation_evidence_debug_clone",
+            "unit",
+            "traits",
+            3,
+            || async {
+                let ev = AttestationEvidence {
+                    attestation_type: AttestationType::ReproducibleBuild,
+                    slsa_level: Some(4),
+                    builder_id: Some("github-actions".into()),
+                };
+                let debug = format!("{ev:?}");
+                assert!(debug.contains("ReproducibleBuild"));
+                let cloned = ev.clone();
+                assert_eq!(cloned.slsa_level, Some(4));
+                assert_eq!(cloned.builder_id.as_deref(), Some("github-actions"));
+
+                RegistryLogData {
+                    reason_code: Some("attestation_evidence_traits_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ── SigstoreBundle serde roundtrip ───────────────────────────────────
+
+    #[test]
+    fn sigstore_bundle_serde_roundtrip() {
+        run_registry_test(
+            "sigstore_bundle_serde_roundtrip",
+            "unit",
+            "serde",
+            4,
+            || async {
+                let bundle = SigstoreBundle {
+                    signature: "base64sig".into(),
+                    certificate: "-----BEGIN CERTIFICATE-----\ndata\n-----END CERTIFICATE-----".into(),
+                    rekor_entry: Some(TransparencyLogEntry {
+                        log_index: 100,
+                        entry_hash: "sha256:entry".into(),
+                        inclusion_proof: InclusionProof {
+                            root_hash: "sha256:root".into(),
+                            tree_size: 500,
+                            hashes: vec!["sha256:h1".into()],
+                            leaf_index: 100,
+                        },
+                        signed_entry_timestamp: vec![0xDE, 0xAD],
+                        log_id: "rekor".into(),
+                    }),
+                    identity: "github-actions".into(),
+                    issuer: "https://token.actions.githubusercontent.com".into(),
+                };
+                let json = serde_json::to_string(&bundle).unwrap();
+                let parsed: SigstoreBundle = serde_json::from_str(&json).unwrap();
+                assert_eq!(parsed.identity, "github-actions");
+                assert_eq!(parsed.signature, "base64sig");
+                assert!(parsed.rekor_entry.is_some());
+                assert_eq!(parsed.rekor_entry.unwrap().log_index, 100);
+
+                RegistryLogData {
+                    reason_code: Some("sigstore_bundle_serde_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn sigstore_bundle_without_rekor_serde() {
+        run_registry_test(
+            "sigstore_bundle_without_rekor_serde",
+            "unit",
+            "serde",
+            1,
+            || async {
+                let bundle = SigstoreBundle {
+                    signature: "sig".into(),
+                    certificate: "cert".into(),
+                    rekor_entry: None,
+                    identity: "id".into(),
+                    issuer: "iss".into(),
+                };
+                let json = serde_json::to_string(&bundle).unwrap();
+                let parsed: SigstoreBundle = serde_json::from_str(&json).unwrap();
+                assert!(parsed.rekor_entry.is_none());
+
+                RegistryLogData {
+                    reason_code: Some("sigstore_no_rekor_serde_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ── InclusionProof standalone serde ───────────────────────────────────
+
+    #[test]
+    fn inclusion_proof_serde_roundtrip() {
+        run_registry_test(
+            "inclusion_proof_serde_roundtrip",
+            "unit",
+            "serde",
+            4,
+            || async {
+                let proof = InclusionProof {
+                    root_hash: "sha256:rootabc".into(),
+                    tree_size: 10_000,
+                    hashes: vec![
+                        "sha256:h1".into(),
+                        "sha256:h2".into(),
+                        "sha256:h3".into(),
+                    ],
+                    leaf_index: 42,
+                };
+                let json = serde_json::to_string(&proof).unwrap();
+                let parsed: InclusionProof = serde_json::from_str(&json).unwrap();
+                assert_eq!(parsed.root_hash, "sha256:rootabc");
+                assert_eq!(parsed.tree_size, 10_000);
+                assert_eq!(parsed.hashes.len(), 3);
+                assert_eq!(parsed.leaf_index, 42);
+
+                RegistryLogData {
+                    reason_code: Some("inclusion_proof_serde_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn inclusion_proof_debug_clone() {
+        run_registry_test(
+            "inclusion_proof_debug_clone",
+            "unit",
+            "traits",
+            2,
+            || async {
+                let proof = InclusionProof {
+                    root_hash: "sha256:r".into(),
+                    tree_size: 1,
+                    hashes: vec![],
+                    leaf_index: 0,
+                };
+                let debug = format!("{proof:?}");
+                assert!(debug.contains("InclusionProof"));
+                let cloned = proof.clone();
+                assert_eq!(cloned.tree_size, 1);
+
+                RegistryLogData {
+                    reason_code: Some("inclusion_proof_traits_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ── MANIFEST_SIGNATURE_CONTEXT constant ──────────────────────────────
+
+    #[test]
+    fn manifest_signature_context_value() {
+        run_registry_test(
+            "manifest_signature_context_value",
+            "unit",
+            "constant",
+            2,
+            || async {
+                assert_eq!(MANIFEST_SIGNATURE_CONTEXT, b"fcp.registry.manifest.v1");
+                assert!(!MANIFEST_SIGNATURE_CONTEXT.is_empty());
+
+                RegistryLogData {
+                    reason_code: Some("context_value_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ── MockTufVerifier fetch_root ────────────────────────────────────────
+
+    #[test]
+    fn mock_tuf_verifier_fetch_root() {
+        run_registry_test(
+            "mock_tuf_verifier_fetch_root",
+            "verify",
+            "tuf-adapter",
+            3,
+            || async {
+                let root = TufRootMetadata {
+                    version: 7,
+                    root_hash: "sha256:customroot".into(),
+                    expires: 9_999_999,
+                    key_ids: vec!["key-a".into(), "key-b".into()],
+                    threshold: 2,
+                };
+                let verifier = MockTufVerifier::new(root);
+
+                let fetched = verifier.fetch_root().await.expect("fetch root");
+                assert_eq!(fetched.version, 7);
+                assert_eq!(fetched.root_hash, "sha256:customroot");
+                assert_eq!(fetched.threshold, 2);
+
+                RegistryLogData {
+                    reason_code: Some("tuf_fetch_root_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ── MockTransparencyVerifier multiple entries ─────────────────────────
+
+    #[test]
+    fn mock_transparency_verifier_multiple_entries() {
+        run_registry_test(
+            "mock_transparency_verifier_multiple_entries",
+            "verify",
+            "transparency-adapter",
+            3,
+            || async {
+                let verifier = MockTransparencyVerifier::new();
+                let make_entry = |idx: u64| TransparencyLogEntry {
+                    log_index: idx,
+                    entry_hash: format!("sha256:entry{idx}"),
+                    inclusion_proof: InclusionProof {
+                        root_hash: "sha256:root".into(),
+                        tree_size: 100,
+                        hashes: vec![],
+                        leaf_index: idx,
+                    },
+                    signed_entry_timestamp: vec![],
+                    log_id: "log".into(),
+                };
+
+                verifier.add_valid_entry("sha256:a".into(), make_entry(1));
+                verifier.add_valid_entry("sha256:b".into(), make_entry(2));
+                verifier.add_valid_entry("sha256:c".into(), make_entry(3));
+
+                let r1 = verifier.verify_entry("sha256:a", None).await.unwrap();
+                assert_eq!(r1.log_index, Some(1));
+
+                let r3 = verifier.verify_entry("sha256:c", None).await.unwrap();
+                assert_eq!(r3.log_index, Some(3));
+
+                let err = verifier.verify_entry("sha256:d", None).await;
+                assert!(err.is_err());
+
+                RegistryLogData {
+                    reason_code: Some("multi_entries_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ── Combined supply chain policy ─────────────────────────────────────
+
+    #[test]
+    fn supply_chain_combined_attestation_and_slsa() {
+        run_registry_test(
+            "supply_chain_combined_attestation_and_slsa",
+            "unit",
+            "supply-chain",
+            1,
+            || async {
+                let mut manifest = minimal_manifest();
+                manifest.policy = Some(PolicySection {
+                    require_transparency_log: false,
+                    require_attestation_types: vec![
+                        AttestationType::InToto,
+                        AttestationType::CodeReview,
+                    ],
+                    min_slsa_level: Some(3),
+                    trusted_builders: vec!["trusted-ci".into()],
+                });
+
+                let evidence = SupplyChainEvidence {
+                    transparency_log_present: false,
+                    attestations: vec![
+                        AttestationEvidence {
+                            attestation_type: AttestationType::InToto,
+                            slsa_level: Some(4),
+                            builder_id: Some("trusted-ci".into()),
+                        },
+                        AttestationEvidence {
+                            attestation_type: AttestationType::CodeReview,
+                            slsa_level: None,
+                            builder_id: None,
+                        },
+                    ],
+                };
+
+                enforce_supply_chain_policy(&manifest, Some(&evidence))
+                    .expect("combined policy passes");
+
+                RegistryLogData {
+                    reason_code: Some("combined_policy_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn supply_chain_combined_fails_on_missing_attestation() {
+        run_registry_test(
+            "supply_chain_combined_fails_on_missing_attestation",
+            "unit",
+            "supply-chain",
+            1,
+            || async {
+                let mut manifest = minimal_manifest();
+                manifest.policy = Some(PolicySection {
+                    require_transparency_log: false,
+                    require_attestation_types: vec![
+                        AttestationType::InToto,
+                        AttestationType::ReproducibleBuild,
+                    ],
+                    min_slsa_level: Some(2),
+                    trusted_builders: vec![],
+                });
+
+                let evidence = SupplyChainEvidence {
+                    transparency_log_present: false,
+                    attestations: vec![AttestationEvidence {
+                        attestation_type: AttestationType::InToto,
+                        slsa_level: Some(3),
+                        builder_id: None,
+                    }],
+                };
+
+                let err = enforce_supply_chain_policy(&manifest, Some(&evidence))
+                    .expect_err("missing reproducible-build");
+                assert!(matches!(
+                    err,
+                    RegistryError::RequiredAttestationMissing { .. }
+                ));
+
+                RegistryLogData {
+                    reason_code: Some("combined_missing_attestation".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ── NoOp verifier Debug coverage ─────────────────────────────────────
+
+    #[test]
+    fn noop_verifiers_debug() {
+        run_registry_test(
+            "noop_verifiers_debug",
+            "unit",
+            "traits",
+            3,
+            || async {
+                let t = NoOpTransparencyVerifier;
+                let debug = format!("{t:?}");
+                assert!(debug.contains("NoOpTransparencyVerifier"));
+
+                let tuf = NoOpTufVerifier;
+                let debug = format!("{tuf:?}");
+                assert!(debug.contains("NoOpTufVerifier"));
+
+                let sig = NoOpSigstoreVerifier;
+                let debug = format!("{sig:?}");
+                assert!(debug.contains("NoOpSigstoreVerifier"));
+
+                RegistryLogData {
+                    reason_code: Some("noop_debug_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ── MockVerifier Debug coverage ──────────────────────────────────────
+
+    #[test]
+    fn mock_verifiers_debug() {
+        run_registry_test(
+            "mock_verifiers_debug",
+            "unit",
+            "traits",
+            3,
+            || async {
+                let mt = MockTransparencyVerifier::new();
+                let debug = format!("{mt:?}");
+                assert!(debug.contains("MockTransparencyVerifier"));
+
+                let root = TufRootMetadata {
+                    version: 1,
+                    root_hash: String::new(),
+                    expires: 0,
+                    key_ids: vec![],
+                    threshold: 1,
+                };
+                let tuf = MockTufVerifier::new(root);
+                let debug = format!("{tuf:?}");
+                assert!(debug.contains("MockTufVerifier"));
+
+                let sig = MockSigstoreVerifier::new();
+                let debug = format!("{sig:?}");
+                assert!(debug.contains("MockSigstoreVerifier"));
+
+                RegistryLogData {
+                    reason_code: Some("mock_debug_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ── SupplyChainVerificationConfig with values ────────────────────────
+
+    #[test]
+    fn supply_chain_verification_config_with_values() {
+        run_registry_test(
+            "supply_chain_verification_config_with_values",
+            "unit",
+            "config",
+            6,
+            || async {
+                let config = SupplyChainVerificationConfig {
+                    tuf_pinned_root: Some(TufRootMetadata {
+                        version: 5,
+                        root_hash: "sha256:abc".into(),
+                        expires: 1_000_000,
+                        key_ids: vec!["k1".into()],
+                        threshold: 1,
+                    }),
+                    trusted_sigstore_identities: vec!["github-actions".into()],
+                    trusted_sigstore_issuers: vec!["https://token.actions.githubusercontent.com".into()],
+                    require_transparency: true,
+                    require_tuf: true,
+                    require_sigstore: true,
+                };
+                let debug = format!("{config:?}");
+                assert!(debug.contains("SupplyChainVerificationConfig"));
+                assert!(config.require_transparency);
+                assert!(config.require_tuf);
+                assert!(config.require_sigstore);
+                assert_eq!(config.trusted_sigstore_identities.len(), 1);
+                assert!(config.tuf_pinned_root.is_some());
+                assert_eq!(config.tuf_pinned_root.as_ref().unwrap().version, 5);
+
+                RegistryLogData {
+                    reason_code: Some("config_with_values_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ── hash_bytes large input determinism ────────────────────────────────
+
+    #[test]
+    fn hash_bytes_large_input() {
+        run_registry_test(
+            "hash_bytes_large_input",
+            "unit",
+            "hash",
+            2,
+            || async {
+                let large = vec![0xABu8; 1_000_000];
+                let h1 = hash_bytes(&large);
+                let h2 = hash_bytes(&large);
+                assert_eq!(h1, h2);
+                assert!(h1.starts_with("sha256:"));
+
+                RegistryLogData {
+                    reason_code: Some("hash_large_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ── signature_message non-collision ───────────────────────────────────
+
+    #[test]
+    fn signature_message_different_inputs_differ() {
+        run_registry_test(
+            "signature_message_different_inputs_differ",
+            "unit",
+            "signature-message",
+            3,
+            || async {
+                let m1 = signature_message(b"data", "hash");
+                let m2 = signature_message(b"datx", "hash");
+                let m3 = signature_message(b"data", "hasx");
+                assert_ne!(m1, m2);
+                assert_ne!(m1, m3);
+                assert_ne!(m2, m3);
+
+                RegistryLogData {
+                    reason_code: Some("sig_msg_differ_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ── MirrorResult Debug/Clone ─────────────────────────────────────────
+
+    #[test]
+    fn mirror_result_debug_clone() {
+        run_registry_test(
+            "mirror_result_debug_clone",
+            "unit",
+            "traits",
+            3,
+            || async {
+                let result = MirrorResult {
+                    manifest_object_id: ObjectId::from_bytes([1u8; 32]),
+                    binary_object_id: ObjectId::from_bytes([2u8; 32]),
+                    manifest_hash: "sha256:manifest".into(),
+                    binary_hash: "sha256:binary".into(),
+                };
+                let debug = format!("{result:?}");
+                assert!(debug.contains("MirrorResult"));
+                let cloned = result.clone();
+                assert_eq!(cloned.manifest_hash, "sha256:manifest");
+                assert_eq!(cloned.binary_hash, "sha256:binary");
+
+                RegistryLogData {
+                    reason_code: Some("mirror_result_traits_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ── VerifiedConnectorBundle Debug/Clone ───────────────────────────────
+
+    #[test]
+    fn verified_bundle_debug_clone() {
+        run_registry_test(
+            "verified_bundle_debug_clone",
+            "unit",
+            "traits",
+            3,
+            || async {
+                let signing_key = Ed25519SigningKey::generate();
+                let verifying_key = signing_key.verifying_key();
+
+                let binary = b"test-binary".to_vec();
+                let binary_hash = hash_bytes(&binary);
+                let unsigned = unsigned_manifest_toml("");
+                let sig = sign_manifest_toml(&unsigned, &signing_key, &binary_hash);
+                let manifest_toml =
+                    with_signatures(&unsigned, &publisher_signature_section("pub1", &sig));
+
+                let bundle = ConnectorBundle {
+                    manifest_toml,
+                    binary,
+                    target: test_target(),
+                };
+
+                let mut trust = RegistryTrustPolicy::default();
+                trust.publisher_keys.insert("pub1".into(), verifying_key);
+
+                let verifier = RegistryVerifier::new(trust);
+                let verified = verifier
+                    .verify_bundle(&bundle, None, None, None)
+                    .expect("verify");
+
+                let debug = format!("{verified:?}");
+                assert!(debug.contains("VerifiedConnectorBundle"));
+                let cloned = verified.clone();
+                assert_eq!(cloned.binary_hash, verified.binary_hash);
+                assert_eq!(cloned.target, verified.target);
+
+                RegistryLogData {
+                    reason_code: Some("verified_bundle_traits_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ── RegistryTrustPolicy with keys ────────────────────────────────────
+
+    #[test]
+    fn registry_trust_policy_debug_with_keys() {
+        run_registry_test(
+            "registry_trust_policy_debug_with_keys",
+            "unit",
+            "traits",
+            2,
+            || async {
+                let key = Ed25519SigningKey::generate().verifying_key();
+                let mut policy = RegistryTrustPolicy::default();
+                policy.publisher_keys.insert("pub1".into(), key.clone());
+                policy.registry_keys.insert("reg1".into(), key);
+                policy.require_registry_signature = true;
+
+                let debug = format!("{policy:?}");
+                assert!(debug.contains("RegistryTrustPolicy"));
+                let cloned = policy.clone();
+                assert_eq!(cloned.publisher_keys.len(), 1);
+                assert!(cloned.require_registry_signature);
+
+                RegistryLogData {
+                    reason_code: Some("trust_policy_debug_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ── ConnectorTarget empty strings ────────────────────────────────────
+
+    #[test]
+    fn connector_target_empty_strings() {
+        run_registry_test(
+            "connector_target_empty_strings",
+            "unit",
+            "target",
+            2,
+            || async {
+                let t = ConnectorTarget {
+                    os: String::new(),
+                    arch: String::new(),
+                };
+                assert_eq!(t.as_string(), "-");
+                let debug = format!("{t:?}");
+                assert!(debug.contains("ConnectorTarget"));
+
+                RegistryLogData {
+                    reason_code: Some("target_empty_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
 }

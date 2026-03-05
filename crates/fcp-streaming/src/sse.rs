@@ -707,4 +707,254 @@ mod tests {
         assert_eq!(client.url(), "https://example.com/events");
         assert_eq!(client.config().max_buffer_size, 4096);
     }
+
+    // ── SseEvent trait impls ──
+
+    #[test]
+    fn test_sse_event_clone() {
+        let event = SseEvent::new("data").with_event("msg").with_id("1");
+        let cloned = event.clone();
+        assert_eq!(event, cloned);
+    }
+
+    #[test]
+    fn test_sse_event_partial_eq() {
+        let a = SseEvent::new("data").with_event("msg");
+        let b = SseEvent::new("data").with_event("msg");
+        let c = SseEvent::new("other");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn test_sse_event_debug() {
+        let event = SseEvent::new("test");
+        let debug = format!("{event:?}");
+        assert!(debug.contains("SseEvent"));
+        assert!(debug.contains("test"));
+    }
+
+    #[test]
+    fn test_sse_event_chained_builder() {
+        let event = SseEvent::new("payload")
+            .with_event("update")
+            .with_id("42");
+        assert_eq!(event.data, "payload");
+        assert_eq!(event.event, Some("update".to_string()));
+        assert_eq!(event.id, Some("42".to_string()));
+        assert_eq!(event.retry, None);
+    }
+
+    // ── SseParser edge cases ──
+
+    #[test]
+    fn test_parse_unknown_field_ignored() {
+        let mut parser = SseParser::new();
+        let data = Bytes::from("unknown: value\ndata: hello\n\n");
+        let events = parser.parse(&data);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data, "hello");
+    }
+
+    #[test]
+    fn test_parse_data_with_colon_in_value() {
+        let mut parser = SseParser::new();
+        let data = Bytes::from("data: key:value:extra\n\n");
+        let events = parser.parse(&data);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data, "key:value:extra");
+    }
+
+    #[test]
+    fn test_parse_data_no_space_after_colon() {
+        let mut parser = SseParser::new();
+        let data = Bytes::from("data:no_space\n\n");
+        let events = parser.parse(&data);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data, "no_space");
+    }
+
+    #[test]
+    fn test_parse_empty_data_field() {
+        let mut parser = SseParser::new();
+        let data = Bytes::from("data:\n\n");
+        let events = parser.parse(&data);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data, "");
+    }
+
+    #[test]
+    fn test_parse_only_comments() {
+        let mut parser = SseParser::new();
+        let data = Bytes::from(": comment 1\n: comment 2\n\n");
+        let events = parser.parse(&data);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_parse_event_type_reset_after_dispatch() {
+        let mut parser = SseParser::new();
+        let data = Bytes::from("event: first\ndata: a\n\ndata: b\n\n");
+        let events = parser.parse(&data);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].event, Some("first".to_string()));
+        // Event type resets after dispatch
+        assert_eq!(events[1].event, None);
+    }
+
+    #[test]
+    fn test_parse_multiple_id_updates() {
+        let mut parser = SseParser::new();
+        let data = Bytes::from("id: 1\ndata: a\n\nid: 2\ndata: b\n\n");
+        let events = parser.parse(&data);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].id, Some("1".to_string()));
+        assert_eq!(events[1].id, Some("2".to_string()));
+        assert_eq!(parser.last_event_id(), Some("2"));
+    }
+
+    #[test]
+    fn test_parse_retry_overrides() {
+        let mut parser = SseParser::new();
+        let data = Bytes::from("retry: 1000\nretry: 2000\ndata: test\n\n");
+        let events = parser.parse(&data);
+        assert_eq!(events.len(), 1);
+        // Last retry value wins
+        assert_eq!(events[0].retry, Some(2000));
+    }
+
+    #[test]
+    fn test_parse_incremental_three_chunks() {
+        let mut parser = SseParser::new();
+        assert!(parser.parse(&Bytes::from("da")).is_empty());
+        assert!(parser.parse(&Bytes::from("ta: hel")).is_empty());
+        let events = parser.parse(&Bytes::from("lo\n\n"));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data, "hello");
+    }
+
+    #[test]
+    fn test_parse_mixed_line_endings() {
+        let mut parser = SseParser::new();
+        // Mix of \n, \r\n, and \r
+        let data = Bytes::from("data: a\ndata: b\r\n\r\n");
+        let events = parser.parse(&data);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data, "a\nb");
+    }
+
+    #[test]
+    fn test_parse_empty_id_field() {
+        let mut parser = SseParser::new();
+        // Set ID first, then empty ID resets per spec
+        let data = Bytes::from("id: old\ndata: a\n\nid:\ndata: b\n\n");
+        let events = parser.parse(&data);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].id, Some("old".to_string()));
+        // Empty id field sets event_id to empty string
+        assert_eq!(events[1].id, Some(String::new()));
+    }
+
+    #[test]
+    fn test_parse_comment_between_fields() {
+        let mut parser = SseParser::new();
+        let data = Bytes::from("event: msg\n: comment\ndata: hello\n\n");
+        let events = parser.parse(&data);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event, Some("msg".to_string()));
+        assert_eq!(events[0].data, "hello");
+    }
+
+    // ── SseConfig trait impls ──
+
+    #[test]
+    fn test_sse_config_clone() {
+        let config = SseConfig::new()
+            .with_timeout(Duration::from_secs(5))
+            .with_header("X-Key", "val");
+        let moved = config;
+        assert_eq!(moved.timeout, Some(Duration::from_secs(5)));
+        assert_eq!(moved.headers.get("X-Key"), Some(&"val".to_string()));
+    }
+
+    #[test]
+    fn test_sse_config_debug() {
+        let config = SseConfig::new();
+        let debug = format!("{config:?}");
+        assert!(debug.contains("SseConfig"));
+    }
+
+    #[test]
+    fn test_sse_config_new_equals_default() {
+        let new = SseConfig::new();
+        let default = SseConfig::default();
+        assert_eq!(new.timeout, default.timeout);
+        assert_eq!(new.max_buffer_size, default.max_buffer_size);
+        assert_eq!(new.auto_reconnect, default.auto_reconnect);
+        assert_eq!(new.max_reconnect_attempts, default.max_reconnect_attempts);
+        assert_eq!(new.reconnect_delay, default.reconnect_delay);
+    }
+
+    #[test]
+    fn test_sse_config_multiple_headers() {
+        let config = SseConfig::new()
+            .with_header("Authorization", "Bearer abc")
+            .with_header("X-Custom", "value");
+        assert_eq!(config.headers.len(), 2);
+        assert_eq!(
+            config.headers.get("Authorization"),
+            Some(&"Bearer abc".to_string())
+        );
+        assert_eq!(
+            config.headers.get("X-Custom"),
+            Some(&"value".to_string())
+        );
+    }
+
+    // ── SseClient tests ──
+
+    #[test]
+    fn test_sse_client_with_http_client() {
+        let http_client = Client::new();
+        let client = SseClient::with_http_client("https://example.com/events", http_client);
+        assert_eq!(client.url(), "https://example.com/events");
+    }
+
+    #[test]
+    fn test_sse_client_debug() {
+        let client = SseClient::new("https://example.com/sse");
+        let debug = format!("{client:?}");
+        assert!(debug.contains("SseClient"));
+    }
+
+    #[test]
+    fn test_sse_client_clone() {
+        let client = SseClient::new("https://example.com/sse");
+        let moved = client;
+        assert_eq!(moved.url(), "https://example.com/sse");
+    }
+
+    // ── SseEvent JSON edge cases ──
+
+    #[test]
+    fn test_sse_event_json_array() {
+        let event = SseEvent::new("[1, 2, 3]");
+        let result: Vec<i32> = event.json().unwrap();
+        assert_eq!(result, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_sse_event_json_empty_object() {
+        let event = SseEvent::new("{}");
+        let result: serde_json::Value = event.json().unwrap();
+        assert!(result.is_object());
+        assert!(result.as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_sse_event_is_event_empty_string() {
+        let event = SseEvent::new("data").with_event("");
+        assert!(event.is_event(""));
+        assert!(!event.is_event("message"));
+    }
 }

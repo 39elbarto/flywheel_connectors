@@ -369,13 +369,117 @@ fn print_human_output(output: &PackageOutput) {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_target_dir;
+    use super::*;
     use std::path::Path;
 
     #[test]
-    fn resolve_target_dir_defaults_to_crate_target() {
+    fn resolve_target_dir_release() {
         let crate_path = Path::new("/tmp/fcp-example");
         let resolved = resolve_target_dir(crate_path, "release");
         assert_eq!(resolved, Path::new("/tmp/fcp-example/target/release"));
+    }
+
+    #[test]
+    fn resolve_target_dir_debug() {
+        let crate_path = Path::new("/tmp/fcp-example");
+        let resolved = resolve_target_dir(crate_path, "debug");
+        assert_eq!(resolved, Path::new("/tmp/fcp-example/target/debug"));
+    }
+
+    #[test]
+    fn extract_manifest_metadata_valid() {
+        let toml = r#"
+[connector]
+id = "acme.storage:s3:1.2.0"
+version = "1.2.0"
+"#;
+        let (id, version) = extract_manifest_metadata(toml).unwrap();
+        assert_eq!(id, "acme.storage:s3:1.2.0");
+        assert_eq!(version, "1.2.0");
+    }
+
+    #[test]
+    fn extract_manifest_metadata_missing_id() {
+        let toml = r#"
+[connector]
+version = "1.0.0"
+"#;
+        let result = extract_manifest_metadata(toml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn extract_manifest_metadata_missing_version() {
+        let toml = r#"
+[connector]
+id = "acme:test:1.0.0"
+"#;
+        let result = extract_manifest_metadata(toml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn extract_manifest_metadata_missing_section() {
+        let toml = r#"
+[other]
+foo = "bar"
+"#;
+        let result = extract_manifest_metadata(toml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn extract_manifest_metadata_empty() {
+        let result = extract_manifest_metadata("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn extract_manifest_metadata_invalid_toml() {
+        let result = extract_manifest_metadata("{{not valid}}");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn find_manifest_nonexistent_dir() {
+        let result = find_manifest(Path::new("/tmp/definitely-not-a-real-fcp-dir-12345"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn compute_sha256_nonexistent_file() {
+        let result = compute_sha256(Path::new("/tmp/nonexistent-file-for-sha256-test"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn compute_sha256_known_value() {
+        // Create a temp file with known content
+        let dir = std::env::temp_dir().join("fcp-test-sha256");
+        let _ = fs::create_dir_all(&dir);
+        let file = dir.join("test.txt");
+        fs::write(&file, b"hello").unwrap();
+        let hash = compute_sha256(&file).unwrap();
+        // SHA-256 of "hello" is 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+        assert_eq!(
+            hash,
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compute_sha256_empty_file() {
+        let dir = std::env::temp_dir().join("fcp-test-sha256-empty");
+        let _ = fs::create_dir_all(&dir);
+        let file = dir.join("empty.txt");
+        fs::write(&file, b"").unwrap();
+        let hash = compute_sha256(&file).unwrap();
+        // SHA-256 of empty is e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+        assert_eq!(
+            hash,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 }

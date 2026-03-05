@@ -218,4 +218,162 @@ mod tests {
         let err2 = err1.clone();
         assert_eq!(err1, err2);
     }
+
+    #[test]
+    fn all_chunk_errors_implement_error() {
+        fn assert_error<E: std::error::Error>(_: &E) {}
+        assert_error(&ChunkError::MissingChunks { expected: 1, got: 0 });
+        assert_error(&ChunkError::LengthMismatch { expected: 1, got: 0 });
+        assert_error(&ChunkError::HashMismatch);
+        assert_error(&ChunkError::InvalidChunkIndex { index: 0, count: 0 });
+    }
+
+    #[test]
+    fn all_encode_errors_implement_error() {
+        fn assert_error<E: std::error::Error>(_: &E) {}
+        assert_error(&EncodeError::PayloadTooLarge { size: 1, max: 0 });
+        assert_error(&EncodeError::EmptyPayload);
+    }
+
+    #[test]
+    fn all_decode_errors_implement_error() {
+        fn assert_error<E: std::error::Error>(_: &E) {}
+        assert_error(&DecodeError::Timeout);
+        assert_error(&DecodeError::Cancelled);
+        assert_error(&DecodeError::InsufficientSymbols { received: 0, needed: 1 });
+        assert_error(&DecodeError::AdmissionDenied { reason: "x".into() });
+        assert_error(&DecodeError::SymbolBufferExceeded { buffered: 1, limit: 0 });
+        assert_error(&DecodeError::MemoryLimitExceeded { used: 1, limit: 0 });
+        assert_error(&DecodeError::InvalidSymbol { reason: "x".into() });
+        assert_error(&DecodeError::InvalidTransmissionInfo { reason: "x".into() });
+        assert_error(&DecodeError::Runtime { reason: "x".into() });
+    }
+
+    #[test]
+    fn chunk_error_clone_eq_all_variants() {
+        let variants: Vec<ChunkError> = vec![
+            ChunkError::MissingChunks { expected: 5, got: 2 },
+            ChunkError::LengthMismatch { expected: 100, got: 50 },
+            ChunkError::HashMismatch,
+            ChunkError::InvalidChunkIndex { index: 3, count: 2 },
+        ];
+        for v in &variants {
+            assert_eq!(v, &v.clone());
+        }
+    }
+
+    #[test]
+    fn encode_error_clone_eq_all_variants() {
+        let variants: Vec<EncodeError> = vec![
+            EncodeError::PayloadTooLarge { size: 100, max: 50 },
+            EncodeError::EmptyPayload,
+        ];
+        for v in &variants {
+            assert_eq!(v, &v.clone());
+        }
+    }
+
+    #[test]
+    fn decode_error_clone_eq_all_variants() {
+        let variants: Vec<DecodeError> = vec![
+            DecodeError::Timeout,
+            DecodeError::Cancelled,
+            DecodeError::InsufficientSymbols { received: 10, needed: 20 },
+            DecodeError::AdmissionDenied { reason: "test".into() },
+            DecodeError::SymbolBufferExceeded { buffered: 100, limit: 50 },
+            DecodeError::MemoryLimitExceeded { used: 1000, limit: 500 },
+            DecodeError::InvalidSymbol { reason: "bad".into() },
+            DecodeError::InvalidTransmissionInfo { reason: "oops".into() },
+            DecodeError::Runtime { reason: "fail".into() },
+        ];
+        for v in &variants {
+            assert_eq!(v, &v.clone());
+        }
+    }
+
+    #[test]
+    fn chunk_error_inequality() {
+        let err1 = ChunkError::MissingChunks { expected: 10, got: 5 };
+        let err2 = ChunkError::MissingChunks { expected: 10, got: 6 };
+        assert_ne!(err1, err2);
+
+        let err3 = ChunkError::HashMismatch;
+        assert_ne!(err1, err3);
+    }
+
+    #[test]
+    fn decode_error_inequality() {
+        let err1 = DecodeError::Timeout;
+        let err2 = DecodeError::Cancelled;
+        assert_ne!(err1, err2);
+    }
+
+    #[test]
+    fn invalid_transmission_info_display() {
+        let err = DecodeError::InvalidTransmissionInfo {
+            reason: "zero symbol size".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "invalid transmission info: zero symbol size"
+        );
+    }
+
+    #[test]
+    fn debug_format_contains_variant_names() {
+        assert!(format!("{:?}", ChunkError::HashMismatch).contains("HashMismatch"));
+        assert!(format!("{:?}", EncodeError::EmptyPayload).contains("EmptyPayload"));
+        assert!(format!("{:?}", DecodeError::Timeout).contains("Timeout"));
+        assert!(format!("{:?}", DecodeError::Cancelled).contains("Cancelled"));
+        assert!(format!("{:?}", DecodeError::Runtime { reason: "x".into() }).contains("Runtime"));
+    }
+
+    #[test]
+    fn encode_error_inequality() {
+        let err1 = EncodeError::EmptyPayload;
+        let err2 = EncodeError::PayloadTooLarge { size: 1, max: 0 };
+        assert_ne!(err1, err2);
+    }
+
+    #[test]
+    fn chunk_error_boundary_values() {
+        let err = ChunkError::MissingChunks { expected: 0, got: 0 };
+        assert_eq!(err.to_string(), "missing chunks: expected 0, got 0");
+
+        let err = ChunkError::LengthMismatch { expected: u64::MAX, got: 0 };
+        assert!(err.to_string().contains(&u64::MAX.to_string()));
+
+        let err = ChunkError::InvalidChunkIndex { index: usize::MAX, count: 0 };
+        assert!(err.to_string().contains(&usize::MAX.to_string()));
+    }
+
+    #[test]
+    fn encode_error_boundary_values() {
+        let err = EncodeError::PayloadTooLarge { size: 0, max: 0 };
+        assert_eq!(
+            err.to_string(),
+            "payload too large: 0 bytes exceeds maximum 0 bytes"
+        );
+    }
+
+    #[test]
+    fn decode_error_display_all_remaining() {
+        let err = DecodeError::InsufficientSymbols { received: 0, needed: 0 };
+        assert_eq!(
+            err.to_string(),
+            "insufficient symbols: received 0, need approximately 0"
+        );
+
+        let err = DecodeError::SymbolBufferExceeded { buffered: 0, limit: 0 };
+        assert_eq!(
+            err.to_string(),
+            "symbol buffer limit exceeded: 0 symbols, limit 0"
+        );
+
+        let err = DecodeError::MemoryLimitExceeded { used: 0, limit: 0 };
+        assert_eq!(
+            err.to_string(),
+            "memory limit exceeded: 0 bytes, limit 0 bytes"
+        );
+    }
 }

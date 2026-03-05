@@ -771,4 +771,266 @@ mod tests {
         assert!(back.is_binary());
         assert_eq!(back.as_binary(), Some(&[10, 20, 30][..]));
     }
+
+    // ── WsMessage trait impls ──
+
+    #[test]
+    fn test_ws_message_clone() {
+        let msg = WsMessage::text("cloneable");
+        let cloned = msg.clone();
+        assert_eq!(msg, cloned);
+    }
+
+    #[test]
+    fn test_ws_message_partial_eq() {
+        let a = WsMessage::text("same");
+        let b = WsMessage::text("same");
+        let c = WsMessage::text("different");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn test_ws_message_debug() {
+        let msg = WsMessage::text("debug me");
+        let debug = format!("{msg:?}");
+        assert!(debug.contains("Text"));
+        assert!(debug.contains("debug me"));
+    }
+
+    #[test]
+    fn test_ws_message_binary_eq() {
+        let a = WsMessage::binary(vec![1, 2, 3]);
+        let b = WsMessage::binary(vec![1, 2, 3]);
+        let c = WsMessage::binary(vec![4, 5, 6]);
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn test_ws_message_close_eq() {
+        let a = WsMessage::Close(None);
+        let b = WsMessage::Close(None);
+        assert_eq!(a, b);
+
+        let c = WsMessage::Close(Some(WsCloseFrame::normal()));
+        let d = WsMessage::Close(Some(WsCloseFrame::normal()));
+        assert_eq!(c, d);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn test_ws_message_text_empty() {
+        let msg = WsMessage::text("");
+        assert!(msg.is_text());
+        assert_eq!(msg.as_text(), Some(""));
+    }
+
+    #[test]
+    fn test_ws_message_binary_empty() {
+        let msg = WsMessage::binary(Vec::<u8>::new());
+        assert!(msg.is_binary());
+        assert_eq!(msg.as_binary(), Some(&[][..]));
+    }
+
+    // ── WsMessage conversion edge cases ──
+
+    #[test]
+    fn test_ws_message_from_tungstenite_ping() {
+        let msg: WsMessage = Message::Ping(vec![42].into()).into();
+        assert_eq!(msg, WsMessage::Ping(vec![42]));
+    }
+
+    #[test]
+    fn test_ws_message_from_tungstenite_pong() {
+        let msg: WsMessage = Message::Pong(vec![99].into()).into();
+        assert_eq!(msg, WsMessage::Pong(vec![99]));
+    }
+
+    #[test]
+    fn test_ws_message_from_tungstenite_close_none() {
+        let msg: WsMessage = Message::Close(None).into();
+        assert!(msg.is_close());
+        assert_eq!(msg, WsMessage::Close(None));
+    }
+
+    #[test]
+    fn test_ws_message_from_tungstenite_close_with_frame() {
+        use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+        use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+
+        let frame = CloseFrame {
+            code: CloseCode::Normal,
+            reason: "bye".into(),
+        };
+        let msg: WsMessage = Message::Close(Some(frame)).into();
+        assert!(msg.is_close());
+        if let WsMessage::Close(Some(f)) = &msg {
+            assert_eq!(f.code, 1000);
+            assert_eq!(f.reason, "bye");
+        } else {
+            panic!("expected Close with frame");
+        }
+    }
+
+    #[test]
+    fn test_ws_message_to_tungstenite_ping() {
+        let msg = WsMessage::Ping(vec![1, 2]);
+        let tung: Message = msg.into();
+        assert!(matches!(tung, Message::Ping(_)));
+    }
+
+    #[test]
+    fn test_ws_message_to_tungstenite_pong() {
+        let msg = WsMessage::Pong(vec![3, 4]);
+        let tung: Message = msg.into();
+        assert!(matches!(tung, Message::Pong(_)));
+    }
+
+    #[test]
+    fn test_ws_message_to_tungstenite_close_none() {
+        let msg = WsMessage::Close(None);
+        let tung: Message = msg.into();
+        assert!(matches!(tung, Message::Close(None)));
+    }
+
+    #[test]
+    fn test_ws_message_to_tungstenite_close_with_frame() {
+        let msg = WsMessage::Close(Some(WsCloseFrame::going_away()));
+        let tung: Message = msg.into();
+        if let Message::Close(Some(f)) = tung {
+            assert_eq!(u16::from(f.code), 1001);
+            assert_eq!(&*f.reason, "Going away");
+        } else {
+            panic!("expected Close with frame");
+        }
+    }
+
+    #[test]
+    fn test_ws_message_ping_empty() {
+        let msg = WsMessage::Ping(vec![]);
+        assert!(!msg.is_text());
+        assert!(!msg.is_binary());
+        assert!(!msg.is_close());
+        assert_eq!(msg.as_text(), None);
+        assert_eq!(msg.as_binary(), None);
+    }
+
+    // ── WsMessage JSON edge cases ──
+
+    #[test]
+    fn test_ws_message_json_on_ping() {
+        let msg = WsMessage::Ping(vec![]);
+        let result: Result<serde_json::Value, _> = msg.json();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ws_message_json_on_pong() {
+        let msg = WsMessage::Pong(vec![]);
+        let result: Result<serde_json::Value, _> = msg.json();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ws_message_json_binary_valid() {
+        let msg = WsMessage::binary(br#"{"a":1}"#.to_vec());
+        let val: serde_json::Value = msg.json().unwrap();
+        assert_eq!(val["a"], 1);
+    }
+
+    // ── WsCloseFrame tests ──
+
+    #[test]
+    fn test_ws_close_frame_clone() {
+        let frame = WsCloseFrame::new(4001, "app error");
+        let cloned = frame.clone();
+        assert_eq!(frame, cloned);
+    }
+
+    #[test]
+    fn test_ws_close_frame_partial_eq() {
+        let a = WsCloseFrame::new(1000, "Normal");
+        let b = WsCloseFrame::new(1000, "Normal");
+        let c = WsCloseFrame::new(1001, "Normal");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn test_ws_close_frame_debug() {
+        let frame = WsCloseFrame::new(1002, "Protocol error");
+        let debug = format!("{frame:?}");
+        assert!(debug.contains("1002"));
+        assert!(debug.contains("Protocol error"));
+    }
+
+    // ── WsConfig tests ──
+
+    #[test]
+    fn test_ws_config_clone() {
+        let config = WsConfig::new()
+            .with_connect_timeout(Duration::from_secs(10))
+            .with_header("X-Key", "val");
+        let moved = config;
+        assert_eq!(moved.connect_timeout, Duration::from_secs(10));
+        assert_eq!(moved.headers.get("X-Key"), Some(&"val".to_string()));
+    }
+
+    #[test]
+    fn test_ws_config_debug() {
+        let config = WsConfig::new();
+        let debug = format!("{config:?}");
+        assert!(debug.contains("WsConfig"));
+    }
+
+    #[test]
+    fn test_ws_config_new_equals_default() {
+        let new = WsConfig::new();
+        let default = WsConfig::default();
+        assert_eq!(new.connect_timeout, default.connect_timeout);
+        assert_eq!(new.ping_interval, default.ping_interval);
+        assert_eq!(new.pong_timeout, default.pong_timeout);
+        assert_eq!(new.max_message_size, default.max_message_size);
+        assert_eq!(new.auto_reconnect, default.auto_reconnect);
+    }
+
+    #[test]
+    fn test_ws_config_no_ping() {
+        let config = WsConfig::new().with_ping_interval(None);
+        assert_eq!(config.ping_interval, None);
+    }
+
+    #[test]
+    fn test_ws_config_multiple_headers() {
+        let config = WsConfig::new()
+            .with_header("Auth", "token")
+            .with_header("X-Custom", "val")
+            .with_header("Accept", "json");
+        assert_eq!(config.headers.len(), 3);
+    }
+
+    #[test]
+    fn test_ws_config_header_override() {
+        let config = WsConfig::new()
+            .with_header("Key", "first")
+            .with_header("Key", "second");
+        assert_eq!(config.headers.get("Key"), Some(&"second".to_string()));
+    }
+
+    // ── WsClient tests ──
+
+    #[test]
+    fn test_ws_client_stream_creates_reconnecting() {
+        let client = WsClient::new("ws://localhost:9999");
+        let _stream = client.stream();
+        // Just verify it doesn't panic
+    }
+
+    #[test]
+    fn test_ws_client_clone() {
+        let client = WsClient::new("ws://localhost:8080");
+        let moved = client;
+        assert_eq!(moved.url(), "ws://localhost:8080");
+    }
 }

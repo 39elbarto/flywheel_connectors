@@ -90,10 +90,8 @@ impl RaptorQDecoder {
         // The internal codec handles K < K' padding automatically.
         // We try at K (optimistic) and keep collecting on failure.
         if self.received_count() >= self.k {
-            match self.try_reconstruct() {
-                Ok(payload) => Ok(Some(payload)),
-                Err(_) => Ok(None), // Not enough yet, keep collecting
-            }
+            self.try_reconstruct()
+                .map_or_else(|_| Ok(None), |payload| Ok(Some(payload)))
         } else {
             Ok(None)
         }
@@ -956,5 +954,162 @@ mod tests {
             }
         })
         .expect("runtime available for async decode test");
+    }
+
+    // ── Decoder timing methods ───────────────────────────────────────────
+
+    #[test]
+    fn decoder_elapsed_increases() {
+        let config = test_config();
+        let decoder = RaptorQDecoder::with_expected_symbols(4, 256, 64, &config);
+
+        let e1 = decoder.elapsed();
+        std::thread::sleep(Duration::from_millis(5));
+        let e2 = decoder.elapsed();
+
+        assert!(e2 > e1, "elapsed should increase over time");
+    }
+
+    #[test]
+    fn decoder_time_remaining_decreases() {
+        let mut config = test_config();
+        config.decode_timeout = Duration::from_secs(10);
+
+        let decoder = RaptorQDecoder::with_expected_symbols(4, 256, 64, &config);
+
+        let r1 = decoder.time_remaining();
+        std::thread::sleep(Duration::from_millis(5));
+        let r2 = decoder.time_remaining();
+
+        assert!(r2 < r1, "time remaining should decrease");
+        assert!(r1 <= Duration::from_secs(10));
+    }
+
+    #[test]
+    fn decoder_needed_minimum_one() {
+        let config = test_config();
+        // With K=0, needed should still return at least 1
+        let decoder = RaptorQDecoder::with_expected_symbols(0, 0, 64, &config);
+        assert!(decoder.needed() >= 1);
+    }
+
+    #[test]
+    fn decoder_expected_k() {
+        let config = test_config();
+        let decoder = RaptorQDecoder::with_expected_symbols(42, 2688, 64, &config);
+        assert_eq!(decoder.expected_k(), 42);
+    }
+
+    // ── DecodePermit edge cases ──────────────────────────────────────────
+
+    #[test]
+    fn permit_elapsed_increases() {
+        let controller =
+            DecodeAdmissionController::with_limits(1, 1024 * 1024, Duration::from_secs(30), 10000);
+        let permit = controller.try_acquire().unwrap();
+
+        let e1 = permit.elapsed();
+        std::thread::sleep(Duration::from_millis(5));
+        let e2 = permit.elapsed();
+
+        assert!(e2 > e1);
+    }
+
+    #[test]
+    fn permit_initial_state() {
+        let controller =
+            DecodeAdmissionController::with_limits(1, 1024, Duration::from_secs(30), 100);
+        let permit = controller.try_acquire().unwrap();
+
+        assert_eq!(permit.symbols_buffered(), 0);
+        assert_eq!(permit.memory_used(), 0);
+        assert!(permit.is_valid());
+    }
+
+    #[test]
+    fn permit_drop_releases_slot() {
+        let controller =
+            DecodeAdmissionController::with_limits(1, 1024, Duration::from_secs(30), 100);
+
+        assert_eq!(controller.active_count(), 0);
+        {
+            let _permit = controller.try_acquire().unwrap();
+            assert_eq!(controller.active_count(), 1);
+            assert!(!controller.has_capacity());
+        }
+        // After drop
+        assert_eq!(controller.active_count(), 0);
+        assert!(controller.has_capacity());
+    }
+
+    // ── map_async_error coverage ─────────────────────────────────────────
+
+    #[test]
+    fn map_async_error_cancelled() {
+        let err = DecodeAdmissionController::map_async_error(AsyncError::Cancelled);
+        assert!(matches!(err, DecodeError::Cancelled));
+    }
+
+    #[test]
+    fn map_async_error_timeout() {
+        let err = DecodeAdmissionController::map_async_error(AsyncError::Timeout {
+            timeout_ms: 5000,
+        });
+        assert!(matches!(err, DecodeError::Timeout));
+    }
+
+    #[test]
+    fn map_async_error_other() {
+        let err = DecodeAdmissionController::map_async_error(AsyncError::Runtime {
+            message: "custom error".into(),
+        });
+        match err {
+            DecodeError::Runtime { reason } => {
+                assert!(reason.contains("custom error"));
+            }
+            other => panic!("expected Runtime, got {other:?}"),
+        }
+    }
+
+    // ── Decoder with OTI ─────────────────────────────────────────────────
+
+    #[test]
+    fn decoder_from_oti_calculates_k() {
+        let config = test_config();
+        // 1024 bytes / 64 byte symbols = 16 source symbols
+        let oti = ObjectTransmissionInformation::new(1024, 64, 1, 1, 8);
+        let decoder = RaptorQDecoder::new(oti, &config);
+        assert_eq!(decoder.expected_k(), 16);
+    }
+
+    #[test]
+    fn decoder_from_oti_rounds_up() {
+        let config = test_config();
+        // 100 bytes / 64 byte symbols = 2 (rounds up from 1.5625)
+        let oti = ObjectTransmissionInformation::new(100, 64, 1, 1, 8);
+        let decoder = RaptorQDecoder::new(oti, &config);
+        assert_eq!(decoder.expected_k(), 2);
+    }
+
+    // ── Admission controller has_capacity ─────────────────────────────────
+
+    #[test]
+    fn admission_controller_has_capacity_after_full_drain() {
+        let controller =
+            DecodeAdmissionController::with_limits(3, 1024 * 1024, Duration::from_secs(30), 10000);
+
+        let p1 = controller.try_acquire().unwrap();
+        let p2 = controller.try_acquire().unwrap();
+        let p3 = controller.try_acquire().unwrap();
+
+        assert!(!controller.has_capacity());
+        assert_eq!(controller.active_count(), 3);
+
+        drop(p1);
+        drop(p2);
+        drop(p3);
+
+        assert!(controller.has_capacity());
+        assert_eq!(controller.active_count(), 0);
     }
 }

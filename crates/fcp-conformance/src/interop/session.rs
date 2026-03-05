@@ -518,4 +518,179 @@ mod tests {
         assert_eq!(result.max_frame_bytes, 2000);
         assert_eq!(result.max_symbols_per_frame, 50);
     }
+
+    // ─── negotiate_suite edge cases ───
+
+    #[test]
+    fn negotiate_suite_empty_offered() {
+        let empty: [&str; 0] = [];
+        assert_eq!(negotiate_suite(&empty, &["Suite1"]), None);
+    }
+
+    #[test]
+    fn negotiate_suite_empty_supported() {
+        let empty: [&str; 0] = [];
+        assert_eq!(negotiate_suite(&["Suite1"], &empty), None);
+    }
+
+    #[test]
+    fn negotiate_suite_both_empty() {
+        let empty: [&str; 0] = [];
+        assert_eq!(negotiate_suite(&empty, &empty), None);
+    }
+
+    #[test]
+    fn negotiate_suite_first_offered_preferred() {
+        assert_eq!(
+            negotiate_suite(&["Suite1", "Suite2"], &["Suite2", "Suite1"]),
+            Some("Suite1")
+        );
+    }
+
+    #[test]
+    fn negotiate_suite_single_common() {
+        assert_eq!(
+            negotiate_suite(&["A", "B", "C"], &["X", "Y", "C"]),
+            Some("C")
+        );
+    }
+
+    // ─── negotiate_limits edge cases ───
+
+    #[test]
+    fn negotiate_limits_identical() {
+        let limits = TransportLimits {
+            max_datagram_bytes: 1024,
+            max_frame_bytes: 4096,
+            max_symbols_per_frame: 100,
+        };
+        let result = negotiate_limits(&limits, &limits);
+        assert_eq!(result.max_datagram_bytes, 1024);
+        assert_eq!(result.max_frame_bytes, 4096);
+        assert_eq!(result.max_symbols_per_frame, 100);
+    }
+
+    #[test]
+    fn negotiate_limits_zero_values() {
+        let a = TransportLimits {
+            max_datagram_bytes: 0,
+            max_frame_bytes: 0,
+            max_symbols_per_frame: 0,
+        };
+        let b = TransportLimits {
+            max_datagram_bytes: 1000,
+            max_frame_bytes: 1000,
+            max_symbols_per_frame: 1000,
+        };
+        let result = negotiate_limits(&a, &b);
+        assert_eq!(result.max_datagram_bytes, 0);
+        assert_eq!(result.max_frame_bytes, 0);
+        assert_eq!(result.max_symbols_per_frame, 0);
+    }
+
+    // ─── build_retry_hello structure ───
+
+    #[test]
+    fn retry_hello_magic_prefix() {
+        let hello = build_retry_hello(b"cookie");
+        assert_eq!(&hello[..4], b"FCPH");
+    }
+
+    #[test]
+    fn retry_hello_version_field() {
+        let hello = build_retry_hello(b"cookie");
+        let version = u16::from_le_bytes([hello[4], hello[5]]);
+        assert_eq!(version, 1);
+    }
+
+    #[test]
+    fn retry_hello_flags_has_cookie() {
+        let hello = build_retry_hello(b"cookie");
+        let flags = u16::from_le_bytes([hello[6], hello[7]]);
+        assert_eq!(flags, 0x01);
+    }
+
+    #[test]
+    fn retry_hello_cookie_length_field() {
+        let cookie = b"test-cookie-123";
+        let hello = build_retry_hello(cookie);
+        let cookie_len = u16::from_le_bytes([hello[8], hello[9]]);
+        assert_eq!(cookie_len as usize, cookie.len());
+    }
+
+    #[test]
+    fn retry_hello_cookie_embedded() {
+        let cookie = b"unique-cookie-value";
+        let hello = build_retry_hello(cookie);
+        assert_eq!(&hello[10..10 + cookie.len()], cookie);
+    }
+
+    #[test]
+    fn retry_hello_total_length() {
+        let cookie = b"cookie";
+        let hello = build_retry_hello(cookie);
+        // 4 + 2 + 2 + 2 + cookie.len() + 16 + 32
+        assert_eq!(hello.len(), 4 + 2 + 2 + 2 + cookie.len() + 16 + 32);
+    }
+
+    #[test]
+    fn retry_hello_empty_cookie() {
+        let hello = build_retry_hello(b"");
+        let cookie_len = u16::from_le_bytes([hello[8], hello[9]]);
+        assert_eq!(cookie_len, 0);
+        assert_eq!(hello.len(), 4 + 2 + 2 + 2 + 16 + 32);
+    }
+
+    // ─── is_datagram_valid boundary ───
+
+    #[test]
+    fn datagram_valid_exactly_at_limit() {
+        let limits = TransportLimits {
+            max_datagram_bytes: 100,
+            max_frame_bytes: 1000,
+            max_symbols_per_frame: 10,
+        };
+        assert!(is_datagram_valid(&[0u8; 100], &limits));
+        assert!(!is_datagram_valid(&[0u8; 101], &limits));
+    }
+
+    #[test]
+    fn datagram_valid_empty() {
+        let limits = TransportLimits {
+            max_datagram_bytes: 100,
+            max_frame_bytes: 1000,
+            max_symbols_per_frame: 10,
+        };
+        assert!(is_datagram_valid(&[], &limits));
+    }
+
+    // ─── is_nonce_fresh edge cases ───
+
+    #[test]
+    fn nonce_fresh_all_zeros() {
+        let mut seen = std::collections::HashSet::new();
+        let zero = [0u8; 16];
+        assert!(is_nonce_fresh(&zero, &mut seen));
+        assert!(!is_nonce_fresh(&zero, &mut seen));
+    }
+
+    #[test]
+    fn nonce_fresh_many_distinct() {
+        let mut seen = std::collections::HashSet::new();
+        for i in 0u16..100 {
+            let mut nonce = [0u8; 16];
+            nonce[0..2].copy_from_slice(&i.to_le_bytes());
+            assert!(is_nonce_fresh(&nonce, &mut seen));
+        }
+        assert_eq!(seen.len(), 100);
+    }
+
+    // ─── SessionInteropTests struct ───
+
+    #[test]
+    fn session_interop_via_struct() {
+        let summary = SessionInteropTests::run();
+        assert!(summary.all_passed());
+        assert_eq!(summary.total, 7);
+    }
 }

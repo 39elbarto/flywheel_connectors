@@ -424,4 +424,179 @@ mod tests {
         // One past: invalid
         assert!(!is_checkpoint_valid(&chk_id, 101, &chk_id, 100));
     }
+
+    // ─── is_object_granted edge cases ───
+
+    #[test]
+    fn object_grant_empty_grants_rejects() {
+        let empty: Vec<String> = vec![];
+        assert!(!is_object_granted("anything", &empty));
+    }
+
+    #[test]
+    fn object_grant_exact_match() {
+        let grants = vec!["obj-001".to_string()];
+        assert!(is_object_granted("obj-001", &grants));
+        assert!(!is_object_granted("obj-002", &grants));
+    }
+
+    #[test]
+    fn object_grant_multiple_entries() {
+        let grants = vec![
+            "obj-a".to_string(),
+            "obj-b".to_string(),
+            "obj-c".to_string(),
+        ];
+        assert!(is_object_granted("obj-a", &grants));
+        assert!(is_object_granted("obj-c", &grants));
+        assert!(!is_object_granted("obj-d", &grants));
+    }
+
+    #[test]
+    fn object_grant_wildcard_with_other_entries() {
+        let grants = vec!["obj-001".to_string(), "*".to_string()];
+        assert!(is_object_granted("anything", &grants));
+        assert!(is_object_granted("", &grants));
+    }
+
+    #[test]
+    fn object_grant_empty_object_id() {
+        let grants = [String::new()];
+        assert!(is_object_granted("", &grants));
+        assert!(!is_object_granted("x", &grants));
+    }
+
+    // ─── is_checkpoint_valid edge cases ───
+
+    #[test]
+    fn checkpoint_valid_zero_seq() {
+        let chk_id = "bb".repeat(32);
+        assert!(is_checkpoint_valid(&chk_id, 0, &chk_id, 0));
+        assert!(is_checkpoint_valid(&chk_id, 0, &chk_id, 100));
+    }
+
+    #[test]
+    fn checkpoint_invalid_different_ids() {
+        let id_a = "aa".repeat(32);
+        let id_b = "bb".repeat(32);
+        assert!(!is_checkpoint_valid(&id_a, 0, &id_b, 0));
+    }
+
+    #[test]
+    fn checkpoint_valid_max_seq() {
+        let chk_id = "cc".repeat(32);
+        assert!(is_checkpoint_valid(&chk_id, u64::MAX, &chk_id, u64::MAX));
+        assert!(!is_checkpoint_valid(&chk_id, u64::MAX, &chk_id, u64::MAX - 1));
+    }
+
+    // ─── is_token_valid_at edge cases ───
+
+    #[test]
+    fn token_valid_one_before_exp() {
+        assert!(is_token_valid_at(100, 99));
+    }
+
+    #[test]
+    fn token_invalid_at_exp() {
+        assert!(!is_token_valid_at(100, 100));
+    }
+
+    #[test]
+    fn token_invalid_after_exp() {
+        assert!(!is_token_valid_at(100, 101));
+    }
+
+    #[test]
+    fn token_valid_at_zero() {
+        assert!(is_token_valid_at(1, 0));
+        assert!(!is_token_valid_at(0, 0));
+    }
+
+    #[test]
+    fn token_valid_max_values() {
+        assert!(!is_token_valid_at(u64::MAX, u64::MAX));
+        assert!(is_token_valid_at(u64::MAX, u64::MAX - 1));
+    }
+
+    // ─── is_holder_valid edge cases ───
+
+    #[test]
+    fn holder_valid_matching() {
+        assert!(is_holder_valid("node-001", "node-001"));
+    }
+
+    #[test]
+    fn holder_invalid_different() {
+        assert!(!is_holder_valid("node-001", "node-002"));
+    }
+
+    #[test]
+    fn holder_empty_strings() {
+        assert!(is_holder_valid("", ""));
+        assert!(!is_holder_valid("", "x"));
+    }
+
+    #[test]
+    fn holder_case_sensitive() {
+        assert!(!is_holder_valid("Node-001", "node-001"));
+    }
+
+    // ─── CapabilityInteropTests struct ───
+
+    #[test]
+    fn capability_interop_tests_via_struct() {
+        let summary = CapabilityInteropTests::run();
+        assert!(summary.all_passed());
+        assert_eq!(summary.total, 7);
+    }
+
+    // ─── CoseSign1 structure edge cases ───
+
+    #[test]
+    fn cose_sign1_empty_payload() {
+        let cose = CoseSign1 {
+            protected: vec![0xA1, 0x01, 0x26],
+            unprotected: std::collections::HashMap::new(),
+            payload: vec![],
+            signature: vec![0u8; 64],
+        };
+        assert!(cose.payload.is_empty());
+        assert_eq!(cose.signature.len(), 64);
+    }
+
+    #[test]
+    fn cose_sign1_large_payload() {
+        let cose = CoseSign1 {
+            protected: vec![0xA1, 0x01, 0x26],
+            unprotected: std::collections::HashMap::new(),
+            payload: vec![0xFFu8; 65536],
+            signature: vec![0u8; 64],
+        };
+        assert_eq!(cose.payload.len(), 65536);
+    }
+
+    // ─── CapabilityTokenPayload validation ───
+
+    #[test]
+    fn token_payload_grants_can_be_empty() {
+        let token = CapabilityTokenPayload {
+            iss: "z:test".to_string(),
+            sub: "node-001".to_string(),
+            aud: "*".to_string(),
+            exp: 2_000_000_000,
+            iat: 1_900_000_000,
+            jti: "id-1".to_string(),
+            grants: vec![],
+            chk_id: "dd".repeat(32),
+            chk_seq: 0,
+        };
+        assert!(token.grants.is_empty());
+        assert!(token.exp > token.iat);
+    }
+
+    #[test]
+    fn token_payload_chk_id_length() {
+        let chk_id = "ee".repeat(32);
+        assert_eq!(chk_id.len(), 64);
+    }
 }

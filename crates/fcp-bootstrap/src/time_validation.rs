@@ -293,4 +293,148 @@ mod tests {
             .is_error()
         );
     }
+
+    #[test]
+    fn classify_drift_boundary_warning_exactly_30s() {
+        let drift = Duration::from_secs(30);
+        let result = classify_drift(drift);
+        assert!(matches!(result, TimeValidationResult::DriftWarning { .. }));
+    }
+
+    #[test]
+    fn classify_drift_boundary_just_below_warning() {
+        let drift = Duration::from_secs(29);
+        let result = classify_drift(drift);
+        assert!(matches!(result, TimeValidationResult::Valid));
+    }
+
+    #[test]
+    fn classify_drift_boundary_error_exactly_300s() {
+        let drift = Duration::from_secs(300);
+        let result = classify_drift(drift);
+        assert!(matches!(result, TimeValidationResult::DriftError { .. }));
+    }
+
+    #[test]
+    fn classify_drift_boundary_just_below_error() {
+        let drift = Duration::from_secs(299);
+        let result = classify_drift(drift);
+        assert!(matches!(result, TimeValidationResult::DriftWarning { .. }));
+    }
+
+    #[test]
+    fn classify_drift_zero() {
+        let drift = Duration::ZERO;
+        let result = classify_drift(drift);
+        assert!(matches!(result, TimeValidationResult::Valid));
+    }
+
+    #[test]
+    fn compute_drift_zero_difference() {
+        let now = Utc::now();
+        let drift = compute_drift(now, now);
+        assert_eq!(drift, Duration::ZERO);
+    }
+
+    #[test]
+    fn compute_drift_system_ahead() {
+        let now = Utc::now();
+        let ntp = now - chrono::Duration::seconds(45);
+        let drift = compute_drift(now, ntp);
+        assert_eq!(drift.as_secs(), 45);
+    }
+
+    #[test]
+    fn compute_drift_ntp_ahead() {
+        let now = Utc::now();
+        let ntp = now + chrono::Duration::seconds(45);
+        let drift = compute_drift(now, ntp);
+        assert_eq!(drift.as_secs(), 45);
+    }
+
+    #[test]
+    fn display_valid() {
+        let result = TimeValidationResult::Valid;
+        assert_eq!(result.to_string(), "Time validated successfully");
+    }
+
+    #[test]
+    fn display_drift_warning() {
+        let result = TimeValidationResult::DriftWarning {
+            drift: Duration::from_secs(45),
+        };
+        let s = result.to_string();
+        assert!(s.contains("Clock drift warning"));
+        assert!(s.contains("45"));
+    }
+
+    #[test]
+    fn display_drift_error() {
+        let result = TimeValidationResult::DriftError {
+            drift: Duration::from_secs(600),
+        };
+        let s = result.to_string();
+        assert!(s.contains("Clock drift error"));
+        assert!(s.contains("sync required"));
+    }
+
+    #[test]
+    fn display_cannot_validate() {
+        let result = TimeValidationResult::CannotValidate;
+        assert_eq!(
+            result.to_string(),
+            "Could not validate time (no network)"
+        );
+    }
+
+    #[test]
+    fn with_drift_error_case() {
+        let validation = TimeValidation::with_drift(Duration::from_secs(600));
+        assert!(matches!(
+            validation.result,
+            TimeValidationResult::DriftError { .. }
+        ));
+        assert!(validation.ntp_time.is_some());
+        assert_eq!(validation.drift.unwrap().as_secs(), 600);
+    }
+
+    #[test]
+    fn with_drift_valid_case() {
+        let validation = TimeValidation::with_drift(Duration::from_secs(1));
+        assert!(matches!(validation.result, TimeValidationResult::Valid));
+    }
+
+    #[test]
+    fn offline_has_no_ntp_time() {
+        let validation = TimeValidation::offline();
+        assert!(validation.ntp_time.is_none());
+        assert!(validation.drift.is_none());
+    }
+
+    #[test]
+    fn result_clone_eq() {
+        let r1 = TimeValidationResult::Valid;
+        let r2 = r1.clone();
+        assert_eq!(r1, r2);
+
+        let r1 = TimeValidationResult::CannotValidate;
+        assert_eq!(r1, r1.clone());
+    }
+
+    #[test]
+    fn result_inequality() {
+        assert_ne!(TimeValidationResult::Valid, TimeValidationResult::CannotValidate);
+        assert_ne!(
+            TimeValidationResult::Valid,
+            TimeValidationResult::DriftWarning { drift: Duration::from_secs(30) }
+        );
+    }
+
+    #[test]
+    fn debug_format_validation() {
+        let validation = TimeValidation::offline();
+        let debug = format!("{validation:?}");
+        assert!(debug.contains("TimeValidation"));
+        assert!(debug.contains("CannotValidate"));
+    }
 }

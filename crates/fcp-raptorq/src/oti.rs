@@ -1,11 +1,11 @@
-//! Object Transmission Information (OTI) for RaptorQ.
+//! Object Transmission Information (OTI) for `RaptorQ`.
 //!
 //! Replaces the external `raptorq::ObjectTransmissionInformation` with an
 //! API-compatible struct owned by this crate.
 
 use serde::{Deserialize, Serialize};
 
-/// Describes how an object was encoded with RaptorQ.
+/// Describes how an object was encoded with `RaptorQ`.
 ///
 /// Contains the parameters needed by a decoder to reconstruct the original
 /// object from received encoding symbols.
@@ -100,5 +100,117 @@ mod tests {
         let json = serde_json::to_string(&oti).unwrap();
         let decoded: ObjectTransmissionInformation = serde_json::from_str(&json).unwrap();
         assert_eq!(oti, decoded);
+    }
+
+    #[test]
+    fn oti_zero_values() {
+        let oti = ObjectTransmissionInformation::new(0, 0, 0, 0, 0);
+        assert_eq!(oti.transfer_length(), 0);
+        assert_eq!(oti.symbol_size(), 0);
+        assert_eq!(oti.source_blocks(), 0);
+        assert_eq!(oti.sub_blocks(), 0);
+        assert_eq!(oti.symbol_alignment(), 0);
+    }
+
+    #[test]
+    fn oti_max_values() {
+        let oti = ObjectTransmissionInformation::new(u64::MAX, u16::MAX, u8::MAX, u16::MAX, u8::MAX);
+        assert_eq!(oti.transfer_length(), u64::MAX);
+        assert_eq!(oti.symbol_size(), u16::MAX);
+        assert_eq!(oti.source_blocks(), u8::MAX);
+        assert_eq!(oti.sub_blocks(), u16::MAX);
+        assert_eq!(oti.symbol_alignment(), u8::MAX);
+    }
+
+    #[test]
+    fn oti_copy_semantics() {
+        let oti1 = ObjectTransmissionInformation::new(1024, 64, 1, 1, 8);
+        let oti2 = oti1; // Copy
+        let oti3 = oti1; // Can still use oti1 because Copy
+        assert_eq!(oti2, oti3);
+        assert_eq!(oti1, oti2);
+    }
+
+    #[test]
+    fn oti_inequality() {
+        let oti1 = ObjectTransmissionInformation::new(1024, 64, 1, 1, 8);
+        let oti2 = ObjectTransmissionInformation::new(2048, 64, 1, 1, 8);
+        assert_ne!(oti1, oti2);
+    }
+
+    #[test]
+    fn oti_inequality_symbol_size() {
+        let oti1 = ObjectTransmissionInformation::new(1024, 64, 1, 1, 8);
+        let oti2 = ObjectTransmissionInformation::new(1024, 128, 1, 1, 8);
+        assert_ne!(oti1, oti2);
+    }
+
+    #[test]
+    fn oti_debug_format() {
+        let oti = ObjectTransmissionInformation::new(1024, 64, 1, 1, 8);
+        let debug = format!("{oti:?}");
+        assert!(debug.contains("ObjectTransmissionInformation"));
+        assert!(debug.contains("1024"));
+        assert!(debug.contains("64"));
+    }
+
+    #[test]
+    fn oti_serde_json_structure() {
+        let oti = ObjectTransmissionInformation::new(4096, 128, 1, 2, 8);
+        let value: serde_json::Value = serde_json::to_value(oti).unwrap();
+        assert_eq!(value["transfer_length"], 4096);
+        assert_eq!(value["symbol_size"], 128);
+        assert_eq!(value["source_blocks"], 1);
+        assert_eq!(value["sub_blocks"], 2);
+        assert_eq!(value["alignment"], 8);
+    }
+
+    #[test]
+    fn oti_serde_from_json_string() {
+        let json = r#"{"transfer_length":512,"symbol_size":32,"source_blocks":1,"sub_blocks":1,"alignment":4}"#;
+        let oti: ObjectTransmissionInformation = serde_json::from_str(json).unwrap();
+        assert_eq!(oti.transfer_length(), 512);
+        assert_eq!(oti.symbol_size(), 32);
+        assert_eq!(oti.source_blocks(), 1);
+        assert_eq!(oti.sub_blocks(), 1);
+        assert_eq!(oti.symbol_alignment(), 4);
+    }
+
+    #[test]
+    fn oti_serde_invalid_json_fails() {
+        let json = r#"{"transfer_length":"not_a_number"}"#;
+        let result = serde_json::from_str::<ObjectTransmissionInformation>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn oti_serde_missing_field_fails() {
+        let json = r#"{"transfer_length":512,"symbol_size":32}"#;
+        let result = serde_json::from_str::<ObjectTransmissionInformation>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn oti_typical_fcp_values() {
+        // FCP typically uses 1 source block, alignment 8
+        let oti = ObjectTransmissionInformation::new(1_048_576, 1280, 1, 1, 8);
+        assert_eq!(oti.transfer_length(), 1_048_576); // 1 MiB
+        assert_eq!(oti.symbol_size(), 1280);
+        assert_eq!(oti.source_blocks(), 1);
+        assert_eq!(oti.symbol_alignment(), 8);
+    }
+
+    #[test]
+    fn oti_each_field_differs() {
+        let base = ObjectTransmissionInformation::new(100, 10, 1, 1, 1);
+        // Differ only in source_blocks
+        let other_src_blocks = ObjectTransmissionInformation::new(100, 10, 2, 1, 1);
+        assert_ne!(base, other_src_blocks);
+        // Differ only in sub_blocks
+        let other_sub_blocks = ObjectTransmissionInformation::new(100, 10, 1, 2, 1);
+        assert_ne!(base, other_sub_blocks);
+        // Differ only in alignment
+        let other_align = ObjectTransmissionInformation::new(100, 10, 1, 1, 2);
+        assert_ne!(base, other_align);
     }
 }

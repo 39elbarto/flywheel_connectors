@@ -500,4 +500,106 @@ mod tests {
             .validate_jsonl()
             .expect("cleared buffer should validate");
     }
+
+    #[test]
+    fn tracing_capture_initially_empty() {
+        let capture = super::TracingCapture::new();
+        assert!(capture.events().is_empty());
+        assert!(!capture.has_errors());
+        assert!(!capture.has_warnings());
+        assert!(!capture.contains("anything"));
+    }
+
+    #[test]
+    fn tracing_capture_assert_no_errors_empty() {
+        let capture = super::TracingCapture::new();
+        capture.assert_no_errors(); // should not panic
+    }
+
+    #[test]
+    fn tracing_capture_assert_no_warnings_empty() {
+        let capture = super::TracingCapture::new();
+        capture.assert_no_warnings(); // should not panic
+    }
+
+    #[test]
+    fn tracing_capture_clear() {
+        let capture = super::TracingCapture::new();
+        capture.clear(); // should not panic on empty
+        assert!(capture.events().is_empty());
+    }
+
+    #[test]
+    fn tracing_capture_debug() {
+        let capture = super::TracingCapture::new();
+        let debug = format!("{capture:?}");
+        assert!(debug.contains("TracingCapture"));
+    }
+
+    #[test]
+    fn captured_event_clone() {
+        let event = super::CapturedEvent {
+            level: "INFO".to_string(),
+            message: "test".to_string(),
+            target: "module".to_string(),
+        };
+        let moved = event;
+        assert_eq!(moved.level, "INFO");
+        assert_eq!(moved.message, "test");
+        assert_eq!(moved.target, "module");
+    }
+
+    #[test]
+    fn captured_event_debug() {
+        let event = super::CapturedEvent {
+            level: "ERROR".to_string(),
+            message: "bad thing".to_string(),
+            target: "my_module".to_string(),
+        };
+        let debug = format!("{event:?}");
+        assert!(debug.contains("CapturedEvent"));
+        assert!(debug.contains("ERROR"));
+        assert!(debug.contains("bad thing"));
+    }
+
+    #[test]
+    fn log_capture_jsonl_initially_empty() {
+        let capture = LogCapture::new();
+        assert!(capture.jsonl().is_empty());
+    }
+
+    #[test]
+    fn log_capture_push_line_appends_newline() {
+        let capture = LogCapture::new();
+        capture.push_line(r#"{"a":1}"#);
+        let jsonl = capture.jsonl();
+        assert!(jsonl.ends_with('\n'));
+        assert_eq!(jsonl.lines().count(), 1);
+    }
+
+    #[test]
+    fn log_capture_push_multiple_lines() {
+        let capture = LogCapture::new();
+        capture.push_line(r#"{"a":1}"#);
+        capture.push_line(r#"{"b":2}"#);
+        let jsonl = capture.jsonl();
+        assert_eq!(jsonl.lines().count(), 2);
+    }
+
+    #[test]
+    fn log_capture_default_same_as_new() {
+        let a = LogCapture::new();
+        let b = LogCapture::default();
+        assert!(a.jsonl().is_empty());
+        assert!(b.jsonl().is_empty());
+    }
+
+    #[test]
+    fn log_capture_clone() {
+        let capture = LogCapture::new();
+        capture.push_line(r#"{"test":true}"#);
+        let cloned = capture.clone();
+        // Clone shares the same Arc buffer
+        assert_eq!(capture.jsonl(), cloned.jsonl());
+    }
 }

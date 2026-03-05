@@ -12,7 +12,7 @@ use crate::oti::ObjectTransmissionInformation;
 /// `RaptorQ` encoder for producing symbols from a payload.
 pub struct RaptorQEncoder {
     inner: SystematicEncoder,
-    /// Original source symbol data (each exactly symbol_size bytes, last may be zero-padded).
+    /// Original source symbol data (each exactly `symbol_size` bytes, last may be zero-padded).
     source_data: Vec<Vec<u8>>,
     config: RaptorQConfig,
     payload_len: usize,
@@ -25,6 +25,11 @@ impl RaptorQEncoder {
     ///
     /// Returns `EncodeError::PayloadTooLarge` if payload exceeds max object size.
     /// Returns `EncodeError::EmptyPayload` if payload is empty.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `SystematicEncoder::new` fails for a non-empty, within-limits payload
+    /// (should not happen in practice).
     pub fn new(payload: &[u8], config: &RaptorQConfig) -> Result<Self, EncodeError> {
         if payload.is_empty() {
             return Err(EncodeError::EmptyPayload);
@@ -122,7 +127,7 @@ impl RaptorQEncoder {
 
     /// Get the object transmission information for this encoding.
     #[must_use]
-    pub fn transmission_info(&self) -> ObjectTransmissionInformation {
+    pub const fn transmission_info(&self) -> ObjectTransmissionInformation {
         ObjectTransmissionInformation::new(
             self.payload_len as u64,
             self.config.symbol_size,
@@ -140,7 +145,7 @@ impl RaptorQEncoder {
 
     /// Get K' (RFC 6330 extended source block size, always >= K).
     #[must_use]
-    pub fn inner_k_prime(&self) -> u32 {
+    pub const fn inner_k_prime(&self) -> u32 {
         self.inner.params().k_prime as u32
     }
 
@@ -430,5 +435,127 @@ mod tests {
             "expected 2 symbols (1 source + 1 repair), got {}",
             all.len()
         );
+    }
+
+    // ── Encoder accessor methods ─────────────────────────────────────────
+
+    #[test]
+    fn encoder_total_symbols() {
+        let config = test_config();
+        let payload = vec![42u8; 6400]; // 100 source symbols
+        let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
+
+        let total = encoder.total_symbols();
+        assert_eq!(total, encoder.source_symbols() + encoder.repair_symbols());
+    }
+
+    #[test]
+    fn encoder_inner_k_prime() {
+        let config = test_config();
+        let payload = vec![42u8; 512];
+        let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
+
+        let k_prime = encoder.inner_k_prime();
+        // K' >= K (always, per RFC 6330)
+        assert!(k_prime >= encoder.source_symbols());
+    }
+
+    #[test]
+    fn encoder_transmission_info() {
+        let config = test_config();
+        let payload = vec![42u8; 512];
+        let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
+
+        let oti = encoder.transmission_info();
+        assert_eq!(oti.transfer_length(), 512);
+        assert_eq!(oti.symbol_size(), 64);
+    }
+
+    #[test]
+    fn encoder_single_byte_payload() {
+        let config = test_config();
+        let payload = vec![0xAB];
+        let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
+
+        assert_eq!(encoder.payload_len(), 1);
+        assert_eq!(encoder.source_symbols(), 1);
+        assert_eq!(encoder.symbol_size(), 64);
+
+        let source = encoder.encode_source();
+        assert_eq!(source.len(), 1);
+        // Symbol should be 64 bytes (zero-padded)
+        assert_eq!(source[0].1.len(), 64);
+        // First byte preserved
+        assert_eq!(source[0].1[0], 0xAB);
+    }
+
+    #[test]
+    fn encoder_payload_exactly_one_symbol() {
+        let config = test_config();
+        let payload = vec![0xFF; 64]; // Exactly one symbol
+        let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
+
+        assert_eq!(encoder.source_symbols(), 1);
+        let source = encoder.encode_source();
+        assert_eq!(source.len(), 1);
+        assert_eq!(source[0].1, vec![0xFF; 64]);
+    }
+
+    #[test]
+    fn encoder_source_esis_sequential() {
+        let config = test_config();
+        let payload = vec![42u8; 256]; // 4 source symbols
+        let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
+
+        let source = encoder.encode_source();
+        for (i, (esi, _)) in source.iter().enumerate() {
+            assert_eq!(*esi, i as u32, "source ESI {esi} should be {i}");
+        }
+    }
+
+    // ── EncodingDecision trait coverage ──────────────────────────────────
+
+    #[test]
+    fn encoding_decision_direct_debug() {
+        let config = test_config();
+        let decision = EncodingDecision::for_payload(&[42u8; 100], &config).unwrap();
+        let debug = format!("{decision:?}");
+        assert!(debug.contains("Direct"));
+    }
+
+    #[test]
+    fn encoding_decision_chunked_debug() {
+        let config = test_config();
+        let decision = EncodingDecision::for_payload(&[42u8; 2048], &config).unwrap();
+        let debug = format!("{decision:?}");
+        assert!(debug.contains("Chunked"));
+    }
+
+    #[test]
+    fn encoding_decision_clone() {
+        let config = test_config();
+        let decision = EncodingDecision::for_payload(&[42u8; 100], &config).unwrap();
+        let moved = decision;
+        assert!(moved.is_direct());
+    }
+
+    #[test]
+    fn encode_decode_roundtrip_small() {
+        let config = test_config();
+        let payload = vec![7u8; 64]; // Exactly one symbol
+
+        let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
+        let symbols = encoder.encode_all();
+        let oti = encoder.transmission_info();
+
+        let mut decoder = crate::RaptorQDecoder::new(oti, &config);
+        for (esi, data) in symbols {
+            if let Ok(Some(decoded)) = decoder.add_symbol(esi, data) {
+                assert_eq!(decoded, payload);
+                return;
+            }
+        }
+
+        panic!("Failed to decode single-symbol payload");
     }
 }

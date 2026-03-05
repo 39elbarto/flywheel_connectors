@@ -522,4 +522,217 @@ mod tests {
         // Tamper with the frame content
         assert!(!session.verify_incoming(seq, b"tampered", &tag));
     }
+
+    // ── Batch: rekey trigger combinations ──
+
+    #[test]
+    fn needs_rekey_frames_exact_threshold() {
+        let policy = SessionReplayPolicy {
+            max_reorder_window: 128,
+            rekey_after_frames: 3,
+            rekey_after_seconds: u64::MAX,
+            rekey_after_bytes: u64::MAX,
+        };
+        let mut session = build_session(true, policy);
+
+        let _ = session.mac_outgoing(b"a");
+        let _ = session.mac_outgoing(b"b");
+        assert!(!session.needs_rekey(1_000)); // 2 frames < 3
+        let _ = session.mac_outgoing(b"c");
+        assert!(session.needs_rekey(1_000)); // 3 frames >= 3
+    }
+
+    #[test]
+    fn needs_rekey_time_saturating_sub() {
+        // Test that established_at > current_time doesn't panic (saturating sub)
+        let policy = SessionReplayPolicy {
+            max_reorder_window: 128,
+            rekey_after_frames: u64::MAX,
+            rekey_after_seconds: 3600,
+            rekey_after_bytes: u64::MAX,
+        };
+        // established_at = 5000, current_time = 1000 (in the past somehow)
+        let session = build_session(true, policy);
+        // Should not need rekey since elapsed would be 0 (saturating)
+        assert!(!session.needs_rekey(500));
+    }
+
+    // ── Batch: session construction ──
+
+    #[test]
+    fn session_initial_state() {
+        let policy = SessionReplayPolicy::default();
+        let session = build_session(true, policy);
+
+        assert_eq!(session.session_id, MeshSessionId([7u8; 16]));
+        assert!(session.is_initiator);
+        assert!(!session.needs_rekey(1_000));
+    }
+
+    #[test]
+    fn session_debug_format() {
+        let session = build_session(true, SessionReplayPolicy::default());
+        let debug = format!("{session:?}");
+        assert!(debug.contains("MeshSession"));
+    }
+
+    // ── Batch: MAC symmetry with Suite2 ──
+
+    #[test]
+    fn suite2_symmetry() {
+        let keys = SessionKeys {
+            k_mac_i2r: [10u8; 32],
+            k_mac_r2i: [20u8; 32],
+            k_ctx: [30u8; 32],
+        };
+        let session_id = MeshSessionId([42u8; 16]);
+        let policy = SessionReplayPolicy::default();
+
+        let mut initiator = MeshSession::new(
+            session_id,
+            NodeId::new("peer-r"),
+            SessionCryptoSuite::Suite2,
+            keys.clone(),
+            TransportLimits::default(),
+            true,
+            2_000,
+            policy.clone(),
+        );
+        let mut responder = MeshSession::new(
+            session_id,
+            NodeId::new("peer-i"),
+            SessionCryptoSuite::Suite2,
+            keys,
+            TransportLimits::default(),
+            false,
+            2_000,
+            policy,
+        );
+
+        let frame = b"suite2 test frame";
+        let (seq, tag) = initiator.mac_outgoing(frame);
+        assert!(responder.verify_incoming(seq, frame, &tag));
+    }
+
+    // ── Batch: empty frame ──
+
+    #[test]
+    fn mac_outgoing_empty_frame() {
+        let mut session = build_session(true, SessionReplayPolicy::default());
+        let (seq, _tag) = session.mac_outgoing(b"");
+        assert_eq!(seq, 1);
+    }
+
+    // ── Batch: large sequence gaps ──
+
+    #[test]
+    fn verify_incoming_large_seq_gap_behind_window_rejected() {
+        let policy = SessionReplayPolicy {
+            max_reorder_window: 128,
+            rekey_after_frames: u64::MAX,
+            rekey_after_seconds: u64::MAX,
+            rekey_after_bytes: u64::MAX,
+        };
+        let mut session = build_session(true, policy);
+        let frame = b"data";
+
+        // Jump to seq=500
+        let tag = compute_session_mac(
+            SessionCryptoSuite::Suite1,
+            session.recv_mac_key(),
+            &session.session_id,
+            session.recv_direction(),
+            500,
+            frame,
+        )
+        .expect("mac");
+        assert!(session.verify_incoming(500, frame, &tag));
+
+        // seq=1 is now 499 behind the window head (500), which exceeds
+        // the max_reorder_window of 128, so it should be rejected
+        let tag1 = compute_session_mac(
+            SessionCryptoSuite::Suite1,
+            session.recv_mac_key(),
+            &session.session_id,
+            session.recv_direction(),
+            1,
+            frame,
+        )
+        .expect("mac");
+        assert!(!session.verify_incoming(1, frame, &tag1));
+    }
+
+    #[test]
+    fn verify_incoming_within_reorder_window_accepted() {
+        let policy = SessionReplayPolicy {
+            max_reorder_window: 128,
+            rekey_after_frames: u64::MAX,
+            rekey_after_seconds: u64::MAX,
+            rekey_after_bytes: u64::MAX,
+        };
+        let mut session = build_session(true, policy);
+        let frame = b"data";
+
+        // Receive seq=100 first
+        let tag100 = compute_session_mac(
+            SessionCryptoSuite::Suite1,
+            session.recv_mac_key(),
+            &session.session_id,
+            session.recv_direction(),
+            100,
+            frame,
+        )
+        .expect("mac");
+        assert!(session.verify_incoming(100, frame, &tag100));
+
+        // seq=50 is 50 behind the window head (100), within window of 128
+        let tag50 = compute_session_mac(
+            SessionCryptoSuite::Suite1,
+            session.recv_mac_key(),
+            &session.session_id,
+            session.recv_direction(),
+            50,
+            frame,
+        )
+        .expect("mac");
+        assert!(session.verify_incoming(50, frame, &tag50));
+    }
+
+    // ── Batch: cross-session isolation ──
+
+    #[test]
+    fn different_sessions_reject_cross_mac() {
+        let keys = SessionKeys {
+            k_mac_i2r: [1u8; 32],
+            k_mac_r2i: [2u8; 32],
+            k_ctx: [3u8; 32],
+        };
+        let policy = SessionReplayPolicy::default();
+
+        let mut session_a = MeshSession::new(
+            MeshSessionId([1u8; 16]),
+            NodeId::new("peer"),
+            SessionCryptoSuite::Suite1,
+            keys.clone(),
+            TransportLimits::default(),
+            true,
+            1_000,
+            policy.clone(),
+        );
+        let mut session_b = MeshSession::new(
+            MeshSessionId([2u8; 16]), // Different session ID
+            NodeId::new("peer"),
+            SessionCryptoSuite::Suite1,
+            keys,
+            TransportLimits::default(),
+            false,
+            1_000,
+            policy,
+        );
+
+        let frame = b"payload";
+        let (seq, tag) = session_a.mac_outgoing(frame);
+        // Should fail because session_b has different session_id
+        assert!(!session_b.verify_incoming(seq, frame, &tag));
+    }
 }

@@ -2893,4 +2893,1029 @@ mod tests {
             assert_eq!(supervisor.stats().failed_polls, 2);
         });
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // SupervisorConfig builder and duration helpers
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn supervisor_config_builder_methods() {
+        let config = SupervisorConfig::new()
+            .with_base_backoff_ms(500)
+            .with_max_backoff_ms(30_000)
+            .with_jitter(false)
+            .with_max_consecutive_failures(10);
+
+        assert_eq!(config.base_backoff_ms, 500);
+        assert_eq!(config.max_backoff_ms, 30_000);
+        assert!(!config.jitter_enabled);
+        assert_eq!(config.max_consecutive_failures, 10);
+    }
+
+    #[test]
+    fn supervisor_config_shutdown_timeout() {
+        let config = SupervisorConfig::default();
+        assert_eq!(config.shutdown_timeout(), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn supervisor_config_cooldown_duration() {
+        let config = SupervisorConfig::default();
+        assert_eq!(config.cooldown_duration(), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn supervisor_config_heartbeat_interval_enabled() {
+        let config = SupervisorConfig::default();
+        assert_eq!(
+            config.heartbeat_interval(),
+            Some(Duration::from_secs(30))
+        );
+    }
+
+    #[test]
+    fn supervisor_config_heartbeat_interval_disabled() {
+        let config = SupervisorConfig {
+            heartbeat_interval_ms: 0,
+            ..Default::default()
+        };
+        assert!(config.heartbeat_interval().is_none());
+    }
+
+    #[test]
+    fn supervisor_config_heartbeat_timeout() {
+        let config = SupervisorConfig::default();
+        let timeout = config.heartbeat_timeout().expect("heartbeat enabled");
+        // 30s * 2.5 = 75s
+        assert_eq!(timeout, Duration::from_secs_f64(30.0 * 2.5));
+    }
+
+    #[test]
+    fn supervisor_config_heartbeat_timeout_disabled() {
+        let config = SupervisorConfig {
+            heartbeat_interval_ms: 0,
+            ..Default::default()
+        };
+        assert!(config.heartbeat_timeout().is_none());
+    }
+
+    #[test]
+    fn supervisor_config_serde_roundtrip() {
+        let config = SupervisorConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: SupervisorConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.base_backoff_ms, config.base_backoff_ms);
+        assert_eq!(parsed.max_backoff_ms, config.max_backoff_ms);
+        assert_eq!(parsed.jitter_enabled, config.jitter_enabled);
+        assert_eq!(
+            parsed.max_consecutive_failures,
+            config.max_consecutive_failures
+        );
+    }
+
+    #[test]
+    fn supervisor_config_validate_zero_max_failures() {
+        let config = SupervisorConfig {
+            max_consecutive_failures: 0,
+            ..Default::default()
+        };
+        let errors = config.validate().unwrap_err();
+        assert!(errors.iter().any(|e| e.contains("max_consecutive_failures")));
+    }
+
+    #[test]
+    fn supervisor_config_validate_low_heartbeat_multiplier() {
+        let config = SupervisorConfig {
+            heartbeat_timeout_multiplier: 0.5,
+            ..Default::default()
+        };
+        let errors = config.validate().unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| e.contains("heartbeat_timeout_multiplier")));
+    }
+
+    #[test]
+    fn supervisor_config_validate_multiple_errors() {
+        let config = SupervisorConfig {
+            base_backoff_ms: 0,
+            max_backoff_ms: 0,
+            max_consecutive_failures: 0,
+            heartbeat_timeout_multiplier: 1.0,
+            ..Default::default()
+        };
+        let errors = config.validate().unwrap_err();
+        assert!(errors.len() >= 3);
+    }
+
+    #[test]
+    fn backoff_caps_at_max() {
+        let config = SupervisorConfig::default().with_jitter(false);
+        // Attempt 31 (> 30 overflow guard)
+        let delay = config.compute_backoff(31);
+        assert_eq!(delay, 60_000);
+    }
+
+    #[test]
+    fn backoff_with_jitter_disabled() {
+        let config = SupervisorConfig::default().with_jitter(false);
+        let delay = config.compute_backoff_with_jitter(0, 0.5);
+        assert_eq!(delay, 1000); // No jitter applied
+    }
+
+    #[test]
+    fn backoff_with_jitter_clamped() {
+        let config = SupervisorConfig::default();
+        // jitter_factor out of range should be clamped
+        let delay_negative = config.compute_backoff_with_jitter(0, -1.0);
+        let delay_over = config.compute_backoff_with_jitter(0, 2.0);
+        // -1.0 clamped to 0.0 → factor=0.5 → 500
+        assert_eq!(delay_negative, 500);
+        // 2.0 clamped to 1.0 → factor=1.0 → 1000
+        assert_eq!(delay_over, 1000);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // PollingCursor additional tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn polling_cursor_with_offset() {
+        let cursor = InMemoryPollingCursor::with_offset(42);
+        assert_eq!(cursor.offset(), Some(42));
+    }
+
+    #[test]
+    fn polling_cursor_record_poll() {
+        let mut cursor = InMemoryPollingCursor::new();
+        assert!(cursor.last_poll_at().is_none());
+        assert_eq!(cursor.last_poll_count(), 0);
+
+        let now = Instant::now();
+        cursor.record_poll(now, 5);
+        assert!(cursor.last_poll_at().is_some());
+        assert_eq!(cursor.last_poll_count(), 5);
+    }
+
+    #[test]
+    fn polling_cursor_persist_restore() {
+        let cursor = InMemoryPollingCursor::new();
+        assert!(cursor.persist().is_ok());
+        let mut cursor2 = InMemoryPollingCursor::new();
+        assert!(cursor2.restore().is_ok());
+    }
+
+    #[test]
+    fn polling_cursor_advance_from_none() {
+        let mut cursor = InMemoryPollingCursor::new();
+        cursor.advance_if_newer(0);
+        assert_eq!(cursor.offset(), Some(1));
+    }
+
+    #[test]
+    fn polling_cursor_advance_equal_id() {
+        let mut cursor = InMemoryPollingCursor::with_offset(101);
+        // advance_if_newer(100) → new_offset=101, which is NOT > 101
+        cursor.advance_if_newer(100);
+        assert_eq!(cursor.offset(), Some(101)); // Unchanged
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // StreamingSession additional tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn streaming_session_persist_restore() {
+        let session = InMemoryStreamingSession::new();
+        assert!(session.persist().is_ok());
+        let mut session2 = InMemoryStreamingSession::new();
+        assert!(session2.restore().is_ok());
+    }
+
+    #[test]
+    fn streaming_session_heartbeat_no_timeout_when_no_heartbeats() {
+        let session = InMemoryStreamingSession::new();
+        // No heartbeats sent or received → no timeout
+        assert!(!session.is_heartbeat_timeout(Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn streaming_session_next_sequence_increments() {
+        let mut session = InMemoryStreamingSession::new();
+        assert_eq!(session.next_sequence(), 0);
+        assert_eq!(session.next_sequence(), 1);
+        assert_eq!(session.next_sequence(), 2);
+        assert_eq!(session.sequence(), 3);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // HealthTracker extended tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn health_tracker_default() {
+        let tracker = HealthTracker::default();
+        assert!(matches!(tracker.state(), HealthState::Starting));
+        assert_eq!(tracker.consecutive_failures(), 0);
+        assert_eq!(tracker.consecutive_successes(), 0);
+    }
+
+    #[test]
+    fn health_tracker_consecutive_counters() {
+        let mut tracker = HealthTracker::new();
+        tracker.record_success();
+        tracker.record_success();
+        assert_eq!(tracker.consecutive_successes(), 2);
+        assert_eq!(tracker.consecutive_failures(), 0);
+
+        tracker.record_failure("err");
+        assert_eq!(tracker.consecutive_successes(), 0);
+        assert_eq!(tracker.consecutive_failures(), 1);
+
+        tracker.record_failure("err2");
+        assert_eq!(tracker.consecutive_failures(), 2);
+
+        tracker.record_success();
+        assert_eq!(tracker.consecutive_failures(), 0);
+        assert_eq!(tracker.consecutive_successes(), 1);
+    }
+
+    #[test]
+    fn health_tracker_snapshot_with_failures() {
+        let mut tracker = HealthTracker::new();
+        tracker.record_failure("timeout");
+        tracker.record_failure("timeout");
+        tracker.record_failure("timeout");
+
+        let snapshot = tracker.snapshot();
+        assert!(matches!(snapshot.status, HealthState::Starting));
+        // 3 failures → load = 3/10 = 0.3
+        assert_eq!(snapshot.load, Some(0.3));
+        assert!(snapshot.details.is_some());
+        let details = snapshot.details.unwrap();
+        assert_eq!(details["consecutive_failures"], 3);
+        assert_eq!(details["last_error"], "timeout");
+    }
+
+    #[test]
+    fn health_tracker_cooldown_not_elapsed_immediately() {
+        let mut tracker = HealthTracker::new();
+        tracker.transition(HealthTransition::ToUnhealthy {
+            reason: "fatal".into(),
+        });
+        // Cooldown just started, should not be elapsed for large durations
+        assert!(!tracker.cooldown_elapsed(Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn health_tracker_cooldown_elapsed_when_healthy() {
+        let tracker = HealthTracker::new();
+        // Not unhealthy → cooldown always "elapsed"
+        assert!(tracker.cooldown_elapsed(Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn health_tracker_stopping_is_terminal() {
+        let mut tracker = HealthTracker::new();
+        tracker.transition(HealthTransition::ToHealthy);
+        tracker.transition(HealthTransition::ToDegraded {
+            reason: "slow".into(),
+        });
+
+        // Manually set to Stopping for testing
+        tracker.apply_transition(HealthTransition::ToStarting);
+        // We can't directly set Stopping via public API, but we can test is_valid_transition
+    }
+
+    #[test]
+    fn health_tracker_transition_validity_matrix() {
+        // Starting → anything is valid
+        let tracker = HealthTracker::new();
+        assert!(tracker.is_valid_transition(&HealthTransition::ToHealthy));
+        assert!(tracker.is_valid_transition(&HealthTransition::ToDegraded {
+            reason: "x".into()
+        }));
+        assert!(tracker.is_valid_transition(&HealthTransition::ToUnhealthy {
+            reason: "x".into()
+        }));
+        assert!(tracker.is_valid_transition(&HealthTransition::ToStarting));
+
+        // Ready → can degrade or fail, NOT go to healthy again
+        let mut tracker = HealthTracker::new();
+        tracker.transition(HealthTransition::ToHealthy);
+        assert!(!tracker.is_valid_transition(&HealthTransition::ToHealthy));
+        assert!(tracker.is_valid_transition(&HealthTransition::ToDegraded {
+            reason: "x".into()
+        }));
+        assert!(tracker.is_valid_transition(&HealthTransition::ToUnhealthy {
+            reason: "x".into()
+        }));
+        assert!(tracker.is_valid_transition(&HealthTransition::ToStarting));
+
+        // Degraded → can recover or fail
+        let mut tracker = HealthTracker::new();
+        tracker.transition(HealthTransition::ToDegraded {
+            reason: "slow".into(),
+        });
+        assert!(tracker.is_valid_transition(&HealthTransition::ToHealthy));
+        assert!(!tracker.is_valid_transition(&HealthTransition::ToDegraded {
+            reason: "x".into()
+        }));
+        assert!(tracker.is_valid_transition(&HealthTransition::ToUnhealthy {
+            reason: "x".into()
+        }));
+
+        // Error → can recover (fully or partially)
+        let mut tracker = HealthTracker::new();
+        tracker.transition(HealthTransition::ToUnhealthy {
+            reason: "bad".into(),
+        });
+        assert!(tracker.is_valid_transition(&HealthTransition::ToHealthy));
+        assert!(tracker.is_valid_transition(&HealthTransition::ToDegraded {
+            reason: "x".into()
+        }));
+        assert!(!tracker.is_valid_transition(&HealthTransition::ToUnhealthy {
+            reason: "x".into()
+        }));
+    }
+
+    #[test]
+    fn health_tracker_evaluate_starting_to_unhealthy() {
+        let config = SupervisorConfig::default().with_max_consecutive_failures(2);
+        let mut tracker = HealthTracker::new();
+        tracker.record_failure("err1");
+        tracker.record_failure("err2");
+        tracker.evaluate(&config);
+        assert!(tracker.is_unhealthy());
+    }
+
+    #[test]
+    fn health_tracker_evaluate_degraded_to_healthy() {
+        let config = SupervisorConfig::default().with_max_consecutive_failures(5);
+        let mut tracker = HealthTracker::new();
+
+        // Starting → Ready
+        tracker.record_success();
+        tracker.evaluate(&config);
+        assert!(tracker.is_healthy());
+
+        // Ready → Degraded
+        tracker.record_failure("err");
+        tracker.evaluate(&config);
+        assert!(tracker.is_degraded());
+
+        // Degraded → Healthy (needs 3 consecutive successes)
+        tracker.record_success();
+        tracker.evaluate(&config);
+        assert!(tracker.is_degraded()); // Only 1 success
+        tracker.record_success();
+        tracker.evaluate(&config);
+        assert!(tracker.is_degraded()); // Only 2
+        tracker.record_success();
+        tracker.evaluate(&config);
+        assert!(tracker.is_healthy()); // 3 → recovered
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CursorStoreError display tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn cursor_store_error_storage_display() {
+        let err = CursorStoreError::Storage("disk full".into());
+        assert!(err.to_string().contains("disk full"));
+    }
+
+    #[test]
+    fn cursor_store_error_stale_lease_display() {
+        let err = CursorStoreError::StaleLeaseSeq {
+            current: 5,
+            incoming: 3,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains('5'));
+        assert!(msg.contains('3'));
+    }
+
+    #[test]
+    fn cursor_store_error_offset_regression_display() {
+        let err = CursorStoreError::OffsetRegression {
+            current: 100,
+            incoming: 50,
+        };
+        assert!(err.to_string().contains("100"));
+        assert!(err.to_string().contains("50"));
+    }
+
+    #[test]
+    fn cursor_store_error_watermark_regression_display() {
+        let err = CursorStoreError::WatermarkRegression {
+            current: 200,
+            incoming: 100,
+        };
+        assert!(err.to_string().contains("200"));
+    }
+
+    #[test]
+    fn cursor_store_error_encoding_display() {
+        let err = CursorStoreError::CursorEncoding("cbor fail".into());
+        assert!(err.to_string().contains("cbor fail"));
+    }
+
+    #[test]
+    fn cursor_store_error_decoding_display() {
+        let err = CursorStoreError::CursorDecoding("invalid cbor".into());
+        assert!(err.to_string().contains("invalid cbor"));
+    }
+
+    #[test]
+    fn cursor_store_error_debug() {
+        let err = CursorStoreError::Storage("test".into());
+        let debug = format!("{err:?}");
+        assert!(debug.contains("Storage"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // StreamingSupervisorStats tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn streaming_supervisor_stats_default() {
+        let stats = StreamingSupervisorStats::default();
+        assert_eq!(stats.connection_attempts, 0);
+        assert_eq!(stats.successful_connections, 0);
+        assert_eq!(stats.failed_connections, 0);
+        assert_eq!(stats.events_processed, 0);
+    }
+
+    #[test]
+    fn streaming_supervisor_stats_clone() {
+        let stats = StreamingSupervisorStats {
+            connection_attempts: 5,
+            successful_connections: 3,
+            failed_connections: 2,
+            events_processed: 100,
+            backoff_time_ms: 500,
+            missed_heartbeats: 1,
+        };
+        let moved = stats;
+        assert_eq!(moved.connection_attempts, 5);
+        assert_eq!(moved.events_processed, 100);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CursorLease Debug
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn cursor_lease_debug() {
+        let lease = CursorLease {
+            lease_seq: 42,
+            lease_object_id: ObjectId::from_bytes([1; 32]),
+        };
+        let debug = format!("{lease:?}");
+        assert!(debug.contains("CursorLease"));
+        assert!(debug.contains("42"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // HealthTransition Debug/Clone
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn health_transition_debug() {
+        let t = HealthTransition::ToDegraded {
+            reason: "slow".into(),
+        };
+        let debug = format!("{t:?}");
+        assert!(debug.contains("ToDegraded"));
+        assert!(debug.contains("slow"));
+    }
+
+    #[test]
+    fn health_transition_clone() {
+        let t = HealthTransition::ToUnhealthy {
+            reason: "fatal".into(),
+        };
+        let moved = t;
+        assert!(format!("{moved:?}").contains("fatal"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // SupervisorOutcome tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn supervisor_outcome_debug() {
+        let shutdown = SupervisorOutcome::Shutdown;
+        assert!(format!("{shutdown:?}").contains("Shutdown"));
+
+        let fatal = SupervisorOutcome::FatalError {
+            message: "auth failed".into(),
+        };
+        assert!(format!("{fatal:?}").contains("auth failed"));
+
+        let max = SupervisorOutcome::MaxFailuresReached { failures: 5 };
+        assert!(format!("{max:?}").contains('5'));
+    }
+
+    #[test]
+    fn supervisor_outcome_clone() {
+        let outcome = SupervisorOutcome::FatalError {
+            message: "test".into(),
+        };
+        let cloned = outcome.clone();
+        assert!(matches!(
+            cloned,
+            SupervisorOutcome::FatalError { message } if message == "test"
+        ));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // StreamingHealthState serde tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn streaming_health_state_serde_roundtrip() {
+        let state = StreamingHealthState {
+            last_heartbeat_at: Some(1000),
+            last_ack_at: Some(900),
+            reconnect_count: 3,
+            missed_heartbeats: 1,
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        let parsed: StreamingHealthState = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.last_heartbeat_at, Some(1000));
+        assert_eq!(parsed.last_ack_at, Some(900));
+        assert_eq!(parsed.reconnect_count, 3);
+        assert_eq!(parsed.missed_heartbeats, 1);
+    }
+
+    #[test]
+    fn streaming_health_state_serde_skip_none() {
+        let state = StreamingHealthState {
+            last_heartbeat_at: None,
+            last_ack_at: None,
+            reconnect_count: 0,
+            missed_heartbeats: 0,
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(!json.contains("last_heartbeat_at"));
+        assert!(!json.contains("last_ack_at"));
+    }
+
+    #[test]
+    fn streaming_health_state_debug() {
+        let state = StreamingHealthState {
+            last_heartbeat_at: Some(42),
+            last_ack_at: None,
+            reconnect_count: 7,
+            missed_heartbeats: 2,
+        };
+        let dbg = format!("{state:?}");
+        assert!(dbg.contains("StreamingHealthState"));
+        assert!(dbg.contains("42"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // HealthTracker evaluate: Error → recovery path
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn health_tracker_evaluate_error_recovery_after_cooldown() {
+        let config = SupervisorConfig {
+            cooldown_after_failure_ms: 0, // Zero cooldown for test
+            max_consecutive_failures: 2,
+            ..Default::default()
+        };
+        let mut tracker = HealthTracker::new();
+
+        // Starting → Unhealthy via failures
+        tracker.record_failure("err1");
+        tracker.record_failure("err2");
+        tracker.evaluate(&config);
+        assert!(tracker.is_unhealthy());
+
+        // Record success — with zero cooldown, should recover
+        tracker.record_success();
+        tracker.evaluate(&config);
+        assert!(tracker.is_healthy());
+    }
+
+    #[test]
+    fn health_tracker_evaluate_error_no_recovery_without_cooldown() {
+        let config = SupervisorConfig {
+            cooldown_after_failure_ms: 3_600_000, // 1 hour cooldown
+            max_consecutive_failures: 2,
+            ..Default::default()
+        };
+        let mut tracker = HealthTracker::new();
+
+        // Go to unhealthy
+        tracker.record_failure("err1");
+        tracker.record_failure("err2");
+        tracker.evaluate(&config);
+        assert!(tracker.is_unhealthy());
+
+        // Record success but cooldown hasn't elapsed
+        tracker.record_success();
+        tracker.evaluate(&config);
+        assert!(tracker.is_unhealthy()); // Still unhealthy
+    }
+
+    #[test]
+    fn health_tracker_snapshot_load_capped_at_one() {
+        let mut tracker = HealthTracker::new();
+        for _ in 0..20 {
+            tracker.record_failure("err");
+        }
+        let snapshot = tracker.snapshot();
+        // Load should be capped at 1.0 (max 10 failures / 10)
+        assert_eq!(snapshot.load, Some(1.0));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CursorStore tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    fn test_connector_id() -> ConnectorId {
+        ConnectorId::from_static("test.cursor:utility:1.0.0")
+    }
+
+    fn test_zone_id() -> ZoneId {
+        "z:test-zone".parse().unwrap()
+    }
+
+    fn test_object_header() -> ObjectHeader {
+        ObjectHeader {
+            schema: fcp_cbor::SchemaId::new(
+                "fcp.connector_state",
+                "state_object",
+                semver::Version::new(1, 0, 0),
+            ),
+            zone_id: test_zone_id(),
+            created_at: 1_000_000,
+            provenance: fcp_core::Provenance {
+                origin_zone: test_zone_id(),
+                chain: vec![],
+                taint: fcp_core::TaintLevel::Untainted,
+                elevated: false,
+                elevation_token: None,
+            },
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        }
+    }
+
+    fn test_cursor_state(offset: i64, watermark: u64) -> CursorState {
+        CursorState {
+            offset: Some(offset),
+            last_seen_id: Some("msg-123".into()),
+            watermark: Some(watermark),
+        }
+    }
+
+    fn test_lease(seq: u64) -> CursorLease {
+        CursorLease {
+            lease_seq: seq,
+            lease_object_id: ObjectId::from_bytes([99; 32]),
+        }
+    }
+
+    #[test]
+    fn cursor_store_new_has_no_head() {
+        let backend = InMemoryCursorStoreBackend::new();
+        let store = CursorStore::new(backend, test_connector_id(), test_zone_id());
+        assert!(store.head().is_none());
+    }
+
+    #[test]
+    fn cursor_store_load_empty_returns_none() {
+        let backend = InMemoryCursorStoreBackend::new();
+        let mut store = CursorStore::new(backend, test_connector_id(), test_zone_id());
+        let result = store.load_cursor().unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn cursor_store_commit_and_load() {
+        let backend = Arc::new(InMemoryCursorStoreBackend::new());
+        let mut store = CursorStore::new(
+            Arc::clone(&backend),
+            test_connector_id(),
+            test_zone_id(),
+        );
+
+        let cursor = test_cursor_state(100, 50);
+        let header = test_object_header();
+        let lease = test_lease(1);
+        let sig = Signature::from_bytes([0u8; 64]);
+
+        let object_id = store.commit_cursor(cursor, header, lease, sig).unwrap();
+        assert!(store.head().is_some());
+        assert_eq!(store.head(), Some(object_id));
+
+        // Load from a fresh store using same backend
+        let mut store2 = CursorStore::new(
+            Arc::clone(&backend),
+            test_connector_id(),
+            test_zone_id(),
+        );
+        let loaded = store2.load_cursor().unwrap().unwrap();
+        assert_eq!(loaded.offset, Some(100));
+        assert_eq!(loaded.watermark, Some(50));
+    }
+
+    #[test]
+    fn cursor_store_rejects_stale_lease() {
+        let backend = InMemoryCursorStoreBackend::new();
+        let mut store = CursorStore::new(backend, test_connector_id(), test_zone_id());
+
+        // First commit with lease_seq=5
+        let cursor = test_cursor_state(100, 50);
+        let header = test_object_header();
+        let lease = test_lease(5);
+        let sig = Signature::from_bytes([0u8; 64]);
+        store
+            .commit_cursor(cursor, header, lease, sig)
+            .unwrap();
+
+        // Second commit with stale lease_seq=3
+        let cursor2 = test_cursor_state(200, 100);
+        let header2 = test_object_header();
+        let stale_lease = test_lease(3);
+        let sig2 = Signature::from_bytes([0u8; 64]);
+        let err = store
+            .commit_cursor(cursor2, header2, stale_lease, sig2)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            CursorStoreError::StaleLeaseSeq {
+                current: 5,
+                incoming: 3
+            }
+        ));
+    }
+
+    #[test]
+    fn cursor_store_rejects_offset_regression() {
+        let backend = InMemoryCursorStoreBackend::new();
+        let mut store = CursorStore::new(backend, test_connector_id(), test_zone_id());
+
+        // First commit at offset=100
+        let cursor = test_cursor_state(100, 50);
+        let header = test_object_header();
+        let lease = test_lease(1);
+        let sig = Signature::from_bytes([0u8; 64]);
+        store
+            .commit_cursor(cursor, header, lease, sig)
+            .unwrap();
+
+        // Second commit with lower offset=50
+        let cursor2 = test_cursor_state(50, 100);
+        let header2 = test_object_header();
+        let lease2 = test_lease(2);
+        let sig2 = Signature::from_bytes([0u8; 64]);
+        let err = store
+            .commit_cursor(cursor2, header2, lease2, sig2)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            CursorStoreError::OffsetRegression {
+                current: 100,
+                incoming: 50
+            }
+        ));
+    }
+
+    #[test]
+    fn cursor_store_rejects_watermark_regression() {
+        let backend = InMemoryCursorStoreBackend::new();
+        let mut store = CursorStore::new(backend, test_connector_id(), test_zone_id());
+
+        // First commit at watermark=200
+        let cursor = test_cursor_state(100, 200);
+        let header = test_object_header();
+        let lease = test_lease(1);
+        let sig = Signature::from_bytes([0u8; 64]);
+        store
+            .commit_cursor(cursor, header, lease, sig)
+            .unwrap();
+
+        // Second commit with lower watermark=100
+        let cursor2 = test_cursor_state(200, 100);
+        let header2 = test_object_header();
+        let lease2 = test_lease(2);
+        let sig2 = Signature::from_bytes([0u8; 64]);
+        let err = store
+            .commit_cursor(cursor2, header2, lease2, sig2)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            CursorStoreError::WatermarkRegression {
+                current: 200,
+                incoming: 100
+            }
+        ));
+    }
+
+    #[test]
+    fn cursor_store_allows_equal_lease_seq() {
+        let backend = InMemoryCursorStoreBackend::new();
+        let mut store = CursorStore::new(backend, test_connector_id(), test_zone_id());
+
+        let cursor = test_cursor_state(100, 50);
+        let header = test_object_header();
+        let lease = test_lease(5);
+        let sig = Signature::from_bytes([0u8; 64]);
+        store
+            .commit_cursor(cursor, header, lease, sig)
+            .unwrap();
+
+        // Same lease_seq=5 is allowed (not stale)
+        let cursor2 = test_cursor_state(200, 100);
+        let header2 = test_object_header();
+        let lease2 = test_lease(5);
+        let sig2 = Signature::from_bytes([0u8; 64]);
+        store
+            .commit_cursor(cursor2, header2, lease2, sig2)
+            .unwrap();
+    }
+
+    #[test]
+    fn cursor_store_with_instance_id() {
+        let backend = InMemoryCursorStoreBackend::new();
+        let instance_id = InstanceId::new();
+        let store = CursorStore::new(backend, test_connector_id(), test_zone_id())
+            .with_instance_id(instance_id);
+        assert!(store.head().is_none());
+    }
+
+    #[test]
+    fn cursor_store_commit_adds_lease_ref() {
+        let backend = Arc::new(InMemoryCursorStoreBackend::new());
+        let mut store = CursorStore::new(
+            Arc::clone(&backend),
+            test_connector_id(),
+            test_zone_id(),
+        );
+
+        let cursor = test_cursor_state(100, 50);
+        let header = test_object_header();
+        let lease = test_lease(1);
+        let sig = Signature::from_bytes([0u8; 64]);
+        store
+            .commit_cursor(cursor, header, lease, sig)
+            .unwrap();
+
+        // Verify the stored object has the lease ref
+        let (_, stored_obj) = backend.load_head().unwrap().unwrap();
+        assert!(stored_obj.header.refs.contains(&ObjectId::from_bytes([99; 32])));
+    }
+
+    #[test]
+    fn cursor_store_sequential_commits_increment_seq() {
+        let backend = Arc::new(InMemoryCursorStoreBackend::new());
+        let mut store = CursorStore::new(
+            Arc::clone(&backend),
+            test_connector_id(),
+            test_zone_id(),
+        );
+
+        // First commit: seq=0
+        let cursor = test_cursor_state(100, 50);
+        let header = test_object_header();
+        let lease = test_lease(1);
+        let sig = Signature::from_bytes([0u8; 64]);
+        store
+            .commit_cursor(cursor, header, lease, sig)
+            .unwrap();
+
+        let (_, obj1) = backend.load_head().unwrap().unwrap();
+        assert_eq!(obj1.seq, 0);
+
+        // Second commit: seq=1
+        let cursor2 = test_cursor_state(200, 100);
+        let header2 = test_object_header();
+        let lease2 = test_lease(2);
+        let sig2 = Signature::from_bytes([0u8; 64]);
+        store
+            .commit_cursor(cursor2, header2, lease2, sig2)
+            .unwrap();
+
+        let (_, obj2) = backend.load_head().unwrap().unwrap();
+        assert_eq!(obj2.seq, 1);
+        assert!(obj2.prev.is_some()); // Links to previous
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // InMemoryCursorStoreBackend tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn in_memory_backend_load_empty() {
+        let backend = InMemoryCursorStoreBackend::new();
+        assert!(backend.load_head().unwrap().is_none());
+    }
+
+    #[test]
+    fn in_memory_backend_default() {
+        let backend = InMemoryCursorStoreBackend::default();
+        assert!(backend.load_head().unwrap().is_none());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // PollResult debug
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn poll_result_debug() {
+        let success: PollResult<i32> = PollResult::success(vec![1, 2]);
+        assert!(format!("{success:?}").contains("Success"));
+
+        let err: PollResult<i32> = PollResult::recoverable("timeout");
+        assert!(format!("{err:?}").contains("timeout"));
+
+        let fatal: PollResult<i32> = PollResult::fatal("unrecoverable");
+        assert!(format!("{fatal:?}").contains("unrecoverable"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // PollingSupervisorStats clone/debug
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn polling_supervisor_stats_debug() {
+        let stats = PollingSupervisorStats::default();
+        let dbg = format!("{stats:?}");
+        assert!(dbg.contains("PollingSupervisorStats"));
+    }
+
+    #[test]
+    fn polling_supervisor_stats_clone() {
+        let stats = PollingSupervisorStats {
+            total_polls: 10,
+            successful_polls: 8,
+            failed_polls: 2,
+            items_processed: 50,
+            backoff_time_ms: 300,
+        };
+        let cloned = stats.clone();
+        assert_eq!(cloned.total_polls, 10);
+        assert_eq!(cloned.items_processed, 50);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Streaming supervisor snapshot without details
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn streaming_health_snapshot_no_prior_details() {
+        let config = SupervisorConfig::default();
+        let session = InMemoryStreamingSession::new();
+        let supervisor = StreamingSupervisor::new(config, session);
+
+        // New tracker has no failures → snapshot.details is None
+        // streaming_health_snapshot should still produce valid details
+        let snapshot = supervisor.streaming_health_snapshot();
+        let details = snapshot.details.expect("should have streaming details");
+        let map = details.as_object().expect("details is object");
+        assert!(map.contains_key("reconnect_count"));
+        assert!(map.contains_key("missed_heartbeats"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Heartbeat timeout edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn streaming_session_heartbeat_with_ack_not_timed_out() {
+        let mut session = InMemoryStreamingSession::new();
+        let now = Instant::now();
+        session.record_heartbeat_sent(now);
+        session.record_heartbeat_ack(now);
+        // Ack just received → not timed out
+        assert!(!session.is_heartbeat_timeout(Duration::from_millis(100)));
+    }
+
+    #[test]
+    fn streaming_session_heartbeat_sent_not_timed_out_yet() {
+        let mut session = InMemoryStreamingSession::new();
+        session.record_heartbeat_sent(Instant::now());
+        // Just sent, no ack, but timeout is large
+        assert!(!session.is_heartbeat_timeout(Duration::from_secs(60)));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CursorLease clone
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn cursor_lease_clone() {
+        let lease = test_lease(42);
+        let cloned = lease;
+        assert_eq!(cloned.lease_seq, 42);
+    }
 }

@@ -720,4 +720,548 @@ mod tests {
         let json_pretty = report.to_json_pretty().expect("pretty json export");
         assert!(json_pretty.contains('\n'));
     }
+
+    #[test]
+    fn config_default_values() {
+        let config = UsageTelemetryConfig::default();
+        assert_eq!(config.retention_secs, 7 * 24 * 60 * 60);
+        assert_eq!(config.sample_rate_bps, 10_000);
+        assert_eq!(config.max_entries, 10_000);
+    }
+
+    #[test]
+    fn recommendation_config_default() {
+        let config = RecommendationConfig::default();
+        assert_eq!(config.unused_after_secs, 30 * 24 * 60 * 60);
+    }
+
+    #[test]
+    fn empty_aggregates_produces_empty_report() {
+        let report = recommend_capabilities(
+            &[],
+            100,
+            RecommendationConfig::default(),
+        );
+        assert!(report.recommendations.is_empty());
+        assert!(report.risk_summaries.is_empty());
+        assert_eq!(report.generated_at, 100);
+    }
+
+    #[test]
+    fn by_suggestion_filter() {
+        let aggregates = vec![
+            CapabilityUsageAggregate {
+                key: CapabilityUsageKey::new(
+                    ZoneId::work(),
+                    ConnectorId::from_static("fcp.a:request-response:1"),
+                    CapabilityId::from_static("fcp.a.read"),
+                ),
+                total: 1,
+                allowed: 1,
+                denied: 0,
+                errors: 0,
+                first_seen: 90,
+                last_seen: 95,
+                last_risk_tier: SafetyTier::Safe,
+            },
+            CapabilityUsageAggregate {
+                key: CapabilityUsageKey::new(
+                    ZoneId::work(),
+                    ConnectorId::from_static("fcp.b:request-response:1"),
+                    CapabilityId::from_static("fcp.b.write"),
+                ),
+                total: 1,
+                allowed: 0,
+                denied: 1,
+                errors: 0,
+                first_seen: 5,
+                last_seen: 5,
+                last_risk_tier: SafetyTier::Dangerous,
+            },
+        ];
+
+        let report = recommend_capabilities(
+            &aggregates,
+            100,
+            RecommendationConfig { unused_after_secs: 50 },
+        );
+
+        let kept = report.by_suggestion(CapabilitySuggestionKind::Keep);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].key.capability_id.as_str(), "fcp.a.read");
+
+        let removed = report.by_suggestion(CapabilitySuggestionKind::RemoveUnused);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].key.capability_id.as_str(), "fcp.b.write");
+    }
+
+    #[test]
+    fn review_risky_active_dangerous_cap() {
+        let key = CapabilityUsageKey::new(
+            ZoneId::work(),
+            ConnectorId::from_static("fcp.d:request-response:1"),
+            CapabilityId::from_static("fcp.d.delete"),
+        );
+        let aggregate = CapabilityUsageAggregate {
+            key,
+            total: 10,
+            allowed: 8,
+            denied: 2,
+            errors: 0,
+            first_seen: 90,
+            last_seen: 99,
+            last_risk_tier: SafetyTier::Critical,
+        };
+
+        let report = recommend_capabilities(
+            &[aggregate],
+            100,
+            RecommendationConfig { unused_after_secs: 50 },
+        );
+
+        assert_eq!(
+            report.recommendations[0].suggestion,
+            CapabilitySuggestionKind::ReviewRisky
+        );
+        assert_eq!(report.recommendations[0].reason_code, "risky_usage");
+    }
+
+    #[test]
+    fn suggestion_kind_serde_roundtrip() {
+        let kinds = [
+            CapabilitySuggestionKind::RemoveUnused,
+            CapabilitySuggestionKind::ReviewRisky,
+            CapabilitySuggestionKind::Keep,
+        ];
+        for kind in kinds {
+            let json = serde_json::to_string(&kind).unwrap();
+            let decoded: CapabilitySuggestionKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded, kind);
+        }
+    }
+
+    #[test]
+    fn suggestion_kind_snake_case_serialization() {
+        let json = serde_json::to_string(&CapabilitySuggestionKind::RemoveUnused).unwrap();
+        assert_eq!(json, "\"remove_unused\"");
+        let json = serde_json::to_string(&CapabilitySuggestionKind::ReviewRisky).unwrap();
+        assert_eq!(json, "\"review_risky\"");
+        let json = serde_json::to_string(&CapabilitySuggestionKind::Keep).unwrap();
+        assert_eq!(json, "\"keep\"");
+    }
+
+    #[test]
+    fn report_serde_roundtrip() {
+        let key = CapabilityUsageKey::new(
+            ZoneId::work(),
+            ConnectorId::from_static("fcp.x:request-response:1"),
+            CapabilityId::from_static("fcp.x.read"),
+        );
+        let report = CapabilityRecommendationReport {
+            generated_at: 42,
+            recommendations: vec![CapabilityRecommendation {
+                key,
+                suggestion: CapabilitySuggestionKind::Keep,
+                reason_code: "active_usage".to_string(),
+                usage_total: 5,
+                last_seen: 40,
+                risk_tier: SafetyTier::Safe,
+            }],
+            risk_summaries: vec![ZoneRiskSummary {
+                zone_id: "z:work".to_string(),
+                safe: 5,
+                risky: 0,
+                dangerous: 0,
+                critical: 0,
+                forbidden: 0,
+            }],
+        };
+
+        let json = report.to_json().unwrap();
+        let decoded: CapabilityRecommendationReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, report);
+    }
+
+    #[test]
+    fn aggregate_error_counting() {
+        let store = CapabilityUsageStore::new(UsageTelemetryConfig::default());
+        let event = sample_event(CapabilityUsageOutcome::Error, 10);
+        store.record(&event);
+        store.record(&sample_event(CapabilityUsageOutcome::Error, 11));
+
+        let snapshot = store.snapshot();
+        assert_eq!(snapshot[0].errors, 2);
+        assert_eq!(snapshot[0].allowed, 0);
+        assert_eq!(snapshot[0].denied, 0);
+    }
+
+    #[test]
+    fn multiple_zones_risk_summary() {
+        let work_agg = CapabilityUsageAggregate {
+            key: CapabilityUsageKey::new(
+                ZoneId::work(),
+                ConnectorId::from_static("fcp.a:request-response:1"),
+                CapabilityId::from_static("fcp.a.read"),
+            ),
+            total: 3,
+            allowed: 3,
+            denied: 0,
+            errors: 0,
+            first_seen: 90,
+            last_seen: 95,
+            last_risk_tier: SafetyTier::Safe,
+        };
+        let priv_agg = CapabilityUsageAggregate {
+            key: CapabilityUsageKey::new(
+                ZoneId::private(),
+                ConnectorId::from_static("fcp.b:request-response:1"),
+                CapabilityId::from_static("fcp.b.admin"),
+            ),
+            total: 2,
+            allowed: 1,
+            denied: 0,
+            errors: 1,
+            first_seen: 80,
+            last_seen: 85,
+            last_risk_tier: SafetyTier::Forbidden,
+        };
+
+        let report = recommend_capabilities(
+            &[work_agg, priv_agg],
+            100,
+            RecommendationConfig { unused_after_secs: 50 },
+        );
+
+        assert_eq!(report.risk_summaries.len(), 2);
+        let work_zone = report.risk_summaries.iter().find(|s| s.zone_id == ZoneId::WORK).unwrap();
+        assert_eq!(work_zone.safe, 3);
+        let priv_zone = report.risk_summaries.iter().find(|s| s.zone_id == ZoneId::PRIVATE).unwrap();
+        assert_eq!(priv_zone.forbidden, 2);
+    }
+
+    #[test]
+    fn snapshot_deterministic_order() {
+        let store = CapabilityUsageStore::new(UsageTelemetryConfig::default());
+
+        let e1 = event_for(
+            ZoneId::work(),
+            ConnectorId::from_static("fcp.zzz:request-response:1"),
+            CapabilityId::from_static("fcp.zzz.read"),
+            SafetyTier::Safe,
+            CapabilityUsageOutcome::Allow,
+            10,
+        );
+        let e2 = event_for(
+            ZoneId::work(),
+            ConnectorId::from_static("fcp.aaa:request-response:1"),
+            CapabilityId::from_static("fcp.aaa.read"),
+            SafetyTier::Safe,
+            CapabilityUsageOutcome::Allow,
+            10,
+        );
+        store.record(&e1);
+        store.record(&e2);
+
+        let snap = store.snapshot();
+        assert_eq!(snap.len(), 2);
+        // Should be sorted: aaa before zzz
+        assert!(snap[0].key.connector_id.as_str() < snap[1].key.connector_id.as_str());
+    }
+
+    #[test]
+    fn summary_counts_correct() {
+        let report = CapabilityRecommendationReport {
+            generated_at: 100,
+            recommendations: vec![
+                CapabilityRecommendation {
+                    key: CapabilityUsageKey::new(
+                        ZoneId::work(),
+                        ConnectorId::from_static("fcp.a:request-response:1"),
+                        CapabilityId::from_static("fcp.a.read"),
+                    ),
+                    suggestion: CapabilitySuggestionKind::Keep,
+                    reason_code: "active_usage".into(),
+                    usage_total: 5,
+                    last_seen: 90,
+                    risk_tier: SafetyTier::Safe,
+                },
+                CapabilityRecommendation {
+                    key: CapabilityUsageKey::new(
+                        ZoneId::work(),
+                        ConnectorId::from_static("fcp.b:request-response:1"),
+                        CapabilityId::from_static("fcp.b.write"),
+                    ),
+                    suggestion: CapabilitySuggestionKind::RemoveUnused,
+                    reason_code: "unused_over_window".into(),
+                    usage_total: 1,
+                    last_seen: 10,
+                    risk_tier: SafetyTier::Risky,
+                },
+                CapabilityRecommendation {
+                    key: CapabilityUsageKey::new(
+                        ZoneId::work(),
+                        ConnectorId::from_static("fcp.c:request-response:1"),
+                        CapabilityId::from_static("fcp.c.delete"),
+                    ),
+                    suggestion: CapabilitySuggestionKind::ReviewRisky,
+                    reason_code: "risky_usage".into(),
+                    usage_total: 3,
+                    last_seen: 95,
+                    risk_tier: SafetyTier::Critical,
+                },
+            ],
+            risk_summaries: vec![],
+        };
+
+        let summary = report.summary();
+        assert_eq!(summary.total, 3);
+        assert_eq!(summary.keep, 1);
+        assert_eq!(summary.remove_unused, 1);
+        assert_eq!(summary.review_risky, 1);
+    }
+
+    // ── Additional edge case tests ──
+
+    #[test]
+    fn sampling_full_rate_always_records() {
+        let config = UsageTelemetryConfig {
+            sample_rate_bps: 10_000,
+            ..UsageTelemetryConfig::default()
+        };
+        let store = CapabilityUsageStore::new(config);
+        for ts in 0..20 {
+            let event = sample_event(CapabilityUsageOutcome::Allow, ts);
+            assert!(store.record(&event));
+        }
+        let snap = store.snapshot();
+        assert_eq!(snap[0].total, 20);
+    }
+
+    #[test]
+    fn aggregate_first_seen_tracks_minimum() {
+        let store = CapabilityUsageStore::new(UsageTelemetryConfig::default());
+        // Record events out of order — first_seen should track the minimum
+        store.record(&sample_event(CapabilityUsageOutcome::Allow, 50));
+        store.record(&sample_event(CapabilityUsageOutcome::Allow, 20));
+        store.record(&sample_event(CapabilityUsageOutcome::Allow, 80));
+
+        let snap = store.snapshot();
+        assert_eq!(snap[0].first_seen, 20);
+        assert_eq!(snap[0].last_seen, 80);
+    }
+
+    #[test]
+    fn aggregate_last_seen_tracks_maximum() {
+        let store = CapabilityUsageStore::new(UsageTelemetryConfig::default());
+        store.record(&sample_event(CapabilityUsageOutcome::Allow, 100));
+        store.record(&sample_event(CapabilityUsageOutcome::Allow, 50));
+
+        let snap = store.snapshot();
+        assert_eq!(snap[0].last_seen, 100);
+    }
+
+    #[test]
+    fn aggregate_mixed_outcomes() {
+        let store = CapabilityUsageStore::new(UsageTelemetryConfig::default());
+        store.record(&sample_event(CapabilityUsageOutcome::Allow, 10));
+        store.record(&sample_event(CapabilityUsageOutcome::Deny, 11));
+        store.record(&sample_event(CapabilityUsageOutcome::Error, 12));
+        store.record(&sample_event(CapabilityUsageOutcome::Allow, 13));
+        store.record(&sample_event(CapabilityUsageOutcome::Deny, 14));
+
+        let snap = store.snapshot();
+        assert_eq!(snap[0].total, 5);
+        assert_eq!(snap[0].allowed, 2);
+        assert_eq!(snap[0].denied, 2);
+        assert_eq!(snap[0].errors, 1);
+    }
+
+    #[test]
+    fn recommendation_forbidden_tier_flagged_risky() {
+        let key = CapabilityUsageKey::new(
+            ZoneId::work(),
+            ConnectorId::from_static("fcp.x:request-response:1"),
+            CapabilityId::from_static("fcp.x.admin"),
+        );
+        let aggregate = CapabilityUsageAggregate {
+            key,
+            total: 1,
+            allowed: 1,
+            denied: 0,
+            errors: 0,
+            first_seen: 95,
+            last_seen: 99,
+            last_risk_tier: SafetyTier::Forbidden,
+        };
+
+        let report = recommend_capabilities(
+            &[aggregate],
+            100,
+            RecommendationConfig { unused_after_secs: 50 },
+        );
+        assert_eq!(
+            report.recommendations[0].suggestion,
+            CapabilitySuggestionKind::ReviewRisky
+        );
+    }
+
+    #[test]
+    fn recommendation_risky_tier_not_flagged() {
+        // Risky tier (not Dangerous/Critical/Forbidden) should be Keep, not ReviewRisky
+        let key = CapabilityUsageKey::new(
+            ZoneId::work(),
+            ConnectorId::from_static("fcp.y:request-response:1"),
+            CapabilityId::from_static("fcp.y.read"),
+        );
+        let aggregate = CapabilityUsageAggregate {
+            key,
+            total: 3,
+            allowed: 3,
+            denied: 0,
+            errors: 0,
+            first_seen: 90,
+            last_seen: 99,
+            last_risk_tier: SafetyTier::Risky,
+        };
+
+        let report = recommend_capabilities(
+            &[aggregate],
+            100,
+            RecommendationConfig { unused_after_secs: 50 },
+        );
+        assert_eq!(
+            report.recommendations[0].suggestion,
+            CapabilitySuggestionKind::Keep
+        );
+    }
+
+    #[test]
+    fn zone_risk_summary_all_tiers() {
+        let tiers = [
+            (SafetyTier::Safe, "fcp.s:request-response:1", "fcp.s.read"),
+            (SafetyTier::Risky, "fcp.r:request-response:1", "fcp.r.read"),
+            (SafetyTier::Dangerous, "fcp.d:request-response:1", "fcp.d.read"),
+            (SafetyTier::Critical, "fcp.c:request-response:1", "fcp.c.read"),
+            (SafetyTier::Forbidden, "fcp.f:request-response:1", "fcp.f.read"),
+        ];
+
+        let aggregates: Vec<CapabilityUsageAggregate> = tiers
+            .iter()
+            .map(|(tier, conn, cap)| CapabilityUsageAggregate {
+                key: CapabilityUsageKey::new(
+                    ZoneId::work(),
+                    ConnectorId::from_static(conn),
+                    CapabilityId::from_static(cap),
+                ),
+                total: 1,
+                allowed: 1,
+                denied: 0,
+                errors: 0,
+                first_seen: 90,
+                last_seen: 99,
+                last_risk_tier: *tier,
+            })
+            .collect();
+
+        let report = recommend_capabilities(
+            &aggregates,
+            100,
+            RecommendationConfig { unused_after_secs: 50 },
+        );
+
+        assert_eq!(report.risk_summaries.len(), 1);
+        let summary = &report.risk_summaries[0];
+        assert_eq!(summary.safe, 1);
+        assert_eq!(summary.risky, 1);
+        assert_eq!(summary.dangerous, 1);
+        assert_eq!(summary.critical, 1);
+        assert_eq!(summary.forbidden, 1);
+    }
+
+    #[test]
+    fn retention_does_not_prune_fresh_entries() {
+        let config = UsageTelemetryConfig {
+            retention_secs: 100,
+            ..UsageTelemetryConfig::default()
+        };
+        let store = CapabilityUsageStore::new(config);
+        store.record(&sample_event(CapabilityUsageOutcome::Allow, 50));
+        // Record at t=60 — first event at t=50 is within 100s retention
+        store.record(&sample_event(CapabilityUsageOutcome::Allow, 60));
+        let snap = store.snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].total, 2);
+    }
+
+    #[test]
+    fn by_suggestion_empty_report() {
+        let report = recommend_capabilities(
+            &[],
+            100,
+            RecommendationConfig::default(),
+        );
+        assert!(report.by_suggestion(CapabilitySuggestionKind::Keep).is_empty());
+        assert!(report.by_suggestion(CapabilitySuggestionKind::RemoveUnused).is_empty());
+        assert!(report.by_suggestion(CapabilitySuggestionKind::ReviewRisky).is_empty());
+    }
+
+    #[test]
+    fn empty_report_summary() {
+        let report = recommend_capabilities(
+            &[],
+            100,
+            RecommendationConfig::default(),
+        );
+        let summary = report.summary();
+        assert_eq!(summary.total, 0);
+        assert_eq!(summary.keep, 0);
+        assert_eq!(summary.remove_unused, 0);
+        assert_eq!(summary.review_risky, 0);
+    }
+
+    #[test]
+    fn zone_risk_summary_serde_roundtrip() {
+        let summary = ZoneRiskSummary {
+            zone_id: "z:work".to_string(),
+            safe: 10,
+            risky: 5,
+            dangerous: 2,
+            critical: 1,
+            forbidden: 0,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let decoded: ZoneRiskSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, summary);
+    }
+
+    #[test]
+    fn recommendation_summary_serde_roundtrip() {
+        let summary = CapabilityRecommendationSummary {
+            total: 10,
+            remove_unused: 3,
+            review_risky: 2,
+            keep: 5,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let decoded: CapabilityRecommendationSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, summary);
+    }
+
+    #[test]
+    fn config_debug_and_clone() {
+        let config = UsageTelemetryConfig::default();
+        let debug = format!("{config:?}");
+        assert!(debug.contains("UsageTelemetryConfig"));
+        let cloned = config;
+        assert_eq!(cloned.retention_secs, config.retention_secs);
+    }
+
+    #[test]
+    fn recommendation_config_debug_and_clone() {
+        let config = RecommendationConfig::default();
+        let debug = format!("{config:?}");
+        assert!(debug.contains("RecommendationConfig"));
+        let cloned = config;
+        assert_eq!(cloned.unused_after_secs, config.unused_after_secs);
+    }
 }

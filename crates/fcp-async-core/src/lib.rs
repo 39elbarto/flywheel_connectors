@@ -944,8 +944,8 @@ mod tests {
     };
 
     use super::{
-        AsyncError, CancellationToken, ContextScope, ExecutionContext, TaskGroup, channel, runtime,
-        task, time,
+        AsyncError, CancellationToken, ContextScope, ExecutionContext, Instrumentation, TaskGroup,
+        channel, runtime, task, time,
     };
 
     #[test]
@@ -1062,5 +1062,622 @@ mod tests {
             .expect_err("cancelled context should fail");
 
         assert_eq!(err, AsyncError::Cancelled);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // AsyncError enum coverage
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn async_error_display_messages() {
+        let timeout = AsyncError::Timeout { timeout_ms: 5000 };
+        assert_eq!(timeout.to_string(), "operation timed out after 5000ms");
+
+        let cancelled = AsyncError::Cancelled;
+        assert_eq!(cancelled.to_string(), "operation cancelled");
+
+        let closed = AsyncError::ChannelClosed;
+        assert_eq!(closed.to_string(), "channel closed");
+
+        let full = AsyncError::ChannelFull;
+        assert_eq!(full.to_string(), "channel full");
+
+        let io = AsyncError::ProtocolIo {
+            message: "connection reset".into(),
+        };
+        assert_eq!(io.to_string(), "protocol io fault: connection reset");
+
+        let join = AsyncError::Join {
+            message: "task panicked".into(),
+        };
+        assert_eq!(join.to_string(), "task join failed: task panicked");
+
+        let rt = AsyncError::Runtime {
+            message: "no runtime".into(),
+        };
+        assert_eq!(rt.to_string(), "runtime failure: no runtime");
+    }
+
+    #[test]
+    fn async_error_clone_and_eq() {
+        let a = AsyncError::Timeout { timeout_ms: 100 };
+        let b = a.clone();
+        assert_eq!(a, b);
+
+        assert_ne!(AsyncError::Cancelled, AsyncError::ChannelClosed);
+        assert_ne!(AsyncError::ChannelFull, AsyncError::ChannelClosed);
+    }
+
+    #[test]
+    fn async_error_debug_format() {
+        let err = AsyncError::Timeout { timeout_ms: 42 };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Timeout"));
+        assert!(dbg.contains("42"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Deadline coverage
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn deadline_after_not_immediately_expired() {
+        let d = super::Deadline::after(Duration::from_secs(10));
+        assert!(!d.is_expired());
+        assert!(d.remaining() > Duration::ZERO);
+    }
+
+    #[test]
+    fn deadline_at_with_past_instant_is_expired() {
+        let past = std::time::Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .unwrap();
+        let d = super::Deadline::at(past);
+        assert!(d.is_expired());
+        assert_eq!(d.remaining(), Duration::ZERO);
+    }
+
+    #[test]
+    fn deadline_clone_and_eq() {
+        let d1 = super::Deadline::after(Duration::from_secs(5));
+        let d2 = d1;
+        assert_eq!(d1, d2);
+    }
+
+    #[runtime::test]
+    async fn deadline_run_succeeds_within_budget() {
+        let d = super::Deadline::after(Duration::from_secs(5));
+        let result = d.run(async { 42_u32 }).await;
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    #[runtime::test]
+    async fn deadline_run_times_out_on_expired() {
+        let past = std::time::Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .unwrap();
+        let d = super::Deadline::at(past);
+        let err = d
+            .run(async {
+                time::sleep(Duration::from_secs(10)).await;
+            })
+            .await
+            .expect_err("expired deadline should timeout");
+        assert!(matches!(err, AsyncError::Timeout { .. }));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // ContextScope coverage
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn context_scope_eq_and_debug() {
+        assert_eq!(ContextScope::Request, ContextScope::Request);
+        assert_eq!(ContextScope::Background, ContextScope::Background);
+        assert_ne!(ContextScope::Request, ContextScope::Background);
+        let dbg = format!("{:?}", ContextScope::Request);
+        assert!(dbg.contains("Request"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // ExecutionContext coverage
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[runtime::test]
+    async fn background_context_no_deadline() {
+        let ctx = ExecutionContext::background();
+        assert_eq!(ctx.scope(), ContextScope::Background);
+        assert!(ctx.deadline().is_none());
+        assert!(ctx.remaining_budget().is_none());
+    }
+
+    #[runtime::test]
+    async fn background_context_run_completes() {
+        let ctx = ExecutionContext::background();
+        let result = ctx.run(async { 99_u64 }).await;
+        assert_eq!(result.unwrap(), 99);
+    }
+
+    #[runtime::test]
+    async fn context_child_inherits_scope_and_cancellation() {
+        let parent = ExecutionContext::request_scoped(Duration::from_secs(10));
+        let child = parent.child();
+
+        assert_eq!(child.scope(), ContextScope::Request);
+        assert!(!child.is_cancelled());
+
+        parent.cancel();
+        assert!(child.is_cancelled());
+    }
+
+    #[runtime::test]
+    async fn context_with_deadline_replaces_existing() {
+        let ctx = ExecutionContext::background().with_deadline(Duration::from_secs(30));
+        assert!(ctx.deadline().is_some());
+        assert!(ctx.remaining_budget().is_some());
+    }
+
+    #[runtime::test]
+    async fn context_remaining_budget_decreases() {
+        let ctx = ExecutionContext::request_scoped(Duration::from_millis(500));
+        let budget_before = ctx.remaining_budget().unwrap();
+        time::sleep(Duration::from_millis(50)).await;
+        let budget_after = ctx.remaining_budget().unwrap();
+        assert!(budget_after < budget_before);
+    }
+
+    #[runtime::test]
+    async fn context_sleep_completes_within_budget() {
+        let ctx = ExecutionContext::request_scoped(Duration::from_secs(5));
+        let result = ctx.sleep(Duration::from_millis(10)).await;
+        assert!(result.is_ok());
+    }
+
+    #[runtime::test]
+    async fn context_sleep_cancelled_returns_error() {
+        let ctx = ExecutionContext::request_scoped(Duration::from_secs(5));
+        ctx.cancel();
+        let err = ctx
+            .sleep(Duration::from_secs(10))
+            .await
+            .expect_err("cancelled context sleep should fail");
+        assert_eq!(err, AsyncError::Cancelled);
+    }
+
+    #[runtime::test]
+    async fn context_is_cancelled_reflects_state() {
+        let ctx = ExecutionContext::request_scoped(Duration::from_secs(10));
+        assert!(!ctx.is_cancelled());
+        ctx.cancel();
+        assert!(ctx.is_cancelled());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // CancellationToken & CancellationListener coverage
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn cancellation_token_default() {
+        let token = CancellationToken::default();
+        assert!(!token.is_cancelled());
+    }
+
+    #[test]
+    fn cancellation_token_cancel_is_observable() {
+        let token = CancellationToken::new();
+        assert!(!token.is_cancelled());
+        token.cancel();
+        assert!(token.is_cancelled());
+    }
+
+    #[test]
+    fn cancellation_token_clone_shares_state() {
+        let token = CancellationToken::new();
+        let cloned = token.clone();
+        token.cancel();
+        assert!(cloned.is_cancelled());
+    }
+
+    #[runtime::test]
+    async fn cancellation_listener_already_cancelled_returns_immediately() {
+        let token = CancellationToken::new();
+        token.cancel();
+
+        let mut listener = token.subscribe();
+        assert!(listener.is_cancelled());
+
+        // cancelled() should return immediately
+        let result = time::timeout(Duration::from_millis(100), listener.cancelled()).await;
+        assert!(result.is_ok());
+    }
+
+    #[runtime::test]
+    async fn cancellation_listener_waits_for_cancel() {
+        let token = CancellationToken::new();
+        let mut listener = token.subscribe();
+        assert!(!listener.is_cancelled());
+
+        let token_clone = token.clone();
+        task::spawn(async move {
+            time::sleep(Duration::from_millis(20)).await;
+            token_clone.cancel();
+        });
+
+        let result = time::timeout(Duration::from_secs(1), listener.cancelled()).await;
+        assert!(result.is_ok());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // TaskGroup coverage
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[runtime::test]
+    async fn task_group_default() {
+        let group = TaskGroup::default();
+        let result = group.shutdown(Duration::from_millis(100)).await;
+        assert!(result.is_ok());
+    }
+
+    #[runtime::test]
+    async fn task_group_spawn_error_propagated() {
+        let mut group = TaskGroup::new();
+
+        group.spawn("failing-task", async {
+            Err(AsyncError::Runtime {
+                message: "deliberate failure".into(),
+            })
+        });
+
+        let err = group
+            .shutdown(Duration::from_secs(1))
+            .await
+            .expect_err("task error should propagate");
+        assert!(matches!(err, AsyncError::Runtime { .. }));
+    }
+
+    #[runtime::test]
+    async fn task_group_shutdown_timeout_aborts_hung_tasks() {
+        let mut group = TaskGroup::new();
+
+        group.spawn("hung-task", async {
+            // Never completes
+            future::pending::<Result<(), AsyncError>>().await
+        });
+
+        let err = group
+            .shutdown(Duration::from_millis(50))
+            .await
+            .expect_err("hung task should cause timeout");
+        assert!(matches!(err, AsyncError::Timeout { .. }));
+    }
+
+    #[runtime::test]
+    async fn task_group_cancellation_token_shared() {
+        let mut group = TaskGroup::new();
+        let token = group.cancellation_token();
+        let mut listener = group.subscribe_cancellation();
+
+        group.spawn("watcher", async move {
+            listener.cancelled().await?;
+            Ok(())
+        });
+
+        assert!(!token.is_cancelled());
+        let result = group.shutdown(Duration::from_secs(1)).await;
+        assert!(result.is_ok());
+        assert!(token.is_cancelled());
+    }
+
+    #[runtime::test]
+    async fn task_group_with_instrumentation_fires_hooks() {
+        use std::sync::atomic::AtomicU32;
+
+        struct CountingHooks {
+            spawns: AtomicU32,
+            exits: AtomicU32,
+        }
+
+        impl super::Instrumentation for CountingHooks {
+            fn on_task_spawn(&self, _name: &str) {
+                self.spawns.fetch_add(1, Ordering::SeqCst);
+            }
+            fn on_task_exit(&self, _name: &str, _result: &Result<(), AsyncError>) {
+                self.exits.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let hooks = Arc::new(CountingHooks {
+            spawns: AtomicU32::new(0),
+            exits: AtomicU32::new(0),
+        });
+        let hooks_ref = Arc::clone(&hooks);
+
+        let mut group = TaskGroup::with_instrumentation(hooks);
+        group.spawn("task-a", async { Ok(()) });
+        group.spawn("task-b", async { Ok(()) });
+
+        group.shutdown(Duration::from_secs(1)).await.unwrap();
+
+        assert_eq!(hooks_ref.spawns.load(Ordering::SeqCst), 2);
+        assert_eq!(hooks_ref.exits.load(Ordering::SeqCst), 2);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Instrumentation trait coverage
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn noop_instrumentation_default() {
+        let noop = super::NoopInstrumentation;
+        // All methods should be callable without panic
+        noop.on_task_spawn("test");
+        noop.on_task_exit("test", &Ok(()));
+        noop.on_queue_send("q", 5, 10);
+        noop.on_queue_receive("q", 4, 10);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // BoundedSender/BoundedReceiver coverage
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[runtime::test]
+    async fn bounded_sender_closed_channel_error() {
+        let (sender, receiver) = channel::bounded::<u32>("test", 4);
+        drop(receiver);
+
+        let err = sender.send(1).await.expect_err("closed channel should fail");
+        assert_eq!(err, AsyncError::ChannelClosed);
+    }
+
+    #[runtime::test]
+    async fn bounded_try_send_closed_channel() {
+        let (sender, receiver) = channel::bounded::<u32>("test", 4);
+        drop(receiver);
+
+        let err = sender.try_send(1).expect_err("closed channel should fail");
+        assert_eq!(err, AsyncError::ChannelClosed);
+    }
+
+    #[runtime::test]
+    async fn bounded_receiver_close_signals_sender() {
+        let (sender, mut receiver) = channel::bounded::<u32>("test", 4);
+        receiver.close();
+
+        // Sender should eventually fail
+        let err = sender.send(1).await.expect_err("closed receiver should fail");
+        assert_eq!(err, AsyncError::ChannelClosed);
+    }
+
+    #[runtime::test]
+    async fn bounded_receiver_returns_none_when_sender_dropped() {
+        let (sender, mut receiver) = channel::bounded::<u32>("test", 4);
+        sender.send(1).await.unwrap();
+        drop(sender);
+
+        assert_eq!(receiver.recv().await, Some(1));
+        assert_eq!(receiver.recv().await, None);
+    }
+
+    #[runtime::test]
+    async fn bounded_with_instrumentation_fires_hooks() {
+        use std::sync::atomic::AtomicU32;
+
+        struct QueueHooks {
+            sends: AtomicU32,
+            recvs: AtomicU32,
+        }
+
+        impl super::Instrumentation for QueueHooks {
+            fn on_queue_send(&self, _name: &str, _depth: usize, _capacity: usize) {
+                self.sends.fetch_add(1, Ordering::SeqCst);
+            }
+            fn on_queue_receive(&self, _name: &str, _depth: usize, _capacity: usize) {
+                self.recvs.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let hooks = Arc::new(QueueHooks {
+            sends: AtomicU32::new(0),
+            recvs: AtomicU32::new(0),
+        });
+        let hooks_ref = Arc::clone(&hooks);
+
+        let (sender, mut receiver) =
+            channel::bounded_with_instrumentation("instrumented", 4, hooks);
+
+        sender.send(1).await.unwrap();
+        sender.try_send(2).unwrap();
+        receiver.recv().await;
+        receiver.recv().await;
+
+        assert_eq!(hooks_ref.sends.load(Ordering::SeqCst), 2);
+        assert_eq!(hooks_ref.recvs.load(Ordering::SeqCst), 2);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Shutdown module coverage
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[runtime::test]
+    async fn wait_for_shutdown_returns_immediately_if_already_set() {
+        let (tx, mut rx) = channel::watch::channel(true);
+        let _ = tx; // keep sender alive
+        let err = super::shutdown::wait_for_shutdown(&mut rx)
+            .await
+            .expect_err("already-shutdown should return Cancelled");
+        assert_eq!(err, AsyncError::Cancelled);
+    }
+
+    #[runtime::test]
+    async fn wait_for_shutdown_signals_on_true() {
+        let (tx, mut rx) = channel::watch::channel(false);
+
+        task::spawn(async move {
+            time::sleep(Duration::from_millis(20)).await;
+            tx.send_replace(true);
+        });
+
+        let err = super::shutdown::wait_for_shutdown(&mut rx)
+            .await
+            .expect_err("shutdown signal should return Cancelled");
+        assert_eq!(err, AsyncError::Cancelled);
+    }
+
+    #[runtime::test]
+    async fn sleep_or_shutdown_completes_sleep() {
+        let (_tx, mut rx) = channel::watch::channel(false);
+        let result =
+            super::shutdown::sleep_or_shutdown(Duration::from_millis(10), &mut rx).await;
+        assert!(result.is_ok());
+    }
+
+    #[runtime::test]
+    async fn sleep_or_shutdown_cancelled_by_shutdown() {
+        let (tx, mut rx) = channel::watch::channel(false);
+
+        task::spawn(async move {
+            time::sleep(Duration::from_millis(10)).await;
+            tx.send_replace(true);
+        });
+
+        let err =
+            super::shutdown::sleep_or_shutdown(Duration::from_secs(60), &mut rx)
+                .await
+                .expect_err("shutdown should cancel sleep");
+        assert_eq!(err, AsyncError::Cancelled);
+    }
+
+    #[runtime::test]
+    async fn sleep_or_shutdown_already_shutdown() {
+        let (_tx, mut rx) = channel::watch::channel(true);
+        let err =
+            super::shutdown::sleep_or_shutdown(Duration::from_secs(60), &mut rx)
+                .await
+                .expect_err("already-shutdown should return immediately");
+        assert_eq!(err, AsyncError::Cancelled);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Runtime builder coverage
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn runtime_builder_current_thread() {
+        let rt = runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current thread runtime");
+        rt.block_on(async { 1 + 1 });
+    }
+
+    #[test]
+    fn runtime_builder_multi_thread() {
+        let rt = runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("multi thread runtime");
+        rt.block_on(async { 2 + 2 });
+    }
+
+    #[test]
+    fn runtime_builder_enable_time_and_io() {
+        let rt = runtime::Builder::new_current_thread()
+            .enable_time()
+            .enable_io()
+            .build()
+            .expect("runtime with time+io");
+        rt.block_on(async { 3 + 3 });
+    }
+
+    #[test]
+    fn runtime_new_default() {
+        let rt = runtime::Runtime::new().expect("default runtime");
+        let result = rt.block_on(async { 42 });
+        assert_eq!(result, 42);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Channel sub-module factory coverage
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[runtime::test]
+    async fn broadcast_channel_basic() {
+        let (tx, mut rx1) = channel::broadcast::channel::<u32>(16);
+        let mut rx2 = tx.subscribe();
+
+        tx.send(42).unwrap();
+        assert_eq!(rx1.recv().await.unwrap(), 42);
+        assert_eq!(rx2.recv().await.unwrap(), 42);
+    }
+
+    #[runtime::test]
+    async fn mpsc_channel_basic() {
+        let (tx, mut rx) = channel::mpsc::channel::<u32>(8);
+        tx.send(7).await.unwrap();
+        assert_eq!(rx.recv().await, Some(7));
+    }
+
+    #[runtime::test]
+    async fn mpsc_unbounded_channel_basic() {
+        let (tx, mut rx) = channel::mpsc::unbounded_channel::<u32>();
+        tx.send(99).unwrap();
+        assert_eq!(rx.recv().await, Some(99));
+    }
+
+    #[runtime::test]
+    async fn oneshot_channel_basic() {
+        let (tx, rx) = channel::oneshot::channel::<String>();
+        tx.send("hello".into()).unwrap();
+        assert_eq!(rx.await.unwrap(), "hello");
+    }
+
+    #[runtime::test]
+    async fn watch_channel_basic() {
+        let (tx, mut rx) = channel::watch::channel(0_u32);
+        assert_eq!(*rx.borrow(), 0);
+
+        tx.send_replace(42);
+        rx.changed().await.unwrap();
+        assert_eq!(*rx.borrow(), 42);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // block_on_sync edge case: current-thread rejection
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn block_on_sync_rejects_current_thread_runtime() {
+        let rt = runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        rt.block_on(async {
+            let err = runtime::block_on_sync(async { 1 })
+                .expect_err("block_on_sync in current-thread should fail");
+            assert!(matches!(err, AsyncError::Runtime { .. }));
+        });
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Time module coverage
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[runtime::test]
+    async fn sleep_zero_completes_immediately() {
+        time::sleep(Duration::ZERO).await;
+    }
+
+    #[runtime::test]
+    async fn interval_ticks_repeatedly() {
+        let mut interval = time::interval(Duration::from_millis(10));
+        interval.tick().await; // first tick is immediate
+        interval.tick().await; // second tick after delay
+    }
+
+    #[runtime::test]
+    async fn timeout_succeeds_when_future_completes_fast() {
+        let result = time::timeout(Duration::from_secs(5), async { 42_u32 }).await;
+        assert_eq!(result.unwrap(), 42);
     }
 }

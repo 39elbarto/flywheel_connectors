@@ -1702,4 +1702,742 @@ mod tests {
         let response = endpoint.discover(None).await;
         assert_eq!(response.connectors.len(), 2);
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ToolDescriptor::from(OperationInfo) conversion tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    fn make_operation(id: &str, description: Option<&str>) -> OperationInfo {
+        use fcp_core::{OperationId, RateLimit};
+        OperationInfo {
+            id: OperationId::new(id).expect("valid operation id"),
+            summary: format!("{id} summary"),
+            description: description.map(String::from),
+            input_schema: serde_json::json!({"type": "object"}),
+            output_schema: serde_json::json!({"type": "string"}),
+            capability: CapabilityId::new(format!("cap.{id}")).expect("valid cap id"),
+            risk_level: RiskLevel::Medium,
+            safety_tier: SafetyTier::Risky,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "Always".to_string(),
+                common_mistakes: vec!["Mistake A".into()],
+                examples: vec![r#"{"key":"val"}"#.into()],
+                related: vec![CapabilityId::new("cap.other").unwrap()],
+            },
+            rate_limit: Some(RateLimit {
+                max: 100,
+                per_ms: 60_000,
+                burst: None,
+                scope: Some("per_user".into()),
+                pool_name: Some("api_pool".into()),
+            }),
+            requires_approval: Some(ApprovalMode::Interactive),
+        }
+    }
+
+    #[test]
+    fn tool_descriptor_from_operation_info_with_description() {
+        let op = make_operation("send_msg", Some("Send a message"));
+        let tool = ToolDescriptor::from(&op);
+
+        assert_eq!(tool.name, "send_msg");
+        assert_eq!(tool.description, "Send a message");
+        assert_eq!(tool.risk_level, RiskLevel::Medium);
+        assert_eq!(tool.safety_tier, SafetyTier::Risky);
+        assert_eq!(tool.idempotency, IdempotencyClass::Strict);
+        assert!(tool.requires_confirmation);
+        assert!(tool.idempotent); // Strict => idempotent
+        assert!(tool.supports_simulate);
+        assert!(tool.ai_hints.is_some());
+    }
+
+    #[test]
+    fn tool_descriptor_from_operation_info_no_description_uses_summary() {
+        let op = make_operation("list_items", None);
+        let tool = ToolDescriptor::from(&op);
+
+        assert_eq!(tool.description, "list_items summary");
+    }
+
+    #[test]
+    fn tool_descriptor_from_operation_idempotent_best_effort() {
+        let mut op = make_operation("update", None);
+        op.idempotency = IdempotencyClass::BestEffort;
+        let tool = ToolDescriptor::from(&op);
+        assert!(tool.idempotent);
+    }
+
+    #[test]
+    fn tool_descriptor_from_operation_not_idempotent_none() {
+        let mut op = make_operation("create", None);
+        op.idempotency = IdempotencyClass::None;
+        op.requires_approval = None;
+        let tool = ToolDescriptor::from(&op);
+        assert!(!tool.idempotent);
+        assert!(!tool.requires_confirmation);
+        assert!(tool.approval_mode.is_none());
+    }
+
+    #[test]
+    fn tool_descriptor_from_operation_rate_limit_pool_name_preferred() {
+        let op = make_operation("op1", None);
+        let tool = ToolDescriptor::from(&op);
+        // pool_name takes precedence via or_else chain
+        assert_eq!(tool.rate_limits, vec!["api_pool"]);
+    }
+
+    #[test]
+    fn tool_descriptor_from_operation_rate_limit_scope_fallback() {
+        use fcp_core::RateLimit;
+        let mut op = make_operation("op2", None);
+        op.rate_limit = Some(RateLimit {
+            max: 10,
+            per_ms: 1000,
+            burst: None,
+            scope: Some("per_connector".into()),
+            pool_name: None,
+        });
+        let tool = ToolDescriptor::from(&op);
+        assert_eq!(tool.rate_limits, vec!["per_connector"]);
+    }
+
+    #[test]
+    fn tool_descriptor_from_operation_no_rate_limit() {
+        let mut op = make_operation("op3", None);
+        op.rate_limit = None;
+        let tool = ToolDescriptor::from(&op);
+        assert!(tool.rate_limits.is_empty());
+    }
+
+    #[test]
+    fn tool_descriptor_from_operation_rate_limit_no_pool_no_scope() {
+        use fcp_core::RateLimit;
+        let mut op = make_operation("op4", None);
+        op.rate_limit = Some(RateLimit {
+            max: 10,
+            per_ms: 1000,
+            burst: None,
+            scope: None,
+            pool_name: None,
+        });
+        let tool = ToolDescriptor::from(&op);
+        assert!(tool.rate_limits.is_empty());
+    }
+
+    #[test]
+    fn tool_descriptor_from_operation_empty_ai_hints() {
+        let mut op = make_operation("op5", None);
+        op.ai_hints = AgentHint::default();
+        let tool = ToolDescriptor::from(&op);
+        assert!(tool.ai_hints.is_none());
+    }
+
+    #[test]
+    fn tool_descriptor_from_operation_examples_parsed() {
+        let op = make_operation("op6", None);
+        let tool = ToolDescriptor::from(&op);
+        assert_eq!(tool.examples.len(), 1);
+        assert_eq!(tool.examples[0].input, serde_json::json!({"key": "val"}));
+        assert!(tool.examples[0].description.is_none());
+        assert!(tool.examples[0].output.is_none());
+    }
+
+    #[test]
+    fn tool_descriptor_from_operation_invalid_example_json() {
+        let mut op = make_operation("op7", None);
+        op.ai_hints.examples = vec!["not valid json".into()];
+        let tool = ToolDescriptor::from(&op);
+        // Invalid JSON falls back to empty object
+        assert_eq!(tool.examples[0].input, serde_json::json!({}));
+    }
+
+    #[test]
+    fn tool_descriptor_from_operation_with_declarations_overrides_rate_limits() {
+        use fcp_core::RateLimitDeclarations;
+        let op = make_operation("send_msg", None);
+        let mut decls = RateLimitDeclarations {
+            limits: vec![],
+            tool_pool_map: HashMap::new(),
+        };
+        decls.tool_pool_map.insert(
+            "send_msg".into(),
+            vec!["pool_a".into(), "pool_b".into()],
+        );
+
+        let tool = ToolDescriptor::from_operation(&op, Some(&decls));
+        assert_eq!(tool.rate_limits, vec!["pool_a", "pool_b"]);
+    }
+
+    #[test]
+    fn tool_descriptor_from_operation_with_declarations_no_match() {
+        use fcp_core::RateLimitDeclarations;
+        let op = make_operation("send_msg", None);
+        let decls = RateLimitDeclarations {
+            limits: vec![],
+            tool_pool_map: HashMap::new(),
+        };
+
+        let tool = ToolDescriptor::from_operation(&op, Some(&decls));
+        // Falls through to the From impl's rate_limits
+        assert_eq!(tool.rate_limits, vec!["api_pool"]);
+    }
+
+    #[test]
+    fn tool_descriptor_from_operation_with_no_declarations() {
+        let op = make_operation("send_msg", None);
+        let tool = ToolDescriptor::from_operation(&op, None);
+        assert_eq!(tool.rate_limits, vec!["api_pool"]);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // SafetyTier level exact values
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn safety_tier_level_exact_values() {
+        assert_eq!(SafetyTier::Safe.level(), 0);
+        assert_eq!(SafetyTier::Risky.level(), 1);
+        assert_eq!(SafetyTier::Dangerous.level(), 2);
+        assert_eq!(SafetyTier::Critical.level(), 3);
+        assert_eq!(SafetyTier::Forbidden.level(), 4);
+    }
+
+    #[test]
+    fn safety_tier_forbidden_not_at_most_critical() {
+        assert!(!SafetyTier::Forbidden.is_at_most(SafetyTier::Critical));
+        assert!(SafetyTier::Forbidden.is_at_most(SafetyTier::Forbidden));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Additional serde roundtrip tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn preflight_request_serialization_roundtrip() {
+        let req = PreflightRequest {
+            connector_id: ConnectorId::new("test", "conn", "v1").unwrap(),
+            operation: "send".into(),
+            params: Some(serde_json::json!({"channel": "123"})),
+            principal: Some("user:alice".into()),
+            zone_id: Some(ZoneId::work()),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: PreflightRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.operation, "send");
+        assert_eq!(parsed.principal.as_deref(), Some("user:alice"));
+        assert!(parsed.params.is_some());
+    }
+
+    #[test]
+    fn preflight_request_minimal_fields() {
+        let req = PreflightRequest {
+            connector_id: ConnectorId::new("test", "conn", "v1").unwrap(),
+            operation: "read".into(),
+            params: None,
+            principal: None,
+            zone_id: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: PreflightRequest = serde_json::from_str(&json).unwrap();
+        assert!(parsed.params.is_none());
+        assert!(parsed.principal.is_none());
+        assert!(parsed.zone_id.is_none());
+    }
+
+    #[test]
+    fn self_check_response_serialization_roundtrip() {
+        let resp = SelfCheckResponse {
+            connector_id: ConnectorId::new("test", "conn", "v1").unwrap(),
+            report: SelfCheckReport::ok(),
+            checked_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: SelfCheckResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.connector_id, resp.connector_id);
+        assert_eq!(parsed.report.status, SelfCheckStatus::Ok);
+    }
+
+    #[test]
+    fn discovery_response_serialization_roundtrip() {
+        let connectors = vec![make_summary(
+            "test",
+            "rtrip",
+            "v1",
+            vec!["ai"],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        )];
+        let resp = DiscoveryResponse::new(connectors, 99);
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: DiscoveryResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.registry_version, 99);
+        assert!(parsed.supports_streaming);
+        assert!(parsed.supports_batching);
+        assert_eq!(parsed.connectors.len(), 1);
+    }
+
+    #[test]
+    fn tool_example_serialization_roundtrip() {
+        let example = ToolExample {
+            description: Some("Send hello".into()),
+            input: serde_json::json!({"msg": "hello"}),
+            output: Some(serde_json::json!({"ok": true})),
+        };
+        let json = serde_json::to_string(&example).unwrap();
+        let parsed: ToolExample = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.description.as_deref(), Some("Send hello"));
+        assert_eq!(parsed.input["msg"], "hello");
+        assert!(parsed.output.is_some());
+    }
+
+    #[test]
+    fn tool_example_minimal() {
+        let example = ToolExample {
+            description: None,
+            input: serde_json::json!({}),
+            output: None,
+        };
+        let json = serde_json::to_string(&example).unwrap();
+        let parsed: ToolExample = serde_json::from_str(&json).unwrap();
+        assert!(parsed.description.is_none());
+        assert!(parsed.output.is_none());
+    }
+
+    #[test]
+    fn estimated_cost_all_none() {
+        let cost = EstimatedCost {
+            api_calls: None,
+            tokens: None,
+            cost_cents: None,
+        };
+        let json = serde_json::to_string(&cost).unwrap();
+        let parsed: EstimatedCost = serde_json::from_str(&json).unwrap();
+        assert!(parsed.api_calls.is_none());
+        assert!(parsed.tokens.is_none());
+        assert!(parsed.cost_cents.is_none());
+    }
+
+    #[test]
+    fn preflight_rate_limit_no_reset_at() {
+        let rl = PreflightRateLimit {
+            limited: false,
+            remaining: 42,
+            reset_at: None,
+        };
+        let json = serde_json::to_string(&rl).unwrap();
+        let parsed: PreflightRateLimit = serde_json::from_str(&json).unwrap();
+        assert!(!parsed.limited);
+        assert_eq!(parsed.remaining, 42);
+        assert!(parsed.reset_at.is_none());
+    }
+
+    #[test]
+    fn introspection_response_serialization_roundtrip() {
+        let summary = make_summary(
+            "test",
+            "intro",
+            "v1",
+            vec!["ai"],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        let resp = IntrospectionResponse {
+            connector: summary,
+            tools: vec![],
+            rate_limits: None,
+            archetype: ConnectorArchetype::Streaming,
+            introspection: Introspection {
+                operations: vec![],
+                events: vec![],
+                resource_types: vec![],
+                auth_caps: None,
+                event_caps: None,
+            },
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: IntrospectionResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.archetype, ConnectorArchetype::Streaming);
+        assert!(parsed.tools.is_empty());
+        assert!(parsed.rate_limits.is_none());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Host health with populated connectors map
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn host_health_response_with_connectors() {
+        let mut connectors = HashMap::new();
+        let id1 = ConnectorId::new("svc", "a", "v1").unwrap();
+        let id2 = ConnectorId::new("svc", "b", "v1").unwrap();
+        connectors.insert(id1, ConnectorHealth::healthy());
+        connectors.insert(id2, ConnectorHealth::unavailable("timeout"));
+
+        let resp = HostHealthResponse {
+            status: HostHealthStatus::Degraded,
+            connectors,
+            uptime_seconds: 7200,
+            active_connections: 10,
+            timestamp: Utc::now(),
+        };
+
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: HostHealthResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.connectors.len(), 2);
+        assert_eq!(parsed.uptime_seconds, 7200);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // DiscoveryFilter edge cases
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn filter_matches_empty_categories_vec() {
+        let filter = DiscoveryFilter {
+            category: Some("ai".into()),
+            ..Default::default()
+        };
+        let summary = make_summary(
+            "test",
+            "empty",
+            "v1",
+            vec![],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        // Connector with no categories should not match any category filter
+        assert!(!filter.matches(&summary));
+    }
+
+    #[test]
+    fn filter_default_matches_everything() {
+        let filter = DiscoveryFilter::default();
+        assert!(filter.category.is_none());
+        assert!(filter.max_risk.is_none());
+        assert!(filter.health.is_none());
+
+        let unavailable = make_summary(
+            "test",
+            "unav",
+            "v1",
+            vec![],
+            SafetyTier::Forbidden,
+            ConnectorHealth::unavailable("gone"),
+        );
+        assert!(filter.matches(&unavailable));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ConnectorSummary optional fields
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn connector_summary_with_optional_fields() {
+        let id = ConnectorId::new("test", "full", "v1").unwrap();
+        let summary = ConnectorSummary {
+            id,
+            name: "Full Summary".into(),
+            description: Some("A described connector".into()),
+            version: semver::Version::new(2, 3, 4),
+            categories: vec!["messaging".into(), "ai".into()],
+            tool_count: 15,
+            max_safety_tier: SafetyTier::Critical,
+            enabled: false,
+            health: ConnectorHealth::degraded("partial"),
+            last_health_check: None,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let parsed: ConnectorSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.description.as_deref(), Some("A described connector"));
+        assert_eq!(parsed.version.to_string(), "2.3.4");
+        assert_eq!(parsed.tool_count, 15);
+        assert!(!parsed.enabled);
+        assert!(parsed.last_health_check.is_none());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Debug trait coverage
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn discovery_filter_debug() {
+        let filter = DiscoveryFilter {
+            category: Some("test".into()),
+            max_risk: Some(SafetyTier::Dangerous),
+            health: Some(HealthFilter::Available),
+        };
+        let debug = format!("{filter:?}");
+        assert!(debug.contains("DiscoveryFilter"));
+        assert!(debug.contains("Dangerous"));
+    }
+
+    #[test]
+    fn preflight_request_debug() {
+        let req = PreflightRequest {
+            connector_id: ConnectorId::new("test", "dbg", "v1").unwrap(),
+            operation: "invoke".into(),
+            params: None,
+            principal: None,
+            zone_id: None,
+        };
+        let debug = format!("{req:?}");
+        assert!(debug.contains("PreflightRequest"));
+        assert!(debug.contains("invoke"));
+    }
+
+    #[test]
+    fn preflight_response_debug() {
+        let resp = PreflightResponse::allowed();
+        let debug = format!("{resp:?}");
+        assert!(debug.contains("PreflightResponse"));
+        assert!(debug.contains("true"));
+    }
+
+    #[test]
+    fn estimated_cost_debug() {
+        let cost = EstimatedCost {
+            api_calls: Some(5),
+            tokens: None,
+            cost_cents: Some(100),
+        };
+        let debug = format!("{cost:?}");
+        assert!(debug.contains("EstimatedCost"));
+        assert!(debug.contains("100"));
+    }
+
+    #[test]
+    fn preflight_rate_limit_debug() {
+        let rl = PreflightRateLimit {
+            limited: true,
+            remaining: 0,
+            reset_at: None,
+        };
+        let debug = format!("{rl:?}");
+        assert!(debug.contains("PreflightRateLimit"));
+    }
+
+    #[test]
+    fn self_check_response_debug() {
+        let resp = SelfCheckResponse {
+            connector_id: ConnectorId::new("test", "dbg", "v1").unwrap(),
+            report: SelfCheckReport::ok(),
+            checked_at: Utc::now(),
+        };
+        let debug = format!("{resp:?}");
+        assert!(debug.contains("SelfCheckResponse"));
+    }
+
+    #[test]
+    fn host_health_response_debug() {
+        let resp = HostHealthResponse {
+            status: HostHealthStatus::Healthy,
+            connectors: HashMap::new(),
+            uptime_seconds: 0,
+            active_connections: 0,
+            timestamp: Utc::now(),
+        };
+        let debug = format!("{resp:?}");
+        assert!(debug.contains("HostHealthResponse"));
+        assert!(debug.contains("Healthy"));
+    }
+
+    #[test]
+    fn connector_archetype_debug() {
+        let debug = format!("{:?}", ConnectorArchetype::Bidirectional);
+        assert!(debug.contains("Bidirectional"));
+    }
+
+    #[test]
+    fn latency_hint_debug() {
+        for hint in [LatencyHint::Fast, LatencyHint::Medium, LatencyHint::Slow, LatencyHint::VerySlow] {
+            let debug = format!("{hint:?}");
+            assert!(!debug.is_empty());
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // DiscoveryEndpoint introspect success with operations
+    // ─────────────────────────────────────────────────────────────────────────
+
+    struct RegistryWithOps {
+        connectors: Vec<ConnectorSummary>,
+    }
+
+    #[async_trait::async_trait]
+    impl ConnectorRegistry for RegistryWithOps {
+        async fn list(&self) -> Vec<ConnectorSummary> {
+            self.connectors.clone()
+        }
+
+        async fn get(&self, id: &ConnectorId) -> Option<ConnectorSummary> {
+            self.connectors.iter().find(|c| &c.id == id).cloned()
+        }
+
+        async fn get_introspection(&self, id: &ConnectorId) -> Option<Introspection> {
+            self.connectors.iter().find(|c| &c.id == id).map(|_| {
+                let op = make_operation("test_op", Some("A test operation"));
+                Introspection {
+                    operations: vec![op],
+                    events: vec![],
+                    resource_types: vec![],
+                    auth_caps: None,
+                    event_caps: None,
+                }
+            })
+        }
+
+        async fn get_archetype(&self, _id: &ConnectorId) -> Option<ConnectorArchetype> {
+            Some(ConnectorArchetype::Streaming)
+        }
+
+        async fn get_rate_limits(&self, _id: &ConnectorId) -> Option<RateLimitDeclarations> {
+            Some(RateLimitDeclarations {
+                limits: vec![],
+                tool_pool_map: {
+                    let mut m = HashMap::new();
+                    m.insert("test_op".into(), vec!["global_pool".into()]);
+                    m
+                },
+            })
+        }
+
+        async fn self_check(&self, _id: &ConnectorId) -> Option<SelfCheckReport> {
+            None
+        }
+
+        fn version(&self) -> u64 {
+            42
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn introspect_with_operations_and_rate_limits() {
+        let summary = make_summary(
+            "rich",
+            "test",
+            "v1",
+            vec!["ai"],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        let registry = RegistryWithOps {
+            connectors: vec![summary.clone()],
+        };
+        let endpoint = DiscoveryEndpoint::new(Arc::new(registry), Arc::new(AllowPolicy));
+
+        let resp = endpoint.introspect(&summary.id).await.unwrap();
+        assert_eq!(resp.archetype, ConnectorArchetype::Streaming);
+        assert_eq!(resp.tools.len(), 1);
+        assert_eq!(resp.tools[0].name, "test_op");
+        assert_eq!(resp.tools[0].description, "A test operation");
+        // Rate limits overridden by declarations
+        assert_eq!(resp.tools[0].rate_limits, vec!["global_pool"]);
+        assert!(resp.rate_limits.is_some());
+        assert_eq!(resp.introspection.operations.len(), 1);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn discovery_endpoint_with_custom_cache_ttl() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let summary = make_summary(
+            "ttl",
+            "test",
+            "v1",
+            vec!["test"],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        let registry = CountingRegistry::new(vec![summary], Arc::clone(&calls));
+        let endpoint = DiscoveryEndpoint::with_cache_ttl(
+            Arc::new(registry),
+            Arc::new(AllowPolicy),
+            Duration::from_millis(0),
+        );
+
+        let _ = endpoint.discover(None).await;
+        let _ = endpoint.discover(None).await;
+        // Zero TTL means every call refreshes
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn discovery_endpoint_preflight_allow_policy() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let registry = CountingRegistry::new(vec![], Arc::clone(&calls));
+        let endpoint = DiscoveryEndpoint::new(Arc::new(registry), Arc::new(AllowPolicy));
+
+        let request = PreflightRequest {
+            connector_id: ConnectorId::new("test", "pf", "v1").unwrap(),
+            operation: "read".into(),
+            params: None,
+            principal: None,
+            zone_id: None,
+        };
+
+        let response = endpoint.preflight(request).await;
+        assert!(response.allowed);
+        assert!(response.reason.is_none());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // DiscoveryCache direct tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn discovery_cache_invalidate_clears() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let summary = make_summary(
+            "inv",
+            "test",
+            "v1",
+            vec![],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        let registry = CountingRegistry::new(vec![summary], Arc::clone(&calls));
+        #[allow(clippy::duration_suboptimal_units)]
+        let cache = DiscoveryCache::new(Duration::from_secs(300));
+
+        let _ = cache.get_or_refresh(&registry).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        cache.invalidate().await;
+
+        let _ = cache.get_or_refresh(&registry).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn discovery_cache_returns_correct_data() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let summary = make_summary(
+            "data",
+            "test",
+            "v1",
+            vec!["storage"],
+            SafetyTier::Risky,
+            ConnectorHealth::healthy(),
+        );
+        let registry = CountingRegistry::new(vec![summary.clone()], Arc::clone(&calls));
+        #[allow(clippy::duration_suboptimal_units)]
+        let cache = DiscoveryCache::new(Duration::from_secs(60));
+
+        let result = cache.get_or_refresh(&registry).await;
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, summary.id);
+        assert_eq!(result[0].max_safety_tier, SafetyTier::Risky);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn discovery_cache_empty_registry() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let registry = CountingRegistry::new(vec![], Arc::clone(&calls));
+        #[allow(clippy::duration_suboptimal_units)]
+        let cache = DiscoveryCache::new(Duration::from_secs(60));
+
+        let result = cache.get_or_refresh(&registry).await;
+        assert!(result.is_empty());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
 }

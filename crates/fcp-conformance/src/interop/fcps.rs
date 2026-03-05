@@ -481,4 +481,147 @@ mod tests {
             assert!(nonces.insert(nonce), "Duplicate nonce at esi={esi}");
         }
     }
+
+    // ─── ReplayWindow edge cases ───
+
+    #[test]
+    fn replay_window_large_jump() {
+        let mut window = ReplayWindow::new(64);
+        assert!(window.accept(0));
+        assert!(window.accept(1000)); // Large jump beyond window
+        assert!(!window.accept(0)); // Far outside window
+        assert!(!window.accept(935)); // 1000 - 935 = 65 >= 64, outside
+        assert!(window.accept(937)); // 1000 - 937 = 63 < 64, inside
+    }
+
+    #[test]
+    fn replay_window_sequential() {
+        let mut window = ReplayWindow::new(64);
+        for i in 0..200 {
+            assert!(window.accept(i), "seq {i} should be accepted");
+        }
+        // Replay any should fail
+        for i in 136..200 {
+            assert!(!window.accept(i), "replay of {i} should be rejected");
+        }
+    }
+
+    #[test]
+    fn replay_window_size_one() {
+        let mut window = ReplayWindow::new(1);
+        assert!(window.accept(0));
+        assert!(!window.accept(0));
+        assert!(window.accept(1));
+        assert!(!window.accept(0)); // Outside window
+    }
+
+    #[test]
+    fn replay_window_out_of_order_acceptance() {
+        let mut window = ReplayWindow::new(64);
+        assert!(window.accept(5));
+        assert!(window.accept(3));
+        assert!(window.accept(1));
+        assert!(window.accept(4));
+        assert!(window.accept(2));
+        assert!(window.accept(0));
+        // All should now be seen
+        for i in 0..=5 {
+            assert!(!window.accept(i), "replay of {i} should fail");
+        }
+    }
+
+    // ─── derive_symbol_nonce structure ───
+
+    #[test]
+    fn symbol_nonce_length() {
+        let nonce = derive_symbol_nonce([0u8; 8], 0, 0);
+        assert_eq!(nonce.len(), 12);
+    }
+
+    #[test]
+    fn symbol_nonce_zone_key_prefix() {
+        let zone_key_id = [0xAA, 0xBB, 0xCC, 0xDD, 0x11, 0x22, 0x33, 0x44];
+        let nonce = derive_symbol_nonce(zone_key_id, 0, 0);
+        assert_eq!(&nonce[..8], &zone_key_id);
+    }
+
+    #[test]
+    fn symbol_nonce_epoch_xor_esi() {
+        let zone_key_id = [0u8; 8];
+        let epoch: u32 = 0x1234;
+        let esi: u32 = 0x00FF;
+        let nonce = derive_symbol_nonce(zone_key_id, epoch, esi);
+        let expected_mixed = (epoch ^ esi).to_le_bytes();
+        assert_eq!(&nonce[8..12], &expected_mixed);
+    }
+
+    #[test]
+    fn symbol_nonce_different_epochs_different_nonces() {
+        let zone_key_id = [1u8; 8];
+        let n1 = derive_symbol_nonce(zone_key_id, 100, 0);
+        let n2 = derive_symbol_nonce(zone_key_id, 200, 0);
+        assert_ne!(n1, n2);
+    }
+
+    // ─── build_symbol_aad structure ───
+
+    #[test]
+    fn symbol_aad_length() {
+        let aad = build_symbol_aad(&[0u8; 32], &[0u8; 32], 0, 0);
+        assert_eq!(aad.len(), 70);
+    }
+
+    #[test]
+    fn symbol_aad_components() {
+        let obj = [0xAAu8; 32];
+        let zone = [0xBBu8; 32];
+        let esi: u32 = 42;
+        let k: u16 = 7;
+        let aad = build_symbol_aad(&obj, &zone, esi, k);
+        assert_eq!(&aad[0..32], &obj);
+        assert_eq!(&aad[32..64], &zone);
+        assert_eq!(&aad[64..68], &esi.to_le_bytes());
+        assert_eq!(&aad[68..70], &k.to_le_bytes());
+    }
+
+    // ─── is_within_mtu edge cases ───
+
+    #[test]
+    fn mtu_empty_datagram() {
+        assert!(is_within_mtu(&[], 0));
+    }
+
+    #[test]
+    fn mtu_zero_rejects_nonempty() {
+        assert!(!is_within_mtu(&[1], 0));
+    }
+
+    #[test]
+    fn mtu_exact_boundary() {
+        assert!(is_within_mtu(&vec![0u8; 1280], 1280));
+        assert!(!is_within_mtu(&vec![0u8; 1281], 1280));
+    }
+
+    // ─── is_payload_complete edge cases ───
+
+    #[test]
+    fn payload_complete_zero_symbols() {
+        assert!(is_payload_complete(&[], 0, 1024));
+    }
+
+    #[test]
+    fn payload_complete_one_symbol() {
+        let record_size = 22 + 512;
+        assert!(is_payload_complete(&vec![0u8; record_size], 1, 512));
+        assert!(!is_payload_complete(&vec![0u8; record_size - 1], 1, 512));
+    }
+
+    // ─── FcpsInteropTests struct ───
+
+    #[test]
+    fn fcps_interop_via_struct() {
+        let summary = FcpsInteropTests::run();
+        assert!(summary.all_passed());
+        assert_eq!(summary.total, 8);
+    }
 }

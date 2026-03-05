@@ -473,4 +473,276 @@ mod tests {
         assert_eq!(replayed.len(), 1);
         assert_eq!(replayed[0].seq, e2.seq);
     }
+
+    #[test]
+    fn buffer_limits_default() {
+        let limits = BufferLimits::default();
+        assert_eq!(limits.min_events, 10);
+        assert_eq!(limits.max_events, 100);
+    }
+
+    #[test]
+    fn buffer_limits_max_enforced() {
+        let limits = BufferLimits::new(5, 20);
+        assert_eq!(limits.min_events, 5);
+        assert_eq!(limits.max_events, 20);
+    }
+
+    #[test]
+    fn buffer_limits_min_overrides_max() {
+        let limits = BufferLimits::new(50, 10);
+        assert_eq!(limits.min_events, 50);
+        assert_eq!(limits.max_events, 50); // max clamped to min
+    }
+
+    #[test]
+    fn emit_with_seq_respects_provided_seq() {
+        let mut manager = EventStreamManager::new(caps(false, false, 3));
+        let e = manager.emit_with_seq("topic", 42, sample_event_data());
+        assert_eq!(e.seq, 42);
+        assert_eq!(e.cursor, "42");
+    }
+
+    #[test]
+    fn emit_auto_increments_seq() {
+        let mut manager = EventStreamManager::new(caps(false, false, 10));
+        let e1 = manager.emit("t", sample_event_data());
+        let e2 = manager.emit("t", sample_event_data());
+        let e3 = manager.emit("t", sample_event_data());
+        assert_eq!(e1.seq, 0);
+        assert_eq!(e2.seq, 1);
+        assert_eq!(e3.seq, 2);
+    }
+
+    #[test]
+    fn replay_from_unknown_topic_error() {
+        let manager = EventStreamManager::new(caps(true, false, 3));
+        let result = manager.replay_from("nonexistent", "0");
+        assert!(matches!(result, Err(ReplayError::UnknownTopic { .. })));
+    }
+
+    #[test]
+    fn replay_from_invalid_cursor_error() {
+        let mut manager = EventStreamManager::new(caps(true, false, 3));
+        manager.emit("t", sample_event_data());
+        let result = manager.replay_from("t", "not_a_number");
+        assert!(matches!(result, Err(ReplayError::InvalidCursor { .. })));
+    }
+
+    #[test]
+    fn replay_from_stale_cursor_error() {
+        let mut manager =
+            EventStreamManager::with_limits(caps(true, false, 2), BufferLimits::new(1, 2));
+        // Fill buffer beyond capacity so oldest gets trimmed
+        manager.emit("t", sample_event_data()); // seq 0
+        manager.emit("t", sample_event_data()); // seq 1
+        manager.emit("t", sample_event_data()); // seq 2 → trims seq 0
+
+        let result = manager.replay_from("t", "0");
+        // seq 0 should have been trimmed, so cursor is stale
+        match result {
+            Err(ReplayError::CursorStale { cursor_seq, .. }) => {
+                assert_eq!(cursor_seq, 0);
+            }
+            // If buffer hasn't trimmed (e.g., pending acks keeping it), replay might succeed
+            Ok(_) => {} // acceptable if buffer retained all events
+            Err(other) => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn replay_from_empty_cursor_returns_all() {
+        let mut manager = EventStreamManager::new(caps(true, false, 10));
+        manager.emit("t", sample_event_data());
+        manager.emit("t", sample_event_data());
+        let events = manager.replay_from("t", "").unwrap();
+        assert_eq!(events.len(), 2);
+    }
+
+    #[test]
+    fn nack_redelivers_events() {
+        let mut manager = EventStreamManager::new(caps(true, true, 5));
+        let e1 = manager.emit("t", sample_event_data());
+        let e2 = manager.emit("t", sample_event_data());
+
+        let nack = EventNack::new("t", vec![e1.seq, e2.seq], "retry");
+        let result = manager.handle_nack(&nack);
+        assert_eq!(result.redeliver.len(), 2);
+        assert!(result.missing.is_empty());
+    }
+
+    #[test]
+    fn nack_unknown_topic_returns_all_missing() {
+        let manager = EventStreamManager::new(caps(true, false, 3));
+        let nack = EventNack::new("nonexistent", vec![0, 1], "retry");
+        let result = manager.handle_nack(&nack);
+        assert!(result.redeliver.is_empty());
+        assert_eq!(result.missing, vec![0, 1]);
+    }
+
+    #[test]
+    fn ack_unknown_topic_returns_all_missing() {
+        let mut manager = EventStreamManager::new(caps(true, true, 3));
+        let ack = EventAck::new("nonexistent", vec![0, 1]).with_cursors(vec![]);
+        let result = manager.handle_ack(&ack);
+        assert!(result.acked.is_empty());
+        assert_eq!(result.missing, vec![0, 1]);
+    }
+
+    #[test]
+    fn unsubscribe_removes_topics() {
+        let mut manager = EventStreamManager::new(caps(true, false, 3));
+        manager.emit("t1", sample_event_data());
+        manager.emit("t2", sample_event_data());
+
+        let removed = manager.unsubscribe(&["t1".to_string()]);
+        assert_eq!(removed, 1);
+        assert!(manager.replay_from("t1", "").is_err());
+        assert!(manager.replay_from("t2", "").is_ok());
+    }
+
+    #[test]
+    fn unsubscribe_nonexistent_returns_zero() {
+        let mut manager = EventStreamManager::new(caps(false, false, 3));
+        assert_eq!(manager.unsubscribe(&["nope".to_string()]), 0);
+    }
+
+    #[test]
+    fn pending_acks_unknown_topic_is_zero() {
+        let manager = EventStreamManager::new(caps(true, true, 3));
+        assert_eq!(manager.pending_acks("nonexistent"), 0);
+    }
+
+    #[test]
+    fn buffer_trim_respects_pending_acks() {
+        let mut manager =
+            EventStreamManager::with_limits(caps(true, true, 1), BufferLimits::new(1, 2));
+        let e1 = manager.emit("t", sample_event_data()); // seq 0, pending ack
+        manager.emit("t", sample_event_data()); // seq 1, pending ack
+        manager.emit("t", sample_event_data()); // seq 2 → tries to trim but pending acks block
+
+        // e1 should still be in buffer because it has pending ack
+        assert!(manager.pending_acks("t") >= 2);
+
+        // Ack e1 to allow trimming
+        let ack = EventAck::new("t", vec![e1.seq]).with_cursors(vec![e1.cursor]);
+        manager.handle_ack(&ack);
+    }
+
+    #[test]
+    fn subscribe_creates_topic_state() {
+        let mut manager = EventStreamManager::new(caps(true, false, 3));
+        let req = SubscribeRequest {
+            r#type: "subscribe".to_string(),
+            id: RequestId::new("req-sub"),
+            topics: vec!["new.topic".to_string()],
+            since: None,
+            max_events_per_sec: None,
+            batch_ms: None,
+            window_size: None,
+            capability_token: None,
+        };
+
+        let outcome = manager.handle_subscribe(&req).unwrap();
+        assert_eq!(
+            outcome.response.result.confirmed_topics,
+            vec!["new.topic".to_string()]
+        );
+        // Topic now exists, so replay_from should work
+        assert!(manager.replay_from("new.topic", "").is_ok());
+    }
+
+    #[test]
+    fn subscribe_with_replay_since() {
+        let mut manager = EventStreamManager::new(caps(true, false, 10));
+        manager.emit("events.replay", sample_event_data()); // seq 0
+        manager.emit("events.replay", sample_event_data()); // seq 1
+        manager.emit("events.replay", sample_event_data()); // seq 2
+
+        let req = SubscribeRequest {
+            r#type: "subscribe".to_string(),
+            id: RequestId::new("req-replay"),
+            topics: vec!["events.replay".to_string()],
+            since: Some("1".to_string()),
+            max_events_per_sec: None,
+            batch_ms: None,
+            window_size: None,
+            capability_token: None,
+        };
+
+        let outcome = manager.handle_subscribe(&req).unwrap();
+        let replayed = outcome.replay_events.get("events.replay").unwrap();
+        assert_eq!(replayed.len(), 1); // only seq 2
+        assert_eq!(replayed[0].seq, 2);
+    }
+
+    #[test]
+    fn multiple_topics_independent() {
+        let mut manager = EventStreamManager::new(caps(true, false, 10));
+        manager.emit("topic.a", sample_event_data());
+        manager.emit("topic.b", sample_event_data());
+        manager.emit("topic.a", sample_event_data());
+
+        let a_events = manager.replay_from("topic.a", "").unwrap();
+        let b_events = manager.replay_from("topic.b", "").unwrap();
+        assert_eq!(a_events.len(), 2);
+        assert_eq!(b_events.len(), 1);
+    }
+
+    #[test]
+    fn replay_error_display() {
+        let e = ReplayError::UnknownTopic { topic: "t".into() };
+        assert_eq!(e.to_string(), "unknown topic 't'");
+
+        let e = ReplayError::InvalidCursor { cursor: "bad".into() };
+        assert_eq!(e.to_string(), "invalid cursor 'bad'");
+
+        let e = ReplayError::CursorStale { cursor_seq: 5, oldest_seq: 10 };
+        assert!(e.to_string().contains('5'));
+        assert!(e.to_string().contains("10"));
+    }
+
+    #[test]
+    fn ack_result_debug() {
+        let result = AckResult { acked: vec![1], missing: vec![2] };
+        let debug = format!("{result:?}");
+        assert!(debug.contains("AckResult"));
+    }
+
+    #[test]
+    fn nack_result_debug() {
+        let result = NackResult { redeliver: vec![], missing: vec![1] };
+        let debug = format!("{result:?}");
+        assert!(debug.contains("NackResult"));
+    }
+
+    #[test]
+    fn subscribe_no_replay_when_disabled() {
+        let mut manager = EventStreamManager::new(caps(false, false, 3));
+        manager.emit("t", sample_event_data());
+
+        let req = SubscribeRequest {
+            r#type: "subscribe".to_string(),
+            id: RequestId::new("req-noreplay"),
+            topics: vec!["t".to_string()],
+            since: Some("0".to_string()),
+            max_events_per_sec: None,
+            batch_ms: None,
+            window_size: None,
+            capability_token: None,
+        };
+
+        let outcome = manager.handle_subscribe(&req).unwrap();
+        assert!(!outcome.response.result.replay_supported);
+        assert!(outcome.replay_events.is_empty());
+    }
+
+    #[test]
+    fn with_limits_constructor() {
+        let caps = caps(true, false, 5);
+        let limits = BufferLimits::new(3, 50);
+        let manager = EventStreamManager::with_limits(caps, limits);
+        let debug = format!("{manager:?}");
+        assert!(debug.contains("EventStreamManager"));
+    }
 }

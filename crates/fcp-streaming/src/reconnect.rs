@@ -482,9 +482,9 @@ mod tests {
         let config = ReconnectConfig::new()
             .with_max_attempts(7)
             .with_jitter(false);
-        let cloned = config.clone();
-        assert_eq!(cloned.max_attempts, Some(7));
-        assert!(!cloned.jitter);
+        let moved = config;
+        assert_eq!(moved.max_attempts, Some(7));
+        assert!(!moved.jitter);
     }
 
     // ── Additional ReconnectHandler tests ──
@@ -599,5 +599,181 @@ mod tests {
         let handler = ReconnectHandler::new(config);
         let debug = format!("{handler:?}");
         assert!(debug.contains("ReconnectHandler"));
+    }
+
+    // ── Delay calculation edge cases ──
+
+    #[test]
+    fn test_delay_fractional_multiplier() {
+        let config = ReconnectConfig::new()
+            .with_initial_delay(Duration::from_secs(4))
+            .with_max_delay(Duration::from_secs(60))
+            .with_backoff_multiplier(0.5)
+            .with_jitter(false);
+
+        // 4 * 0.5^0 = 4, 4 * 0.5^1 = 2, 4 * 0.5^2 = 1
+        assert_eq!(config.delay_for_attempt(0), Duration::from_secs(4));
+        assert_eq!(config.delay_for_attempt(1), Duration::from_secs(2));
+        assert_eq!(config.delay_for_attempt(2), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn test_delay_very_small_initial() {
+        let config = ReconnectConfig::new()
+            .with_initial_delay(Duration::from_millis(1))
+            .with_max_delay(Duration::from_secs(60))
+            .with_backoff_multiplier(2.0)
+            .with_jitter(false);
+
+        assert_eq!(config.delay_for_attempt(0), Duration::from_millis(1));
+        assert_eq!(config.delay_for_attempt(1), Duration::from_millis(2));
+        assert_eq!(config.delay_for_attempt(10), Duration::from_millis(1024));
+    }
+
+    #[test]
+    fn test_delay_jitter_statistical_bounds() {
+        let config = ReconnectConfig::new()
+            .with_initial_delay(Duration::from_secs(10))
+            .with_max_delay(Duration::from_secs(60))
+            .with_backoff_multiplier(1.0)
+            .with_jitter(true);
+
+        // With jitter (0.5x to 1.5x), base is 10s → range [5s, 15s]
+        for _ in 0..50 {
+            let delay = config.delay_for_attempt(0);
+            assert!(
+                delay >= Duration::from_secs(5),
+                "delay {delay:?} below lower jitter bound"
+            );
+            assert!(
+                delay <= Duration::from_secs(15),
+                "delay {delay:?} above upper jitter bound"
+            );
+        }
+    }
+
+    #[test]
+    fn test_delay_max_exactly_equals_base() {
+        let config = ReconnectConfig::new()
+            .with_initial_delay(Duration::from_secs(5))
+            .with_max_delay(Duration::from_secs(5))
+            .with_backoff_multiplier(2.0)
+            .with_jitter(false);
+
+        // All attempts capped at 5s
+        assert_eq!(config.delay_for_attempt(0), Duration::from_secs(5));
+        assert_eq!(config.delay_for_attempt(1), Duration::from_secs(5));
+        assert_eq!(config.delay_for_attempt(100), Duration::from_secs(5));
+    }
+
+    // ── Handler lifecycle tests ──
+
+    #[test]
+    fn test_handler_multi_cycle_reset() {
+        let config = ReconnectConfig::new().with_max_attempts(3);
+        let mut handler = ReconnectHandler::new(config);
+
+        // First cycle
+        handler.record_failure();
+        handler.record_failure();
+        assert_eq!(handler.attempts(), 2);
+
+        // Reset simulates successful reconnection
+        handler.reset();
+        assert_eq!(handler.attempts(), 0);
+        assert!(handler.can_reconnect());
+
+        // Second cycle
+        handler.record_failure();
+        handler.record_failure();
+        handler.record_failure();
+        assert!(!handler.can_reconnect());
+
+        // Reset again
+        handler.reset();
+        assert!(handler.can_reconnect());
+    }
+
+    #[test]
+    fn test_handler_max_attempts_one() {
+        let config = ReconnectConfig::new().with_max_attempts(1);
+        let mut handler = ReconnectHandler::new(config);
+
+        assert!(handler.can_reconnect());
+        handler.record_failure();
+        assert!(!handler.can_reconnect());
+    }
+
+    #[test]
+    fn test_handler_unlimited_many_failures() {
+        let config = ReconnectConfig::new().with_unlimited_attempts();
+        let mut handler = ReconnectHandler::new(config);
+
+        for _ in 0..10_000 {
+            handler.record_failure();
+        }
+        assert!(handler.can_reconnect());
+        assert_eq!(handler.attempts(), 10_000);
+    }
+
+    // ── Async reconnect tests ──
+
+    #[fcp_async_core::runtime::test]
+    async fn test_reconnect_multiple_failures_then_success() {
+        let config = ReconnectConfig::new()
+            .with_max_attempts(10)
+            .with_initial_delay(Duration::from_millis(1))
+            .with_jitter(false);
+        let mut handler = ReconnectHandler::new(config);
+
+        let mut call_count = 0;
+        let result = handler
+            .reconnect(|| {
+                call_count += 1;
+                async move {
+                    if call_count < 5 {
+                        Err(StreamError::ConnectionFailed(format!("fail {call_count}")))
+                    } else {
+                        Ok("success")
+                    }
+                }
+            })
+            .await;
+
+        assert_eq!(result.unwrap(), "success");
+        assert_eq!(call_count, 5);
+        assert_eq!(handler.attempts(), 0); // reset on success
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_wait_for_reconnect_success_then_exhausted() {
+        let config = ReconnectConfig::new()
+            .with_max_attempts(2)
+            .with_initial_delay(Duration::from_millis(1))
+            .with_jitter(false);
+        let mut handler = ReconnectHandler::new(config);
+
+        // First wait succeeds
+        handler.wait_for_reconnect().await.unwrap();
+        assert_eq!(handler.attempts(), 1);
+
+        // Second wait succeeds
+        handler.wait_for_reconnect().await.unwrap();
+        assert_eq!(handler.attempts(), 2);
+
+        // Third should be exhausted
+        let result = handler.wait_for_reconnect().await;
+        assert!(matches!(
+            result,
+            Err(StreamError::ReconnectLimitExceeded { attempts: 2 })
+        ));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_with_retry_returns_correct_type() {
+        let config = ReconnectConfig::new().with_max_attempts(1);
+        let result: StreamResult<Vec<i32>> =
+            with_retry(config, || async { Ok(vec![1, 2, 3]) }).await;
+        assert_eq!(result.unwrap(), vec![1, 2, 3]);
     }
 }

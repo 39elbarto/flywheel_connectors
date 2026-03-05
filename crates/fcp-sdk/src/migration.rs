@@ -824,6 +824,397 @@ mod tests {
         .expect("runtime should execute cancellation-aware retry test");
     }
 
+    // -- ConnectorRuntimeConfig builder tests --------------------------------
+
+    #[test]
+    fn config_with_shutdown_timeout() {
+        let config =
+            ConnectorRuntimeConfig::default().with_shutdown_timeout(Duration::from_secs(10));
+        assert_eq!(config.shutdown_timeout, Duration::from_secs(10));
+        // request_timeout unchanged
+        assert_eq!(config.request_timeout, Duration::from_secs(120));
+    }
+
+    #[test]
+    fn config_builder_chain_both() {
+        let config = ConnectorRuntimeConfig::default()
+            .with_request_timeout(Duration::from_secs(60))
+            .with_shutdown_timeout(Duration::from_secs(5));
+        assert_eq!(config.request_timeout, Duration::from_secs(60));
+        assert_eq!(config.shutdown_timeout, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn config_debug() {
+        let config = ConnectorRuntimeConfig::default();
+        let debug = format!("{config:?}");
+        assert!(debug.contains("ConnectorRuntimeConfig"));
+    }
+
+    #[test]
+    fn config_clone() {
+        let config = ConnectorRuntimeConfig::default()
+            .with_request_timeout(Duration::from_secs(77));
+        let moved = config;
+        assert_eq!(moved.request_timeout, Duration::from_secs(77));
+    }
+
+    // -- ConnectorRuntime additional tests ------------------------------------
+
+    #[test]
+    fn runtime_request_context_with_custom_timeout() {
+        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
+        let ctx = runtime.request_context_with_timeout(Duration::from_secs(5));
+        assert!(!ctx.is_cancelled());
+        assert!(ctx.remaining_budget().is_some());
+    }
+
+    #[test]
+    fn runtime_shutdown_timeout_accessor() {
+        let runtime = ConnectorRuntime::new(
+            ConnectorRuntimeConfig::default().with_shutdown_timeout(Duration::from_secs(15)),
+        );
+        assert_eq!(runtime.shutdown_timeout(), Duration::from_secs(15));
+    }
+
+    #[test]
+    fn runtime_multiple_background_contexts_independent() {
+        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
+        let bg1 = runtime.background_context();
+        let bg2 = runtime.background_context();
+        assert!(!bg1.is_cancelled());
+        assert!(!bg2.is_cancelled());
+        // Shutting down cancels both
+        runtime.shutdown();
+        assert!(bg1.is_cancelled());
+        assert!(bg2.is_cancelled());
+    }
+
+    #[test]
+    fn runtime_shutdown_idempotent() {
+        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
+        runtime.shutdown();
+        assert!(runtime.is_shutting_down());
+        runtime.shutdown(); // second call should not panic
+        assert!(runtime.is_shutting_down());
+    }
+
+    #[test]
+    fn runtime_debug() {
+        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
+        let debug = format!("{runtime:?}");
+        assert!(debug.contains("ConnectorRuntime"));
+    }
+
+    #[test]
+    fn runtime_clone() {
+        let runtime = ConnectorRuntime::new(
+            ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(42)),
+        );
+        let moved = runtime;
+        assert_eq!(moved.request_timeout(), Duration::from_secs(42));
+    }
+
+    // -- HttpRetryConfig serde tests ------------------------------------------
+
+    #[test]
+    fn http_retry_config_serde_roundtrip() {
+        let config = HttpRetryConfig {
+            max_retries: 7,
+            initial_delay_ms: 250,
+            max_delay_ms: 15_000,
+            jitter_enabled: false,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: HttpRetryConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.max_retries, 7);
+        assert_eq!(deserialized.initial_delay_ms, 250);
+        assert_eq!(deserialized.max_delay_ms, 15_000);
+        assert!(!deserialized.jitter_enabled);
+    }
+
+    #[test]
+    fn http_retry_config_serde_default_from_empty() {
+        let deserialized: HttpRetryConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(deserialized.max_retries, 3);
+        assert_eq!(deserialized.initial_delay_ms, 500);
+        assert_eq!(deserialized.max_delay_ms, 30_000);
+        assert!(deserialized.jitter_enabled);
+    }
+
+    #[test]
+    fn http_retry_config_debug_and_clone() {
+        let config = HttpRetryConfig::default();
+        let cloned = config.clone();
+        let debug = format!("{config:?}");
+        assert!(debug.contains("HttpRetryConfig"));
+        assert_eq!(cloned.max_retries, config.max_retries);
+    }
+
+    // -- classify_http_status additional tests --------------------------------
+
+    #[test]
+    fn classify_408_backoff() {
+        assert_eq!(classify_http_status(408, None), RetryDecision::Backoff);
+    }
+
+    #[test]
+    fn classify_425_backoff() {
+        assert_eq!(classify_http_status(425, None), RetryDecision::Backoff);
+    }
+
+    #[test]
+    fn classify_503_backoff() {
+        assert_eq!(classify_http_status(503, None), RetryDecision::Backoff);
+    }
+
+    #[test]
+    fn classify_200_terminal() {
+        assert_eq!(classify_http_status(200, None), RetryDecision::Terminal);
+    }
+
+    #[test]
+    fn classify_429_with_custom_retry_after() {
+        let hint = Duration::from_secs(60);
+        let decision = classify_http_status(429, Some(hint));
+        assert_eq!(decision, RetryDecision::After(hint));
+    }
+
+    // -- map_async_to_fcp_error additional tests ------------------------------
+
+    #[test]
+    fn map_runtime_error_to_fcp_internal() {
+        let err = AsyncError::Runtime {
+            message: "thread pool exhausted".into(),
+        };
+        let fcp_err = map_async_to_fcp_error(&err);
+        match fcp_err {
+            FcpError::Internal { message } => {
+                assert!(message.contains("thread pool exhausted"));
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_protocol_io_error_to_fcp_internal() {
+        let err = AsyncError::ProtocolIo {
+            message: "broken pipe".into(),
+        };
+        let fcp_err = map_async_to_fcp_error(&err);
+        match fcp_err {
+            FcpError::Internal { message } => {
+                assert!(message.contains("broken pipe"));
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_channel_closed_to_fcp_internal() {
+        let err = AsyncError::ChannelClosed;
+        let fcp_err = map_async_to_fcp_error(&err);
+        assert!(matches!(fcp_err, FcpError::Internal { .. }));
+    }
+
+    #[test]
+    fn map_timeout_message_contains_ms() {
+        let err = AsyncError::Timeout { timeout_ms: 12_345 };
+        let fcp_err = map_async_to_fcp_error(&err);
+        match fcp_err {
+            FcpError::External { message, .. } => {
+                assert!(message.contains("12345"));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_cancelled_not_retryable() {
+        let err = AsyncError::Cancelled;
+        let fcp_err = map_async_to_fcp_error(&err);
+        match fcp_err {
+            FcpError::External { retryable, .. } => {
+                assert!(!retryable);
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    // -- RetryLoop additional tests -------------------------------------------
+
+    #[test]
+    fn retry_loop_with_explicit_retry_after() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let ctx = ExecutionContext::request_scoped(Duration::from_secs(10));
+            let policy = RetryPolicy::new()
+                .with_max_attempts(Some(5))
+                .with_base_backoff_ms(10)
+                .with_jitter_enabled(false);
+
+            let result: Result<&str, TestError> =
+                RetryLoop::execute(&ctx, &policy, |attempt| async move {
+                    if attempt == 0 {
+                        AttemptOutcome::Retryable {
+                            error: TestError::Transient("rate limited".into()),
+                            retry_after: Some(Duration::from_millis(50)),
+                        }
+                    } else {
+                        AttemptOutcome::Success("recovered")
+                    }
+                })
+                .await;
+
+            assert_eq!(result.unwrap(), "recovered");
+        })
+        .expect("runtime should execute retry-after retry test");
+    }
+
+    #[test]
+    fn retry_loop_max_attempts_zero() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let ctx = ExecutionContext::request_scoped(Duration::from_secs(5));
+            let policy = RetryPolicy::new().with_max_attempts(Some(0));
+
+            let result: Result<&str, TestError> =
+                RetryLoop::execute(&ctx, &policy, |_attempt| async {
+                    AttemptOutcome::Success("should not run")
+                })
+                .await;
+
+            // With 0 max attempts, no attempt runs
+            assert!(result.is_err());
+        })
+        .expect("runtime should execute zero-max-attempts test");
+    }
+
+    // -- TestError and ConnectorErrorMapping coverage --------------------------
+
+    #[test]
+    fn test_error_display_all_variants() {
+        assert_eq!(
+            TestError::Transient("oops".into()).to_string(),
+            "transient: oops"
+        );
+        assert_eq!(
+            TestError::Fatal("bad".into()).to_string(),
+            "fatal: bad"
+        );
+        assert_eq!(
+            TestError::DeadlineExceeded("5s".into()).to_string(),
+            "deadline: 5s"
+        );
+        assert_eq!(TestError::Cancelled.to_string(), "cancelled");
+    }
+
+    #[test]
+    fn test_error_from_async_timeout() {
+        let err = TestError::from_async_error(AsyncError::Timeout { timeout_ms: 3000 });
+        match err {
+            TestError::DeadlineExceeded(msg) => assert!(msg.contains("3000")),
+            other => panic!("expected DeadlineExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_error_from_async_cancelled() {
+        let err = TestError::from_async_error(AsyncError::Cancelled);
+        assert!(matches!(err, TestError::Cancelled));
+    }
+
+    #[test]
+    fn test_error_from_async_runtime() {
+        let err = TestError::from_async_error(AsyncError::Runtime {
+            message: "pool died".into(),
+        });
+        match err {
+            TestError::Fatal(msg) => assert!(msg.contains("pool died")),
+            other => panic!("expected Fatal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_error_from_async_channel_closed() {
+        let err = TestError::from_async_error(AsyncError::ChannelClosed);
+        assert!(matches!(err, TestError::Fatal(_)));
+    }
+
+    #[test]
+    fn test_error_to_fcp_all_variants() {
+        let transient = TestError::Transient("net".into());
+        assert!(matches!(transient.to_fcp_error(), FcpError::Internal { .. }));
+
+        let fatal = TestError::Fatal("auth".into());
+        assert!(matches!(fatal.to_fcp_error(), FcpError::Internal { .. }));
+
+        let deadline = TestError::DeadlineExceeded("5s".into());
+        assert!(matches!(deadline.to_fcp_error(), FcpError::External { .. }));
+
+        let cancelled = TestError::Cancelled;
+        assert!(matches!(cancelled.to_fcp_error(), FcpError::External { .. }));
+    }
+
+    #[test]
+    fn test_error_is_retryable() {
+        assert!(TestError::Transient("x".into()).is_retryable());
+        assert!(!TestError::Fatal("x".into()).is_retryable());
+        assert!(!TestError::DeadlineExceeded("x".into()).is_retryable());
+        assert!(!TestError::Cancelled.is_retryable());
+    }
+
+    #[test]
+    fn test_error_retry_after_default_none() {
+        let err = TestError::Transient("x".into());
+        assert!(err.retry_after().is_none());
+    }
+
+    // -- AttemptOutcome coverage ----------------------------------------------
+
+    #[test]
+    fn attempt_outcome_success_variant() {
+        let outcome: AttemptOutcome<i32, String> = AttemptOutcome::Success(42);
+        match outcome {
+            AttemptOutcome::Success(v) => assert_eq!(v, 42),
+            _ => panic!("expected Success"),
+        }
+    }
+
+    #[test]
+    fn attempt_outcome_retryable_variant() {
+        let outcome: AttemptOutcome<i32, String> = AttemptOutcome::Retryable {
+            error: "transient".into(),
+            retry_after: Some(Duration::from_secs(5)),
+        };
+        match outcome {
+            AttemptOutcome::Retryable { error, retry_after } => {
+                assert_eq!(error, "transient");
+                assert_eq!(retry_after, Some(Duration::from_secs(5)));
+            }
+            _ => panic!("expected Retryable"),
+        }
+    }
+
+    #[test]
+    fn attempt_outcome_terminal_variant() {
+        let outcome: AttemptOutcome<i32, String> = AttemptOutcome::Terminal("fatal".into());
+        match outcome {
+            AttemptOutcome::Terminal(e) => assert_eq!(e, "fatal"),
+            _ => panic!("expected Terminal"),
+        }
+    }
+
+    #[test]
+    fn attempt_outcome_retryable_no_retry_after() {
+        let outcome: AttemptOutcome<(), &str> = AttemptOutcome::Retryable {
+            error: "err",
+            retry_after: None,
+        };
+        match outcome {
+            AttemptOutcome::Retryable { retry_after, .. } => assert!(retry_after.is_none()),
+            _ => panic!("expected Retryable"),
+        }
+    }
+
     // -- Test error type for testing ------------------------------------------
 
     #[derive(Debug)]

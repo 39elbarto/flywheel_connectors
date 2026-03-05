@@ -458,4 +458,161 @@ mod tests {
         // Actually 100 - 50 = 50 which is < 64, so it should be within window
         assert!(window.accept(50));
     }
+
+    // ─── ControlPlaneReplayWindow edge cases ───
+
+    #[test]
+    fn replay_window_sequential_fill() {
+        let mut window = ControlPlaneReplayWindow::new(64);
+        for i in 0..128 {
+            assert!(window.accept(i), "seq {i} should be accepted");
+        }
+        for i in 64..128 {
+            assert!(!window.accept(i), "replay of {i} should fail");
+        }
+    }
+
+    #[test]
+    fn replay_window_out_of_order() {
+        let mut window = ControlPlaneReplayWindow::new(64);
+        assert!(window.accept(10));
+        assert!(window.accept(5));
+        assert!(window.accept(8));
+        assert!(!window.accept(5)); // Already seen
+        assert!(window.accept(0)); // Still in window
+    }
+
+    #[test]
+    fn replay_window_exact_boundary() {
+        let mut window = ControlPlaneReplayWindow::new(64);
+        assert!(window.accept(63));
+        assert!(window.accept(0)); // 63 - 0 = 63 < 64, in window
+        assert!(!window.accept(0)); // Already seen
+    }
+
+    #[test]
+    fn replay_window_one_past_boundary() {
+        let mut window = ControlPlaneReplayWindow::new(64);
+        assert!(window.accept(64));
+        assert!(!window.accept(0)); // 64 - 0 = 64 >= 64, outside window
+    }
+
+    // ─── build_fcpc_nonce edge cases ───
+
+    #[test]
+    fn fcpc_nonce_length() {
+        let nonce = build_fcpc_nonce(0, 0);
+        assert_eq!(nonce.len(), 12);
+    }
+
+    #[test]
+    fn fcpc_nonce_seq_encoding() {
+        let nonce = build_fcpc_nonce(0x0102_0304_0506_0708, 0);
+        assert_eq!(&nonce[..8], &0x0102_0304_0506_0708_u64.to_le_bytes());
+    }
+
+    #[test]
+    fn fcpc_nonce_direction_byte() {
+        let nonce_i2r = build_fcpc_nonce(0, 0);
+        let nonce_r2i = build_fcpc_nonce(0, 1);
+        assert_eq!(nonce_i2r[8], 0);
+        assert_eq!(nonce_r2i[8], 1);
+    }
+
+    #[test]
+    fn fcpc_nonce_padding_zeros() {
+        let nonce = build_fcpc_nonce(42, 1);
+        assert_eq!(&nonce[9..12], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn fcpc_nonce_max_seq() {
+        let nonce = build_fcpc_nonce(u64::MAX, 0);
+        assert_eq!(&nonce[..8], &u64::MAX.to_le_bytes());
+    }
+
+    // ─── OrderedProcessor edge cases ───
+
+    #[test]
+    fn ordered_processor_initial_state() {
+        let proc = OrderedProcessor::new();
+        assert_eq!(proc.next_expected, 0);
+        assert!(proc.buffered.is_empty());
+    }
+
+    #[test]
+    fn ordered_processor_sequential() {
+        let mut proc = OrderedProcessor::new();
+        proc.process(0);
+        proc.process(1);
+        proc.process(2);
+        assert_eq!(proc.next_expected, 3);
+        assert!(proc.buffered.is_empty());
+    }
+
+    #[test]
+    fn ordered_processor_out_of_order_with_drain() {
+        let mut proc = OrderedProcessor::new();
+        proc.process(2); // Buffered
+        proc.process(1); // Buffered
+        assert_eq!(proc.next_expected, 0);
+        assert_eq!(proc.buffered.len(), 2);
+
+        proc.process(0); // Triggers drain of 1 and 2
+        assert_eq!(proc.next_expected, 3);
+        assert!(proc.buffered.is_empty());
+    }
+
+    #[test]
+    fn ordered_processor_duplicate_ignored() {
+        let mut proc = OrderedProcessor::new();
+        proc.process(0);
+        proc.process(0); // Already processed, ignored
+        assert_eq!(proc.next_expected, 1);
+    }
+
+    #[test]
+    fn ordered_processor_large_gap() {
+        let mut proc = OrderedProcessor::new();
+        proc.process(100);
+        assert_eq!(proc.next_expected, 0);
+        assert_eq!(proc.buffered.len(), 1);
+    }
+
+    // ─── build_fcpc_aad structure ───
+
+    #[test]
+    fn fcpc_aad_length() {
+        let aad = build_fcpc_aad(&[0u8; 16], 0, 0);
+        assert_eq!(aad.len(), 26);
+    }
+
+    #[test]
+    fn fcpc_aad_components() {
+        let session_id = [0xCCu8; 16];
+        let seq: u64 = 999;
+        let flags: u16 = 0x0003;
+        let aad = build_fcpc_aad(&session_id, seq, flags);
+        assert_eq!(&aad[0..16], &session_id);
+        assert_eq!(&aad[16..24], &seq.to_le_bytes());
+        assert_eq!(&aad[24..26], &flags.to_le_bytes());
+    }
+
+    #[test]
+    fn fcpc_aad_different_inputs_differ() {
+        let aad1 = build_fcpc_aad(&[0xAAu8; 16], 1, 0);
+        let aad2 = build_fcpc_aad(&[0xAAu8; 16], 2, 0);
+        let aad3 = build_fcpc_aad(&[0xAAu8; 16], 1, 1);
+        assert_ne!(aad1, aad2);
+        assert_ne!(aad1, aad3);
+    }
+
+    // ─── FcpcInteropTests struct ───
+
+    #[test]
+    fn fcpc_interop_via_struct() {
+        let summary = FcpcInteropTests::run();
+        assert!(summary.all_passed());
+        assert_eq!(summary.total, 7);
+    }
 }

@@ -155,3 +155,118 @@ fn print_human_report(report: &ManifestFixReport, check_only: bool) {
         println!("Status: no changes needed");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_report(
+        changed: bool,
+        wrote: bool,
+        validation_error: Option<&str>,
+    ) -> ManifestFixReport {
+        ManifestFixReport {
+            path: "connectors/test/manifest.toml".to_string(),
+            mode: if wrote { "write" } else { "check" }.to_string(),
+            changed,
+            wrote,
+            interface_hash_before: "abc123".to_string(),
+            interface_hash_after: if changed {
+                "def456".to_string()
+            } else {
+                "abc123".to_string()
+            },
+            validation_error: validation_error.map(String::from),
+        }
+    }
+
+    #[test]
+    fn report_serde_roundtrip() {
+        let report = sample_report(true, false, None);
+        let json = serde_json::to_string(&report).unwrap();
+        let back: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(back["path"], "connectors/test/manifest.toml");
+        assert_eq!(back["changed"], true);
+        assert_eq!(back["wrote"], false);
+    }
+
+    #[test]
+    fn report_no_change_no_write() {
+        let report = sample_report(false, false, None);
+        assert!(!report.changed);
+        assert!(!report.wrote);
+        assert_eq!(report.interface_hash_before, report.interface_hash_after);
+    }
+
+    #[test]
+    fn report_changed_but_not_written() {
+        let report = sample_report(true, false, None);
+        assert!(report.changed);
+        assert!(!report.wrote);
+        assert_ne!(report.interface_hash_before, report.interface_hash_after);
+    }
+
+    #[test]
+    fn report_changed_and_written() {
+        let report = sample_report(true, true, None);
+        assert!(report.changed);
+        assert!(report.wrote);
+    }
+
+    #[test]
+    fn report_with_validation_error() {
+        let report = sample_report(false, false, Some("missing required field"));
+        assert!(report.validation_error.is_some());
+        assert_eq!(report.validation_error.unwrap(), "missing required field");
+    }
+
+    #[test]
+    fn report_skip_serializing_none_validation_error() {
+        let report = sample_report(false, false, None);
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(!json.contains("validation_error"));
+    }
+
+    #[test]
+    fn report_includes_validation_error_when_present() {
+        let report = sample_report(false, false, Some("bad hash"));
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(json.contains("validation_error"));
+        assert!(json.contains("bad hash"));
+    }
+
+    #[test]
+    fn report_mode_check() {
+        let report = sample_report(false, false, None);
+        assert_eq!(report.mode, "check");
+    }
+
+    #[test]
+    fn report_mode_write() {
+        let report = sample_report(true, true, None);
+        assert_eq!(report.mode, "write");
+    }
+
+    #[test]
+    fn fix_args_debug() {
+        let args = FixArgs {
+            manifest_path: PathBuf::from("manifest.toml"),
+            check: false,
+            write: false,
+            json: false,
+        };
+        let debug = format!("{args:?}");
+        assert!(debug.contains("manifest.toml"));
+    }
+
+    #[test]
+    fn fix_args_default_path() {
+        let args = FixArgs {
+            manifest_path: PathBuf::from("manifest.toml"),
+            check: false,
+            write: false,
+            json: false,
+        };
+        assert_eq!(args.manifest_path, PathBuf::from("manifest.toml"));
+    }
+}

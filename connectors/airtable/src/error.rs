@@ -547,7 +547,7 @@ mod tests {
     #[test]
     fn result_type_alias_compiles() {
         let ok: AirtableResult<u32> = Ok(42);
-        assert_eq!(ok.unwrap(), 42);
+        assert!(matches!(ok, Ok(42)));
 
         let err: AirtableResult<u32> = Err(AirtableError::Unauthorized);
         assert!(err.is_err());

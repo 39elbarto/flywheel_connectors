@@ -467,6 +467,7 @@ mod tests {
         let cloned = resp.clone();
         assert_eq!(cloned.bases.len(), 1);
         assert_eq!(cloned.offset.as_deref(), Some("next"));
+        assert_eq!(resp.bases.len(), 1);
     }
 
     #[test]
@@ -483,6 +484,7 @@ mod tests {
         };
         let cloned = resp.clone();
         assert_eq!(cloned.tables.len(), 1);
+        assert_eq!(resp.tables.len(), 1);
     }
 
     #[test]
@@ -494,5 +496,6 @@ mod tests {
         };
         let cloned = rec.clone();
         assert_eq!(cloned.id, "rec1");
+        assert_eq!(rec.id, "rec1");
     }
 }

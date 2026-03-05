@@ -134,3 +134,119 @@ fn get_rustc_version() -> Option<String> {
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collect_returns_valid_os() {
+        let info = collect();
+        assert!(!info.os.is_empty(), "os should not be empty");
+        let valid_os = ["linux", "macos", "windows"];
+        assert!(
+            valid_os.contains(&info.os.as_str()),
+            "unexpected os: {}",
+            info.os
+        );
+    }
+
+    #[test]
+    fn collect_returns_valid_arch() {
+        let info = collect();
+        assert!(!info.arch.is_empty());
+        let valid_arch = ["x86_64", "aarch64", "x86", "arm"];
+        assert!(
+            valid_arch.contains(&info.arch.as_str()),
+            "unexpected arch: {}",
+            info.arch
+        );
+    }
+
+    #[test]
+    fn collect_returns_positive_cpu_count() {
+        let info = collect();
+        assert!(info.cpu_count >= 1);
+    }
+
+    #[test]
+    fn collect_returns_nonempty_fcp_version() {
+        let info = collect();
+        assert!(!info.fcp_version.is_empty());
+    }
+
+    #[test]
+    fn collect_returns_timestamp_not_epoch() {
+        let info = collect();
+        assert!(info.timestamp.timestamp() > 0);
+    }
+
+    #[test]
+    fn collect_os_version_not_empty() {
+        let info = collect();
+        assert!(!info.os_version.is_empty());
+    }
+
+    #[test]
+    fn get_os_version_returns_string() {
+        let version = get_os_version();
+        assert!(!version.is_empty());
+    }
+
+    #[test]
+    fn get_git_info_returns_some_in_repo() {
+        let (commit, branch, dirty) = get_git_info();
+        // We're in a git repo, so these should be Some
+        assert!(commit.is_some(), "expected git commit");
+        assert!(branch.is_some(), "expected git branch");
+        assert!(dirty.is_some(), "expected git dirty status");
+    }
+
+    #[test]
+    fn get_git_commit_is_short_hash() {
+        let (commit, _, _) = get_git_info();
+        if let Some(c) = commit {
+            assert!(
+                c.len() >= 7 && c.len() <= 12,
+                "short hash length: {}",
+                c.len()
+            );
+            assert!(c.chars().all(|ch| ch.is_ascii_hexdigit()), "not hex: {c}");
+        }
+    }
+
+    #[test]
+    fn get_git_branch_is_nonempty() {
+        let (_, branch, _) = get_git_info();
+        if let Some(b) = branch {
+            assert!(!b.is_empty());
+        }
+    }
+
+    #[test]
+    fn get_rustc_version_returns_some() {
+        let version = get_rustc_version();
+        assert!(version.is_some());
+        let v = version.unwrap();
+        assert!(v.starts_with("rustc "), "expected 'rustc ...' got '{v}'");
+    }
+
+    #[test]
+    fn collect_deterministic_static_fields() {
+        let info1 = collect();
+        let info2 = collect();
+        assert_eq!(info1.os, info2.os);
+        assert_eq!(info1.arch, info2.arch);
+        assert_eq!(info1.cpu_count, info2.cpu_count);
+        assert_eq!(info1.fcp_version, info2.fcp_version);
+    }
+
+    #[test]
+    fn collect_git_branch_is_main() {
+        let info = collect();
+        // Per AGENTS.md, we always use main
+        if let Some(ref branch) = info.git_branch {
+            assert_eq!(branch, "main", "expected main branch");
+        }
+    }
+}

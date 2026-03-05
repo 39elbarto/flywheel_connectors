@@ -1896,4 +1896,1580 @@ mod tests {
         log.check_eq(tls.url(), "https://localhost:6333".to_string(), "https url")?;
         Ok(())
     }
+
+    // ── FcpError variant tests used by the connector ─────────────────────
+
+    #[test]
+    fn test_fcp_error_not_configured_display() {
+        let err = FcpError::NotConfigured;
+        assert_eq!(err.to_string(), "Connector not configured");
+    }
+
+    #[test]
+    fn test_fcp_error_not_configured_is_not_retryable() {
+        assert!(!FcpError::NotConfigured.is_retryable());
+    }
+
+    #[test]
+    fn test_fcp_error_not_configured_retry_after_is_none() {
+        assert!(FcpError::NotConfigured.retry_after().is_none());
+    }
+
+    #[test]
+    fn test_fcp_error_not_configured_debug() {
+        let debug = format!("{:?}", FcpError::NotConfigured);
+        assert!(debug.contains("NotConfigured"));
+    }
+
+    #[test]
+    fn test_fcp_error_not_configured_std_error_trait() {
+        let err: &dyn std::error::Error = &FcpError::NotConfigured;
+        assert!(err.to_string().contains("not configured"));
+    }
+
+    #[test]
+    fn test_fcp_error_not_configured_to_fcp_error_code() {
+        let response = FcpError::NotConfigured.to_response();
+        assert_eq!(response.code, "FCP-5002");
+    }
+
+    #[test]
+    fn test_fcp_error_invalid_request_display() {
+        let err = FcpError::InvalidRequest {
+            code: 1003,
+            message: "Missing operation".into(),
+        };
+        assert_eq!(err.to_string(), "Invalid request: Missing operation");
+    }
+
+    #[test]
+    fn test_fcp_error_invalid_request_is_not_retryable() {
+        let err = FcpError::InvalidRequest {
+            code: 1003,
+            message: "bad".into(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn test_fcp_error_invalid_request_retry_after_is_none() {
+        let err = FcpError::InvalidRequest {
+            code: 1003,
+            message: "bad".into(),
+        };
+        assert!(err.retry_after().is_none());
+    }
+
+    #[test]
+    fn test_fcp_error_invalid_request_to_response() {
+        let err = FcpError::InvalidRequest {
+            code: 1003,
+            message: "Missing operation".into(),
+        };
+        let resp = err.to_response();
+        assert_eq!(resp.code, "FCP-1003");
+        assert!(resp.message.contains("Missing operation"));
+    }
+
+    #[test]
+    fn test_fcp_error_invalid_request_debug() {
+        let err = FcpError::InvalidRequest {
+            code: 1003,
+            message: "test".into(),
+        };
+        let debug = format!("{err:?}");
+        assert!(debug.contains("InvalidRequest"));
+        assert!(debug.contains("1003"));
+    }
+
+    #[test]
+    fn test_fcp_error_invalid_request_std_error() {
+        let err = FcpError::InvalidRequest {
+            code: 1003,
+            message: "test".into(),
+        };
+        let boxed: Box<dyn std::error::Error> = Box::new(err);
+        assert!(boxed.to_string().contains("test"));
+    }
+
+    #[test]
+    fn test_fcp_error_operation_not_granted_display() {
+        let err = FcpError::OperationNotGranted {
+            operation: "vectordb.unknown_op".into(),
+        };
+        assert!(err.to_string().contains("vectordb.unknown_op"));
+    }
+
+    #[test]
+    fn test_fcp_error_operation_not_granted_is_not_retryable() {
+        let err = FcpError::OperationNotGranted {
+            operation: "test".into(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn test_fcp_error_operation_not_granted_to_response() {
+        let err = FcpError::OperationNotGranted {
+            operation: "vectordb.query_vectors".into(),
+        };
+        let resp = err.to_response();
+        assert_eq!(resp.code, "FCP-3003");
+    }
+
+    #[test]
+    fn test_fcp_error_internal_display() {
+        let err = FcpError::Internal {
+            message: "serialize failed".into(),
+        };
+        assert_eq!(err.to_string(), "Internal error: serialize failed");
+    }
+
+    #[test]
+    fn test_fcp_error_internal_is_not_retryable() {
+        let err = FcpError::Internal {
+            message: "boom".into(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn test_fcp_error_internal_to_response() {
+        let err = FcpError::Internal {
+            message: "oops".into(),
+        };
+        let resp = err.to_response();
+        assert_eq!(resp.code, "FCP-9001");
+    }
+
+    // ── Helper function tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_require_string_present() {
+        let input = json!({ "name": "hello" });
+        assert_eq!(require_string(&input, "name").unwrap(), "hello");
+    }
+
+    #[test]
+    fn test_require_string_missing() {
+        let input = json!({});
+        let err = require_string(&input, "name").unwrap_err();
+        assert!(err.to_string().contains("name"));
+    }
+
+    #[test]
+    fn test_require_string_wrong_type() {
+        let input = json!({ "name": 123 });
+        let err = require_string(&input, "name").unwrap_err();
+        assert!(err.to_string().contains("name"));
+    }
+
+    #[test]
+    fn test_optional_string_present() {
+        let input = json!({ "ns": "default" });
+        assert_eq!(optional_string(&input, "ns").unwrap(), Some("default"));
+    }
+
+    #[test]
+    fn test_optional_string_absent() {
+        let input = json!({});
+        assert_eq!(optional_string(&input, "ns").unwrap(), None);
+    }
+
+    #[test]
+    fn test_optional_string_wrong_type() {
+        let input = json!({ "ns": 42 });
+        let err = optional_string(&input, "ns").unwrap_err();
+        assert!(err.to_string().contains("ns"));
+    }
+
+    #[test]
+    fn test_require_bool_present() {
+        let input = json!({ "confirm": true });
+        assert!(require_bool(&input, "confirm").unwrap());
+    }
+
+    #[test]
+    fn test_require_bool_missing() {
+        let input = json!({});
+        assert!(require_bool(&input, "confirm").is_err());
+    }
+
+    #[test]
+    fn test_require_bool_wrong_type() {
+        let input = json!({ "confirm": "yes" });
+        assert!(require_bool(&input, "confirm").is_err());
+    }
+
+    #[test]
+    fn test_optional_bool_present() {
+        let input = json!({ "flag": false });
+        assert_eq!(optional_bool(&input, "flag").unwrap(), Some(false));
+    }
+
+    #[test]
+    fn test_optional_bool_absent() {
+        let input = json!({});
+        assert_eq!(optional_bool(&input, "flag").unwrap(), None);
+    }
+
+    #[test]
+    fn test_optional_bool_wrong_type() {
+        let input = json!({ "flag": 1 });
+        assert!(optional_bool(&input, "flag").is_err());
+    }
+
+    #[test]
+    fn test_require_u64_present() {
+        let input = json!({ "dim": 1536 });
+        assert_eq!(require_u64(&input, "dim").unwrap(), 1536);
+    }
+
+    #[test]
+    fn test_require_u64_missing() {
+        let input = json!({});
+        assert!(require_u64(&input, "dim").is_err());
+    }
+
+    #[test]
+    fn test_require_u64_wrong_type() {
+        let input = json!({ "dim": "abc" });
+        assert!(require_u64(&input, "dim").is_err());
+    }
+
+    #[test]
+    fn test_require_u64_negative() {
+        let input = json!({ "dim": -5 });
+        assert!(require_u64(&input, "dim").is_err());
+    }
+
+    #[test]
+    fn test_require_array_present() {
+        let input = json!({ "ids": ["a", "b"] });
+        let arr = require_array(&input, "ids").unwrap();
+        assert_eq!(arr.len(), 2);
+    }
+
+    #[test]
+    fn test_require_array_missing() {
+        let input = json!({});
+        assert!(require_array(&input, "ids").is_err());
+    }
+
+    #[test]
+    fn test_require_array_wrong_type() {
+        let input = json!({ "ids": "not-array" });
+        assert!(require_array(&input, "ids").is_err());
+    }
+
+    #[test]
+    fn test_require_object_present() {
+        let input = json!({ "meta": { "key": "value" } });
+        let obj = require_object(&input, "meta").unwrap();
+        assert!(obj.contains_key("key"));
+    }
+
+    #[test]
+    fn test_require_object_missing() {
+        let input = json!({});
+        assert!(require_object(&input, "meta").is_err());
+    }
+
+    #[test]
+    fn test_require_object_wrong_type() {
+        let input = json!({ "meta": [1, 2, 3] });
+        assert!(require_object(&input, "meta").is_err());
+    }
+
+    #[test]
+    fn test_optional_object_present() {
+        let input = json!({ "opts": { "k": "v" } });
+        let obj = optional_object(&input, "opts").unwrap();
+        assert!(obj.is_some());
+    }
+
+    #[test]
+    fn test_optional_object_absent() {
+        let input = json!({});
+        assert_eq!(optional_object(&input, "opts").unwrap(), None);
+    }
+
+    #[test]
+    fn test_optional_object_wrong_type() {
+        let input = json!({ "opts": "string" });
+        assert!(optional_object(&input, "opts").is_err());
+    }
+
+    // ── Collection name validation ───────────────────────────────────────
+
+    #[test]
+    fn test_valid_collection_name_simple() {
+        assert!(is_valid_collection_name("docs"));
+    }
+
+    #[test]
+    fn test_valid_collection_name_with_digits() {
+        assert!(is_valid_collection_name("docs123"));
+    }
+
+    #[test]
+    fn test_valid_collection_name_with_hyphen() {
+        assert!(is_valid_collection_name("my-collection"));
+    }
+
+    #[test]
+    fn test_valid_collection_name_with_underscore() {
+        assert!(is_valid_collection_name("my_collection"));
+    }
+
+    #[test]
+    fn test_valid_collection_name_single_char() {
+        assert!(is_valid_collection_name("a"));
+    }
+
+    #[test]
+    fn test_invalid_collection_name_empty() {
+        assert!(!is_valid_collection_name(""));
+    }
+
+    #[test]
+    fn test_invalid_collection_name_starts_with_digit() {
+        assert!(!is_valid_collection_name("1abc"));
+    }
+
+    #[test]
+    fn test_invalid_collection_name_starts_with_hyphen() {
+        assert!(!is_valid_collection_name("-abc"));
+    }
+
+    #[test]
+    fn test_invalid_collection_name_uppercase() {
+        assert!(!is_valid_collection_name("Docs"));
+    }
+
+    #[test]
+    fn test_invalid_collection_name_spaces() {
+        assert!(!is_valid_collection_name("my collection"));
+    }
+
+    #[test]
+    fn test_invalid_collection_name_special_chars() {
+        assert!(!is_valid_collection_name("docs@v2"));
+    }
+
+    #[test]
+    fn test_invalid_collection_name_dot() {
+        assert!(!is_valid_collection_name("my.collection"));
+    }
+
+    // ── Capability mapping ───────────────────────────────────────────────
+
+    #[test]
+    fn test_capability_mapping_list_collections() {
+        let cap = required_capability_for_operation("vectordb.list_collections").unwrap();
+        assert_eq!(cap.as_str(), "vectordb.collections.read");
+    }
+
+    #[test]
+    fn test_capability_mapping_describe_collection() {
+        let cap = required_capability_for_operation("vectordb.describe_collection").unwrap();
+        assert_eq!(cap.as_str(), "vectordb.collections.read");
+    }
+
+    #[test]
+    fn test_capability_mapping_create_collection() {
+        let cap = required_capability_for_operation("vectordb.create_collection").unwrap();
+        assert_eq!(cap.as_str(), "vectordb.collections.write");
+    }
+
+    #[test]
+    fn test_capability_mapping_delete_collection() {
+        let cap = required_capability_for_operation("vectordb.delete_collection").unwrap();
+        assert_eq!(cap.as_str(), "vectordb.collections.delete");
+    }
+
+    #[test]
+    fn test_capability_mapping_query_vectors() {
+        let cap = required_capability_for_operation("vectordb.query_vectors").unwrap();
+        assert_eq!(cap.as_str(), "vectordb.vectors.read");
+    }
+
+    #[test]
+    fn test_capability_mapping_fetch_vectors() {
+        let cap = required_capability_for_operation("vectordb.fetch_vectors").unwrap();
+        assert_eq!(cap.as_str(), "vectordb.vectors.read");
+    }
+
+    #[test]
+    fn test_capability_mapping_upsert_vectors() {
+        let cap = required_capability_for_operation("vectordb.upsert_vectors").unwrap();
+        assert_eq!(cap.as_str(), "vectordb.vectors.write");
+    }
+
+    #[test]
+    fn test_capability_mapping_update_vector_metadata() {
+        let cap = required_capability_for_operation("vectordb.update_vector_metadata").unwrap();
+        assert_eq!(cap.as_str(), "vectordb.vectors.write");
+    }
+
+    #[test]
+    fn test_capability_mapping_delete_vectors() {
+        let cap = required_capability_for_operation("vectordb.delete_vectors").unwrap();
+        assert_eq!(cap.as_str(), "vectordb.vectors.delete");
+    }
+
+    #[test]
+    fn test_capability_mapping_unknown_returns_none() {
+        assert!(required_capability_for_operation("vectordb.nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_capability_mapping_empty_returns_none() {
+        assert!(required_capability_for_operation("").is_none());
+    }
+
+    // ── Connector Default trait ──────────────────────────────────────────
+
+    #[test]
+    fn test_connector_default() {
+        let connector = VectorDbConnector::default();
+        assert!(!connector.is_configured());
+        assert!(connector.provider().is_none());
+    }
+
+    // ── Introspection schema completeness ────────────────────────────────
+
+    #[test]
+    fn test_introspect_all_ops_have_input_schema() {
+        let connector = VectorDbConnector::new();
+        let introspection = connector.handle_introspect();
+        for op in &introspection.operations {
+            assert!(
+                op.input_schema.is_object(),
+                "op {} input_schema should be object",
+                op.id.as_str()
+            );
+            assert_eq!(
+                op.input_schema.get("type").and_then(|v| v.as_str()),
+                Some("object"),
+                "op {} input_schema type should be 'object'",
+                op.id.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn test_introspect_all_ops_have_output_schema() {
+        let connector = VectorDbConnector::new();
+        let introspection = connector.handle_introspect();
+        for op in &introspection.operations {
+            assert!(
+                op.output_schema.is_object(),
+                "op {} output_schema should be object",
+                op.id.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn test_introspect_unknown_op_has_no_capability() {
+        assert!(required_capability_for_operation("vectordb.banana").is_none());
+    }
+
+    #[test]
+    fn test_introspect_read_ops_are_safe() {
+        let connector = VectorDbConnector::new();
+        let introspection = connector.handle_introspect();
+        for op in &introspection.operations {
+            let id = op.id.as_str();
+            if id.contains("list")
+                || id.contains("describe")
+                || id.contains("query")
+                || id.contains("fetch")
+            {
+                assert_eq!(
+                    op.risk_level,
+                    RiskLevel::Low,
+                    "read op {id} should have Low risk"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_introspect_required_metadata() {
+        let connector = VectorDbConnector::new();
+        let introspection = connector.handle_introspect();
+        for op in &introspection.operations {
+            assert!(
+                !op.summary.is_empty(),
+                "op {} should have summary",
+                op.id.as_str()
+            );
+            assert!(
+                !op.capability.as_str().is_empty(),
+                "op {} should have capability",
+                op.id.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn test_introspect_all_ops_have_valid_risk_levels() {
+        let connector = VectorDbConnector::new();
+        let introspection = connector.handle_introspect();
+        for op in &introspection.operations {
+            // Just verify we can match on the risk level (it's a valid enum variant)
+            match op.risk_level {
+                RiskLevel::Low | RiskLevel::Medium | RiskLevel::High | RiskLevel::Critical => {}
+            }
+        }
+    }
+
+    #[test]
+    fn test_introspect_deterministic() {
+        let c1 = VectorDbConnector::new();
+        let c2 = VectorDbConnector::new();
+        let i1 = c1.handle_introspect();
+        let i2 = c2.handle_introspect();
+        assert_eq!(i1.operations.len(), i2.operations.len());
+        for (a, b) in i1.operations.iter().zip(i2.operations.iter()) {
+            assert_eq!(a.id.as_str(), b.id.as_str());
+            assert_eq!(a.summary, b.summary);
+        }
+    }
+
+    // ── Invoke error paths ───────────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_missing_operation_field() {
+        let mut connector = VectorDbConnector::new();
+        connector
+            .handle_configure(json!({
+                "provider": "qdrant",
+                "endpoint": "localhost:6333",
+                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00",
+                "use_tls": false
+            }))
+            .await
+            .unwrap();
+
+        let result = connector
+            .handle_invoke(json!({
+                "input": {},
+                "capability_token": { "raw": [] }
+            }))
+            .await;
+        assert!(
+            matches!(result, Err(FcpError::InvalidRequest { .. })),
+            "missing operation should fail"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_input_not_object() {
+        let mut connector = VectorDbConnector::new();
+        connector
+            .handle_configure(json!({
+                "provider": "qdrant",
+                "endpoint": "localhost:6333",
+                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00",
+                "use_tls": false
+            }))
+            .await
+            .unwrap();
+
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "vectordb.list_collections",
+                "input": "not-an-object",
+                "capability_token": { "raw": [] }
+            }))
+            .await;
+        assert!(
+            matches!(result, Err(FcpError::InvalidRequest { .. })),
+            "non-object input should fail"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_missing_capability_token() {
+        let mut connector = VectorDbConnector::new();
+        connector
+            .handle_configure(json!({
+                "provider": "qdrant",
+                "endpoint": "localhost:6333",
+                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00",
+                "use_tls": false
+            }))
+            .await
+            .unwrap();
+
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "vectordb.list_collections",
+                "input": {}
+            }))
+            .await;
+        assert!(
+            matches!(result, Err(FcpError::InvalidRequest { .. })),
+            "missing capability_token should fail"
+        );
+    }
+
+    #[test]
+    fn test_capability_for_unknown_operation_is_none() {
+        // The capability lookup for an unknown operation returns None,
+        // which the invoke path converts to OperationNotGranted.
+        // We test the mapping function directly since the invoke path
+        // checks the capability_token before reaching this point.
+        assert!(required_capability_for_operation("vectordb.nonexistent").is_none());
+    }
+
+    // ── Operation-specific input validation (via full invoke path) ───────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_query_empty_vector() {
+        let mut connector = VectorDbConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+
+        connector
+            .handle_configure(json!({
+                "provider": "qdrant",
+                "endpoint": "localhost:6333",
+                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00",
+                "use_tls": false
+            }))
+            .await
+            .unwrap();
+
+        let handshake = handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            &["vectordb.vectors.read"],
+        );
+        connector
+            .handle_handshake(serde_json::to_value(handshake).unwrap())
+            .await
+            .unwrap();
+
+        let token = build_token(
+            &signing_key,
+            "vectordb.vectors.read",
+            &["vectordb.query_vectors"],
+        );
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "vectordb.query_vectors",
+                "input": { "collection": "test", "vector": [] },
+                "capability_token": token
+            }))
+            .await;
+        assert!(
+            matches!(result, Err(FcpError::InvalidRequest { .. })),
+            "empty vector should fail"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_query_non_numeric_vector() {
+        let mut connector = VectorDbConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+
+        connector
+            .handle_configure(json!({
+                "provider": "qdrant",
+                "endpoint": "localhost:6333",
+                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00",
+                "use_tls": false
+            }))
+            .await
+            .unwrap();
+
+        let handshake = handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            &["vectordb.vectors.read"],
+        );
+        connector
+            .handle_handshake(serde_json::to_value(handshake).unwrap())
+            .await
+            .unwrap();
+
+        let token = build_token(
+            &signing_key,
+            "vectordb.vectors.read",
+            &["vectordb.query_vectors"],
+        );
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "vectordb.query_vectors",
+                "input": { "collection": "test", "vector": ["not", "numbers"] },
+                "capability_token": token
+            }))
+            .await;
+        assert!(
+            matches!(result, Err(FcpError::InvalidRequest { .. })),
+            "non-numeric vector should fail"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_query_top_k_zero() {
+        let mut connector = VectorDbConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+
+        connector
+            .handle_configure(json!({
+                "provider": "qdrant",
+                "endpoint": "localhost:6333",
+                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00",
+                "use_tls": false
+            }))
+            .await
+            .unwrap();
+
+        let handshake = handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            &["vectordb.vectors.read"],
+        );
+        connector
+            .handle_handshake(serde_json::to_value(handshake).unwrap())
+            .await
+            .unwrap();
+
+        let token = build_token(
+            &signing_key,
+            "vectordb.vectors.read",
+            &["vectordb.query_vectors"],
+        );
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "vectordb.query_vectors",
+                "input": { "collection": "test", "vector": [0.1, 0.2], "top_k": 0 },
+                "capability_token": token
+            }))
+            .await;
+        assert!(
+            matches!(result, Err(FcpError::InvalidRequest { .. })),
+            "top_k=0 should fail"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_upsert_empty_vectors() {
+        let mut connector = VectorDbConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+
+        connector
+            .handle_configure(json!({
+                "provider": "qdrant",
+                "endpoint": "localhost:6333",
+                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00",
+                "use_tls": false
+            }))
+            .await
+            .unwrap();
+
+        let handshake = handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            &["vectordb.vectors.write"],
+        );
+        connector
+            .handle_handshake(serde_json::to_value(handshake).unwrap())
+            .await
+            .unwrap();
+
+        let token = build_token(
+            &signing_key,
+            "vectordb.vectors.write",
+            &["vectordb.upsert_vectors"],
+        );
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "vectordb.upsert_vectors",
+                "input": { "collection": "test", "vectors": [] },
+                "capability_token": token
+            }))
+            .await;
+        assert!(
+            matches!(result, Err(FcpError::InvalidRequest { .. })),
+            "empty vectors array should fail"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_upsert_success() {
+        let mut connector = VectorDbConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+
+        connector
+            .handle_configure(json!({
+                "provider": "qdrant",
+                "endpoint": "localhost:6333",
+                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00",
+                "use_tls": false
+            }))
+            .await
+            .unwrap();
+
+        let handshake = handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            &["vectordb.vectors.write"],
+        );
+        connector
+            .handle_handshake(serde_json::to_value(handshake).unwrap())
+            .await
+            .unwrap();
+
+        let token = build_token(
+            &signing_key,
+            "vectordb.vectors.write",
+            &["vectordb.upsert_vectors"],
+        );
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "vectordb.upsert_vectors",
+                "input": {
+                    "collection": "test",
+                    "vectors": [
+                        { "id": "v1", "values": [0.1, 0.2, 0.3] },
+                        { "id": "v2", "values": [0.4, 0.5, 0.6], "metadata": { "label": "test" } }
+                    ]
+                },
+                "capability_token": token
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(result["upserted_count"], 2);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_fetch_vectors_success() {
+        let mut connector = VectorDbConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+
+        connector
+            .handle_configure(json!({
+                "provider": "qdrant",
+                "endpoint": "localhost:6333",
+                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00",
+                "use_tls": false
+            }))
+            .await
+            .unwrap();
+
+        let handshake = handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            &["vectordb.vectors.read"],
+        );
+        connector
+            .handle_handshake(serde_json::to_value(handshake).unwrap())
+            .await
+            .unwrap();
+
+        let token = build_token(
+            &signing_key,
+            "vectordb.vectors.read",
+            &["vectordb.fetch_vectors"],
+        );
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "vectordb.fetch_vectors",
+                "input": { "collection": "test", "ids": ["id1", "id2"] },
+                "capability_token": token
+            }))
+            .await
+            .unwrap();
+
+        let vectors = result["vectors"].as_object().unwrap();
+        assert!(vectors.contains_key("id1"));
+        assert!(vectors.contains_key("id2"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_fetch_vectors_empty_ids_fails() {
+        let mut connector = VectorDbConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+
+        connector
+            .handle_configure(json!({
+                "provider": "qdrant",
+                "endpoint": "localhost:6333",
+                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00",
+                "use_tls": false
+            }))
+            .await
+            .unwrap();
+
+        let handshake = handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            &["vectordb.vectors.read"],
+        );
+        connector
+            .handle_handshake(serde_json::to_value(handshake).unwrap())
+            .await
+            .unwrap();
+
+        let token = build_token(
+            &signing_key,
+            "vectordb.vectors.read",
+            &["vectordb.fetch_vectors"],
+        );
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "vectordb.fetch_vectors",
+                "input": { "collection": "test", "ids": [] },
+                "capability_token": token
+            }))
+            .await;
+        assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_delete_vectors_requires_criteria() {
+        let mut connector = VectorDbConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+
+        connector
+            .handle_configure(json!({
+                "provider": "qdrant",
+                "endpoint": "localhost:6333",
+                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00",
+                "use_tls": false
+            }))
+            .await
+            .unwrap();
+
+        let handshake = handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            &["vectordb.vectors.delete"],
+        );
+        connector
+            .handle_handshake(serde_json::to_value(handshake).unwrap())
+            .await
+            .unwrap();
+
+        let token = build_token(
+            &signing_key,
+            "vectordb.vectors.delete",
+            &["vectordb.delete_vectors"],
+        );
+        // No ids, no filter, no delete_all
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "vectordb.delete_vectors",
+                "input": { "collection": "test" },
+                "capability_token": token
+            }))
+            .await;
+        assert!(
+            matches!(result, Err(FcpError::InvalidRequest { .. })),
+            "delete without criteria should fail"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_delete_vectors_with_delete_all() {
+        let mut connector = VectorDbConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+
+        connector
+            .handle_configure(json!({
+                "provider": "qdrant",
+                "endpoint": "localhost:6333",
+                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00",
+                "use_tls": false
+            }))
+            .await
+            .unwrap();
+
+        let handshake = handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            &["vectordb.vectors.delete"],
+        );
+        connector
+            .handle_handshake(serde_json::to_value(handshake).unwrap())
+            .await
+            .unwrap();
+
+        let token = build_token(
+            &signing_key,
+            "vectordb.vectors.delete",
+            &["vectordb.delete_vectors"],
+        );
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "vectordb.delete_vectors",
+                "input": { "collection": "test", "delete_all": true },
+                "capability_token": token
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result["deleted_count"], 0);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_update_vector_metadata_success() {
+        let mut connector = VectorDbConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+
+        connector
+            .handle_configure(json!({
+                "provider": "qdrant",
+                "endpoint": "localhost:6333",
+                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00",
+                "use_tls": false
+            }))
+            .await
+            .unwrap();
+
+        let handshake = handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            &["vectordb.vectors.write"],
+        );
+        connector
+            .handle_handshake(serde_json::to_value(handshake).unwrap())
+            .await
+            .unwrap();
+
+        let token = build_token(
+            &signing_key,
+            "vectordb.vectors.write",
+            &["vectordb.update_vector_metadata"],
+        );
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "vectordb.update_vector_metadata",
+                "input": {
+                    "collection": "test",
+                    "id": "vec-1",
+                    "metadata": { "label": "updated" }
+                },
+                "capability_token": token
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result["updated"], true);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_create_collection_invalid_name() {
+        let mut connector = VectorDbConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+
+        connector
+            .handle_configure(json!({
+                "provider": "qdrant",
+                "endpoint": "localhost:6333",
+                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00",
+                "use_tls": false
+            }))
+            .await
+            .unwrap();
+
+        let handshake = handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            &["vectordb.collections.write"],
+        );
+        connector
+            .handle_handshake(serde_json::to_value(handshake).unwrap())
+            .await
+            .unwrap();
+
+        let token = build_token(
+            &signing_key,
+            "vectordb.collections.write",
+            &["vectordb.create_collection"],
+        );
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "vectordb.create_collection",
+                "input": { "collection": "BAD NAME", "dimension": 128 },
+                "capability_token": token
+            }))
+            .await;
+        assert!(
+            matches!(result, Err(FcpError::InvalidRequest { .. })),
+            "invalid collection name should fail"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_create_collection_dimension_out_of_range() {
+        let mut connector = VectorDbConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+
+        connector
+            .handle_configure(json!({
+                "provider": "qdrant",
+                "endpoint": "localhost:6333",
+                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00",
+                "use_tls": false
+            }))
+            .await
+            .unwrap();
+
+        let handshake = handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            &["vectordb.collections.write"],
+        );
+        connector
+            .handle_handshake(serde_json::to_value(handshake).unwrap())
+            .await
+            .unwrap();
+
+        let token = build_token(
+            &signing_key,
+            "vectordb.collections.write",
+            &["vectordb.create_collection"],
+        );
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "vectordb.create_collection",
+                "input": { "collection": "valid", "dimension": 10001 },
+                "capability_token": token
+            }))
+            .await;
+        assert!(
+            matches!(result, Err(FcpError::InvalidRequest { .. })),
+            "dimension > 10000 should fail"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_create_collection_invalid_metric() {
+        let mut connector = VectorDbConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+
+        connector
+            .handle_configure(json!({
+                "provider": "qdrant",
+                "endpoint": "localhost:6333",
+                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00",
+                "use_tls": false
+            }))
+            .await
+            .unwrap();
+
+        let handshake = handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            &["vectordb.collections.write"],
+        );
+        connector
+            .handle_handshake(serde_json::to_value(handshake).unwrap())
+            .await
+            .unwrap();
+
+        let token = build_token(
+            &signing_key,
+            "vectordb.collections.write",
+            &["vectordb.create_collection"],
+        );
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "vectordb.create_collection",
+                "input": { "collection": "valid", "dimension": 128, "metric": "manhattan" },
+                "capability_token": token
+            }))
+            .await;
+        assert!(
+            matches!(result, Err(FcpError::InvalidRequest { .. })),
+            "invalid metric should fail"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_create_collection_success() {
+        let mut connector = VectorDbConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+
+        connector
+            .handle_configure(json!({
+                "provider": "qdrant",
+                "endpoint": "localhost:6333",
+                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00",
+                "use_tls": false
+            }))
+            .await
+            .unwrap();
+
+        let handshake = handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            &["vectordb.collections.write"],
+        );
+        connector
+            .handle_handshake(serde_json::to_value(handshake).unwrap())
+            .await
+            .unwrap();
+
+        let token = build_token(
+            &signing_key,
+            "vectordb.collections.write",
+            &["vectordb.create_collection"],
+        );
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "vectordb.create_collection",
+                "input": { "collection": "embeddings", "dimension": 1536, "metric": "cosine" },
+                "capability_token": token
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result["collection"], "embeddings");
+        assert_eq!(result["status"], "created");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_delete_collection_success() {
+        let mut connector = VectorDbConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+
+        connector
+            .handle_configure(json!({
+                "provider": "qdrant",
+                "endpoint": "localhost:6333",
+                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00",
+                "use_tls": false
+            }))
+            .await
+            .unwrap();
+
+        let handshake = handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            &["vectordb.collections.delete"],
+        );
+        connector
+            .handle_handshake(serde_json::to_value(handshake).unwrap())
+            .await
+            .unwrap();
+
+        let token = build_token(
+            &signing_key,
+            "vectordb.collections.delete",
+            &["vectordb.delete_collection"],
+        );
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "vectordb.delete_collection",
+                "input": { "collection": "old-index", "confirm": true },
+                "capability_token": token
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result["deleted"], true);
+        assert_eq!(result["collection"], "old-index");
+    }
+
+    // ── Health metrics tracking ──────────────────────────────────────────
+
+    #[test]
+    fn test_health_metrics_initial() {
+        let connector = VectorDbConnector::new();
+        let health = connector.handle_health();
+        assert_eq!(health["metrics"]["requests_total"], 0);
+        assert_eq!(health["metrics"]["requests_error"], 0);
+    }
+
+    // ── Handshake response structure ─────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_handshake_response_structure() {
+        let mut connector = VectorDbConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+
+        connector
+            .handle_configure(json!({
+                "provider": "qdrant",
+                "endpoint": "localhost:6333",
+                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00",
+                "use_tls": false
+            }))
+            .await
+            .unwrap();
+
+        let handshake = handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            &["vectordb.collections.read", "vectordb.vectors.read"],
+        );
+        let response = connector
+            .handle_handshake(serde_json::to_value(handshake).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response["status"], "accepted");
+        assert!(response["session_id"].is_string());
+        let caps = response["capabilities_granted"].as_array().unwrap();
+        assert_eq!(caps.len(), 2);
+    }
+
+    // ── Upsert vector validation edge cases ──────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_upsert_vector_id_too_long() {
+        let mut connector = VectorDbConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+
+        connector
+            .handle_configure(json!({
+                "provider": "qdrant",
+                "endpoint": "localhost:6333",
+                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00",
+                "use_tls": false
+            }))
+            .await
+            .unwrap();
+
+        let handshake = handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            &["vectordb.vectors.write"],
+        );
+        connector
+            .handle_handshake(serde_json::to_value(handshake).unwrap())
+            .await
+            .unwrap();
+
+        let token = build_token(
+            &signing_key,
+            "vectordb.vectors.write",
+            &["vectordb.upsert_vectors"],
+        );
+        let long_id = "x".repeat(513);
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "vectordb.upsert_vectors",
+                "input": {
+                    "collection": "test",
+                    "vectors": [{ "id": long_id, "values": [0.1] }]
+                },
+                "capability_token": token
+            }))
+            .await;
+        assert!(
+            matches!(result, Err(FcpError::InvalidRequest { .. })),
+            "vector id > 512 chars should fail"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_upsert_vector_empty_id() {
+        let mut connector = VectorDbConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+
+        connector
+            .handle_configure(json!({
+                "provider": "qdrant",
+                "endpoint": "localhost:6333",
+                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00",
+                "use_tls": false
+            }))
+            .await
+            .unwrap();
+
+        let handshake = handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            &["vectordb.vectors.write"],
+        );
+        connector
+            .handle_handshake(serde_json::to_value(handshake).unwrap())
+            .await
+            .unwrap();
+
+        let token = build_token(
+            &signing_key,
+            "vectordb.vectors.write",
+            &["vectordb.upsert_vectors"],
+        );
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "vectordb.upsert_vectors",
+                "input": {
+                    "collection": "test",
+                    "vectors": [{ "id": "", "values": [0.1] }]
+                },
+                "capability_token": token
+            }))
+            .await;
+        assert!(
+            matches!(result, Err(FcpError::InvalidRequest { .. })),
+            "empty vector id should fail"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_upsert_vector_bad_metadata_type() {
+        let mut connector = VectorDbConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+
+        connector
+            .handle_configure(json!({
+                "provider": "qdrant",
+                "endpoint": "localhost:6333",
+                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00",
+                "use_tls": false
+            }))
+            .await
+            .unwrap();
+
+        let handshake = handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            &["vectordb.vectors.write"],
+        );
+        connector
+            .handle_handshake(serde_json::to_value(handshake).unwrap())
+            .await
+            .unwrap();
+
+        let token = build_token(
+            &signing_key,
+            "vectordb.vectors.write",
+            &["vectordb.upsert_vectors"],
+        );
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "vectordb.upsert_vectors",
+                "input": {
+                    "collection": "test",
+                    "vectors": [{ "id": "v1", "values": [0.1], "metadata": "not-an-object" }]
+                },
+                "capability_token": token
+            }))
+            .await;
+        assert!(
+            matches!(result, Err(FcpError::InvalidRequest { .. })),
+            "metadata as string should fail"
+        );
+    }
+
+    // ── FcpError to_response for all variants used in connector ──────────
+
+    #[test]
+    fn test_fcp_error_not_handshaken_to_response() {
+        let err = FcpError::NotHandshaken;
+        let resp = err.to_response();
+        assert_eq!(resp.code, "FCP-5003");
+        assert!(resp.message.contains("not handshaken"));
+    }
+
+    #[test]
+    fn test_fcp_error_not_handshaken_display() {
+        assert_eq!(
+            FcpError::NotHandshaken.to_string(),
+            "Connector not handshaken"
+        );
+    }
+
+    #[test]
+    fn test_fcp_error_not_handshaken_not_retryable() {
+        assert!(!FcpError::NotHandshaken.is_retryable());
+    }
+
+    // ── Retryable errors that might surface via external services ────────
+
+    #[test]
+    fn test_fcp_error_external_retryable() {
+        let err = FcpError::External {
+            service: "vectordb".into(),
+            message: "rate limited".into(),
+            status_code: Some(429),
+            retryable: true,
+            retry_after: Some(std::time::Duration::from_secs(30)),
+        };
+        assert!(err.is_retryable());
+        assert_eq!(err.retry_after(), Some(std::time::Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn test_fcp_error_external_not_retryable() {
+        let err = FcpError::External {
+            service: "vectordb".into(),
+            message: "bad request".into(),
+            status_code: Some(400),
+            retryable: false,
+            retry_after: None,
+        };
+        assert!(!err.is_retryable());
+        assert!(err.retry_after().is_none());
+    }
+
+    #[test]
+    fn test_fcp_error_external_display() {
+        let err = FcpError::External {
+            service: "pinecone".into(),
+            message: "index not found".into(),
+            status_code: Some(404),
+            retryable: false,
+            retry_after: None,
+        };
+        let display = err.to_string();
+        assert!(display.contains("pinecone"));
+        assert!(display.contains("index not found"));
+    }
+
+    #[test]
+    fn test_fcp_error_rate_limited_is_retryable() {
+        let err = FcpError::RateLimited {
+            retry_after_ms: 5000,
+            violation: None,
+        };
+        assert!(err.is_retryable());
+        assert_eq!(err.retry_after(), Some(std::time::Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn test_fcp_error_upstream_timeout_is_retryable() {
+        let err = FcpError::UpstreamTimeout {
+            service: "qdrant".into(),
+        };
+        assert!(err.is_retryable());
+        assert!(err.retry_after().is_none());
+    }
+
+    #[test]
+    fn test_fcp_error_dependency_unavailable_is_retryable() {
+        let err = FcpError::DependencyUnavailable {
+            service: "pinecone".into(),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn test_fcp_error_connector_unavailable_is_retryable() {
+        let err = FcpError::ConnectorUnavailable {
+            code: 5001,
+            message: "restarting".into(),
+        };
+        assert!(err.is_retryable());
+    }
+
+    // ── Verify the entire error category for vectordb-relevant errors ────
+
+    #[test]
+    fn test_fcp_error_categories() {
+        use fcp_core::ErrorCategory;
+
+        assert_eq!(FcpError::NotConfigured.category(), ErrorCategory::Connector);
+        assert_eq!(FcpError::NotHandshaken.category(), ErrorCategory::Connector);
+        assert_eq!(
+            FcpError::InvalidRequest {
+                code: 1003,
+                message: "x".into()
+            }
+            .category(),
+            ErrorCategory::Protocol
+        );
+        assert_eq!(
+            FcpError::OperationNotGranted {
+                operation: "x".into()
+            }
+            .category(),
+            ErrorCategory::Capability
+        );
+        assert_eq!(
+            FcpError::Internal {
+                message: "x".into()
+            }
+            .category(),
+            ErrorCategory::Internal
+        );
+    }
 }

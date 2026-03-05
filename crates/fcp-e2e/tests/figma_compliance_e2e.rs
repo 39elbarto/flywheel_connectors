@@ -37,14 +37,14 @@ use wiremock::{
 // ============================================================================
 
 struct FigmaConnectorAdapter {
-    connector: fcp_async_core::sync::Mutex<FigmaConnector>,
+    connector: FigmaConnector,
     id: ConnectorId,
 }
 
 impl FigmaConnectorAdapter {
     fn new() -> Self {
         Self {
-            connector: fcp_async_core::sync::Mutex::new(FigmaConnector::new()),
+            connector: FigmaConnector::new(),
             id: ConnectorId::from_static("figma"),
         }
     }
@@ -57,44 +57,35 @@ impl FcpConnector for FigmaConnectorAdapter {
     }
 
     async fn configure(&mut self, config: serde_json::Value) -> fcp_core::FcpResult<()> {
-        self.connector
-            .lock()
-            .await
-            .handle_configure(config)
-            .await
-            .map(|_| ())
+        self.connector.handle_configure(config).await.map(|_| ())
     }
 
     async fn handshake(&mut self, req: HandshakeRequest) -> fcp_core::FcpResult<HandshakeResponse> {
-        let request = serde_json::to_value(req).map_err(|err| FcpError::Internal {
-            message: format!("failed to serialize handshake request: {err}"),
-        })?;
-        let response = self
-            .connector
-            .lock()
-            .await
-            .handle_handshake(request)
-            .await?;
-        serde_json::from_value(response).map_err(|err| FcpError::Internal {
-            message: format!("failed to deserialize handshake response: {err}"),
-        })
+        self.connector.handle_handshake(req).await
     }
 
     async fn health(&self) -> HealthSnapshot {
-        match self.connector.lock().await.handle_health().await {
-            Ok(payload) => {
-                let status = payload
+        match self.connector.handle_health().await {
+            Ok(val) => {
+                let status = val
                     .get("status")
-                    .and_then(serde_json::Value::as_str)
+                    .and_then(|s| s.as_str())
                     .unwrap_or("unknown");
-                match status {
-                    "healthy" => HealthSnapshot::ready(),
-                    "not_configured" => HealthSnapshot::degraded("not_configured"),
-                    other => HealthSnapshot::degraded(format!("figma_status:{other}")),
+                if status == "healthy" {
+                    HealthSnapshot::healthy()
+                } else {
+                    HealthSnapshot::degraded("not_healthy")
                 }
             }
-            Err(err) => HealthSnapshot::error(err.to_string()),
+            Err(_) => HealthSnapshot::degraded("error"),
         }
+    }
+
+    async fn self_check(&self) -> fcp_core::FcpResult<SelfCheckReport> {
+        let value = self.connector.handle_self_check().await?;
+        serde_json::from_value(value).map_err(|e| FcpError::Internal {
+            message: format!("Failed to parse self_check result: {e}"),
+        })
     }
 
     fn metrics(&self) -> ConnectorMetrics {
@@ -102,73 +93,31 @@ impl FcpConnector for FigmaConnectorAdapter {
     }
 
     async fn shutdown(&mut self, _req: ShutdownRequest) -> fcp_core::FcpResult<()> {
-        self.connector
-            .lock()
-            .await
-            .handle_shutdown(json!({}))
-            .await
-            .map(|_| ())
+        Ok(())
     }
 
     fn introspect(&self) -> Introspection {
-        Introspection {
-            operations: vec![OperationInfo {
-                id: OperationId::from_static("figma.get_file"),
-                summary: "Retrieve a Figma file".to_string(),
-                description: None,
-                input_schema: json!({
-                    "type": "object",
-                    "required": ["file_key"],
-                    "properties": {
-                        "file_key": { "type": "string" }
-                    }
-                }),
-                output_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "name": { "type": "string" },
-                        "document": { "type": "object" }
-                    }
-                }),
-                capability: CapabilityId::from_static("figma.get_file"),
-                risk_level: RiskLevel::Low,
-                safety_tier: SafetyTier::Safe,
-                idempotency: IdempotencyClass::Strict,
-                ai_hints: AgentHint {
-                    when_to_use: "Retrieve a full Figma file.".to_string(),
-                    common_mistakes: Vec::new(),
-                    examples: vec![r#"{"file_key":"abc123"}"#.to_string()],
-                    related: vec![CapabilityId::from_static("figma.get_file_nodes")],
-                },
-                rate_limit: None,
-                requires_approval: None,
-            }],
-            events: Vec::new(),
-            resource_types: Vec::new(),
-            auth_caps: None,
-            event_caps: None,
-        }
+        let value = self.connector.handle_introspect();
+        serde_json::from_value(value).unwrap_or_else(|_| Introspection { operations: vec![] })
     }
 
     async fn invoke(&self, req: InvokeRequest) -> fcp_core::FcpResult<InvokeResponse> {
-        let request_id = req.id;
+        let request_id = req.id.clone();
         let params = json!({
             "operation": req.operation.as_str(),
             "input": req.input,
             "capability_token": req.capability_token,
         });
-        let value = self.connector.lock().await.handle_invoke(params).await?;
+        let value = self.connector.handle_invoke(params).await?;
         Ok(InvokeResponse::ok(request_id, value))
     }
 
     async fn simulate(&self, req: SimulateRequest) -> fcp_core::FcpResult<SimulateResponse> {
         let request = serde_json::to_value(req).map_err(|err| FcpError::Internal {
-            message: format!("failed to serialize simulate request: {err}"),
+            message: err.to_string(),
         })?;
-        let value = self.connector.lock().await.handle_simulate(request).await?;
-        serde_json::from_value(value).map_err(|err| FcpError::Internal {
-            message: format!("failed to deserialize simulate response: {err}"),
-        })
+        let value = self.connector.handle_simulate(request).await?;
+        Ok(serde_json::from_value(value).unwrap())
     }
 
     async fn subscribe(&self, _req: SubscribeRequest) -> fcp_core::FcpResult<SubscribeResponse> {

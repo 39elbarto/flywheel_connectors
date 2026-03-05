@@ -479,6 +479,31 @@ mod tests {
         assert!(result.merged);
     }
 
+    #[test]
+    fn merge_result_not_merged() {
+        let json = json!({
+            "sha": "deadbeef",
+            "merged": false,
+            "message": "Pull Request was not merged"
+        });
+        let result: MergeResult = serde_json::from_value(json).unwrap();
+        assert!(!result.merged);
+        assert_eq!(result.sha, "deadbeef");
+    }
+
+    #[test]
+    fn merge_result_clone_debug() {
+        let result = MergeResult {
+            sha: "abc".into(),
+            merged: true,
+            message: "OK".into(),
+        };
+        let cloned = result.clone();
+        assert_eq!(cloned.sha, "abc");
+        let debug = format!("{result:?}");
+        assert!(debug.contains("abc"));
+    }
+
     // ---- Workflow ----
 
     #[test]
@@ -494,5 +519,859 @@ mod tests {
         let json = serde_json::to_string(&wf).unwrap();
         let back: Workflow = serde_json::from_str(&json).unwrap();
         assert_eq!(back.name, "CI");
+    }
+
+    #[test]
+    fn workflow_clone_debug() {
+        let wf = Workflow {
+            id: 99,
+            name: "Deploy".into(),
+            path: ".github/workflows/deploy.yml".into(),
+            state: "disabled_manually".into(),
+            created_at: "2026-01-01".into(),
+            updated_at: "2026-03-01".into(),
+        };
+        let cloned = wf.clone();
+        assert_eq!(cloned.id, 99);
+        let debug = format!("{wf:?}");
+        assert!(debug.contains("Deploy"));
+    }
+
+    // ---- WorkflowsResponse ----
+
+    #[test]
+    fn workflows_response_deserialize() {
+        let json = json!({
+            "total_count": 2,
+            "workflows": [
+                {
+                    "id": 1,
+                    "name": "CI",
+                    "path": ".github/workflows/ci.yml",
+                    "state": "active",
+                    "created_at": "2026-01-01",
+                    "updated_at": "2026-03-01"
+                },
+                {
+                    "id": 2,
+                    "name": "CD",
+                    "path": ".github/workflows/cd.yml",
+                    "state": "active",
+                    "created_at": "2026-01-01",
+                    "updated_at": "2026-03-01"
+                }
+            ]
+        });
+        let resp: WorkflowsResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.total_count, 2);
+        assert_eq!(resp.workflows.len(), 2);
+        assert_eq!(resp.workflows[0].name, "CI");
+    }
+
+    #[test]
+    fn workflows_response_empty() {
+        let json = json!({
+            "total_count": 0,
+            "workflows": []
+        });
+        let resp: WorkflowsResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.total_count, 0);
+        assert!(resp.workflows.is_empty());
+    }
+
+    // ---- User edge cases ----
+
+    #[test]
+    fn user_clone_debug() {
+        let user = User {
+            login: "alice".into(),
+            id: 42,
+            avatar_url: "https://example.com/avatar.png".into(),
+            user_type: "User".into(),
+        };
+        let cloned = user.clone();
+        assert_eq!(cloned.login, "alice");
+        assert_eq!(cloned.id, 42);
+        let debug = format!("{user:?}");
+        assert!(debug.contains("alice"));
+    }
+
+    #[test]
+    fn user_type_field_rename() {
+        let user = User {
+            login: "bot".into(),
+            id: 1,
+            avatar_url: String::new(),
+            user_type: "Bot".into(),
+        };
+        let json = serde_json::to_value(&user).unwrap();
+        // Should serialize as "type", not "user_type"
+        assert_eq!(json["type"], "Bot");
+        assert!(json.get("user_type").is_none());
+    }
+
+    #[test]
+    fn user_roundtrip_preserves_all_fields() {
+        let user = User {
+            login: "octocat".into(),
+            id: 123_456,
+            avatar_url: "https://avatars.example.com/u/123456".into(),
+            user_type: "Organization".into(),
+        };
+        let json_str = serde_json::to_string(&user).unwrap();
+        let back: User = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(back.login, user.login);
+        assert_eq!(back.id, user.id);
+        assert_eq!(back.avatar_url, user.avatar_url);
+        assert_eq!(back.user_type, user.user_type);
+    }
+
+    // ---- Label edge cases ----
+
+    #[test]
+    fn label_without_description() {
+        let json = json!({"id": 1, "name": "enhancement", "color": "a2eeef"});
+        let label: Label = serde_json::from_value(json).unwrap();
+        assert!(label.description.is_none());
+        assert_eq!(label.color, "a2eeef");
+    }
+
+    #[test]
+    fn label_with_empty_color_default() {
+        let json = json!({"id": 1, "name": "bug"});
+        let label: Label = serde_json::from_value(json).unwrap();
+        assert_eq!(label.color, "");
+    }
+
+    #[test]
+    fn label_clone_debug() {
+        let label = Label {
+            id: 5,
+            name: "priority:high".into(),
+            color: "ff0000".into(),
+            description: Some("High priority".into()),
+        };
+        let cloned = label.clone();
+        assert_eq!(cloned.name, "priority:high");
+        let debug = format!("{label:?}");
+        assert!(debug.contains("priority:high"));
+    }
+
+    #[test]
+    fn label_roundtrip() {
+        let label = Label {
+            id: 10,
+            name: "wontfix".into(),
+            color: "ffffff".into(),
+            description: None,
+        };
+        let json = serde_json::to_string(&label).unwrap();
+        let back: Label = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.id, 10);
+        assert_eq!(back.name, "wontfix");
+        assert!(back.description.is_none());
+    }
+
+    // ---- Milestone ----
+
+    #[test]
+    fn milestone_serde_roundtrip() {
+        let ms = Milestone {
+            id: 1,
+            number: 3,
+            title: "v1.0".into(),
+            state: "open".into(),
+        };
+        let json = serde_json::to_string(&ms).unwrap();
+        let back: Milestone = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.number, 3);
+        assert_eq!(back.title, "v1.0");
+    }
+
+    #[test]
+    fn milestone_clone_debug() {
+        let ms = Milestone {
+            id: 2,
+            number: 5,
+            title: "v2.0".into(),
+            state: "closed".into(),
+        };
+        let cloned = ms.clone();
+        assert_eq!(cloned.state, "closed");
+        let debug = format!("{ms:?}");
+        assert!(debug.contains("v2.0"));
+    }
+
+    // ---- Issue edge cases ----
+
+    #[test]
+    fn issue_with_all_optional_fields() {
+        let json = json!({
+            "id": 100,
+            "number": 99,
+            "title": "Full issue",
+            "state": "closed",
+            "body": "This is the body",
+            "user": {"login": "alice", "id": 10, "avatar_url": "https://a.com/img.png", "type": "User"},
+            "labels": [{"id": 1, "name": "bug", "color": "d73a4a"}],
+            "assignees": [{"login": "bob", "id": 20}],
+            "milestone": {"id": 1, "number": 1, "title": "v1.0", "state": "open"},
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-03-01T00:00:00Z",
+            "closed_at": "2026-03-02T00:00:00Z",
+            "html_url": "https://github.com/org/repo/issues/99",
+            "comments": 5
+        });
+        let issue: Issue = serde_json::from_value(json).unwrap();
+        assert_eq!(issue.body.as_deref(), Some("This is the body"));
+        assert_eq!(issue.labels.len(), 1);
+        assert_eq!(issue.labels[0].name, "bug");
+        assert_eq!(issue.assignees.len(), 1);
+        assert_eq!(issue.assignees[0].login, "bob");
+        assert!(issue.milestone.is_some());
+        assert_eq!(issue.milestone.unwrap().title, "v1.0");
+        assert_eq!(issue.closed_at.as_deref(), Some("2026-03-02T00:00:00Z"));
+        assert_eq!(issue.comments, 5);
+    }
+
+    #[test]
+    fn issue_clone_debug() {
+        let json = json!({
+            "id": 1,
+            "number": 1,
+            "title": "Test",
+            "state": "open",
+            "user": {"login": "a", "id": 1},
+            "created_at": "2026-01-01",
+            "updated_at": "2026-01-01",
+            "html_url": "https://github.com/a/b/issues/1"
+        });
+        let issue: Issue = serde_json::from_value(json).unwrap();
+        let cloned = issue.clone();
+        assert_eq!(cloned.title, "Test");
+        let debug = format!("{issue:?}");
+        assert!(debug.contains("Test"));
+    }
+
+    #[test]
+    fn issue_roundtrip() {
+        let json = json!({
+            "id": 50,
+            "number": 10,
+            "title": "Roundtrip test",
+            "state": "open",
+            "user": {"login": "dev", "id": 7, "avatar_url": "", "type": "User"},
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-02T00:00:00Z",
+            "html_url": "https://github.com/org/repo/issues/10"
+        });
+        let issue: Issue = serde_json::from_value(json).unwrap();
+        let serialized = serde_json::to_string(&issue).unwrap();
+        let back: Issue = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(back.number, 10);
+        assert_eq!(back.title, "Roundtrip test");
+        assert_eq!(back.user.login, "dev");
+    }
+
+    // ---- PullRequest edge cases ----
+
+    #[test]
+    fn pull_request_with_all_optional_fields() {
+        let json = json!({
+            "id": 200,
+            "number": 15,
+            "title": "Full PR",
+            "state": "closed",
+            "body": "PR body text",
+            "user": {"login": "dev", "id": 20, "avatar_url": "", "type": "User"},
+            "head": {"label": "dev:feature", "ref": "feature", "sha": "aaa111"},
+            "base": {"label": "org:main", "ref": "main", "sha": "bbb222"},
+            "labels": [{"id": 1, "name": "enhancement", "color": "84b6eb"}],
+            "assignees": [{"login": "reviewer", "id": 30}],
+            "merged": true,
+            "mergeable": true,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-02-01T00:00:00Z",
+            "merged_at": "2026-02-01T12:00:00Z",
+            "closed_at": "2026-02-01T12:00:00Z",
+            "html_url": "https://github.com/org/repo/pull/15",
+            "draft": false,
+            "additions": 100,
+            "deletions": 50,
+            "changed_files": 10
+        });
+        let pr: PullRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(pr.body.as_deref(), Some("PR body text"));
+        assert!(pr.merged);
+        assert_eq!(pr.mergeable, Some(true));
+        assert_eq!(pr.merged_at.as_deref(), Some("2026-02-01T12:00:00Z"));
+        assert_eq!(pr.additions, 100);
+        assert_eq!(pr.deletions, 50);
+        assert_eq!(pr.changed_files, 10);
+        assert_eq!(pr.labels.len(), 1);
+        assert_eq!(pr.assignees.len(), 1);
+    }
+
+    #[test]
+    fn pull_request_mergeable_null() {
+        let json = json!({
+            "id": 201,
+            "number": 16,
+            "title": "PR with null mergeable",
+            "state": "open",
+            "user": {"login": "dev", "id": 20},
+            "head": {"label": "dev:branch", "ref": "branch", "sha": "ccc"},
+            "base": {"label": "org:main", "ref": "main", "sha": "ddd"},
+            "created_at": "2026-01-01",
+            "updated_at": "2026-01-01",
+            "html_url": "https://github.com/org/repo/pull/16",
+            "mergeable": null
+        });
+        let pr: PullRequest = serde_json::from_value(json).unwrap();
+        assert!(pr.mergeable.is_none());
+    }
+
+    #[test]
+    fn pull_request_clone_debug() {
+        let json = json!({
+            "id": 300,
+            "number": 20,
+            "title": "Clone test PR",
+            "state": "open",
+            "user": {"login": "dev", "id": 1},
+            "head": {"label": "dev:b", "ref": "b", "sha": "aaa"},
+            "base": {"label": "org:main", "ref": "main", "sha": "bbb"},
+            "created_at": "2026-01-01",
+            "updated_at": "2026-01-01",
+            "html_url": "https://github.com/org/repo/pull/20"
+        });
+        let pr: PullRequest = serde_json::from_value(json).unwrap();
+        let cloned = pr.clone();
+        assert_eq!(cloned.number, 20);
+        let debug = format!("{pr:?}");
+        assert!(debug.contains("Clone test PR"));
+    }
+
+    #[test]
+    fn pull_request_roundtrip() {
+        let json = json!({
+            "id": 400,
+            "number": 25,
+            "title": "Roundtrip PR",
+            "state": "open",
+            "user": {"login": "dev", "id": 1, "avatar_url": "", "type": "User"},
+            "head": {"label": "dev:feat", "ref": "feat", "sha": "111"},
+            "base": {"label": "org:main", "ref": "main", "sha": "222"},
+            "created_at": "2026-01-01",
+            "updated_at": "2026-01-01",
+            "html_url": "https://github.com/org/repo/pull/25",
+            "draft": true
+        });
+        let pr: PullRequest = serde_json::from_value(json).unwrap();
+        let serialized = serde_json::to_string(&pr).unwrap();
+        let back: PullRequest = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(back.number, 25);
+        assert!(back.draft);
+        assert_eq!(back.head.ref_name, "feat");
+    }
+
+    // ---- PullRequestRef ----
+
+    #[test]
+    fn pull_request_ref_serde() {
+        let pr_ref = PullRequestRef {
+            label: "owner:branch-name".into(),
+            ref_name: "branch-name".into(),
+            sha: "deadbeef".into(),
+        };
+        let json = serde_json::to_value(&pr_ref).unwrap();
+        // "ref_name" should serialize as "ref"
+        assert_eq!(json["ref"], "branch-name");
+        assert!(json.get("ref_name").is_none());
+        let back: PullRequestRef = serde_json::from_value(json).unwrap();
+        assert_eq!(back.ref_name, "branch-name");
+    }
+
+    #[test]
+    fn pull_request_ref_clone_debug() {
+        let pr_ref = PullRequestRef {
+            label: "a:b".into(),
+            ref_name: "b".into(),
+            sha: "abc".into(),
+        };
+        let cloned = pr_ref.clone();
+        assert_eq!(cloned.sha, "abc");
+        let debug = format!("{pr_ref:?}");
+        assert!(debug.contains("abc"));
+    }
+
+    // ---- Repository edge cases ----
+
+    #[test]
+    fn repository_with_all_optional_fields() {
+        let json = json!({
+            "id": 1000,
+            "name": "full-repo",
+            "full_name": "org/full-repo",
+            "owner": {"login": "org", "id": 100, "avatar_url": "", "type": "Organization"},
+            "description": "A complete repository",
+            "private": true,
+            "fork": true,
+            "html_url": "https://github.com/org/full-repo",
+            "default_branch": "develop",
+            "language": "Rust",
+            "stargazers_count": 1000,
+            "forks_count": 200,
+            "open_issues_count": 15,
+            "created_at": "2025-01-01",
+            "updated_at": "2026-03-01"
+        });
+        let repo: Repository = serde_json::from_value(json).unwrap();
+        assert_eq!(repo.description.as_deref(), Some("A complete repository"));
+        assert!(repo.private);
+        assert!(repo.fork);
+        assert_eq!(repo.language.as_deref(), Some("Rust"));
+        assert_eq!(repo.stargazers_count, 1000);
+        assert_eq!(repo.forks_count, 200);
+        assert_eq!(repo.open_issues_count, 15);
+        assert_eq!(repo.default_branch, "develop");
+    }
+
+    #[test]
+    fn repository_clone_debug() {
+        let json = json!({
+            "id": 1,
+            "name": "test",
+            "full_name": "org/test",
+            "owner": {"login": "org", "id": 1},
+            "html_url": "https://github.com/org/test",
+            "default_branch": "main",
+            "created_at": "2026-01-01",
+            "updated_at": "2026-01-01"
+        });
+        let repo: Repository = serde_json::from_value(json).unwrap();
+        let cloned = repo.clone();
+        assert_eq!(cloned.name, "test");
+        let debug = format!("{repo:?}");
+        assert!(debug.contains("org/test"));
+    }
+
+    #[test]
+    fn repository_roundtrip() {
+        let json = json!({
+            "id": 5,
+            "name": "round",
+            "full_name": "org/round",
+            "owner": {"login": "org", "id": 1, "avatar_url": "", "type": "User"},
+            "html_url": "https://github.com/org/round",
+            "default_branch": "main",
+            "created_at": "2026-01-01",
+            "updated_at": "2026-01-01"
+        });
+        let repo: Repository = serde_json::from_value(json).unwrap();
+        let serialized = serde_json::to_string(&repo).unwrap();
+        let back: Repository = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(back.full_name, "org/round");
+        assert!(!back.private);
+        assert!(back.description.is_none());
+    }
+
+    // ---- FileContent edge cases ----
+
+    #[test]
+    fn file_content_without_content() {
+        let json = json!({
+            "name": "src",
+            "path": "src",
+            "sha": "abc123",
+            "size": 0,
+            "type": "dir",
+            "html_url": "https://github.com/org/repo/tree/main/src"
+        });
+        let fc: FileContent = serde_json::from_value(json).unwrap();
+        assert!(fc.content.is_none());
+        assert!(fc.encoding.is_none());
+        assert_eq!(fc.content_type, "dir");
+        assert_eq!(fc.size, 0);
+    }
+
+    #[test]
+    fn file_content_clone_debug() {
+        let fc = FileContent {
+            name: "lib.rs".into(),
+            path: "src/lib.rs".into(),
+            sha: "aabbcc".into(),
+            size: 512,
+            content_type: "file".into(),
+            content: Some("base64data".into()),
+            encoding: Some("base64".into()),
+            html_url: "https://github.com/org/repo/blob/main/src/lib.rs".into(),
+        };
+        let cloned = fc.clone();
+        assert_eq!(cloned.name, "lib.rs");
+        let debug = format!("{fc:?}");
+        assert!(debug.contains("lib.rs"));
+    }
+
+    #[test]
+    fn file_content_roundtrip() {
+        let fc = FileContent {
+            name: "README.md".into(),
+            path: "README.md".into(),
+            sha: "deadbeef".into(),
+            size: 2048,
+            content_type: "file".into(),
+            content: Some("SGVsbG8gV29ybGQ=".into()),
+            encoding: Some("base64".into()),
+            html_url: "https://github.com/org/repo/blob/main/README.md".into(),
+        };
+        let serialized = serde_json::to_string(&fc).unwrap();
+        let back: FileContent = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(back.name, "README.md");
+        assert_eq!(back.content.as_deref(), Some("SGVsbG8gV29ybGQ="));
+        assert_eq!(back.content_type, "file");
+    }
+
+    // ---- CodeSearchItem + CodeSearchRepo ----
+
+    #[test]
+    fn code_search_item_serde() {
+        let json = json!({
+            "name": "main.rs",
+            "path": "src/main.rs",
+            "sha": "abc123",
+            "html_url": "https://github.com/org/repo/blob/main/src/main.rs",
+            "repository": {
+                "id": 1,
+                "name": "repo",
+                "full_name": "org/repo",
+                "html_url": "https://github.com/org/repo"
+            }
+        });
+        let item: CodeSearchItem = serde_json::from_value(json).unwrap();
+        assert_eq!(item.name, "main.rs");
+        assert_eq!(item.repository.full_name, "org/repo");
+    }
+
+    #[test]
+    fn code_search_item_clone_debug() {
+        let item = CodeSearchItem {
+            name: "test.rs".into(),
+            path: "tests/test.rs".into(),
+            sha: "ff00ff".into(),
+            html_url: "https://github.com/a/b/blob/main/tests/test.rs".into(),
+            repository: CodeSearchRepo {
+                id: 42,
+                name: "b".into(),
+                full_name: "a/b".into(),
+                html_url: "https://github.com/a/b".into(),
+            },
+        };
+        let cloned = item.clone();
+        assert_eq!(cloned.repository.id, 42);
+        let debug = format!("{item:?}");
+        assert!(debug.contains("test.rs"));
+    }
+
+    #[test]
+    fn code_search_item_roundtrip() {
+        let item = CodeSearchItem {
+            name: "lib.rs".into(),
+            path: "src/lib.rs".into(),
+            sha: "aabbcc".into(),
+            html_url: "https://github.com/o/r/blob/main/src/lib.rs".into(),
+            repository: CodeSearchRepo {
+                id: 10,
+                name: "r".into(),
+                full_name: "o/r".into(),
+                html_url: "https://github.com/o/r".into(),
+            },
+        };
+        let serialized = serde_json::to_string(&item).unwrap();
+        let back: CodeSearchItem = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(back.path, "src/lib.rs");
+        assert_eq!(back.repository.name, "r");
+    }
+
+    #[test]
+    fn code_search_repo_clone_debug() {
+        let repo = CodeSearchRepo {
+            id: 7,
+            name: "project".into(),
+            full_name: "user/project".into(),
+            html_url: "https://github.com/user/project".into(),
+        };
+        let cloned = repo.clone();
+        assert_eq!(cloned.full_name, "user/project");
+        let debug = format!("{repo:?}");
+        assert!(debug.contains("user/project"));
+    }
+
+    // ---- SearchResults edge cases ----
+
+    #[test]
+    fn search_results_empty() {
+        let json = json!({
+            "total_count": 0,
+            "incomplete_results": false,
+            "items": []
+        });
+        let results: SearchResults<Issue> = serde_json::from_value(json).unwrap();
+        assert_eq!(results.total_count, 0);
+        assert!(results.items.is_empty());
+    }
+
+    #[test]
+    fn search_results_incomplete() {
+        let json = json!({
+            "total_count": 10000,
+            "incomplete_results": true,
+            "items": []
+        });
+        let results: SearchResults<Repository> = serde_json::from_value(json).unwrap();
+        assert!(results.incomplete_results);
+        assert_eq!(results.total_count, 10000);
+    }
+
+    #[test]
+    fn search_results_clone_debug() {
+        let json = json!({
+            "total_count": 1,
+            "incomplete_results": false,
+            "items": [{
+                "id": 1, "name": "r", "full_name": "o/r",
+                "owner": {"login": "o", "id": 1},
+                "html_url": "https://github.com/o/r",
+                "default_branch": "main",
+                "created_at": "2026-01-01",
+                "updated_at": "2026-01-01"
+            }]
+        });
+        let results: SearchResults<Repository> = serde_json::from_value(json).unwrap();
+        let cloned = results.clone();
+        assert_eq!(cloned.items.len(), 1);
+        let debug = format!("{results:?}");
+        assert!(debug.contains("total_count"));
+    }
+
+    // ---- ApiErrorResponse edge cases ----
+
+    #[test]
+    fn api_error_response_minimal() {
+        let json = json!({"message": "Something went wrong"});
+        let err: ApiErrorResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(err.message, "Something went wrong");
+        assert!(err.documentation_url.is_none());
+        assert!(err.errors.is_none());
+    }
+
+    #[test]
+    fn api_error_response_clone_debug() {
+        let err = ApiErrorResponse {
+            message: "Not Found".into(),
+            documentation_url: Some("https://docs.github.com/".into()),
+            errors: None,
+        };
+        let cloned = err.clone();
+        assert_eq!(cloned.message, "Not Found");
+        let debug = format!("{err:?}");
+        assert!(debug.contains("Not Found"));
+    }
+
+    #[test]
+    fn api_error_response_with_multiple_errors() {
+        let json = json!({
+            "message": "Validation Failed",
+            "errors": [
+                {"resource": "Issue", "field": "title", "code": "missing_field"},
+                {"resource": "Issue", "field": "body", "code": "too_long", "message": "Body is too long"}
+            ]
+        });
+        let err: ApiErrorResponse = serde_json::from_value(json).unwrap();
+        let errors = err.errors.unwrap();
+        assert_eq!(errors.len(), 2);
+        assert_eq!(errors[0].field.as_deref(), Some("title"));
+        assert_eq!(errors[1].message.as_deref(), Some("Body is too long"));
+    }
+
+    // ---- ApiValidationError ----
+
+    #[test]
+    fn api_validation_error_all_none() {
+        let json = json!({});
+        let err: ApiValidationError = serde_json::from_value(json).unwrap();
+        assert!(err.resource.is_none());
+        assert!(err.field.is_none());
+        assert!(err.code.is_none());
+        assert!(err.message.is_none());
+    }
+
+    #[test]
+    fn api_validation_error_clone_debug() {
+        let err = ApiValidationError {
+            resource: Some("PullRequest".into()),
+            field: Some("head".into()),
+            code: Some("invalid".into()),
+            message: Some("Head does not exist".into()),
+        };
+        let cloned = err.clone();
+        assert_eq!(cloned.resource.as_deref(), Some("PullRequest"));
+        let debug = format!("{err:?}");
+        assert!(debug.contains("PullRequest"));
+    }
+
+    // ---- CreateIssueRequest edge cases ----
+
+    #[test]
+    fn create_issue_request_with_all_fields() {
+        let req = CreateIssueRequest {
+            title: "Full issue".into(),
+            body: Some("Body text".into()),
+            assignees: Some(vec!["alice".into(), "bob".into()]),
+            labels: Some(vec!["bug".into(), "urgent".into()]),
+            milestone: Some(5),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"body\":\"Body text\""));
+        assert!(json.contains("\"assignees\""));
+        assert!(json.contains("\"labels\""));
+        assert!(json.contains("\"milestone\":5"));
+    }
+
+    #[test]
+    fn create_issue_request_skip_serializing_none() {
+        let req = CreateIssueRequest {
+            title: "Minimal".into(),
+            body: None,
+            assignees: None,
+            labels: None,
+            milestone: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(!json.contains("body"));
+        assert!(!json.contains("assignees"));
+        assert!(!json.contains("labels"));
+        assert!(!json.contains("milestone"));
+        // Only title should remain
+        let val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(val.as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn create_issue_request_clone_debug() {
+        let req = CreateIssueRequest {
+            title: "Test".into(),
+            body: None,
+            assignees: None,
+            labels: None,
+            milestone: None,
+        };
+        let cloned = req.clone();
+        assert_eq!(cloned.title, "Test");
+        let debug = format!("{req:?}");
+        assert!(debug.contains("Test"));
+    }
+
+    // ---- CreatePullRequestRequest edge cases ----
+
+    #[test]
+    fn create_pr_request_minimal() {
+        let req = CreatePullRequestRequest {
+            title: "PR".into(),
+            head: "feature".into(),
+            base: "main".into(),
+            body: None,
+            draft: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(!json.contains("body"));
+        assert!(!json.contains("draft"));
+        let val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(val.as_object().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn create_pr_request_with_all_fields() {
+        let req = CreatePullRequestRequest {
+            title: "Feature PR".into(),
+            head: "feat-branch".into(),
+            base: "develop".into(),
+            body: Some("Adds a new feature".into()),
+            draft: Some(false),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"body\":\"Adds a new feature\""));
+        assert!(json.contains("\"draft\":false"));
+    }
+
+    #[test]
+    fn create_pr_request_clone_debug() {
+        let req = CreatePullRequestRequest {
+            title: "T".into(),
+            head: "h".into(),
+            base: "b".into(),
+            body: None,
+            draft: None,
+        };
+        let cloned = req.clone();
+        assert_eq!(cloned.head, "h");
+        let debug = format!("{req:?}");
+        assert!(debug.contains("\"h\""));
+    }
+
+    // ---- MergePullRequestRequest edge cases ----
+
+    #[test]
+    fn merge_pr_request_with_all_fields() {
+        let req = MergePullRequestRequest {
+            commit_title: Some("Merge PR #5".into()),
+            commit_message: Some("Merging feature branch".into()),
+            merge_method: Some("squash".into()),
+            sha: Some("abc123".into()),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"commit_title\":\"Merge PR #5\""));
+        assert!(json.contains("\"merge_method\":\"squash\""));
+        assert!(json.contains("\"sha\":\"abc123\""));
+    }
+
+    #[test]
+    fn merge_pr_request_skip_serializing_none() {
+        let req = MergePullRequestRequest {
+            commit_title: None,
+            commit_message: None,
+            merge_method: None,
+            sha: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(json, "{}");
+    }
+
+    #[test]
+    fn merge_pr_request_partial_fields() {
+        let req = MergePullRequestRequest {
+            commit_title: None,
+            commit_message: None,
+            merge_method: Some("rebase".into()),
+            sha: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("merge_method"));
+        assert!(!json.contains("commit_title"));
+        assert!(!json.contains("sha"));
+    }
+
+    #[test]
+    fn merge_pr_request_clone_debug() {
+        let req = MergePullRequestRequest {
+            commit_title: Some("title".into()),
+            commit_message: None,
+            merge_method: None,
+            sha: None,
+        };
+        let cloned = req.clone();
+        assert_eq!(cloned.commit_title.as_deref(), Some("title"));
+        let debug = format!("{req:?}");
+        assert!(debug.contains("title"));
     }
 }

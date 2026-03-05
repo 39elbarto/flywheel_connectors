@@ -97,6 +97,8 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    // ── Collection ─────────────────────────────────────────────────────
+
     #[test]
     fn collection_serde() {
         let c = Collection {
@@ -106,6 +108,65 @@ mod tests {
         let back: Collection = serde_json::from_str(&json_str).unwrap();
         assert_eq!(back.name, "my_collection");
     }
+
+    #[test]
+    fn collection_roundtrip() {
+        let c = Collection {
+            name: "roundtrip_test".into(),
+        };
+        let val = serde_json::to_value(&c).unwrap();
+        let back: Collection = serde_json::from_value(val).unwrap();
+        assert_eq!(back.name, c.name);
+    }
+
+    #[test]
+    fn collection_clone() {
+        let c = Collection {
+            name: "original".into(),
+        };
+        let cloned = c.clone();
+        assert_eq!(cloned.name, "original");
+        assert_eq!(c.name, "original");
+    }
+
+    #[test]
+    fn collection_debug() {
+        let c = Collection {
+            name: "debug_test".into(),
+        };
+        let debug = format!("{c:?}");
+        assert!(debug.contains("Collection"));
+        assert!(debug.contains("debug_test"));
+    }
+
+    #[test]
+    fn collection_empty_name() {
+        let c = Collection {
+            name: String::new(),
+        };
+        let json_str = serde_json::to_string(&c).unwrap();
+        let back: Collection = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(back.name, "");
+    }
+
+    #[test]
+    fn collection_unicode_name() {
+        let c = Collection {
+            name: "коллекция_日本語".into(),
+        };
+        let json_str = serde_json::to_string(&c).unwrap();
+        let back: Collection = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(back.name, "коллекция_日本語");
+    }
+
+    #[test]
+    fn collection_deserialize_extra_fields_ignored() {
+        let json = json!({"name": "test", "extra": 42});
+        let c: Collection = serde_json::from_value(json).unwrap();
+        assert_eq!(c.name, "test");
+    }
+
+    // ── CollectionInfo ─────────────────────────────────────────────────
 
     #[test]
     fn collection_info_serde() {
@@ -120,6 +181,107 @@ mod tests {
         assert_eq!(info.vectors_count, Some(1000));
         assert!(info.optimizer_status.is_none());
     }
+
+    #[test]
+    fn collection_info_all_none_optionals() {
+        let json = json!({"status": "yellow"});
+        let info: CollectionInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(info.status, "yellow");
+        assert!(info.optimizer_status.is_none());
+        assert!(info.vectors_count.is_none());
+        assert!(info.indexed_vectors_count.is_none());
+        assert!(info.points_count.is_none());
+        assert!(info.segments_count.is_none());
+        assert!(info.config.is_none());
+    }
+
+    #[test]
+    fn collection_info_all_fields_present() {
+        let json = json!({
+            "status": "green",
+            "optimizer_status": {"status": "ok"},
+            "vectors_count": 2000,
+            "indexed_vectors_count": 1500,
+            "points_count": 1000,
+            "segments_count": 4,
+            "config": {"params": {"vectors": {"size": 768}}}
+        });
+        let info: CollectionInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(info.status, "green");
+        assert!(info.optimizer_status.is_some());
+        assert_eq!(info.vectors_count, Some(2000));
+        assert_eq!(info.indexed_vectors_count, Some(1500));
+        assert_eq!(info.points_count, Some(1000));
+        assert_eq!(info.segments_count, Some(4));
+        assert!(info.config.is_some());
+    }
+
+    #[test]
+    fn collection_info_roundtrip() {
+        let info = CollectionInfo {
+            status: "green".into(),
+            optimizer_status: Some(json!({"status": "ok"})),
+            vectors_count: Some(100),
+            indexed_vectors_count: Some(90),
+            points_count: Some(50),
+            segments_count: Some(1),
+            config: Some(json!({"key": "val"})),
+        };
+        let val = serde_json::to_value(&info).unwrap();
+        let back: CollectionInfo = serde_json::from_value(val).unwrap();
+        assert_eq!(back.status, "green");
+        assert_eq!(back.vectors_count, Some(100));
+        assert_eq!(back.indexed_vectors_count, Some(90));
+    }
+
+    #[test]
+    fn collection_info_clone() {
+        let info = CollectionInfo {
+            status: "green".into(),
+            optimizer_status: None,
+            vectors_count: Some(42),
+            indexed_vectors_count: None,
+            points_count: None,
+            segments_count: None,
+            config: None,
+        };
+        let cloned = info.clone();
+        assert_eq!(cloned.status, "green");
+        assert_eq!(cloned.vectors_count, Some(42));
+        assert_eq!(info.status, "green");
+    }
+
+    #[test]
+    fn collection_info_debug() {
+        let info = CollectionInfo {
+            status: "red".into(),
+            optimizer_status: None,
+            vectors_count: None,
+            indexed_vectors_count: None,
+            points_count: None,
+            segments_count: None,
+            config: None,
+        };
+        let debug = format!("{info:?}");
+        assert!(debug.contains("CollectionInfo"));
+        assert!(debug.contains("red"));
+    }
+
+    #[test]
+    fn collection_info_zero_counts() {
+        let json = json!({
+            "status": "green",
+            "vectors_count": 0,
+            "points_count": 0,
+            "segments_count": 0
+        });
+        let info: CollectionInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(info.vectors_count, Some(0));
+        assert_eq!(info.points_count, Some(0));
+        assert_eq!(info.segments_count, Some(0));
+    }
+
+    // ── Point ──────────────────────────────────────────────────────────
 
     #[test]
     fn point_serde_skip_none() {
@@ -147,6 +309,137 @@ mod tests {
     }
 
     #[test]
+    fn point_skip_serializing_vector_none() {
+        let p = Point {
+            id: json!(1),
+            vector: None,
+            payload: Some(json!({"key": "val"})),
+        };
+        let val = serde_json::to_value(&p).unwrap();
+        assert!(val.get("vector").is_none());
+        assert!(val.get("payload").is_some());
+    }
+
+    #[test]
+    fn point_skip_serializing_payload_none() {
+        let p = Point {
+            id: json!(1),
+            vector: Some(json!([1.0, 2.0])),
+            payload: None,
+        };
+        let val = serde_json::to_value(&p).unwrap();
+        assert!(val.get("vector").is_some());
+        assert!(val.get("payload").is_none());
+    }
+
+    #[test]
+    fn point_both_optional_present() {
+        let p = Point {
+            id: json!(99),
+            vector: Some(json!([0.5])),
+            payload: Some(json!({"x": 1})),
+        };
+        let val = serde_json::to_value(&p).unwrap();
+        assert!(val.get("vector").is_some());
+        assert!(val.get("payload").is_some());
+        assert_eq!(val["id"], 99);
+    }
+
+    #[test]
+    fn point_roundtrip_with_all_fields() {
+        let p = Point {
+            id: json!({"uuid": "abc-def"}),
+            vector: Some(json!([0.1, 0.2, 0.3, 0.4])),
+            payload: Some(json!({"category": "test", "score": 0.99})),
+        };
+        let json_str = serde_json::to_string(&p).unwrap();
+        let back: Point = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(back.id, json!({"uuid": "abc-def"}));
+        assert_eq!(back.vector.unwrap().as_array().unwrap().len(), 4);
+        assert_eq!(back.payload.unwrap()["category"], "test");
+    }
+
+    #[test]
+    fn point_integer_id() {
+        let p = Point {
+            id: json!(12345),
+            vector: None,
+            payload: None,
+        };
+        let val = serde_json::to_value(&p).unwrap();
+        assert_eq!(val["id"], 12345);
+    }
+
+    #[test]
+    fn point_string_id() {
+        let p = Point {
+            id: json!("string-id-value"),
+            vector: None,
+            payload: None,
+        };
+        let val = serde_json::to_value(&p).unwrap();
+        assert_eq!(val["id"], "string-id-value");
+    }
+
+    #[test]
+    fn point_clone() {
+        let p = Point {
+            id: json!(42),
+            vector: Some(json!([1.0])),
+            payload: Some(json!({"a": "b"})),
+        };
+        let cloned = p.clone();
+        assert_eq!(cloned.id, json!(42));
+        assert_eq!(cloned.vector, Some(json!([1.0])));
+        assert_eq!(p.id, json!(42));
+    }
+
+    #[test]
+    fn point_debug() {
+        let p = Point {
+            id: json!(7),
+            vector: None,
+            payload: None,
+        };
+        let debug = format!("{p:?}");
+        assert!(debug.contains("Point"));
+    }
+
+    #[test]
+    fn point_deserialize_missing_optionals() {
+        let json = json!({"id": 42});
+        let p: Point = serde_json::from_value(json).unwrap();
+        assert_eq!(p.id, json!(42));
+        assert!(p.vector.is_none());
+        assert!(p.payload.is_none());
+    }
+
+    #[test]
+    fn point_deserialize_explicit_null_optionals() {
+        let json = json!({"id": 1, "vector": null, "payload": null});
+        let p: Point = serde_json::from_value(json).unwrap();
+        assert!(p.vector.is_none());
+        assert!(p.payload.is_none());
+    }
+
+    #[test]
+    fn point_named_vectors() {
+        // Qdrant supports named vectors as an object
+        let p = Point {
+            id: json!(1),
+            vector: Some(json!({"text": [0.1, 0.2], "image": [0.3, 0.4, 0.5]})),
+            payload: None,
+        };
+        let val = serde_json::to_value(&p).unwrap();
+        let back: Point = serde_json::from_value(val).unwrap();
+        let vec_val = back.vector.unwrap();
+        assert!(vec_val.get("text").is_some());
+        assert!(vec_val.get("image").is_some());
+    }
+
+    // ── SearchResult ───────────────────────────────────────────────────
+
+    #[test]
     fn search_result_serde() {
         let json = json!({
             "id": 1,
@@ -160,12 +453,181 @@ mod tests {
     }
 
     #[test]
+    fn search_result_all_optionals_missing() {
+        let json = json!({"id": 1, "score": 0.5});
+        let sr: SearchResult = serde_json::from_value(json).unwrap();
+        assert!(sr.version.is_none());
+        assert!(sr.payload.is_none());
+        assert!(sr.vector.is_none());
+    }
+
+    #[test]
+    fn search_result_all_fields_present() {
+        let json = json!({
+            "id": "abc",
+            "score": 0.99,
+            "version": 7,
+            "payload": {"key": "value"},
+            "vector": [0.1, 0.2, 0.3]
+        });
+        let sr: SearchResult = serde_json::from_value(json).unwrap();
+        assert_eq!(sr.id, json!("abc"));
+        assert!((sr.score - 0.99).abs() < f64::EPSILON);
+        assert_eq!(sr.version, Some(7));
+        assert!(sr.payload.is_some());
+        assert!(sr.vector.is_some());
+    }
+
+    #[test]
+    fn search_result_skip_serializing_none_fields() {
+        let sr = SearchResult {
+            id: json!(1),
+            version: None,
+            score: 0.8,
+            payload: None,
+            vector: None,
+        };
+        let val = serde_json::to_value(&sr).unwrap();
+        assert!(val.get("payload").is_none());
+        assert!(val.get("vector").is_none());
+        // version is not skip_serializing_if, so it should be present as null
+        assert!(val.get("version").is_some());
+    }
+
+    #[test]
+    fn search_result_roundtrip() {
+        let sr = SearchResult {
+            id: json!(42),
+            version: Some(5),
+            score: 0.777,
+            payload: Some(json!({"data": true})),
+            vector: Some(json!([0.5, 0.6])),
+        };
+        let json_str = serde_json::to_string(&sr).unwrap();
+        let back: SearchResult = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(back.id, json!(42));
+        assert!((back.score - 0.777).abs() < f64::EPSILON);
+        assert_eq!(back.version, Some(5));
+    }
+
+    #[test]
+    fn search_result_clone() {
+        let sr = SearchResult {
+            id: json!(1),
+            version: Some(1),
+            score: 0.5,
+            payload: None,
+            vector: None,
+        };
+        let cloned = sr.clone();
+        assert_eq!(cloned.id, json!(1));
+        assert!((cloned.score - 0.5).abs() < f64::EPSILON);
+        assert_eq!(sr.version, Some(1));
+    }
+
+    #[test]
+    fn search_result_debug() {
+        let sr = SearchResult {
+            id: json!(1),
+            version: None,
+            score: 0.1,
+            payload: None,
+            vector: None,
+        };
+        let debug = format!("{sr:?}");
+        assert!(debug.contains("SearchResult"));
+    }
+
+    #[test]
+    fn search_result_negative_score() {
+        let json = json!({"id": 1, "score": -0.5});
+        let sr: SearchResult = serde_json::from_value(json).unwrap();
+        assert!((sr.score - (-0.5)).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn search_result_zero_score() {
+        let json = json!({"id": 1, "score": 0.0});
+        let sr: SearchResult = serde_json::from_value(json).unwrap();
+        assert!((sr.score).abs() < f64::EPSILON);
+    }
+
+    // ── ScrollResult ───────────────────────────────────────────────────
+
+    #[test]
     fn scroll_result_serde() {
         let json = json!({"points": [{"id": 1}], "next_page_offset": 42});
         let sr: ScrollResult = serde_json::from_value(json).unwrap();
         assert_eq!(sr.points.len(), 1);
         assert!(sr.next_page_offset.is_some());
     }
+
+    #[test]
+    fn scroll_result_no_next_page() {
+        let json = json!({"points": [{"id": 1}, {"id": 2}]});
+        let sr: ScrollResult = serde_json::from_value(json).unwrap();
+        assert_eq!(sr.points.len(), 2);
+        assert!(sr.next_page_offset.is_none());
+    }
+
+    #[test]
+    fn scroll_result_empty_points() {
+        let json = json!({"points": []});
+        let sr: ScrollResult = serde_json::from_value(json).unwrap();
+        assert!(sr.points.is_empty());
+        assert!(sr.next_page_offset.is_none());
+    }
+
+    #[test]
+    fn scroll_result_null_next_page_offset() {
+        let json = json!({"points": [], "next_page_offset": null});
+        let sr: ScrollResult = serde_json::from_value(json).unwrap();
+        assert!(sr.next_page_offset.is_none());
+    }
+
+    #[test]
+    fn scroll_result_string_offset() {
+        // Qdrant can use string UUIDs as offsets
+        let json = json!({"points": [], "next_page_offset": "abc-def-123"});
+        let sr: ScrollResult = serde_json::from_value(json).unwrap();
+        assert_eq!(sr.next_page_offset, Some(json!("abc-def-123")));
+    }
+
+    #[test]
+    fn scroll_result_roundtrip() {
+        let sr = ScrollResult {
+            points: vec![json!({"id": 1}), json!({"id": 2})],
+            next_page_offset: Some(json!(3)),
+        };
+        let val = serde_json::to_value(&sr).unwrap();
+        let back: ScrollResult = serde_json::from_value(val).unwrap();
+        assert_eq!(back.points.len(), 2);
+        assert_eq!(back.next_page_offset, Some(json!(3)));
+    }
+
+    #[test]
+    fn scroll_result_clone() {
+        let sr = ScrollResult {
+            points: vec![json!({"id": 1})],
+            next_page_offset: Some(json!(99)),
+        };
+        let cloned = sr.clone();
+        assert_eq!(cloned.points.len(), 1);
+        assert_eq!(cloned.next_page_offset, Some(json!(99)));
+        assert_eq!(sr.points.len(), 1);
+    }
+
+    #[test]
+    fn scroll_result_debug() {
+        let sr = ScrollResult {
+            points: vec![],
+            next_page_offset: None,
+        };
+        let debug = format!("{sr:?}");
+        assert!(debug.contains("ScrollResult"));
+    }
+
+    // ── CountResult ────────────────────────────────────────────────────
 
     #[test]
     fn count_result_serde() {
@@ -176,11 +638,97 @@ mod tests {
     }
 
     #[test]
+    fn count_result_zero() {
+        let json = json!({"count": 0});
+        let cr: CountResult = serde_json::from_value(json).unwrap();
+        assert_eq!(cr.count, 0);
+    }
+
+    #[test]
+    fn count_result_large_value() {
+        let json = json!({"count": 18446744073709551615_u64});
+        let cr: CountResult = serde_json::from_value(json).unwrap();
+        assert_eq!(cr.count, u64::MAX);
+    }
+
+    #[test]
+    fn count_result_roundtrip() {
+        let cr = CountResult { count: 42 };
+        let val = serde_json::to_value(&cr).unwrap();
+        let back: CountResult = serde_json::from_value(val).unwrap();
+        assert_eq!(back.count, 42);
+    }
+
+    #[test]
+    fn count_result_clone() {
+        let cr = CountResult { count: 10 };
+        let cloned = cr.clone();
+        assert_eq!(cloned.count, 10);
+        assert_eq!(cr.count, 10);
+    }
+
+    #[test]
+    fn count_result_debug() {
+        let cr = CountResult { count: 77 };
+        let debug = format!("{cr:?}");
+        assert!(debug.contains("CountResult"));
+        assert!(debug.contains("77"));
+    }
+
+    // ── QdrantResponse ─────────────────────────────────────────────────
+
+    #[test]
     fn qdrant_response_serde() {
         let json = json!({"status": "ok", "result": {"count": 5}, "time": 0.001});
         let resp: QdrantResponse = serde_json::from_value(json).unwrap();
         assert!(resp.time.is_some());
     }
+
+    #[test]
+    fn qdrant_response_all_none() {
+        let json = json!({});
+        let resp: QdrantResponse = serde_json::from_value(json).unwrap();
+        assert!(resp.status.is_none());
+        assert!(resp.result.is_none());
+        assert!(resp.time.is_none());
+    }
+
+    #[test]
+    fn qdrant_response_null_result() {
+        let json = json!({"status": "ok", "result": null, "time": 0.0});
+        let resp: QdrantResponse = serde_json::from_value(json).unwrap();
+        assert!(resp.result.is_none());
+    }
+
+    #[test]
+    fn qdrant_response_status_as_object() {
+        // Qdrant sometimes returns status as an object
+        let json = json!({"status": {"error": "something"}, "result": null});
+        let resp: QdrantResponse = serde_json::from_value(json).unwrap();
+        assert!(resp.status.is_some());
+        let status_val = resp.status.unwrap();
+        assert!(status_val.is_object());
+    }
+
+    #[test]
+    fn qdrant_response_clone() {
+        let json = json!({"status": "ok", "result": [1, 2], "time": 0.5});
+        let resp: QdrantResponse = serde_json::from_value(json).unwrap();
+        let cloned = resp.clone();
+        assert!(cloned.time.is_some());
+        assert!((cloned.time.unwrap() - 0.5).abs() < f64::EPSILON);
+        assert!(resp.status.is_some());
+    }
+
+    #[test]
+    fn qdrant_response_debug() {
+        let json = json!({"status": "ok"});
+        let resp: QdrantResponse = serde_json::from_value(json).unwrap();
+        let debug = format!("{resp:?}");
+        assert!(debug.contains("QdrantResponse"));
+    }
+
+    // ── ListCollectionsResponse ────────────────────────────────────────
 
     #[test]
     fn list_collections_response_serde() {
@@ -195,11 +743,129 @@ mod tests {
     }
 
     #[test]
+    fn list_collections_response_empty_collections() {
+        let json = json!({
+            "status": "ok",
+            "result": {"collections": []}
+        });
+        let resp: ListCollectionsResponse = serde_json::from_value(json).unwrap();
+        let result = resp.result.unwrap();
+        assert!(result.collections.is_empty());
+    }
+
+    #[test]
+    fn list_collections_response_no_result() {
+        let json = json!({"status": "ok"});
+        let resp: ListCollectionsResponse = serde_json::from_value(json).unwrap();
+        assert!(resp.result.is_none());
+    }
+
+    #[test]
+    fn list_collections_response_multiple_collections() {
+        let json = json!({
+            "status": "ok",
+            "result": {
+                "collections": [
+                    {"name": "alpha"},
+                    {"name": "beta"},
+                    {"name": "gamma"}
+                ]
+            }
+        });
+        let resp: ListCollectionsResponse = serde_json::from_value(json).unwrap();
+        let result = resp.result.unwrap();
+        assert_eq!(result.collections.len(), 3);
+        assert_eq!(result.collections[2].name, "gamma");
+    }
+
+    #[test]
+    fn list_collections_response_clone() {
+        let json = json!({
+            "status": "ok",
+            "result": {"collections": [{"name": "c1"}]}
+        });
+        let resp: ListCollectionsResponse = serde_json::from_value(json).unwrap();
+        let cloned = resp.clone();
+        assert_eq!(cloned.status, Some("ok".into()));
+        assert!(resp.result.is_some());
+    }
+
+    #[test]
+    fn list_collections_response_debug() {
+        let json = json!({"status": "ok", "result": {"collections": []}});
+        let resp: ListCollectionsResponse = serde_json::from_value(json).unwrap();
+        let debug = format!("{resp:?}");
+        assert!(debug.contains("ListCollectionsResponse"));
+    }
+
+    // ── ListCollectionsResult ──────────────────────────────────────────
+
+    #[test]
+    fn list_collections_result_clone() {
+        let result = ListCollectionsResult {
+            collections: vec![
+                Collection { name: "a".into() },
+                Collection { name: "b".into() },
+            ],
+        };
+        let cloned = result.clone();
+        assert_eq!(cloned.collections.len(), 2);
+        assert_eq!(cloned.collections[0].name, "a");
+        assert_eq!(result.collections.len(), 2);
+    }
+
+    #[test]
+    fn list_collections_result_debug() {
+        let result = ListCollectionsResult {
+            collections: vec![],
+        };
+        let debug = format!("{result:?}");
+        assert!(debug.contains("ListCollectionsResult"));
+    }
+
+    // ── OperationResponse ──────────────────────────────────────────────
+
+    #[test]
     fn operation_response_serde() {
         let json = json!({"status": "ok", "result": true});
         let resp: OperationResponse = serde_json::from_value(json).unwrap();
         assert_eq!(resp.status.as_deref(), Some("ok"));
     }
+
+    #[test]
+    fn operation_response_no_status() {
+        let json = json!({"result": {"operation_id": 1}});
+        let resp: OperationResponse = serde_json::from_value(json).unwrap();
+        assert!(resp.status.is_none());
+        assert!(resp.result.is_some());
+    }
+
+    #[test]
+    fn operation_response_all_none() {
+        let json = json!({});
+        let resp: OperationResponse = serde_json::from_value(json).unwrap();
+        assert!(resp.status.is_none());
+        assert!(resp.result.is_none());
+    }
+
+    #[test]
+    fn operation_response_clone() {
+        let json = json!({"status": "acknowledged", "result": true});
+        let resp: OperationResponse = serde_json::from_value(json).unwrap();
+        let cloned = resp.clone();
+        assert_eq!(cloned.status.as_deref(), Some("acknowledged"));
+        assert!(resp.result.is_some());
+    }
+
+    #[test]
+    fn operation_response_debug() {
+        let json = json!({"status": "ok"});
+        let resp: OperationResponse = serde_json::from_value(json).unwrap();
+        let debug = format!("{resp:?}");
+        assert!(debug.contains("OperationResponse"));
+    }
+
+    // ── OperationReceipt ───────────────────────────────────────────────
 
     #[test]
     fn operation_receipt_serialize() {
@@ -212,5 +878,111 @@ mod tests {
         let json_str = serde_json::to_string(&receipt).unwrap();
         assert!(json_str.contains("upsert"));
         assert!(json_str.contains("my_collection"));
+    }
+
+    #[test]
+    fn operation_receipt_all_fields_serialized() {
+        let receipt = OperationReceipt {
+            operation: "delete".into(),
+            effect: "removed 5 points".into(),
+            resource: "test_col".into(),
+            timestamp: "2026-01-01T12:00:00Z".into(),
+        };
+        let val = serde_json::to_value(&receipt).unwrap();
+        assert_eq!(val["operation"], "delete");
+        assert_eq!(val["effect"], "removed 5 points");
+        assert_eq!(val["resource"], "test_col");
+        assert_eq!(val["timestamp"], "2026-01-01T12:00:00Z");
+    }
+
+    #[test]
+    fn operation_receipt_clone() {
+        let receipt = OperationReceipt {
+            operation: "create_collection".into(),
+            effect: "created".into(),
+            resource: "new_col".into(),
+            timestamp: "2026-03-04T00:00:00Z".into(),
+        };
+        let cloned = receipt.clone();
+        assert_eq!(cloned.operation, "create_collection");
+        assert_eq!(cloned.resource, "new_col");
+        assert_eq!(receipt.effect, "created");
+    }
+
+    #[test]
+    fn operation_receipt_debug() {
+        let receipt = OperationReceipt {
+            operation: "upsert".into(),
+            effect: "ok".into(),
+            resource: "col".into(),
+            timestamp: "now".into(),
+        };
+        let debug = format!("{receipt:?}");
+        assert!(debug.contains("OperationReceipt"));
+        assert!(debug.contains("upsert"));
+    }
+
+    #[test]
+    fn operation_receipt_empty_fields() {
+        let receipt = OperationReceipt {
+            operation: String::new(),
+            effect: String::new(),
+            resource: String::new(),
+            timestamp: String::new(),
+        };
+        let val = serde_json::to_value(&receipt).unwrap();
+        assert_eq!(val["operation"], "");
+        assert_eq!(val["effect"], "");
+    }
+
+    // ── Deserialization error cases ────────────────────────────────────
+
+    #[test]
+    fn collection_missing_name_fails() {
+        let json = json!({});
+        let result = serde_json::from_value::<Collection>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn collection_info_missing_status_fails() {
+        let json = json!({"vectors_count": 10});
+        let result = serde_json::from_value::<CollectionInfo>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn point_missing_id_fails() {
+        let json = json!({"vector": [1.0]});
+        let result = serde_json::from_value::<Point>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn search_result_missing_score_fails() {
+        let json = json!({"id": 1});
+        let result = serde_json::from_value::<SearchResult>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn search_result_missing_id_fails() {
+        let json = json!({"score": 0.5});
+        let result = serde_json::from_value::<SearchResult>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn scroll_result_missing_points_fails() {
+        let json = json!({"next_page_offset": 1});
+        let result = serde_json::from_value::<ScrollResult>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn count_result_missing_count_fails() {
+        let json = json!({});
+        let result = serde_json::from_value::<CountResult>(json);
+        assert!(result.is_err());
     }
 }

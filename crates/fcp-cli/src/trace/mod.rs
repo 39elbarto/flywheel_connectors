@@ -173,4 +173,62 @@ mod tests {
             TraceReplayInputFormat::Cbor
         );
     }
+
+    #[test]
+    fn trace_format_arg_debug() {
+        assert!(format!("{:?}", TraceFormatArg::Auto).contains("Auto"));
+        assert!(format!("{:?}", TraceFormatArg::Json).contains("Json"));
+        assert!(format!("{:?}", TraceFormatArg::Cbor).contains("Cbor"));
+    }
+
+    #[test]
+    fn trace_format_arg_clone() {
+        let arg = TraceFormatArg::Json;
+        let cloned = arg;
+        assert!(matches!(cloned, TraceFormatArg::Json));
+    }
+
+    #[test]
+    fn trace_replay_args_debug() {
+        let args = TraceReplayArgs {
+            file: "test.json".to_string(),
+            format: TraceFormatArg::Auto,
+            json: false,
+        };
+        let debug = format!("{args:?}");
+        assert!(debug.contains("test.json"));
+        assert!(debug.contains("Auto"));
+    }
+
+    #[test]
+    fn trace_replay_args_json_flag_default() {
+        let args = TraceReplayArgs {
+            file: "trace.cbor".to_string(),
+            format: TraceFormatArg::Cbor,
+            json: false,
+        };
+        assert!(!args.json);
+    }
+
+    #[test]
+    fn format_auto_is_default() {
+        let args = TraceReplayArgs {
+            file: "x.json".to_string(),
+            format: TraceFormatArg::Auto,
+            json: false,
+        };
+        assert!(matches!(args.format, TraceFormatArg::Auto));
+    }
+
+    #[test]
+    fn all_format_variants_convert_successfully() {
+        let variants = [
+            TraceFormatArg::Auto,
+            TraceFormatArg::Json,
+            TraceFormatArg::Cbor,
+        ];
+        for v in variants {
+            let _: TraceReplayInputFormat = v.into();
+        }
+    }
 }

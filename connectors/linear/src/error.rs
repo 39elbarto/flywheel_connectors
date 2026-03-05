@@ -117,7 +117,9 @@ pub type LinearResult<T> = Result<T, LinearError>;
 mod tests {
     use super::*;
 
-    // ---- Display ----
+    // ════════════════════════════════════════════════════════════════
+    // Display messages for all variants
+    // ════════════════════════════════════════════════════════════════
 
     #[test]
     fn display_api_error() {
@@ -129,20 +131,37 @@ mod tests {
     }
 
     #[test]
+    fn display_api_error_without_status() {
+        let err = LinearError::Api {
+            message: "Something went wrong".into(),
+            status_code: None,
+        };
+        let s = err.to_string();
+        assert!(s.contains("Something went wrong"));
+        assert!(s.starts_with("Linear API error:"));
+    }
+
+    #[test]
     fn display_rate_limited() {
         let err = LinearError::RateLimited {
             retry_after_ms: 5000,
         };
-        assert!(err.to_string().contains("5000ms"));
+        let s = err.to_string();
+        assert!(s.contains("5000ms"));
+        assert!(s.contains("Rate limited"));
+    }
+
+    #[test]
+    fn display_rate_limited_zero_ms() {
+        let err = LinearError::RateLimited { retry_after_ms: 0 };
+        assert!(err.to_string().contains("0ms"));
     }
 
     #[test]
     fn display_unauthorized() {
-        assert!(
-            LinearError::Unauthorized
-                .to_string()
-                .contains("Linear API key")
-        );
+        let s = LinearError::Unauthorized.to_string();
+        assert!(s.contains("Linear API key"));
+        assert!(s.contains("Invalid or expired"));
     }
 
     #[test]
@@ -150,10 +169,46 @@ mod tests {
         let err = LinearError::NotFound {
             resource: "issue:abc".into(),
         };
-        assert!(err.to_string().contains("issue:abc"));
+        let s = err.to_string();
+        assert!(s.contains("issue:abc"));
+        assert!(s.contains("not found"));
     }
 
-    // ---- is_retryable ----
+    #[test]
+    fn display_not_found_empty_resource() {
+        let err = LinearError::NotFound {
+            resource: String::new(),
+        };
+        assert!(err.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn display_json_error() {
+        let json_err = serde_json::from_str::<serde_json::Value>("not-json").unwrap_err();
+        let err = LinearError::Json(json_err);
+        let s = err.to_string();
+        assert!(s.starts_with("JSON error:"));
+    }
+
+    #[test]
+    fn display_http_error() {
+        // Build a reqwest error via an invalid URL
+        let client = reqwest::Client::new();
+        let rt = fcp_async_core::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let http_err = rt
+            .block_on(async { client.get("http://[::0:0:0:invalid]:0/bad").send().await })
+            .unwrap_err();
+        let err = LinearError::Http(http_err);
+        let s = err.to_string();
+        assert!(s.starts_with("HTTP error:"));
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // is_retryable for all variants
+    // ════════════════════════════════════════════════════════════════
 
     #[test]
     fn is_retryable_rate_limited() {
@@ -163,6 +218,19 @@ mod tests {
             }
             .is_retryable()
         );
+    }
+
+    #[test]
+    fn is_retryable_http_error() {
+        let client = reqwest::Client::new();
+        let rt = fcp_async_core::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let http_err = rt
+            .block_on(async { client.get("http://[::0:0:0:invalid]:0/bad").send().await })
+            .unwrap_err();
+        assert!(LinearError::Http(http_err).is_retryable());
     }
 
     #[test]
@@ -177,11 +245,88 @@ mod tests {
     }
 
     #[test]
+    fn is_retryable_api_502() {
+        assert!(
+            LinearError::Api {
+                message: "bad gateway".into(),
+                status_code: Some(502),
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn is_retryable_api_503() {
+        assert!(
+            LinearError::Api {
+                message: "service unavailable".into(),
+                status_code: Some(503),
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn is_retryable_api_599() {
+        assert!(
+            LinearError::Api {
+                message: "network error".into(),
+                status_code: Some(599),
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn is_retryable_api_429() {
+        assert!(
+            LinearError::Api {
+                message: "rate limited".into(),
+                status_code: Some(429),
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
     fn not_retryable_api_400() {
         assert!(
             !LinearError::Api {
                 message: "bad".into(),
                 status_code: Some(400),
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn not_retryable_api_404() {
+        assert!(
+            !LinearError::Api {
+                message: "not found".into(),
+                status_code: Some(404),
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn not_retryable_api_422() {
+        assert!(
+            !LinearError::Api {
+                message: "unprocessable".into(),
+                status_code: Some(422),
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn not_retryable_api_no_status() {
+        assert!(
+            !LinearError::Api {
+                message: "graphql error".into(),
+                status_code: None,
             }
             .is_retryable()
         );
@@ -208,7 +353,9 @@ mod tests {
         assert!(!LinearError::Json(json_err).is_retryable());
     }
 
-    // ---- retry_after ----
+    // ════════════════════════════════════════════════════════════════
+    // retry_after
+    // ════════════════════════════════════════════════════════════════
 
     #[test]
     fn retry_after_rate_limited() {
@@ -219,11 +366,83 @@ mod tests {
     }
 
     #[test]
-    fn retry_after_other_none() {
+    fn retry_after_rate_limited_zero() {
+        let err = LinearError::RateLimited { retry_after_ms: 0 };
+        assert_eq!(err.retry_after(), Some(Duration::from_millis(0)));
+    }
+
+    #[test]
+    fn retry_after_rate_limited_large() {
+        let err = LinearError::RateLimited {
+            retry_after_ms: 120_000,
+        };
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(120)));
+    }
+
+    #[test]
+    fn retry_after_unauthorized_none() {
         assert_eq!(LinearError::Unauthorized.retry_after(), None);
     }
 
-    // ---- to_fcp_error ----
+    #[test]
+    fn retry_after_not_found_none() {
+        assert_eq!(
+            LinearError::NotFound {
+                resource: "x".into()
+            }
+            .retry_after(),
+            None
+        );
+    }
+
+    #[test]
+    fn retry_after_api_none() {
+        assert_eq!(
+            LinearError::Api {
+                message: "err".into(),
+                status_code: Some(500),
+            }
+            .retry_after(),
+            None
+        );
+    }
+
+    #[test]
+    fn retry_after_json_none() {
+        let json_err = serde_json::from_str::<serde_json::Value>("bad").unwrap_err();
+        assert_eq!(LinearError::Json(json_err).retry_after(), None);
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // to_fcp_error for all error-to-FcpError mappings
+    // ════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn to_fcp_error_http() {
+        let client = reqwest::Client::new();
+        let rt = fcp_async_core::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let http_err = rt
+            .block_on(async { client.get("http://[::0:0:0:invalid]:0/bad").send().await })
+            .unwrap_err();
+        let err = LinearError::Http(http_err);
+        match err.to_fcp_error() {
+            FcpError::External {
+                service,
+                retryable,
+                status_code,
+                ..
+            } => {
+                assert_eq!(service, "linear");
+                assert!(retryable);
+                // reqwest errors from DNS/connection won't have a status code
+                assert!(status_code.is_none());
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
 
     #[test]
     fn to_fcp_error_api_401() {
@@ -231,7 +450,13 @@ mod tests {
             message: "unauthorized".into(),
             status_code: Some(401),
         };
-        assert!(matches!(err.to_fcp_error(), FcpError::Unauthorized { .. }));
+        match err.to_fcp_error() {
+            FcpError::Unauthorized { code, message } => {
+                assert_eq!(code, 2001);
+                assert!(message.contains("Linear API key"));
+            }
+            other => panic!("expected Unauthorized, got {other:?}"),
+        }
     }
 
     #[test]
@@ -240,7 +465,13 @@ mod tests {
             message: "forbidden".into(),
             status_code: Some(403),
         };
-        assert!(matches!(err.to_fcp_error(), FcpError::Unauthorized { .. }));
+        match err.to_fcp_error() {
+            FcpError::Unauthorized { code, message } => {
+                assert_eq!(code, 2001);
+                assert!(message.contains("insufficient"));
+            }
+            other => panic!("expected Unauthorized, got {other:?}"),
+        }
     }
 
     #[test]
@@ -250,7 +481,13 @@ mod tests {
             status_code: Some(429),
         };
         match err.to_fcp_error() {
-            FcpError::RateLimited { retry_after_ms, .. } => assert_eq!(retry_after_ms, 60_000),
+            FcpError::RateLimited {
+                retry_after_ms,
+                violation,
+            } => {
+                assert_eq!(retry_after_ms, 60_000);
+                assert!(violation.is_none());
+            }
             other => panic!("expected RateLimited, got {other:?}"),
         }
     }
@@ -263,10 +500,62 @@ mod tests {
         };
         match err.to_fcp_error() {
             FcpError::External {
-                service, retryable, ..
+                service,
+                message,
+                status_code,
+                retryable,
+                retry_after,
             } => {
                 assert_eq!(service, "linear");
+                assert_eq!(message, "server error");
+                assert_eq!(status_code, Some(500));
                 assert!(retryable);
+                assert!(retry_after.is_none());
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_api_no_status_external() {
+        let err = LinearError::Api {
+            message: "graphql parse error".into(),
+            status_code: None,
+        };
+        match err.to_fcp_error() {
+            FcpError::External {
+                service,
+                message,
+                status_code,
+                retryable,
+                ..
+            } => {
+                assert_eq!(service, "linear");
+                assert_eq!(message, "graphql parse error");
+                assert!(status_code.is_none());
+                assert!(!retryable);
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_api_200_external() {
+        // Non-auth, non-rate-limit, non-5xx status goes to External fallthrough
+        let err = LinearError::Api {
+            message: "bad request".into(),
+            status_code: Some(400),
+        };
+        match err.to_fcp_error() {
+            FcpError::External {
+                service,
+                retryable,
+                status_code,
+                ..
+            } => {
+                assert_eq!(service, "linear");
+                assert!(!retryable);
+                assert_eq!(status_code, Some(400));
             }
             other => panic!("expected External, got {other:?}"),
         }
@@ -278,7 +567,22 @@ mod tests {
             retry_after_ms: 2000,
         };
         match err.to_fcp_error() {
-            FcpError::RateLimited { retry_after_ms, .. } => assert_eq!(retry_after_ms, 2000),
+            FcpError::RateLimited {
+                retry_after_ms,
+                violation,
+            } => {
+                assert_eq!(retry_after_ms, 2000);
+                assert!(violation.is_none());
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_rate_limited_zero() {
+        let err = LinearError::RateLimited { retry_after_ms: 0 };
+        match err.to_fcp_error() {
+            FcpError::RateLimited { retry_after_ms, .. } => assert_eq!(retry_after_ms, 0),
             other => panic!("expected RateLimited, got {other:?}"),
         }
     }
@@ -286,7 +590,11 @@ mod tests {
     #[test]
     fn to_fcp_error_unauthorized() {
         match LinearError::Unauthorized.to_fcp_error() {
-            FcpError::Unauthorized { code, .. } => assert_eq!(code, 2001),
+            FcpError::Unauthorized { code, message } => {
+                assert_eq!(code, 2001);
+                assert!(message.contains("expired"));
+                assert!(message.contains("Linear API key"));
+            }
             other => panic!("expected Unauthorized, got {other:?}"),
         }
     }
@@ -303,13 +611,135 @@ mod tests {
     }
 
     #[test]
+    fn to_fcp_error_not_found_empty_resource() {
+        let err = LinearError::NotFound {
+            resource: String::new(),
+        };
+        match err.to_fcp_error() {
+            FcpError::ResourceNotFound { resource } => assert_eq!(resource, ""),
+            other => panic!("expected ResourceNotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn to_fcp_error_json_internal() {
         let json_err = serde_json::from_str::<serde_json::Value>("{bad}").unwrap_err();
         let err = LinearError::Json(json_err);
-        assert!(matches!(err.to_fcp_error(), FcpError::Internal { .. }));
+        match err.to_fcp_error() {
+            FcpError::Internal { message } => {
+                assert!(message.starts_with("JSON error:"));
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
     }
 
-    // ---- From / Result / trait ----
+    // ════════════════════════════════════════════════════════════════
+    // Debug format
+    // ════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn debug_api_error() {
+        let err = LinearError::Api {
+            message: "some api error".into(),
+            status_code: Some(502),
+        };
+        let debug = format!("{err:?}");
+        assert!(debug.contains("Api"));
+        assert!(debug.contains("some api error"));
+        assert!(debug.contains("502"));
+    }
+
+    #[test]
+    fn debug_rate_limited() {
+        let err = LinearError::RateLimited {
+            retry_after_ms: 3000,
+        };
+        let debug = format!("{err:?}");
+        assert!(debug.contains("RateLimited"));
+        assert!(debug.contains("3000"));
+    }
+
+    #[test]
+    fn debug_unauthorized() {
+        let debug = format!("{:?}", LinearError::Unauthorized);
+        assert!(debug.contains("Unauthorized"));
+    }
+
+    #[test]
+    fn debug_not_found() {
+        let err = LinearError::NotFound {
+            resource: "team:xyz".into(),
+        };
+        let debug = format!("{err:?}");
+        assert!(debug.contains("NotFound"));
+        assert!(debug.contains("team:xyz"));
+    }
+
+    #[test]
+    fn debug_json_error() {
+        let json_err = serde_json::from_str::<serde_json::Value>("!!!").unwrap_err();
+        let err = LinearError::Json(json_err);
+        let debug = format!("{err:?}");
+        assert!(debug.contains("Json"));
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // std::error::Error trait
+    // ════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn error_trait_impl() {
+        let _: &dyn std::error::Error = &LinearError::Unauthorized;
+    }
+
+    #[test]
+    fn error_trait_source_json() {
+        let json_err = serde_json::from_str::<serde_json::Value>("!!!").unwrap_err();
+        let err = LinearError::Json(json_err);
+        // Json variant wraps serde_json::Error via #[from], so source() is Some
+        let source = std::error::Error::source(&err);
+        assert!(source.is_some());
+    }
+
+    #[test]
+    fn error_trait_source_unauthorized_none() {
+        // Unit-like variants have no source
+        let source = std::error::Error::source(&LinearError::Unauthorized);
+        assert!(source.is_none());
+    }
+
+    #[test]
+    fn error_trait_source_api_none() {
+        // Api is a struct variant, not wrapping an error via #[from]
+        let err = LinearError::Api {
+            message: "test".into(),
+            status_code: None,
+        };
+        let source = std::error::Error::source(&err);
+        assert!(source.is_none());
+    }
+
+    #[test]
+    fn error_trait_source_not_found_none() {
+        let err = LinearError::NotFound {
+            resource: "x".into(),
+        };
+        let source = std::error::Error::source(&err);
+        assert!(source.is_none());
+    }
+
+    #[test]
+    fn error_trait_source_rate_limited_none() {
+        let err = LinearError::RateLimited {
+            retry_after_ms: 100,
+        };
+        let source = std::error::Error::source(&err);
+        assert!(source.is_none());
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // From conversions / Result type alias
+    // ════════════════════════════════════════════════════════════════
 
     #[test]
     fn from_serde_json_error() {
@@ -321,11 +751,104 @@ mod tests {
     #[test]
     fn linear_result_ok() {
         let r: LinearResult<u32> = Ok(42);
-        assert!(r.is_ok());
+        assert!(matches!(r, Ok(42)));
     }
 
     #[test]
-    fn error_trait_impl() {
-        let _: &dyn std::error::Error = &LinearError::Unauthorized;
+    fn linear_result_err() {
+        let r: LinearResult<u32> = Err(LinearError::Unauthorized);
+        assert!(matches!(r, Err(LinearError::Unauthorized)));
+    }
+
+    #[test]
+    fn linear_result_map() {
+        let r: LinearResult<u32> = Ok(10);
+        let mapped = r.map(|v| v * 2);
+        assert_eq!(mapped.unwrap(), 20);
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // Edge cases / boundary conditions
+    // ════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn api_error_all_5xx_retryable() {
+        for code in 500..=599 {
+            let err = LinearError::Api {
+                message: format!("status {code}"),
+                status_code: Some(code),
+            };
+            assert!(
+                err.is_retryable(),
+                "expected Api(status={code}) to be retryable"
+            );
+        }
+    }
+
+    #[test]
+    fn api_error_4xx_not_retryable_except_429() {
+        for code in [400, 401, 403, 404, 405, 408, 409, 410, 413, 415, 422] {
+            let err = LinearError::Api {
+                message: format!("status {code}"),
+                status_code: Some(code),
+            };
+            assert!(
+                !err.is_retryable(),
+                "expected Api(status={code}) to NOT be retryable"
+            );
+        }
+        // 429 IS retryable
+        let err429 = LinearError::Api {
+            message: "throttled".into(),
+            status_code: Some(429),
+        };
+        assert!(err429.is_retryable());
+    }
+
+    #[test]
+    fn to_fcp_error_api_503_retryable_external() {
+        let err = LinearError::Api {
+            message: "service unavailable".into(),
+            status_code: Some(503),
+        };
+        match err.to_fcp_error() {
+            FcpError::External {
+                retryable,
+                status_code,
+                ..
+            } => {
+                assert!(retryable);
+                assert_eq!(status_code, Some(503));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_preserves_message_content() {
+        let msg = "Complex error: field 'x' is invalid (expected String, got Number)";
+        let err = LinearError::Api {
+            message: msg.into(),
+            status_code: Some(400),
+        };
+        match err.to_fcp_error() {
+            FcpError::External { message, .. } => {
+                assert_eq!(message, msg);
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rate_limited_large_value_roundtrips() {
+        let err = LinearError::RateLimited {
+            retry_after_ms: u64::MAX,
+        };
+        match err.to_fcp_error() {
+            FcpError::RateLimited { retry_after_ms, .. } => {
+                assert_eq!(retry_after_ms, u64::MAX);
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
     }
 }

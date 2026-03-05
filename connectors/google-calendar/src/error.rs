@@ -124,196 +124,335 @@ mod tests {
     use super::*;
     use fcp_core::FcpError;
 
+    // ── Display message tests ──────────────────────────────────────────────
+
     #[test]
-    fn test_api_401_maps_to_unauthorized() {
-        let err = GoogleCalendarError::Api {
-            code: 401,
-            message: "bad token".into(),
-        };
-        let fcp = err.to_fcp_error();
-        assert!(matches!(fcp, FcpError::Unauthorized { code: 2001, .. }));
+    fn display_http_error() {
+        // Build a reqwest::Error by attempting an invalid URL
+        let http_err = reqwest::Client::new().get("://bad").build().unwrap_err();
+        let err = GoogleCalendarError::Http(http_err);
+        let msg = err.to_string();
+        assert!(msg.starts_with("HTTP error: "), "got: {msg}");
     }
 
     #[test]
-    fn test_api_404_maps_to_resource_not_found() {
-        let err = GoogleCalendarError::Api {
-            code: 404,
-            message: "calendar not found".into(),
-        };
-        let fcp = err.to_fcp_error();
-        assert!(matches!(fcp, FcpError::ResourceNotFound { .. }));
+    fn display_json_error() {
+        let json_err: serde_json::Error =
+            serde_json::from_str::<serde_json::Value>("{invalid}").unwrap_err();
+        let err = GoogleCalendarError::Json(json_err);
+        let msg = err.to_string();
+        assert!(msg.starts_with("JSON error: "), "got: {msg}");
     }
 
     #[test]
-    fn test_api_429_maps_to_rate_limited() {
+    fn display_api_error() {
         let err = GoogleCalendarError::Api {
-            code: 429,
-            message: "rate limited".into(),
+            code: 403,
+            message: "forbidden".into(),
         };
-        let fcp = err.to_fcp_error();
-        assert!(matches!(
-            fcp,
-            FcpError::RateLimited {
-                retry_after_ms: 60_000,
-                ..
-            }
-        ));
+        assert_eq!(
+            err.to_string(),
+            "Google Calendar API error: forbidden (code: 403)"
+        );
     }
 
     #[test]
-    fn test_api_500_maps_to_external() {
+    fn display_rate_limited() {
+        let err = GoogleCalendarError::RateLimited {
+            retry_after_secs: 42,
+        };
+        assert_eq!(err.to_string(), "Rate limited, retry after 42s");
+    }
+
+    #[test]
+    fn display_unauthorized() {
+        let err = GoogleCalendarError::Unauthorized;
+        assert_eq!(
+            err.to_string(),
+            "Invalid or expired Google Calendar credentials"
+        );
+    }
+
+    #[test]
+    fn display_event_not_found() {
+        let err = GoogleCalendarError::EventNotFound {
+            event_id: "abc123".into(),
+        };
+        assert_eq!(err.to_string(), "Event not found: abc123");
+    }
+
+    #[test]
+    fn display_calendar_not_found() {
+        let err = GoogleCalendarError::CalendarNotFound {
+            calendar_id: "work@group.calendar.google.com".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "Calendar not found: work@group.calendar.google.com"
+        );
+    }
+
+    // ── Debug trait tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn debug_api_error() {
         let err = GoogleCalendarError::Api {
             code: 500,
-            message: "server error".into(),
+            message: "internal".into(),
         };
-        let fcp = err.to_fcp_error();
-        assert!(matches!(
-            fcp,
-            FcpError::External {
-                retryable: true,
-                ..
-            }
-        ));
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Api"), "got: {dbg}");
+        assert!(dbg.contains("500"), "got: {dbg}");
+        assert!(dbg.contains("internal"), "got: {dbg}");
     }
 
     #[test]
-    fn test_rate_limited_maps_with_correct_ms() {
-        let err = GoogleCalendarError::RateLimited {
-            retry_after_secs: 30,
-        };
-        let fcp = err.to_fcp_error();
-        assert!(matches!(
-            fcp,
-            FcpError::RateLimited {
-                retry_after_ms: 30_000,
-                violation: None
-            }
-        ));
-    }
-
-    #[test]
-    fn test_unauthorized_maps_to_fcp_unauthorized() {
+    fn debug_unauthorized() {
         let err = GoogleCalendarError::Unauthorized;
-        let fcp = err.to_fcp_error();
-        assert!(matches!(fcp, FcpError::Unauthorized { code: 2001, .. }));
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Unauthorized"), "got: {dbg}");
     }
 
     #[test]
-    fn test_event_not_found_maps_to_resource_not_found() {
+    fn debug_rate_limited() {
+        let err = GoogleCalendarError::RateLimited {
+            retry_after_secs: 10,
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("RateLimited"), "got: {dbg}");
+        assert!(dbg.contains("10"), "got: {dbg}");
+    }
+
+    #[test]
+    fn debug_event_not_found() {
         let err = GoogleCalendarError::EventNotFound {
-            event_id: "evt123".into(),
+            event_id: "e42".into(),
         };
-        let fcp = err.to_fcp_error();
-        assert!(
-            matches!(fcp, FcpError::ResourceNotFound { resource } if resource.contains("evt123"))
-        );
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("EventNotFound"), "got: {dbg}");
+        assert!(dbg.contains("e42"), "got: {dbg}");
     }
 
     #[test]
-    fn test_calendar_not_found_maps_to_resource_not_found() {
+    fn debug_calendar_not_found() {
         let err = GoogleCalendarError::CalendarNotFound {
-            calendar_id: "cal456".into(),
+            calendar_id: "c99".into(),
         };
-        let fcp = err.to_fcp_error();
-        assert!(
-            matches!(fcp, FcpError::ResourceNotFound { resource } if resource.contains("cal456"))
-        );
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("CalendarNotFound"), "got: {dbg}");
+        assert!(dbg.contains("c99"), "got: {dbg}");
     }
 
     #[test]
-    fn test_json_error_maps_to_internal() {
+    fn debug_json_error() {
         let json_err: serde_json::Error =
-            serde_json::from_str::<serde_json::Value>("invalid").unwrap_err();
+            serde_json::from_str::<serde_json::Value>("!!!").unwrap_err();
         let err = GoogleCalendarError::Json(json_err);
-        let fcp = err.to_fcp_error();
-        assert!(matches!(fcp, FcpError::Internal { message } if message.contains("JSON error")));
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Json"), "got: {dbg}");
+    }
+
+    // ── std::error::Error trait tests ──────────────────────────────────────
+
+    #[test]
+    fn std_error_source_json() {
+        let json_err: serde_json::Error =
+            serde_json::from_str::<serde_json::Value>("nope").unwrap_err();
+        let err = GoogleCalendarError::Json(json_err);
+        let source = std::error::Error::source(&err);
+        assert!(source.is_some(), "Json variant should have a source");
     }
 
     #[test]
-    fn test_retryable_checks() {
-        // Retryable
+    fn std_error_source_http() {
+        let http_err = reqwest::Client::new().get("://bad").build().unwrap_err();
+        let err = GoogleCalendarError::Http(http_err);
+        let source = std::error::Error::source(&err);
+        assert!(source.is_some(), "Http variant should have a source");
+    }
+
+    #[test]
+    fn std_error_source_none_for_non_wrapped() {
+        let err = GoogleCalendarError::Unauthorized;
         assert!(
-            GoogleCalendarError::RateLimited {
-                retry_after_secs: 1
-            }
-            .is_retryable()
-        );
-        assert!(
-            GoogleCalendarError::Api {
-                code: 429,
-                message: String::new()
-            }
-            .is_retryable()
-        );
-        assert!(
-            GoogleCalendarError::Api {
-                code: 500,
-                message: String::new()
-            }
-            .is_retryable()
-        );
-        assert!(
-            GoogleCalendarError::Api {
-                code: 502,
-                message: String::new()
-            }
-            .is_retryable()
-        );
-        assert!(
-            GoogleCalendarError::Api {
-                code: 503,
-                message: String::new()
-            }
-            .is_retryable()
+            std::error::Error::source(&err).is_none(),
+            "Unauthorized should have no source"
         );
 
-        // Not retryable
+        let err2 = GoogleCalendarError::Api {
+            code: 500,
+            message: "err".into(),
+        };
+        assert!(
+            std::error::Error::source(&err2).is_none(),
+            "Api should have no source"
+        );
+
+        let err3 = GoogleCalendarError::EventNotFound {
+            event_id: "e".into(),
+        };
+        assert!(
+            std::error::Error::source(&err3).is_none(),
+            "EventNotFound should have no source"
+        );
+
+        let err4 = GoogleCalendarError::CalendarNotFound {
+            calendar_id: "c".into(),
+        };
+        assert!(
+            std::error::Error::source(&err4).is_none(),
+            "CalendarNotFound should have no source"
+        );
+
+        let err5 = GoogleCalendarError::RateLimited {
+            retry_after_secs: 5,
+        };
+        assert!(
+            std::error::Error::source(&err5).is_none(),
+            "RateLimited should have no source"
+        );
+    }
+
+    // ── is_retryable tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn is_retryable_http() {
+        let http_err = reqwest::Client::new().get("://bad").build().unwrap_err();
+        let err = GoogleCalendarError::Http(http_err);
+        assert!(err.is_retryable(), "Http errors should be retryable");
+    }
+
+    #[test]
+    fn is_retryable_rate_limited() {
+        let err = GoogleCalendarError::RateLimited {
+            retry_after_secs: 1,
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn is_retryable_api_429() {
+        let err = GoogleCalendarError::Api {
+            code: 429,
+            message: String::new(),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn is_retryable_api_500() {
+        let err = GoogleCalendarError::Api {
+            code: 500,
+            message: String::new(),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn is_retryable_api_502() {
+        let err = GoogleCalendarError::Api {
+            code: 502,
+            message: String::new(),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn is_retryable_api_503() {
+        let err = GoogleCalendarError::Api {
+            code: 503,
+            message: String::new(),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn not_retryable_json() {
+        let json_err: serde_json::Error =
+            serde_json::from_str::<serde_json::Value>("bad").unwrap_err();
+        let err = GoogleCalendarError::Json(json_err);
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn not_retryable_unauthorized() {
         assert!(!GoogleCalendarError::Unauthorized.is_retryable());
-        assert!(
-            !GoogleCalendarError::EventNotFound {
-                event_id: "x".into()
-            }
-            .is_retryable()
-        );
-        assert!(
-            !GoogleCalendarError::CalendarNotFound {
-                calendar_id: "x".into()
-            }
-            .is_retryable()
-        );
-        assert!(
-            !GoogleCalendarError::Api {
-                code: 401,
-                message: String::new()
-            }
-            .is_retryable()
-        );
-        assert!(
-            !GoogleCalendarError::Api {
-                code: 403,
-                message: String::new()
-            }
-            .is_retryable()
-        );
-        assert!(
-            !GoogleCalendarError::Api {
-                code: 404,
-                message: String::new()
-            }
-            .is_retryable()
-        );
     }
 
     #[test]
-    fn test_retry_after_extraction() {
-        assert_eq!(
-            GoogleCalendarError::RateLimited {
-                retry_after_secs: 60
-            }
-            .retry_after()
-            .map(|d| d.as_secs()),
-            Some(60)
-        );
+    fn not_retryable_event_not_found() {
+        let err = GoogleCalendarError::EventNotFound {
+            event_id: "x".into(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn not_retryable_calendar_not_found() {
+        let err = GoogleCalendarError::CalendarNotFound {
+            calendar_id: "x".into(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn not_retryable_api_400() {
+        let err = GoogleCalendarError::Api {
+            code: 400,
+            message: String::new(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn not_retryable_api_401() {
+        let err = GoogleCalendarError::Api {
+            code: 401,
+            message: String::new(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn not_retryable_api_403() {
+        let err = GoogleCalendarError::Api {
+            code: 403,
+            message: String::new(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn not_retryable_api_404() {
+        let err = GoogleCalendarError::Api {
+            code: 404,
+            message: String::new(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    // ── retry_after tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn retry_after_rate_limited_returns_duration() {
+        let err = GoogleCalendarError::RateLimited {
+            retry_after_secs: 60,
+        };
+        let dur = err.retry_after().expect("should return Some");
+        assert_eq!(dur, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn retry_after_rate_limited_zero_secs() {
+        let err = GoogleCalendarError::RateLimited {
+            retry_after_secs: 0,
+        };
+        let dur = err.retry_after().expect("should return Some");
+        assert_eq!(dur, Duration::from_secs(0));
+    }
+
+    #[test]
+    fn retry_after_none_for_all_non_rate_limited() {
         assert!(GoogleCalendarError::Unauthorized.retry_after().is_none());
         assert!(
             GoogleCalendarError::EventNotFound {
@@ -323,6 +462,13 @@ mod tests {
             .is_none()
         );
         assert!(
+            GoogleCalendarError::CalendarNotFound {
+                calendar_id: "x".into()
+            }
+            .retry_after()
+            .is_none()
+        );
+        assert!(
             GoogleCalendarError::Api {
                 code: 429,
                 message: String::new()
@@ -330,27 +476,460 @@ mod tests {
             .retry_after()
             .is_none()
         );
+        assert!(
+            GoogleCalendarError::Api {
+                code: 500,
+                message: String::new()
+            }
+            .retry_after()
+            .is_none()
+        );
+
+        let json_err: serde_json::Error =
+            serde_json::from_str::<serde_json::Value>("bad").unwrap_err();
+        assert!(GoogleCalendarError::Json(json_err).retry_after().is_none());
+    }
+
+    // ── to_fcp_error mapping tests ─────────────────────────────────────────
+
+    #[test]
+    fn fcp_error_http_maps_to_external() {
+        let http_err = reqwest::Client::new().get("://bad").build().unwrap_err();
+        let err = GoogleCalendarError::Http(http_err);
+        let fcp = err.to_fcp_error();
+        match fcp {
+            FcpError::External {
+                service, retryable, ..
+            } => {
+                assert_eq!(service, "google-calendar");
+                assert!(retryable, "Http errors are retryable");
+            }
+            other => panic!("Expected FcpError::External, got: {other:?}"),
+        }
     }
 
     #[test]
-    fn test_api_502_503_are_retryable_external() {
-        for code in [502, 503] {
+    fn fcp_error_api_401_maps_to_unauthorized() {
+        let err = GoogleCalendarError::Api {
+            code: 401,
+            message: "bad token".into(),
+        };
+        let fcp = err.to_fcp_error();
+        match fcp {
+            FcpError::Unauthorized { code, message } => {
+                assert_eq!(code, 2001);
+                assert!(
+                    message.contains("Google Calendar"),
+                    "message should mention Google Calendar: {message}"
+                );
+            }
+            other => panic!("Expected FcpError::Unauthorized, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fcp_error_api_429_maps_to_rate_limited() {
+        let err = GoogleCalendarError::Api {
+            code: 429,
+            message: "rate limited".into(),
+        };
+        let fcp = err.to_fcp_error();
+        match fcp {
+            FcpError::RateLimited {
+                retry_after_ms,
+                violation,
+            } => {
+                assert_eq!(retry_after_ms, 60_000);
+                assert!(violation.is_none());
+            }
+            other => panic!("Expected FcpError::RateLimited, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fcp_error_api_404_maps_to_resource_not_found() {
+        let err = GoogleCalendarError::Api {
+            code: 404,
+            message: "calendar not found".into(),
+        };
+        let fcp = err.to_fcp_error();
+        match fcp {
+            FcpError::ResourceNotFound { resource } => {
+                assert_eq!(resource, "calendar not found");
+            }
+            other => panic!("Expected FcpError::ResourceNotFound, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fcp_error_api_500_maps_to_external_retryable() {
+        let err = GoogleCalendarError::Api {
+            code: 500,
+            message: "server error".into(),
+        };
+        let fcp = err.to_fcp_error();
+        match fcp {
+            FcpError::External {
+                service,
+                message,
+                status_code,
+                retryable,
+                ..
+            } => {
+                assert_eq!(service, "google-calendar");
+                assert_eq!(message, "server error");
+                assert_eq!(status_code, Some(500));
+                assert!(retryable);
+            }
+            other => panic!("Expected FcpError::External, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fcp_error_api_502_maps_to_external_retryable() {
+        let err = GoogleCalendarError::Api {
+            code: 502,
+            message: "bad gateway".into(),
+        };
+        let fcp = err.to_fcp_error();
+        match fcp {
+            FcpError::External {
+                retryable,
+                status_code,
+                ..
+            } => {
+                assert!(retryable);
+                assert_eq!(status_code, Some(502));
+            }
+            other => panic!("Expected FcpError::External, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fcp_error_api_503_maps_to_external_retryable() {
+        let err = GoogleCalendarError::Api {
+            code: 503,
+            message: "service unavailable".into(),
+        };
+        let fcp = err.to_fcp_error();
+        match fcp {
+            FcpError::External {
+                retryable,
+                status_code,
+                ..
+            } => {
+                assert!(retryable);
+                assert_eq!(status_code, Some(503));
+            }
+            other => panic!("Expected FcpError::External, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fcp_error_api_403_maps_to_external_not_retryable() {
+        let err = GoogleCalendarError::Api {
+            code: 403,
+            message: "forbidden".into(),
+        };
+        let fcp = err.to_fcp_error();
+        match fcp {
+            FcpError::External {
+                retryable,
+                status_code,
+                service,
+                ..
+            } => {
+                assert!(!retryable);
+                assert_eq!(status_code, Some(403));
+                assert_eq!(service, "google-calendar");
+            }
+            other => panic!("Expected FcpError::External, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fcp_error_api_400_maps_to_external_not_retryable() {
+        let err = GoogleCalendarError::Api {
+            code: 400,
+            message: "bad request".into(),
+        };
+        let fcp = err.to_fcp_error();
+        match fcp {
+            FcpError::External {
+                retryable,
+                status_code,
+                ..
+            } => {
+                assert!(!retryable);
+                assert_eq!(status_code, Some(400));
+            }
+            other => panic!("Expected FcpError::External, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fcp_error_rate_limited_correct_ms_conversion() {
+        let err = GoogleCalendarError::RateLimited {
+            retry_after_secs: 30,
+        };
+        let fcp = err.to_fcp_error();
+        match fcp {
+            FcpError::RateLimited {
+                retry_after_ms,
+                violation,
+            } => {
+                assert_eq!(retry_after_ms, 30_000);
+                assert!(violation.is_none());
+            }
+            other => panic!("Expected FcpError::RateLimited, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fcp_error_rate_limited_zero_secs() {
+        let err = GoogleCalendarError::RateLimited {
+            retry_after_secs: 0,
+        };
+        let fcp = err.to_fcp_error();
+        match fcp {
+            FcpError::RateLimited { retry_after_ms, .. } => {
+                assert_eq!(retry_after_ms, 0);
+            }
+            other => panic!("Expected FcpError::RateLimited, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fcp_error_rate_limited_large_value() {
+        let err = GoogleCalendarError::RateLimited {
+            retry_after_secs: 3600,
+        };
+        let fcp = err.to_fcp_error();
+        match fcp {
+            FcpError::RateLimited { retry_after_ms, .. } => {
+                assert_eq!(retry_after_ms, 3_600_000);
+            }
+            other => panic!("Expected FcpError::RateLimited, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fcp_error_unauthorized_maps_to_fcp_unauthorized() {
+        let err = GoogleCalendarError::Unauthorized;
+        let fcp = err.to_fcp_error();
+        match fcp {
+            FcpError::Unauthorized { code, message } => {
+                assert_eq!(code, 2001);
+                assert!(message.contains("expired"), "message: {message}");
+                assert!(message.contains("Google Calendar"), "message: {message}");
+            }
+            other => panic!("Expected FcpError::Unauthorized, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fcp_error_event_not_found_resource_format() {
+        let err = GoogleCalendarError::EventNotFound {
+            event_id: "abc123def".into(),
+        };
+        let fcp = err.to_fcp_error();
+        match fcp {
+            FcpError::ResourceNotFound { resource } => {
+                assert_eq!(resource, "event:abc123def");
+            }
+            other => panic!("Expected FcpError::ResourceNotFound, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fcp_error_calendar_not_found_resource_format() {
+        let err = GoogleCalendarError::CalendarNotFound {
+            calendar_id: "user@example.com".into(),
+        };
+        let fcp = err.to_fcp_error();
+        match fcp {
+            FcpError::ResourceNotFound { resource } => {
+                assert_eq!(resource, "calendar:user@example.com");
+            }
+            other => panic!("Expected FcpError::ResourceNotFound, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fcp_error_json_maps_to_internal() {
+        let json_err: serde_json::Error =
+            serde_json::from_str::<serde_json::Value>("invalid").unwrap_err();
+        let err = GoogleCalendarError::Json(json_err);
+        let fcp = err.to_fcp_error();
+        match fcp {
+            FcpError::Internal { message } => {
+                assert!(
+                    message.starts_with("JSON error: "),
+                    "message should start with 'JSON error: ': {message}"
+                );
+            }
+            other => panic!("Expected FcpError::Internal, got: {other:?}"),
+        }
+    }
+
+    // ── From trait conversion tests ────────────────────────────────────────
+
+    #[test]
+    fn from_serde_json_error() {
+        let json_err: serde_json::Error =
+            serde_json::from_str::<serde_json::Value>("not json").unwrap_err();
+        let err: GoogleCalendarError = json_err.into();
+        assert!(matches!(err, GoogleCalendarError::Json(_)));
+    }
+
+    #[test]
+    fn from_reqwest_error() {
+        let http_err = reqwest::Client::new().get("://bad").build().unwrap_err();
+        let err: GoogleCalendarError = http_err.into();
+        assert!(matches!(err, GoogleCalendarError::Http(_)));
+    }
+
+    // ── GCalResult type alias tests ────────────────────────────────────────
+
+    #[test]
+    fn gcal_result_ok() {
+        let result: GCalResult<i32> = Ok(42);
+        assert!(matches!(result, Ok(42)));
+    }
+
+    #[test]
+    fn gcal_result_err() {
+        let result: GCalResult<i32> = Err(GoogleCalendarError::Unauthorized);
+        assert!(result.is_err());
+    }
+
+    // ── Edge case tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn api_error_empty_message() {
+        let err = GoogleCalendarError::Api {
+            code: 500,
+            message: String::new(),
+        };
+        assert_eq!(err.to_string(), "Google Calendar API error:  (code: 500)");
+        // to_fcp_error should still work with empty message
+        let fcp = err.to_fcp_error();
+        assert!(matches!(fcp, FcpError::External { .. }));
+    }
+
+    #[test]
+    fn api_error_unusual_code() {
+        // A code that doesn't match any special branch (not 401/404/429/500/502/503)
+        let err = GoogleCalendarError::Api {
+            code: 418,
+            message: "I'm a teapot".into(),
+        };
+        assert!(!err.is_retryable());
+        let fcp = err.to_fcp_error();
+        match fcp {
+            FcpError::External {
+                status_code,
+                retryable,
+                message,
+                ..
+            } => {
+                assert_eq!(status_code, Some(418));
+                assert!(!retryable);
+                assert_eq!(message, "I'm a teapot");
+            }
+            other => panic!("Expected FcpError::External, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn event_not_found_empty_id() {
+        let err = GoogleCalendarError::EventNotFound {
+            event_id: String::new(),
+        };
+        assert_eq!(err.to_string(), "Event not found: ");
+        let fcp = err.to_fcp_error();
+        match fcp {
+            FcpError::ResourceNotFound { resource } => {
+                assert_eq!(resource, "event:");
+            }
+            other => panic!("Expected FcpError::ResourceNotFound, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn calendar_not_found_empty_id() {
+        let err = GoogleCalendarError::CalendarNotFound {
+            calendar_id: String::new(),
+        };
+        assert_eq!(err.to_string(), "Calendar not found: ");
+        let fcp = err.to_fcp_error();
+        match fcp {
+            FcpError::ResourceNotFound { resource } => {
+                assert_eq!(resource, "calendar:");
+            }
+            other => panic!("Expected FcpError::ResourceNotFound, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_error_retry_after_is_none_even_for_retryable_codes() {
+        // retry_after only returns Some for RateLimited variant, not Api variant
+        for code in [429, 500, 502, 503] {
             let err = GoogleCalendarError::Api {
                 code,
-                message: format!("error {code}"),
+                message: String::new(),
             };
-            assert!(err.is_retryable(), "API {code} should be retryable");
-            let fcp = err.to_fcp_error();
             assert!(
-                matches!(
-                    fcp,
-                    FcpError::External {
-                        retryable: true,
-                        ..
-                    }
-                ),
-                "API {code} should map to retryable External"
+                err.retry_after().is_none(),
+                "Api(code={code}) should have no retry_after"
             );
+        }
+    }
+
+    #[test]
+    fn fcp_error_api_external_has_correct_service_name() {
+        // All External mappings should use "google-calendar" as service
+        for code in [400, 403, 418, 500, 502, 503] {
+            let err = GoogleCalendarError::Api {
+                code,
+                message: "test".into(),
+            };
+            let fcp = err.to_fcp_error();
+            if let FcpError::External { service, .. } = fcp {
+                assert_eq!(
+                    service, "google-calendar",
+                    "service should be google-calendar for code {code}"
+                );
+            }
+            // 401/404/429 map to different variants, skip those
+        }
+    }
+
+    #[test]
+    fn fcp_error_api_external_retry_after_is_none() {
+        // Api errors that map to External have retry_after=None (since Api.retry_after() is None)
+        let err = GoogleCalendarError::Api {
+            code: 500,
+            message: "error".into(),
+        };
+        let fcp = err.to_fcp_error();
+        if let FcpError::External { retry_after, .. } = fcp {
+            assert!(retry_after.is_none());
+        } else {
+            panic!("Expected FcpError::External");
+        }
+    }
+
+    #[test]
+    fn fcp_error_http_retry_after_is_none() {
+        // Http errors map to External with retry_after from self.retry_after() which is None
+        let http_err = reqwest::Client::new().get("://bad").build().unwrap_err();
+        let err = GoogleCalendarError::Http(http_err);
+        let fcp = err.to_fcp_error();
+        if let FcpError::External { retry_after, .. } = fcp {
+            assert!(retry_after.is_none());
+        } else {
+            panic!("Expected FcpError::External");
         }
     }
 }

@@ -307,3 +307,412 @@ impl DatagramErrorVector {
         ]
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── DatagramGoldenVector structural tests ───────────────────────────
+
+    #[test]
+    fn load_all_encoding_vectors_returns_three() {
+        let vectors = DatagramGoldenVector::load_all();
+        assert_eq!(vectors.len(), 3);
+    }
+
+    #[test]
+    fn vector_1_has_correct_description() {
+        let v = DatagramGoldenVector::vector_1_minimal_empty_frame();
+        assert!(v.description.contains("empty frame"));
+    }
+
+    #[test]
+    fn vector_1_empty_frame_header_40_bytes() {
+        let v = DatagramGoldenVector::vector_1_minimal_empty_frame();
+        let encoded = hex::decode(&v.expected_encoded).unwrap();
+        // 16 (session_id) + 8 (seq) + 16 (mac) + 0 (frame) = 40
+        assert_eq!(encoded.len(), 40);
+    }
+
+    #[test]
+    fn vector_1_session_id_is_16_bytes() {
+        let v = DatagramGoldenVector::vector_1_minimal_empty_frame();
+        let sid = hex::decode(&v.session_id).unwrap();
+        assert_eq!(sid.len(), 16);
+    }
+
+    #[test]
+    fn vector_1_mac_is_16_bytes() {
+        let v = DatagramGoldenVector::vector_1_minimal_empty_frame();
+        let mac = hex::decode(&v.mac).unwrap();
+        assert_eq!(mac.len(), 16);
+    }
+
+    #[test]
+    fn vector_1_seq_is_zero() {
+        let v = DatagramGoldenVector::vector_1_minimal_empty_frame();
+        assert_eq!(v.seq, 0);
+    }
+
+    #[test]
+    fn vector_1_frame_bytes_empty() {
+        let v = DatagramGoldenVector::vector_1_minimal_empty_frame();
+        assert!(v.frame_bytes.is_empty());
+    }
+
+    #[test]
+    fn vector_2_has_payload() {
+        let v = DatagramGoldenVector::vector_2_with_payload();
+        assert!(!v.frame_bytes.is_empty());
+        let frame = hex::decode(&v.frame_bytes).unwrap();
+        assert!(!frame.is_empty());
+    }
+
+    #[test]
+    fn vector_2_seq_is_42() {
+        let v = DatagramGoldenVector::vector_2_with_payload();
+        assert_eq!(v.seq, 42);
+    }
+
+    #[test]
+    fn vector_2_encoded_length_includes_payload() {
+        let v = DatagramGoldenVector::vector_2_with_payload();
+        let encoded = hex::decode(&v.expected_encoded).unwrap();
+        let frame = hex::decode(&v.frame_bytes).unwrap();
+        assert_eq!(encoded.len(), 40 + frame.len());
+    }
+
+    #[test]
+    fn vector_3_max_seq() {
+        let v = DatagramGoldenVector::vector_3_max_seq();
+        assert_eq!(v.seq, u64::MAX);
+    }
+
+    #[test]
+    fn vector_3_has_payload() {
+        let v = DatagramGoldenVector::vector_3_max_seq();
+        let frame = hex::decode(&v.frame_bytes).unwrap();
+        assert!(!frame.is_empty());
+    }
+
+    #[test]
+    fn all_encoding_vectors_have_valid_hex() {
+        for v in DatagramGoldenVector::load_all() {
+            assert!(
+                hex::decode(&v.session_id).is_ok(),
+                "session_id: {}",
+                v.description
+            );
+            assert!(hex::decode(&v.mac).is_ok(), "mac: {}", v.description);
+            assert!(
+                hex::decode(&v.expected_encoded).is_ok(),
+                "encoded: {}",
+                v.description
+            );
+            if !v.frame_bytes.is_empty() {
+                assert!(
+                    hex::decode(&v.frame_bytes).is_ok(),
+                    "frame: {}",
+                    v.description
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn all_encoding_vectors_session_id_16_bytes() {
+        for v in DatagramGoldenVector::load_all() {
+            let sid = hex::decode(&v.session_id).unwrap();
+            assert_eq!(sid.len(), 16, "session_id length: {}", v.description);
+        }
+    }
+
+    #[test]
+    fn all_encoding_vectors_mac_16_bytes() {
+        for v in DatagramGoldenVector::load_all() {
+            let mac = hex::decode(&v.mac).unwrap();
+            assert_eq!(mac.len(), 16, "mac length: {}", v.description);
+        }
+    }
+
+    #[test]
+    fn all_encoding_vectors_structure_self_consistent() {
+        for v in DatagramGoldenVector::load_all() {
+            let encoded = hex::decode(&v.expected_encoded).unwrap();
+            let sid = hex::decode(&v.session_id).unwrap();
+            let mac = hex::decode(&v.mac).unwrap();
+            let frame = if v.frame_bytes.is_empty() {
+                vec![]
+            } else {
+                hex::decode(&v.frame_bytes).unwrap()
+            };
+
+            // Verify: session_id || seq_le || mac || frame
+            assert_eq!(
+                &encoded[..16],
+                &sid[..],
+                "session_id mismatch: {}",
+                v.description
+            );
+            let seq_bytes = v.seq.to_le_bytes();
+            assert_eq!(
+                &encoded[16..24],
+                &seq_bytes[..],
+                "seq mismatch: {}",
+                v.description
+            );
+            assert_eq!(
+                &encoded[24..40],
+                &mac[..],
+                "mac mismatch: {}",
+                v.description
+            );
+            assert_eq!(
+                &encoded[40..],
+                &frame[..],
+                "frame mismatch: {}",
+                v.description
+            );
+        }
+    }
+
+    #[test]
+    fn encoding_vectors_serde_roundtrip() {
+        for v in DatagramGoldenVector::load_all() {
+            let json = serde_json::to_string(&v).unwrap();
+            let back: DatagramGoldenVector = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.session_id, v.session_id);
+            assert_eq!(back.seq, v.seq);
+            assert_eq!(back.mac, v.mac);
+            assert_eq!(back.frame_bytes, v.frame_bytes);
+            assert_eq!(back.expected_encoded, v.expected_encoded);
+        }
+    }
+
+    // ── DatagramMacGoldenVector tests ───────────────────────────────────
+
+    #[test]
+    fn load_all_mac_vectors_returns_four() {
+        let vectors = DatagramMacGoldenVector::load_all();
+        assert_eq!(vectors.len(), 4);
+    }
+
+    #[test]
+    fn mac_vectors_have_valid_hex() {
+        for v in DatagramMacGoldenVector::load_all() {
+            assert!(
+                hex::decode(&v.mac_key).is_ok(),
+                "mac_key: {}",
+                v.description
+            );
+            assert!(
+                hex::decode(&v.session_id).is_ok(),
+                "session_id: {}",
+                v.description
+            );
+            assert!(
+                hex::decode(&v.frame_bytes).is_ok(),
+                "frame_bytes: {}",
+                v.description
+            );
+            assert!(
+                hex::decode(&v.expected_mac).is_ok(),
+                "expected_mac: {}",
+                v.description
+            );
+        }
+    }
+
+    #[test]
+    fn mac_vectors_key_is_32_bytes() {
+        for v in DatagramMacGoldenVector::load_all() {
+            let key = hex::decode(&v.mac_key).unwrap();
+            assert_eq!(key.len(), 32, "mac_key length: {}", v.description);
+        }
+    }
+
+    #[test]
+    fn mac_vectors_session_id_is_16_bytes() {
+        for v in DatagramMacGoldenVector::load_all() {
+            let sid = hex::decode(&v.session_id).unwrap();
+            assert_eq!(sid.len(), 16, "session_id length: {}", v.description);
+        }
+    }
+
+    #[test]
+    fn mac_vectors_expected_mac_is_16_bytes() {
+        for v in DatagramMacGoldenVector::load_all() {
+            let mac = hex::decode(&v.expected_mac).unwrap();
+            assert_eq!(mac.len(), 16, "expected_mac length: {}", v.description);
+        }
+    }
+
+    #[test]
+    fn mac_vectors_suite_is_valid() {
+        for v in DatagramMacGoldenVector::load_all() {
+            assert!(
+                v.suite == "Suite1" || v.suite == "Suite2",
+                "invalid suite '{}': {}",
+                v.suite,
+                v.description
+            );
+        }
+    }
+
+    #[test]
+    fn mac_vectors_direction_is_valid() {
+        for v in DatagramMacGoldenVector::load_all() {
+            assert!(
+                v.direction == "InitiatorToResponder" || v.direction == "ResponderToInitiator",
+                "invalid direction '{}': {}",
+                v.direction,
+                v.description
+            );
+        }
+    }
+
+    #[test]
+    fn mac_vectors_cover_both_suites() {
+        let vectors = DatagramMacGoldenVector::load_all();
+        let suites: std::collections::HashSet<&str> =
+            vectors.iter().map(|v| v.suite.as_str()).collect();
+        assert!(suites.contains("Suite1"));
+        assert!(suites.contains("Suite2"));
+    }
+
+    #[test]
+    fn mac_vectors_cover_both_directions() {
+        let vectors = DatagramMacGoldenVector::load_all();
+        let dirs: std::collections::HashSet<&str> =
+            vectors.iter().map(|v| v.direction.as_str()).collect();
+        assert!(dirs.contains("InitiatorToResponder"));
+        assert!(dirs.contains("ResponderToInitiator"));
+    }
+
+    #[test]
+    fn mac_vectors_different_directions_produce_different_macs() {
+        let vectors = DatagramMacGoldenVector::load_all();
+        // Suite1 has both directions with seq=1
+        let suite1: Vec<_> = vectors.iter().filter(|v| v.suite == "Suite1").collect();
+        if suite1.len() >= 2 {
+            assert_ne!(suite1[0].expected_mac, suite1[1].expected_mac);
+        }
+    }
+
+    #[test]
+    fn mac_vectors_serde_roundtrip() {
+        for v in DatagramMacGoldenVector::load_all() {
+            let json = serde_json::to_string(&v).unwrap();
+            let back: DatagramMacGoldenVector = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.expected_mac, v.expected_mac);
+            assert_eq!(back.suite, v.suite);
+            assert_eq!(back.direction, v.direction);
+            assert_eq!(back.seq, v.seq);
+        }
+    }
+
+    // ── DatagramErrorVector tests ───────────────────────────────────────
+
+    #[test]
+    fn load_all_error_vectors_returns_four() {
+        let vectors = DatagramErrorVector::load_all();
+        assert_eq!(vectors.len(), 4);
+    }
+
+    #[test]
+    fn error_vectors_have_valid_hex() {
+        for v in DatagramErrorVector::load_all() {
+            if !v.input_bytes.is_empty() {
+                assert!(
+                    hex::decode(&v.input_bytes).is_ok(),
+                    "input_bytes: {}",
+                    v.description
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn error_vectors_expected_error_is_valid() {
+        for v in DatagramErrorVector::load_all() {
+            assert!(
+                v.expected_error == "TooShort" || v.expected_error == "TooLarge",
+                "invalid error kind '{}': {}",
+                v.expected_error,
+                v.description
+            );
+        }
+    }
+
+    #[test]
+    fn error_vectors_cover_both_error_types() {
+        let vectors = DatagramErrorVector::load_all();
+        let errors: std::collections::HashSet<&str> =
+            vectors.iter().map(|v| v.expected_error.as_str()).collect();
+        assert!(errors.contains("TooShort"));
+        assert!(errors.contains("TooLarge"));
+    }
+
+    #[test]
+    fn error_vectors_too_short_has_less_than_40_bytes() {
+        for v in DatagramErrorVector::load_all() {
+            if v.expected_error == "TooShort" {
+                let bytes = hex::decode(&v.input_bytes).unwrap_or_default();
+                assert!(
+                    bytes.len() < 40,
+                    "TooShort should have <40 bytes: {}",
+                    v.description
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn error_vectors_too_large_exceeds_limit() {
+        for v in DatagramErrorVector::load_all() {
+            if v.expected_error == "TooLarge" {
+                let bytes = hex::decode(&v.input_bytes).unwrap();
+                assert!(
+                    bytes.len() > v.max_datagram_bytes as usize,
+                    "TooLarge should exceed limit: {}",
+                    v.description
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn error_vectors_serde_roundtrip() {
+        for v in DatagramErrorVector::load_all() {
+            let json = serde_json::to_string(&v).unwrap();
+            let back: DatagramErrorVector = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.expected_error, v.expected_error);
+            assert_eq!(back.max_datagram_bytes, v.max_datagram_bytes);
+            assert_eq!(back.input_bytes, v.input_bytes);
+        }
+    }
+
+    #[test]
+    fn encoding_vectors_unique_descriptions() {
+        let vectors = DatagramGoldenVector::load_all();
+        let descs: std::collections::HashSet<&str> =
+            vectors.iter().map(|v| v.description.as_str()).collect();
+        assert_eq!(descs.len(), vectors.len(), "descriptions should be unique");
+    }
+
+    #[test]
+    fn mac_vectors_unique_descriptions() {
+        let vectors = DatagramMacGoldenVector::load_all();
+        let descs: std::collections::HashSet<&str> =
+            vectors.iter().map(|v| v.description.as_str()).collect();
+        assert_eq!(descs.len(), vectors.len(), "descriptions should be unique");
+    }
+
+    #[test]
+    fn error_vectors_unique_descriptions() {
+        let vectors = DatagramErrorVector::load_all();
+        let descs: std::collections::HashSet<&str> =
+            vectors.iter().map(|v| v.description.as_str()).collect();
+        assert_eq!(descs.len(), vectors.len(), "descriptions should be unique");
+    }
+}

@@ -860,16 +860,29 @@ impl TlsVerifier for DefaultTlsVerifier {
             return Ok(());
         }
 
+        // Use constant-time comparison to prevent timing side-channel attacks
+        // that could leak SPKI pin values byte-by-byte.
+        let mut matched = false;
         for pin in expected_pins {
-            if cert_spki == pin.as_slice() {
-                return Ok(());
+            if pin.len() == cert_spki.len() {
+                let mut diff = 0u8;
+                for (a, b) in cert_spki.iter().zip(pin.iter()) {
+                    diff |= a ^ b;
+                }
+                if diff == 0 {
+                    matched = true;
+                }
             }
         }
 
-        Err(EgressError::Denied {
-            reason: "SPKI pin verification failed: no matching pin".into(),
-            code: DenyReason::SpkiPinMismatch,
-        })
+        if matched {
+            Ok(())
+        } else {
+            Err(EgressError::Denied {
+                reason: "SPKI pin verification failed: no matching pin".into(),
+                code: DenyReason::SpkiPinMismatch,
+            })
+        }
     }
 }
 

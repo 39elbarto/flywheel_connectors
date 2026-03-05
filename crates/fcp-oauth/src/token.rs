@@ -37,7 +37,7 @@ pub struct TokenResponse {
 }
 
 /// Stored OAuth tokens with metadata.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct OAuthTokens {
     /// The access token.
     access_token: String,
@@ -59,6 +59,20 @@ pub struct OAuthTokens {
 
     /// When the tokens were issued.
     issued_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for OAuthTokens {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthTokens")
+            .field("access_token", &"[REDACTED]")
+            .field("token_type", &self.token_type)
+            .field("expires_at", &self.expires_at)
+            .field("refresh_token", &self.refresh_token.as_ref().map(|_| "[REDACTED]"))
+            .field("scopes", &self.scopes)
+            .field("id_token", &self.id_token.as_ref().map(|_| "[REDACTED]"))
+            .field("issued_at", &self.issued_at)
+            .finish()
+    }
 }
 
 impl OAuthTokens {

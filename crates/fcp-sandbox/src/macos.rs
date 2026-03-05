@@ -29,6 +29,21 @@ use tracing::{debug, info, warn};
 
 use crate::sandbox::{CompiledPolicy, Sandbox, SandboxError};
 
+/// Sanitize a filesystem path for safe inclusion in an SBPL profile string.
+///
+/// Rejects paths containing characters that could inject SBPL directives
+/// (double quotes, parentheses, backslashes, newlines). Returns the path
+/// unchanged if safe, or a placeholder that will match nothing if dangerous.
+fn sanitize_sbpl_path(path: &str) -> String {
+    if path.contains('"') || path.contains('\\') || path.contains('(') || path.contains(')') || path.contains('\n') || path.contains('\r') {
+        warn!(path = %path, "Rejected sandbox path containing SBPL-injection characters");
+        // Return a path that will never match any real filesystem entry
+        "/dev/null/REJECTED_UNSAFE_PATH".to_string()
+    } else {
+        path.to_string()
+    }
+}
+
 // ============================================================================
 // macOS Sandbox
 // ============================================================================
@@ -97,7 +112,8 @@ impl MacOsSandbox {
         if !policy.readonly_paths.is_empty() {
             profile.push_str("(allow file-read*\n");
             for path in &policy.readonly_paths {
-                let _ = writeln!(profile, "  (subpath \"{}\")", path.display());
+                let escaped = sanitize_sbpl_path(&path.display().to_string());
+                let _ = writeln!(profile, "  (subpath \"{escaped}\")");
             }
             profile.push_str(")\n");
         }
@@ -106,7 +122,8 @@ impl MacOsSandbox {
         if !policy.writable_paths.is_empty() {
             profile.push_str("(allow file-read* file-write*\n");
             for path in &policy.writable_paths {
-                let _ = writeln!(profile, "  (subpath \"{}\")", path.display());
+                let escaped = sanitize_sbpl_path(&path.display().to_string());
+                let _ = writeln!(profile, "  (subpath \"{escaped}\")");
             }
             profile.push_str(")\n");
         }
@@ -229,21 +246,11 @@ impl MacOsSandbox {
             }
         }
 
-        // No new processes if deny_exec
-        if policy.deny_exec {
-            let nproc_limit = libc::rlimit {
-                rlim_cur: 0,
-                rlim_max: 0,
-            };
-            unsafe {
-                if libc::setrlimit(libc::RLIMIT_NPROC, &nproc_limit) != 0 {
-                    warn!(
-                        error = %std::io::Error::last_os_error(),
-                        "Failed to set process limit"
-                    );
-                }
-            }
-        }
+        // NOTE: RLIMIT_NPROC is NOT set on macOS even when deny_exec is true.
+        // On macOS (like Linux NPTL), RLIMIT_NPROC counts threads as processes.
+        // Setting it to 0 would crash any async runtime (Tokio, etc.) that needs
+        // worker threads. Process execution is instead restricted by the SBPL
+        // profile's `(deny process-exec)` directive.
 
         info!("Applied resource limits via setrlimit");
     }

@@ -36,11 +36,12 @@ impl RaptorQDecoder {
     #[must_use]
     pub fn new(oti: ObjectTransmissionInformation, config: &RaptorQConfig) -> Self {
         let size = usize::from(oti.symbol_size()).max(1);
-        let k = (oti.transfer_length() as usize).div_ceil(size);
+        let k_usize = (oti.transfer_length() as usize).div_ceil(size);
+        let k = u32::try_from(k_usize).unwrap_or(u32::MAX);
 
         Self {
             received: HashMap::new(),
-            k: k as u32,
+            k,
             transfer_length: oti.transfer_length(),
             symbol_size: oti.symbol_size(),
             config: config.clone(),
@@ -178,7 +179,7 @@ impl RaptorQDecoder {
     /// Number of unique symbols received.
     #[must_use]
     pub fn received_count(&self) -> u32 {
-        self.received.len() as u32
+        u32::try_from(self.received.len()).unwrap_or(u32::MAX)
     }
 
     /// Approximate number needed for reconstruction.

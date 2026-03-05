@@ -175,7 +175,7 @@ pub static V3: [u32; 256] = [
 /// A value in the range `[0, m)`.
 #[must_use]
 pub fn rand(y: u32, i: u8, m: u32) -> u32 {
-    debug_assert!(m > 0, "modulus must be positive");
+    assert!(m > 0, "modulus must be positive");
 
     let x0 = ((y.wrapping_add(u32::from(i))) & 0xFF) as usize;
     let x1 = (((y >> 8).wrapping_add(u32::from(i))) & 0xFF) as usize;

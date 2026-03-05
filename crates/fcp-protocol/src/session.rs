@@ -505,14 +505,16 @@ fn map_attestation_error(err: TailscaleError) -> SessionError {
 
 /// Get current Unix timestamp in seconds.
 ///
-/// # Panics
-/// Panics if the system clock is set before the Unix epoch.
+/// Returns the current Unix timestamp in seconds.
+///
+/// Returns 0 if the system clock is before the Unix epoch (e.g.,
+/// misconfigured containers or embedded devices), rather than panicking.
 #[must_use]
 pub fn current_timestamp() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("system time before Unix epoch")
+        .unwrap_or_default()
         .as_secs()
 }
 

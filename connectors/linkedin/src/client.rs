@@ -1,0 +1,347 @@
+//! LinkedIn API client.
+
+#![allow(clippy::doc_markdown)]
+
+use std::fmt;
+use std::time::Duration;
+
+use fcp_core::CredentialId;
+use reqwest::{Client, Response, StatusCode};
+use tracing::{debug, instrument};
+
+use crate::{
+    error::{LinkedInError, LinkedInResult},
+    types::ApiErrorResponse,
+};
+
+/// Default LinkedIn REST API v2 base URL.
+pub const DEFAULT_BASE_URL: &str = "https://api.linkedin.com/v2";
+
+/// LinkedIn REST-li protocol version header value.
+const RESTLI_PROTOCOL_VERSION: &str = "2.0.0";
+
+/// Authentication mode for the LinkedIn API.
+#[derive(Clone)]
+pub enum LinkedInAuth {
+    /// OAuth2 access token (passed as `Authorization: Bearer <token>`).
+    AccessToken(String),
+    /// Secretless credential reference (egress proxy injection).
+    CredentialId(CredentialId),
+}
+
+impl LinkedInAuth {
+    #[must_use]
+    pub fn redacted_label(&self) -> String {
+        match self {
+            Self::AccessToken(_) => "access_token:redacted".to_string(),
+            Self::CredentialId(id) => format!("credential_id:{id}"),
+        }
+    }
+
+    #[must_use]
+    pub const fn is_secretless(&self) -> bool {
+        matches!(self, Self::CredentialId(_))
+    }
+}
+
+impl fmt::Debug for LinkedInAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AccessToken(_) => f.debug_tuple("AccessToken").field(&"<redacted>").finish(),
+            Self::CredentialId(id) => f.debug_tuple("CredentialId").field(id).finish(),
+        }
+    }
+}
+
+/// LinkedIn API client.
+pub struct LinkedInClient {
+    client: Client,
+    auth: LinkedInAuth,
+    base_url: String,
+}
+
+impl fmt::Debug for LinkedInClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LinkedInClient")
+            .field("auth", &self.auth)
+            .field("base_url", &self.base_url)
+            .finish()
+    }
+}
+
+impl LinkedInClient {
+    /// Create a new LinkedIn client.
+    pub fn new(auth: LinkedInAuth, base_url: Option<&str>) -> LinkedInResult<Self> {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(30))
+            .user_agent("fcp-linkedin/0.1.0 (FCP connector)")
+            .build()?;
+
+        Ok(Self {
+            client,
+            auth,
+            base_url: base_url
+                .unwrap_or(DEFAULT_BASE_URL)
+                .trim_end_matches('/')
+                .to_string(),
+        })
+    }
+
+    fn add_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.auth {
+            LinkedInAuth::AccessToken(token) => {
+                req.header("Authorization", format!("Bearer {token}"))
+            }
+            LinkedInAuth::CredentialId(id) => req.header("X-FCP-Credential-Id", id.to_string()),
+        }
+    }
+
+    fn add_restli_header(req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        req.header("X-Restli-Protocol-Version", RESTLI_PROTOCOL_VERSION)
+    }
+
+    async fn handle_response(&self, resp: Response) -> LinkedInResult<serde_json::Value> {
+        let status = resp.status();
+        if status.is_success() {
+            let body = resp.text().await?;
+            if body.is_empty() {
+                return Ok(serde_json::json!({}));
+            }
+            Ok(serde_json::from_str(&body)?)
+        } else {
+            self.handle_error(status, resp).await
+        }
+    }
+
+    async fn handle_error(
+        &self,
+        status: StatusCode,
+        resp: Response,
+    ) -> LinkedInResult<serde_json::Value> {
+        let retry_after = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok());
+
+        let body = resp.text().await.unwrap_or_default();
+
+        // LinkedIn returns {"message": "...", "serviceErrorCode": 123, "status": 401} on errors.
+        let detail = serde_json::from_str::<ApiErrorResponse>(&body)
+            .ok()
+            .and_then(|e| e.message)
+            .unwrap_or_else(|| {
+                if body.is_empty() {
+                    format!("HTTP {}", status.as_u16())
+                } else {
+                    body.clone()
+                }
+            });
+
+        match status.as_u16() {
+            401 => Err(LinkedInError::Unauthorized),
+            403 => Err(LinkedInError::Forbidden),
+            404 => Err(LinkedInError::NotFound { resource: detail }),
+            429 => Err(LinkedInError::RateLimited {
+                retry_after_ms: retry_after.unwrap_or(60) * 1000,
+            }),
+            code => Err(LinkedInError::Api {
+                status_code: code,
+                message: detail,
+            }),
+        }
+    }
+
+    #[instrument(skip(self), fields(url))]
+    async fn get(&self, path: &str) -> LinkedInResult<serde_json::Value> {
+        let url = format!("{}{path}", self.base_url);
+        debug!(url = %url, "GET request");
+        let req = Self::add_restli_header(self.add_auth(self.client.get(&url)))
+            .header("Accept", "application/json");
+        let resp = req.send().await?;
+        self.handle_response(resp).await
+    }
+
+    #[instrument(skip(self, body), fields(url))]
+    async fn post(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> LinkedInResult<serde_json::Value> {
+        let url = format!("{}{path}", self.base_url);
+        debug!(url = %url, "POST request");
+        let req = Self::add_restli_header(self.add_auth(self.client.post(&url)))
+            .header("Accept", "application/json")
+            .json(body);
+        let resp = req.send().await?;
+        self.handle_response(resp).await
+    }
+
+    #[instrument(skip(self), fields(url))]
+    async fn delete(&self, path: &str) -> LinkedInResult<serde_json::Value> {
+        let url = format!("{}{path}", self.base_url);
+        debug!(url = %url, "DELETE request");
+        let req = Self::add_restli_header(self.add_auth(self.client.delete(&url)))
+            .header("Accept", "application/json");
+        let resp = req.send().await?;
+        self.handle_response(resp).await
+    }
+
+    // -- Profile --
+
+    /// Get the current authenticated user's profile.
+    pub async fn get_profile(&self) -> LinkedInResult<serde_json::Value> {
+        self.get("/me").await
+    }
+
+    /// Get a profile by person ID.
+    pub async fn get_profile_by_id(&self, person_id: &str) -> LinkedInResult<serde_json::Value> {
+        self.get(&format!("/people/(id:{person_id})")).await
+    }
+
+    // -- Connections --
+
+    /// List the authenticated user's connections.
+    pub async fn list_connections(&self) -> LinkedInResult<serde_json::Value> {
+        self.get("/connections?q=viewer&start=0&count=50").await
+    }
+
+    // -- Organizations --
+
+    /// Get a company/organization by ID.
+    pub async fn get_company(&self, company_id: &str) -> LinkedInResult<serde_json::Value> {
+        self.get(&format!("/organizations/{company_id}")).await
+    }
+
+    /// Get follower statistics for a company.
+    pub async fn list_company_followers(
+        &self,
+        company_id: &str,
+    ) -> LinkedInResult<serde_json::Value> {
+        self.get(&format!(
+            "/organizationalEntityFollowerStatistics?q=organizationalEntity&organizationalEntity=urn:li:organization:{company_id}"
+        ))
+        .await
+    }
+
+    // -- Posts (UGC) --
+
+    /// Create a new UGC post.
+    pub async fn create_post(&self, body: &serde_json::Value) -> LinkedInResult<serde_json::Value> {
+        self.post("/ugcPosts", body).await
+    }
+
+    /// Delete a UGC post by its URN.
+    pub async fn delete_post(&self, post_urn: &str) -> LinkedInResult<serde_json::Value> {
+        let encoded = post_urn.replace(':', "%3A").replace('#', "%23");
+        self.delete(&format!("/ugcPosts/{encoded}")).await
+    }
+
+    /// Get a UGC post by its URN.
+    pub async fn get_post(&self, post_urn: &str) -> LinkedInResult<serde_json::Value> {
+        let encoded = post_urn.replace(':', "%3A").replace('#', "%23");
+        self.get(&format!("/ugcPosts/{encoded}")).await
+    }
+
+    // -- Analytics --
+
+    /// Get share statistics for an organizational entity.
+    pub async fn share_statistics(&self, share_urn: &str) -> LinkedInResult<serde_json::Value> {
+        let encoded = share_urn.replace(':', "%3A").replace('#', "%23");
+        self.get(&format!(
+            "/organizationalEntityShareStatistics?q=organizationalEntity&organizationalEntity={encoded}"
+        ))
+        .await
+    }
+
+    // -- Search --
+
+    /// Search for companies by keywords.
+    pub async fn search_companies(&self, keywords: &str) -> LinkedInResult<serde_json::Value> {
+        let encoded_kw = keywords.replace(' ', "%20");
+        self.get(&format!(
+            "/search/blended?q=all&keywords={encoded_kw}&types=List(COMPANY)"
+        ))
+        .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auth_debug_redacts_token() {
+        let auth = LinkedInAuth::AccessToken("secret-access-token".into());
+        let dbg = format!("{auth:?}");
+        assert!(!dbg.contains("secret-access-token"));
+        assert!(dbg.contains("redacted"));
+    }
+
+    #[test]
+    fn auth_secretless_detection() {
+        let token = LinkedInAuth::AccessToken("tok".into());
+        assert!(!token.is_secretless());
+        let cred = LinkedInAuth::CredentialId(CredentialId::new());
+        assert!(cred.is_secretless());
+    }
+
+    #[test]
+    fn auth_redacted_label() {
+        let token = LinkedInAuth::AccessToken("tok".into());
+        assert_eq!(token.redacted_label(), "access_token:redacted");
+    }
+
+    #[test]
+    fn auth_credential_label() {
+        let cred = LinkedInAuth::CredentialId(CredentialId::new());
+        let label = cred.redacted_label();
+        assert!(label.starts_with("credential_id:"));
+    }
+
+    #[test]
+    fn client_new_default_url() {
+        let client = LinkedInClient::new(LinkedInAuth::AccessToken("tok".into()), None).unwrap();
+        assert_eq!(client.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn client_new_custom_url() {
+        let client = LinkedInClient::new(
+            LinkedInAuth::AccessToken("tok".into()),
+            Some("https://test.example.com/v2/"),
+        )
+        .unwrap();
+        assert_eq!(client.base_url, "https://test.example.com/v2");
+    }
+
+    #[test]
+    fn client_debug_redacts() {
+        let client = LinkedInClient::new(LinkedInAuth::AccessToken("secret".into()), None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(!dbg.contains("secret"));
+        assert!(dbg.contains("redacted"));
+    }
+
+    #[test]
+    fn default_base_url_is_linkedin_v2() {
+        assert_eq!(DEFAULT_BASE_URL, "https://api.linkedin.com/v2");
+    }
+
+    #[test]
+    fn auth_debug_credential_id() {
+        let cred = LinkedInAuth::CredentialId(CredentialId::new());
+        let dbg = format!("{cred:?}");
+        assert!(dbg.contains("CredentialId"));
+    }
+
+    #[test]
+    fn client_strips_trailing_slash() {
+        let client = LinkedInClient::new(
+            LinkedInAuth::AccessToken("tok".into()),
+            Some("https://api.linkedin.com/v2///"),
+        )
+        .unwrap();
+        assert!(!client.base_url.ends_with('/'));
+    }
+}

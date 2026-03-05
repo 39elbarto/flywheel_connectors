@@ -547,4 +547,209 @@ mod tests {
         let store = TokenStore::default();
         assert!(store.keys().is_empty());
     }
+
+    // ── Batch: token response deserialization edge cases ──
+
+    #[test]
+    fn test_token_response_minimal_json() {
+        // Only required fields
+        let json = r#"{"access_token":"tok","token_type":"Bearer"}"#;
+        let resp: TokenResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.access_token, "tok");
+        assert_eq!(resp.token_type, "Bearer");
+        assert!(resp.expires_in.is_none());
+        assert!(resp.refresh_token.is_none());
+        assert!(resp.scope.is_none());
+        assert!(resp.id_token.is_none());
+    }
+
+    #[test]
+    fn test_token_response_with_all_fields() {
+        let json = r#"{
+            "access_token": "at",
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "refresh_token": "rt",
+            "scope": "openid email",
+            "id_token": "eyJhbGciOiJSUzI1NiJ9.e30.sig"
+        }"#;
+        let resp: TokenResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.expires_in, Some(3600));
+        assert_eq!(resp.refresh_token, Some("rt".into()));
+        assert_eq!(resp.scope, Some("openid email".into()));
+        assert!(resp.id_token.is_some());
+    }
+
+    #[test]
+    fn test_token_response_clone() {
+        let resp = mock_token_response(Some(3600));
+        let cloned = resp.clone();
+        assert_eq!(resp.access_token, cloned.access_token);
+        assert_eq!(resp.expires_in, cloned.expires_in);
+    }
+
+    // ── Batch: OAuthTokens edge cases ──
+
+    #[test]
+    fn test_token_no_scopes() {
+        let resp = TokenResponse {
+            access_token: "tok".into(),
+            token_type: "Bearer".into(),
+            expires_in: None,
+            refresh_token: None,
+            scope: None,
+            id_token: None,
+        };
+        let tokens = OAuthTokens::from_response(resp);
+        assert!(tokens.scopes().is_empty());
+    }
+
+    #[test]
+    fn test_token_single_scope() {
+        let resp = TokenResponse {
+            access_token: "tok".into(),
+            token_type: "Bearer".into(),
+            expires_in: None,
+            refresh_token: None,
+            scope: Some("read".into()),
+            id_token: None,
+        };
+        let tokens = OAuthTokens::from_response(resp);
+        assert_eq!(tokens.scopes(), &["read"]);
+    }
+
+    #[test]
+    fn test_token_needs_refresh_within_custom_threshold() {
+        // Token expires in 30 seconds
+        let tokens = OAuthTokens::from_response(mock_token_response(Some(30)));
+        // With 60-second threshold → needs refresh
+        assert!(tokens.needs_refresh_within(Duration::from_secs(60)));
+        // With 10-second threshold → does not need refresh
+        assert!(!tokens.needs_refresh_within(Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn test_token_clone() {
+        let tokens = OAuthTokens::from_response(mock_token_response(Some(3600)));
+        let cloned = tokens.clone();
+        assert_eq!(tokens.access_token(), cloned.access_token());
+        assert_eq!(tokens.token_type(), cloned.token_type());
+        assert_eq!(tokens.refresh_token(), cloned.refresh_token());
+        assert_eq!(tokens.scopes(), cloned.scopes());
+    }
+
+    #[test]
+    fn test_token_serialize() {
+        let tokens = OAuthTokens::from_response(mock_token_response(Some(3600)));
+        let json = serde_json::to_string(&tokens).unwrap();
+        assert!(json.contains("test_access_token"));
+        assert!(json.contains("Bearer"));
+    }
+
+    #[test]
+    fn test_token_debug_contains_type() {
+        let tokens = OAuthTokens::from_response(mock_token_response(Some(3600)));
+        let debug = format!("{tokens:?}");
+        assert!(debug.contains("OAuthTokens"));
+    }
+
+    // ── Batch: TokenStore advanced ──
+
+    #[test]
+    fn test_token_store_overwrite() {
+        let store = TokenStore::new();
+        let tokens1 = OAuthTokens::from_response(mock_token_response(Some(3600)));
+        store.store("key", tokens1);
+
+        let new_resp = TokenResponse {
+            access_token: "new_tok".into(),
+            token_type: "Bearer".into(),
+            expires_in: Some(7200),
+            refresh_token: None,
+            scope: None,
+            id_token: None,
+        };
+        let tokens2 = OAuthTokens::from_response(new_resp);
+        store.store("key", tokens2);
+
+        let retrieved = store.get("key").unwrap();
+        assert_eq!(retrieved.access_token(), "new_tok");
+    }
+
+    #[test]
+    fn test_token_store_update_existing() {
+        let store = TokenStore::new();
+        store.store(
+            "key",
+            OAuthTokens::from_response(mock_token_response(Some(3600))),
+        );
+
+        let new_tokens = OAuthTokens::from_response(TokenResponse {
+            access_token: "updated".into(),
+            token_type: "Bearer".into(),
+            expires_in: Some(7200),
+            refresh_token: None,
+            scope: None,
+            id_token: None,
+        });
+
+        assert!(store.update("key", new_tokens).is_ok());
+        assert_eq!(store.get("key").unwrap().access_token(), "updated");
+    }
+
+    #[test]
+    fn test_token_store_remove_nonexistent() {
+        let store = TokenStore::new();
+        assert!(store.remove("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_token_store_get_nonexistent() {
+        let store = TokenStore::new();
+        assert!(store.get("missing").is_none());
+    }
+
+    #[test]
+    fn test_token_store_get_with_metadata_nonexistent() {
+        let store = TokenStore::new();
+        assert!(store.get_with_metadata("missing").is_none());
+    }
+
+    #[test]
+    fn test_token_store_has_valid_token_expired() {
+        let store = TokenStore::new();
+        store.store(
+            "expired",
+            OAuthTokens::from_response(mock_token_response(Some(0))),
+        );
+        assert!(!store.has_valid_token("expired"));
+    }
+
+    #[test]
+    fn test_token_store_has_valid_token_missing() {
+        let store = TokenStore::new();
+        assert!(!store.has_valid_token("missing"));
+    }
+
+    #[test]
+    fn test_token_store_clone() {
+        let store = TokenStore::new();
+        store.store(
+            "key",
+            OAuthTokens::from_response(mock_token_response(Some(3600))),
+        );
+        let cloned = store.clone();
+        assert!(cloned.has_valid_token("key"));
+    }
+
+    #[test]
+    fn test_token_store_with_cleanup_interval() {
+        let store = TokenStore::new().with_cleanup_interval(Duration::from_secs(120));
+        // Should still work normally
+        store.store(
+            "key",
+            OAuthTokens::from_response(mock_token_response(Some(3600))),
+        );
+        assert!(store.has_valid_token("key"));
+    }
 }

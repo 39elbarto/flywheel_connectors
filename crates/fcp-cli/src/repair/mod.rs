@@ -219,4 +219,52 @@ mod tests {
         assert_eq!(report.overall_status, CoverageStatus::Healthy);
         assert!(report.coverage.is_available);
     }
+
+    #[test]
+    fn simulate_report_coverage_values() {
+        let zone: ZoneId = "z:test".parse().unwrap();
+        let report = simulate_report(&zone);
+        assert_eq!(report.coverage.distinct_nodes, 5);
+        assert_eq!(report.coverage.coverage_bps, 9500);
+        assert_eq!(report.coverage.max_node_fraction_bps, 2500);
+        assert_eq!(report.coverage.min_symbols_required, Some(100));
+        assert_eq!(report.coverage.symbols_available, Some(142));
+    }
+
+    #[test]
+    fn simulate_report_placement_values() {
+        let zone: ZoneId = "z:test".parse().unwrap();
+        let report = simulate_report(&zone);
+        assert_eq!(report.placement.policy_name, "default");
+        assert_eq!(report.placement.target_replicas, 3);
+        assert_eq!(report.placement.placement_nodes.len(), 5);
+        assert_eq!(report.placement.healthy_nodes, 4);
+        assert_eq!(report.placement.degraded_nodes, 1);
+    }
+
+    #[test]
+    fn simulate_report_no_pending_repairs() {
+        let zone: ZoneId = "z:test".parse().unwrap();
+        let report = simulate_report(&zone);
+        assert!(report.pending_repairs.is_empty());
+        assert!(report.last_repair_cycle.is_none());
+    }
+
+    #[test]
+    fn simulate_report_schema_version() {
+        let zone: ZoneId = "z:test".parse().unwrap();
+        let report = simulate_report(&zone);
+        assert_eq!(report.schema_version, "1.0.0");
+    }
+
+    #[test]
+    fn simulate_report_json_roundtrip() {
+        let zone: ZoneId = "z:test".parse().unwrap();
+        let report = simulate_report(&zone);
+        let json = serde_json::to_string(&report).unwrap();
+        let back: RepairReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.zone_id, "z:test");
+        assert_eq!(back.overall_status, CoverageStatus::Healthy);
+        assert_eq!(back.coverage.distinct_nodes, 5);
+    }
 }

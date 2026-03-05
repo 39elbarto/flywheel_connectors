@@ -413,4 +413,399 @@ mod tests {
         assert_eq!(escape_control_chars("Hello\x00World"), "Hello\\u{0}World");
         assert_eq!(escape_control_chars("Hello\x1bWorld"), "Hello\\u{1b}World");
     }
+
+    // ---- FormatMode ----
+
+    #[test]
+    fn format_mode_as_parse_mode() {
+        assert_eq!(FormatMode::Plain.as_parse_mode(), None);
+        assert_eq!(FormatMode::Html.as_parse_mode(), Some("HTML"));
+        assert_eq!(FormatMode::MarkdownV2.as_parse_mode(), Some("MarkdownV2"));
+    }
+
+    #[test]
+    fn format_mode_eq() {
+        assert_eq!(FormatMode::Plain, FormatMode::Plain);
+        assert_ne!(FormatMode::Plain, FormatMode::Html);
+        assert_ne!(FormatMode::Html, FormatMode::MarkdownV2);
+    }
+
+    // ---- validate_html ----
+
+    #[test]
+    fn validate_html_valid_tags() {
+        assert!(validate_html("<b>bold</b>").is_ok());
+        assert!(validate_html("<i>italic</i>").is_ok());
+        assert!(validate_html("no tags at all").is_ok());
+    }
+
+    #[test]
+    fn validate_html_unclosed_tag() {
+        // A truly unclosed tag: `<b` without closing `>`
+        assert!(matches!(validate_html("hello <b"), Err(FormatError::InvalidHtml)));
+    }
+
+    #[test]
+    fn validate_html_valid_named_entities() {
+        assert!(validate_html("&amp; &lt; &gt; &quot; &apos;").is_ok());
+    }
+
+    #[test]
+    fn validate_html_valid_numeric_entities() {
+        assert!(validate_html("&#65;").is_ok()); // 'A'
+        assert!(validate_html("&#x41;").is_ok()); // 'A' hex
+    }
+
+    #[test]
+    fn validate_html_invalid_entity_no_semicolon() {
+        assert!(matches!(validate_html("&amp no semicolon"), Err(FormatError::InvalidHtml)));
+    }
+
+    #[test]
+    fn validate_html_invalid_entity_name() {
+        assert!(matches!(validate_html("&bogus;"), Err(FormatError::InvalidHtml)));
+    }
+
+    #[test]
+    fn validate_html_entity_too_long() {
+        assert!(matches!(validate_html("&verylonginvalidname;"), Err(FormatError::InvalidHtml)));
+    }
+
+    #[test]
+    fn validate_html_control_chars_rejected() {
+        assert!(matches!(validate_html("hello\x00world"), Err(FormatError::ControlChars)));
+    }
+
+    // ---- validate_markdown ----
+
+    #[test]
+    fn validate_markdown_valid() {
+        assert!(validate_markdown("hello world").is_ok());
+        assert!(validate_markdown("escaped \\* star").is_ok());
+        assert!(validate_markdown("multiple \\_ \\~ escapes").is_ok());
+    }
+
+    #[test]
+    fn validate_markdown_trailing_backslash() {
+        assert!(matches!(validate_markdown("trailing \\"), Err(FormatError::InvalidMarkdown)));
+    }
+
+    #[test]
+    fn validate_markdown_control_chars_rejected() {
+        assert!(matches!(validate_markdown("hello\x01world"), Err(FormatError::ControlChars)));
+    }
+
+    // ---- Formatter::render_with_fallback ----
+
+    #[test]
+    fn render_plain_passthrough() {
+        let result = Formatter::render_with_fallback("hello", FormatMode::Plain);
+        assert_eq!(result.rendered, "hello");
+        assert!(result.parse_mode_used.is_none());
+    }
+
+    #[test]
+    fn render_plain_escapes_control() {
+        let result = Formatter::render_with_fallback("hi\x00there", FormatMode::Plain);
+        assert!(result.rendered.contains("\\u{0}"));
+        assert!(result.parse_mode_used.is_none());
+    }
+
+    #[test]
+    fn render_html_valid() {
+        let result = Formatter::render_with_fallback("<b>bold</b>", FormatMode::Html);
+        assert_eq!(result.rendered, "<b>bold</b>");
+        assert_eq!(result.parse_mode_used, Some(FormatMode::Html));
+    }
+
+    #[test]
+    fn render_html_invalid_falls_back() {
+        // Truly invalid: `<b` without closing `>`
+        let result = Formatter::render_with_fallback("hello <b", FormatMode::Html);
+        // Should fall back to plaintext with HTML stripped
+        assert!(!result.rendered.contains("<b"));
+        assert!(result.parse_mode_used.is_none());
+    }
+
+    #[test]
+    fn render_markdown_valid() {
+        let result = Formatter::render_with_fallback("hello \\*world\\*", FormatMode::MarkdownV2);
+        assert_eq!(result.rendered, "hello \\*world\\*");
+        assert_eq!(result.parse_mode_used, Some(FormatMode::MarkdownV2));
+    }
+
+    #[test]
+    fn render_markdown_invalid_falls_back() {
+        let result = Formatter::render_with_fallback("trailing \\", FormatMode::MarkdownV2);
+        // Should fall back to plaintext with markdown stripped
+        assert!(result.parse_mode_used.is_none());
+    }
+
+    // ---- Formatter::render_plaintext_fallback ----
+
+    #[test]
+    fn render_plaintext_fallback_plain() {
+        let result = Formatter::render_plaintext_fallback("hello", FormatMode::Plain);
+        assert_eq!(result.rendered, "hello");
+        assert!(result.parse_mode_used.is_none());
+    }
+
+    #[test]
+    fn render_plaintext_fallback_html() {
+        let result = Formatter::render_plaintext_fallback("<b>bold</b>", FormatMode::Html);
+        assert_eq!(result.rendered, "bold");
+        assert!(result.parse_mode_used.is_none());
+    }
+
+    #[test]
+    fn render_plaintext_fallback_markdown() {
+        let result = Formatter::render_plaintext_fallback("hello *world*", FormatMode::MarkdownV2);
+        assert!(!result.rendered.contains('*'));
+        assert!(result.parse_mode_used.is_none());
+    }
+
+    // ---- strip_html ----
+
+    #[test]
+    fn strip_html_removes_tags() {
+        assert_eq!(strip_html("<b>bold</b>"), "bold");
+        assert_eq!(strip_html("<i>italic</i> text"), "italic text");
+        assert_eq!(strip_html("no tags"), "no tags");
+    }
+
+    #[test]
+    fn strip_html_decodes_named_entities() {
+        assert_eq!(strip_html("&amp;"), "&");
+        assert_eq!(strip_html("&lt;"), "<");
+        assert_eq!(strip_html("&gt;"), ">");
+        assert_eq!(strip_html("&quot;"), "\"");
+        assert_eq!(strip_html("&apos;"), "'");
+    }
+
+    #[test]
+    fn strip_html_decodes_numeric_entities() {
+        assert_eq!(strip_html("&#65;"), "A");
+        assert_eq!(strip_html("&#x41;"), "A");
+    }
+
+    #[test]
+    fn strip_html_unknown_entity_preserved() {
+        // Unknown named entity is preserved literally
+        let result = strip_html("&bogus;");
+        assert_eq!(result, "&bogus;");
+    }
+
+    #[test]
+    fn strip_html_unclosed_entity() {
+        // When there's no `;`, strip_html consumes chars into the entity buffer
+        // up to the 10-char limit, then outputs `&` + buffer contents.
+        // "amp no sem" is 10 chars, then "icolon" remains as regular text.
+        let result = strip_html("&amp no semicolon");
+        assert!(result.starts_with("&amp no sem"));
+    }
+
+    // ---- strip_markdown ----
+
+    #[test]
+    fn strip_markdown_removes_controls() {
+        assert_eq!(strip_markdown("*bold*"), "bold");
+        assert_eq!(strip_markdown("_italic_"), "italic");
+        assert_eq!(strip_markdown("`code`"), "code");
+        assert_eq!(strip_markdown("~strike~"), "strike");
+    }
+
+    #[test]
+    fn strip_markdown_preserves_escaped() {
+        assert_eq!(strip_markdown("\\*literal\\*"), "*literal*");
+        assert_eq!(strip_markdown("\\_underscore\\_"), "_underscore_");
+    }
+
+    #[test]
+    fn strip_markdown_removes_all_control_chars() {
+        // All markdown control chars should be removed
+        let controls = "*_`~[]()>#+-=|{}.!";
+        assert_eq!(strip_markdown(controls), "");
+    }
+
+    // ---- is_markdown_control ----
+
+    #[test]
+    fn is_markdown_control_positive() {
+        for ch in "*_`~[]()>#+-=|{}.!".chars() {
+            assert!(is_markdown_control(ch), "expected {ch:?} to be control");
+        }
+    }
+
+    #[test]
+    fn is_markdown_control_negative() {
+        for ch in "abcABC123 \n\t".chars() {
+            assert!(!is_markdown_control(ch), "expected {ch:?} not to be control");
+        }
+    }
+
+    // ---- classify_error_message ----
+
+    #[test]
+    fn classify_parse_errors() {
+        assert_eq!(classify_error_message("Can't parse entities"), ErrorClass::ParseError);
+        assert_eq!(classify_error_message("can't find end of the entity"), ErrorClass::ParseError);
+        assert_eq!(classify_error_message("invalid markdown in text"), ErrorClass::ParseError);
+        assert_eq!(classify_error_message("Markdown parse failed"), ErrorClass::ParseError);
+    }
+
+    #[test]
+    fn classify_rate_limits() {
+        assert_eq!(classify_error_message("Rate limit exceeded"), ErrorClass::RateLimit);
+        assert_eq!(classify_error_message("rate-limit reached"), ErrorClass::RateLimit);
+        assert_eq!(classify_error_message("Too many requests"), ErrorClass::RateLimit);
+        assert_eq!(classify_error_message("retry after 30s"), ErrorClass::RateLimit);
+        assert_eq!(classify_error_message("HTTP 429 error"), ErrorClass::RateLimit);
+    }
+
+    #[test]
+    fn classify_transient() {
+        assert_eq!(classify_error_message("Connection timeout"), ErrorClass::Transient);
+        assert_eq!(classify_error_message("request timed out"), ErrorClass::Transient);
+        assert_eq!(classify_error_message("temporarily unavailable"), ErrorClass::Transient);
+        assert_eq!(classify_error_message("service unavailable"), ErrorClass::Transient);
+        assert_eq!(classify_error_message("connection reset by peer"), ErrorClass::Transient);
+        assert_eq!(classify_error_message("connection refused"), ErrorClass::Transient);
+        assert_eq!(classify_error_message("network error occurred"), ErrorClass::Transient);
+        assert_eq!(classify_error_message("HTTP 502 Bad Gateway"), ErrorClass::Transient);
+        assert_eq!(classify_error_message("HTTP 503 Service Unavailable"), ErrorClass::Transient);
+        assert_eq!(classify_error_message("HTTP 504 Gateway Timeout"), ErrorClass::Transient);
+        assert_eq!(classify_error_message("temporary failure"), ErrorClass::Transient);
+    }
+
+    #[test]
+    fn classify_terminal() {
+        assert_eq!(classify_error_message("not found"), ErrorClass::Terminal);
+        assert_eq!(classify_error_message("access denied"), ErrorClass::Terminal);
+        assert_eq!(classify_error_message("invalid API key"), ErrorClass::Terminal);
+    }
+
+    #[test]
+    fn classify_case_insensitive() {
+        assert_eq!(classify_error_message("RATE LIMIT EXCEEDED"), ErrorClass::RateLimit);
+        assert_eq!(classify_error_message("CONNECTION TIMEOUT"), ErrorClass::Transient);
+    }
+
+    // ---- is_parse_error_message ----
+
+    #[test]
+    fn is_parse_error_positive() {
+        assert!(is_parse_error_message("Can't parse entities in text"));
+        assert!(is_parse_error_message("can't find end of the entity"));
+        assert!(is_parse_error_message("invalid markdown formatting"));
+    }
+
+    #[test]
+    fn is_parse_error_negative() {
+        assert!(!is_parse_error_message("rate limit exceeded"));
+        assert!(!is_parse_error_message("unknown error"));
+    }
+
+    // ---- contains_disallowed_control ----
+
+    #[test]
+    fn disallowed_control_chars() {
+        assert!(contains_disallowed_control("hello\x00world"));
+        assert!(contains_disallowed_control("bell\x07here"));
+        assert!(contains_disallowed_control("escape\x1b[0m"));
+    }
+
+    #[test]
+    fn allowed_control_chars() {
+        assert!(!contains_disallowed_control("hello\nworld"));
+        assert!(!contains_disallowed_control("hello\r\nworld"));
+        assert!(!contains_disallowed_control("hello\tworld"));
+        assert!(!contains_disallowed_control("no controls"));
+    }
+
+    // ---- entity helpers ----
+
+    #[test]
+    fn is_valid_entity_named() {
+        assert!(is_valid_entity("amp"));
+        assert!(is_valid_entity("lt"));
+        assert!(is_valid_entity("gt"));
+        assert!(is_valid_entity("quot"));
+        assert!(is_valid_entity("apos"));
+        assert!(!is_valid_entity("bogus"));
+    }
+
+    #[test]
+    fn is_valid_entity_numeric() {
+        assert!(is_valid_entity("#65"));
+        assert!(is_valid_entity("#x41"));
+        assert!(!is_valid_entity("#"));
+        assert!(!is_valid_entity("#x"));
+        assert!(!is_valid_entity("#xGG"));
+    }
+
+    #[test]
+    fn decode_entity_named() {
+        assert_eq!(decode_entity("amp"), Some('&'));
+        assert_eq!(decode_entity("lt"), Some('<'));
+        assert_eq!(decode_entity("gt"), Some('>'));
+        assert_eq!(decode_entity("quot"), Some('"'));
+        assert_eq!(decode_entity("apos"), Some('\''));
+        assert_eq!(decode_entity("bogus"), None);
+    }
+
+    #[test]
+    fn decode_entity_numeric() {
+        assert_eq!(decode_entity("#65"), Some('A'));
+        assert_eq!(decode_entity("#x41"), Some('A'));
+        assert_eq!(decode_entity("#0"), Some('\0'));
+        assert_eq!(decode_entity("#xZZ"), None);
+    }
+
+    // ---- RenderResult ----
+
+    #[test]
+    fn render_result_eq() {
+        let a = RenderResult {
+            rendered: "hello".into(),
+            parse_mode_used: None,
+        };
+        let b = RenderResult {
+            rendered: "hello".into(),
+            parse_mode_used: None,
+        };
+        assert_eq!(a, b);
+    }
+
+    // ---- FormatError ----
+
+    #[test]
+    fn format_error_variants() {
+        let e1 = FormatError::InvalidHtml;
+        let e2 = FormatError::InvalidMarkdown;
+        let e3 = FormatError::ControlChars;
+        assert_ne!(e1, e2);
+        assert_ne!(e2, e3);
+        assert_eq!(e1.clone(), FormatError::InvalidHtml);
+    }
+
+    // ---- ErrorClass ----
+
+    #[test]
+    fn error_class_variants() {
+        assert_ne!(ErrorClass::ParseError, ErrorClass::RateLimit);
+        assert_ne!(ErrorClass::Transient, ErrorClass::Terminal);
+        assert_eq!(ErrorClass::ParseError, ErrorClass::ParseError);
+    }
+
+    // ---- escape_control_chars edge cases ----
+
+    #[test]
+    fn escape_control_chars_empty() {
+        assert_eq!(escape_control_chars(""), "");
+    }
+
+    #[test]
+    fn escape_control_chars_only_allowed() {
+        assert_eq!(escape_control_chars("\n\r\t"), "\n\r\t");
+    }
 }

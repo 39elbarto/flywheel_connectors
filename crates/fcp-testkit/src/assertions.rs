@@ -303,4 +303,291 @@ mod tests {
         let json = serde_json::json!([1, 2, 3]);
         assert_json_array_len(&json, 3);
     }
+
+    #[test]
+    fn test_assert_json_array_len_empty() {
+        let json = serde_json::json!([]);
+        assert_json_array_len(&json, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Expected array of length")]
+    fn test_assert_json_array_len_mismatch() {
+        let json = serde_json::json!([1, 2]);
+        assert_json_array_len(&json, 5);
+    }
+
+    // ---- assert_ok / assert_err ----
+
+    #[test]
+    fn test_assert_ok_passes() {
+        let result: FcpResult<i32> = Ok(42);
+        assert_ok(&result);
+    }
+
+    #[test]
+    #[should_panic(expected = "Expected Ok")]
+    fn test_assert_ok_fails() {
+        let result: FcpResult<i32> = Err(FcpError::NotConfigured);
+        assert_ok(&result);
+    }
+
+    #[test]
+    fn test_assert_err_passes() {
+        let result: FcpResult<i32> = Err(FcpError::NotConfigured);
+        assert_err(&result);
+    }
+
+    #[test]
+    #[should_panic(expected = "Expected Err")]
+    fn test_assert_err_fails() {
+        let result: FcpResult<i32> = Ok(42);
+        assert_err(&result);
+    }
+
+    // ---- assert_error_type ----
+
+    #[test]
+    fn test_assert_error_type_passes() {
+        let result: FcpResult<i32> = Err(FcpError::NotConfigured);
+        assert_error_type(&result, "NotConfigured");
+    }
+
+    #[test]
+    #[should_panic(expected = "Expected error containing")]
+    fn test_assert_error_type_wrong_type() {
+        let result: FcpResult<i32> = Err(FcpError::NotConfigured);
+        assert_error_type(&result, "RateLimited");
+    }
+
+    #[test]
+    #[should_panic(expected = "Expected error")]
+    fn test_assert_error_type_ok() {
+        let result: FcpResult<i32> = Ok(42);
+        assert_error_type(&result, "NotConfigured");
+    }
+
+    // ---- assert_not_configured ----
+
+    #[test]
+    fn test_assert_not_configured_passes() {
+        let result: FcpResult<i32> = Err(FcpError::NotConfigured);
+        assert_not_configured(&result);
+    }
+
+    #[test]
+    #[should_panic(expected = "Expected NotConfigured")]
+    fn test_assert_not_configured_wrong_error() {
+        let result: FcpResult<i32> = Err(FcpError::NotHandshaken);
+        assert_not_configured(&result);
+    }
+
+    // ---- assert_not_handshaken ----
+
+    #[test]
+    fn test_assert_not_handshaken_passes() {
+        let result: FcpResult<i32> = Err(FcpError::NotHandshaken);
+        assert_not_handshaken(&result);
+    }
+
+    #[test]
+    #[should_panic(expected = "Expected NotHandshaken")]
+    fn test_assert_not_handshaken_wrong_error() {
+        let result: FcpResult<i32> = Err(FcpError::NotConfigured);
+        assert_not_handshaken(&result);
+    }
+
+    // ---- Health assertions ----
+
+    fn ready_snapshot() -> HealthSnapshot {
+        HealthSnapshot {
+            status: HealthState::Ready,
+            uptime_ms: 1000,
+            load: None,
+            details: None,
+            rate_limit: None,
+        }
+    }
+
+    fn degraded_snapshot(reason: &str) -> HealthSnapshot {
+        HealthSnapshot {
+            status: HealthState::Degraded {
+                reason: reason.into(),
+            },
+            uptime_ms: 1000,
+            load: None,
+            details: None,
+            rate_limit: None,
+        }
+    }
+
+    fn error_snapshot(reason: &str) -> HealthSnapshot {
+        HealthSnapshot {
+            status: HealthState::Error {
+                reason: reason.into(),
+            },
+            uptime_ms: 1000,
+            load: None,
+            details: None,
+            rate_limit: None,
+        }
+    }
+
+    fn test_response(result: Option<serde_json::Value>) -> InvokeResponse {
+        use fcp_core::RequestId;
+        let mut resp = InvokeResponse::ok(RequestId::new("test-req"), serde_json::json!(null));
+        resp.result = result;
+        resp
+    }
+
+    #[test]
+    fn test_assert_healthy() {
+        assert_healthy(&ready_snapshot());
+    }
+
+    #[test]
+    #[should_panic(expected = "Expected Ready")]
+    fn test_assert_healthy_fails_on_degraded() {
+        assert_healthy(&degraded_snapshot("test"));
+    }
+
+    #[test]
+    fn test_assert_degraded() {
+        assert_degraded(&degraded_snapshot("slow"));
+    }
+
+    #[test]
+    #[should_panic(expected = "Expected Degraded")]
+    fn test_assert_degraded_fails_on_ready() {
+        assert_degraded(&ready_snapshot());
+    }
+
+    #[test]
+    fn test_assert_unhealthy() {
+        assert_unhealthy(&error_snapshot("down"));
+    }
+
+    #[test]
+    #[should_panic(expected = "Expected Error")]
+    fn test_assert_unhealthy_fails_on_ready() {
+        assert_unhealthy(&ready_snapshot());
+    }
+
+    // ---- InvokeResponse assertions ----
+
+    #[test]
+    fn test_assert_has_result() {
+        let response = test_response(Some(serde_json::json!({"id": 1})));
+        assert_has_result(&response);
+    }
+
+    #[test]
+    #[should_panic(expected = "Expected result but got JSON null")]
+    fn test_assert_has_result_null() {
+        let response = test_response(Some(serde_json::Value::Null));
+        assert_has_result(&response);
+    }
+
+    #[test]
+    #[should_panic(expected = "Expected result but got None")]
+    fn test_assert_has_result_none() {
+        let response = test_response(None);
+        assert_has_result(&response);
+    }
+
+    #[test]
+    fn test_assert_no_result_none() {
+        let response = test_response(None);
+        assert_no_result(&response);
+    }
+
+    #[test]
+    fn test_assert_no_result_null() {
+        let response = test_response(Some(serde_json::Value::Null));
+        assert_no_result(&response);
+    }
+
+    #[test]
+    #[should_panic(expected = "Expected null result")]
+    fn test_assert_no_result_has_value() {
+        let response = test_response(Some(serde_json::json!(42)));
+        assert_no_result(&response);
+    }
+
+    #[test]
+    fn test_assert_result_has_field() {
+        let response = test_response(Some(serde_json::json!({"name": "test", "id": 1})));
+        assert_result_has_field(&response, "name");
+        assert_result_has_field(&response, "id");
+    }
+
+    #[test]
+    #[should_panic(expected = "Expected field")]
+    fn test_assert_result_has_field_missing() {
+        let response = test_response(Some(serde_json::json!({"name": "test"})));
+        assert_result_has_field(&response, "missing");
+    }
+
+    #[test]
+    fn test_assert_result_field_eq() {
+        let response = test_response(Some(serde_json::json!({"count": 42})));
+        assert_result_field_eq(&response, "count", &serde_json::json!(42));
+    }
+
+    #[test]
+    #[should_panic(expected = "Expected field")]
+    fn test_assert_result_field_eq_mismatch() {
+        let response = test_response(Some(serde_json::json!({"count": 42})));
+        assert_result_field_eq(&response, "count", &serde_json::json!(99));
+    }
+
+    // ---- JSON assertions ----
+
+    #[test]
+    fn test_assert_json_eq_passes() {
+        let a = serde_json::json!({"x": 1, "y": [2, 3]});
+        let b = serde_json::json!({"x": 1, "y": [2, 3]});
+        assert_json_eq(&a, &b);
+    }
+
+    #[test]
+    #[should_panic(expected = "JSON values don't match")]
+    fn test_assert_json_eq_fails() {
+        let a = serde_json::json!({"x": 1});
+        let b = serde_json::json!({"x": 2});
+        assert_json_eq(&a, &b);
+    }
+
+    #[test]
+    fn test_assert_json_string_contains() {
+        let val = serde_json::json!("hello world");
+        assert_json_string_contains(&val, "world");
+    }
+
+    #[test]
+    #[should_panic(expected = "Expected string containing")]
+    fn test_assert_json_string_contains_fails() {
+        let val = serde_json::json!("hello");
+        assert_json_string_contains(&val, "world");
+    }
+
+    #[test]
+    fn test_assert_json_has_nested() {
+        let json = serde_json::json!({
+            "a": { "b": { "c": 42 } }
+        });
+        assert_json_has(&json, "a.b.c");
+    }
+
+    // ---- Timing assertions ----
+
+    #[fcp_async_core::runtime::test]
+    async fn test_assert_completes_within() {
+        let result = assert_completes_within(
+            async { 42 },
+            std::time::Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(result, 42);
+    }
 }

@@ -1299,4 +1299,415 @@ mod tests {
         assert!(gate.readonly_paths.is_empty());
         assert!(gate.writable_paths.is_empty());
     }
+
+    // ── Additional coverage (bead 2ct9j) ──
+
+    #[test]
+    fn test_wasi_config_with_network_constraints() {
+        use fcp_manifest::NetworkConstraints;
+        let constraints = NetworkConstraints {
+            host_allow: vec!["api.example.com".into()],
+            port_allow: vec![443],
+            ip_allow: vec![],
+            cidr_deny: vec![],
+            deny_localhost: true,
+            deny_private_ranges: true,
+            deny_tailnet_ranges: true,
+            require_sni: false,
+            spki_pins: vec![],
+            deny_ip_literals: true,
+            require_host_canonicalization: false,
+            dns_max_ips: 16,
+            max_redirects: 5,
+            connect_timeout_ms: 10_000,
+            total_timeout_ms: 60_000,
+            max_response_bytes: 10_485_760,
+        };
+        let config = WasiConfig::default().with_network_constraints(constraints);
+        assert!(config.network_constraints.is_some());
+        let nc = config.network_constraints.unwrap();
+        assert_eq!(nc.host_allow, vec!["api.example.com"]);
+        assert_eq!(nc.port_allow, vec![443]);
+    }
+
+    #[test]
+    fn test_wasi_config_builder_chaining() {
+        let mut env = HashMap::new();
+        env.insert("APP_ENV".into(), "test".into());
+        let config = WasiConfig::default()
+            .with_deterministic_mode(1_700_000_000, 99)
+            .with_env(env)
+            .with_args(vec!["--verbose".into()])
+            .with_inherit_stdio(true, false);
+
+        assert!(config.deterministic_mode);
+        assert_eq!(config.deterministic_seed, 99);
+        assert_eq!(config.env_vars.get("APP_ENV"), Some(&"test".into()));
+        assert_eq!(config.args, vec!["--verbose"]);
+        assert!(config.inherit_stdout);
+        assert!(!config.inherit_stderr);
+    }
+
+    #[test]
+    fn test_wasi_host_state_check_timeout_not_expired() {
+        let config = WasiConfig::default(); // 30s timeout
+        let wasi_ctx = WasiCtxBuilder::new().build();
+        let state = WasiHostState::new(&config, wasi_ctx);
+        // Just created, should not be timed out
+        assert!(state.check_timeout().is_ok());
+    }
+
+    #[test]
+    fn test_wasi_host_state_check_timeout_expired() {
+        let mut config = WasiConfig::default();
+        config.wall_clock_timeout = Duration::from_nanos(1); // Effectively zero
+        let wasi_ctx = WasiCtxBuilder::new().build();
+        let state = WasiHostState::new(&config, wasi_ctx);
+        // Sleep briefly to ensure expiry
+        std::thread::sleep(Duration::from_millis(1));
+        assert!(matches!(state.check_timeout(), Err(WasiError::Timeout)));
+    }
+
+    #[test]
+    fn test_wasi_host_state_current_time_deterministic() {
+        let config = WasiConfig::default().with_deterministic_mode(1_700_000_000, 0);
+        let wasi_ctx = WasiCtxBuilder::new().build();
+        let state = WasiHostState::new(&config, wasi_ctx);
+        let time = state.current_time();
+        let expected = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        assert_eq!(time, expected);
+    }
+
+    #[test]
+    fn test_wasi_host_state_current_time_real() {
+        let config = WasiConfig::default(); // deterministic_mode = false
+        let wasi_ctx = WasiCtxBuilder::new().build();
+        let state = WasiHostState::new(&config, wasi_ctx);
+        let before = SystemTime::now();
+        let time = state.current_time();
+        let after = SystemTime::now();
+        assert!(time >= before);
+        assert!(time <= after);
+    }
+
+    #[test]
+    fn test_wasi_host_state_get_random_bytes_deterministic() {
+        let config = WasiConfig::default().with_deterministic_mode(0, 42);
+        let wasi_ctx1 = WasiCtxBuilder::new().build();
+        let state1 = WasiHostState::new(&config, wasi_ctx1);
+        let wasi_ctx2 = WasiCtxBuilder::new().build();
+        let state2 = WasiHostState::new(&config, wasi_ctx2);
+
+        let bytes1 = state1.get_random_bytes(32);
+        let bytes2 = state2.get_random_bytes(32);
+        assert_eq!(bytes1, bytes2);
+        assert_eq!(bytes1.len(), 32);
+    }
+
+    #[test]
+    fn test_wasi_host_state_get_random_bytes_zero_length() {
+        let config = WasiConfig::default().with_deterministic_mode(0, 1);
+        let wasi_ctx = WasiCtxBuilder::new().build();
+        let state = WasiHostState::new(&config, wasi_ctx);
+        let bytes = state.get_random_bytes(0);
+        assert!(bytes.is_empty());
+    }
+
+    #[test]
+    fn test_wasi_host_state_get_random_bytes_real() {
+        let config = WasiConfig::default(); // non-deterministic
+        let wasi_ctx = WasiCtxBuilder::new().build();
+        let state = WasiHostState::new(&config, wasi_ctx);
+        let bytes = state.get_random_bytes(32);
+        assert_eq!(bytes.len(), 32);
+        // Extremely unlikely to be all zeros from a real RNG
+        assert!(bytes.iter().any(|&b| b != 0));
+    }
+
+    #[test]
+    fn test_resource_limiter_memory_growing() {
+        use wasmtime::ResourceLimiter;
+        let config = WasiConfig {
+            memory_limit_bytes: 1024,
+            ..WasiConfig::default()
+        };
+        let wasi_ctx = WasiCtxBuilder::new().build();
+        let mut state = WasiHostState::new(&config, wasi_ctx);
+
+        // Within limit
+        assert!(state.memory_growing(0, 512, None).unwrap());
+        assert!(state.memory_growing(0, 1024, None).unwrap());
+        // Exceeds limit
+        assert!(!state.memory_growing(0, 1025, None).unwrap());
+        assert!(!state.memory_growing(0, 2048, None).unwrap());
+    }
+
+    #[test]
+    fn test_resource_limiter_table_growing() {
+        use wasmtime::ResourceLimiter;
+        let config = WasiConfig::default();
+        let wasi_ctx = WasiCtxBuilder::new().build();
+        let mut state = WasiHostState::new(&config, wasi_ctx);
+
+        // Tables always allowed to grow
+        assert!(state.table_growing(0, 1000, None).unwrap());
+        assert!(state.table_growing(0, 1_000_000, None).unwrap());
+    }
+
+    #[test]
+    fn test_execution_result_debug() {
+        let result = ExecutionResult {
+            exit_code: 0,
+            stdout: Some(Bytes::from_static(b"hello")),
+            stderr: None,
+            duration: Duration::from_millis(42),
+            fuel_consumed: Some(1234),
+        };
+        let dbg = format!("{result:?}");
+        assert!(dbg.contains("exit_code"));
+        assert!(dbg.contains("fuel_consumed"));
+    }
+
+    #[test]
+    fn test_wasi_error_from_sandbox_error() {
+        let sandbox_err = SandboxError::Timeout;
+        let wasi_err = WasiError::from(sandbox_err);
+        assert!(wasi_err.to_string().contains("timeout"));
+    }
+
+    #[test]
+    fn test_wasi_error_from_io_error() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "forbidden");
+        let wasi_err = WasiError::from(io_err);
+        assert!(wasi_err.to_string().contains("forbidden"));
+    }
+
+    #[test]
+    fn test_wasi_error_debug() {
+        let err = WasiError::Timeout;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Timeout"));
+
+        let err = WasiError::FsAccessDenied {
+            path: "/secret".into(),
+            reason: "nope".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("FsAccessDenied"));
+        assert!(dbg.contains("/secret"));
+    }
+
+    #[test]
+    fn test_network_gate_check_tcp_with_constraints() {
+        use fcp_manifest::NetworkConstraints;
+        let constraints = NetworkConstraints {
+            host_allow: vec!["db.internal.com".into()],
+            port_allow: vec![5432],
+            ip_allow: vec![],
+            cidr_deny: vec![],
+            deny_localhost: true,
+            deny_private_ranges: false,
+            deny_tailnet_ranges: true,
+            require_sni: false,
+            spki_pins: vec![],
+            deny_ip_literals: true,
+            require_host_canonicalization: false,
+            dns_max_ips: 16,
+            max_redirects: 5,
+            connect_timeout_ms: 10_000,
+            total_timeout_ms: 60_000,
+            max_response_bytes: 10_485_760,
+        };
+
+        let gate = NetworkCapabilityGate::new(Some(constraints), true);
+        // Allowed host+port
+        let result = gate.check_tcp("db.internal.com", 5432, true);
+        assert!(result.is_ok());
+        // Denied host
+        let result = gate.check_tcp("evil.com", 5432, false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_network_gate_check_tcp_blocked_no_constraints() {
+        let gate = NetworkCapabilityGate::new(None, false);
+        let result = gate.check_tcp("anything.com", 80, false);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("no network policy"));
+    }
+
+    #[test]
+    fn test_fs_capability_gate_check_access_read_tmp() {
+        // /tmp always exists on macOS/Linux
+        let gate = FsCapabilityGate::new(vec![PathBuf::from("/tmp")], vec![]);
+        assert!(gate.check_access(Path::new("/tmp"), false).is_ok());
+        // Write should be denied (only in readonly list)
+        assert!(gate.check_access(Path::new("/tmp"), true).is_err());
+    }
+
+    #[test]
+    fn test_fs_capability_gate_check_access_write_allowed() {
+        let gate = FsCapabilityGate::new(vec![], vec![PathBuf::from("/tmp")]);
+        // Writable paths grant both read and write
+        assert!(gate.check_access(Path::new("/tmp"), false).is_ok());
+        assert!(gate.check_access(Path::new("/tmp"), true).is_ok());
+    }
+
+    #[test]
+    fn test_fs_capability_gate_check_access_denied() {
+        let gate = FsCapabilityGate::new(vec![PathBuf::from("/tmp")], vec![]);
+        // /etc is not in the allow list
+        let result = gate.check_access(Path::new("/etc"), false);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("not in allowed list"));
+    }
+
+    #[test]
+    fn test_fs_capability_gate_check_access_nonexistent_read() {
+        let gate = FsCapabilityGate::new(vec![PathBuf::from("/tmp")], vec![]);
+        let result = gate.check_access(Path::new("/tmp/nonexistent_12345_test"), false);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("does not exist"));
+    }
+
+    #[test]
+    fn test_extract_custom_section_with_valid_wasm() {
+        // Construct a minimal valid WASM with a custom section named "fcp-manifest"
+        let section_name = b"fcp-manifest";
+        let payload = b"{\"test\":true}";
+        let name_len = section_name.len();
+        let section_content_len = 1 + name_len + payload.len(); // 1 byte for name LEB128 len
+
+        let mut wasm = Vec::new();
+        // WASM magic + version
+        wasm.extend_from_slice(b"\0asm\x01\0\0\0");
+        // Custom section (id=0)
+        wasm.push(0);
+        // Section size (LEB128) - small enough to fit in one byte
+        wasm.push(section_content_len as u8);
+        // Name length (LEB128)
+        wasm.push(name_len as u8);
+        // Name
+        wasm.extend_from_slice(section_name);
+        // Payload
+        wasm.extend_from_slice(payload);
+
+        let result = extract_custom_section(&wasm, "fcp-manifest");
+        assert_eq!(result, Some(payload.to_vec()));
+    }
+
+    #[test]
+    fn test_extract_custom_section_wrong_name() {
+        let section_name = b"other-section";
+        let payload = b"data";
+        let name_len = section_name.len();
+        let section_content_len = 1 + name_len + payload.len();
+
+        let mut wasm = Vec::new();
+        wasm.extend_from_slice(b"\0asm\x01\0\0\0");
+        wasm.push(0);
+        wasm.push(section_content_len as u8);
+        wasm.push(name_len as u8);
+        wasm.extend_from_slice(section_name);
+        wasm.extend_from_slice(payload);
+
+        let result = extract_custom_section(&wasm, "fcp-manifest");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_custom_section_skips_non_custom() {
+        let mut wasm = Vec::new();
+        // WASM magic + version
+        wasm.extend_from_slice(b"\0asm\x01\0\0\0");
+        // Type section (id=1) with 2 bytes of data
+        wasm.push(1);
+        wasm.push(2);
+        wasm.extend_from_slice(&[0, 0]);
+        // Custom section with fcp-manifest
+        let section_name = b"fcp-manifest";
+        let payload = b"found-it";
+        let name_len = section_name.len();
+        let section_content_len = 1 + name_len + payload.len();
+        wasm.push(0);
+        wasm.push(section_content_len as u8);
+        wasm.push(name_len as u8);
+        wasm.extend_from_slice(section_name);
+        wasm.extend_from_slice(payload);
+
+        let result = extract_custom_section(&wasm, "fcp-manifest");
+        assert_eq!(result, Some(payload.to_vec()));
+    }
+
+    #[test]
+    fn test_leb128_overflow_guard() {
+        // Craft a sequence that would shift beyond usize::BITS
+        // Each continuation byte adds 7 bits; 10 bytes = 70 bits > 64 bits
+        let mut bytes = vec![0x80u8; 10]; // 10 continuation bytes
+        bytes.push(0x01); // terminator
+        // Should return None due to shift overflow
+        assert!(read_leb128(&bytes).is_none());
+    }
+
+    #[test]
+    fn test_deterministic_rng_produces_full_byte_range() {
+        let mut rng = DeterministicRng::new(1);
+        let mut seen = [false; 256];
+        // Generate enough bytes to cover most of the byte range
+        for _ in 0..10_000 {
+            seen[rng.next_byte() as usize] = true;
+        }
+        // Should see at least 200 distinct values from a good xorshift
+        let distinct = seen.iter().filter(|&&s| s).count();
+        assert!(distinct > 200, "only {distinct} distinct byte values in 10k samples");
+    }
+
+    #[test]
+    fn test_wasi_runtime_new() {
+        let config = WasiConfig::default();
+        let runtime = WasiRuntime::new(config);
+        assert!(runtime.is_ok());
+    }
+
+    #[test]
+    fn test_wasi_runtime_new_with_fuel() {
+        let mut config = WasiConfig::default();
+        config.max_fuel = 1_000_000;
+        let runtime = WasiRuntime::new(config);
+        assert!(runtime.is_ok());
+    }
+
+    #[test]
+    fn test_wasi_runtime_load_invalid_component() {
+        let config = WasiConfig::default();
+        let runtime = WasiRuntime::new(config).unwrap();
+        let result = runtime.load_component(b"not valid wasm");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_wasi_runtime_create_store() {
+        let config = WasiConfig {
+            max_fuel: 500_000,
+            ..WasiConfig::default()
+        };
+        let runtime = WasiRuntime::new(config).unwrap();
+        let store = runtime.create_store();
+        assert!(store.is_ok());
+    }
+
+    #[test]
+    fn test_wasi_runtime_create_store_with_env_and_args() {
+        let mut env = HashMap::new();
+        env.insert("TEST".into(), "1".into());
+        let config = WasiConfig::default()
+            .with_env(env)
+            .with_args(vec!["--flag".into()]);
+        let runtime = WasiRuntime::new(config).unwrap();
+        let store = runtime.create_store();
+        assert!(store.is_ok());
+    }
 }

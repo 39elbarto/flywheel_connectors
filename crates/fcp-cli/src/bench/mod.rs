@@ -951,4 +951,158 @@ mod tests {
         let copied = cloned;
         assert_eq!(copied.frame_seq, 7);
     }
+
+    // ---- normalize_size_label additional ----
+
+    #[test]
+    fn normalize_size_label_empty_string() {
+        assert_eq!(normalize_size_label(""), "");
+    }
+
+    #[test]
+    fn normalize_size_label_only_whitespace() {
+        assert_eq!(normalize_size_label("   "), "");
+    }
+
+    #[test]
+    fn normalize_size_label_numeric_only() {
+        assert_eq!(normalize_size_label("1024"), "1024");
+    }
+
+    // ---- parse_size_bytes additional boundaries ----
+
+    #[test]
+    fn parse_size_bytes_one_byte() {
+        assert_eq!(parse_size_bytes("1b").unwrap(), 1);
+    }
+
+    #[test]
+    fn parse_size_bytes_one_raw() {
+        assert_eq!(parse_size_bytes("1").unwrap(), 1);
+    }
+
+    #[test]
+    fn parse_size_bytes_large_kb() {
+        assert_eq!(parse_size_bytes("10_000kb").unwrap(), 10_000 * 1024);
+    }
+
+    #[test]
+    fn parse_size_bytes_negative_rejected() {
+        let err = parse_size_bytes("-1mb").unwrap_err();
+        assert!(err.to_string().contains("invalid size value"));
+    }
+
+    #[test]
+    fn parse_size_bytes_decimal_rejected() {
+        let err = parse_size_bytes("1.5mb").unwrap_err();
+        assert!(err.to_string().contains("invalid size value"));
+    }
+
+    #[test]
+    fn parse_size_bytes_only_underscores_in_number() {
+        // "___mb" → number portion is "___", stripped to "" → "size value missing"
+        let err = parse_size_bytes("___mb").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("size value missing") || msg.contains("invalid size value"));
+    }
+
+    // ---- parse_fcps_header additional ----
+
+    #[test]
+    fn parse_fcps_header_zero_seq() {
+        let mut frame = vec![0u8; FCPS_HEADER_LEN];
+        frame[0..4].copy_from_slice(b"FCPS");
+        // frame_seq at 106..114 is already 0
+        let header = parse_fcps_header(&frame).unwrap();
+        assert_eq!(header.frame_seq, 0);
+    }
+
+    #[test]
+    fn parse_fcps_header_partial_magic() {
+        let mut frame = vec![0u8; FCPS_HEADER_LEN];
+        frame[0..3].copy_from_slice(b"FCP");
+        // 4th byte is 0, not 'S'
+        assert!(parse_fcps_header(&frame).is_none());
+    }
+
+    #[test]
+    fn parse_fcps_header_one_byte_short() {
+        let frame = vec![0u8; FCPS_HEADER_LEN - 1];
+        assert!(parse_fcps_header(&frame).is_none());
+    }
+
+    #[test]
+    fn parse_fcps_header_extra_data_after() {
+        let mut frame = vec![0xFFu8; FCPS_HEADER_LEN + 1000];
+        frame[0..4].copy_from_slice(b"FCPS");
+        frame[106..114].copy_from_slice(&1_u64.to_le_bytes());
+        let header = parse_fcps_header(&frame).unwrap();
+        assert_eq!(header.frame_seq, 1);
+    }
+
+    // ---- enum variant equality ----
+
+    #[test]
+    fn output_format_equality() {
+        assert!(OutputFormat::Json == OutputFormat::Json);
+        assert!(OutputFormat::Human == OutputFormat::Human);
+        assert!(OutputFormat::Json != OutputFormat::Human);
+    }
+
+    #[test]
+    fn mesh_path_equality() {
+        assert!(MeshPath::Direct == MeshPath::Direct);
+        assert!(MeshPath::Derp == MeshPath::Derp);
+        assert!(MeshPath::Direct != MeshPath::Derp);
+    }
+
+    #[test]
+    fn cbor_target_equality() {
+        assert!(CborTarget::All == CborTarget::All);
+        assert!(CborTarget::SchemaHash == CborTarget::SchemaHash);
+        assert!(CborTarget::Serialize != CborTarget::Deserialize);
+    }
+
+    #[test]
+    fn primitive_target_equality() {
+        assert!(PrimitiveTarget::All == PrimitiveTarget::All);
+        assert!(PrimitiveTarget::ObjectId == PrimitiveTarget::ObjectId);
+        assert!(PrimitiveTarget::SessionMac != PrimitiveTarget::FcpsFrame);
+    }
+
+    // ---- placeholder with format! name ----
+
+    #[test]
+    fn placeholder_with_dynamic_name() {
+        let k = 3;
+        let n = 5;
+        let result = BenchmarkResult::placeholder(
+            format!("secrets-{k}-of-{n}"),
+            "not implemented",
+        );
+        assert_eq!(result.name, "secrets-3-of-5");
+    }
+
+    #[test]
+    fn placeholder_with_mesh_path_name() {
+        for path_name in &["direct", "derp"] {
+            let result = BenchmarkResult::placeholder(
+                format!("invoke-mesh-{path_name}"),
+                "fcp-mesh not yet implemented",
+            );
+            assert!(result.name.starts_with("invoke-mesh-"));
+            assert_eq!(result.sample_count, 0);
+        }
+    }
+
+    // ---- FCPS_HEADER_LEN constant ----
+
+    #[test]
+    fn fcps_header_len_matches_field_layout() {
+        // Layout: magic(4) + version(2) + flags(2) + symbol_count(4) + payload_len(4)
+        // + zone_hash(32) + symbol_size(2) + epoch(8) + object_hash(32) +
+        // base_esi(8) + ack_epoch(8) + frame_seq(8) = 114
+        let computed = 4 + 2 + 2 + 4 + 4 + 32 + 2 + 8 + 32 + 8 + 8 + 8;
+        assert_eq!(FCPS_HEADER_LEN, computed);
+    }
 }

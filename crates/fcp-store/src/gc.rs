@@ -689,6 +689,436 @@ mod tests {
         });
     }
 
+    // --- Additional GC tests ---
+
+    #[test]
+    fn gc_config_default() {
+        let config = GcConfig::default();
+        assert_eq!(config.max_evictions_per_run, 10_000);
+        assert!(config.enforce_lease_expiry);
+    }
+
+    #[test]
+    fn gc_result_serde_roundtrip() {
+        let result = GcResult {
+            live: 10,
+            evicted: 3,
+            expired_leases: 1,
+            pinned: 2,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let deserialized: GcResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.live, 10);
+        assert_eq!(deserialized.evicted, 3);
+        assert_eq!(deserialized.expired_leases, 1);
+        assert_eq!(deserialized.pinned, 2);
+    }
+
+    #[test]
+    fn gc_result_clone() {
+        let result = GcResult {
+            live: 5,
+            evicted: 2,
+            expired_leases: 0,
+            pinned: 1,
+        };
+        let cloned = result.clone();
+        assert_eq!(cloned.live, result.live);
+        assert_eq!(cloned.evicted, result.evicted);
+    }
+
+    #[test]
+    fn gc_roots_new_is_empty() {
+        let roots = GcRoots::new();
+        assert!(roots.zone_checkpoint.is_none());
+        assert!(roots.pinned.is_empty());
+        assert_eq!(roots.all_roots().len(), 0);
+    }
+
+    #[test]
+    fn gc_roots_default_same_as_new() {
+        let new = GcRoots::new();
+        let default = GcRoots::default();
+        assert_eq!(new.zone_checkpoint, default.zone_checkpoint);
+        assert_eq!(new.pinned.len(), default.pinned.len());
+    }
+
+    #[test]
+    fn gc_roots_is_root_non_root() {
+        let roots = GcRoots::new();
+        let id = ObjectId::from_bytes([99; 32]);
+        assert!(!roots.is_root(&id));
+    }
+
+    #[test]
+    fn gc_roots_checkpoint_is_root() {
+        let mut roots = GcRoots::new();
+        let id = ObjectId::from_bytes([1; 32]);
+        roots.set_checkpoint(id);
+        assert!(roots.is_root(&id));
+    }
+
+    #[test]
+    fn gc_roots_pin_is_root() {
+        let mut roots = GcRoots::new();
+        let id = ObjectId::from_bytes([2; 32]);
+        roots.add_pin(id);
+        assert!(roots.is_root(&id));
+    }
+
+    #[test]
+    fn gc_roots_remove_pin_no_longer_root() {
+        let mut roots = GcRoots::new();
+        let id = ObjectId::from_bytes([3; 32]);
+        roots.add_pin(id);
+        assert!(roots.is_root(&id));
+        roots.remove_pin(&id);
+        assert!(!roots.is_root(&id));
+    }
+
+    #[test]
+    fn gc_roots_all_roots_includes_checkpoint_and_pins() {
+        let mut roots = GcRoots::new();
+        let cp = ObjectId::from_bytes([1; 32]);
+        let pin1 = ObjectId::from_bytes([2; 32]);
+        let pin2 = ObjectId::from_bytes([3; 32]);
+        roots.set_checkpoint(cp);
+        roots.add_pin(pin1);
+        roots.add_pin(pin2);
+        let all = roots.all_roots();
+        assert_eq!(all.len(), 3);
+        assert!(all.contains(&cp));
+        assert!(all.contains(&pin1));
+        assert!(all.contains(&pin2));
+    }
+
+    #[test]
+    fn gc_roots_duplicate_pin_idempotent() {
+        let mut roots = GcRoots::new();
+        let id = ObjectId::from_bytes([4; 32]);
+        roots.add_pin(id);
+        roots.add_pin(id);
+        assert_eq!(roots.pinned.len(), 1);
+    }
+
+    #[test]
+    fn gc_roots_remove_nonexistent_pin_noop() {
+        let mut roots = GcRoots::new();
+        let id = ObjectId::from_bytes([5; 32]);
+        roots.remove_pin(&id); // Should not panic
+        assert!(roots.pinned.is_empty());
+    }
+
+    #[test]
+    fn gc_collect_empty_store() {
+        run_store_test("gc_collect_empty_store", "verify", "gc", 3, || async {
+            let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+            let gc = GarbageCollector::new(GcConfig::default());
+            let roots = GcRoots::new();
+
+            let result = gc.collect(&test_zone(), &roots, &store, 0).await.unwrap();
+
+            assert_eq!(result.live, 0);
+            assert_eq!(result.evicted, 0);
+            assert_eq!(result.pinned, 0);
+
+            StoreLogData {
+                details: Some(json!({"empty_store": true})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn gc_collect_all_ephemeral_no_roots() {
+        run_store_test(
+            "gc_collect_all_ephemeral_no_roots",
+            "verify",
+            "gc",
+            2,
+            || async {
+                let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+                let gc = GarbageCollector::new(GcConfig::default());
+
+                for i in 1..=3 {
+                    store
+                        .put(test_object(i, vec![], RetentionClass::Ephemeral))
+                        .await
+                        .unwrap();
+                }
+
+                let roots = GcRoots::new();
+                let result = gc.collect(&test_zone(), &roots, &store, 0).await.unwrap();
+
+                assert_eq!(result.live, 0);
+                assert_eq!(result.evicted, 3);
+
+                StoreLogData {
+                    details: Some(json!({"evicted_all": true})),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn gc_lease_expiry_disabled() {
+        run_store_test("gc_lease_expiry_disabled", "verify", "gc", 2, || async {
+            let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+            let config = GcConfig {
+                enforce_lease_expiry: false,
+                ..Default::default()
+            };
+            let gc = GarbageCollector::new(config);
+
+            // Object with future lease — should still be evicted when enforce_lease_expiry=false
+            store
+                .put(test_object(
+                    1,
+                    vec![],
+                    RetentionClass::Lease { expires_at: 9999 },
+                ))
+                .await
+                .unwrap();
+
+            let roots = GcRoots::new();
+            let result = gc.collect(&test_zone(), &roots, &store, 100).await.unwrap();
+
+            assert_eq!(result.evicted, 1);
+            assert!(!store.exists(&ObjectId::from_bytes([1; 32])).await);
+
+            StoreLogData {
+                details: Some(json!({"lease_expiry_disabled": true})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn gc_collect_with_ref_chain() {
+        run_store_test("gc_collect_with_ref_chain", "verify", "gc", 4, || async {
+            let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+            let gc = GarbageCollector::new(GcConfig::default());
+
+            // Chain: 1 -> 2 -> 3
+            store
+                .put(test_object(1, vec![2], RetentionClass::Ephemeral))
+                .await
+                .unwrap();
+            store
+                .put(test_object(2, vec![3], RetentionClass::Ephemeral))
+                .await
+                .unwrap();
+            store
+                .put(test_object(3, vec![], RetentionClass::Ephemeral))
+                .await
+                .unwrap();
+            // Disconnected: 4 -> 5
+            store
+                .put(test_object(4, vec![5], RetentionClass::Ephemeral))
+                .await
+                .unwrap();
+            store
+                .put(test_object(5, vec![], RetentionClass::Ephemeral))
+                .await
+                .unwrap();
+
+            let mut roots = GcRoots::new();
+            roots.set_checkpoint(ObjectId::from_bytes([1; 32]));
+
+            let result = gc.collect(&test_zone(), &roots, &store, 0).await.unwrap();
+
+            assert_eq!(result.live, 3); // 1,2,3 reachable
+            assert_eq!(result.evicted, 2); // 4,5 evicted
+            assert!(store.exists(&ObjectId::from_bytes([3; 32])).await);
+            assert!(!store.exists(&ObjectId::from_bytes([4; 32])).await);
+
+            StoreLogData {
+                details: Some(json!({"chain": "1->2->3", "evicted": "4,5"})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn gc_config_clone_and_debug() {
+        let config = GcConfig::default();
+        let cloned = config.clone();
+        assert_eq!(cloned.max_evictions_per_run, config.max_evictions_per_run);
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("GcConfig"));
+    }
+
+    #[test]
+    fn gc_prunes_symbol_store_nonexistent_ok() {
+        run_store_test(
+            "gc_prunes_symbol_nonexistent",
+            "verify",
+            "gc",
+            2,
+            || async {
+                let object_store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+                let symbol_store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+                let gc = GarbageCollector::new(GcConfig::default());
+
+                // Object in object store but NOT in symbol store
+                object_store
+                    .put(test_object(1, vec![], RetentionClass::Ephemeral))
+                    .await
+                    .unwrap();
+
+                let roots = GcRoots::new();
+                let result = gc
+                    .collect_and_prune_symbols(
+                        &test_zone(),
+                        &roots,
+                        &object_store,
+                        &symbol_store,
+                        0,
+                    )
+                    .await
+                    .unwrap();
+
+                assert_eq!(result.evicted, 1);
+                assert!(!object_store.exists(&ObjectId::from_bytes([1; 32])).await);
+
+                StoreLogData {
+                    details: Some(json!({"symbol_store_empty": true})),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn would_collect_pinned_object() {
+        run_store_test("would_collect_pinned", "verify", "gc", 1, || async {
+            let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+            let gc = GarbageCollector::new(GcConfig::default());
+
+            store
+                .put(test_object(1, vec![], RetentionClass::Pinned))
+                .await
+                .unwrap();
+
+            let roots = GcRoots::new();
+
+            // Pinned object should NOT be collected
+            assert!(
+                !gc.would_collect(
+                    &ObjectId::from_bytes([1; 32]),
+                    &test_zone(),
+                    &roots,
+                    &store,
+                    0,
+                )
+                .await
+            );
+
+            StoreLogData {
+                details: Some(json!({"pinned": true})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn would_collect_valid_lease() {
+        run_store_test("would_collect_valid_lease", "verify", "gc", 1, || async {
+            let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+            let gc = GarbageCollector::new(GcConfig::default());
+
+            store
+                .put(test_object(
+                    1,
+                    vec![],
+                    RetentionClass::Lease { expires_at: 9999 },
+                ))
+                .await
+                .unwrap();
+
+            let roots = GcRoots::new();
+
+            // Valid lease should NOT be collected
+            assert!(
+                !gc.would_collect(
+                    &ObjectId::from_bytes([1; 32]),
+                    &test_zone(),
+                    &roots,
+                    &store,
+                    100,
+                )
+                .await
+            );
+
+            StoreLogData {
+                details: Some(json!({"valid_lease": true})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn would_collect_expired_lease() {
+        run_store_test("would_collect_expired_lease", "verify", "gc", 1, || async {
+            let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+            let gc = GarbageCollector::new(GcConfig::default());
+
+            store
+                .put(test_object(
+                    1,
+                    vec![],
+                    RetentionClass::Lease { expires_at: 50 },
+                ))
+                .await
+                .unwrap();
+
+            let roots = GcRoots::new();
+
+            // Expired lease, unreachable → should be collected
+            assert!(
+                gc.would_collect(
+                    &ObjectId::from_bytes([1; 32]),
+                    &test_zone(),
+                    &roots,
+                    &store,
+                    100,
+                )
+                .await
+            );
+
+            StoreLogData {
+                details: Some(json!({"expired_lease": true})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn would_collect_root_object() {
+        run_store_test("would_collect_root_object", "verify", "gc", 1, || async {
+            let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+            let gc = GarbageCollector::new(GcConfig::default());
+
+            let id = ObjectId::from_bytes([1; 32]);
+            store
+                .put(test_object(1, vec![], RetentionClass::Ephemeral))
+                .await
+                .unwrap();
+
+            let mut roots = GcRoots::new();
+            roots.set_checkpoint(id);
+
+            // Root object should NOT be collected
+            assert!(!gc.would_collect(&id, &test_zone(), &roots, &store, 0).await);
+
+            StoreLogData {
+                details: Some(json!({"is_root": true})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
     #[test]
     fn would_collect_unreachable() {
         run_store_test("would_collect_unreachable", "verify", "gc", 2, || async {

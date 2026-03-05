@@ -1153,4 +1153,227 @@ mod tests {
         let result = simulate_introspection("fcp.unknown:test:v1", None);
         assert!(result.is_err());
     }
+
+    // ---- label functions ----
+
+    #[test]
+    fn risk_level_labels() {
+        assert_eq!(risk_level_label(RiskLevel::Low), "low");
+        assert_eq!(risk_level_label(RiskLevel::Medium), "medium");
+        assert_eq!(risk_level_label(RiskLevel::High), "high");
+        assert_eq!(risk_level_label(RiskLevel::Critical), "critical");
+    }
+
+    #[test]
+    fn safety_tier_labels() {
+        assert_eq!(safety_tier_label(SafetyTier::Safe), "safe");
+        assert_eq!(safety_tier_label(SafetyTier::Risky), "risky");
+        assert_eq!(safety_tier_label(SafetyTier::Dangerous), "dangerous");
+        assert_eq!(safety_tier_label(SafetyTier::Critical), "critical");
+        assert_eq!(safety_tier_label(SafetyTier::Forbidden), "forbidden");
+    }
+
+    #[test]
+    fn idempotency_labels() {
+        assert_eq!(idempotency_label(IdempotencyClass::None), "none");
+        assert_eq!(
+            idempotency_label(IdempotencyClass::BestEffort),
+            "best_effort"
+        );
+        assert_eq!(idempotency_label(IdempotencyClass::Strict), "strict");
+    }
+
+    #[test]
+    fn approval_labels() {
+        assert_eq!(approval_label(ApprovalMode::None), "none");
+        assert_eq!(approval_label(ApprovalMode::Policy), "policy");
+        assert_eq!(approval_label(ApprovalMode::Interactive), "interactive");
+        assert_eq!(
+            approval_label(ApprovalMode::ElevationToken),
+            "elevation_token"
+        );
+    }
+
+    #[test]
+    fn rate_limit_unit_labels() {
+        assert_eq!(rate_limit_unit_label(RateLimitUnit::Requests), "requests");
+        assert_eq!(rate_limit_unit_label(RateLimitUnit::Tokens), "tokens");
+        assert_eq!(rate_limit_unit_label(RateLimitUnit::Bytes), "bytes");
+        assert_eq!(rate_limit_unit_label(RateLimitUnit::Custom), "custom");
+    }
+
+    #[test]
+    fn rate_limit_enforcement_labels() {
+        assert_eq!(rate_limit_enforcement_label(RateLimitEnforcement::Hard), "hard");
+        assert_eq!(rate_limit_enforcement_label(RateLimitEnforcement::Soft), "soft");
+        assert_eq!(
+            rate_limit_enforcement_label(RateLimitEnforcement::Advisory),
+            "advisory"
+        );
+    }
+
+    #[test]
+    fn rate_limit_scope_labels() {
+        assert_eq!(rate_limit_scope_label(RateLimitScope::Instance), "instance");
+        assert_eq!(
+            rate_limit_scope_label(RateLimitScope::Credential),
+            "credential"
+        );
+        assert_eq!(rate_limit_scope_label(RateLimitScope::Global), "global");
+    }
+
+    // ---- simulate_list_output details ----
+
+    #[test]
+    fn list_output_private_zone_has_three_connectors() {
+        let output = simulate_list_output(Some("z:private"));
+        assert_eq!(output.by_zone[0].connectors.len(), 3);
+        assert_eq!(output.by_zone[0].connectors[0].id, "fcp.twitter:social:v1");
+    }
+
+    #[test]
+    fn list_output_work_zone_has_two_connectors() {
+        let output = simulate_list_output(Some("z:work"));
+        assert_eq!(output.by_zone[0].connectors.len(), 2);
+        assert!(output
+            .by_zone[0]
+            .connectors
+            .iter()
+            .any(|c| c.id == "fcp.openai:ai:v1"));
+    }
+
+    // ---- simulate_connector_info details ----
+
+    #[test]
+    fn info_twitter_has_rate_limits() {
+        let info = simulate_connector_info("fcp.twitter:social:v1").unwrap();
+        let rate_limits = info.rate_limits.unwrap();
+        assert_eq!(rate_limits.limits.len(), 2);
+        assert_eq!(rate_limits.limits[0].id, "twitter_api");
+        assert_eq!(rate_limits.limits[0].config.requests, 180);
+    }
+
+    #[test]
+    fn info_twitter_has_events() {
+        let info = simulate_connector_info("fcp.twitter:social:v1").unwrap();
+        assert_eq!(info.events.len(), 2);
+        assert!(info.events.iter().any(|e| e.topic == "tweets.new"));
+    }
+
+    #[test]
+    fn info_twitter_has_sandbox() {
+        let info = simulate_connector_info("fcp.twitter:social:v1").unwrap();
+        assert_eq!(info.sandbox.profile, "strict");
+        assert!(info.sandbox.network_access);
+        assert!(info.sandbox.allowed_hosts.contains(&"api.twitter.com".to_string()));
+    }
+
+    #[test]
+    fn info_twitter_has_supply_chain() {
+        let info = simulate_connector_info("fcp.twitter:social:v1").unwrap();
+        assert!(info.signed);
+        assert_eq!(info.publisher.as_deref(), Some("Flywheel Labs"));
+        assert!(info.attestations.contains(&"in-toto".to_string()));
+    }
+
+    // ---- simulate_introspection details ----
+
+    #[test]
+    fn introspect_operations_have_schemas() {
+        let intro = simulate_introspection("fcp.twitter:social:v1", None).unwrap();
+        for op in &intro.operations {
+            assert!(op.input_schema.is_object(), "op {} missing input_schema", op.id);
+            assert!(op.output_schema.is_object(), "op {} missing output_schema", op.id);
+        }
+    }
+
+    #[test]
+    fn introspect_operations_have_ai_hints() {
+        let intro = simulate_introspection("fcp.twitter:social:v1", None).unwrap();
+        for op in &intro.operations {
+            assert!(!op.ai_hints.when_to_use.is_empty(), "op {} missing when_to_use", op.id);
+            assert!(!op.ai_hints.common_mistakes.is_empty(), "op {} missing common_mistakes", op.id);
+        }
+    }
+
+    #[test]
+    fn introspect_filter_comma_separated() {
+        let intro =
+            simulate_introspection("fcp.twitter:social:v1", Some("post_tweet,send_dm")).unwrap();
+        assert_eq!(intro.operations.len(), 2);
+    }
+
+    #[test]
+    fn introspect_filter_no_match() {
+        let intro =
+            simulate_introspection("fcp.twitter:social:v1", Some("nonexistent_op")).unwrap();
+        assert!(intro.operations.is_empty());
+    }
+
+    #[test]
+    fn introspect_has_resource_types() {
+        let intro = simulate_introspection("fcp.twitter:social:v1", None).unwrap();
+        assert_eq!(intro.resource_types.len(), 2);
+        assert!(intro.resource_types.iter().any(|r| r.name == "Tweet"));
+        assert!(intro.resource_types.iter().any(|r| r.name == "User"));
+    }
+
+    #[test]
+    fn introspect_has_auth_caps() {
+        let intro = simulate_introspection("fcp.twitter:social:v1", None).unwrap();
+        let auth = intro.auth_caps.unwrap();
+        assert!(auth.methods.contains(&"oauth2".to_string()));
+        assert!(auth.supports_refresh);
+    }
+
+    #[test]
+    fn introspect_event_caps() {
+        let intro = simulate_introspection("fcp.twitter:social:v1", None).unwrap();
+        let caps = intro.event_caps.unwrap();
+        assert!(caps.streaming);
+        assert!(caps.replay);
+        assert_eq!(caps.min_buffer_events, 1000);
+    }
+
+    // ---- ConnectorHealthDisplay ----
+
+    #[test]
+    fn health_labels() {
+        assert_eq!(ConnectorHealth::healthy().label(), "healthy");
+        assert_eq!(ConnectorHealth::degraded("slow").label(), "degraded");
+        assert_eq!(ConnectorHealth::unavailable("down").label(), "unavailable");
+    }
+
+    #[test]
+    fn health_reason() {
+        assert!(ConnectorHealth::healthy().reason().is_none());
+        assert_eq!(
+            ConnectorHealth::degraded("slow").reason(),
+            Some("slow")
+        );
+        assert_eq!(
+            ConnectorHealth::unavailable("crash").reason(),
+            Some("crash")
+        );
+    }
+
+    // ---- introspect_serialization_roundtrip ----
+
+    #[test]
+    fn info_json_serialization_roundtrip() {
+        let info = simulate_connector_info("fcp.twitter:social:v1").unwrap();
+        let json = serde_json::to_string(&info).unwrap();
+        let deserialized: ConnectorInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.id, info.id);
+        assert_eq!(deserialized.operations.len(), info.operations.len());
+    }
+
+    #[test]
+    fn introspection_json_serialization_roundtrip() {
+        let intro = simulate_introspection("fcp.twitter:social:v1", None).unwrap();
+        let json = serde_json::to_string(&intro).unwrap();
+        let deserialized: ConnectorIntrospection = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.connector_id, intro.connector_id);
+        assert_eq!(deserialized.operations.len(), intro.operations.len());
+    }
 }

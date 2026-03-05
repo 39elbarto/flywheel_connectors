@@ -1083,10 +1083,7 @@ mod tests {
         let connector: ConnectorId = "fcp.test:example:v1".parse().unwrap();
         let checks = simulate_self_checks(&[connector], DoctorScenario::Healthy);
         assert_eq!(checks.len(), 1);
-        assert_eq!(
-            checks[0].report.status,
-            fcp_core::SelfCheckStatus::Ok
-        );
+        assert_eq!(checks[0].report.status, fcp_core::SelfCheckStatus::Ok);
     }
 
     #[test]
@@ -1094,20 +1091,14 @@ mod tests {
         let connector: ConnectorId = "fcp.test:example:v1".parse().unwrap();
         let checks = simulate_self_checks(&[connector], DoctorScenario::Critical);
         assert_eq!(checks.len(), 1);
-        assert_eq!(
-            checks[0].report.status,
-            fcp_core::SelfCheckStatus::Failed
-        );
+        assert_eq!(checks[0].report.status, fcp_core::SelfCheckStatus::Failed);
     }
 
     #[test]
     fn simulate_self_checks_degraded_scenario() {
         let connector: ConnectorId = "fcp.test:example:v1".parse().unwrap();
         let checks = simulate_self_checks(&[connector], DoctorScenario::Degraded);
-        assert_eq!(
-            checks[0].report.status,
-            fcp_core::SelfCheckStatus::Degraded
-        );
+        assert_eq!(checks[0].report.status, fcp_core::SelfCheckStatus::Degraded);
     }
 
     #[test]
@@ -1175,21 +1166,36 @@ mod tests {
     fn healthy_report_has_passing_checks() {
         let zone_id: ZoneId = "z:test".parse().unwrap();
         let report = simulate_report(&zone_id, &[], DoctorScenario::Healthy);
-        assert!(report.checks.iter().all(|c| c.status == types::CheckStatus::Ok));
+        assert!(
+            report
+                .checks
+                .iter()
+                .all(|c| c.status == types::CheckStatus::Ok)
+        );
     }
 
     #[test]
     fn degraded_report_has_warning_checks() {
         let zone_id: ZoneId = "z:test".parse().unwrap();
         let report = simulate_report(&zone_id, &[], DoctorScenario::Degraded);
-        assert!(report.checks.iter().any(|c| c.status == types::CheckStatus::Warn));
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|c| c.status == types::CheckStatus::Warn)
+        );
     }
 
     #[test]
     fn critical_report_has_failing_checks() {
         let zone_id: ZoneId = "z:test".parse().unwrap();
         let report = simulate_report(&zone_id, &[], DoctorScenario::Critical);
-        assert!(report.checks.iter().any(|c| c.status == types::CheckStatus::Fail));
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|c| c.status == types::CheckStatus::Fail)
+        );
     }
 
     #[test]
@@ -1202,5 +1208,256 @@ mod tests {
             .find(|c| c.status == types::CheckStatus::Fail)
             .expect("should have a failing check");
         assert!(failing_check.reason_code.is_some());
+    }
+
+    // ---- Cross-scenario invariants ----
+
+    #[test]
+    fn all_scenarios_have_schema_version() {
+        let zone_id: ZoneId = "z:test".parse().unwrap();
+        for scenario in [
+            DoctorScenario::Healthy,
+            DoctorScenario::Degraded,
+            DoctorScenario::StaleCheckpoint,
+            DoctorScenario::StaleRevocation,
+            DoctorScenario::NetworkPartition,
+            DoctorScenario::LowCoverage,
+            DoctorScenario::Critical,
+        ] {
+            let report = simulate_report(&zone_id, &[], scenario);
+            assert_eq!(report.schema_version, "1.1.0", "scenario: {scenario:?}");
+            assert_eq!(report.zone_id, "z:test", "scenario: {scenario:?}");
+        }
+    }
+
+    #[test]
+    fn all_scenarios_have_nonempty_checks() {
+        let zone_id: ZoneId = "z:test".parse().unwrap();
+        for scenario in [
+            DoctorScenario::Healthy,
+            DoctorScenario::Degraded,
+            DoctorScenario::StaleCheckpoint,
+            DoctorScenario::StaleRevocation,
+            DoctorScenario::NetworkPartition,
+            DoctorScenario::LowCoverage,
+            DoctorScenario::Critical,
+        ] {
+            let report = simulate_report(&zone_id, &[], scenario);
+            assert!(
+                !report.checks.is_empty(),
+                "scenario {scenario:?} has no checks"
+            );
+        }
+    }
+
+    // ---- Healthy scenario details ----
+
+    #[test]
+    fn healthy_report_store_is_healthy() {
+        let zone_id: ZoneId = "z:test".parse().unwrap();
+        let report = simulate_report(&zone_id, &[], DoctorScenario::Healthy);
+        assert!(report.store_coverage.store_healthy);
+        assert_eq!(report.store_coverage.checkpoint_coverage_bps, Some(10000));
+    }
+
+    #[test]
+    fn healthy_report_transport_allows_lan_and_derp() {
+        let zone_id: ZoneId = "z:test".parse().unwrap();
+        let report = simulate_report(&zone_id, &[], DoctorScenario::Healthy);
+        assert!(report.transport_policy.allow_lan);
+        assert!(report.transport_policy.allow_derp);
+        assert!(!report.transport_policy.allow_funnel);
+    }
+
+    // ---- Degraded scenario details ----
+
+    #[test]
+    fn degraded_report_has_since_timestamp() {
+        let zone_id: ZoneId = "z:test".parse().unwrap();
+        let report = simulate_report(&zone_id, &[], DoctorScenario::Degraded);
+        assert!(report.degraded_mode.since.is_some());
+    }
+
+    #[test]
+    fn degraded_report_has_reason_code_fcp_5001() {
+        let zone_id: ZoneId = "z:test".parse().unwrap();
+        let report = simulate_report(&zone_id, &[], DoctorScenario::Degraded);
+        assert!(
+            report
+                .degraded_mode
+                .reasons
+                .iter()
+                .any(|r| r.code == "FCP-5001")
+        );
+    }
+
+    // ---- Critical scenario details ----
+
+    #[test]
+    fn critical_report_all_transport_disabled() {
+        let zone_id: ZoneId = "z:test".parse().unwrap();
+        let report = simulate_report(&zone_id, &[], DoctorScenario::Critical);
+        assert!(!report.transport_policy.allow_lan);
+        assert!(!report.transport_policy.allow_derp);
+        assert!(!report.transport_policy.allow_funnel);
+    }
+
+    #[test]
+    fn critical_report_store_unhealthy() {
+        let zone_id: ZoneId = "z:test".parse().unwrap();
+        let report = simulate_report(&zone_id, &[], DoctorScenario::Critical);
+        assert!(!report.store_coverage.store_healthy);
+        assert_eq!(report.store_coverage.checkpoint_coverage_bps, Some(0));
+    }
+
+    #[test]
+    fn critical_report_all_missing() {
+        let zone_id: ZoneId = "z:test".parse().unwrap();
+        let report = simulate_report(&zone_id, &[], DoctorScenario::Critical);
+        assert_eq!(report.checkpoint.freshness, FreshnessLevel::Missing);
+        assert_eq!(report.revocation.freshness, FreshnessLevel::Missing);
+        assert_eq!(report.audit.freshness, FreshnessLevel::Missing);
+    }
+
+    #[test]
+    fn critical_report_multiple_degraded_reasons() {
+        let zone_id: ZoneId = "z:test".parse().unwrap();
+        let report = simulate_report(&zone_id, &[], DoctorScenario::Critical);
+        assert!(report.degraded_mode.reasons.len() >= 2);
+    }
+
+    // ---- Stale revocation details ----
+
+    #[test]
+    fn stale_revocation_has_high_age() {
+        let zone_id: ZoneId = "z:test".parse().unwrap();
+        let report = simulate_report(&zone_id, &[], DoctorScenario::StaleRevocation);
+        assert!(report.revocation.age_secs.unwrap() >= 7200);
+    }
+
+    #[test]
+    fn stale_revocation_has_reason_code_fcp_5003() {
+        let zone_id: ZoneId = "z:test".parse().unwrap();
+        let report = simulate_report(&zone_id, &[], DoctorScenario::StaleRevocation);
+        let check = report
+            .checks
+            .iter()
+            .find(|c| c.status == types::CheckStatus::Fail)
+            .expect("should have failing check");
+        assert_eq!(check.reason_code.as_deref(), Some("FCP-5003"));
+    }
+
+    // ---- Network partition details ----
+
+    #[test]
+    fn network_partition_low_store_coverage() {
+        let zone_id: ZoneId = "z:test".parse().unwrap();
+        let report = simulate_report(&zone_id, &[], DoctorScenario::NetworkPartition);
+        assert!(report.store_coverage.checkpoint_coverage_bps.unwrap() < 5000);
+        assert!(!report.store_coverage.store_healthy);
+    }
+
+    #[test]
+    fn network_partition_multiple_reasons() {
+        let zone_id: ZoneId = "z:test".parse().unwrap();
+        let report = simulate_report(&zone_id, &[], DoctorScenario::NetworkPartition);
+        assert!(report.degraded_mode.reasons.len() >= 2);
+        assert!(
+            report
+                .degraded_mode
+                .reasons
+                .iter()
+                .any(|r| r.code == "FCP-6001")
+        );
+        assert!(
+            report
+                .degraded_mode
+                .reasons
+                .iter()
+                .any(|r| r.code == "FCP-6002")
+        );
+    }
+
+    // ---- Low coverage details ----
+
+    #[test]
+    fn low_coverage_fresh_heads_but_unhealthy_store() {
+        let zone_id: ZoneId = "z:test".parse().unwrap();
+        let report = simulate_report(&zone_id, &[], DoctorScenario::LowCoverage);
+        assert_eq!(report.checkpoint.freshness, FreshnessLevel::Fresh);
+        assert_eq!(report.revocation.freshness, FreshnessLevel::Fresh);
+        assert!(!report.store_coverage.store_healthy);
+    }
+
+    // ---- Self-check connector_id ----
+
+    #[test]
+    fn self_check_preserves_connector_id() {
+        let connector: ConnectorId = "fcp.test:check:v1".parse().unwrap();
+        let checks = simulate_self_checks(&[connector.clone()], DoctorScenario::Healthy);
+        assert_eq!(checks[0].connector_id, connector.to_string());
+    }
+
+    #[test]
+    fn self_check_all_degraded_scenarios_produce_degraded() {
+        let connector: ConnectorId = "fcp.test:check:v1".parse().unwrap();
+        for scenario in [
+            DoctorScenario::Degraded,
+            DoctorScenario::LowCoverage,
+            DoctorScenario::NetworkPartition,
+            DoctorScenario::StaleCheckpoint,
+            DoctorScenario::StaleRevocation,
+        ] {
+            let checks = simulate_self_checks(&[connector.clone()], scenario);
+            assert_eq!(
+                checks[0].report.status,
+                fcp_core::SelfCheckStatus::Degraded,
+                "scenario {scenario:?}"
+            );
+        }
+    }
+
+    // ---- DoctorScenario all variants ----
+
+    #[test]
+    fn all_scenario_variants_debug() {
+        let variants = [
+            DoctorScenario::Healthy,
+            DoctorScenario::Degraded,
+            DoctorScenario::StaleCheckpoint,
+            DoctorScenario::StaleRevocation,
+            DoctorScenario::NetworkPartition,
+            DoctorScenario::LowCoverage,
+            DoctorScenario::Critical,
+        ];
+        for v in variants {
+            let dbg = format!("{v:?}");
+            assert!(!dbg.is_empty());
+        }
+    }
+
+    // ---- Report JSON roundtrips per scenario ----
+
+    #[test]
+    fn all_scenarios_json_roundtrip() {
+        let zone_id: ZoneId = "z:test".parse().unwrap();
+        for scenario in [
+            DoctorScenario::Healthy,
+            DoctorScenario::Degraded,
+            DoctorScenario::StaleCheckpoint,
+            DoctorScenario::StaleRevocation,
+            DoctorScenario::NetworkPartition,
+            DoctorScenario::LowCoverage,
+            DoctorScenario::Critical,
+        ] {
+            let report = simulate_report(&zone_id, &[], scenario);
+            let json = serde_json::to_string(&report).unwrap();
+            let back: types::DoctorReport = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.zone_id, "z:test", "roundtrip failed for {scenario:?}");
+            assert_eq!(
+                back.overall_status, report.overall_status,
+                "status mismatch for {scenario:?}"
+            );
+        }
     }
 }

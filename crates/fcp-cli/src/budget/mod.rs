@@ -203,7 +203,11 @@ mod tests {
     #[test]
     fn budget_enforcement_modes() {
         let report = simulate_budget_report(None);
-        let private = report.zones.iter().find(|z| z.zone_id == "z:private").unwrap();
+        let private = report
+            .zones
+            .iter()
+            .find(|z| z.zone_id == "z:private")
+            .unwrap();
         let work = report.zones.iter().find(|z| z.zone_id == "z:work").unwrap();
         assert_eq!(private.enforcement, BudgetEnforcement::Deny);
         assert_eq!(work.enforcement, BudgetEnforcement::Warn);

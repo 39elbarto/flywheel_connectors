@@ -197,10 +197,7 @@ mod tests {
     #[test]
     fn mesh_context_with_overrides() {
         let mut overrides = BTreeMap::new();
-        overrides.insert(
-            "timeout_ms".to_string(),
-            serde_json::json!(5000),
-        );
+        overrides.insert("timeout_ms".to_string(), serde_json::json!(5000));
         let ctx = MeshContext {
             name: "staging".to_string(),
             endpoint: "tcp://staging:9000".to_string(),

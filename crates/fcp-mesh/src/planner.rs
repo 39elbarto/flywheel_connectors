@@ -1024,4 +1024,477 @@ mod tests {
         assert!(!version_gte("1.0.0", "1.1.0"));
         assert!(version_gte("10.0.0", "9.0.0"));
     }
+
+    // === version_gte edge cases ===
+
+    #[test]
+    fn version_gte_shorter_installed() {
+        // "1.0" vs "1.0.0" — missing part treated as 0
+        assert!(version_gte("1.0", "1.0.0"));
+    }
+
+    #[test]
+    fn version_gte_shorter_required() {
+        // "1.0.5" vs "1.0" — extra installed parts ignored once required exhausted
+        assert!(version_gte("1.0.5", "1.0"));
+    }
+
+    #[test]
+    fn version_gte_empty_strings() {
+        // Both empty → equal → true
+        assert!(version_gte("", ""));
+    }
+
+    #[test]
+    fn version_gte_non_numeric_parts() {
+        // Non-numeric parts are filtered out by parse::<u32>().ok()
+        // "1.2.beta" → [1, 2], "1.2.0" → [1, 2, 0]
+        assert!(version_gte("1.2.beta", "1.2.0"));
+    }
+
+    #[test]
+    fn version_gte_major_dominates() {
+        assert!(version_gte("3.0.0", "2.99.99"));
+        assert!(!version_gte("2.99.99", "3.0.0"));
+    }
+
+    // === LeasePurpose Display ===
+
+    #[test]
+    fn lease_purpose_display() {
+        assert_eq!(LeasePurpose::SingletonWriter.to_string(), "singleton_writer");
+        assert_eq!(
+            LeasePurpose::OperationExecution.to_string(),
+            "operation_execution"
+        );
+        assert_eq!(
+            LeasePurpose::CoordinatorElection.to_string(),
+            "coordinator_election"
+        );
+        assert_eq!(LeasePurpose::Other.to_string(), "other");
+    }
+
+    #[test]
+    fn lease_purpose_equality() {
+        assert_eq!(LeasePurpose::SingletonWriter, LeasePurpose::SingletonWriter);
+        assert_ne!(LeasePurpose::SingletonWriter, LeasePurpose::Other);
+    }
+
+    // === CandidateNode ordering ===
+
+    #[test]
+    fn candidate_node_ord_higher_score_first() {
+        let a = CandidateNode::new(test_node_id("a"), 100.0);
+        let b = CandidateNode::new(test_node_id("b"), 50.0);
+        // sort() puts lesser first; Ord is defined so higher score < lower score
+        let mut v = vec![b.clone(), a.clone()];
+        v.sort();
+        assert_eq!(v[0].node_id.as_str(), "node-a"); // higher score
+        assert_eq!(v[1].node_id.as_str(), "node-b");
+    }
+
+    #[test]
+    fn candidate_node_ord_tiebreak_by_node_id() {
+        let a = CandidateNode::new(test_node_id("alpha"), 50.0);
+        let b = CandidateNode::new(test_node_id("beta"), 50.0);
+        let mut v = vec![b.clone(), a.clone()];
+        v.sort();
+        // Same score → alphabetical by node_id
+        assert_eq!(v[0].node_id.as_str(), "node-alpha");
+        assert_eq!(v[1].node_id.as_str(), "node-beta");
+    }
+
+    #[test]
+    fn candidate_node_eq_by_node_id() {
+        let a = CandidateNode::new(test_node_id("x"), 100.0);
+        let b = CandidateNode::new(test_node_id("x"), 50.0);
+        // PartialEq compares only node_id
+        assert_eq!(a, b);
+    }
+
+    // === CandidateNode::adjust and mark_ineligible ===
+
+    #[test]
+    fn candidate_adjust_adds_delta() {
+        let mut c = CandidateNode::new(test_node_id("n"), 100.0);
+        c.adjust(ScoreAdjustment::bonus(
+            AdjustmentFactor::DataLocality,
+            15.0,
+            "test bonus",
+        ));
+        assert!((c.score - 115.0).abs() < f64::EPSILON);
+        assert_eq!(c.adjustments.len(), 1);
+        assert!(c.eligible);
+    }
+
+    #[test]
+    fn candidate_adjust_penalty_subtracts() {
+        let mut c = CandidateNode::new(test_node_id("n"), 100.0);
+        c.adjust(ScoreAdjustment::penalty(
+            AdjustmentFactor::Connector,
+            30.0,
+            "test penalty",
+        ));
+        assert!((c.score - 70.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn candidate_mark_ineligible_zeroes_score() {
+        let mut c = CandidateNode::new(test_node_id("n"), 100.0);
+        c.mark_ineligible(DecisionReason::Custom("test".to_string()));
+        assert!(!c.eligible);
+        assert!((c.score - 0.0).abs() < f64::EPSILON);
+        assert_eq!(c.decision_reasons.len(), 1);
+    }
+
+    #[test]
+    fn candidate_add_reason() {
+        let mut c = CandidateNode::new(test_node_id("n"), 50.0);
+        c.add_reason(DecisionReason::SelectedAsBest { rank: 1 });
+        c.add_reason(DecisionReason::HasLocalData { symbol_count: 3 });
+        assert_eq!(c.decision_reasons.len(), 2);
+    }
+
+    // === ScoreAdjustment bonus vs penalty sign ===
+
+    #[test]
+    fn score_adjustment_bonus_positive_delta() {
+        let adj = ScoreAdjustment::bonus(AdjustmentFactor::DataLocality, 10.0, "bonus");
+        assert!(adj.delta > 0.0);
+        assert!((adj.delta - 10.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn score_adjustment_penalty_negative_delta() {
+        let adj = ScoreAdjustment::penalty(AdjustmentFactor::Connector, 10.0, "penalty");
+        assert!(adj.delta < 0.0);
+        assert!((adj.delta - (-10.0)).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn score_adjustment_penalty_abs_negative_input() {
+        // penalty with already-negative input → still negative via -delta.abs()
+        let adj = ScoreAdjustment::penalty(AdjustmentFactor::Connector, -5.0, "neg");
+        assert!((adj.delta - (-5.0)).abs() < f64::EPSILON);
+    }
+
+    // === AdjustmentFactor traits ===
+
+    #[test]
+    fn adjustment_factor_copy_eq() {
+        let a = AdjustmentFactor::Custom;
+        let b = a; // Copy
+        assert_eq!(a, b);
+        assert_ne!(AdjustmentFactor::Connector, AdjustmentFactor::DataLocality);
+    }
+
+    // === PlannerContext builder ===
+
+    #[test]
+    fn planner_context_builder_defaults() {
+        let ctx = PlannerContext::new(test_connector_id());
+        assert!(ctx.min_connector_version.is_none());
+        assert!(ctx.min_memory_mb.is_none());
+        assert!(!ctx.requires_gpu);
+        assert!(!ctx.requires_tpu);
+        assert!(ctx.preferred_symbols.is_empty());
+        assert!(ctx.required_symbols.is_empty());
+        assert!(!ctx.singleton_writer);
+        assert!(ctx.target_zone.is_none());
+        assert!(ctx.excluded_nodes.is_empty());
+    }
+
+    #[test]
+    fn planner_context_with_min_version() {
+        let ctx = PlannerContext::new(test_connector_id()).with_min_version("2.1.0");
+        assert_eq!(ctx.min_connector_version.as_deref(), Some("2.1.0"));
+    }
+
+    #[test]
+    fn planner_context_with_min_memory() {
+        let ctx = PlannerContext::new(test_connector_id()).with_min_memory_mb(512);
+        assert_eq!(ctx.min_memory_mb, Some(512));
+    }
+
+    #[test]
+    fn planner_context_with_gpu_tpu() {
+        let ctx = PlannerContext::new(test_connector_id()).with_gpu().with_tpu();
+        assert!(ctx.requires_gpu);
+        assert!(ctx.requires_tpu);
+    }
+
+    #[test]
+    fn planner_context_with_symbols() {
+        let sym = test_object_id(7);
+        let ctx = PlannerContext::new(test_connector_id())
+            .with_preferred_symbols(vec![sym])
+            .with_required_symbols(vec![sym]);
+        assert_eq!(ctx.preferred_symbols.len(), 1);
+        assert_eq!(ctx.required_symbols.len(), 1);
+    }
+
+    #[test]
+    fn planner_context_with_singleton_writer() {
+        let ctx = PlannerContext::new(test_connector_id()).with_singleton_writer();
+        assert!(ctx.singleton_writer);
+    }
+
+    #[test]
+    fn planner_context_with_target_zone() {
+        let zone: ZoneId = "z:test".parse().unwrap();
+        let ctx = PlannerContext::new(test_connector_id()).with_target_zone(zone);
+        assert!(ctx.target_zone.is_some());
+    }
+
+    #[test]
+    fn planner_context_excluding_multiple() {
+        let ctx =
+            PlannerContext::new(test_connector_id()).excluding(["node-a", "node-b", "node-c"]);
+        assert_eq!(ctx.excluded_nodes.len(), 3);
+        assert!(ctx.excluded_nodes.contains("node-a"));
+    }
+
+    // === PlannerInput builder ===
+
+    #[test]
+    fn planner_input_defaults() {
+        let input = PlannerInput::new(vec![], 500);
+        assert!(input.nodes.is_empty());
+        assert_eq!(input.current_time, 500);
+        assert!(input.singleton_lease_holder.is_none());
+    }
+
+    #[test]
+    fn planner_input_with_singleton_holder() {
+        let input = PlannerInput::new(vec![], 0).with_singleton_holder("node-x");
+        assert_eq!(input.singleton_lease_holder.as_deref(), Some("node-x"));
+    }
+
+    // === NodeInfo::node_id accessor ===
+
+    #[test]
+    fn node_info_node_id() {
+        let info = make_node_info("abc", 1024, true, "1.0.0", vec![]);
+        assert_eq!(info.node_id().as_str(), "node-abc");
+    }
+
+    // === ExecutionPlan ===
+
+    #[test]
+    fn execution_plan_empty_candidates() {
+        let plan = ExecutionPlan::from_candidates(&[], 5, 1000);
+        assert!(!plan.has_target());
+        assert!(plan.target_node().is_none());
+        assert!(plan.alternatives.is_empty());
+        assert_eq!(plan.nodes_considered, 5);
+        assert_eq!(plan.nodes_excluded, 5);
+    }
+
+    #[test]
+    fn execution_plan_single_candidate() {
+        let c = CandidateNode::new(test_node_id("only"), 80.0);
+        let plan = ExecutionPlan::from_candidates(&[c], 3, 2000);
+        assert!(plan.has_target());
+        assert_eq!(plan.target_node().unwrap().as_str(), "node-only");
+        assert!(plan.alternatives.is_empty());
+        assert_eq!(plan.nodes_excluded, 2);
+        assert_eq!(plan.planned_at, 2000);
+    }
+
+    // === select_best ===
+
+    #[test]
+    fn select_best_returns_highest_score() {
+        let planner = ExecutionPlanner::new();
+        let nodes = vec![
+            make_node_info("low", 512, true, "1.0.0", vec![]),
+            make_node_info("high", 8192, true, "1.0.0", vec![]),
+        ];
+        let input = PlannerInput::new(nodes, 1000);
+        let context = PlannerContext::new(test_connector_id());
+        let best = planner.select_best(&input, &context);
+        assert!(best.is_some());
+        assert_eq!(best.unwrap().node_id.as_str(), "node-high");
+    }
+
+    #[test]
+    fn select_best_none_when_no_eligible() {
+        let planner = ExecutionPlanner::new();
+        // All nodes missing connector
+        let nodes = vec![
+            make_node_info("a", 2048, false, "1.0.0", vec![]),
+            make_node_info("b", 4096, false, "1.0.0", vec![]),
+        ];
+        let input = PlannerInput::new(nodes, 1000);
+        let context = PlannerContext::new(test_connector_id());
+        assert!(planner.select_best(&input, &context).is_none());
+    }
+
+    #[test]
+    fn select_best_none_when_empty_nodes() {
+        let planner = ExecutionPlanner::new();
+        let input = PlannerInput::new(vec![], 1000);
+        let context = PlannerContext::new(test_connector_id());
+        assert!(planner.select_best(&input, &context).is_none());
+    }
+
+    // === plan with empty nodes ===
+
+    #[test]
+    fn plan_empty_nodes_returns_empty() {
+        let planner = ExecutionPlanner::new();
+        let input = PlannerInput::new(vec![], 1000);
+        let context = PlannerContext::new(test_connector_id());
+        let candidates = planner.plan(&input, &context);
+        assert!(candidates.is_empty());
+    }
+
+    // === decision reasons on ranked candidates ===
+
+    #[test]
+    fn plan_adds_selected_as_best_to_first() {
+        let planner = ExecutionPlanner::new();
+        let nodes = vec![
+            make_node_info("a", 4096, true, "1.0.0", vec![]),
+            make_node_info("b", 2048, true, "1.0.0", vec![]),
+        ];
+        let input = PlannerInput::new(nodes, 1000);
+        let context = PlannerContext::new(test_connector_id());
+        let candidates = planner.plan(&input, &context);
+        assert_eq!(candidates.len(), 2);
+        // First candidate has SelectedAsBest
+        assert!(candidates[0].decision_reasons.iter().any(|r| matches!(
+            r,
+            DecisionReason::SelectedAsBest { rank: 1 }
+        )));
+        // Second has EligibleNotSelected
+        assert!(candidates[1].decision_reasons.iter().any(|r| matches!(
+            r,
+            DecisionReason::EligibleNotSelected {
+                rank: 2,
+                better_count: 1
+            }
+        )));
+    }
+
+    // === Multiple preferred symbols ===
+
+    #[test]
+    fn data_locality_bonus_scales_with_symbol_count() {
+        let planner = ExecutionPlanner::new();
+        let s1 = test_object_id(1);
+        let s2 = test_object_id(2);
+        let s3 = test_object_id(3);
+
+        let nodes = vec![
+            make_node_info("one", 2048, true, "1.0.0", vec![s1]),
+            make_node_info("three", 2048, true, "1.0.0", vec![s1, s2, s3]),
+        ];
+
+        let input = PlannerInput::new(nodes, 1000);
+        let context =
+            PlannerContext::new(test_connector_id()).with_preferred_symbols(vec![s1, s2, s3]);
+
+        let candidates = planner.plan(&input, &context);
+        // Node with 3 symbols should score higher than node with 1
+        assert_eq!(candidates[0].node_id.as_str(), "node-three");
+        assert!(candidates[0].score > candidates[1].score);
+    }
+
+    // === Singleton writer: holder gets through ===
+
+    #[test]
+    fn singleton_writer_no_holder_set() {
+        let planner = ExecutionPlanner::new();
+        let nodes = vec![
+            make_node_info("a", 2048, true, "1.0.0", vec![]),
+            make_node_info("b", 4096, true, "1.0.0", vec![]),
+        ];
+        // singleton_writer context but no holder set → all eligible
+        let input = PlannerInput::new(nodes, 1000);
+        let context = PlannerContext::new(test_connector_id()).with_singleton_writer();
+        let candidates = planner.plan(&input, &context);
+        assert_eq!(candidates.len(), 2);
+    }
+
+    // === ExecutionPlanner Default ===
+
+    #[test]
+    fn execution_planner_default() {
+        let planner = ExecutionPlanner::default();
+        // Should behave identically to new()
+        let nodes = vec![make_node_info("a", 2048, true, "1.0.0", vec![])];
+        let input = PlannerInput::new(nodes, 1000);
+        let context = PlannerContext::new(test_connector_id());
+        let candidates = planner.plan(&input, &context);
+        assert_eq!(candidates.len(), 1);
+    }
+
+    // === DelegationRequest ===
+
+    #[test]
+    fn delegation_request_new() {
+        let plan = ExecutionPlan::from_candidates(&[], 0, 1000);
+        let req = DelegationRequest::new(
+            test_node_id("target"),
+            test_node_id("requester"),
+            test_connector_id(),
+            "op-1".to_string(),
+            plan,
+        );
+        assert_eq!(req.target_node.as_str(), "node-target");
+        assert_eq!(req.requester_node.as_str(), "node-requester");
+        assert_eq!(req.operation_id, "op-1");
+    }
+
+    // === DecisionReason Debug ===
+
+    #[test]
+    fn decision_reason_variants_debug() {
+        let reasons: Vec<DecisionReason> = vec![
+            DecisionReason::SelectedAsBest { rank: 1 },
+            DecisionReason::EligibleNotSelected {
+                rank: 2,
+                better_count: 1,
+            },
+            DecisionReason::MissingConnector {
+                connector_id: "c".to_string(),
+            },
+            DecisionReason::IncompatibleVersion {
+                connector_id: "c".to_string(),
+                required: "2.0".to_string(),
+                installed: "1.0".to_string(),
+            },
+            DecisionReason::LeaseConflict {
+                holder: test_node_id("h"),
+                lease_purpose: "singleton_writer".to_string(),
+            },
+            DecisionReason::ZoneRestriction {
+                zone: "z".to_string(),
+                reason: "r".to_string(),
+            },
+            DecisionReason::HasLocalData { symbol_count: 5 },
+            DecisionReason::MissingRequiredSymbol {
+                symbol_prefix: "ab".to_string(),
+            },
+            DecisionReason::Custom("test".to_string()),
+        ];
+        for r in &reasons {
+            let s = format!("{r:?}");
+            assert!(!s.is_empty());
+        }
+    }
+
+    // === HeldLease construction ===
+
+    #[test]
+    fn held_lease_fields() {
+        let lease = HeldLease {
+            subject_id: test_object_id(1),
+            purpose: LeasePurpose::OperationExecution,
+            expires_at: 9999,
+        };
+        assert_eq!(lease.purpose, LeasePurpose::OperationExecution);
+        assert_eq!(lease.expires_at, 9999);
+    }
 }

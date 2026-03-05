@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use fcp_core::{ObjectId, ZoneId};
 use parking_lot::RwLock;
-use raptorq::ObjectTransmissionInformation;
+use fcp_raptorq::ObjectTransmissionInformation;
 use serde::{Deserialize, Serialize};
 
 use crate::coverage::SymbolDistribution;
@@ -350,10 +350,9 @@ impl SymbolStore for MemorySymbolStore {
     }
 
     async fn symbol_count(&self, object_id: &ObjectId) -> u32 {
-        self.objects
-            .read()
-            .get(object_id)
-            .map_or(0, |obj| u32::try_from(obj.symbols.len()).unwrap_or(u32::MAX))
+        self.objects.read().get(object_id).map_or(0, |obj| {
+            u32::try_from(obj.symbols.len()).unwrap_or(u32::MAX)
+        })
     }
 
     async fn delete_object(&self, object_id: &ObjectId) -> Result<(), SymbolStoreError> {
@@ -925,6 +924,455 @@ mod tests {
                         "used_bytes": used_after,
                         "duplicate_insert": "ignored"
                     })),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    // --- Additional symbol store tests ---
+
+    #[test]
+    fn oti_serde_roundtrip() {
+        run_store_test("oti_serde_roundtrip", "verify", "serde", 1, || async {
+            let oti = ObjectTransmissionInfo {
+                transfer_length: 4096,
+                symbol_size: 128,
+                source_blocks: 2,
+                sub_blocks: 4,
+                alignment: 16,
+            };
+            let json = serde_json::to_string(&oti).unwrap();
+            let deserialized: ObjectTransmissionInfo = serde_json::from_str(&json).unwrap();
+            assert_eq!(oti, deserialized);
+
+            StoreLogData {
+                details: Some(json!({"serde": "roundtrip_ok"})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn oti_copy_and_clone() {
+        run_store_test("oti_copy_clone", "verify", "traits", 1, || async {
+            let oti = ObjectTransmissionInfo {
+                transfer_length: 256,
+                symbol_size: 64,
+                source_blocks: 1,
+                sub_blocks: 1,
+                alignment: 8,
+            };
+            let copied = oti;
+            let cloned = oti.clone();
+            assert_eq!(copied, cloned);
+
+            StoreLogData {
+                details: Some(json!({"copy_eq_clone": true})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn object_symbol_meta_serde_roundtrip() {
+        run_store_test("osm_serde_roundtrip", "verify", "serde", 1, || async {
+            let meta = test_object_meta();
+            let json = serde_json::to_string(&meta).unwrap();
+            let deserialized: ObjectSymbolMeta = serde_json::from_str(&json).unwrap();
+            assert_eq!(meta, deserialized);
+
+            StoreLogData {
+                details: Some(json!({"serde": "roundtrip_ok"})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn symbol_meta_serde_roundtrip() {
+        run_store_test("symbol_meta_serde", "verify", "serde", 1, || async {
+            let meta = SymbolMeta {
+                object_id: test_object_id(),
+                esi: 5,
+                zone_id: test_zone(),
+                source_node: Some(42),
+                stored_at: 999_999,
+            };
+            let json = serde_json::to_string(&meta).unwrap();
+            let deserialized: SymbolMeta = serde_json::from_str(&json).unwrap();
+            assert_eq!(deserialized.esi, 5);
+            assert_eq!(deserialized.source_node, Some(42));
+
+            StoreLogData {
+                details: Some(json!({"serde": "roundtrip_ok"})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn symbol_size_mismatch_rejected() {
+        run_store_test("symbol_size_mismatch", "verify", "write", 1, || async {
+            let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+            store.put_object_meta(test_object_meta()).await.unwrap();
+
+            // test_object_meta has symbol_size=64, but we provide 32 bytes
+            let bad_symbol = StoredSymbol {
+                meta: SymbolMeta {
+                    object_id: test_object_id(),
+                    esi: 0,
+                    zone_id: test_zone(),
+                    source_node: Some(1),
+                    stored_at: 1_000_000,
+                },
+                data: Bytes::from(vec![0u8; 32]), // Wrong size!
+            };
+
+            let result = store.put_symbol(bad_symbol).await;
+            assert!(matches!(
+                result,
+                Err(SymbolStoreError::InvalidSymbol { .. })
+            ));
+
+            StoreLogData {
+                details: Some(json!({"error": "size_mismatch"})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn get_symbol_not_found_esi() {
+        run_store_test("get_symbol_not_found_esi", "verify", "read", 1, || async {
+            let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+            store.put_object_meta(test_object_meta()).await.unwrap();
+            store.put_symbol(test_symbol(0)).await.unwrap();
+
+            // ESI 99 does not exist
+            let result = store.get_symbol(&test_object_id(), 99).await;
+            assert!(matches!(result, Err(SymbolStoreError::NotFound { .. })));
+
+            StoreLogData {
+                details: Some(json!({"error": "not_found", "esi": 99})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn get_symbol_object_not_found() {
+        run_store_test(
+            "get_symbol_object_not_found",
+            "verify",
+            "read",
+            1,
+            || async {
+                let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+                let unknown_id = ObjectId::from_bytes([99; 32]);
+
+                let result = store.get_symbol(&unknown_id, 0).await;
+                assert!(matches!(result, Err(SymbolStoreError::ObjectNotFound(_))));
+
+                StoreLogData {
+                    details: Some(json!({"error": "object_not_found"})),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn delete_symbol_not_found_esi() {
+        run_store_test(
+            "delete_symbol_not_found_esi",
+            "verify",
+            "delete",
+            1,
+            || async {
+                let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+                store.put_object_meta(test_object_meta()).await.unwrap();
+
+                let result = store.delete_symbol(&test_object_id(), 99).await;
+                assert!(matches!(result, Err(SymbolStoreError::NotFound { .. })));
+
+                StoreLogData {
+                    details: Some(json!({"error": "not_found"})),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn delete_object_not_found() {
+        run_store_test("delete_object_not_found", "verify", "delete", 1, || async {
+            let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+            let unknown_id = ObjectId::from_bytes([99; 32]);
+
+            let result = store.delete_object(&unknown_id).await;
+            assert!(matches!(result, Err(SymbolStoreError::ObjectNotFound(_))));
+
+            StoreLogData {
+                details: Some(json!({"error": "object_not_found"})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn can_reconstruct_missing_object() {
+        run_store_test("can_reconstruct_missing", "verify", "repair", 1, || async {
+            let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+            let unknown_id = ObjectId::from_bytes([99; 32]);
+
+            assert!(!store.can_reconstruct(&unknown_id).await);
+
+            StoreLogData {
+                details: Some(json!({"can_reconstruct": false})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn can_reconstruct_with_policy_missing_object() {
+        run_store_test(
+            "can_reconstruct_policy_missing",
+            "verify",
+            "repair",
+            1,
+            || async {
+                let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+                let unknown_id = ObjectId::from_bytes([99; 32]);
+                let policy = fcp_core::ObjectPlacementPolicy {
+                    min_nodes: 1,
+                    max_node_fraction_bps: 10_000,
+                    preferred_devices: vec![],
+                    excluded_devices: vec![],
+                    target_coverage_bps: 10_000,
+                    min_source_diversity: 0,
+                };
+
+                assert!(
+                    !store
+                        .can_reconstruct_with_policy(&unknown_id, &policy)
+                        .await
+                );
+
+                StoreLogData {
+                    details: Some(json!({"can_reconstruct_with_policy": false})),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn get_distribution_missing_object() {
+        run_store_test(
+            "get_distribution_missing",
+            "verify",
+            "placement",
+            1,
+            || async {
+                let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+                let unknown_id = ObjectId::from_bytes([99; 32]);
+
+                assert!(store.get_distribution(&unknown_id).await.is_none());
+
+                StoreLogData {
+                    details: Some(json!({"distribution": "none"})),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn get_all_symbols_missing_object() {
+        run_store_test("get_all_symbols_missing", "verify", "read", 1, || async {
+            let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+            let unknown_id = ObjectId::from_bytes([99; 32]);
+
+            let symbols = store.get_all_symbols(&unknown_id).await;
+            assert!(symbols.is_empty());
+
+            StoreLogData {
+                details: Some(json!({"count": 0})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn symbol_count_missing_object() {
+        run_store_test("symbol_count_missing", "verify", "read", 1, || async {
+            let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+            let unknown_id = ObjectId::from_bytes([99; 32]);
+
+            assert_eq!(store.symbol_count(&unknown_id).await, 0);
+
+            StoreLogData {
+                details: Some(json!({"count": 0})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn put_object_meta_duplicate_same_data() {
+        run_store_test("put_meta_dup_same_data", "verify", "write", 1, || async {
+            let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+            let meta = test_object_meta();
+
+            store.put_object_meta(meta.clone()).await.unwrap();
+            // Same meta again should succeed
+            store.put_object_meta(meta).await.unwrap();
+
+            StoreLogData {
+                details: Some(json!({"duplicate": "ok"})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn put_object_meta_duplicate_different_data() {
+        run_store_test(
+            "put_meta_dup_different_data",
+            "verify",
+            "write",
+            1,
+            || async {
+                let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+                let meta = test_object_meta();
+                store.put_object_meta(meta).await.unwrap();
+
+                // Different meta with same object_id
+                let mut different = test_object_meta();
+                different.source_symbols = 999;
+
+                let result = store.put_object_meta(different).await;
+                assert!(matches!(
+                    result,
+                    Err(SymbolStoreError::InvalidSymbol { .. })
+                ));
+
+                StoreLogData {
+                    details: Some(json!({"error": "metadata_mismatch"})),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn list_zone_empty() {
+        run_store_test("list_zone_empty_symbols", "verify", "list", 1, || async {
+            let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+
+            let ids = store.list_zone(&test_zone()).await;
+            assert!(ids.is_empty());
+
+            StoreLogData {
+                details: Some(json!({"count": 0})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn storage_quota_returns_config_value() {
+        run_store_test(
+            "storage_quota_symbol",
+            "verify",
+            "accounting",
+            1,
+            || async {
+                let config = MemorySymbolStoreConfig {
+                    max_bytes: 99_999,
+                    local_node_id: 0,
+                };
+                let store = MemorySymbolStore::new(config);
+
+                assert_eq!(store.storage_quota().await, 99_999);
+
+                StoreLogData {
+                    details: Some(json!({"quota": 99_999})),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn config_default_values() {
+        run_store_test("symbol_config_default", "verify", "config", 2, || async {
+            let config = MemorySymbolStoreConfig::default();
+            assert_eq!(config.max_bytes, 512 * 1024 * 1024);
+            assert_eq!(config.local_node_id, 0);
+
+            StoreLogData {
+                details: Some(json!({"max_bytes": config.max_bytes})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn delete_symbol_frees_storage() {
+        run_store_test(
+            "delete_symbol_frees_storage",
+            "verify",
+            "accounting",
+            2,
+            || async {
+                let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+                store.put_object_meta(test_object_meta()).await.unwrap();
+                store.put_symbol(test_symbol(0)).await.unwrap();
+
+                let used_before = store.storage_used().await;
+                assert!(used_before > 0);
+
+                store.delete_symbol(&test_object_id(), 0).await.unwrap();
+                let used_after = store.storage_used().await;
+                assert!(used_after < used_before);
+
+                StoreLogData {
+                    details: Some(json!({"freed": used_before - used_after})),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn get_distribution_tracks_local_node() {
+        run_store_test(
+            "distribution_local_node",
+            "verify",
+            "placement",
+            2,
+            || async {
+                let config = MemorySymbolStoreConfig {
+                    max_bytes: 512 * 1024 * 1024,
+                    local_node_id: 42,
+                };
+                let store = MemorySymbolStore::new(config);
+                store.put_object_meta(test_object_meta()).await.unwrap();
+
+                // Symbol with no source_node → falls back to local_node_id
+                let mut symbol = test_symbol(0);
+                symbol.meta.source_node = None;
+                store.put_symbol(symbol).await.unwrap();
+
+                let dist = store.get_distribution(&test_object_id()).await.unwrap();
+                assert_eq!(dist.distinct_nodes(), 1);
+                assert!(dist.nodes.contains_key(&42));
+
+                StoreLogData {
+                    details: Some(json!({"local_node": 42})),
                     ..StoreLogData::default()
                 }
             },

@@ -286,4 +286,184 @@ mod tests {
         assert!(json.contains("fcp.myservice"));
         assert!(json.contains("Cargo.toml"));
     }
+
+    // ---- ConnectorArchetype ----
+
+    #[test]
+    fn archetype_from_str_case_insensitive() {
+        assert!("REQUEST-RESPONSE".parse::<ConnectorArchetype>().is_ok());
+        assert!("Streaming".parse::<ConnectorArchetype>().is_ok());
+        assert!("POLLING".parse::<ConnectorArchetype>().is_ok());
+    }
+
+    #[test]
+    fn archetype_from_str_unknown() {
+        let result = "unknown".parse::<ConnectorArchetype>();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("unknown archetype"));
+    }
+
+    #[test]
+    fn archetype_from_str_request_response_alias() {
+        // "requestresponse" (no hyphen) should also work
+        assert!("requestresponse".parse::<ConnectorArchetype>().is_ok());
+    }
+
+    #[test]
+    fn archetype_display_all_variants() {
+        let variants = [
+            (ConnectorArchetype::RequestResponse, "request-response"),
+            (ConnectorArchetype::Streaming, "streaming"),
+            (ConnectorArchetype::Bidirectional, "bidirectional"),
+            (ConnectorArchetype::Polling, "polling"),
+            (ConnectorArchetype::Webhook, "webhook"),
+            (ConnectorArchetype::Queue, "queue"),
+            (ConnectorArchetype::File, "file"),
+            (ConnectorArchetype::Database, "database"),
+            (ConnectorArchetype::Cli, "cli"),
+            (ConnectorArchetype::Browser, "browser"),
+        ];
+        for (variant, expected) in variants {
+            assert_eq!(variant.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn archetype_serde_roundtrip() {
+        let arch = ConnectorArchetype::Bidirectional;
+        let json = serde_json::to_string(&arch).unwrap();
+        assert_eq!(json, "\"bidirectional\"");
+        let parsed: ConnectorArchetype = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, arch);
+    }
+
+    // ---- PrecheckResults ----
+
+    #[test]
+    fn precheck_results_all_pass() {
+        let checks = vec![
+            PrecheckItem {
+                id: "a".to_string(),
+                description: "A".to_string(),
+                passed: true,
+                message: None,
+                severity: CheckSeverity::Error,
+            },
+            PrecheckItem {
+                id: "b".to_string(),
+                description: "B".to_string(),
+                passed: true,
+                message: None,
+                severity: CheckSeverity::Warning,
+            },
+        ];
+        let result = PrecheckResults::passed(checks);
+        assert!(result.passed);
+        assert_eq!(result.summary.total, 2);
+        assert_eq!(result.summary.passed, 2);
+        assert_eq!(result.summary.failed, 0);
+        assert_eq!(result.summary.warnings, 0);
+    }
+
+    #[test]
+    fn precheck_results_warning_only_still_fails() {
+        let checks = vec![PrecheckItem {
+            id: "w".to_string(),
+            description: "W".to_string(),
+            passed: false,
+            message: Some("warn".to_string()),
+            severity: CheckSeverity::Warning,
+        }];
+        let result = PrecheckResults::passed(checks);
+        assert!(!result.passed);
+        assert_eq!(result.summary.warnings, 1);
+        assert_eq!(result.summary.failed, 0);
+    }
+
+    // ---- CheckSeverity ----
+
+    #[test]
+    fn check_severity_serde() {
+        let json = serde_json::to_string(&CheckSeverity::Error).unwrap();
+        assert_eq!(json, "\"error\"");
+        let json = serde_json::to_string(&CheckSeverity::Warning).unwrap();
+        assert_eq!(json, "\"warning\"");
+        let json = serde_json::to_string(&CheckSeverity::Info).unwrap();
+        assert_eq!(json, "\"info\"");
+    }
+
+    // ---- CheckResult ----
+
+    #[test]
+    fn check_result_serialization() {
+        let result = CheckResult {
+            path: "/tmp/test".to_string(),
+            connector_id: Some("fcp.test".to_string()),
+            prechecks: PrecheckResults::passed(vec![]),
+            suggested_fixes: vec![SuggestedFix {
+                check_id: "manifest.valid".to_string(),
+                action: "Fix it".to_string(),
+                file: Some("manifest.toml".to_string()),
+            }],
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("fcp.test"));
+        assert!(json.contains("Fix it"));
+        assert!(json.contains("manifest.toml"));
+    }
+
+    #[test]
+    fn check_result_no_connector_id() {
+        let result = CheckResult {
+            path: "/tmp/test".to_string(),
+            connector_id: None,
+            prechecks: PrecheckResults::passed(vec![]),
+            suggested_fixes: vec![],
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("\"connector_id\":null"));
+    }
+
+    // ---- SuggestedFix ----
+
+    #[test]
+    fn suggested_fix_without_file_skips_field() {
+        let fix = SuggestedFix {
+            check_id: "test".to_string(),
+            action: "Do something".to_string(),
+            file: None,
+        };
+        let json = serde_json::to_string(&fix).unwrap();
+        assert!(!json.contains("file"));
+    }
+
+    // ---- CreatedFile ----
+
+    #[test]
+    fn created_file_serde() {
+        let file = CreatedFile {
+            path: "src/main.rs".to_string(),
+            purpose: "Entrypoint".to_string(),
+            size: 1024,
+        };
+        let json = serde_json::to_string(&file).unwrap();
+        let parsed: CreatedFile = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.path, "src/main.rs");
+        assert_eq!(parsed.size, 1024);
+    }
+
+    // ---- PrecheckItem ----
+
+    #[test]
+    fn precheck_item_message_skipped_when_none() {
+        let item = PrecheckItem {
+            id: "test".to_string(),
+            description: "Test".to_string(),
+            passed: true,
+            message: None,
+            severity: CheckSeverity::Info,
+        };
+        let json = serde_json::to_string(&item).unwrap();
+        assert!(!json.contains("message"));
+    }
 }

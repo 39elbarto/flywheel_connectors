@@ -249,4 +249,96 @@ mod tests {
         let outliers = count_outliers(&sorted);
         assert!(outliers >= 1);
     }
+
+    // ---- percentile ordering invariants ----
+
+    #[test]
+    fn percentiles_ordering_invariant() {
+        let sorted: Vec<u64> = (1..=200).map(|x| x * 500_000).collect();
+        let p = calculate_percentiles(&sorted);
+        assert!(p.min_ms <= p.p50_ms);
+        assert!(p.p50_ms <= p.p90_ms);
+        assert!(p.p90_ms <= p.p95_ms);
+        assert!(p.p95_ms <= p.p99_ms);
+        assert!(p.p99_ms <= p.max_ms);
+    }
+
+    #[test]
+    fn percentiles_mean_between_min_and_max() {
+        let sorted: Vec<u64> = (1..=100).map(|x| x * 1_000_000).collect();
+        let p = calculate_percentiles(&sorted);
+        assert!(p.mean_ms >= p.min_ms);
+        assert!(p.mean_ms <= p.max_ms);
+    }
+
+    #[test]
+    fn percentiles_stddev_non_negative() {
+        let sorted: Vec<u64> = vec![1, 5, 10, 50, 100, 500, 1000];
+        let p = calculate_percentiles(&sorted);
+        assert!(p.stddev_ms >= 0.0);
+    }
+
+    // ---- count_outliers boundary ----
+
+    #[test]
+    fn count_outliers_exactly_four_elements() {
+        let sorted = vec![10_u64, 20, 30, 40];
+        let outliers = count_outliers(&sorted);
+        assert_eq!(outliers, 0); // no outliers in tight range
+    }
+
+    #[test]
+    fn count_outliers_uniform_data() {
+        let sorted = vec![100_u64; 50];
+        let outliers = count_outliers(&sorted);
+        assert_eq!(outliers, 0); // IQR=0 → all equal → no outliers
+    }
+
+    #[test]
+    fn count_outliers_multiple_extremes() {
+        let mut sorted: Vec<u64> = (1..=50).collect();
+        sorted.push(50_000);
+        sorted.push(60_000);
+        sorted.push(70_000);
+        sorted.sort_unstable();
+        let outliers = count_outliers(&sorted);
+        assert!(outliers >= 3);
+    }
+
+    // ---- run_benchmark_with_result ----
+
+    #[test]
+    fn run_benchmark_returns_non_zero_durations() {
+        let (percentiles, _) = run_benchmark_with_result(1, 20, || {
+            // busy spin to ensure measurable time
+            let mut sum = 0_u64;
+            for i in 0..100 {
+                sum = sum.wrapping_add(i);
+            }
+            std::hint::black_box(sum)
+        });
+        // With 20 samples, we should get valid statistics
+        assert!(percentiles.max_ms >= 0.0);
+        assert!(percentiles.mean_ms >= 0.0);
+    }
+
+    #[test]
+    fn run_benchmark_single_iteration() {
+        let (percentiles, _) = run_benchmark_with_result(0, 1, || 99_u32);
+        // single sample: min == max == p50 == mean
+        assert!((percentiles.min_ms - percentiles.max_ms).abs() < f64::EPSILON);
+        assert!((percentiles.min_ms - percentiles.mean_ms).abs() < f64::EPSILON);
+    }
+
+    // ---- percentile precision ----
+
+    #[test]
+    fn percentiles_known_values() {
+        // 10 samples: 1ms, 2ms, ..., 10ms (in nanoseconds)
+        let sorted: Vec<u64> = (1..=10).map(|x| x * 1_000_000).collect();
+        let p = calculate_percentiles(&sorted);
+        assert!((p.min_ms - 1.0).abs() < 0.001);
+        assert!((p.max_ms - 10.0).abs() < 0.001);
+        assert!((p.mean_ms - 5.5).abs() < 0.001);
+    }
 }

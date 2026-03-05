@@ -361,4 +361,215 @@ mod tests {
         let result = timeout_stream.next().await;
         assert!(result.is_none());
     }
+
+    // ── RateLimitedStream tests ──
+
+    #[fcp_async_core::runtime::test]
+    async fn rate_limited_stream_empty() {
+        let stream = stream::empty::<i32>();
+        let rl = RateLimitedStream::new(stream, Duration::from_millis(10));
+        pin_mut!(rl);
+
+        assert!(rl.next().await.is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn rate_limited_stream_single_item() {
+        let stream = stream::iter(vec![42]);
+        let rl = RateLimitedStream::new(stream, Duration::from_millis(1));
+        pin_mut!(rl);
+
+        assert_eq!(rl.next().await, Some(42));
+        assert!(rl.next().await.is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn rate_limited_stream_preserves_order() {
+        let stream = stream::iter(vec![10, 20, 30, 40, 50]);
+        let rl = RateLimitedStream::new(stream, Duration::from_millis(1));
+        pin_mut!(rl);
+
+        let mut items = Vec::new();
+        while let Some(item) = rl.next().await {
+            items.push(item);
+        }
+        assert_eq!(items, vec![10, 20, 30, 40, 50]);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn rate_limited_stream_enforces_interval() {
+        let stream = stream::iter(vec![1, 2, 3]);
+        let interval = Duration::from_millis(50);
+        let rl = RateLimitedStream::new(stream, interval);
+        pin_mut!(rl);
+
+        let start = std::time::Instant::now();
+        let mut items = Vec::new();
+        while let Some(item) = rl.next().await {
+            items.push(item);
+        }
+        let elapsed = start.elapsed();
+
+        assert_eq!(items, vec![1, 2, 3]);
+        // With 3 items and 50ms interval, after item 1 and 2 we wait 50ms each = ~100ms minimum
+        assert!(
+            elapsed >= Duration::from_millis(80),
+            "expected >=80ms, got {elapsed:?}"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn rate_limited_stream_zero_interval() {
+        let stream = stream::iter(vec![1, 2, 3]);
+        let rl = RateLimitedStream::new(stream, Duration::ZERO);
+        pin_mut!(rl);
+
+        let mut items = Vec::new();
+        while let Some(item) = rl.next().await {
+            items.push(item);
+        }
+        assert_eq!(items, vec![1, 2, 3]);
+    }
+
+    // ── BatchStream tests ──
+
+    #[fcp_async_core::runtime::test]
+    async fn batch_stream_full_batch() {
+        let stream = stream::iter(vec![1, 2, 3, 4, 5, 6]);
+        let batched = BatchStream::new(stream, 3, Duration::from_secs(10));
+        pin_mut!(batched);
+
+        let batch1 = batched.next().await.unwrap();
+        assert_eq!(batch1, vec![1, 2, 3]);
+
+        let batch2 = batched.next().await.unwrap();
+        assert_eq!(batch2, vec![4, 5, 6]);
+
+        assert!(batched.next().await.is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn batch_stream_partial_at_end() {
+        let stream = stream::iter(vec![1, 2, 3, 4, 5]);
+        let batched = BatchStream::new(stream, 3, Duration::from_secs(10));
+        pin_mut!(batched);
+
+        let batch1 = batched.next().await.unwrap();
+        assert_eq!(batch1, vec![1, 2, 3]);
+
+        // Remaining items at stream end
+        let batch2 = batched.next().await.unwrap();
+        assert_eq!(batch2, vec![4, 5]);
+
+        assert!(batched.next().await.is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn batch_stream_empty() {
+        let stream = stream::empty::<i32>();
+        let batched = BatchStream::new(stream, 3, Duration::from_secs(10));
+        pin_mut!(batched);
+
+        assert!(batched.next().await.is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn batch_stream_single_item_end() {
+        let stream = stream::iter(vec![42]);
+        let batched = BatchStream::new(stream, 5, Duration::from_secs(10));
+        pin_mut!(batched);
+
+        let batch = batched.next().await.unwrap();
+        assert_eq!(batch, vec![42]);
+        assert!(batched.next().await.is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn batch_stream_exact_batch_size() {
+        let stream = stream::iter(vec![1, 2, 3]);
+        let batched = BatchStream::new(stream, 3, Duration::from_secs(10));
+        pin_mut!(batched);
+
+        let batch = batched.next().await.unwrap();
+        assert_eq!(batch, vec![1, 2, 3]);
+        assert!(batched.next().await.is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn batch_stream_max_size_one() {
+        let stream = stream::iter(vec![1, 2, 3]);
+        let batched = BatchStream::new(stream, 1, Duration::from_secs(10));
+        pin_mut!(batched);
+
+        assert_eq!(batched.next().await.unwrap(), vec![1]);
+        assert_eq!(batched.next().await.unwrap(), vec![2]);
+        assert_eq!(batched.next().await.unwrap(), vec![3]);
+        assert!(batched.next().await.is_none());
+    }
+
+    // ── CountingStream additional tests ──
+
+    #[fcp_async_core::runtime::test]
+    async fn counting_stream_single_item() {
+        let stream = stream::iter(vec![99]);
+        let mut counting = CountingStream::new(stream);
+
+        assert_eq!(counting.items_count(), 0);
+        assert_eq!(counting.next().await, Some(99));
+        assert_eq!(counting.items_count(), 1);
+        assert!(counting.next().await.is_none());
+        // Count doesn't change after stream ends
+        assert_eq!(counting.items_count(), 1);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn counting_stream_count_persists_after_exhaustion() {
+        let stream = stream::iter(vec![1, 2, 3]);
+        let mut counting = CountingStream::new(stream);
+
+        while counting.next().await.is_some() {}
+        assert_eq!(counting.items_count(), 3);
+
+        // Additional polls don't change count
+        assert!(counting.next().await.is_none());
+        assert_eq!(counting.items_count(), 3);
+    }
+
+    // ── StreamExt trait tests ──
+
+    #[fcp_async_core::runtime::test]
+    async fn stream_ext_buffered_batches() {
+        let stream = stream::iter(vec![1, 2, 3, 4]);
+        let batched = super::StreamExt::buffered_batches(stream, 2, Duration::from_secs(10));
+        pin_mut!(batched);
+
+        assert_eq!(batched.next().await.unwrap(), vec![1, 2]);
+        assert_eq!(batched.next().await.unwrap(), vec![3, 4]);
+        assert!(batched.next().await.is_none());
+    }
+
+    // ── TimeoutStream additional tests ──
+
+    #[fcp_async_core::runtime::test]
+    async fn timeout_stream_single_item() {
+        let stream = stream::iter(vec![42]);
+        let ts = TimeoutStream::new(stream, Duration::from_secs(1));
+        pin_mut!(ts);
+
+        assert_eq!(ts.next().await.unwrap().unwrap(), 42);
+        assert!(ts.next().await.is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn timeout_stream_wraps_items_in_ok() {
+        let stream = stream::iter(vec![1, 2]);
+        let ts = TimeoutStream::new(stream, Duration::from_secs(1));
+        pin_mut!(ts);
+
+        // Each item should be Ok-wrapped
+        let r1 = ts.next().await.unwrap();
+        assert!(r1.is_ok());
+        let r2 = ts.next().await.unwrap();
+        assert!(r2.is_ok());
+    }
 }

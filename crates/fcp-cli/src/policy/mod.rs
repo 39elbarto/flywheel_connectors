@@ -1200,4 +1200,488 @@ mod tests {
                 .any(|flag| flag == "transport_derp_enabled")
         );
     }
+
+    // ---- parse_simulation_input ----
+
+    #[test]
+    fn parse_simulation_input_empty() {
+        assert!(parse_simulation_input("").is_err());
+    }
+
+    #[test]
+    fn parse_simulation_input_whitespace_only() {
+        assert!(parse_simulation_input("   \n\t  ").is_err());
+    }
+
+    #[test]
+    fn parse_simulation_input_invalid_json() {
+        assert!(parse_simulation_input("{not valid}").is_err());
+    }
+
+    // ---- parse_created_at ----
+
+    #[test]
+    fn parse_created_at_none() {
+        assert!(parse_created_at(None).unwrap().is_none());
+    }
+
+    #[test]
+    fn parse_created_at_valid_rfc3339() {
+        let dt = parse_created_at(Some("2026-03-01T12:00:00Z"))
+            .unwrap()
+            .unwrap();
+        assert!(dt.to_rfc3339().contains("2026-03-01"));
+    }
+
+    #[test]
+    fn parse_created_at_invalid() {
+        assert!(parse_created_at(Some("not-a-date")).is_err());
+    }
+
+    #[test]
+    fn parse_created_at_with_offset() {
+        let dt = parse_created_at(Some("2026-03-01T12:00:00+05:00"))
+            .unwrap()
+            .unwrap();
+        // Converted to UTC: 12:00 +05:00 = 07:00 UTC
+        assert!(dt.to_rfc3339().contains("07:00:00"));
+    }
+
+    // ---- diff_patterns ----
+
+    #[test]
+    fn diff_patterns_both_empty() {
+        let (added, removed) = diff_patterns(&[], &[]);
+        assert!(added.is_empty());
+        assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn diff_patterns_identical() {
+        let patterns = vec![PolicyPattern {
+            pattern: "fcp.test:*".to_string(),
+        }];
+        let (added, removed) = diff_patterns(&patterns, &patterns);
+        assert!(added.is_empty());
+        assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn diff_patterns_added() {
+        let before = vec![];
+        let after = vec![PolicyPattern {
+            pattern: "fcp.test:*".to_string(),
+        }];
+        let (added, removed) = diff_patterns(&before, &after);
+        assert_eq!(added, vec!["fcp.test:*"]);
+        assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn diff_patterns_removed() {
+        let before = vec![PolicyPattern {
+            pattern: "fcp.test:*".to_string(),
+        }];
+        let after = vec![];
+        let (added, removed) = diff_patterns(&before, &after);
+        assert!(added.is_empty());
+        assert_eq!(removed, vec!["fcp.test:*"]);
+    }
+
+    #[test]
+    fn diff_patterns_mixed() {
+        let before = vec![
+            PolicyPattern {
+                pattern: "a".to_string(),
+            },
+            PolicyPattern {
+                pattern: "b".to_string(),
+            },
+        ];
+        let after = vec![
+            PolicyPattern {
+                pattern: "b".to_string(),
+            },
+            PolicyPattern {
+                pattern: "c".to_string(),
+            },
+        ];
+        let (added, removed) = diff_patterns(&before, &after);
+        assert_eq!(added, vec!["c"]);
+        assert_eq!(removed, vec!["a"]);
+    }
+
+    // ---- diff_capability_ids ----
+
+    #[test]
+    fn diff_capability_ids_empty() {
+        let (added, removed) = diff_capability_ids(&[], &[]);
+        assert!(added.is_empty());
+        assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn diff_capability_ids_added_and_removed() {
+        let before = vec!["cap.read".parse().unwrap()];
+        let after = vec!["cap.write".parse().unwrap()];
+        let (added, removed) = diff_capability_ids(&before, &after);
+        assert_eq!(added, vec!["cap.write"]);
+        assert_eq!(removed, vec!["cap.read"]);
+    }
+
+    // ---- transport_policy_changed ----
+
+    #[test]
+    fn transport_policy_unchanged() {
+        let policy = fcp_core::ZoneTransportPolicy::default();
+        assert!(!transport_policy_changed(&policy, &policy));
+    }
+
+    #[test]
+    fn transport_policy_lan_changed() {
+        let before = fcp_core::ZoneTransportPolicy::default();
+        let mut after = before.clone();
+        after.allow_lan = !before.allow_lan;
+        assert!(transport_policy_changed(&before, &after));
+    }
+
+    #[test]
+    fn transport_policy_derp_changed() {
+        let before = fcp_core::ZoneTransportPolicy::default();
+        let mut after = before.clone();
+        after.allow_derp = !before.allow_derp;
+        assert!(transport_policy_changed(&before, &after));
+    }
+
+    #[test]
+    fn transport_policy_funnel_changed() {
+        let before = fcp_core::ZoneTransportPolicy::default();
+        let mut after = before.clone();
+        after.allow_funnel = !before.allow_funnel;
+        assert!(transport_policy_changed(&before, &after));
+    }
+
+    // ---- compute_risk_flags ----
+
+    #[test]
+    fn risk_flags_empty_when_no_changes() {
+        let added = PolicyListDiff::default();
+        let changed = PolicyChangedFields::default();
+        let flags = compute_risk_flags(&added, &changed);
+        assert!(flags.is_empty());
+    }
+
+    #[test]
+    fn risk_flags_principal_allow_expanded() {
+        let added = PolicyListDiff {
+            principal_allow: vec!["user:*".to_string()],
+            ..Default::default()
+        };
+        let changed = PolicyChangedFields::default();
+        let flags = compute_risk_flags(&added, &changed);
+        assert!(flags.contains(&"principal_allow_expanded".to_string()));
+    }
+
+    #[test]
+    fn risk_flags_connector_allow_expanded() {
+        let added = PolicyListDiff {
+            connector_allow: vec!["fcp.*".to_string()],
+            ..Default::default()
+        };
+        let changed = PolicyChangedFields::default();
+        let flags = compute_risk_flags(&added, &changed);
+        assert!(flags.contains(&"connector_allow_expanded".to_string()));
+    }
+
+    #[test]
+    fn risk_flags_capability_allow_expanded() {
+        let added = PolicyListDiff {
+            capability_allow: vec!["cap.*".to_string()],
+            ..Default::default()
+        };
+        let changed = PolicyChangedFields::default();
+        let flags = compute_risk_flags(&added, &changed);
+        assert!(flags.contains(&"capability_allow_expanded".to_string()));
+    }
+
+    #[test]
+    fn risk_flags_transport_derp_enabled() {
+        let added = PolicyListDiff::default();
+        let changed = PolicyChangedFields {
+            transport_policy: Some(TransportPolicyChange {
+                before: fcp_core::ZoneTransportPolicy {
+                    allow_derp: false,
+                    ..Default::default()
+                },
+                after: fcp_core::ZoneTransportPolicy {
+                    allow_derp: true,
+                    ..Default::default()
+                },
+            }),
+            ..Default::default()
+        };
+        let flags = compute_risk_flags(&added, &changed);
+        assert!(flags.contains(&"transport_derp_enabled".to_string()));
+    }
+
+    #[test]
+    fn risk_flags_transport_funnel_enabled() {
+        let added = PolicyListDiff::default();
+        let changed = PolicyChangedFields {
+            transport_policy: Some(TransportPolicyChange {
+                before: fcp_core::ZoneTransportPolicy {
+                    allow_funnel: false,
+                    ..Default::default()
+                },
+                after: fcp_core::ZoneTransportPolicy {
+                    allow_funnel: true,
+                    ..Default::default()
+                },
+            }),
+            ..Default::default()
+        };
+        let flags = compute_risk_flags(&added, &changed);
+        assert!(flags.contains(&"transport_funnel_enabled".to_string()));
+    }
+
+    #[test]
+    fn risk_flags_multiple_risks() {
+        let added = PolicyListDiff {
+            principal_allow: vec!["user:*".to_string()],
+            connector_allow: vec!["fcp.*".to_string()],
+            ..Default::default()
+        };
+        let changed = PolicyChangedFields::default();
+        let flags = compute_risk_flags(&added, &changed);
+        assert_eq!(flags.len(), 2);
+    }
+
+    // ---- diff_json_objects ----
+
+    #[test]
+    fn diff_json_objects_identical() {
+        let obj = serde_json::json!({"a": 1, "b": "hello"});
+        let diff = diff_json_objects(&obj, &obj).unwrap();
+        assert!(diff.added.is_empty());
+        assert!(diff.removed.is_empty());
+        assert!(diff.changed.is_empty());
+    }
+
+    #[test]
+    fn diff_json_objects_added_key() {
+        let before = serde_json::json!({"a": 1});
+        let after = serde_json::json!({"a": 1, "b": 2});
+        let diff = diff_json_objects(&before, &after).unwrap();
+        assert_eq!(diff.added.len(), 1);
+        assert!(diff.added.contains_key("b"));
+        assert!(diff.removed.is_empty());
+        assert!(diff.changed.is_empty());
+    }
+
+    #[test]
+    fn diff_json_objects_removed_key() {
+        let before = serde_json::json!({"a": 1, "b": 2});
+        let after = serde_json::json!({"a": 1});
+        let diff = diff_json_objects(&before, &after).unwrap();
+        assert!(diff.added.is_empty());
+        assert_eq!(diff.removed.len(), 1);
+        assert!(diff.removed.contains_key("b"));
+    }
+
+    #[test]
+    fn diff_json_objects_changed_value() {
+        let before = serde_json::json!({"a": 1});
+        let after = serde_json::json!({"a": 2});
+        let diff = diff_json_objects(&before, &after).unwrap();
+        assert!(diff.added.is_empty());
+        assert!(diff.removed.is_empty());
+        assert_eq!(diff.changed.len(), 1);
+        assert!(diff.changed.contains_key("a"));
+    }
+
+    #[test]
+    fn diff_json_objects_not_object_fails() {
+        let before = serde_json::json!([1, 2]);
+        let after = serde_json::json!({"a": 1});
+        assert!(diff_json_objects(&before, &after).is_err());
+    }
+
+    // ---- parse_policy_document ----
+
+    #[test]
+    fn parse_policy_document_empty() {
+        assert!(parse_policy_document("").is_err());
+    }
+
+    #[test]
+    fn parse_policy_document_invalid_json() {
+        assert!(parse_policy_document("{bad json}").is_err());
+    }
+
+    // ---- parse_bundle_object ----
+
+    #[test]
+    fn parse_bundle_object_unsupported_schema() {
+        let value = serde_json::json!({"some": "data"});
+        assert!(parse_bundle_object("fcp.core:Unknown@1.0.0", &value).is_err());
+    }
+
+    // ---- default_zone_policy ----
+
+    #[test]
+    fn default_zone_policy_structure() {
+        let invoke = InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: fcp_core::RequestId::new("req-1"),
+            connector_id: "fcp.test:base:v1".parse().unwrap(),
+            operation: "op".parse().unwrap(),
+            zone_id: fcp_core::ZoneId::work(),
+            input: serde_json::json!({}),
+            capability_token: fcp_core::CapabilityToken::test_token(),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+        let policy = default_zone_policy(&invoke);
+        assert_eq!(policy.zone_id, fcp_core::ZoneId::work());
+        assert!(policy.principal_allow.is_empty());
+        assert!(policy.principal_deny.is_empty());
+        assert!(policy.connector_allow.is_empty());
+        assert!(policy.connector_deny.is_empty());
+        assert!(policy.capability_allow.is_empty());
+        assert!(policy.capability_deny.is_empty());
+        assert!(policy.capability_ceiling.is_empty());
+        assert!(policy.usage_budget.is_none());
+        assert!(policy.requires_posture.is_none());
+    }
+
+    // ---- PolicyListDiff default ----
+
+    #[test]
+    fn policy_list_diff_default_empty() {
+        let d = PolicyListDiff::default();
+        assert!(d.principal_allow.is_empty());
+        assert!(d.principal_deny.is_empty());
+        assert!(d.connector_allow.is_empty());
+        assert!(d.connector_deny.is_empty());
+        assert!(d.capability_allow.is_empty());
+        assert!(d.capability_deny.is_empty());
+        assert!(d.capability_ceiling.is_empty());
+    }
+
+    // ---- PolicyChangedFields default ----
+
+    #[test]
+    fn policy_changed_fields_default_all_none() {
+        let d = PolicyChangedFields::default();
+        assert!(d.transport_policy.is_none());
+        assert!(d.decision_receipts.is_none());
+        assert!(d.requires_posture.is_none());
+    }
+
+    // ---- BundleApplyPlan serde ----
+
+    #[test]
+    fn bundle_apply_plan_serializes() {
+        let plan = BundleApplyPlan {
+            plan_type: "bundle_apply".to_string(),
+            zone_id: "z:work".to_string(),
+            bundle_id: "bundle-1".to_string(),
+            state_path: "/tmp/state.json".to_string(),
+        };
+        let json = serde_json::to_string(&plan).unwrap();
+        assert!(json.contains("\"plan_type\":\"bundle_apply\""));
+        assert!(json.contains("\"bundle_id\":\"bundle-1\""));
+    }
+
+    // ---- BundleRollbackPlan serde ----
+
+    #[test]
+    fn bundle_rollback_plan_serializes() {
+        let plan = BundleRollbackPlan {
+            plan_type: "bundle_rollback".to_string(),
+            zone_id: "z:work".to_string(),
+            target_bundle_id: "bundle-prev".to_string(),
+            state_path: "/tmp/state.json".to_string(),
+        };
+        let json = serde_json::to_string(&plan).unwrap();
+        assert!(json.contains("\"plan_type\":\"bundle_rollback\""));
+        assert!(json.contains("\"target_bundle_id\":\"bundle-prev\""));
+    }
+
+    // ---- RollbackPlan serde ----
+
+    #[test]
+    fn rollback_plan_serializes() {
+        let plan = RollbackPlan {
+            policy_type: "zone_policy".to_string(),
+            zone_id: "z:work".to_string(),
+            current_policy_id: "oid-1".to_string(),
+            previous_policy_id: "oid-2".to_string(),
+            plan_type: "rollback".to_string(),
+        };
+        let json = serde_json::to_string(&plan).unwrap();
+        assert!(json.contains("\"plan_type\":\"rollback\""));
+        assert!(json.contains("\"zone_id\":\"z:work\""));
+    }
+
+    // ---- PolicyDiffOutput serde ----
+
+    #[test]
+    fn policy_diff_output_serializes() {
+        let output = PolicyDiffOutput {
+            policy_type: "zone_policy".to_string(),
+            zone_id: "z:work".to_string(),
+            previous_policy_id: "prev-id".to_string(),
+            current_policy_id: "curr-id".to_string(),
+            added: serde_json::json!({}),
+            removed: serde_json::json!({}),
+            changed: serde_json::json!({}),
+            risk_flags: vec!["transport_derp_enabled".to_string()],
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        assert!(json.contains("\"risk_flags\""));
+        assert!(json.contains("transport_derp_enabled"));
+    }
+
+    // ---- PolicyDocument methods ----
+
+    #[test]
+    fn policy_document_zone_policy_type() {
+        let invoke = InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: fcp_core::RequestId::new("req-1"),
+            connector_id: "fcp.test:base:v1".parse().unwrap(),
+            operation: "op".parse().unwrap(),
+            zone_id: fcp_core::ZoneId::work(),
+            input: serde_json::json!({}),
+            capability_token: fcp_core::CapabilityToken::test_token(),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+        let doc = PolicyDocument::ZonePolicy(default_zone_policy(&invoke));
+        assert_eq!(doc.policy_type(), "zone_policy");
+        assert_eq!(*doc.zone_id(), fcp_core::ZoneId::work());
+    }
+
+    // ---- diff_zone_policy no changes ----
+
+    #[test]
+    fn diff_zone_policy_identical() {
+        let zone = fcp_core::ZoneId::work();
+        let policy = base_policy(zone);
+        let diff = diff_zone_policy(&policy, &policy).unwrap();
+        assert!(diff.risk_flags.is_empty());
+    }
 }

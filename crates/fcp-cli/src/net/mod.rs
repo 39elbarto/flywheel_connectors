@@ -873,8 +873,13 @@ mod tests {
             host: Some("api.example.com".to_string()),
             port: Some(443),
         };
-        let suggestion =
-            suggestion_for(DenyReason::HostNotAllowed, &constraints, &parsed, None, None);
+        let suggestion = suggestion_for(
+            DenyReason::HostNotAllowed,
+            &constraints,
+            &parsed,
+            None,
+            None,
+        );
         assert!(suggestion.is_some());
         let s = suggestion.unwrap();
         assert_eq!(s.field, "network_constraints.host_allow");
@@ -888,8 +893,13 @@ mod tests {
             host: None,
             port: Some(8080),
         };
-        let suggestion =
-            suggestion_for(DenyReason::PortNotAllowed, &constraints, &parsed, None, Some(8080));
+        let suggestion = suggestion_for(
+            DenyReason::PortNotAllowed,
+            &constraints,
+            &parsed,
+            None,
+            Some(8080),
+        );
         assert!(suggestion.is_some());
         let s = suggestion.unwrap();
         assert_eq!(s.field, "network_constraints.port_allow");
@@ -903,8 +913,13 @@ mod tests {
             host: None,
             port: None,
         };
-        let suggestion =
-            suggestion_for(DenyReason::IpLiteralDenied, &constraints, &parsed, None, None);
+        let suggestion = suggestion_for(
+            DenyReason::IpLiteralDenied,
+            &constraints,
+            &parsed,
+            None,
+            None,
+        );
         assert!(suggestion.is_some());
         let s = suggestion.unwrap();
         assert_eq!(s.action, "set");
@@ -918,8 +933,13 @@ mod tests {
             host: None,
             port: None,
         };
-        let suggestion =
-            suggestion_for(DenyReason::MaxRedirectsExceeded, &constraints, &parsed, None, None);
+        let suggestion = suggestion_for(
+            DenyReason::MaxRedirectsExceeded,
+            &constraints,
+            &parsed,
+            None,
+            None,
+        );
         assert!(suggestion.is_some());
         let s = suggestion.unwrap();
         assert_eq!(s.field, "network_constraints.max_redirects");

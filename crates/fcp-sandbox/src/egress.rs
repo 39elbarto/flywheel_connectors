@@ -1644,4 +1644,431 @@ mod tests {
         assert!(req.sni_override.is_none());
         assert!(req.credential_id.is_none());
     }
+
+    // === canonicalize_host_pattern ===
+
+    #[test]
+    fn test_canonicalize_host_pattern_exact() {
+        let pat = canonicalize_host_pattern("API.Example.COM").unwrap();
+        assert_eq!(pat, "api.example.com");
+    }
+
+    #[test]
+    fn test_canonicalize_host_pattern_wildcard() {
+        let pat = canonicalize_host_pattern("*.API.Example.COM").unwrap();
+        assert_eq!(pat, "*.api.example.com");
+    }
+
+    #[test]
+    fn test_canonicalize_host_pattern_ip_literal() {
+        let pat = canonicalize_host_pattern("10.0.0.1").unwrap();
+        assert_eq!(pat, "10.0.0.1");
+    }
+
+    #[test]
+    fn test_canonicalize_host_pattern_empty() {
+        assert!(canonicalize_host_pattern("").is_none());
+    }
+
+    // === check_ip_constraints: deny flags disabled ===
+
+    #[test]
+    fn test_check_ip_localhost_allowed_when_deny_disabled() {
+        let guard = EgressGuard::new();
+        let mut constraints = test_constraints();
+        constraints.deny_localhost = false;
+        let result = guard.check_ip_constraints("127.0.0.1".parse().unwrap(), &constraints);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_check_ip_private_allowed_when_deny_disabled() {
+        let guard = EgressGuard::new();
+        let mut constraints = test_constraints();
+        constraints.deny_private_ranges = false;
+        let result = guard.check_ip_constraints("192.168.1.1".parse().unwrap(), &constraints);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_check_ip_tailnet_allowed_when_deny_disabled() {
+        let guard = EgressGuard::new();
+        let mut constraints = test_constraints();
+        constraints.deny_tailnet_ranges = false;
+        let result = guard.check_ip_constraints("100.100.100.100".parse().unwrap(), &constraints);
+        assert!(result.is_ok());
+    }
+
+    // === IPv4-mapped IPv6 CIDR bypass prevention ===
+
+    #[test]
+    fn test_check_ip_cidr_deny_ipv4_mapped_ipv6() {
+        let guard = EgressGuard::new();
+        let mut constraints = test_constraints();
+        constraints.deny_localhost = false;
+        constraints.deny_private_ranges = false;
+        constraints.cidr_deny = vec!["203.0.113.0/24".into()];
+
+        // IPv4-mapped IPv6 should be normalized and matched
+        let result =
+            guard.check_ip_constraints("::ffff:203.0.113.42".parse().unwrap(), &constraints);
+        assert!(result.is_err());
+        if let Err(EgressError::Denied { code, .. }) = result {
+            assert_eq!(code, DenyReason::CidrDenyMatched);
+        }
+    }
+
+    // === validate_dns_resolution edge cases ===
+
+    #[test]
+    fn test_validate_dns_resolution_empty() {
+        let guard = EgressGuard::new();
+        let constraints = test_constraints();
+        let result = guard.validate_dns_resolution(&[], &constraints);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_validate_dns_resolution_exactly_at_limit() {
+        let guard = EgressGuard::new();
+        let mut constraints = test_constraints();
+        constraints.dns_max_ips = 2;
+        let ips: Vec<IpAddr> = vec!["8.8.8.8".parse().unwrap(), "8.8.4.4".parse().unwrap()];
+        let result = guard.validate_dns_resolution(&ips, &constraints);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 2);
+    }
+
+    // === EgressDecision field defaults ===
+
+    #[test]
+    fn test_egress_decision_fields() {
+        let d = EgressDecision {
+            allowed: true,
+            canonical_host: "example.com".into(),
+            resolved_ips: vec!["1.2.3.4".parse().unwrap()],
+            port: 443,
+            tls_required: true,
+            expected_sni: Some("example.com".into()),
+            spki_pins: vec![vec![1, 2, 3]],
+            credential_injected: false,
+        };
+        assert!(d.allowed);
+        assert_eq!(d.resolved_ips.len(), 1);
+        assert!(!d.credential_injected);
+    }
+
+    #[test]
+    fn test_egress_tcp_decision_fields() {
+        let d = EgressTcpDecision {
+            decision: EgressDecision {
+                allowed: true,
+                canonical_host: "db.test".into(),
+                resolved_ips: vec![],
+                port: 5432,
+                tls_required: false,
+                expected_sni: None,
+                spki_pins: vec![],
+                credential_injected: true,
+            },
+            tcp_auth: Some(b"AUTH bytes".to_vec()),
+        };
+        assert!(d.decision.credential_injected);
+        assert!(d.tcp_auth.is_some());
+    }
+
+    // === HTTP no host URL ===
+
+    #[test]
+    fn test_evaluate_url_no_host() {
+        let guard = EgressGuard::new();
+        let constraints = test_constraints();
+        let request = EgressRequest::Http(EgressHttpRequest {
+            url: "file:///etc/passwd".into(),
+            method: "GET".into(),
+            headers: vec![],
+            body: None,
+            credential_id: None,
+        });
+        let result = guard.evaluate(&request, &constraints);
+        assert!(matches!(result, Err(EgressError::InvalidUrl(_))));
+    }
+
+    // === HTTP port 80 from http:// scheme ===
+
+    #[test]
+    fn test_evaluate_http_scheme_port_80() {
+        let guard = EgressGuard::new();
+        let mut constraints = test_constraints();
+        constraints.port_allow = vec![80, 443];
+        constraints.require_sni = false;
+        let request = EgressRequest::Http(EgressHttpRequest {
+            url: "http://api.example.com/data".into(),
+            method: "GET".into(),
+            headers: vec![],
+            body: None,
+            credential_id: None,
+        });
+        let decision = guard.evaluate(&request, &constraints).unwrap();
+        assert_eq!(decision.port, 80);
+        assert!(!decision.tls_required);
+    }
+
+    // === Non-canonical host rejected when required ===
+
+    #[test]
+    fn test_evaluate_non_canonical_host_rejected() {
+        // Use TCP path to bypass URL parser normalization (URL parser lowercases hosts)
+        let guard = EgressGuard::new();
+        let mut constraints = test_constraints();
+        constraints.require_host_canonicalization = true;
+        constraints.deny_ip_literals = false;
+        constraints.host_allow = vec!["api.example.com".into()];
+
+        let request = EgressRequest::TcpConnect(EgressTcpConnectRequest {
+            host: "API.EXAMPLE.COM".into(),
+            port: 443,
+            tls: true,
+            sni_override: None,
+            credential_id: None,
+        });
+        let result = guard.evaluate(&request, &constraints);
+        assert!(result.is_err());
+        if let Err(EgressError::Denied { code, .. }) = result {
+            assert_eq!(code, DenyReason::HostnameNotCanonical);
+        }
+    }
+
+    // === TCP connect without TLS ===
+
+    #[test]
+    fn test_tcp_connect_no_tls() {
+        let guard = EgressGuard::new();
+        let mut constraints = test_constraints();
+        constraints.require_sni = false;
+        let request = EgressRequest::TcpConnect(EgressTcpConnectRequest {
+            host: "api.example.com".into(),
+            port: 443,
+            tls: false,
+            sni_override: None,
+            credential_id: None,
+        });
+        let decision = guard.evaluate(&request, &constraints).unwrap();
+        assert!(!decision.tls_required);
+        assert!(decision.expected_sni.is_none());
+    }
+
+    // === authorize_http with mock injector ===
+
+    struct MockInjector {
+        authorized: bool,
+        host_allowed: bool,
+    }
+
+    impl CredentialInjector for MockInjector {
+        fn is_authorized(
+            &self,
+            _cred: &str,
+            _op: &str,
+            _allow: &[String],
+        ) -> Result<bool, EgressError> {
+            Ok(self.authorized)
+        }
+
+        fn is_host_allowed(&self, _cred: &str, _host: &str) -> Result<bool, EgressError> {
+            Ok(self.host_allowed)
+        }
+
+        fn inject_http(
+            &self,
+            _cred: &str,
+            headers: &mut Vec<HttpHeader>,
+        ) -> Result<(), EgressError> {
+            headers.push(HttpHeader {
+                name: "Authorization".into(),
+                value: "Bearer mock-token".into(),
+            });
+            Ok(())
+        }
+
+        fn get_tcp_auth(&self, _cred: &str) -> Result<Option<Vec<u8>>, EgressError> {
+            Ok(Some(b"mock-auth".to_vec()))
+        }
+    }
+
+    #[test]
+    fn test_authorize_http_no_credential() {
+        let guard = EgressGuard::new();
+        let constraints = test_constraints();
+        let injector = MockInjector {
+            authorized: true,
+            host_allowed: true,
+        };
+
+        let mut req = EgressHttpRequest {
+            url: "https://api.example.com/".into(),
+            method: "GET".into(),
+            headers: vec![],
+            body: None,
+            credential_id: None,
+        };
+
+        let decision = guard
+            .authorize_http(&mut req, &constraints, &injector, "op", &[])
+            .unwrap();
+        assert!(!decision.credential_injected);
+    }
+
+    #[test]
+    fn test_authorize_http_credential_injected() {
+        let guard = EgressGuard::new();
+        let constraints = test_constraints();
+        let injector = MockInjector {
+            authorized: true,
+            host_allowed: true,
+        };
+
+        let mut req = EgressHttpRequest {
+            url: "https://api.example.com/".into(),
+            method: "GET".into(),
+            headers: vec![],
+            body: None,
+            credential_id: Some("cred-1".into()),
+        };
+
+        let decision = guard
+            .authorize_http(
+                &mut req,
+                &constraints,
+                &injector,
+                "op",
+                &["cred-1".into()],
+            )
+            .unwrap();
+        assert!(decision.credential_injected);
+        assert!(req.headers.iter().any(|h| h.name == "Authorization"));
+    }
+
+    #[test]
+    fn test_authorize_http_credential_not_authorized() {
+        let guard = EgressGuard::new();
+        let constraints = test_constraints();
+        let injector = MockInjector {
+            authorized: false,
+            host_allowed: true,
+        };
+
+        let mut req = EgressHttpRequest {
+            url: "https://api.example.com/".into(),
+            method: "GET".into(),
+            headers: vec![],
+            body: None,
+            credential_id: Some("cred-1".into()),
+        };
+
+        let result =
+            guard.authorize_http(&mut req, &constraints, &injector, "op", &["cred-1".into()]);
+        assert!(result.is_err());
+        if let Err(EgressError::Denied { code, .. }) = result {
+            assert_eq!(code, DenyReason::CredentialNotAuthorized);
+        }
+    }
+
+    #[test]
+    fn test_authorize_http_credential_host_not_allowed() {
+        let guard = EgressGuard::new();
+        let constraints = test_constraints();
+        let injector = MockInjector {
+            authorized: true,
+            host_allowed: false,
+        };
+
+        let mut req = EgressHttpRequest {
+            url: "https://api.example.com/".into(),
+            method: "GET".into(),
+            headers: vec![],
+            body: None,
+            credential_id: Some("cred-1".into()),
+        };
+
+        let result =
+            guard.authorize_http(&mut req, &constraints, &injector, "op", &["cred-1".into()]);
+        assert!(result.is_err());
+        if let Err(EgressError::Denied { code, .. }) = result {
+            assert_eq!(code, DenyReason::CredentialHostNotAllowed);
+        }
+    }
+
+    // === authorize_tcp ===
+
+    #[test]
+    fn test_authorize_tcp_no_credential() {
+        let guard = EgressGuard::new();
+        let constraints = test_constraints();
+        let injector = MockInjector {
+            authorized: true,
+            host_allowed: true,
+        };
+
+        let req = EgressTcpConnectRequest {
+            host: "api.example.com".into(),
+            port: 443,
+            tls: true,
+            sni_override: None,
+            credential_id: None,
+        };
+
+        let result = guard
+            .authorize_tcp(&req, &constraints, &injector, "op", &[])
+            .unwrap();
+        assert!(result.tcp_auth.is_none());
+        assert!(!result.decision.credential_injected);
+    }
+
+    #[test]
+    fn test_authorize_tcp_with_credential() {
+        let guard = EgressGuard::new();
+        let constraints = test_constraints();
+        let injector = MockInjector {
+            authorized: true,
+            host_allowed: true,
+        };
+
+        let req = EgressTcpConnectRequest {
+            host: "api.example.com".into(),
+            port: 443,
+            tls: true,
+            sni_override: None,
+            credential_id: Some("cred-1".into()),
+        };
+
+        let result = guard
+            .authorize_tcp(&req, &constraints, &injector, "op", &["cred-1".into()])
+            .unwrap();
+        assert!(result.tcp_auth.is_some());
+        assert!(result.decision.credential_injected);
+    }
+
+    #[test]
+    fn test_authorize_tcp_credential_denied() {
+        let guard = EgressGuard::new();
+        let constraints = test_constraints();
+        let injector = MockInjector {
+            authorized: false,
+            host_allowed: true,
+        };
+
+        let req = EgressTcpConnectRequest {
+            host: "api.example.com".into(),
+            port: 443,
+            tls: true,
+            sni_override: None,
+            credential_id: Some("cred-1".into()),
+        };
+
+        let result =
+            guard.authorize_tcp(&req, &constraints, &injector, "op", &["cred-1".into()]);
+        assert!(result.is_err());
+    }
 }

@@ -409,4 +409,195 @@ mod tests {
         handler.wait_for_reconnect().await.unwrap();
         assert_eq!(handler.attempts(), 2);
     }
+
+    // ── Additional ReconnectConfig tests ──
+
+    #[test]
+    fn test_delay_zero_multiplier() {
+        let config = ReconnectConfig::new()
+            .with_initial_delay(Duration::from_secs(1))
+            .with_max_delay(Duration::from_secs(60))
+            .with_backoff_multiplier(0.0)
+            .with_jitter(false);
+
+        // 0^n = 0 for n>0, so delay is 1 * 0 = 0 for attempt > 0
+        // attempt 0: 1 * 0^0 = 1 * 1 = 1s
+        assert_eq!(config.delay_for_attempt(0), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn test_delay_multiplier_one() {
+        let config = ReconnectConfig::new()
+            .with_initial_delay(Duration::from_secs(2))
+            .with_max_delay(Duration::from_secs(60))
+            .with_backoff_multiplier(1.0)
+            .with_jitter(false);
+
+        // With multiplier 1.0, delay is constant
+        assert_eq!(config.delay_for_attempt(0), Duration::from_secs(2));
+        assert_eq!(config.delay_for_attempt(1), Duration::from_secs(2));
+        assert_eq!(config.delay_for_attempt(5), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn test_delay_large_attempt_capped() {
+        let config = ReconnectConfig::new()
+            .with_initial_delay(Duration::from_secs(1))
+            .with_max_delay(Duration::from_secs(30))
+            .with_backoff_multiplier(2.0)
+            .with_jitter(false);
+
+        // Very large attempt: should be capped at max_delay
+        let delay = config.delay_for_attempt(100);
+        assert_eq!(delay, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_delay_i32_max_attempt() {
+        let config = ReconnectConfig::new()
+            .with_initial_delay(Duration::from_secs(1))
+            .with_max_delay(Duration::from_secs(10))
+            .with_backoff_multiplier(2.0)
+            .with_jitter(false);
+
+        // u32::MAX attempt should gracefully handle i32 overflow
+        let delay = config.delay_for_attempt(u32::MAX);
+        assert_eq!(delay, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn test_config_new_equals_default() {
+        let new = ReconnectConfig::new();
+        let default = ReconnectConfig::default();
+
+        assert_eq!(new.max_attempts, default.max_attempts);
+        assert_eq!(new.initial_delay, default.initial_delay);
+        assert_eq!(new.max_delay, default.max_delay);
+        assert!((new.backoff_multiplier - default.backoff_multiplier).abs() < f64::EPSILON);
+        assert_eq!(new.jitter, default.jitter);
+    }
+
+    #[test]
+    fn test_config_clone() {
+        let config = ReconnectConfig::new()
+            .with_max_attempts(7)
+            .with_jitter(false);
+        let cloned = config.clone();
+        assert_eq!(cloned.max_attempts, Some(7));
+        assert!(!cloned.jitter);
+    }
+
+    // ── Additional ReconnectHandler tests ──
+
+    #[test]
+    fn test_handler_record_failure_increments() {
+        let config = ReconnectConfig::new().with_max_attempts(5);
+        let mut handler = ReconnectHandler::new(config);
+
+        assert_eq!(handler.attempts(), 0);
+        handler.record_failure();
+        assert_eq!(handler.attempts(), 1);
+        handler.record_failure();
+        assert_eq!(handler.attempts(), 2);
+    }
+
+    #[test]
+    fn test_handler_record_failure_then_reset() {
+        let config = ReconnectConfig::new().with_max_attempts(5);
+        let mut handler = ReconnectHandler::new(config);
+
+        handler.record_failure();
+        handler.record_failure();
+        handler.record_failure();
+        assert_eq!(handler.attempts(), 3);
+        handler.reset();
+        assert_eq!(handler.attempts(), 0);
+        assert!(handler.can_reconnect());
+    }
+
+    #[test]
+    fn test_handler_can_reconnect_boundary() {
+        let config = ReconnectConfig::new().with_max_attempts(2);
+        let mut handler = ReconnectHandler::new(config);
+
+        assert!(handler.can_reconnect()); // 0 < 2
+        handler.record_failure();
+        assert!(handler.can_reconnect()); // 1 < 2
+        handler.record_failure();
+        assert!(!handler.can_reconnect()); // 2 >= 2
+    }
+
+    #[test]
+    fn test_handler_zero_max_attempts() {
+        let config = ReconnectConfig::new().with_max_attempts(0);
+        let handler = ReconnectHandler::new(config);
+
+        // Zero max attempts means reconnection is never allowed
+        assert!(!handler.can_reconnect());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_reconnect_succeeds_first_try() {
+        let config = ReconnectConfig::new()
+            .with_max_attempts(3)
+            .with_initial_delay(Duration::from_millis(1));
+        let mut handler = ReconnectHandler::new(config);
+
+        let result = handler
+            .reconnect(|| async { Ok::<_, StreamError>(99) })
+            .await;
+
+        assert_eq!(result.unwrap(), 99);
+        assert_eq!(handler.attempts(), 0); // reset on success
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_reconnect_resets_on_success() {
+        let config = ReconnectConfig::new()
+            .with_max_attempts(5)
+            .with_initial_delay(Duration::from_millis(1))
+            .with_jitter(false);
+        let mut handler = ReconnectHandler::new(config);
+
+        let mut call_count = 0;
+        let result = handler
+            .reconnect(|| {
+                call_count += 1;
+                async move {
+                    if call_count < 3 {
+                        Err(StreamError::ConnectionFailed("fail".into()))
+                    } else {
+                        Ok(42)
+                    }
+                }
+            })
+            .await;
+
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(handler.attempts(), 0); // reset after success
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_with_retry_immediate_success() {
+        let config = ReconnectConfig::new().with_max_attempts(3);
+        let result = with_retry(config, || async { Ok::<_, StreamError>("hello") }).await;
+        assert_eq!(result.unwrap(), "hello");
+    }
+
+    // ── ReconnectConfig debug ──
+
+    #[test]
+    fn test_reconnect_config_debug() {
+        let config = ReconnectConfig::new();
+        let debug = format!("{config:?}");
+        assert!(debug.contains("ReconnectConfig"));
+    }
+
+    #[test]
+    fn test_reconnect_handler_debug() {
+        let config = ReconnectConfig::new();
+        let handler = ReconnectHandler::new(config);
+        let debug = format!("{handler:?}");
+        assert!(debug.contains("ReconnectHandler"));
+    }
 }

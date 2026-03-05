@@ -874,4 +874,200 @@ mod tests {
         let events = load_audit_events("z:work", None, 10, &filter).unwrap();
         assert!(events.iter().all(|e| e.event_type == "capability.invoke"));
     }
+
+    // ---- format_timestamp edge cases ----
+
+    #[test]
+    fn format_timestamp_epoch_zero() {
+        let formatted = format_timestamp(0);
+        assert!(formatted.contains("1970"));
+    }
+
+    #[test]
+    fn format_timestamp_iso_format() {
+        let formatted = format_timestamp(1_700_000_000);
+        assert!(formatted.ends_with('Z'));
+        assert!(formatted.contains('T'));
+    }
+
+    // ---- truncate edge cases ----
+
+    #[test]
+    fn truncate_empty() {
+        assert_eq!(truncate("", 10), "");
+    }
+
+    #[test]
+    fn truncate_very_short_max() {
+        // max_len <= 3 means no room for "...", just truncate
+        assert_eq!(truncate("abcdef", 3), "abc");
+    }
+
+    #[test]
+    fn truncate_one_char_over() {
+        assert_eq!(truncate("abcdefg", 6), "abc...");
+    }
+
+    // ---- load_events with since ----
+
+    #[test]
+    fn load_events_with_since_parameter() {
+        let filter = AuditFilter::default();
+        let events = load_audit_events("z:work", Some(50), 10, &filter).unwrap();
+        assert!(!events.is_empty());
+        assert_eq!(events[0].seq, 50);
+    }
+
+    #[test]
+    fn load_events_demo_zone() {
+        let filter = AuditFilter::default();
+        let events = load_audit_events("z:demo", None, 10, &filter).unwrap();
+        assert!(!events.is_empty());
+    }
+
+    // ---- load_events filter by connector ----
+
+    #[test]
+    fn load_events_filter_by_connector() {
+        let filter = AuditFilter {
+            connector_id: Some("fcp.telegram:base:v1".to_string()),
+            ..Default::default()
+        };
+        let events = load_audit_events("z:work", None, 10, &filter).unwrap();
+        assert!(events.iter().all(|e| e.connector_id.as_deref() == Some("fcp.telegram:base:v1")));
+    }
+
+    #[test]
+    fn load_events_filter_by_operation() {
+        let filter = AuditFilter {
+            operation_id: Some("send_message".to_string()),
+            ..Default::default()
+        };
+        let events = load_audit_events("z:work", None, 10, &filter).unwrap();
+        assert!(events.iter().all(|e| e.operation_id.as_deref() == Some("send_message")));
+    }
+
+    #[test]
+    fn load_events_filter_by_correlation() {
+        let filter = AuditFilter {
+            correlation_id: Some("a".repeat(32)),
+            ..Default::default()
+        };
+        let events = load_audit_events("z:work", None, 10, &filter).unwrap();
+        assert_eq!(events.len(), 1);
+    }
+
+    // ---- parse_event_records ----
+
+    #[test]
+    fn parse_event_records_empty() {
+        let records = parse_event_records("").unwrap();
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn parse_event_records_whitespace() {
+        let records = parse_event_records("   \n  \n  ").unwrap();
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn parse_event_records_invalid_json() {
+        let result = parse_event_records("{not json}");
+        assert!(result.is_err());
+    }
+
+    // ---- parse_audit_head ----
+
+    #[test]
+    fn parse_audit_head_rejects_array() {
+        let result = parse_audit_head("[1,2,3]");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("single JSON object"));
+    }
+
+    // ---- verify_chain ----
+
+    #[test]
+    fn verify_chain_empty_records() {
+        let report = verify_chain(&[], None, None);
+        assert!(matches!(report.status, AuditVerifyStatus::Ok));
+        assert_eq!(report.chain_len, 0);
+        assert!(report.issues.is_empty());
+    }
+
+    // ---- AuditVerifyStatus serde ----
+
+    #[test]
+    fn verify_status_serde() {
+        let json = serde_json::to_string(&AuditVerifyStatus::Ok).unwrap();
+        assert_eq!(json, "\"ok\"");
+        let json = serde_json::to_string(&AuditVerifyStatus::Warn).unwrap();
+        assert_eq!(json, "\"warn\"");
+        let json = serde_json::to_string(&AuditVerifyStatus::Fail).unwrap();
+        assert_eq!(json, "\"fail\"");
+    }
+
+    // ---- AuditVerifyReport serde ----
+
+    #[test]
+    fn verify_report_serde_roundtrip() {
+        let report = AuditVerifyReport {
+            status: AuditVerifyStatus::Ok,
+            zone_id: Some("z:work".to_string()),
+            chain_len: 5,
+            head_seq: Some(4),
+            head_event: Some("event-id".to_string()),
+            issues: vec![],
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        let parsed: AuditVerifyReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.chain_len, 5);
+        assert!(parsed.issues.is_empty());
+    }
+
+    // ---- AuditVerifyIssue ----
+
+    #[test]
+    fn verify_issue_skips_none_fields() {
+        let issue = AuditVerifyIssue {
+            code: "test".to_string(),
+            message: "msg".to_string(),
+            seq: None,
+            object_id: None,
+        };
+        let json = serde_json::to_string(&issue).unwrap();
+        assert!(!json.contains("seq"));
+        assert!(!json.contains("object_id"));
+    }
+
+    // ---- load_events all event types present ----
+
+    #[test]
+    fn load_events_has_diverse_event_types() {
+        let filter = AuditFilter::default();
+        let events = load_audit_events("z:work", None, 100, &filter).unwrap();
+        let types: Vec<&str> = events.iter().map(|e| e.event_type.as_str()).collect();
+        assert!(types.contains(&"capability.invoke"));
+        assert!(types.contains(&"secret.access"));
+        assert!(types.contains(&"elevation.granted"));
+        assert!(types.contains(&"revocation.issued"));
+        assert!(types.contains(&"security.violation"));
+    }
+
+    // ---- AuditTailError display ----
+
+    #[test]
+    fn audit_tail_error_display() {
+        let err = AuditTailError::zone_not_found("z:test");
+        let display = format!("{err}");
+        assert!(display.contains("FCP-4001"));
+        assert!(display.contains("z:test"));
+    }
+
+    #[test]
+    fn audit_tail_error_interrupted() {
+        let err = AuditTailError::interrupted();
+        assert_eq!(err.code, "FCP-9001");
+    }
 }

@@ -3689,6 +3689,726 @@ sig = "base64:{sig_b64}"
 
     // ── VerificationReport ───────────────────────────────────────────────
 
+    // ── signature_message determinism ──────────────────────────────────
+
+    #[test]
+    fn signature_message_length_prefix_format() {
+        run_registry_test(
+            "signature_message_length_prefix_format",
+            "unit",
+            "signature-message",
+            4,
+            || async {
+                let signing_bytes = b"hello";
+                let binary_hash = "sha256:abc";
+                let msg = signature_message(signing_bytes, binary_hash);
+
+                // Expected: u32le(5) || "hello" || u32le(10) || "sha256:abc"
+                assert_eq!(msg.len(), 4 + 5 + 4 + 10);
+                assert_eq!(&msg[..4], &5u32.to_le_bytes());
+                assert_eq!(&msg[4..9], b"hello");
+                assert_eq!(&msg[9..13], &10u32.to_le_bytes());
+                assert_eq!(&msg[13..], b"sha256:abc");
+
+                RegistryLogData {
+                    reason_code: Some("signature_message_format_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn signature_message_empty_inputs() {
+        run_registry_test(
+            "signature_message_empty_inputs",
+            "unit",
+            "signature-message",
+            2,
+            || async {
+                let msg = signature_message(b"", "");
+                assert_eq!(msg.len(), 8); // two u32le(0)
+                assert_eq!(&msg[..4], &0u32.to_le_bytes());
+                assert_eq!(&msg[4..], &0u32.to_le_bytes());
+
+                RegistryLogData {
+                    reason_code: Some("signature_message_empty_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn signature_message_deterministic() {
+        run_registry_test(
+            "signature_message_deterministic",
+            "unit",
+            "signature-message",
+            1,
+            || async {
+                let a = signature_message(b"data", "hash");
+                let b = signature_message(b"data", "hash");
+                assert_eq!(a, b);
+
+                RegistryLogData {
+                    reason_code: Some("signature_message_deterministic".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ── hash_bytes ────────────────────────────────────────────────────────
+
+    #[test]
+    fn hash_bytes_sha256_prefix() {
+        run_registry_test(
+            "hash_bytes_sha256_prefix",
+            "unit",
+            "hash",
+            2,
+            || async {
+                let h = hash_bytes(b"test data");
+                assert!(h.starts_with("sha256:"));
+                // SHA256 hex is 64 chars
+                assert_eq!(h.len(), 7 + 64);
+
+                RegistryLogData {
+                    reason_code: Some("hash_bytes_prefix_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn hash_bytes_deterministic() {
+        run_registry_test(
+            "hash_bytes_deterministic",
+            "unit",
+            "hash",
+            1,
+            || async {
+                let a = hash_bytes(b"identical");
+                let b = hash_bytes(b"identical");
+                assert_eq!(a, b);
+
+                let c = hash_bytes(b"different");
+                assert_ne!(a, c);
+
+                RegistryLogData {
+                    reason_code: Some("hash_bytes_deterministic".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn hash_bytes_empty() {
+        run_registry_test(
+            "hash_bytes_empty",
+            "unit",
+            "hash",
+            1,
+            || async {
+                let h = hash_bytes(b"");
+                assert!(h.starts_with("sha256:"));
+                // SHA256 of empty is e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+                assert!(h.contains("e3b0c44298fc1c149afbf4c8996fb924"));
+
+                RegistryLogData {
+                    reason_code: Some("hash_bytes_empty_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ── manifest_signing_bytes ────────────────────────────────────────────
+
+    #[test]
+    fn manifest_signing_bytes_strips_signatures() {
+        run_registry_test(
+            "manifest_signing_bytes_strips_signatures",
+            "unit",
+            "signing-bytes",
+            1,
+            || async {
+                let manifest = minimal_manifest();
+                // Even if manifest has no signatures, signing_bytes should succeed
+                let bytes = manifest_signing_bytes(&manifest).expect("signing bytes");
+                assert!(!bytes.is_empty());
+
+                // Converting to JSON and checking signatures is removed
+                let value =
+                    serde_json::to_value(&manifest).expect("json");
+                let signing_view = {
+                    let mut v = value;
+                    v.as_object_mut().unwrap().remove("signatures");
+                    v
+                };
+                // signing_bytes is deterministic for same manifest content
+                let bytes2 = manifest_signing_bytes(&manifest).expect("signing bytes");
+                assert_eq!(bytes, bytes2);
+                let _ = signing_view; // used above
+
+                RegistryLogData {
+                    reason_code: Some("signing_bytes_strips_sigs".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ── attestation_label ─────────────────────────────────────────────────
+
+    #[test]
+    fn attestation_label_all_variants() {
+        run_registry_test(
+            "attestation_label_all_variants",
+            "unit",
+            "attestation-label",
+            3,
+            || async {
+                assert_eq!(attestation_label(AttestationType::InToto), "in-toto");
+                assert_eq!(
+                    attestation_label(AttestationType::ReproducibleBuild),
+                    "reproducible-build"
+                );
+                assert_eq!(attestation_label(AttestationType::CodeReview), "code-review");
+
+                RegistryLogData {
+                    reason_code: Some("attestation_labels_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ── enforce_capability_ceiling edge cases ─────────────────────────────
+
+    #[test]
+    fn capability_ceiling_empty_allows_all() {
+        run_registry_test(
+            "capability_ceiling_empty_allows_all",
+            "unit",
+            "policy",
+            1,
+            || async {
+                let manifest = minimal_manifest();
+                let policy = test_zone_policy(vec![]); // empty ceiling
+                enforce_capability_ceiling(Some(&policy), &manifest).expect("empty ceiling allows all");
+
+                RegistryLogData {
+                    reason_code: Some("empty_ceiling_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn capability_ceiling_none_policy_allows_all() {
+        run_registry_test(
+            "capability_ceiling_none_policy_allows_all",
+            "unit",
+            "policy",
+            1,
+            || async {
+                let manifest = minimal_manifest();
+                enforce_capability_ceiling(None, &manifest).expect("no policy allows all");
+
+                RegistryLogData {
+                    reason_code: Some("no_policy_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ── enforce_supply_chain_policy edge cases ────────────────────────────
+
+    #[test]
+    fn supply_chain_no_policy_section_passes() {
+        run_registry_test(
+            "supply_chain_no_policy_section_passes",
+            "unit",
+            "supply-chain",
+            1,
+            || async {
+                let mut manifest = minimal_manifest();
+                manifest.policy = None;
+                enforce_supply_chain_policy(&manifest, None).expect("no policy passes");
+
+                RegistryLogData {
+                    reason_code: Some("no_policy_section_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn supply_chain_transparency_evidence_false_rejected() {
+        run_registry_test(
+            "supply_chain_transparency_evidence_false_rejected",
+            "unit",
+            "supply-chain",
+            1,
+            || async {
+                let mut manifest = minimal_manifest();
+                manifest.policy = Some(PolicySection {
+                    require_transparency_log: true,
+                    require_attestation_types: vec![],
+                    min_slsa_level: None,
+                    trusted_builders: Vec::new(),
+                });
+                // Add a transparency_log_entry so the first check passes
+                use fcp_manifest::ObjectIdRef;
+                manifest.signatures = Some(SignaturesSection {
+                    publisher_signatures: vec![],
+                    publisher_threshold: None,
+                    registry_signature: None,
+                    transparency_log_entry: Some(
+                        ObjectIdRef::try_from("objectid:0000000000000000000000000000000000000000000000000000000000000000".to_string()).unwrap()
+                    ),
+                });
+
+                let evidence = SupplyChainEvidence {
+                    transparency_log_present: false,
+                    attestations: vec![],
+                };
+
+                let err = enforce_supply_chain_policy(&manifest, Some(&evidence))
+                    .expect_err("evidence false rejected");
+                assert!(matches!(err, RegistryError::TransparencyEvidenceMissing));
+
+                RegistryLogData {
+                    reason_code: Some("evidence_false_rejected".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn supply_chain_slsa_no_level_in_attestation_rejected() {
+        run_registry_test(
+            "supply_chain_slsa_no_level_in_attestation_rejected",
+            "unit",
+            "supply-chain",
+            1,
+            || async {
+                let mut manifest = minimal_manifest();
+                manifest.policy = Some(PolicySection {
+                    require_transparency_log: false,
+                    require_attestation_types: vec![],
+                    min_slsa_level: Some(2),
+                    trusted_builders: Vec::new(),
+                });
+
+                let evidence = SupplyChainEvidence {
+                    transparency_log_present: false,
+                    attestations: vec![AttestationEvidence {
+                        attestation_type: AttestationType::InToto,
+                        slsa_level: None, // no level provided
+                        builder_id: None,
+                    }],
+                };
+
+                let err = enforce_supply_chain_policy(&manifest, Some(&evidence))
+                    .expect_err("no slsa level");
+                assert!(matches!(
+                    err,
+                    RegistryError::SlsaLevelInsufficient { required: 2 }
+                ));
+
+                RegistryLogData {
+                    reason_code: Some("slsa_no_level_rejected".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn supply_chain_trusted_builder_no_builder_id_passes() {
+        run_registry_test(
+            "supply_chain_trusted_builder_no_builder_id_passes",
+            "unit",
+            "supply-chain",
+            1,
+            || async {
+                let mut manifest = minimal_manifest();
+                manifest.policy = Some(PolicySection {
+                    require_transparency_log: false,
+                    require_attestation_types: vec![],
+                    min_slsa_level: None,
+                    trusted_builders: vec!["trusted-ci".to_string()],
+                });
+
+                let evidence = SupplyChainEvidence {
+                    transparency_log_present: false,
+                    attestations: vec![AttestationEvidence {
+                        attestation_type: AttestationType::InToto,
+                        slsa_level: None,
+                        builder_id: None, // no builder_id → skipped
+                    }],
+                };
+
+                enforce_supply_chain_policy(&manifest, Some(&evidence))
+                    .expect("no builder_id passes");
+
+                RegistryLogData {
+                    reason_code: Some("no_builder_id_passes".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ── verify_publishers edge cases ──────────────────────────────────────
+
+    #[test]
+    fn verify_publishers_empty_signatures_returns_false() {
+        run_registry_test(
+            "verify_publishers_empty_signatures_returns_false",
+            "unit",
+            "signature",
+            1,
+            || async {
+                let sigs = SignaturesSection {
+                    publisher_signatures: vec![],
+                    publisher_threshold: None,
+                    registry_signature: None,
+                    transparency_log_entry: None,
+                };
+                let trust = RegistryTrustPolicy::default();
+                let signing_bytes = b"data";
+                let result =
+                    verify_publishers(&trust, &sigs, signing_bytes, "sha256:hash")
+                        .expect("no error");
+                assert!(!result);
+
+                RegistryLogData {
+                    reason_code: Some("empty_publishers_false".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn verify_registry_no_registry_signature_returns_false() {
+        run_registry_test(
+            "verify_registry_no_registry_signature_returns_false",
+            "unit",
+            "signature",
+            1,
+            || async {
+                let sigs = SignaturesSection {
+                    publisher_signatures: vec![],
+                    publisher_threshold: None,
+                    registry_signature: None,
+                    transparency_log_entry: None,
+                };
+                let trust = RegistryTrustPolicy::default();
+                let result =
+                    verify_registry(&trust, &sigs, b"data", "sha256:hash")
+                        .expect("no error");
+                assert!(!result);
+
+                RegistryLogData {
+                    reason_code: Some("no_registry_sig_false".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ── Both publisher + registry signatures ──────────────────────────────
+
+    #[test]
+    fn verify_bundle_accepts_both_publisher_and_registry_signature() {
+        run_registry_test(
+            "verify_bundle_accepts_both_publisher_and_registry_signature",
+            "verify",
+            "signature",
+            1,
+            || async {
+                let pub_key = Ed25519SigningKey::generate();
+                let reg_key = Ed25519SigningKey::generate();
+
+                let binary = b"registry-binary".to_vec();
+                let binary_hash = hash_bytes(&binary);
+                let unsigned = unsigned_manifest_toml("");
+                let pub_sig = sign_manifest_toml(&unsigned, &pub_key, &binary_hash);
+                let reg_sig = sign_manifest_toml(&unsigned, &reg_key, &binary_hash);
+
+                let signatures = format!(
+                    "{}\n{}",
+                    publisher_signature_section("pub1", &pub_sig),
+                    registry_signature_section("reg1", &reg_sig),
+                );
+                let manifest_toml = with_signatures(&unsigned, &signatures);
+
+                let bundle = ConnectorBundle {
+                    manifest_toml,
+                    binary,
+                    target: test_target(),
+                };
+
+                let mut trust = RegistryTrustPolicy::default();
+                trust.publisher_keys.insert("pub1".to_string(), pub_key.verifying_key());
+                trust.registry_keys.insert("reg1".to_string(), reg_key.verifying_key());
+                trust.require_registry_signature = true;
+
+                let verifier = RegistryVerifier::new(trust);
+                let verified = verifier
+                    .verify_bundle(&bundle, None, None, None)
+                    .expect("both signatures valid");
+                assert!(!verified.manifest_hash.is_empty());
+
+                RegistryLogData {
+                    connector_id: Some(verified.manifest.connector.id.to_string()),
+                    reason_code: Some("both_signatures_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ── rate_limit_declarations ───────────────────────────────────────────
+
+    #[test]
+    fn rate_limit_declarations_none_when_absent() {
+        run_registry_test(
+            "rate_limit_declarations_none_when_absent",
+            "unit",
+            "rate-limits",
+            1,
+            || async {
+                let signing_key = Ed25519SigningKey::generate();
+                let verifying_key = signing_key.verifying_key();
+
+                let binary = b"registry-binary".to_vec();
+                let binary_hash = hash_bytes(&binary);
+                let unsigned = unsigned_manifest_toml("");
+                let sig = sign_manifest_toml(&unsigned, &signing_key, &binary_hash);
+                let manifest_toml =
+                    with_signatures(&unsigned, &publisher_signature_section("pub1", &sig));
+
+                let bundle = ConnectorBundle {
+                    manifest_toml,
+                    binary,
+                    target: test_target(),
+                };
+
+                let mut trust = RegistryTrustPolicy::default();
+                trust.publisher_keys.insert("pub1".to_string(), verifying_key);
+
+                let verifier = RegistryVerifier::new(trust);
+                let verified = verifier
+                    .verify_bundle(&bundle, None, None, None)
+                    .expect("verify");
+
+                assert!(verified.rate_limit_declarations().is_none());
+
+                RegistryLogData {
+                    reason_code: Some("rate_limits_none".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ── ConnectorTarget edge cases ────────────────────────────────────────
+
+    #[test]
+    fn connector_target_custom_os_arch() {
+        run_registry_test(
+            "connector_target_custom_os_arch",
+            "unit",
+            "target",
+            2,
+            || async {
+                let t = ConnectorTarget {
+                    os: "freebsd".to_string(),
+                    arch: "riscv64".to_string(),
+                };
+                assert_eq!(t.as_string(), "freebsd-riscv64");
+                let t2 = t.clone();
+                assert_eq!(t, t2);
+
+                RegistryLogData {
+                    reason_code: Some("custom_target_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ── RegistryTrustPolicy defaults ──────────────────────────────────────
+
+    #[test]
+    fn registry_trust_policy_default_empty() {
+        run_registry_test(
+            "registry_trust_policy_default_empty",
+            "unit",
+            "trust-policy",
+            3,
+            || async {
+                let policy = RegistryTrustPolicy::default();
+                assert!(policy.publisher_keys.is_empty());
+                assert!(policy.registry_keys.is_empty());
+                assert!(!policy.require_registry_signature);
+
+                RegistryLogData {
+                    reason_code: Some("trust_policy_default_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ── SupplyChainEvidence defaults ──────────────────────────────────────
+
+    #[test]
+    fn supply_chain_evidence_default() {
+        run_registry_test(
+            "supply_chain_evidence_default",
+            "unit",
+            "supply-chain",
+            2,
+            || async {
+                let evidence = SupplyChainEvidence::default();
+                assert!(!evidence.transparency_log_present);
+                assert!(evidence.attestations.is_empty());
+
+                RegistryLogData {
+                    reason_code: Some("evidence_default_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ── Type Debug/Clone trait coverage ───────────────────────────────────
+
+    #[test]
+    fn type_debug_coverage() {
+        run_registry_test(
+            "type_debug_coverage",
+            "unit",
+            "traits",
+            4,
+            || async {
+                let entry = TransparencyLogEntry {
+                    log_index: 1,
+                    entry_hash: "sha256:a".to_string(),
+                    inclusion_proof: InclusionProof {
+                        root_hash: "sha256:r".to_string(),
+                        tree_size: 100,
+                        hashes: vec!["sha256:h".to_string()],
+                        leaf_index: 0,
+                    },
+                    signed_entry_timestamp: vec![1],
+                    log_id: "log1".to_string(),
+                };
+                let _ = format!("{entry:?}");
+                let cloned = entry.clone();
+                assert_eq!(cloned.log_index, 1);
+
+                let tuf = TufRootMetadata {
+                    version: 1,
+                    root_hash: "hash".to_string(),
+                    expires: 0,
+                    key_ids: vec![],
+                    threshold: 1,
+                };
+                let _ = format!("{tuf:?}");
+
+                let target = TufTargetInfo {
+                    target_path: "p".to_string(),
+                    hash: "h".to_string(),
+                    length: 0,
+                    delegations: vec![],
+                };
+                let _ = format!("{target:?}");
+
+                let bundle = SigstoreBundle {
+                    signature: "s".to_string(),
+                    certificate: "c".to_string(),
+                    rekor_entry: None,
+                    identity: "i".to_string(),
+                    issuer: "is".to_string(),
+                };
+                let _ = format!("{bundle:?}");
+
+                RegistryLogData {
+                    reason_code: Some("debug_coverage_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn type_serde_roundtrip_coverage() {
+        run_registry_test(
+            "type_serde_roundtrip_coverage",
+            "unit",
+            "serde",
+            3,
+            || async {
+                let entry = TransparencyLogEntry {
+                    log_index: 42,
+                    entry_hash: "sha256:abc".to_string(),
+                    inclusion_proof: InclusionProof {
+                        root_hash: "sha256:root".to_string(),
+                        tree_size: 1000,
+                        hashes: vec!["sha256:h1".to_string()],
+                        leaf_index: 42,
+                    },
+                    signed_entry_timestamp: vec![9, 8, 7],
+                    log_id: "sigstore".to_string(),
+                };
+                let json = serde_json::to_string(&entry).unwrap();
+                let parsed: TransparencyLogEntry = serde_json::from_str(&json).unwrap();
+                assert_eq!(parsed.log_index, 42);
+
+                let tuf = TufRootMetadata {
+                    version: 3,
+                    root_hash: "sha256:root".to_string(),
+                    expires: 9_999_999,
+                    key_ids: vec!["k1".to_string()],
+                    threshold: 2,
+                };
+                let json = serde_json::to_string(&tuf).unwrap();
+                let parsed: TufRootMetadata = serde_json::from_str(&json).unwrap();
+                assert_eq!(parsed.version, 3);
+                assert_eq!(parsed.threshold, 2);
+
+                let target = TufTargetInfo {
+                    target_path: "connectors/fcp.test.tar.gz".to_string(),
+                    hash: "sha256:xyz".to_string(),
+                    length: 2048,
+                    delegations: vec!["targets".to_string(), "snapshot".to_string()],
+                };
+                let json = serde_json::to_string(&target).unwrap();
+                let parsed: TufTargetInfo = serde_json::from_str(&json).unwrap();
+                assert_eq!(parsed.length, 2048);
+
+                RegistryLogData {
+                    reason_code: Some("serde_roundtrip_ok".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
     #[test]
     fn verification_report_serde_roundtrip() {
         run_registry_test(

@@ -807,4 +807,463 @@ mod tests {
         // BTreeMap ensures deterministic order regardless of insertion order
         assert_eq!(claims1.to_cbor().unwrap(), claims2.to_cbor().unwrap());
     }
+
+    // ---- CwtClaims builder coverage ----
+
+    #[test]
+    fn cwt_claims_audience() {
+        let claims = CwtClaims::new().audience("aud:mesh");
+        let cbor = claims.to_cbor().unwrap();
+        let parsed = CwtClaims::from_cbor(&cbor).unwrap();
+        match parsed.get(cwt_claims::AUD).unwrap() {
+            ciborium::Value::Text(s) => assert_eq!(s, "aud:mesh"),
+            other => panic!("expected text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cwt_claims_token_id() {
+        let cti = b"unique-id-123";
+        let claims = CwtClaims::new().token_id(cti);
+        let cbor = claims.to_cbor().unwrap();
+        let parsed = CwtClaims::from_cbor(&cbor).unwrap();
+        assert_eq!(parsed.get_jti(), Some(cti.as_slice()));
+    }
+
+    #[test]
+    fn cwt_claims_issued_at_roundtrip() {
+        let now = Utc::now();
+        let claims = CwtClaims::new().issued_at(now);
+        let cbor = claims.to_cbor().unwrap();
+        let parsed = CwtClaims::from_cbor(&cbor).unwrap();
+        match parsed.get(cwt_claims::IAT).unwrap() {
+            ciborium::Value::Integer(i) => {
+                assert_eq!(i64::try_from(*i).unwrap(), now.timestamp());
+            }
+            other => panic!("expected integer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cwt_claims_expiration_roundtrip() {
+        let exp = Utc::now() + Duration::hours(2);
+        let claims = CwtClaims::new().expiration(exp);
+        assert_eq!(claims.get_expiration(), Some(exp.timestamp()));
+    }
+
+    #[test]
+    fn cwt_claims_not_before_roundtrip() {
+        let nbf = Utc::now() - Duration::minutes(5);
+        let claims = CwtClaims::new().not_before(nbf);
+        assert_eq!(claims.get_not_before(), Some(nbf.timestamp()));
+    }
+
+    #[test]
+    fn cwt_claims_holder_node_roundtrip() {
+        let claims = CwtClaims::new().holder_node("node:holder-1");
+        let cbor = claims.to_cbor().unwrap();
+        let parsed = CwtClaims::from_cbor(&cbor).unwrap();
+        assert_eq!(parsed.get_holder_node(), Some("node:holder-1"));
+    }
+
+    #[test]
+    fn cwt_claims_audience_binary() {
+        let oid = b"\x01\x02\x03\x04";
+        let claims = CwtClaims::new().audience_binary(oid);
+        let cbor = claims.to_cbor().unwrap();
+        let parsed = CwtClaims::from_cbor(&cbor).unwrap();
+        match parsed.get(fcp2_claims::AUD_BINARY).unwrap() {
+            ciborium::Value::Bytes(b) => assert_eq!(b.as_slice(), oid.as_slice()),
+            other => panic!("expected bytes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cwt_claims_grant_objects() {
+        let obj1 = b"\xaa\xbb";
+        let obj2 = b"\xcc\xdd";
+        let claims = CwtClaims::new().grant_objects(&[obj1, obj2]);
+        let cbor = claims.to_cbor().unwrap();
+        let parsed = CwtClaims::from_cbor(&cbor).unwrap();
+        match parsed.get(fcp2_claims::GRANT_OBJECT_IDS).unwrap() {
+            ciborium::Value::Array(arr) => {
+                assert_eq!(arr.len(), 2);
+            }
+            other => panic!("expected array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cwt_claims_checkpoint() {
+        let chk_id = b"\x01\x02\x03";
+        let claims = CwtClaims::new().checkpoint(chk_id, 42);
+        let cbor = claims.to_cbor().unwrap();
+        let parsed = CwtClaims::from_cbor(&cbor).unwrap();
+        match parsed.get(fcp2_claims::CHK_ID).unwrap() {
+            ciborium::Value::Bytes(b) => assert_eq!(b.as_slice(), chk_id.as_slice()),
+            other => panic!("expected bytes, got {other:?}"),
+        }
+        match parsed.get(fcp2_claims::CHK_SEQ).unwrap() {
+            ciborium::Value::Integer(i) => assert_eq!(i64::try_from(*i).unwrap(), 42),
+            other => panic!("expected integer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cwt_claims_operations_roundtrip() {
+        let claims = CwtClaims::new().operations(&["read", "write", "delete"]);
+        let cbor = claims.to_cbor().unwrap();
+        let parsed = CwtClaims::from_cbor(&cbor).unwrap();
+        match parsed.get(fcp2_claims::OPERATIONS).unwrap() {
+            ciborium::Value::Array(arr) => {
+                assert_eq!(arr.len(), 3);
+                match &arr[0] {
+                    ciborium::Value::Text(s) => assert_eq!(s, "read"),
+                    other => panic!("expected text, got {other:?}"),
+                }
+            }
+            other => panic!("expected array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cwt_claims_custom_claim() {
+        let claims = CwtClaims::new().custom(-99999, ciborium::Value::Bool(true));
+        let cbor = claims.to_cbor().unwrap();
+        let parsed = CwtClaims::from_cbor(&cbor).unwrap();
+        match parsed.get(-99999).unwrap() {
+            ciborium::Value::Bool(b) => assert!(b),
+            other => panic!("expected bool, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cwt_claims_get_missing_returns_none() {
+        let claims = CwtClaims::new();
+        assert!(claims.get_issuer().is_none());
+        assert!(claims.get_subject().is_none());
+        assert!(claims.get_expiration().is_none());
+        assert!(claims.get_not_before().is_none());
+        assert!(claims.get_capability_id().is_none());
+        assert!(claims.get_zone_id().is_none());
+        assert!(claims.get_holder_node().is_none());
+        assert!(claims.get_jti().is_none());
+    }
+
+    #[test]
+    fn cwt_claims_get_wrong_type_returns_none() {
+        // Store an integer where a string is expected
+        let claims = CwtClaims::new().custom(cwt_claims::ISS, ciborium::Value::Integer(42.into()));
+        assert!(claims.get_issuer().is_none());
+    }
+
+    // ---- from_cbor error paths ----
+
+    #[test]
+    fn cwt_claims_from_cbor_not_map() {
+        // Encode an array instead of a map
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&ciborium::Value::Array(vec![]), &mut bytes).unwrap();
+        let err = CwtClaims::from_cbor(&bytes).unwrap_err();
+        assert!(err.to_string().contains("expected CBOR map"));
+    }
+
+    #[test]
+    fn cwt_claims_from_cbor_non_integer_key() {
+        let map = vec![(
+            ciborium::Value::Text("bad-key".into()),
+            ciborium::Value::Bool(true),
+        )];
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&ciborium::Value::Map(map), &mut bytes).unwrap();
+        let err = CwtClaims::from_cbor(&bytes).unwrap_err();
+        assert!(err.to_string().contains("claim key must be integer"));
+    }
+
+    #[test]
+    fn cwt_claims_from_cbor_invalid_bytes() {
+        let err = CwtClaims::from_cbor(&[0xff, 0xff]).unwrap_err();
+        assert!(matches!(err, CryptoError::SerializationError(_)));
+    }
+
+    // ---- CoseToken additional coverage ----
+
+    #[test]
+    fn cose_token_claims_unverified() {
+        let sk = Ed25519SigningKey::generate();
+        let claims = CwtClaims::new()
+            .issuer("test-unverified")
+            .capability_id("cap:test");
+        let token = CoseToken::sign(&sk, &claims).unwrap();
+
+        // Should work without needing the public key
+        let unverified = token.claims_unverified().unwrap();
+        assert_eq!(unverified.get_issuer(), Some("test-unverified"));
+        assert_eq!(unverified.get_capability_id(), Some("cap:test"));
+    }
+
+    #[test]
+    fn cose_token_from_cbor_invalid() {
+        let err = CoseToken::from_cbor(&[0x01, 0x02, 0x03]).unwrap_err();
+        assert!(matches!(err, CryptoError::SerializationError(_)));
+    }
+
+    #[test]
+    fn cose_token_verify_with_lookup_wrong_key() {
+        let sk = Ed25519SigningKey::generate();
+        let sk2 = Ed25519SigningKey::generate();
+        let pk2 = sk2.verifying_key();
+        let kid = sk.key_id();
+
+        let claims = CwtClaims::new().issuer("test");
+        let token = CoseToken::sign(&sk, &claims).unwrap();
+
+        // Lookup returns a different key — verification should fail
+        let err = token
+            .verify_with_lookup(|k| if k == &kid { Some(pk2) } else { None })
+            .unwrap_err();
+        assert!(matches!(err, CryptoError::SignatureVerificationFailed));
+    }
+
+    #[test]
+    fn cose_token_verify_with_lookup_key_not_found() {
+        let sk = Ed25519SigningKey::generate();
+        let claims = CwtClaims::new().issuer("test");
+        let token = CoseToken::sign(&sk, &claims).unwrap();
+
+        // Lookup always returns None
+        let err = token.verify_with_lookup(|_| None).unwrap_err();
+        assert!(matches!(err, CryptoError::InvalidKeyId(_)));
+    }
+
+    // ---- validate_timing edge cases ----
+
+    #[test]
+    fn validate_timing_no_claims_passes() {
+        // Token with no exp or nbf should pass timing validation
+        let claims = CwtClaims::new().issuer("test");
+        assert!(CoseToken::validate_timing(&claims, Utc::now()).is_ok());
+    }
+
+    #[test]
+    fn validate_timing_exactly_at_expiration_fails() {
+        // now >= exp should fail (boundary)
+        let now = Utc::now();
+        let claims = CwtClaims::new().expiration(now);
+        assert!(matches!(
+            CoseToken::validate_timing(&claims, now),
+            Err(CryptoError::TokenExpired)
+        ));
+    }
+
+    #[test]
+    fn validate_timing_just_before_expiration_passes() {
+        let now = Utc::now();
+        let exp = now + Duration::seconds(1);
+        let claims = CwtClaims::new().expiration(exp);
+        assert!(CoseToken::validate_timing(&claims, now).is_ok());
+    }
+
+    #[test]
+    fn validate_timing_exactly_at_nbf_passes() {
+        // now >= nbf should pass (boundary)
+        let now = Utc::now();
+        let claims = CwtClaims::new().not_before(now);
+        assert!(CoseToken::validate_timing(&claims, now).is_ok());
+    }
+
+    // ---- CapabilityTokenBuilder coverage ----
+
+    #[test]
+    fn capability_token_builder_default() {
+        let b1 = CapabilityTokenBuilder::new();
+        let b2 = CapabilityTokenBuilder::default();
+        // Both produce empty claims
+        assert!(b1.claims.get_issuer().is_none());
+        assert!(b2.claims.get_issuer().is_none());
+    }
+
+    #[test]
+    fn capability_token_builder_with_checkpoint() {
+        let sk = Ed25519SigningKey::generate();
+        let pk = sk.verifying_key();
+
+        let token = CapabilityTokenBuilder::new()
+            .capability_id("cap:test")
+            .zone_id("z:work")
+            .principal("user:test")
+            .issuing_node("node:primary")
+            .checkpoint(b"\x01\x02", 7)
+            .issuer("node:primary")
+            .validity(Utc::now(), Utc::now() + Duration::hours(1))
+            .sign(&sk)
+            .unwrap();
+
+        let claims = token.verify(&pk).unwrap();
+        assert_eq!(claims.get_capability_id(), Some("cap:test"));
+        match claims.get(fcp2_claims::CHK_SEQ).unwrap() {
+            ciborium::Value::Integer(i) => assert_eq!(i64::try_from(*i).unwrap(), 7),
+            other => panic!("expected integer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn capability_token_builder_issued_now_sets_iat() {
+        let sk = Ed25519SigningKey::generate();
+        let pk = sk.verifying_key();
+        let before = Utc::now().timestamp();
+
+        let token = CapabilityTokenBuilder::new()
+            .capability_id("cap:test")
+            .issued_now()
+            .sign(&sk)
+            .unwrap();
+
+        let claims = token.verify(&pk).unwrap();
+        match claims.get(cwt_claims::IAT).unwrap() {
+            ciborium::Value::Integer(i) => {
+                let iat = i64::try_from(*i).unwrap();
+                assert!(iat >= before);
+            }
+            other => panic!("expected integer, got {other:?}"),
+        }
+    }
+
+    // ---- Claim key constants ----
+
+    #[test]
+    fn cwt_claim_keys_are_positive() {
+        assert!(cwt_claims::ISS > 0);
+        assert!(cwt_claims::SUB > 0);
+        assert!(cwt_claims::AUD > 0);
+        assert!(cwt_claims::EXP > 0);
+        assert!(cwt_claims::NBF > 0);
+        assert!(cwt_claims::IAT > 0);
+        assert!(cwt_claims::CTI > 0);
+    }
+
+    #[test]
+    fn fcp2_claim_keys_are_negative() {
+        assert!(fcp2_claims::CAPABILITY_ID < 0);
+        assert!(fcp2_claims::ZONE_ID < 0);
+        assert!(fcp2_claims::OPERATIONS < 0);
+        assert!(fcp2_claims::PRINCIPAL_ID < 0);
+        assert!(fcp2_claims::DELEGATION_DEPTH < 0);
+        assert!(fcp2_claims::PARENT_TOKEN < 0);
+        assert!(fcp2_claims::ISS_NODE < 0);
+        assert!(fcp2_claims::AUD_BINARY < 0);
+        assert!(fcp2_claims::GRANT_OBJECT_IDS < 0);
+        assert!(fcp2_claims::HOLDER_NODE < 0);
+        assert!(fcp2_claims::CHK_ID < 0);
+        assert!(fcp2_claims::CHK_SEQ < 0);
+        assert!(fcp2_claims::CONSTRAINTS < 0);
+        assert!(fcp2_claims::GRANTS < 0);
+        assert!(fcp2_claims::INSTANCE_ID < 0);
+    }
+
+    #[test]
+    fn fcp2_claim_keys_are_unique() {
+        let keys = [
+            fcp2_claims::CAPABILITY_ID,
+            fcp2_claims::ZONE_ID,
+            fcp2_claims::OPERATIONS,
+            fcp2_claims::PRINCIPAL_ID,
+            fcp2_claims::DELEGATION_DEPTH,
+            fcp2_claims::PARENT_TOKEN,
+            fcp2_claims::ISS_NODE,
+            fcp2_claims::AUD_BINARY,
+            fcp2_claims::GRANT_OBJECT_IDS,
+            fcp2_claims::HOLDER_NODE,
+            fcp2_claims::CHK_ID,
+            fcp2_claims::CHK_SEQ,
+            fcp2_claims::CONSTRAINTS,
+            fcp2_claims::GRANTS,
+            fcp2_claims::INSTANCE_ID,
+        ];
+        let mut sorted = keys.to_vec();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), keys.len(), "duplicate claim keys detected");
+    }
+
+    // ---- COSE_ALG_EDDSA constant ----
+
+    #[test]
+    fn cose_alg_eddsa_value() {
+        // EdDSA is IANA algorithm -8
+        assert_eq!(COSE_ALG_EDDSA, -8);
+    }
+
+    // ---- CwtClaims overwrite ----
+
+    #[test]
+    fn cwt_claims_overwrite_replaces_value() {
+        let claims = CwtClaims::new().issuer("first").issuer("second");
+        assert_eq!(claims.get_issuer(), Some("second"));
+    }
+
+    // ---- Multiple claims combined ----
+
+    #[test]
+    fn cwt_claims_all_standard_claims() {
+        let now = Utc::now();
+        let exp = now + Duration::hours(1);
+        let claims = CwtClaims::new()
+            .issuer("iss")
+            .subject("sub")
+            .audience("aud")
+            .expiration(exp)
+            .not_before(now)
+            .issued_at(now)
+            .token_id(b"tid")
+            .capability_id("cap:all")
+            .zone_id("z:all")
+            .operations(&["op1"])
+            .principal_id("p:test")
+            .issuing_node("node:1")
+            .holder_node("node:2");
+
+        let cbor = claims.to_cbor().unwrap();
+        let parsed = CwtClaims::from_cbor(&cbor).unwrap();
+
+        assert_eq!(parsed.get_issuer(), Some("iss"));
+        assert_eq!(parsed.get_subject(), Some("sub"));
+        assert_eq!(parsed.get_expiration(), Some(exp.timestamp()));
+        assert_eq!(parsed.get_not_before(), Some(now.timestamp()));
+        assert_eq!(parsed.get_capability_id(), Some("cap:all"));
+        assert_eq!(parsed.get_zone_id(), Some("z:all"));
+        assert_eq!(parsed.get_holder_node(), Some("node:2"));
+        assert_eq!(parsed.get_jti(), Some(b"tid".as_slice()));
+    }
+
+    // ---- CoseToken sign→cbor→parse→verify full chain ----
+
+    #[test]
+    fn cose_token_full_chain_with_all_fcp2_claims() {
+        let sk = Ed25519SigningKey::generate();
+        let pk = sk.verifying_key();
+
+        let now = Utc::now();
+        let claims = CwtClaims::new()
+            .issuer("node:origin")
+            .capability_id("cap:mesh.replicate")
+            .zone_id("z:prod")
+            .principal_id("agent:worker")
+            .operations(&["replicate", "checkpoint"])
+            .holder_node("node:holder-x")
+            .checkpoint(b"\xde\xad", 99)
+            .not_before(now - Duration::seconds(10))
+            .expiration(now + Duration::hours(1))
+            .token_id(b"tok-001");
+
+        let token = CoseToken::sign(&sk, &claims).unwrap();
+        let cbor = token.to_cbor().unwrap();
+        let restored = CoseToken::from_cbor(&cbor).unwrap();
+        let verified = restored.verify(&pk).unwrap();
+
+        assert_eq!(verified.get_issuer(), Some("node:origin"));
+        assert_eq!(verified.get_capability_id(), Some("cap:mesh.replicate"));
+        assert_eq!(verified.get_holder_node(), Some("node:holder-x"));
+        CoseToken::validate_timing(&verified, now).unwrap();
+    }
 }

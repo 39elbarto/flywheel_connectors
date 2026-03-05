@@ -754,4 +754,337 @@ mod tests {
         assert_eq!(OverallStatus::Warn.symbol(), "⚠");
         assert_eq!(OverallStatus::Fail.symbol(), "✗");
     }
+
+    // ---- OverallStatus ansi_color ----
+
+    #[test]
+    fn overall_status_ansi_colors() {
+        assert_eq!(OverallStatus::Ok.ansi_color(), "\x1b[32m");
+        assert_eq!(OverallStatus::Warn.ansi_color(), "\x1b[33m");
+        assert_eq!(OverallStatus::Fail.ansi_color(), "\x1b[31m");
+    }
+
+    // ---- OverallStatus serde ----
+
+    #[test]
+    fn overall_status_serialization() {
+        assert_eq!(serde_json::to_string(&OverallStatus::Ok).unwrap(), "\"OK\"");
+        assert_eq!(
+            serde_json::to_string(&OverallStatus::Warn).unwrap(),
+            "\"WARN\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OverallStatus::Fail).unwrap(),
+            "\"FAIL\""
+        );
+    }
+
+    #[test]
+    fn overall_status_deserialization() {
+        let ok: OverallStatus = serde_json::from_str("\"OK\"").unwrap();
+        assert_eq!(ok, OverallStatus::Ok);
+        let fail: OverallStatus = serde_json::from_str("\"FAIL\"").unwrap();
+        assert_eq!(fail, OverallStatus::Fail);
+    }
+
+    // ---- FreshnessLevel ----
+
+    #[test]
+    fn freshness_level_default_is_fresh() {
+        assert_eq!(FreshnessLevel::default(), FreshnessLevel::Fresh);
+    }
+
+    #[test]
+    fn freshness_level_serde_roundtrip() {
+        for level in [
+            FreshnessLevel::Fresh,
+            FreshnessLevel::Stale,
+            FreshnessLevel::TooStale,
+            FreshnessLevel::Missing,
+        ] {
+            let json = serde_json::to_string(&level).unwrap();
+            let back: FreshnessLevel = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, level);
+        }
+    }
+
+    #[test]
+    fn freshness_level_snake_case_serde() {
+        assert_eq!(
+            serde_json::to_string(&FreshnessLevel::TooStale).unwrap(),
+            "\"too_stale\""
+        );
+        assert_eq!(
+            serde_json::to_string(&FreshnessLevel::Fresh).unwrap(),
+            "\"fresh\""
+        );
+    }
+
+    // ---- CheckStatus / CheckSeverity serde ----
+
+    #[test]
+    fn check_status_serde() {
+        assert_eq!(serde_json::to_string(&CheckStatus::Ok).unwrap(), "\"OK\"");
+        assert_eq!(
+            serde_json::to_string(&CheckStatus::Warn).unwrap(),
+            "\"WARN\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CheckStatus::Fail).unwrap(),
+            "\"FAIL\""
+        );
+    }
+
+    #[test]
+    fn check_severity_serde() {
+        assert_eq!(
+            serde_json::to_string(&CheckSeverity::Info).unwrap(),
+            "\"info\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CheckSeverity::Warning).unwrap(),
+            "\"warning\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CheckSeverity::Critical).unwrap(),
+            "\"critical\""
+        );
+    }
+
+    // ---- CheckResult defaults ----
+
+    #[test]
+    fn check_result_ok_defaults_to_info_severity() {
+        let c = CheckResult::ok("test", "msg");
+        assert_eq!(c.severity, CheckSeverity::Info);
+        assert!(c.reason_code.is_none());
+    }
+
+    #[test]
+    fn check_result_warn_defaults_to_warning_severity() {
+        let c = CheckResult::warn("test", "msg");
+        assert_eq!(c.severity, CheckSeverity::Warning);
+    }
+
+    #[test]
+    fn check_result_fail_defaults_to_critical_severity() {
+        let c = CheckResult::fail("test", "msg");
+        assert_eq!(c.severity, CheckSeverity::Critical);
+    }
+
+    #[test]
+    fn check_result_with_severity_override() {
+        let c = CheckResult::ok("test", "msg").with_severity(CheckSeverity::Critical);
+        assert_eq!(c.status, CheckStatus::Ok);
+        assert_eq!(c.severity, CheckSeverity::Critical);
+    }
+
+    // ---- Default impls ----
+
+    #[test]
+    fn checkpoint_status_default() {
+        let d = CheckpointStatus::default();
+        assert!(d.checkpoint_id.is_none());
+        assert!(d.checkpoint_seq.is_none());
+        assert!(d.age_secs.is_none());
+        assert_eq!(d.freshness, FreshnessLevel::Fresh);
+        assert!(d.reason.is_none());
+    }
+
+    #[test]
+    fn revocation_status_default() {
+        let d = RevocationStatus::default();
+        assert!(d.head_id.is_none());
+        assert!(d.head_seq.is_none());
+        assert_eq!(d.freshness, FreshnessLevel::Fresh);
+    }
+
+    #[test]
+    fn audit_status_default() {
+        let d = AuditStatus::default();
+        assert!(d.head_id.is_none());
+        assert!(d.coverage.is_none());
+        assert_eq!(d.freshness, FreshnessLevel::Fresh);
+    }
+
+    #[test]
+    fn transport_policy_default_all_false() {
+        let d = TransportPolicyStatus::default();
+        assert!(!d.allow_lan);
+        assert!(!d.allow_derp);
+        assert!(!d.allow_funnel);
+    }
+
+    #[test]
+    fn store_coverage_default() {
+        let d = StoreCoverageStatus::default();
+        assert!(!d.store_healthy);
+        assert!(d.checkpoint_coverage_bps.is_none());
+        assert!(d.reason.is_none());
+    }
+
+    #[test]
+    fn degraded_mode_default_not_degraded() {
+        let d = DegradedModeStatus::default();
+        assert!(!d.is_degraded);
+        assert!(d.reasons.is_empty());
+        assert!(d.since.is_none());
+    }
+
+    // ---- compute_overall_status priority ----
+
+    #[test]
+    fn overall_status_ok_on_missing_checkpoint_alone() {
+        // Missing freshness alone doesn't trigger Fail (only TooStale does);
+        // the Critical scenario uses Missing + fail checks to reach Fail.
+        let report = DoctorReport::builder("z:test")
+            .checkpoint(CheckpointStatus {
+                freshness: FreshnessLevel::Missing,
+                ..Default::default()
+            })
+            .build();
+        assert_eq!(report.overall_status, OverallStatus::Ok);
+    }
+
+    #[test]
+    fn overall_status_fail_on_too_stale_audit() {
+        let report = DoctorReport::builder("z:test")
+            .audit(AuditStatus {
+                freshness: FreshnessLevel::TooStale,
+                ..Default::default()
+            })
+            .build();
+        assert_eq!(report.overall_status, OverallStatus::Fail);
+    }
+
+    #[test]
+    fn overall_status_warn_on_stale_audit() {
+        let report = DoctorReport::builder("z:test")
+            .audit(AuditStatus {
+                freshness: FreshnessLevel::Stale,
+                ..Default::default()
+            })
+            .build();
+        assert_eq!(report.overall_status, OverallStatus::Warn);
+    }
+
+    #[test]
+    fn overall_status_warn_on_warn_check() {
+        let report = DoctorReport::builder("z:test")
+            .add_check(CheckResult::warn("slow_net", "network slow"))
+            .build();
+        assert_eq!(report.overall_status, OverallStatus::Warn);
+    }
+
+    #[test]
+    fn overall_status_critical_fail_beats_degraded() {
+        // Even if degraded=true, a critical fail check still yields Fail
+        let report = DoctorReport::builder("z:test")
+            .degraded_mode(DegradedModeStatus {
+                is_degraded: true,
+                reasons: vec![],
+                since: None,
+            })
+            .add_check(CheckResult::fail("fatal", "fatal error"))
+            .build();
+        assert_eq!(report.overall_status, OverallStatus::Fail);
+    }
+
+    // ---- skip_serializing_if ----
+
+    #[test]
+    fn connector_self_checks_skipped_when_empty() {
+        let report = DoctorReport::builder("z:test").build();
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(!json.contains("connector_self_checks"));
+    }
+
+    #[test]
+    fn connector_self_checks_present_when_nonempty() {
+        let report = DoctorReport::builder("z:test")
+            .add_self_check(ConnectorSelfCheck {
+                connector_id: "fcp.test:a:v1".to_string(),
+                report: SelfCheckReport::ok(),
+            })
+            .build();
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(json.contains("connector_self_checks"));
+        assert!(json.contains("fcp.test:a:v1"));
+    }
+
+    // ---- DegradedReason serde ----
+
+    #[test]
+    fn degraded_reason_serde_roundtrip() {
+        let reason = DegradedReason {
+            code: "FCP-9999".to_string(),
+            description: "test failure".to_string(),
+        };
+        let json = serde_json::to_string(&reason).unwrap();
+        let back: DegradedReason = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.code, "FCP-9999");
+        assert_eq!(back.description, "test failure");
+    }
+
+    // ---- CheckResult serde ----
+
+    #[test]
+    fn check_result_serde_roundtrip() {
+        let check = CheckResult::warn("net_slow", "slow")
+            .with_reason_code("FCP-1234")
+            .with_severity(CheckSeverity::Warning);
+        let json = serde_json::to_string(&check).unwrap();
+        let back: CheckResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name, "net_slow");
+        assert_eq!(back.status, CheckStatus::Warn);
+        assert_eq!(back.reason_code.as_deref(), Some("FCP-1234"));
+    }
+
+    // ---- Builder chaining ----
+
+    #[test]
+    fn builder_all_sections_set() {
+        let report = DoctorReport::builder("z:full")
+            .checkpoint(CheckpointStatus {
+                freshness: FreshnessLevel::Fresh,
+                ..Default::default()
+            })
+            .revocation(RevocationStatus {
+                freshness: FreshnessLevel::Fresh,
+                ..Default::default()
+            })
+            .audit(AuditStatus {
+                freshness: FreshnessLevel::Fresh,
+                ..Default::default()
+            })
+            .transport_policy(TransportPolicyStatus {
+                allow_lan: true,
+                allow_derp: true,
+                allow_funnel: true,
+            })
+            .store_coverage(StoreCoverageStatus {
+                store_healthy: true,
+                ..Default::default()
+            })
+            .degraded_mode(DegradedModeStatus::default())
+            .add_check(CheckResult::ok("a", "a"))
+            .add_check(CheckResult::ok("b", "b"))
+            .add_self_check(ConnectorSelfCheck {
+                connector_id: "fcp.x:y:v1".to_string(),
+                report: SelfCheckReport::ok(),
+            })
+            .build();
+        assert_eq!(report.zone_id, "z:full");
+        assert_eq!(report.checks.len(), 2);
+        assert_eq!(report.connector_self_checks.len(), 1);
+        assert!(report.transport_policy.allow_funnel);
+    }
+
+    // ---- Schema version ----
+
+    #[test]
+    fn schema_version_constant_matches_builder() {
+        let report = DoctorReport::builder("z:test").build();
+        assert_eq!(report.schema_version, DoctorReport::SCHEMA_VERSION);
+    }
 }

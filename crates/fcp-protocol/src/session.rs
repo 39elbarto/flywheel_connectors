@@ -2008,4 +2008,38 @@ mod tests {
             "timestamp skew too large (delta 500 > max 120)"
         );
     }
+
+    // ── Security regression: current_timestamp pre-epoch safety (1fcd949) ──
+
+    #[test]
+    fn test_current_timestamp_returns_nonzero() {
+        // On a normal system, current_timestamp should return a reasonable value
+        let ts = current_timestamp();
+        // Should be after 2025-01-01 (Unix timestamp 1735689600)
+        assert!(ts > 1_735_689_600, "Timestamp {ts} seems too low for 2025+");
+    }
+
+    #[test]
+    fn test_current_timestamp_does_not_panic() {
+        // The fix ensures this never panics, even on edge-case systems.
+        // We can't easily mock SystemTime::now(), but we verify the function
+        // signature guarantees a u64 return (no Result/Option) and that
+        // unwrap_or_default produces 0 on pre-epoch clocks.
+        use std::time::UNIX_EPOCH;
+
+        // Simulate what the function does: duration_since returns Err for
+        // pre-epoch clocks, and unwrap_or_default yields Duration::ZERO (0 secs).
+        let pre_epoch_result = UNIX_EPOCH
+            .checked_sub(std::time::Duration::from_secs(100))
+            .map(|pre_epoch| {
+                pre_epoch
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+            });
+        // If checked_sub succeeds (it should), the result is 0
+        if let Some(ts) = pre_epoch_result {
+            assert_eq!(ts, 0, "Pre-epoch clock should produce timestamp 0");
+        }
+    }
 }

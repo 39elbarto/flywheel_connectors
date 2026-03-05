@@ -102,6 +102,14 @@ impl RaptorQDecoder {
     fn try_reconstruct(&self) -> Result<Vec<u8>, DecodeError> {
         let k = self.k as usize;
         let symbol_size = usize::from(self.symbol_size);
+        let transfer_len = self.transfer_length as usize;
+
+        if transfer_len > self.config.max_object_size as usize {
+            return Err(DecodeError::MemoryLimitExceeded {
+                used: transfer_len,
+                limit: self.config.max_object_size as usize,
+            });
+        }
 
         if k == 0 || symbol_size == 0 {
             return Err(DecodeError::InsufficientSymbols {
@@ -158,7 +166,6 @@ impl RaptorQDecoder {
         match decoder.decode(&symbols) {
             Ok(result) => {
                 // Reconstruct payload from first K source symbols
-                let transfer_len = self.transfer_length as usize;
                 let mut payload = Vec::with_capacity(transfer_len);
 
                 for source_sym in &result.source[..k] {
@@ -1108,5 +1115,43 @@ mod tests {
 
         assert!(controller.has_capacity());
         assert_eq!(controller.active_count(), 0);
+    }
+
+    // ── Security regression: overflow/truncation safety (1fcd949) ──
+
+    #[test]
+    fn decoder_new_saturates_k_for_huge_transfer() {
+        let config = test_config();
+        // Create OTI with a massive transfer_length and symbol_size=1
+        // so k_usize = transfer_length / symbol_size could exceed u32::MAX
+        // on 64-bit systems where usize > u32.
+        let oti = ObjectTransmissionInformation::new(
+            u64::from(u32::MAX) + 1000, // transfer_length > u32::MAX bytes
+            1,                           // symbol_size = 1 byte
+            1,
+            1,
+            1,
+        );
+        let decoder = RaptorQDecoder::new(oti, &config);
+        // k should be saturated to u32::MAX, not truncated/wrapped
+        assert_eq!(decoder.expected_k(), u32::MAX);
+    }
+
+    #[test]
+    fn decoder_received_count_starts_at_zero() {
+        let config = test_config();
+        let decoder = RaptorQDecoder::with_expected_symbols(10, 640, 64, &config);
+        assert_eq!(decoder.received_count(), 0);
+    }
+
+    #[test]
+    fn decoder_new_with_zero_symbol_size_uses_max_of_one() {
+        let config = test_config();
+        // symbol_size = 0 should not cause division by zero
+        // The code uses `usize::from(oti.symbol_size()).max(1)`
+        let oti = ObjectTransmissionInformation::new(1024, 0, 1, 1, 1);
+        let decoder = RaptorQDecoder::new(oti, &config);
+        // Should create decoder with k = 1024 / max(0,1) = 1024
+        assert_eq!(decoder.expected_k(), 1024);
     }
 }

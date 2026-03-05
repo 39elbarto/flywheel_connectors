@@ -719,4 +719,88 @@ mod tests {
         let debug = format!("{sandbox:?}");
         assert!(debug.contains("MacOsSandbox"));
     }
+
+    // ── Batch: SBPL path sanitization (security regression for 1fcd949) ──
+
+    #[test]
+    fn test_sanitize_sbpl_path_clean_path_passes_through() {
+        assert_eq!(sanitize_sbpl_path("/usr/local/bin"), "/usr/local/bin");
+        assert_eq!(sanitize_sbpl_path("/tmp/test"), "/tmp/test");
+        assert_eq!(sanitize_sbpl_path("/home/user/data.db"), "/home/user/data.db");
+    }
+
+    #[test]
+    fn test_sanitize_sbpl_path_rejects_double_quotes() {
+        // Double quotes could close the SBPL string and inject directives
+        let result = sanitize_sbpl_path("/tmp/evil\")(allow default)(\"");
+        assert_eq!(result, "/dev/null/REJECTED_UNSAFE_PATH");
+    }
+
+    #[test]
+    fn test_sanitize_sbpl_path_rejects_backslash() {
+        let result = sanitize_sbpl_path("/tmp/evil\\path");
+        assert_eq!(result, "/dev/null/REJECTED_UNSAFE_PATH");
+    }
+
+    #[test]
+    fn test_sanitize_sbpl_path_rejects_parentheses() {
+        // Parentheses are SBPL syntax delimiters
+        let result = sanitize_sbpl_path("/tmp/evil(allow default)");
+        assert_eq!(result, "/dev/null/REJECTED_UNSAFE_PATH");
+
+        let result = sanitize_sbpl_path("/tmp/evil)inject");
+        assert_eq!(result, "/dev/null/REJECTED_UNSAFE_PATH");
+    }
+
+    #[test]
+    fn test_sanitize_sbpl_path_rejects_newlines() {
+        let result = sanitize_sbpl_path("/tmp/evil\npath");
+        assert_eq!(result, "/dev/null/REJECTED_UNSAFE_PATH");
+
+        let result = sanitize_sbpl_path("/tmp/evil\rpath");
+        assert_eq!(result, "/dev/null/REJECTED_UNSAFE_PATH");
+    }
+
+    #[test]
+    fn test_sanitize_sbpl_path_empty_string() {
+        // Empty string has no dangerous chars, passes through
+        assert_eq!(sanitize_sbpl_path(""), "");
+    }
+
+    #[test]
+    fn test_sanitize_sbpl_path_allows_special_but_safe_chars() {
+        // These are unusual but not SBPL-injectable
+        assert_eq!(sanitize_sbpl_path("/tmp/path with spaces"), "/tmp/path with spaces");
+        assert_eq!(sanitize_sbpl_path("/tmp/path-with-dashes"), "/tmp/path-with-dashes");
+        assert_eq!(sanitize_sbpl_path("/tmp/path_under_score"), "/tmp/path_under_score");
+        assert_eq!(sanitize_sbpl_path("/tmp/path.with.dots"), "/tmp/path.with.dots");
+    }
+
+    #[test]
+    fn test_generate_profile_with_malicious_readonly_path() {
+        let mut policy = test_policy();
+        policy.readonly_paths = vec![PathBuf::from("/tmp/safe"), PathBuf::from("/tmp/evil\")(allow default)(\"")];
+        let profile = MacOsSandbox::generate_profile(&policy);
+
+        // Safe path should be present
+        assert!(profile.contains("/tmp/safe"));
+        // Malicious path should be replaced with the rejection placeholder
+        assert!(profile.contains("/dev/null/REJECTED_UNSAFE_PATH"));
+        // The injected SBPL directive must NOT appear
+        assert!(!profile.contains("(allow default)"));
+    }
+
+    #[test]
+    fn test_generate_profile_with_malicious_writable_path() {
+        let mut policy = test_policy();
+        policy.writable_paths = vec![PathBuf::from("/tmp/evil\n(allow default)")];
+        let profile = MacOsSandbox::generate_profile(&policy);
+
+        // Injection attempt must be sanitized
+        assert!(profile.contains("/dev/null/REJECTED_UNSAFE_PATH"));
+        // Count occurrences of "(allow default)" - should be zero outside system boilerplate
+        // The profile should NOT have an extra "(allow default)" from injection
+        let default_deny_count = profile.matches("(deny default)").count();
+        assert_eq!(default_deny_count, 1, "Only the legitimate deny-default should be present");
+    }
 }

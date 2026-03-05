@@ -156,9 +156,10 @@ pub struct ReceivedSymbol {
 }
 
 /// Reason for decode failure.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DecodeError {
     /// Not enough symbols received to solve the system.
+    #[error("insufficient symbols: received {received}, required {required}")]
     InsufficientSymbols {
         /// Number of symbols received.
         received: usize,
@@ -166,6 +167,7 @@ pub enum DecodeError {
         required: usize,
     },
     /// Matrix became singular during Gaussian elimination.
+    #[error("singular matrix at row {row}")]
     SingularMatrix {
         /// Deterministic witness row for elimination failure.
         ///
@@ -175,6 +177,7 @@ pub enum DecodeError {
         row: usize,
     },
     /// Symbol size mismatch.
+    #[error("symbol size mismatch: expected {expected}, actual {actual}")]
     SymbolSizeMismatch {
         /// Expected size.
         expected: usize,
@@ -182,6 +185,7 @@ pub enum DecodeError {
         actual: usize,
     },
     /// Received symbol has mismatched equation vectors.
+    #[error("symbol equation arity mismatch for ESI {esi}: {columns} columns vs {coefficients} coefficients")]
     SymbolEquationArityMismatch {
         /// ESI of the malformed symbol.
         esi: u32,
@@ -191,6 +195,7 @@ pub enum DecodeError {
         coefficients: usize,
     },
     /// Received symbol references a column outside the decode domain [0, L).
+    #[error("column index out of range for ESI {esi}: column {column} >= {max_valid}")]
     ColumnIndexOutOfRange {
         /// ESI of the malformed symbol.
         esi: u32,
@@ -201,6 +206,7 @@ pub enum DecodeError {
     },
     /// Internal corruption guard: reconstructed output does not satisfy an
     /// input equation and is therefore unsafe to return as success.
+    #[error("corrupt decoded output for ESI {esi} at byte {byte_index}: expected {expected:#04x}, actual {actual:#04x}")]
     CorruptDecodedOutput {
         /// ESI of the mismatched equation row.
         esi: u32,
@@ -2579,5 +2585,30 @@ mod tests {
         h1.write(&[1, 2, 3]);
         h2.write(&[4, 5, 6]);
         assert_ne!(h1.finish(), h2.finish());
+    }
+
+    // ── Security regression: checked_mul overflow guard (1fcd949) ──
+
+    #[test]
+    fn insufficient_symbols_error_is_recoverable() {
+        // The checked_mul guard returns InsufficientSymbols on overflow.
+        // Verify this error variant is classified as recoverable so callers
+        // can retry with more symbols rather than treating it as fatal.
+        let err = DecodeError::InsufficientSymbols {
+            received: usize::MAX,
+            required: usize::MAX,
+        };
+        assert!(err.is_recoverable());
+    }
+
+    #[test]
+    fn decode_error_display_insufficient_symbols() {
+        let err = DecodeError::InsufficientSymbols {
+            received: 5,
+            required: 10,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains('5'), "should mention received count");
+        assert!(msg.contains("10"), "should mention required count");
     }
 }

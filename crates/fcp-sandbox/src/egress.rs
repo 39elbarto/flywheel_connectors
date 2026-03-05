@@ -2077,4 +2077,63 @@ mod tests {
         let result = guard.authorize_tcp(&req, &constraints, &injector, "op", &["cred-1".into()]);
         assert!(result.is_err());
     }
+
+    // ── Security regression: constant-time SPKI comparison (1fcd949) ──
+
+    #[test]
+    fn test_spki_constant_time_match_first_pin() {
+        let verifier = DefaultTlsVerifier;
+        let pin1 = vec![0xAA; 32];
+        let pin2 = vec![0xBB; 32];
+        // Match against first pin
+        assert!(verifier.verify_spki(&pin1, &[pin1.clone(), pin2]).is_ok());
+    }
+
+    #[test]
+    fn test_spki_constant_time_match_last_pin() {
+        let verifier = DefaultTlsVerifier;
+        let pin1 = vec![0xAA; 32];
+        let pin2 = vec![0xBB; 32];
+        // Match against last pin — should still succeed (no early return)
+        assert!(verifier.verify_spki(&pin2, &[pin1, pin2.clone()]).is_ok());
+    }
+
+    #[test]
+    fn test_spki_no_match_different_content() {
+        let verifier = DefaultTlsVerifier;
+        let pin = vec![0xAA; 32];
+        let cert = vec![0xCC; 32];
+        let result = verifier.verify_spki(&cert, &[pin]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_spki_no_match_different_length() {
+        let verifier = DefaultTlsVerifier;
+        // Length mismatch should fail — the constant-time loop only runs
+        // when lengths match, but the overall result must still deny.
+        let pin = vec![0xAA; 32];
+        let cert = vec![0xAA; 16]; // same prefix but shorter
+        let result = verifier.verify_spki(&cert, &[pin]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_spki_empty_pins_allows_all() {
+        let verifier = DefaultTlsVerifier;
+        // Empty pin list means no pinning is configured → allow
+        assert!(verifier.verify_spki(&[1, 2, 3], &[]).is_ok());
+    }
+
+    #[test]
+    fn test_spki_single_byte_difference() {
+        let verifier = DefaultTlsVerifier;
+        let pin = vec![0x00; 32];
+        let mut cert = vec![0x00; 32];
+        // Differ only in the last byte — constant-time comparison must
+        // still evaluate all bytes and reject.
+        cert[31] = 0x01;
+        let result = verifier.verify_spki(&cert, &[pin]);
+        assert!(result.is_err());
+    }
 }

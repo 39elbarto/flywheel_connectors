@@ -667,6 +667,44 @@ mod tests {
         assert!(debug.contains("OAuthTokens"));
     }
 
+    // ── Security regression: Debug redaction (1fcd949) ──
+
+    #[test]
+    fn test_token_debug_redacts_access_token() {
+        let tokens = OAuthTokens::from_response(mock_token_response(Some(3600)));
+        let debug = format!("{tokens:?}");
+        // The actual token value must NOT appear in debug output
+        assert!(!debug.contains("test_access_token"), "access_token leaked in Debug output");
+        // Instead, [REDACTED] should appear
+        assert!(debug.contains("[REDACTED]"), "Debug output missing [REDACTED] placeholder");
+    }
+
+    #[test]
+    fn test_token_debug_redacts_refresh_token() {
+        let tokens = OAuthTokens::from_response(mock_token_response(Some(3600)));
+        let debug = format!("{tokens:?}");
+        assert!(!debug.contains("test_refresh_token"), "refresh_token leaked in Debug output");
+    }
+
+    #[test]
+    fn test_token_debug_redacts_id_token() {
+        let mut resp = mock_token_response(Some(3600));
+        resp.id_token = Some("super_secret_id_token_jwt".into());
+        let tokens = OAuthTokens::from_response(resp);
+        let debug = format!("{tokens:?}");
+        assert!(!debug.contains("super_secret_id_token_jwt"), "id_token leaked in Debug output");
+    }
+
+    #[test]
+    fn test_token_debug_preserves_non_sensitive_fields() {
+        let tokens = OAuthTokens::from_response(mock_token_response(Some(3600)));
+        let debug = format!("{tokens:?}");
+        // Non-sensitive fields should still be visible
+        assert!(debug.contains("Bearer"), "token_type should be visible in Debug");
+        assert!(debug.contains("scopes"), "scopes field should be visible in Debug");
+        assert!(debug.contains("issued_at"), "issued_at field should be visible in Debug");
+    }
+
     // ── Batch: TokenStore advanced ──
 
     #[test]

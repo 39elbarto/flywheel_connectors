@@ -214,4 +214,70 @@ mod tests {
         let other_align = ObjectTransmissionInformation::new(100, 10, 1, 1, 2);
         assert_ne!(base, other_align);
     }
+
+    // ── Additional OTI tests ───────────────────────────────────────────────
+
+    #[test]
+    fn oti_serde_roundtrip_max_values() {
+        let oti =
+            ObjectTransmissionInformation::new(u64::MAX, u16::MAX, u8::MAX, u16::MAX, u8::MAX);
+        let json = serde_json::to_string(&oti).unwrap();
+        let decoded: ObjectTransmissionInformation = serde_json::from_str(&json).unwrap();
+        assert_eq!(oti, decoded);
+    }
+
+    #[test]
+    fn oti_serde_roundtrip_zero_values() {
+        let oti = ObjectTransmissionInformation::new(0, 0, 0, 0, 0);
+        let json = serde_json::to_string(&oti).unwrap();
+        let decoded: ObjectTransmissionInformation = serde_json::from_str(&json).unwrap();
+        assert_eq!(oti, decoded);
+    }
+
+    #[test]
+    fn oti_serde_extra_fields_ignored() {
+        // JSON with an extra field should still deserialize (serde default behavior)
+        let json = r#"{"transfer_length":1024,"symbol_size":64,"source_blocks":1,"sub_blocks":1,"alignment":8,"extra_field":"ignored"}"#;
+        let oti: ObjectTransmissionInformation = serde_json::from_str(json).unwrap();
+        assert_eq!(oti.transfer_length(), 1024);
+        assert_eq!(oti.symbol_size(), 64);
+    }
+
+    #[test]
+    fn oti_small_symbol_size() {
+        let oti = ObjectTransmissionInformation::new(10, 1, 1, 1, 1);
+        assert_eq!(oti.transfer_length(), 10);
+        assert_eq!(oti.symbol_size(), 1);
+    }
+
+    #[test]
+    fn oti_large_transfer_length() {
+        let oti = ObjectTransmissionInformation::new(1_000_000_000_000, 1024, 1, 1, 8);
+        assert_eq!(oti.transfer_length(), 1_000_000_000_000);
+    }
+
+    #[test]
+    fn oti_equality_reflexive() {
+        let oti = ObjectTransmissionInformation::new(512, 64, 1, 1, 4);
+        assert_eq!(oti, oti);
+    }
+
+    #[test]
+    fn oti_equality_symmetric() {
+        let oti1 = ObjectTransmissionInformation::new(512, 64, 1, 1, 4);
+        let oti2 = ObjectTransmissionInformation::new(512, 64, 1, 1, 4);
+        assert_eq!(oti1, oti2);
+        assert_eq!(oti2, oti1);
+    }
+
+    #[test]
+    fn oti_debug_contains_all_fields() {
+        let oti = ObjectTransmissionInformation::new(999, 55, 3, 7, 2);
+        let debug = format!("{oti:?}");
+        assert!(debug.contains("999"));
+        assert!(debug.contains("55"));
+        assert!(debug.contains('3'));
+        assert!(debug.contains('7'));
+        assert!(debug.contains('2'));
+    }
 }

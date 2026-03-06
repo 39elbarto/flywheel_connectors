@@ -537,4 +537,246 @@ mod tests {
         assert_eq!(summary.passed, 0);
         assert_eq!(summary.failed, 0);
     }
+
+    // ── AssertionsSummary additional tests ────────────────────────────────
+
+    #[test]
+    fn assertions_summary_clone_is_independent() {
+        let original = AssertionsSummary::new(10, 3);
+        let cloned = original;
+        // Copy trait: original is still valid
+        assert_eq!(original.passed, cloned.passed);
+        assert_eq!(original.failed, cloned.failed);
+    }
+
+    #[test]
+    fn assertions_summary_debug_contains_fields() {
+        let summary = AssertionsSummary::new(7, 2);
+        let dbg = format!("{summary:?}");
+        assert!(dbg.contains("passed"));
+        assert!(dbg.contains("failed"));
+        assert!(dbg.contains('7'));
+        assert!(dbg.contains('2'));
+    }
+
+    #[test]
+    fn assertions_summary_max_values() {
+        let summary = AssertionsSummary::new(u32::MAX, u32::MAX);
+        let json_str = serde_json::to_string(&summary).expect("serialize");
+        let back: AssertionsSummary = serde_json::from_str(&json_str).expect("deserialize");
+        assert_eq!(back.passed, u32::MAX);
+        assert_eq!(back.failed, u32::MAX);
+    }
+
+    // ── E2eLogEntry additional tests ─────────────────────────────────────
+
+    #[test]
+    fn log_entry_new_with_warn_level() {
+        let entry = E2eLogEntry::new(
+            "warn",
+            "warn_test",
+            "my-mod",
+            "teardown",
+            "corr-warn",
+            "fail",
+            100,
+            AssertionsSummary::new(2, 1),
+            json!({"detail": "something went wrong"}),
+        );
+        assert_eq!(entry.level, "warn");
+        assert_eq!(entry.phase, "teardown");
+        assert_eq!(entry.result, "fail");
+        assert_eq!(entry.duration_ms, 100);
+        assert_eq!(entry.assertions.passed, 2);
+        assert_eq!(entry.assertions.failed, 1);
+    }
+
+    #[test]
+    fn log_entry_new_with_error_level() {
+        let entry = E2eLogEntry::new(
+            "error",
+            "error_test",
+            "fcp-e2e",
+            "execute",
+            "corr-err",
+            "fail",
+            0,
+            AssertionsSummary::new(0, 5),
+            json!({}),
+        );
+        assert_eq!(entry.level, "error");
+        assert_eq!(entry.result, "fail");
+        assert_eq!(entry.assertions.failed, 5);
+    }
+
+    #[test]
+    fn log_entry_log_version_defaults_to_v1() {
+        let entry = E2eLogEntry::new(
+            "info",
+            "version_check",
+            "mod",
+            "setup",
+            "corr-v",
+            "pass",
+            0,
+            AssertionsSummary::new(1, 0),
+            json!({}),
+        );
+        assert_eq!(entry.log_version, "v1");
+    }
+
+    #[test]
+    fn log_entry_timestamp_is_utc() {
+        let before = chrono::Utc::now();
+        let entry = E2eLogEntry::new(
+            "info",
+            "ts_test",
+            "mod",
+            "setup",
+            "corr-ts",
+            "pass",
+            0,
+            AssertionsSummary::new(1, 0),
+            json!({}),
+        );
+        let after = chrono::Utc::now();
+        assert!(entry.timestamp >= before);
+        assert!(entry.timestamp <= after);
+    }
+
+    #[test]
+    fn log_entry_validate_rejects_missing_fields() {
+        // Manually construct an entry missing required fields via deserialization
+        let incomplete = json!({
+            "timestamp": "2026-01-01T00:00:00Z",
+            "level": "info",
+            "test_name": "incomplete"
+            // missing: module, phase, correlation_id, result, duration_ms, assertions, context
+        });
+        // This should fail schema validation
+        assert!(validate_log_entry_value(&incomplete).is_err());
+    }
+
+    #[test]
+    fn log_entry_clone_preserves_context() {
+        let entry = E2eLogEntry::new(
+            "info",
+            "clone_ctx",
+            "mod",
+            "verify",
+            "corr-ctx",
+            "pass",
+            42,
+            AssertionsSummary::new(3, 0),
+            json!({"zone_id": "z:personal", "extra": [1, 2, 3]}),
+        );
+        let cloned = entry.clone();
+        drop(entry);
+        assert_eq!(cloned.test_name, "clone_ctx");
+        assert_eq!(
+            cloned.context.get("zone_id").and_then(|v| v.as_str()),
+            Some("z:personal")
+        );
+        let arr = cloned.context.get("extra").and_then(|v| v.as_array());
+        assert_eq!(arr.map(Vec::len), Some(3));
+    }
+
+    // ── E2eLogger additional tests ───────────────────────────────────────
+
+    #[test]
+    fn logger_push_multiple_and_drain_returns_all() {
+        let mut logger = super::E2eLogger::new();
+        for i in 0..5 {
+            logger.push(E2eLogEntry::new(
+                "info",
+                format!("t{i}"),
+                "m",
+                "setup",
+                format!("c{i}"),
+                "pass",
+                i,
+                AssertionsSummary::new(1, 0),
+                json!({}),
+            ));
+        }
+        assert_eq!(logger.entries().len(), 5);
+        let drained = logger.drain();
+        assert_eq!(drained.len(), 5);
+        assert!(logger.entries().is_empty());
+    }
+
+    #[test]
+    fn logger_drain_on_empty_returns_empty_vec() {
+        let mut logger = super::E2eLogger::new();
+        let drained = logger.drain();
+        assert!(drained.is_empty());
+    }
+
+    #[test]
+    fn logger_to_json_lines_empty_returns_empty_string() {
+        let logger = super::E2eLogger::new();
+        assert_eq!(logger.to_json_lines(), "");
+    }
+
+    // ── LogSchemaError additional tests ──────────────────────────────────
+
+    #[test]
+    fn log_schema_error_invalid_json_debug() {
+        let e = super::LogSchemaError::InvalidJson {
+            message: "unexpected EOF".to_string(),
+        };
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("InvalidJson"));
+        assert!(dbg.contains("unexpected EOF"));
+    }
+
+    #[test]
+    fn log_schema_error_missing_field_display() {
+        let e = super::LogSchemaError::MissingField {
+            field: "correlation_id",
+        };
+        assert_eq!(
+            e.to_string(),
+            "missing required field: correlation_id"
+        );
+    }
+
+    #[test]
+    fn log_schema_error_invalid_field_debug() {
+        let e = super::LogSchemaError::InvalidField {
+            field: "duration_ms",
+            message: "expected u64".to_string(),
+        };
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("InvalidField"));
+        assert!(dbg.contains("duration_ms"));
+    }
+
+    // ── validate_log_entry_value additional tests ────────────────────────
+
+    #[test]
+    fn validate_log_entry_value_valid_script_entry_with_artifacts() {
+        let entry = json!({
+            "timestamp": "2026-03-06T12:00:00Z",
+            "script": "regression_test",
+            "step": "verify_output",
+            "step_number": 7,
+            "correlation_id": "11111111-1111-4111-8111-111111111111",
+            "duration_ms": 55,
+            "result": "pass",
+            "artifacts": ["log.jsonl", "report.json"]
+        });
+        validate_log_entry_value(&entry).expect("valid script entry with artifacts");
+    }
+
+    #[test]
+    fn validate_log_entry_value_rejects_non_object() {
+        let entry = json!("not an object");
+        assert!(validate_log_entry_value(&entry).is_err());
+    }
+
+    #[test]
+    fn validate_log_entry_value_rejects_null() {
+        assert!(validate_log_entry_value(&json!(null)).is_err());
+    }
 }

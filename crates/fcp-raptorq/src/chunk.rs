@@ -389,4 +389,172 @@ mod tests {
         assert_eq!(chunks[0].len(), 64 * 1024);
         assert_eq!(manifest.chunk_size_at(0).unwrap(), 64 * 1024);
     }
+
+    // ── RawChunk additional tests ──────────────────────────────────────────
+
+    #[test]
+    fn raw_chunk_content_id_differs_from_empty() {
+        let filled = RawChunk::new(vec![1, 2, 3]);
+        let empty = RawChunk::new(vec![]);
+        assert_ne!(filled.content_id(), empty.content_id());
+    }
+
+    #[test]
+    fn raw_chunk_large_payload() {
+        let data = vec![0xABu8; 1_000_000];
+        let chunk = RawChunk::new(data.clone());
+        assert_eq!(chunk.len(), 1_000_000);
+        assert!(!chunk.is_empty());
+        assert_eq!(chunk.bytes, data);
+    }
+
+    #[test]
+    fn raw_chunk_single_byte() {
+        let chunk = RawChunk::new(vec![0xFF]);
+        assert_eq!(chunk.len(), 1);
+        assert!(!chunk.is_empty());
+    }
+
+    #[test]
+    fn raw_chunk_clone() {
+        let chunk = RawChunk::new(vec![10, 20, 30]);
+        let cloned = chunk.clone();
+        assert_eq!(cloned.bytes, chunk.bytes);
+        assert_eq!(cloned.content_id(), chunk.content_id());
+    }
+
+    #[test]
+    fn raw_chunk_debug_format() {
+        let chunk = RawChunk::new(vec![1, 2]);
+        let debug = format!("{chunk:?}");
+        assert!(debug.contains("RawChunk"));
+    }
+
+    #[test]
+    fn raw_chunk_serde_roundtrip() {
+        let chunk = RawChunk::new(vec![5, 10, 15, 20]);
+        let json = serde_json::to_string(&chunk).unwrap();
+        let deserialized: RawChunk = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.bytes, chunk.bytes);
+    }
+
+    // ── Manifest edge cases ────────────────────────────────────────────────
+
+    #[test]
+    fn manifest_from_payload_chunk_size_one() {
+        let payload = vec![1u8, 2, 3, 4, 5];
+        let (manifest, chunks) = ChunkedObjectManifest::from_payload(&payload, 1);
+
+        assert_eq!(manifest.total_len, 5);
+        assert_eq!(manifest.chunk_size, 1);
+        assert_eq!(manifest.chunk_count(), 5);
+        assert_eq!(chunks.len(), 5);
+        for (i, chunk) in chunks.iter().enumerate() {
+            assert_eq!(chunk.len(), 1);
+            assert_eq!(chunk.bytes[0], (i + 1) as u8);
+        }
+    }
+
+    #[test]
+    fn manifest_reconstruct_empty_manifest() {
+        let (manifest, chunks) = ChunkedObjectManifest::from_payload(&[], 64 * 1024);
+        let reconstructed = manifest.reconstruct(&chunks).unwrap();
+        assert!(reconstructed.is_empty());
+    }
+
+    #[test]
+    fn manifest_reconstruct_unchecked_empty() {
+        let (manifest, chunks) = ChunkedObjectManifest::from_payload(&[], 64 * 1024);
+        let reconstructed = manifest.reconstruct_unchecked(&chunks).unwrap();
+        assert!(reconstructed.is_empty());
+    }
+
+    #[test]
+    fn manifest_reconstruct_unchecked_missing_chunks() {
+        let payload = vec![1u8; 200_000];
+        let (manifest, mut chunks) = ChunkedObjectManifest::from_payload(&payload, 64 * 1024);
+        chunks.pop();
+        let result = manifest.reconstruct_unchecked(&chunks);
+        assert!(matches!(result, Err(ChunkError::MissingChunks { .. })));
+    }
+
+    #[test]
+    fn manifest_reconstruct_unchecked_length_mismatch() {
+        let payload = vec![1u8; 200_000];
+        let (manifest, mut chunks) = ChunkedObjectManifest::from_payload(&payload, 64 * 1024);
+        // Replace last chunk with a shorter one to cause length mismatch
+        let last_idx = chunks.len() - 1;
+        chunks[last_idx] = RawChunk::new(vec![0u8; 1]);
+        let result = manifest.reconstruct_unchecked(&chunks);
+        assert!(matches!(result, Err(ChunkError::LengthMismatch { .. })));
+    }
+
+    #[test]
+    fn manifest_chunk_size_at_evenly_divisible() {
+        // Payload that is evenly divisible by chunk size
+        let payload = vec![42u8; 256 * 1024]; // 256KB / 64KB = 4 even chunks
+        let chunk_size = 64 * 1024;
+        let (manifest, _) = ChunkedObjectManifest::from_payload(&payload, chunk_size);
+
+        assert_eq!(manifest.chunk_count(), 4);
+        for i in 0..4 {
+            assert_eq!(manifest.chunk_size_at(i).unwrap(), 64 * 1024);
+        }
+    }
+
+    #[test]
+    fn manifest_verify_hash_empty_payload() {
+        let (manifest, _) = ChunkedObjectManifest::from_payload(&[], 64 * 1024);
+        assert!(manifest.verify_hash(&[]));
+        assert!(!manifest.verify_hash(&[1u8]));
+    }
+
+    #[test]
+    fn manifest_payload_hash_deterministic() {
+        let payload = vec![42u8; 10_000];
+        let (m1, _) = ChunkedObjectManifest::from_payload(&payload, 1024);
+        let (m2, _) = ChunkedObjectManifest::from_payload(&payload, 1024);
+        assert_eq!(m1.payload_hash, m2.payload_hash);
+    }
+
+    #[test]
+    fn manifest_payload_hash_changes_with_content() {
+        let payload_a = vec![1u8; 1000];
+        let payload_b = vec![2u8; 1000];
+        let (m1, _) = ChunkedObjectManifest::from_payload(&payload_a, 1024);
+        let (m2, _) = ChunkedObjectManifest::from_payload(&payload_b, 1024);
+        assert_ne!(m1.payload_hash, m2.payload_hash);
+    }
+
+    #[test]
+    fn manifest_chunk_ids_are_unique() {
+        // Each chunk with different content should have a unique ID
+        let payload: Vec<u8> = (0..1000_u32).map(|i| (i % 256) as u8).collect();
+        let (manifest, _) = ChunkedObjectManifest::from_payload(&payload, 100);
+
+        let mut seen = std::collections::HashSet::new();
+        for id in &manifest.chunks {
+            assert!(seen.insert(id), "duplicate chunk ID found");
+        }
+    }
+
+    #[test]
+    fn manifest_reconstruct_extra_chunks_rejected() {
+        let payload = vec![1u8; 100];
+        let (manifest, mut chunks) = ChunkedObjectManifest::from_payload(&payload, 50);
+        // Add an extra chunk
+        chunks.push(RawChunk::new(vec![0u8; 50]));
+        let result = manifest.reconstruct(&chunks);
+        assert!(matches!(result, Err(ChunkError::MissingChunks { expected: 2, got: 3 })));
+    }
+
+    #[test]
+    fn manifest_reconstruct_length_mismatch_error() {
+        let payload = vec![1u8; 200_000];
+        let (manifest, mut chunks) = ChunkedObjectManifest::from_payload(&payload, 64 * 1024);
+        // Replace a chunk with one of different length
+        chunks[0] = RawChunk::new(vec![0u8; 1]);
+        let result = manifest.reconstruct(&chunks);
+        assert!(matches!(result, Err(ChunkError::LengthMismatch { .. })));
+    }
 }

@@ -432,4 +432,265 @@ mod tests {
             "memory limit exceeded: 0 bytes, limit 0 bytes"
         );
     }
+
+    // ── ChunkError additional tests ────────────────────────────────────────
+
+    #[test]
+    fn chunk_error_missing_chunks_display_exact() {
+        let err = ChunkError::MissingChunks {
+            expected: 4,
+            got: 1,
+        };
+        assert_eq!(err.to_string(), "missing chunks: expected 4, got 1");
+    }
+
+    #[test]
+    fn chunk_error_length_mismatch_display_exact() {
+        let err = ChunkError::LengthMismatch {
+            expected: 65536,
+            got: 32768,
+        };
+        assert_eq!(
+            err.to_string(),
+            "length mismatch: expected 65536, got 32768"
+        );
+    }
+
+    #[test]
+    fn chunk_error_invalid_chunk_index_display_exact() {
+        let err = ChunkError::InvalidChunkIndex {
+            index: 10,
+            count: 5,
+        };
+        assert_eq!(
+            err.to_string(),
+            "invalid chunk index 10: manifest has 5 chunks"
+        );
+    }
+
+    #[test]
+    fn chunk_error_ne_cross_variant() {
+        assert_ne!(
+            ChunkError::HashMismatch,
+            ChunkError::MissingChunks {
+                expected: 0,
+                got: 0
+            }
+        );
+        assert_ne!(
+            ChunkError::HashMismatch,
+            ChunkError::LengthMismatch {
+                expected: 0,
+                got: 0
+            }
+        );
+        assert_ne!(
+            ChunkError::HashMismatch,
+            ChunkError::InvalidChunkIndex { index: 0, count: 0 }
+        );
+    }
+
+    // ── EncodeError additional tests ───────────────────────────────────────
+
+    #[test]
+    fn encode_error_payload_too_large_display_exact() {
+        let err = EncodeError::PayloadTooLarge {
+            size: 128_000_000,
+            max: 67_108_864,
+        };
+        assert_eq!(
+            err.to_string(),
+            "payload too large: 128000000 bytes exceeds maximum 67108864 bytes"
+        );
+    }
+
+    #[test]
+    fn encode_error_empty_payload_display_exact() {
+        let err = EncodeError::EmptyPayload;
+        assert_eq!(err.to_string(), "cannot encode empty payload");
+    }
+
+    // ── DecodeError additional tests ───────────────────────────────────────
+
+    #[test]
+    fn decode_error_timeout_display_exact() {
+        let err = DecodeError::Timeout;
+        assert_eq!(err.to_string(), "decode timed out");
+    }
+
+    #[test]
+    fn decode_error_cancelled_display_exact() {
+        let err = DecodeError::Cancelled;
+        assert_eq!(err.to_string(), "decode cancelled");
+    }
+
+    #[test]
+    fn decode_error_admission_denied_display_exact() {
+        let err = DecodeError::AdmissionDenied {
+            reason: "max concurrent (16) exceeded".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "decode admission denied: max concurrent (16) exceeded"
+        );
+    }
+
+    #[test]
+    fn decode_error_invalid_symbol_display_exact() {
+        let err = DecodeError::InvalidSymbol {
+            reason: "symbol size mismatch: expected 64 bytes, got 128 bytes".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "invalid symbol: symbol size mismatch: expected 64 bytes, got 128 bytes"
+        );
+    }
+
+    #[test]
+    fn decode_error_runtime_display_exact() {
+        let err = DecodeError::Runtime {
+            reason: "tokio join failed".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "decode runtime failure: tokio join failed"
+        );
+    }
+
+    #[test]
+    fn decode_error_insufficient_symbols_display_exact() {
+        let err = DecodeError::InsufficientSymbols {
+            received: 50,
+            needed: 101,
+        };
+        assert_eq!(
+            err.to_string(),
+            "insufficient symbols: received 50, need approximately 101"
+        );
+    }
+
+    #[test]
+    fn decode_error_symbol_buffer_exceeded_display_exact() {
+        let err = DecodeError::SymbolBufferExceeded {
+            buffered: 10001,
+            limit: 10000,
+        };
+        assert_eq!(
+            err.to_string(),
+            "symbol buffer limit exceeded: 10001 symbols, limit 10000"
+        );
+    }
+
+    #[test]
+    fn decode_error_memory_limit_exceeded_display_exact() {
+        let err = DecodeError::MemoryLimitExceeded {
+            used: 100_000_000,
+            limit: 67_108_864,
+        };
+        assert_eq!(
+            err.to_string(),
+            "memory limit exceeded: 100000000 bytes, limit 67108864 bytes"
+        );
+    }
+
+    #[test]
+    fn decode_error_invalid_transmission_info_display_exact() {
+        let err = DecodeError::InvalidTransmissionInfo {
+            reason: "symbol size must be > 0".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "invalid transmission info: symbol size must be > 0"
+        );
+    }
+
+    // ── Debug format tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn chunk_error_debug_all_variants() {
+        let variants: Vec<ChunkError> = vec![
+            ChunkError::MissingChunks {
+                expected: 1,
+                got: 0,
+            },
+            ChunkError::LengthMismatch {
+                expected: 1,
+                got: 0,
+            },
+            ChunkError::HashMismatch,
+            ChunkError::InvalidChunkIndex { index: 0, count: 0 },
+        ];
+        for v in &variants {
+            let debug = format!("{v:?}");
+            assert!(!debug.is_empty());
+        }
+    }
+
+    #[test]
+    fn encode_error_debug_all_variants() {
+        let variants: Vec<EncodeError> = vec![
+            EncodeError::PayloadTooLarge { size: 1, max: 0 },
+            EncodeError::EmptyPayload,
+        ];
+        for v in &variants {
+            let debug = format!("{v:?}");
+            assert!(!debug.is_empty());
+        }
+    }
+
+    #[test]
+    fn decode_error_debug_all_variants() {
+        let variants: Vec<DecodeError> = vec![
+            DecodeError::Timeout,
+            DecodeError::Cancelled,
+            DecodeError::InsufficientSymbols {
+                received: 0,
+                needed: 1,
+            },
+            DecodeError::AdmissionDenied {
+                reason: "x".into(),
+            },
+            DecodeError::SymbolBufferExceeded {
+                buffered: 1,
+                limit: 0,
+            },
+            DecodeError::MemoryLimitExceeded { used: 1, limit: 0 },
+            DecodeError::InvalidSymbol {
+                reason: "x".into(),
+            },
+            DecodeError::InvalidTransmissionInfo {
+                reason: "x".into(),
+            },
+            DecodeError::Runtime {
+                reason: "x".into(),
+            },
+        ];
+        for v in &variants {
+            let debug = format!("{v:?}");
+            assert!(!debug.is_empty());
+        }
+    }
+
+    // ── Error trait source() tests ─────────────────────────────────────────
+
+    #[test]
+    fn chunk_error_source_is_none() {
+        use std::error::Error;
+        let err = ChunkError::HashMismatch;
+        assert!(err.source().is_none());
+    }
+
+    #[test]
+    fn encode_error_source_is_none() {
+        use std::error::Error;
+        let err = EncodeError::EmptyPayload;
+        assert!(err.source().is_none());
+    }
+
+    #[test]
+    fn decode_error_source_is_none() {
+        use std::error::Error;
+        let err = DecodeError::Timeout;
+        assert!(err.source().is_none());
+    }
 }

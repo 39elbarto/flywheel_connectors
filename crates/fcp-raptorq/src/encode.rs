@@ -559,4 +559,187 @@ mod tests {
 
         panic!("Failed to decode single-symbol payload");
     }
+
+    // ── Encoder payload boundary tests ─────────────────────────────────────
+
+    #[test]
+    fn encoder_payload_at_small_max() {
+        // Use a config with a small max_object_size to avoid slow encoding
+        let config = RaptorQConfig {
+            symbol_size: 64,
+            repair_ratio_bps: 500,
+            max_object_size: 2048,
+            decode_timeout: std::time::Duration::from_secs(30),
+            max_chunk_threshold: 1024,
+            chunk_size: 256,
+        };
+        let payload = vec![42u8; 2048]; // Exactly at limit
+        let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
+        assert_eq!(encoder.payload_len(), 2048);
+    }
+
+    #[test]
+    fn encoder_payload_one_over_max() {
+        let config = RaptorQConfig {
+            symbol_size: 64,
+            repair_ratio_bps: 500,
+            max_object_size: 2048,
+            decode_timeout: std::time::Duration::from_secs(30),
+            max_chunk_threshold: 1024,
+            chunk_size: 256,
+        };
+        let payload = vec![42u8; 2049]; // One over limit
+        let result = RaptorQEncoder::new(&payload, &config);
+        assert!(matches!(result, Err(EncodeError::PayloadTooLarge { .. })));
+    }
+
+    #[test]
+    fn encoder_payload_not_symbol_aligned() {
+        let config = test_config(); // symbol_size = 64
+        let payload = vec![42u8; 100]; // 100 bytes, not aligned to 64
+        let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
+        // ceil(100 / 64) = 2 source symbols
+        assert_eq!(encoder.source_symbols(), 2);
+
+        // Source symbols should be zero-padded
+        let source = encoder.encode_source();
+        assert_eq!(source.len(), 2);
+        assert_eq!(source[0].1.len(), 64); // First symbol: full 64 bytes
+        assert_eq!(source[1].1.len(), 64); // Second symbol: 36 real + 28 zero-padded
+        // Verify zero-padding in last symbol
+        for &byte in &source[1].1[36..] {
+            assert_eq!(byte, 0, "expected zero-padding in last symbol");
+        }
+    }
+
+    #[test]
+    fn encoder_encode_all_includes_source_and_repair() {
+        let config = RaptorQConfig {
+            symbol_size: 64,
+            repair_ratio_bps: 5000, // 50% overhead for clear repair count
+            max_object_size: 1024 * 1024,
+            decode_timeout: std::time::Duration::from_secs(30),
+            max_chunk_threshold: 1024,
+            chunk_size: 256,
+        };
+        let payload = vec![42u8; 640]; // 10 source symbols
+        let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
+
+        assert_eq!(encoder.source_symbols(), 10);
+        assert_eq!(encoder.repair_symbols(), 5); // 50% of 10
+
+        let all = encoder.encode_all();
+        assert_eq!(all.len(), 15); // 10 source + 5 repair
+    }
+
+    #[test]
+    fn encoder_source_data_preserved() {
+        let config = test_config();
+        let payload: Vec<u8> = (0..128_u8).collect(); // 2 symbols
+        let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
+        let source = encoder.encode_source();
+
+        // First symbol should be bytes 0..64
+        assert_eq!(&source[0].1[..64], &payload[..64]);
+        // Second symbol should be bytes 64..128
+        assert_eq!(&source[1].1[..64], &payload[64..128]);
+    }
+
+    #[test]
+    fn encoder_transmission_info_fields() {
+        let config = test_config();
+        let payload = vec![0u8; 300];
+        let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
+        let oti = encoder.transmission_info();
+
+        assert_eq!(oti.transfer_length(), 300);
+        assert_eq!(oti.symbol_size(), 64);
+        assert_eq!(oti.source_blocks(), 1);
+        assert_eq!(oti.sub_blocks(), 1);
+        assert_eq!(oti.symbol_alignment(), 8);
+    }
+
+    #[test]
+    fn encoder_k_prime_ge_k() {
+        // K' should always be >= K per RFC 6330
+        let config = test_config();
+        for size in [64, 128, 256, 512, 1024] {
+            let payload = vec![42u8; size];
+            let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
+            assert!(
+                encoder.inner_k_prime() >= encoder.source_symbols(),
+                "K' ({}) < K ({}) for payload size {size}",
+                encoder.inner_k_prime(),
+                encoder.source_symbols(),
+            );
+        }
+    }
+
+    // ── EncodingDecision additional tests ──────────────────────────────────
+
+    #[test]
+    fn encoding_decision_chunked_manifest_fields() {
+        let config = test_config();
+        let payload = vec![42u8; 4096]; // Over 1KB threshold
+
+        let decision = EncodingDecision::for_payload(&payload, &config).unwrap();
+        if let EncodingDecision::Chunked { manifest, chunks } = decision {
+            assert_eq!(manifest.total_len, 4096);
+            assert_eq!(manifest.chunk_size, 256);
+            // 4096 / 256 = 16 chunks
+            assert_eq!(chunks.len(), 16);
+            assert_eq!(manifest.chunk_count(), 16);
+            // Verify manifest hash matches payload
+            assert!(manifest.verify_hash(&payload));
+        } else {
+            panic!("expected Chunked decision");
+        }
+    }
+
+    #[test]
+    fn encoding_decision_direct_has_symbols_and_oti() {
+        let config = test_config();
+        let payload = vec![42u8; 256]; // Under threshold
+
+        let decision = EncodingDecision::for_payload(&payload, &config).unwrap();
+        if let EncodingDecision::Direct {
+            symbols,
+            transmission_info,
+        } = decision
+        {
+            assert!(!symbols.is_empty());
+            assert_eq!(transmission_info.transfer_length(), 256);
+            assert_eq!(transmission_info.symbol_size(), 64);
+        } else {
+            panic!("expected Direct decision");
+        }
+    }
+
+    #[test]
+    fn encode_decode_roundtrip_varying_sizes() {
+        let config = test_config();
+        for size in [1_usize, 32, 63, 64, 65, 128, 255, 256, 512, 1024] {
+            let payload: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
+            let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
+            let symbols = encoder.encode_all();
+            let oti = encoder.transmission_info();
+
+            let mut dec = crate::RaptorQDecoder::new(oti, &config);
+            let mut result = None;
+            for (esi, data) in symbols {
+                if let Ok(Some(d)) = dec.add_symbol(esi, data) {
+                    result = Some(d);
+                    break;
+                }
+            }
+            let output = result.unwrap_or_else(|| {
+                panic!("Failed to decode payload of size {size}");
+            });
+            assert_eq!(
+                &output[..payload.len()],
+                &payload[..],
+                "roundtrip failed for size {size}"
+            );
+        }
+    }
 }

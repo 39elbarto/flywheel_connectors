@@ -156,21 +156,35 @@ impl DocuSignClient {
     }
 
     #[instrument(skip(self), fields(url))]
-    async fn get(&self, path: &str) -> DocuSignResult<serde_json::Value> {
+    async fn get(
+        &self,
+        path: &str,
+        query: Option<&[(&str, String)]>,
+    ) -> DocuSignResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
         debug!(url = %url, "GET request");
-        let req = self
+        let mut req = self
             .add_auth(self.client.get(&url))
             .header("Accept", "application/json");
+        if let Some(q) = query {
+            req = req.query(q);
+        }
         let resp = req.send().await?;
         self.handle_response(resp).await
     }
 
     #[instrument(skip(self), fields(url))]
-    async fn get_raw(&self, path: &str) -> DocuSignResult<Vec<u8>> {
+    async fn get_raw(
+        &self,
+        path: &str,
+        query: Option<&[(&str, String)]>,
+    ) -> DocuSignResult<Vec<u8>> {
         let url = format!("{}{path}", self.base_url);
         debug!(url = %url, "GET raw request");
-        let req = self.add_auth(self.client.get(&url));
+        let mut req = self.add_auth(self.client.get(&url));
+        if let Some(q) = query {
+            req = req.query(q);
+        }
         let resp = req.send().await?;
         self.handle_response_raw(resp).await
     }
@@ -214,16 +228,30 @@ impl DocuSignClient {
         &self,
         params: &ListEnvelopesParams<'_>,
     ) -> DocuSignResult<serde_json::Value> {
-        let qs = build_query(&[
-            params.from_date.map(|v| ("from_date", v.to_string())),
-            params.to_date.map(|v| ("to_date", v.to_string())),
-            params.status.map(|v| ("status", v.to_string())),
-            params.search_text.map(|v| ("search_text", v.to_string())),
-            params.count.map(|v| ("count", v.to_string())),
-            params.start_position.map(|v| ("start_position", v.to_string())),
-        ]);
-        self.get(&format!("/{}/envelopes{qs}", params.account_id))
-            .await
+        let mut q = Vec::new();
+        if let Some(v) = params.from_date {
+            q.push(("from_date", v.to_string()));
+        }
+        if let Some(v) = params.to_date {
+            q.push(("to_date", v.to_string()));
+        }
+        if let Some(v) = params.status {
+            q.push(("status", v.to_string()));
+        }
+        if let Some(v) = params.search_text {
+            q.push(("search_text", v.to_string()));
+        }
+        if let Some(v) = params.count {
+            q.push(("count", v.to_string()));
+        }
+        if let Some(v) = params.start_position {
+            q.push(("start_position", v.to_string()));
+        }
+        self.get(
+            &format!("/{}/envelopes", params.account_id),
+            if q.is_empty() { None } else { Some(&q) },
+        )
+        .await
     }
 
     /// Get envelope details.
@@ -233,9 +261,12 @@ impl DocuSignClient {
         envelope_id: &str,
         include: Option<&str>,
     ) -> DocuSignResult<serde_json::Value> {
-        let qs = build_query(&[include.map(|v| ("include", v.to_string()))]);
-        self.get(&format!("/{account_id}/envelopes/{envelope_id}{qs}"))
-            .await
+        let q = include.map(|v| vec![("include", v.to_string())]);
+        self.get(
+            &format!("/{account_id}/envelopes/{envelope_id}"),
+            q.as_deref(),
+        )
+        .await
     }
 
     /// Create envelope.
@@ -295,8 +326,9 @@ impl DocuSignClient {
         account_id: &str,
         search_text: Option<&str>,
     ) -> DocuSignResult<serde_json::Value> {
-        let qs = build_query(&[search_text.map(|v| ("search_text", v.to_string()))]);
-        self.get(&format!("/{account_id}/templates{qs}")).await
+        let q = search_text.map(|v| vec![("search_text", v.to_string())]);
+        self.get(&format!("/{account_id}/templates"), q.as_deref())
+            .await
     }
 
     /// Get template details.
@@ -305,7 +337,7 @@ impl DocuSignClient {
         account_id: &str,
         template_id: &str,
     ) -> DocuSignResult<serde_json::Value> {
-        self.get(&format!("/{account_id}/templates/{template_id}"))
+        self.get(&format!("/{account_id}/templates/{template_id}"), None)
             .await
     }
 
@@ -319,24 +351,12 @@ impl DocuSignClient {
         document_id: Option<&str>,
     ) -> DocuSignResult<Vec<u8>> {
         let doc_path = document_id.unwrap_or("combined");
-        self.get_raw(&format!(
-            "/{account_id}/envelopes/{envelope_id}/documents/{doc_path}"
-        ))
+        self.get_raw(
+            &format!("/{account_id}/envelopes/{envelope_id}/documents/{doc_path}"),
+            None,
+        )
         .await
     }
-}
-
-fn build_query(params: &[Option<(&str, String)>]) -> String {
-    let mut qs = String::new();
-    let mut sep = '?';
-    for param in params.iter().flatten() {
-        qs.push(sep);
-        qs.push_str(param.0);
-        qs.push('=');
-        qs.push_str(&param.1);
-        sep = '&';
-    }
-    qs
 }
 
 #[cfg(test)]
@@ -370,48 +390,6 @@ mod tests {
         let cred = DocuSignAuth::CredentialId(CredentialId::new());
         let label = cred.redacted_label();
         assert!(label.starts_with("credential_id:"));
-    }
-
-    #[test]
-    fn build_query_empty() {
-        assert_eq!(build_query(&[None, None]), "");
-    }
-
-    #[test]
-    fn build_query_one() {
-        assert_eq!(
-            build_query(&[Some(("from_date", "2026-01-01".into()))]),
-            "?from_date=2026-01-01"
-        );
-    }
-
-    #[test]
-    fn build_query_two() {
-        assert_eq!(
-            build_query(&[
-                Some(("from_date", "2026-01-01".into())),
-                Some(("status", "completed".into()))
-            ]),
-            "?from_date=2026-01-01&status=completed"
-        );
-    }
-
-    #[test]
-    fn build_query_with_nones() {
-        assert_eq!(
-            build_query(&[
-                None,
-                Some(("status", "sent".into())),
-                None,
-                Some(("count", "25".into())),
-            ]),
-            "?status=sent&count=25"
-        );
-    }
-
-    #[test]
-    fn build_query_all_none() {
-        assert_eq!(build_query(&[None, None, None, None, None, None]), "");
     }
 
     #[test]
@@ -457,5 +435,115 @@ mod tests {
         let dbg = format!("{c:?}");
         assert!(!dbg.contains("secret"));
         assert!(dbg.contains("DocuSignClient"));
+    }
+
+    #[test]
+    fn auth_clone_bearer() {
+        let auth = DocuSignAuth::BearerToken("tok123".into());
+        let cloned = auth.clone();
+        drop(auth);
+        assert_eq!(cloned.redacted_label(), "bearer_token:redacted");
+    }
+
+    #[test]
+    fn auth_clone_credential() {
+        let auth = DocuSignAuth::CredentialId(CredentialId::new());
+        let cloned = auth.clone();
+        drop(auth);
+        assert!(cloned.is_secretless());
+    }
+
+    #[test]
+    fn client_debug_contains_base_url() {
+        let c = DocuSignClient::new(
+            DocuSignAuth::BearerToken("tok".into()),
+            None,
+        )
+        .unwrap();
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("base_url"));
+    }
+
+    #[test]
+    fn client_new_with_credential_id() {
+        let cred = CredentialId::new();
+        let c =
+            DocuSignClient::new(DocuSignAuth::CredentialId(cred), None).unwrap();
+        assert_eq!(c.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn default_base_url_contains_docusign() {
+        assert!(DEFAULT_BASE_URL.contains("docusign"));
+    }
+
+    #[test]
+    fn default_base_url_is_https() {
+        assert!(DEFAULT_BASE_URL.starts_with("https://"));
+    }
+
+    #[test]
+    fn default_base_url_contains_restapi() {
+        assert!(DEFAULT_BASE_URL.contains("restapi"));
+    }
+
+    #[test]
+    fn auth_bearer_is_not_secretless() {
+        let auth = DocuSignAuth::BearerToken("any".into());
+        assert!(!auth.is_secretless());
+    }
+
+    #[test]
+    fn auth_credential_is_secretless() {
+        let auth = DocuSignAuth::CredentialId(CredentialId::new());
+        assert!(auth.is_secretless());
+    }
+
+    #[test]
+    fn auth_debug_bearer_shows_tuple_name() {
+        let auth = DocuSignAuth::BearerToken("secret".into());
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("BearerToken"));
+    }
+
+    #[test]
+    fn auth_debug_credential_shows_id() {
+        let cred = DocuSignAuth::CredentialId(CredentialId::new());
+        let dbg = format!("{cred:?}");
+        assert!(dbg.contains("CredentialId"));
+    }
+
+    #[test]
+    fn client_strips_multiple_trailing_slashes() {
+        let c = DocuSignClient::new(
+            DocuSignAuth::BearerToken("k".into()),
+            Some("https://example.com/api////"),
+        )
+        .unwrap();
+        assert!(!c.base_url.ends_with('/'));
+    }
+
+    #[test]
+    fn list_envelopes_params_default() {
+        let p = ListEnvelopesParams::default();
+        assert_eq!(p.account_id, "");
+        assert!(p.from_date.is_none());
+        assert!(p.to_date.is_none());
+        assert!(p.status.is_none());
+        assert!(p.search_text.is_none());
+        assert!(p.count.is_none());
+        assert!(p.start_position.is_none());
+    }
+
+    #[test]
+    fn list_envelopes_params_debug() {
+        let p = ListEnvelopesParams {
+            account_id: "acc-123",
+            from_date: Some("2026-01-01"),
+            ..Default::default()
+        };
+        let dbg = format!("{p:?}");
+        assert!(dbg.contains("ListEnvelopesParams"));
+        assert!(dbg.contains("acc-123"));
     }
 }

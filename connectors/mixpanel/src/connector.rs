@@ -835,4 +835,268 @@ mod tests {
         assert!(c.client.is_none());
         assert!(c.session_id.is_none());
     }
+
+    #[test]
+    fn connector_new_request_count_zero() {
+        let c = MixpanelConnector::new();
+        assert_eq!(c.request_count.load(Ordering::Relaxed), 0);
+        assert_eq!(c.error_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn doctor_check_skip_serializing_none_message() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        // skip_serializing_if means the key should not appear
+        assert!(!v.as_object().unwrap().contains_key("message"));
+    }
+
+    #[test]
+    fn doctor_check_includes_message_when_present() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: false,
+            message: Some("failure reason".into()),
+            critical: true,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert_eq!(v["message"], "failure reason");
+    }
+
+    #[test]
+    fn doctor_check_serde_roundtrip() {
+        let check = DoctorCheck {
+            name: "config".into(),
+            passed: true,
+            message: Some("ok".into()),
+            critical: true,
+        };
+        let s = serde_json::to_string(&check).unwrap();
+        let check2: DoctorCheck = serde_json::from_str(&s).unwrap();
+        assert_eq!(check2.name, "config");
+        assert!(check2.passed);
+        assert_eq!(check2.message, Some("ok".into()));
+        assert!(check2.critical);
+    }
+
+    #[test]
+    fn doctor_status_serde_healthy() {
+        let v = serde_json::to_value(DoctorStatus::Healthy).unwrap();
+        assert_eq!(v, "healthy");
+        let ds: DoctorStatus = serde_json::from_value(json!("healthy")).unwrap();
+        assert_eq!(ds, DoctorStatus::Healthy);
+    }
+
+    #[test]
+    fn doctor_status_serde_degraded() {
+        let v = serde_json::to_value(DoctorStatus::Degraded).unwrap();
+        assert_eq!(v, "degraded");
+        let ds: DoctorStatus = serde_json::from_value(json!("degraded")).unwrap();
+        assert_eq!(ds, DoctorStatus::Degraded);
+    }
+
+    #[test]
+    fn doctor_status_serde_unhealthy() {
+        let v = serde_json::to_value(DoctorStatus::Unhealthy).unwrap();
+        assert_eq!(v, "unhealthy");
+        let ds: DoctorStatus = serde_json::from_value(json!("unhealthy")).unwrap();
+        assert_eq!(ds, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_result_serde_roundtrip() {
+        let r = DoctorResult::from_checks(vec![
+            DoctorCheck {
+                name: "a".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: Some("issue".into()),
+                critical: false,
+            },
+        ]);
+        let s = serde_json::to_string(&r).unwrap();
+        let r2: DoctorResult = serde_json::from_str(&s).unwrap();
+        assert_eq!(r2.status, DoctorStatus::Degraded);
+        assert_eq!(r2.checks.len(), 2);
+    }
+
+    #[test]
+    fn doctor_check_clone() {
+        let check = DoctorCheck {
+            name: "x".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let check2 = check.clone();
+        assert_eq!(check.name, check2.name);
+    }
+
+    #[test]
+    fn doctor_check_debug() {
+        let check = DoctorCheck {
+            name: "y".into(),
+            passed: false,
+            message: None,
+            critical: true,
+        };
+        let dbg = format!("{check:?}");
+        assert!(dbg.contains("DoctorCheck"));
+    }
+
+    #[test]
+    fn doctor_result_clone() {
+        let r = DoctorResult::from_checks(vec![]);
+        let r2 = r.clone();
+        assert_eq!(r.status, r2.status);
+    }
+
+    #[test]
+    fn doctor_result_debug() {
+        let r = DoctorResult::from_checks(vec![]);
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("DoctorResult"));
+    }
+
+    #[test]
+    fn require_str_array_value() {
+        let input = json!({"from_date": [1, 2, 3]});
+        assert!(require_str(&input, "from_date").is_err());
+    }
+
+    #[test]
+    fn require_str_bool_value() {
+        let input = json!({"from_date": true});
+        assert!(require_str(&input, "from_date").is_err());
+    }
+
+    #[test]
+    fn require_str_empty_string() {
+        let input = json!({"from_date": ""});
+        // Empty string is still a valid string; require_str just checks for string presence
+        assert_eq!(require_str(&input, "from_date").unwrap(), "");
+    }
+
+    #[test]
+    fn operations_events_query_has_correct_capability() {
+        let ops = operations_info();
+        let eq = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "mixpanel.events.query")
+            .unwrap();
+        assert_eq!(eq["capability"], "mixpanel.events.read");
+    }
+
+    #[test]
+    fn operations_funnels_list_has_correct_capability() {
+        let ops = operations_info();
+        let fl = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "mixpanel.funnels.list")
+            .unwrap();
+        assert_eq!(fl["capability"], "mixpanel.funnels.read");
+    }
+
+    #[test]
+    fn operations_insights_query_has_correct_capability() {
+        let ops = operations_info();
+        let iq = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "mixpanel.insights.query")
+            .unwrap();
+        assert_eq!(iq["capability"], "mixpanel.insights.read");
+    }
+
+    #[test]
+    fn operations_all_strict_idempotency() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            assert_eq!(
+                op["idempotency"], "strict",
+                "op {} should be strict",
+                op["id"]
+            );
+        }
+    }
+
+    #[test]
+    fn doctor_result_multiple_critical_failures() {
+        let checks = vec![
+            DoctorCheck {
+                name: "a".into(),
+                passed: false,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: None,
+                critical: true,
+            },
+        ];
+        let r = DoctorResult::from_checks(checks);
+        assert_eq!(r.status, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_result_mixed_critical_and_non_critical_failures() {
+        let checks = vec![
+            DoctorCheck {
+                name: "a".into(),
+                passed: false,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: None,
+                critical: false,
+            },
+        ];
+        let r = DoctorResult::from_checks(checks);
+        // Critical failure takes priority
+        assert_eq!(r.status, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn config_whitespace_secret_rejected() {
+        let result = MixpanelConfig::from_params(&json!({
+            "username": "u",
+            "secret": "   ",
+            "project_id": "1",
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn doctor_status_copy() {
+        let s = DoctorStatus::Healthy;
+        let s2 = s;
+        assert_eq!(s, s2);
+    }
+
+    #[test]
+    fn doctor_status_eq() {
+        assert_eq!(DoctorStatus::Healthy, DoctorStatus::Healthy);
+        assert_ne!(DoctorStatus::Healthy, DoctorStatus::Degraded);
+        assert_ne!(DoctorStatus::Degraded, DoctorStatus::Unhealthy);
+    }
 }

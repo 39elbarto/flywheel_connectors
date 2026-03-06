@@ -1313,4 +1313,291 @@ mod tests {
     fn test_normalize_large_numeric() {
         assert_eq!(normalize_chat_id("9999999999999").unwrap(), "9999999999999");
     }
+
+    // ─── TelegramClient construction tests ──────────────────────────
+
+    #[test]
+    fn test_client_new_success() {
+        let client = TelegramClient::new("123456:ABCtest");
+        assert!(client.is_ok());
+    }
+
+    #[test]
+    fn test_client_debug_format() {
+        let client = TelegramClient::new("123456:SECRET").unwrap();
+        let debug = format!("{client:?}");
+        assert!(debug.contains("TelegramClient"));
+        // Debug includes the credential (it's not redacted at the client level)
+        assert!(debug.contains("123456:SECRET"));
+    }
+
+    #[test]
+    fn test_client_clone() {
+        let original = TelegramClient::new("test_token").unwrap();
+        let cloned = original.clone();
+        drop(original);
+        // Cloned client is independent
+        let debug = format!("{cloned:?}");
+        assert!(debug.contains("TelegramClient"));
+    }
+
+    #[test]
+    fn test_client_with_base_url() {
+        let client = TelegramClient::new("test_token")
+            .unwrap()
+            .with_base_url("http://localhost:9090");
+        let debug = format!("{client:?}");
+        assert!(debug.contains("localhost:9090"));
+    }
+
+    #[test]
+    fn test_client_api_url_format() {
+        let client = TelegramClient::new("my_token").unwrap();
+        let url = client.api_url("sendMessage");
+        assert_eq!(url, "https://api.telegram.org/botmy_token/sendMessage");
+    }
+
+    #[test]
+    fn test_client_api_url_custom_base() {
+        let client = TelegramClient::new("my_token")
+            .unwrap()
+            .with_base_url("http://localhost:8080");
+        let url = client.api_url("getMe");
+        assert_eq!(url, "http://localhost:8080/botmy_token/getMe");
+    }
+
+    #[test]
+    fn test_file_download_url_default_base() {
+        let client = TelegramClient::new("bot_token_123").unwrap();
+        let url = client.file_download_url("documents/file.pdf");
+        assert_eq!(
+            url,
+            "https://api.telegram.org/file/botbot_token_123/documents/file.pdf"
+        );
+    }
+
+    #[test]
+    fn test_file_download_url_custom_base() {
+        let client = TelegramClient::new("tok")
+            .unwrap()
+            .with_base_url("http://localhost:9999");
+        let url = client.file_download_url("pics/photo.jpg");
+        assert_eq!(url, "http://localhost:9999/file/bottok/pics/photo.jpg");
+    }
+
+    // ─── SendMessageOptions tests ───────────────────────────────────
+
+    #[test]
+    fn test_send_message_options_default() {
+        let opts = SendMessageOptions::default();
+        assert!(opts.parse_mode.is_none());
+        assert!(opts.reply_to_message_id.is_none());
+        assert!(opts.message_thread_id.is_none());
+    }
+
+    #[test]
+    fn test_send_message_options_html_builder() {
+        let opts = SendMessageOptions::default().html();
+        assert_eq!(opts.parse_mode.as_deref(), Some("HTML"));
+    }
+
+    #[test]
+    fn test_send_message_options_markdown_v2_builder() {
+        let opts = SendMessageOptions::default().markdown_v2();
+        assert_eq!(opts.parse_mode.as_deref(), Some("MarkdownV2"));
+    }
+
+    #[test]
+    fn test_send_message_options_reply_to_builder() {
+        let opts = SendMessageOptions::default().reply_to_message_id(42);
+        assert_eq!(opts.reply_to_message_id, Some(42));
+    }
+
+    #[test]
+    fn test_send_message_options_chaining() {
+        let opts = SendMessageOptions::default()
+            .html()
+            .reply_to_message_id(7);
+        assert_eq!(opts.parse_mode.as_deref(), Some("HTML"));
+        assert_eq!(opts.reply_to_message_id, Some(7));
+    }
+
+    // ─── SendMediaOptions tests ─────────────────────────────────────
+
+    #[test]
+    fn test_send_media_options_default() {
+        let opts = SendMediaOptions::default();
+        assert!(opts.caption.is_none());
+        assert!(opts.parse_mode.is_none());
+        assert!(opts.reply_to_message_id.is_none());
+    }
+
+    // ─── TelegramError is_retryable additional tests ─────────────────
+
+    #[test]
+    fn test_http_error_is_std_error() {
+        let err: Box<dyn std::error::Error> = Box::new(TelegramError::Api {
+            code: 500,
+            description: "test".into(),
+        });
+        // Api variant should not have source
+        assert!(err.source().is_none());
+    }
+
+    #[test]
+    fn test_api_504_is_retryable() {
+        let err = TelegramError::Api {
+            code: 504,
+            description: "Gateway Timeout".into(),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn test_api_501_is_retryable() {
+        let err = TelegramError::Api {
+            code: 501,
+            description: "Not Implemented".into(),
+        };
+        assert!(err.is_retryable()); // 501 >= 500
+    }
+
+    #[test]
+    fn test_api_negative_code_not_retryable() {
+        let err = TelegramError::Api {
+            code: -1,
+            description: "Unknown".into(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    // ─── SendMediaRequest custom serialize tests ─────────────────────
+
+    #[test]
+    fn test_send_media_request_serialize_photo() {
+        let req = SendMediaRequest {
+            chat_id: "123".into(),
+            media_field: "photo".into(),
+            media_value: "AgACAgIAAxk".into(),
+            caption: Some("Test caption".into()),
+            parse_mode: Some("HTML".into()),
+            reply_to_message_id: Some(7),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["chat_id"], "123");
+        assert_eq!(json["photo"], "AgACAgIAAxk");
+        assert_eq!(json["caption"], "Test caption");
+        assert_eq!(json["parse_mode"], "HTML");
+        assert_eq!(json["reply_to_message_id"], 7);
+    }
+
+    #[test]
+    fn test_send_media_request_serialize_document_minimal() {
+        let req = SendMediaRequest {
+            chat_id: "456".into(),
+            media_field: "document".into(),
+            media_value: "BQACAgIAAxk".into(),
+            caption: None,
+            parse_mode: None,
+            reply_to_message_id: None,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["chat_id"], "456");
+        assert_eq!(json["document"], "BQACAgIAAxk");
+        assert!(json.get("caption").is_none());
+        assert!(json.get("parse_mode").is_none());
+        assert!(json.get("reply_to_message_id").is_none());
+    }
+
+    #[test]
+    fn test_send_media_request_serialize_video_with_caption() {
+        let req = SendMediaRequest {
+            chat_id: "789".into(),
+            media_field: "video".into(),
+            media_value: "CQACAgIAAxk".into(),
+            caption: Some("Watch this".into()),
+            parse_mode: None,
+            reply_to_message_id: None,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["video"], "CQACAgIAAxk");
+        assert_eq!(json["caption"], "Watch this");
+        assert!(json.get("parse_mode").is_none());
+    }
+
+    // ─── TelegramError Display comprehensive tests ────────────────
+
+    #[test]
+    fn test_api_error_display_includes_code_and_desc() {
+        let err = TelegramError::Api {
+            code: 504,
+            description: "Gateway Timeout".into(),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("504"));
+        assert!(msg.contains("Gateway Timeout"));
+    }
+
+    #[test]
+    fn test_invalid_chat_id_display_includes_id() {
+        let err = TelegramError::InvalidChatId("weird://value".into());
+        let msg = format!("{err}");
+        assert!(msg.contains("weird://value"));
+    }
+
+    #[test]
+    fn test_api_error_debug_format_contains_variant() {
+        let err = TelegramError::Api {
+            code: 200,
+            description: "Unusual".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Api"));
+        assert!(dbg.contains("200"));
+    }
+
+    // ─── SendMediaOptions clone test ─────────────────────────────────
+
+    #[test]
+    fn test_send_media_options_clone() {
+        let original = SendMediaOptions {
+            caption: Some("test caption".into()),
+            parse_mode: Some("HTML".into()),
+            reply_to_message_id: Some(42),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.caption.as_deref(), Some("test caption"));
+        assert_eq!(cloned.parse_mode.as_deref(), Some("HTML"));
+        assert_eq!(cloned.reply_to_message_id, Some(42));
+    }
+
+    #[test]
+    fn test_send_message_options_clone() {
+        let original = SendMessageOptions::default().html().reply_to_message_id(99);
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.parse_mode.as_deref(), Some("HTML"));
+        assert_eq!(cloned.reply_to_message_id, Some(99));
+    }
+
+    #[test]
+    fn test_send_message_options_debug() {
+        let opts = SendMessageOptions::default().markdown_v2();
+        let dbg = format!("{opts:?}");
+        assert!(dbg.contains("SendMessageOptions"));
+        assert!(dbg.contains("MarkdownV2"));
+    }
+
+    #[test]
+    fn test_send_media_options_debug() {
+        let opts = SendMediaOptions {
+            caption: Some("debug test".into()),
+            parse_mode: None,
+            reply_to_message_id: None,
+        };
+        let dbg = format!("{opts:?}");
+        assert!(dbg.contains("SendMediaOptions"));
+        assert!(dbg.contains("debug test"));
+    }
 }

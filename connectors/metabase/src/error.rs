@@ -308,4 +308,178 @@ mod tests {
             "Metabase API error (500): Internal"
         );
     }
+
+    #[test]
+    fn error_display_http() {
+        // Build an HTTP error from reqwest
+        let client = reqwest::Client::new();
+        let err = client
+            .get("http://[::invalid::host]")
+            .build()
+            .unwrap_err();
+        let me = MetabaseError::Http(err);
+        let display = me.to_string();
+        assert!(display.starts_with("HTTP error:"), "got: {display}");
+    }
+
+    #[test]
+    fn error_display_json() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{bad");
+        let me = MetabaseError::Json(bad.unwrap_err());
+        let display = me.to_string();
+        assert!(display.starts_with("JSON error:"), "got: {display}");
+    }
+
+    #[test]
+    fn error_debug_unauthorized() {
+        let dbg = format!("{:?}", MetabaseError::Unauthorized);
+        assert!(dbg.contains("Unauthorized"));
+    }
+
+    #[test]
+    fn error_debug_forbidden() {
+        let dbg = format!("{:?}", MetabaseError::Forbidden);
+        assert!(dbg.contains("Forbidden"));
+    }
+
+    #[test]
+    fn error_debug_not_found() {
+        let dbg = format!("{:?}", MetabaseError::NotFound { resource: "card".into() });
+        assert!(dbg.contains("NotFound"));
+        assert!(dbg.contains("card"));
+    }
+
+    #[test]
+    fn error_debug_rate_limited() {
+        let dbg = format!("{:?}", MetabaseError::RateLimited { retry_after_ms: 5000 });
+        assert!(dbg.contains("RateLimited"));
+        assert!(dbg.contains("5000"));
+    }
+
+    #[test]
+    fn error_debug_api() {
+        let dbg = format!("{:?}", MetabaseError::Api { status_code: 502, message: "bad gateway".into() });
+        assert!(dbg.contains("Api"));
+        assert!(dbg.contains("502"));
+        assert!(dbg.contains("bad gateway"));
+    }
+
+    #[test]
+    fn api_501_is_retryable() {
+        assert!(MetabaseError::Api { status_code: 501, message: "not impl".into() }.is_retryable());
+    }
+
+    #[test]
+    fn api_502_is_retryable() {
+        assert!(
+            MetabaseError::Api { status_code: 502, message: "bad gateway".into() }.is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_504_is_retryable() {
+        assert!(MetabaseError::Api { status_code: 504, message: "timeout".into() }.is_retryable());
+    }
+
+    #[test]
+    fn api_599_is_retryable() {
+        assert!(MetabaseError::Api { status_code: 599, message: "custom".into() }.is_retryable());
+    }
+
+    #[test]
+    fn api_200_not_retryable() {
+        assert!(!MetabaseError::Api { status_code: 200, message: "ok".into() }.is_retryable());
+    }
+
+    #[test]
+    fn api_404_not_retryable() {
+        assert!(!MetabaseError::Api { status_code: 404, message: "gone".into() }.is_retryable());
+    }
+
+    #[test]
+    fn json_not_retryable() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{bad");
+        assert!(!MetabaseError::Json(bad.unwrap_err()).is_retryable());
+    }
+
+    #[test]
+    fn retry_after_none_for_json() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{bad");
+        assert_eq!(MetabaseError::Json(bad.unwrap_err()).retry_after(), None);
+    }
+
+    #[test]
+    fn retry_after_rate_limited_zero_ms() {
+        let err = MetabaseError::RateLimited { retry_after_ms: 0 };
+        assert_eq!(err.retry_after(), Some(Duration::from_millis(0)));
+    }
+
+    #[test]
+    fn retry_after_rate_limited_large_value() {
+        let err = MetabaseError::RateLimited { retry_after_ms: 300_000 };
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(300)));
+    }
+
+    #[test]
+    fn http_error_to_fcp_external() {
+        let client = reqwest::Client::new();
+        let err = client
+            .get("http://[::invalid::host]")
+            .build()
+            .unwrap_err();
+        let me = MetabaseError::Http(err);
+        match me.to_fcp_error() {
+            FcpError::External { service, retryable, .. } => {
+                assert_eq!(service, "metabase");
+                assert!(retryable); // HTTP errors are retryable
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_error_422_to_fcp_error() {
+        match (MetabaseError::Api { status_code: 422, message: "unprocessable".into() })
+            .to_fcp_error()
+        {
+            FcpError::External { status_code, retryable, message, .. } => {
+                assert_eq!(status_code, Some(422));
+                assert!(!retryable);
+                assert_eq!(message, "unprocessable");
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_error_502_to_fcp_error() {
+        match (MetabaseError::Api { status_code: 502, message: "bad gw".into() }).to_fcp_error() {
+            FcpError::External { status_code, retryable, .. } => {
+                assert_eq!(status_code, Some(502));
+                assert!(retryable);
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rate_limited_zero_to_fcp_error() {
+        match (MetabaseError::RateLimited { retry_after_ms: 0 }).to_fcp_error() {
+            FcpError::External { retry_after, retryable, .. } => {
+                assert!(retryable);
+                assert_eq!(retry_after, Some(Duration::from_millis(0)));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn not_found_fcp_error_has_service() {
+        match (MetabaseError::NotFound { resource: "db_99".into() }).to_fcp_error() {
+            FcpError::External { service, .. } => {
+                assert_eq!(service, "metabase");
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
 }

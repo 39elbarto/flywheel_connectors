@@ -177,4 +177,179 @@ mod tests {
         assert_eq!(v["funnel_id"], 999);
         assert_eq!(v["name"], "Onboarding");
     }
+
+    #[test]
+    fn funnel_clone() {
+        let f = Funnel {
+            funnel_id: 42,
+            name: Some("Clone Test".into()),
+        };
+        let f2 = f.clone();
+        assert_eq!(f.funnel_id, f2.funnel_id);
+        assert_eq!(f.name, f2.name);
+    }
+
+    #[test]
+    fn funnel_debug() {
+        let f = Funnel {
+            funnel_id: 1,
+            name: None,
+        };
+        let dbg = format!("{f:?}");
+        assert!(dbg.contains("Funnel"));
+        assert!(dbg.contains("funnel_id"));
+    }
+
+    #[test]
+    fn funnel_name_none_serializes_as_null() {
+        let f = Funnel {
+            funnel_id: 10,
+            name: None,
+        };
+        let v = serde_json::to_value(&f).unwrap();
+        assert!(v["name"].is_null());
+    }
+
+    #[test]
+    fn funnel_large_id() {
+        let f: Funnel =
+            serde_json::from_value(json!({"funnel_id": 9999999999u64})).unwrap();
+        assert_eq!(f.funnel_id, 9999999999);
+    }
+
+    #[test]
+    fn event_query_result_clone() {
+        let e = EventQueryResult {
+            data: Some(json!({"key": "value"})),
+            computed_at: Some("2025-01-01T00:00:00Z".into()),
+        };
+        let e2 = e.clone();
+        assert_eq!(e.data, e2.data);
+        assert_eq!(e.computed_at, e2.computed_at);
+    }
+
+    #[test]
+    fn event_query_result_debug() {
+        let e = EventQueryResult {
+            data: None,
+            computed_at: None,
+        };
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("EventQueryResult"));
+    }
+
+    #[test]
+    fn event_query_result_serialize_with_null_data() {
+        let e = EventQueryResult {
+            data: None,
+            computed_at: Some("2025-06-01".into()),
+        };
+        let v = serde_json::to_value(&e).unwrap();
+        assert!(v["data"].is_null());
+        assert_eq!(v["computed_at"], "2025-06-01");
+    }
+
+    #[test]
+    fn insights_query_result_clone() {
+        let i = InsightsQueryResult {
+            data: Some(json!([1, 2, 3])),
+            computed_at: None,
+        };
+        let i2 = i.clone();
+        assert_eq!(i.data, i2.data);
+    }
+
+    #[test]
+    fn insights_query_result_debug() {
+        let i = InsightsQueryResult {
+            data: None,
+            computed_at: None,
+        };
+        let dbg = format!("{i:?}");
+        assert!(dbg.contains("InsightsQueryResult"));
+    }
+
+    #[test]
+    fn insights_query_result_data_nested() {
+        let i: InsightsQueryResult = serde_json::from_value(json!({
+            "data": {"series": [{"date": "2025-01-01", "value": 100}]},
+            "computed_at": "2025-01-02",
+        }))
+        .unwrap();
+        assert!(i.data.unwrap()["series"].is_array());
+    }
+
+    #[test]
+    fn api_error_response_clone() {
+        let e = ApiErrorResponse {
+            error: Some("err".into()),
+            message: Some("msg".into()),
+        };
+        let e2 = e.clone();
+        assert_eq!(e.error, e2.error);
+        assert_eq!(e.message, e2.message);
+    }
+
+    #[test]
+    fn api_error_response_debug() {
+        let e = ApiErrorResponse {
+            error: None,
+            message: None,
+        };
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("ApiErrorResponse"));
+    }
+
+    #[test]
+    fn funnel_json_string_roundtrip() {
+        let f = Funnel {
+            funnel_id: 55,
+            name: Some("String Test".into()),
+        };
+        let s = serde_json::to_string(&f).unwrap();
+        let f2: Funnel = serde_json::from_str(&s).unwrap();
+        assert_eq!(f2.funnel_id, 55);
+        assert_eq!(f2.name, Some("String Test".into()));
+    }
+
+    #[test]
+    fn event_query_result_json_string_roundtrip() {
+        let e = EventQueryResult {
+            data: Some(json!({"x": 1})),
+            computed_at: Some("ts".into()),
+        };
+        let s = serde_json::to_string(&e).unwrap();
+        let e2: EventQueryResult = serde_json::from_str(&s).unwrap();
+        assert_eq!(e2.computed_at, Some("ts".into()));
+    }
+
+    #[test]
+    fn insights_query_result_json_string_roundtrip() {
+        let i = InsightsQueryResult {
+            data: Some(json!({"metric": 42})),
+            computed_at: Some("2025-06-01".into()),
+        };
+        let s = serde_json::to_string(&i).unwrap();
+        let i2: InsightsQueryResult = serde_json::from_str(&s).unwrap();
+        assert!(i2.data.is_some());
+        assert_eq!(i2.computed_at, Some("2025-06-01".into()));
+    }
+
+    #[test]
+    fn api_error_response_extra_fields_ignored() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({
+            "error": "Bad Request",
+            "message": "Invalid",
+            "details": "extra info",
+        }))
+        .unwrap();
+        assert_eq!(e.error, Some("Bad Request".into()));
+        assert_eq!(e.message, Some("Invalid".into()));
+    }
+
+    #[test]
+    fn funnel_zero_id() {
+        let f: Funnel = serde_json::from_value(json!({"funnel_id": 0})).unwrap();
+        assert_eq!(f.funnel_id, 0);
+    }
 }

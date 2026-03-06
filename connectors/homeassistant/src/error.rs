@@ -474,4 +474,168 @@ mod tests {
             "Home Assistant API error (500): Internal"
         );
     }
+
+    #[test]
+    fn api_501_is_retryable() {
+        assert!(
+            HomeAssistantError::Api {
+                status_code: 501,
+                message: "not implemented".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_599_is_retryable() {
+        assert!(
+            HomeAssistantError::Api {
+                status_code: 599,
+                message: "edge".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_499_not_retryable() {
+        assert!(
+            !HomeAssistantError::Api {
+                status_code: 499,
+                message: "client".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn json_not_retryable() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{bad");
+        assert!(!HomeAssistantError::Json(bad.unwrap_err()).is_retryable());
+    }
+
+    #[test]
+    fn error_debug_format_api() {
+        let err = HomeAssistantError::Api {
+            status_code: 503,
+            message: "unavailable".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Api"));
+        assert!(dbg.contains("503"));
+    }
+
+    #[test]
+    fn error_debug_format_unauthorized() {
+        let dbg = format!("{:?}", HomeAssistantError::Unauthorized);
+        assert!(dbg.contains("Unauthorized"));
+    }
+
+    #[test]
+    fn error_debug_format_unavailable() {
+        let dbg = format!("{:?}", HomeAssistantError::Unavailable);
+        assert!(dbg.contains("Unavailable"));
+    }
+
+    #[test]
+    fn error_debug_format_entity_not_found() {
+        let err = HomeAssistantError::EntityNotFound {
+            entity_id: "light.test".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("EntityNotFound"));
+        assert!(dbg.contains("light.test"));
+    }
+
+    #[test]
+    fn error_debug_format_service_not_found() {
+        let err = HomeAssistantError::ServiceNotFound {
+            service: "light.blink".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("ServiceNotFound"));
+    }
+
+    #[test]
+    fn retry_after_zero_ms() {
+        let err = HomeAssistantError::RateLimited {
+            retry_after_ms: 0,
+        };
+        assert_eq!(err.retry_after(), Some(Duration::from_millis(0)));
+    }
+
+    #[test]
+    fn retry_after_large_value() {
+        let err = HomeAssistantError::RateLimited {
+            retry_after_ms: 3_600_000,
+        };
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn api_error_retryable_has_no_retry_after() {
+        match (HomeAssistantError::Api {
+            status_code: 500,
+            message: "err".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External { retry_after, .. } => assert!(retry_after.is_none()),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_display_json() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{{");
+        let err = HomeAssistantError::Json(bad.unwrap_err());
+        let display = err.to_string();
+        assert!(display.starts_with("JSON error:"));
+    }
+
+    #[test]
+    fn api_502_is_retryable() {
+        assert!(
+            HomeAssistantError::Api {
+                status_code: 502,
+                message: "bad gateway".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_504_is_retryable() {
+        assert!(
+            HomeAssistantError::Api {
+                status_code: 504,
+                message: "gateway timeout".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn retry_after_none_for_json_error() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{bad");
+        assert_eq!(
+            HomeAssistantError::Json(bad.unwrap_err()).retry_after(),
+            None
+        );
+    }
+
+    #[test]
+    fn unavailable_to_fcp_error_retryable() {
+        match HomeAssistantError::Unavailable.to_fcp_error() {
+            FcpError::External {
+                retryable,
+                retry_after,
+                ..
+            } => {
+                assert!(retryable);
+                assert!(retry_after.is_none());
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
 }

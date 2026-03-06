@@ -770,4 +770,201 @@ mod tests {
         assert!(c.config.is_none());
         assert!(c.client.is_none());
     }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn doctor_check_clone() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: true,
+            message: Some("ok".into()),
+            critical: false,
+        };
+        let c = check.clone();
+        assert_eq!(c.name, "test");
+        assert!(c.passed);
+    }
+
+    #[test]
+    fn doctor_check_debug() {
+        let check = DoctorCheck {
+            name: "check1".into(),
+            passed: false,
+            message: None,
+            critical: true,
+        };
+        let dbg = format!("{check:?}");
+        assert!(dbg.contains("DoctorCheck"));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn doctor_result_clone() {
+        let r = DoctorResult::from_checks(vec![]);
+        let c = r.clone();
+        assert_eq!(c.status, DoctorStatus::Healthy);
+    }
+
+    #[test]
+    fn doctor_result_debug() {
+        let r = DoctorResult::from_checks(vec![]);
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("DoctorResult"));
+    }
+
+    #[test]
+    fn doctor_status_serialize_all_variants() {
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Healthy).unwrap(),
+            json!("healthy")
+        );
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Degraded).unwrap(),
+            json!("degraded")
+        );
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Unhealthy).unwrap(),
+            json!("unhealthy")
+        );
+    }
+
+    #[test]
+    fn doctor_status_deserialize_all_variants() {
+        let h: DoctorStatus = serde_json::from_value(json!("healthy")).unwrap();
+        assert_eq!(h, DoctorStatus::Healthy);
+        let d: DoctorStatus = serde_json::from_value(json!("degraded")).unwrap();
+        assert_eq!(d, DoctorStatus::Degraded);
+        let u: DoctorStatus = serde_json::from_value(json!("unhealthy")).unwrap();
+        assert_eq!(u, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_check_skip_none_message() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert!(v.get("message").is_none());
+    }
+
+    #[test]
+    fn doctor_check_with_message() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: false,
+            message: Some("failure".into()),
+            critical: true,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert_eq!(v["message"], "failure");
+    }
+
+    #[test]
+    fn require_str_empty_string_returns_ok() {
+        let input = json!({"field": ""});
+        assert_eq!(require_str(&input, "field").unwrap(), "");
+    }
+
+    #[test]
+    fn require_str_object_value() {
+        let input = json!({"field": {"nested": true}});
+        assert!(require_str(&input, "field").is_err());
+    }
+
+    #[test]
+    fn connector_new_equals_default() {
+        let c1 = RetoolConnector::new();
+        let c2 = RetoolConnector::default();
+        assert!(c1.config.is_none());
+        assert!(c2.config.is_none());
+    }
+
+    #[test]
+    fn doctor_check_deserialize() {
+        let v = json!({
+            "name": "config",
+            "passed": true,
+            "message": "ok",
+            "critical": false
+        });
+        let check: DoctorCheck = serde_json::from_value(v).unwrap();
+        assert_eq!(check.name, "config");
+        assert!(check.passed);
+    }
+
+    #[test]
+    fn doctor_status_eq() {
+        assert_eq!(DoctorStatus::Healthy, DoctorStatus::Healthy);
+        assert_ne!(DoctorStatus::Healthy, DoctorStatus::Degraded);
+    }
+
+    #[test]
+    fn doctor_status_copy() {
+        let status = DoctorStatus::Unhealthy;
+        let copied = status;
+        assert_eq!(status, copied);
+    }
+
+    #[test]
+    fn workflows_run_is_risky() {
+        let ops = operations_info();
+        let run = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "retool.workflows.run")
+            .unwrap();
+        assert_eq!(run["safety_tier"], "risky");
+        assert_eq!(run["idempotency"], "none");
+    }
+
+    #[test]
+    fn workflows_list_is_strict_idempotent() {
+        let ops = operations_info();
+        let list = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "retool.workflows.list")
+            .unwrap();
+        assert_eq!(list["idempotency"], "strict");
+    }
+
+    #[test]
+    fn config_with_subdomain_and_base_url() {
+        let config = RetoolConfig::from_params(&json!({
+            "api_token": "tok",
+            "subdomain": "myorg",
+            "base_url": "https://custom.retool.com/api/v1",
+        }))
+        .unwrap();
+        assert_eq!(config.subdomain, Some("myorg".into()));
+        assert_eq!(
+            config.base_url,
+            Some("https://custom.retool.com/api/v1".into())
+        );
+    }
+
+    #[test]
+    fn doctor_result_all_non_critical_fail() {
+        let checks = vec![
+            DoctorCheck {
+                name: "a".into(),
+                passed: false,
+                message: Some("warn a".into()),
+                critical: false,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: Some("warn b".into()),
+                critical: false,
+            },
+        ];
+        let r = DoctorResult::from_checks(checks);
+        assert_eq!(r.status, DoctorStatus::Degraded);
+    }
 }

@@ -424,4 +424,249 @@ mod tests {
         .unwrap();
         assert!(d.domain.is_none());
     }
+
+    // -- Clone trait tests --
+
+    #[test]
+    fn entity_state_clone() {
+        let s = EntityState {
+            entity_id: "light.test".into(),
+            state: "on".into(),
+            attributes: json!({"brightness": 255}),
+            last_changed: None,
+            last_updated: None,
+            last_reported: None,
+            context: None,
+        };
+        let cloned = s.clone();
+        drop(s);
+        assert_eq!(cloned.entity_id, "light.test");
+        assert_eq!(cloned.state, "on");
+    }
+
+    #[test]
+    fn state_context_clone() {
+        let c = StateContext {
+            id: Some("ctx1".into()),
+            parent_id: None,
+            user_id: Some("u1".into()),
+        };
+        let cloned = c.clone();
+        drop(c);
+        assert_eq!(cloned.id, Some("ctx1".into()));
+    }
+
+    #[test]
+    fn area_clone() {
+        let a = Area {
+            area_id: "kitchen".into(),
+            name: "Kitchen".into(),
+            aliases: vec!["cooking".into()],
+            picture: None,
+        };
+        let cloned = a.clone();
+        drop(a);
+        assert_eq!(cloned.area_id, "kitchen");
+        assert_eq!(cloned.aliases.len(), 1);
+    }
+
+    #[test]
+    fn device_clone() {
+        let d = Device {
+            entity_id: "light.desk".into(),
+            state: "on".into(),
+            attributes: json!({}),
+            domain: Some("light".into()),
+        };
+        let cloned = d.clone();
+        drop(d);
+        assert_eq!(cloned.domain, Some("light".into()));
+    }
+
+    #[test]
+    fn automation_clone() {
+        let a = Automation {
+            entity_id: "automation.test".into(),
+            state: "on".into(),
+            attributes: json!({}),
+            last_triggered: None,
+            friendly_name: Some("Test".into()),
+        };
+        let cloned = a.clone();
+        drop(a);
+        assert_eq!(cloned.friendly_name, Some("Test".into()));
+    }
+
+    #[test]
+    fn scene_clone() {
+        let s = Scene {
+            entity_id: "scene.test".into(),
+            state: "scening".into(),
+            attributes: json!({}),
+            friendly_name: Some("Movie".into()),
+        };
+        let cloned = s.clone();
+        drop(s);
+        assert_eq!(cloned.friendly_name, Some("Movie".into()));
+    }
+
+    #[test]
+    fn history_entry_clone() {
+        let h = HistoryEntry {
+            entity_id: "sensor.temp".into(),
+            state: "22.5".into(),
+            attributes: json!({}),
+            last_changed: None,
+            last_updated: None,
+        };
+        let cloned = h.clone();
+        drop(h);
+        assert_eq!(cloned.state, "22.5");
+    }
+
+    #[test]
+    fn statistics_record_clone() {
+        let s = StatisticsRecord {
+            statistic_id: Some("sensor:energy".into()),
+            start: None,
+            end: None,
+            mean: Some(1.5),
+            min: None,
+            max: None,
+            sum: None,
+            state: None,
+        };
+        let cloned = s.clone();
+        drop(s);
+        assert_eq!(cloned.mean, Some(1.5));
+    }
+
+    // -- Debug trait tests --
+
+    #[test]
+    fn entity_state_debug() {
+        let s: EntityState = serde_json::from_value(json!({
+            "entity_id": "light.dbg",
+            "state": "on"
+        }))
+        .unwrap();
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("EntityState"));
+        assert!(dbg.contains("light.dbg"));
+    }
+
+    #[test]
+    fn area_debug() {
+        let a: Area = serde_json::from_value(json!({
+            "area_id": "living",
+            "name": "Living Room"
+        }))
+        .unwrap();
+        let dbg = format!("{a:?}");
+        assert!(dbg.contains("Area"));
+    }
+
+    #[test]
+    fn service_domain_debug() {
+        let sd: ServiceDomain = serde_json::from_value(json!({
+            "domain": "light",
+            "services": {}
+        }))
+        .unwrap();
+        let dbg = format!("{sd:?}");
+        assert!(dbg.contains("ServiceDomain"));
+    }
+
+    #[test]
+    fn api_error_response_debug() {
+        let e = ApiErrorResponse {
+            message: Some("test".into()),
+        };
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("ApiErrorResponse"));
+    }
+
+    // -- Serialization edge cases --
+
+    #[test]
+    fn entity_state_empty_attributes_default() {
+        let s: EntityState = serde_json::from_value(json!({
+            "entity_id": "sensor.x",
+            "state": "0"
+        }))
+        .unwrap();
+        // attributes should default to null/empty via #[serde(default)]
+        assert!(s.attributes.is_null() || s.attributes.is_object());
+    }
+
+    #[test]
+    fn area_empty_aliases_default() {
+        let a: Area = serde_json::from_value(json!({
+            "area_id": "office",
+            "name": "Office"
+        }))
+        .unwrap();
+        assert!(a.aliases.is_empty());
+    }
+
+    #[test]
+    fn service_call_request_clone() {
+        let r = ServiceCallRequest {
+            entity_id: Some("light.test".into()),
+            service_data: Some(json!({"brightness_pct": 50})),
+            target: None,
+        };
+        let cloned = r.clone();
+        drop(r);
+        assert_eq!(cloned.entity_id, Some("light.test".into()));
+    }
+
+    #[test]
+    fn set_state_request_clone() {
+        let r = SetStateRequest {
+            state: "on".into(),
+            attributes: Some(json!({"brightness": 128})),
+        };
+        let cloned = r.clone();
+        drop(r);
+        assert_eq!(cloned.state, "on");
+    }
+
+    #[test]
+    fn api_error_response_clone() {
+        let e = ApiErrorResponse {
+            message: Some("test".into()),
+        };
+        let cloned = e.clone();
+        drop(e);
+        assert_eq!(cloned.message, Some("test".into()));
+    }
+
+    #[test]
+    fn statistics_record_all_fields() {
+        let s: StatisticsRecord = serde_json::from_value(json!({
+            "statistic_id": "sensor:energy",
+            "start": "2026-03-01T00:00:00Z",
+            "end": "2026-03-01T01:00:00Z",
+            "mean": 1.5,
+            "min": 0.5,
+            "max": 2.5,
+            "sum": 36.0,
+            "state": 1.5
+        }))
+        .unwrap();
+        assert_eq!(s.sum, Some(36.0));
+        assert_eq!(s.state, Some(1.5));
+    }
+
+    #[test]
+    fn service_domain_clone() {
+        let sd = ServiceDomain {
+            domain: "light".into(),
+            services: json!({"turn_on": {}}),
+        };
+        let cloned = sd.clone();
+        drop(sd);
+        assert_eq!(cloned.domain, "light");
+    }
 }

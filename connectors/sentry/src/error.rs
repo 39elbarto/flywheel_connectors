@@ -374,4 +374,111 @@ mod tests {
     fn error_display_api() {
         assert_eq!(SentryError::Api { status_code: 500, message: "Internal".into() }.to_string(), "Sentry API error (500): Internal");
     }
+
+    // ── Additional retryable boundary cases ───────────────────────
+
+    #[test]
+    fn api_599_is_retryable() {
+        assert!(SentryError::Api { status_code: 599, message: "edge".into() }.is_retryable());
+    }
+
+    #[test]
+    fn api_499_not_retryable() {
+        assert!(!SentryError::Api { status_code: 499, message: "not server".into() }.is_retryable());
+    }
+
+    #[test]
+    fn json_not_retryable() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{bad");
+        assert!(!SentryError::Json(bad.unwrap_err()).is_retryable());
+    }
+
+    #[test]
+    fn retry_after_none_for_json() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{bad");
+        assert_eq!(SentryError::Json(bad.unwrap_err()).retry_after(), None);
+    }
+
+    #[test]
+    fn rate_limited_zero_ms() {
+        let err = SentryError::RateLimited { retry_after_ms: 0 };
+        assert!(err.is_retryable());
+        assert_eq!(err.retry_after(), Some(Duration::from_millis(0)));
+    }
+
+    #[test]
+    fn rate_limited_large_ms() {
+        let err = SentryError::RateLimited { retry_after_ms: 3_600_000 };
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(3600)));
+    }
+
+    // ── Display edge cases ────────────────────────────────────────
+
+    #[test]
+    fn error_display_not_found_empty_resource() {
+        assert_eq!(
+            SentryError::NotFound { resource: String::new() }.to_string(),
+            "Not found: "
+        );
+    }
+
+    #[test]
+    fn error_display_api_empty_message() {
+        assert_eq!(
+            SentryError::Api { status_code: 502, message: String::new() }.to_string(),
+            "Sentry API error (502): "
+        );
+    }
+
+    // ── to_fcp_error service field ────────────────────────────────
+
+    #[test]
+    fn all_fcp_errors_have_sentry_service() {
+        let errors: Vec<SentryError> = vec![
+            SentryError::Unauthorized,
+            SentryError::Forbidden,
+            SentryError::NotFound { resource: "x".into() },
+            SentryError::RateLimited { retry_after_ms: 1000 },
+            SentryError::Api { status_code: 500, message: "err".into() },
+        ];
+        for err in &errors {
+            let fcp = err.to_fcp_error();
+            if let FcpError::External { service, .. } = fcp {
+                assert_eq!(service, "sentry");
+            }
+        }
+    }
+
+    #[test]
+    fn rate_limited_fcp_error_retry_after_matches() {
+        match (SentryError::RateLimited { retry_after_ms: 45_000 }).to_fcp_error() {
+            FcpError::External { retry_after, .. } => {
+                assert_eq!(retry_after, Some(Duration::from_secs(45)));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    // ── Debug format ──────────────────────────────────────────────
+
+    #[test]
+    fn error_debug_format() {
+        let err = SentryError::Api { status_code: 503, message: "retry".into() };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Api"));
+        assert!(dbg.contains("503"));
+    }
+
+    #[test]
+    fn error_debug_unauthorized() {
+        let dbg = format!("{:?}", SentryError::Unauthorized);
+        assert!(dbg.contains("Unauthorized"));
+    }
+
+    #[test]
+    fn error_debug_rate_limited() {
+        let dbg = format!("{:?}", SentryError::RateLimited { retry_after_ms: 100 });
+        assert!(dbg.contains("RateLimited"));
+        assert!(dbg.contains("100"));
+    }
 }

@@ -264,4 +264,73 @@ mod tests {
                 .unwrap();
         assert_eq!(client.base_url, "https://custom.example.com");
     }
+
+    #[test]
+    fn client_debug_contains_struct_name() {
+        let auth = RetoolAuth {
+            api_token: "tok".into(),
+        };
+        let client = RetoolClient::new(auth, None, None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("RetoolClient"));
+    }
+
+    #[test]
+    fn auth_debug_contains_struct_name() {
+        let auth = RetoolAuth {
+            api_token: "tok".into(),
+        };
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("RetoolAuth"));
+    }
+
+    #[test]
+    fn default_base_url_template_contains_placeholder() {
+        assert!(DEFAULT_BASE_URL_TEMPLATE.contains("{subdomain}"));
+    }
+
+    #[test]
+    fn default_base_url_template_starts_with_https() {
+        assert!(DEFAULT_BASE_URL_TEMPLATE.starts_with("https://"));
+    }
+
+    #[test]
+    fn auth_redacted_label_consistent() {
+        let auth1 = RetoolAuth {
+            api_token: "secret1".into(),
+        };
+        let auth2 = RetoolAuth {
+            api_token: "secret2".into(),
+        };
+        assert_eq!(auth1.redacted_label(), auth2.redacted_label());
+    }
+
+    #[test]
+    fn client_debug_does_not_contain_token() {
+        let auth = RetoolAuth {
+            api_token: "super-secret-token-value".into(),
+        };
+        let client = RetoolClient::new(auth, None, None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(!dbg.contains("super-secret-token-value"));
+    }
+
+    #[test]
+    fn client_strips_multiple_trailing_slashes() {
+        let auth = RetoolAuth {
+            api_token: "tok".into(),
+        };
+        let client =
+            RetoolClient::new(auth, None, Some("https://example.com/api/v1///")).unwrap();
+        assert!(!client.base_url.ends_with('/'));
+    }
+
+    #[test]
+    fn client_empty_custom_url() {
+        let auth = RetoolAuth {
+            api_token: "tok".into(),
+        };
+        let client = RetoolClient::new(auth, None, Some("")).unwrap();
+        assert!(client.base_url.is_empty());
+    }
 }

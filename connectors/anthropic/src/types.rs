@@ -672,4 +672,602 @@ mod tests {
         let back: Tool = serde_json::from_str(&json).unwrap();
         assert_eq!(back.name, "calculator");
     }
+
+    // ---- Model additional tests ----
+
+    #[test]
+    fn model_copy_and_use() {
+        let original = Model::ClaudeOpus4_5;
+        let copied = original;
+        let _ = original;
+        assert_eq!(copied.as_str(), "claude-opus-4-5-20251101");
+    }
+
+    #[test]
+    fn model_debug() {
+        let dbg = format!("{:?}", Model::Claude3_5Sonnet);
+        assert!(dbg.contains("Claude3_5Sonnet"));
+    }
+
+    #[test]
+    fn model_serde_all_variants() {
+        for model in [
+            Model::ClaudeOpus4_5,
+            Model::ClaudeSonnet4,
+            Model::Claude3_5Haiku,
+            Model::Claude3_5Sonnet,
+        ] {
+            let json = serde_json::to_string(&model).unwrap();
+            let back: Model = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, model);
+        }
+    }
+
+    #[test]
+    fn model_3_5_sonnet_pricing() {
+        assert_eq!(Model::Claude3_5Sonnet.input_price_per_million(), 3.0);
+        assert_eq!(Model::Claude3_5Sonnet.output_price_per_million(), 15.0);
+    }
+
+    // ---- Role additional tests ----
+
+    #[test]
+    fn role_copy_and_use() {
+        let original = Role::User;
+        let copied = original;
+        let _ = original;
+        assert_eq!(copied, Role::User);
+    }
+
+    #[test]
+    fn role_debug() {
+        assert!(format!("{:?}", Role::User).contains("User"));
+        assert!(format!("{:?}", Role::Assistant).contains("Assistant"));
+    }
+
+    #[test]
+    fn role_eq() {
+        assert_eq!(Role::User, Role::User);
+        assert_eq!(Role::Assistant, Role::Assistant);
+        assert_ne!(Role::User, Role::Assistant);
+    }
+
+    // ---- StopReason additional tests ----
+
+    #[test]
+    fn stop_reason_all_variants_serde() {
+        for (variant, expected) in [
+            (StopReason::EndTurn, "\"end_turn\""),
+            (StopReason::MaxTokens, "\"max_tokens\""),
+            (StopReason::StopSequence, "\"stop_sequence\""),
+            (StopReason::ToolUse, "\"tool_use\""),
+        ] {
+            let json = serde_json::to_string(&variant).unwrap();
+            assert_eq!(json, expected);
+            let back: StopReason = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, variant);
+        }
+    }
+
+    #[test]
+    fn stop_reason_copy_and_use() {
+        let original = StopReason::MaxTokens;
+        let copied = original;
+        let _ = original;
+        assert_eq!(copied, StopReason::MaxTokens);
+    }
+
+    #[test]
+    fn stop_reason_debug() {
+        let dbg = format!("{:?}", StopReason::StopSequence);
+        assert!(dbg.contains("StopSequence"));
+    }
+
+    // ---- MessageContent ----
+
+    #[test]
+    fn message_content_blocks_variant() {
+        let blocks = vec![
+            ContentBlock::Text {
+                text: "hello".into(),
+            },
+            ContentBlock::Text {
+                text: "world".into(),
+            },
+        ];
+        let content = MessageContent::Blocks(blocks);
+        let json = serde_json::to_string(&content).unwrap();
+        assert!(json.contains("hello"));
+        assert!(json.contains("world"));
+    }
+
+    #[test]
+    fn message_content_text_serde_roundtrip() {
+        let content = MessageContent::Text("test message".into());
+        let json = serde_json::to_string(&content).unwrap();
+        let back: MessageContent = serde_json::from_str(&json).unwrap();
+        match back {
+            MessageContent::Text(s) => assert_eq!(s, "test message"),
+            MessageContent::Blocks(_) => panic!("expected Text"),
+        }
+    }
+
+    #[test]
+    fn message_content_clone_and_drop() {
+        let original = MessageContent::Text("clone_test".into());
+        let cloned = original.clone();
+        drop(original);
+        match cloned {
+            MessageContent::Text(s) => assert_eq!(s, "clone_test"),
+            MessageContent::Blocks(_) => panic!("expected Text"),
+        }
+    }
+
+    // ---- ContentBlock additional ----
+
+    #[test]
+    fn content_block_image_base64_serde() {
+        let block = ContentBlock::Image {
+            source: ImageSource::Base64 {
+                media_type: "image/png".into(),
+                data: "abc123".into(),
+            },
+        };
+        let json = serde_json::to_string(&block).unwrap();
+        assert!(json.contains("\"type\":\"image\""));
+        let back: ContentBlock = serde_json::from_str(&json).unwrap();
+        match back {
+            ContentBlock::Image { source } => match source {
+                ImageSource::Base64 { media_type, data } => {
+                    assert_eq!(media_type, "image/png");
+                    assert_eq!(data, "abc123");
+                }
+                ImageSource::Url { .. } => panic!("expected Base64"),
+            },
+            other => panic!("expected Image, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn content_block_tool_result_no_error() {
+        let block = ContentBlock::ToolResult {
+            tool_use_id: "t1".into(),
+            content: "result".into(),
+            is_error: None,
+        };
+        let json = serde_json::to_string(&block).unwrap();
+        assert!(!json.contains("is_error"));
+    }
+
+    #[test]
+    fn content_block_clone_and_drop() {
+        let original = ContentBlock::Text {
+            text: "clone_me".into(),
+        };
+        let cloned = original.clone();
+        drop(original);
+        match cloned {
+            ContentBlock::Text { text } => assert_eq!(text, "clone_me"),
+            _ => panic!("expected Text"),
+        }
+    }
+
+    // ---- Tool additional tests ----
+
+    #[test]
+    fn tool_clone_and_drop() {
+        let original = Tool {
+            name: "tool_a".into(),
+            description: "desc".into(),
+            input_schema: json!({}),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.name, "tool_a");
+        assert_eq!(cloned.description, "desc");
+    }
+
+    #[test]
+    fn tool_debug() {
+        let tool = Tool {
+            name: "test_tool".into(),
+            description: "desc".into(),
+            input_schema: json!({}),
+        };
+        let dbg = format!("{tool:?}");
+        assert!(dbg.contains("Tool"));
+        assert!(dbg.contains("test_tool"));
+    }
+
+    // ---- ToolChoice additional tests ----
+
+    #[test]
+    fn tool_choice_any_serde() {
+        let any = ToolChoice::Any;
+        let json = serde_json::to_string(&any).unwrap();
+        assert!(json.contains("\"type\":\"any\""));
+        let back: ToolChoice = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, ToolChoice::Any));
+    }
+
+    #[test]
+    fn tool_choice_tool_roundtrip() {
+        let tc = ToolChoice::Tool {
+            name: "my_tool".into(),
+        };
+        let json = serde_json::to_string(&tc).unwrap();
+        let back: ToolChoice = serde_json::from_str(&json).unwrap();
+        match back {
+            ToolChoice::Tool { name } => assert_eq!(name, "my_tool"),
+            _ => panic!("expected Tool variant"),
+        }
+    }
+
+    #[test]
+    fn tool_choice_clone_and_drop() {
+        let original = ToolChoice::Auto;
+        let cloned = original.clone();
+        drop(original);
+        assert!(matches!(cloned, ToolChoice::Auto));
+    }
+
+    // ---- Usage additional tests ----
+
+    #[test]
+    fn usage_total_tokens_large() {
+        let usage = Usage {
+            input_tokens: 100_000,
+            output_tokens: 50_000,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+        };
+        assert_eq!(usage.total_tokens(), 150_000);
+    }
+
+    #[test]
+    fn usage_clone_and_drop() {
+        let original = Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            cache_creation_input_tokens: 2,
+            cache_read_input_tokens: 3,
+        };
+        let cloned = original;
+        assert_eq!(cloned.input_tokens, 10);
+        assert_eq!(cloned.cache_creation_input_tokens, 2);
+        assert_eq!(cloned.cache_read_input_tokens, 3);
+    }
+
+    #[test]
+    fn usage_calculate_cost_opus() {
+        let usage = Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+        };
+        let cost = usage.calculate_cost(Model::ClaudeOpus4_5);
+        // 1M * $15/M + 1M * $75/M = $90
+        assert!((cost - 90.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn usage_calculate_cost_haiku() {
+        let usage = Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+        };
+        let cost = usage.calculate_cost(Model::Claude3_5Haiku);
+        // 1M * $0.25/M + 1M * $1.25/M = $1.50
+        assert!((cost - 1.50).abs() < 0.01);
+    }
+
+    // ---- MessagesRequest ----
+
+    #[test]
+    fn messages_request_serialize_skip_none() {
+        let req = MessagesRequest {
+            model: "claude-sonnet-4-20250514".into(),
+            messages: vec![],
+            max_tokens: 100,
+            system: None,
+            temperature: None,
+            stream: None,
+            tools: None,
+            tool_choice: None,
+            stop_sequences: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(!json.contains("system"));
+        assert!(!json.contains("temperature"));
+        assert!(!json.contains("stream"));
+        assert!(!json.contains("tools"));
+        assert!(!json.contains("tool_choice"));
+        assert!(!json.contains("stop_sequences"));
+    }
+
+    #[test]
+    fn messages_request_serialize_with_all_fields() {
+        let req = MessagesRequest {
+            model: "claude-sonnet-4-20250514".into(),
+            messages: vec![Message {
+                role: Role::User,
+                content: "hi".into(),
+            }],
+            max_tokens: 1024,
+            system: Some("system prompt".into()),
+            temperature: Some(0.7),
+            stream: Some(true),
+            tools: Some(vec![Tool {
+                name: "calc".into(),
+                description: "Calculator".into(),
+                input_schema: json!({}),
+            }]),
+            tool_choice: Some(ToolChoice::Auto),
+            stop_sequences: Some(vec!["STOP".into()]),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("system prompt"));
+        assert!(json.contains("0.7"));
+        assert!(json.contains("calc"));
+        assert!(json.contains("STOP"));
+    }
+
+    // ---- Message ----
+
+    #[test]
+    fn message_clone_and_drop() {
+        let original = Message {
+            role: Role::User,
+            content: "test".into(),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.role, Role::User);
+    }
+
+    #[test]
+    fn message_debug() {
+        let msg = Message {
+            role: Role::Assistant,
+            content: "response".into(),
+        };
+        let dbg = format!("{msg:?}");
+        assert!(dbg.contains("Message"));
+        assert!(dbg.contains("Assistant"));
+    }
+
+    // ---- ResponseContentBlock ----
+
+    #[test]
+    fn response_content_block_tool_use_as_text_is_none() {
+        let block = ResponseContentBlock::ToolUse {
+            id: "t1".into(),
+            name: "calc".into(),
+            input: json!({"x": 42}),
+        };
+        assert!(block.as_text().is_none());
+    }
+
+    #[test]
+    fn response_content_block_clone_and_drop() {
+        let original = ResponseContentBlock::Text {
+            text: "hello".into(),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.as_text(), Some("hello"));
+    }
+
+    // ---- ApiError ----
+
+    #[test]
+    fn api_error_clone_and_drop() {
+        let original = ApiError {
+            error_type: "test_error".into(),
+            message: "something".into(),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.error_type, "test_error");
+        assert_eq!(cloned.message, "something");
+    }
+
+    #[test]
+    fn api_error_debug() {
+        let err = ApiError {
+            error_type: "debug_test".into(),
+            message: "msg".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("ApiError"));
+        assert!(dbg.contains("debug_test"));
+    }
+
+    // ---- StreamEvent ----
+
+    #[test]
+    fn stream_event_ping_serde() {
+        let json = r#"{"type":"ping"}"#;
+        let event: StreamEvent = serde_json::from_str(json).unwrap();
+        assert!(matches!(event, StreamEvent::Ping));
+    }
+
+    #[test]
+    fn stream_event_message_stop_serde() {
+        let json = r#"{"type":"message_stop"}"#;
+        let event: StreamEvent = serde_json::from_str(json).unwrap();
+        assert!(matches!(event, StreamEvent::MessageStop));
+    }
+
+    #[test]
+    fn stream_event_content_block_stop_serde() {
+        let json = r#"{"type":"content_block_stop","index":0}"#;
+        let event: StreamEvent = serde_json::from_str(json).unwrap();
+        match event {
+            StreamEvent::ContentBlockStop { index } => assert_eq!(index, 0),
+            _ => panic!("expected ContentBlockStop"),
+        }
+    }
+
+    #[test]
+    fn stream_event_error_serde() {
+        let json = r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#;
+        let event: StreamEvent = serde_json::from_str(json).unwrap();
+        match event {
+            StreamEvent::Error { error } => {
+                assert_eq!(error.error_type, "overloaded_error");
+                assert_eq!(error.message, "Overloaded");
+            }
+            _ => panic!("expected Error"),
+        }
+    }
+
+    #[test]
+    fn stream_event_clone_and_drop() {
+        let original = StreamEvent::Ping;
+        let cloned = original.clone();
+        drop(original);
+        assert!(matches!(cloned, StreamEvent::Ping));
+    }
+
+    // ---- ContentDelta ----
+
+    #[test]
+    fn content_delta_text_serde() {
+        let json = r#"{"type":"text_delta","text":"hello"}"#;
+        let delta: ContentDelta = serde_json::from_str(json).unwrap();
+        match delta {
+            ContentDelta::TextDelta { text } => assert_eq!(text, "hello"),
+            ContentDelta::InputJsonDelta { .. } => panic!("expected TextDelta"),
+        }
+    }
+
+    #[test]
+    fn content_delta_input_json_serde() {
+        let json = r#"{"type":"input_json_delta","partial_json":"{\"x\":"}"#;
+        let delta: ContentDelta = serde_json::from_str(json).unwrap();
+        match delta {
+            ContentDelta::InputJsonDelta { partial_json } => {
+                assert!(partial_json.contains("\"x\":"));
+            }
+            ContentDelta::TextDelta { .. } => panic!("expected InputJsonDelta"),
+        }
+    }
+
+    // ---- ContentBlockStartData ----
+
+    #[test]
+    fn content_block_start_text_serde() {
+        let json = r#"{"type":"text","text":""}"#;
+        let data: ContentBlockStartData = serde_json::from_str(json).unwrap();
+        match data {
+            ContentBlockStartData::Text { text } => assert!(text.is_empty()),
+            ContentBlockStartData::ToolUse { .. } => panic!("expected Text"),
+        }
+    }
+
+    #[test]
+    fn content_block_start_tool_use_serde() {
+        let json = r#"{"type":"tool_use","id":"t1","name":"calc","input":{}}"#;
+        let data: ContentBlockStartData = serde_json::from_str(json).unwrap();
+        match data {
+            ContentBlockStartData::ToolUse { id, name, .. } => {
+                assert_eq!(id, "t1");
+                assert_eq!(name, "calc");
+            }
+            ContentBlockStartData::Text { .. } => panic!("expected ToolUse"),
+        }
+    }
+
+    // ---- MessageDeltaData ----
+
+    #[test]
+    fn message_delta_data_serde() {
+        let json = r#"{"stop_reason":"end_turn","stop_sequence":null}"#;
+        let data: MessageDeltaData = serde_json::from_str(json).unwrap();
+        assert_eq!(data.stop_reason, Some(StopReason::EndTurn));
+        assert!(data.stop_sequence.is_none());
+    }
+
+    #[test]
+    fn message_delta_data_with_stop_sequence() {
+        let json = r#"{"stop_reason":"stop_sequence","stop_sequence":"STOP"}"#;
+        let data: MessageDeltaData = serde_json::from_str(json).unwrap();
+        assert_eq!(data.stop_reason, Some(StopReason::StopSequence));
+        assert_eq!(data.stop_sequence, Some("STOP".into()));
+    }
+
+    // ---- ImageSource additional ----
+
+    #[test]
+    fn image_source_clone_and_drop() {
+        let original = ImageSource::Url {
+            url: "https://example.com/img.png".into(),
+        };
+        let cloned = original.clone();
+        drop(original);
+        match cloned {
+            ImageSource::Url { url } => assert_eq!(url, "https://example.com/img.png"),
+            ImageSource::Base64 { .. } => panic!("expected Url"),
+        }
+    }
+
+    // ---- MessagesResponse with tool_use ----
+
+    #[test]
+    fn messages_response_with_tool_use() {
+        let json = json!({
+            "id": "msg_02",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Let me calculate that."},
+                {"type": "tool_use", "id": "t1", "name": "calc", "input": {"x": 42}}
+            ],
+            "model": "claude-sonnet-4-20250514",
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 20, "output_tokens": 15}
+        });
+        let resp: MessagesResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.content.len(), 2);
+        assert_eq!(resp.content[0].as_text(), Some("Let me calculate that."));
+        assert_eq!(resp.content[1].as_text(), None);
+        assert_eq!(resp.stop_reason, Some(StopReason::ToolUse));
+    }
+
+    #[test]
+    fn messages_response_clone_and_drop() {
+        let json = json!({
+            "id": "msg_03",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Hi!"}],
+            "model": "claude-sonnet-4-20250514",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 5, "output_tokens": 2}
+        });
+        let original: MessagesResponse = serde_json::from_value(json).unwrap();
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.id, "msg_03");
+    }
+
+    // ---- MessageStartData ----
+
+    #[test]
+    fn message_start_data_serde() {
+        let json = json!({
+            "id": "msg_start",
+            "role": "assistant",
+            "model": "claude-sonnet-4-20250514",
+            "usage": {"input_tokens": 1, "output_tokens": 0}
+        });
+        let data: MessageStartData = serde_json::from_value(json).unwrap();
+        assert_eq!(data.id, "msg_start");
+        assert_eq!(data.role, Role::Assistant);
+        assert_eq!(data.usage.input_tokens, 1);
+    }
 }

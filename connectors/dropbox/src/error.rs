@@ -457,4 +457,100 @@ mod tests {
             other => panic!("expected External, got {other:?}"),
         }
     }
+
+    #[test]
+    fn api_502_is_retryable() {
+        assert!(
+            DropboxError::Api {
+                status_code: 502,
+                message: "bad gw".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_599_is_retryable() {
+        assert!(
+            DropboxError::Api {
+                status_code: 599,
+                message: "err".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_499_not_retryable() {
+        assert!(
+            !DropboxError::Api {
+                status_code: 499,
+                message: "err".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn json_error_not_retryable() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{invalid");
+        assert!(!DropboxError::Json(bad.unwrap_err()).is_retryable());
+    }
+
+    #[test]
+    fn json_error_retry_after_none() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{invalid");
+        assert_eq!(DropboxError::Json(bad.unwrap_err()).retry_after(), None);
+    }
+
+    #[test]
+    fn rate_limited_retry_after_small() {
+        let err = DropboxError::RateLimited {
+            retry_after_ms: 100,
+        };
+        assert_eq!(err.retry_after(), Some(Duration::from_millis(100)));
+    }
+
+    #[test]
+    fn rate_limited_retry_after_zero() {
+        let err = DropboxError::RateLimited { retry_after_ms: 0 };
+        assert_eq!(err.retry_after(), Some(Duration::from_millis(0)));
+    }
+
+    #[test]
+    fn error_debug_unauthorized() {
+        let err = DropboxError::Unauthorized;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Unauthorized"));
+    }
+
+    #[test]
+    fn error_debug_api_contains_code() {
+        let err = DropboxError::Api {
+            status_code: 503,
+            message: "svc unavail".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("503"));
+    }
+
+    #[test]
+    fn unauthorized_fcp_error_no_retry_after() {
+        match DropboxError::Unauthorized.to_fcp_error() {
+            FcpError::External { retry_after, .. } => assert!(retry_after.is_none()),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn not_found_fcp_error_no_retry_after() {
+        match (DropboxError::NotFound {
+            resource: "file".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External { retry_after, .. } => assert!(retry_after.is_none()),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
 }

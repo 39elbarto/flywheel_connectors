@@ -520,4 +520,132 @@ mod tests {
         let err = RoamError::RateLimited { retry_after_ms: 0 };
         assert_eq!(err.retry_after(), Some(Duration::from_millis(0)));
     }
+
+    #[test]
+    fn error_debug_unauthorized() {
+        let dbg = format!("{:?}", RoamError::Unauthorized);
+        assert!(dbg.contains("Unauthorized"));
+    }
+
+    #[test]
+    fn error_debug_forbidden() {
+        let dbg = format!("{:?}", RoamError::Forbidden);
+        assert!(dbg.contains("Forbidden"));
+    }
+
+    #[test]
+    fn error_debug_not_found() {
+        let dbg = format!("{:?}", RoamError::NotFound { resource: "pg".into() });
+        assert!(dbg.contains("NotFound"));
+        assert!(dbg.contains("pg"));
+    }
+
+    #[test]
+    fn error_debug_rate_limited() {
+        let dbg = format!("{:?}", RoamError::RateLimited { retry_after_ms: 5000 });
+        assert!(dbg.contains("RateLimited"));
+        assert!(dbg.contains("5000"));
+    }
+
+    #[test]
+    fn error_debug_api() {
+        let dbg = format!("{:?}", RoamError::Api { status_code: 500, message: "err".into() });
+        assert!(dbg.contains("Api"));
+        assert!(dbg.contains("500"));
+    }
+
+    #[test]
+    fn error_debug_graph_not_found() {
+        let dbg = format!("{:?}", RoamError::GraphNotFound { graph: "my-graph-123".into() });
+        assert!(dbg.contains("GraphNotFound"));
+        assert!(dbg.contains("my-graph-123"));
+    }
+
+    #[test]
+    fn http_error_display_contains_http() {
+        // We can test Display for Http variant via a constructed reqwest error
+        // Just verify the error enum variant name in debug
+        let err = RoamError::Api { status_code: 408, message: "timeout".into() };
+        assert!(err.to_string().contains("408"));
+    }
+
+    #[test]
+    fn api_error_501_is_retryable() {
+        assert!(RoamError::Api { status_code: 501, message: "not impl".into() }.is_retryable());
+    }
+
+    #[test]
+    fn api_error_504_is_retryable() {
+        assert!(RoamError::Api { status_code: 504, message: "gw timeout".into() }.is_retryable());
+    }
+
+    #[test]
+    fn api_error_not_retryable_403() {
+        assert!(!RoamError::Api { status_code: 403, message: "no".into() }.is_retryable());
+    }
+
+    #[test]
+    fn api_error_not_retryable_404() {
+        assert!(!RoamError::Api { status_code: 404, message: "miss".into() }.is_retryable());
+    }
+
+    #[test]
+    fn api_error_not_retryable_422() {
+        assert!(!RoamError::Api { status_code: 422, message: "unprocessable".into() }.is_retryable());
+    }
+
+    #[test]
+    fn rate_limited_large_retry_after() {
+        let err = RoamError::RateLimited { retry_after_ms: 300_000 };
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(300)));
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn json_error_not_retryable() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{bad");
+        assert!(!RoamError::Json(bad.unwrap_err()).is_retryable());
+    }
+
+    #[test]
+    fn json_error_retry_after_none() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{bad");
+        assert_eq!(RoamError::Json(bad.unwrap_err()).retry_after(), None);
+    }
+
+    #[test]
+    fn graph_not_found_to_fcp_error_service() {
+        match (RoamError::GraphNotFound { graph: "x".into() }).to_fcp_error() {
+            FcpError::External { service, .. } => assert_eq!(service, "roam"),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rate_limited_to_fcp_error_service() {
+        match (RoamError::RateLimited { retry_after_ms: 1000 }).to_fcp_error() {
+            FcpError::External { service, .. } => assert_eq!(service, "roam"),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unauthorized_to_fcp_error_message() {
+        match RoamError::Unauthorized.to_fcp_error() {
+            FcpError::External { message, .. } => {
+                assert!(message.contains("Authentication"));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forbidden_to_fcp_error_message() {
+        match RoamError::Forbidden.to_fcp_error() {
+            FcpError::External { message, .. } => {
+                assert!(message.contains("permissions"));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
 }

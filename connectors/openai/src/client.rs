@@ -195,11 +195,12 @@ impl OpenAIClient {
 
         let response = request.send().await?;
         let status = response.status();
+        let headers = response.headers().clone();
         let bytes = response.bytes().await?;
         if status.is_success() {
             Ok(())
         } else {
-            Err(parse_error_response(status, response.headers(), &bytes))
+            Err(parse_error_response(status, &headers, &bytes))
         }
     }
 
@@ -413,12 +414,13 @@ impl OpenAIClient {
 
         let response = request.multipart(form).send().await?;
         let status = response.status();
+        let headers = response.headers().clone();
         let bytes = response.bytes().await?;
 
         if status.is_success() {
             serde_json::from_slice(&bytes).map_err(OpenAIError::from)
         } else {
-            Err(parse_error_response(status, response.headers(), &bytes))
+            Err(parse_error_response(status, &headers, &bytes))
         }
     }
 
@@ -457,12 +459,13 @@ impl OpenAIClient {
 
         let response = request.json(&request_body).send().await?;
         let status = response.status();
+        let headers = response.headers().clone();
         let bytes = response.bytes().await?;
 
         if status.is_success() {
             Ok(bytes.to_vec())
         } else {
-            Err(parse_error_response(status, response.headers(), &bytes))
+            Err(parse_error_response(status, &headers, &bytes))
         }
     }
 
@@ -546,12 +549,13 @@ impl OpenAIClient {
 
         let response = request.send().await?;
         let status = response.status();
+        let headers = response.headers().clone();
         let bytes = response.bytes().await?;
 
         if status.is_success() {
             serde_json::from_slice(&bytes).map_err(OpenAIError::from)
         } else {
-            Err(parse_error_response(status, response.headers(), &bytes))
+            Err(parse_error_response(status, &headers, &bytes))
         }
     }
 
@@ -593,12 +597,13 @@ impl OpenAIClient {
 
         let response = request.send().await?;
         let status = response.status();
+        let headers = response.headers().clone();
         let bytes = response.bytes().await?;
 
         if status.is_success() {
             serde_json::from_slice(&bytes).map_err(OpenAIError::from)
         } else {
-            Err(parse_error_response(status, response.headers(), &bytes))
+            Err(parse_error_response(status, &headers, &bytes))
         }
     }
 
@@ -662,8 +667,9 @@ impl OpenAIClient {
 
         let status = response.status();
         if !status.is_success() {
+            let headers = response.headers().clone();
             let bytes = response.bytes().await?;
-            return Err(parse_error_response(status, response.headers(), &bytes));
+            return Err(parse_error_response(status, &headers, &bytes));
         }
 
         Ok(response)
@@ -675,12 +681,13 @@ impl OpenAIClient {
         R: serde::de::DeserializeOwned + Send,
     {
         let status = response.status();
+        let headers = response.headers().clone();
         let bytes = response.bytes().await?;
 
         if status.is_success() {
             serde_json::from_slice(&bytes).map_err(OpenAIError::from)
         } else {
-            Err(parse_error_response(status, response.headers(), &bytes))
+            Err(parse_error_response(status, &headers, &bytes))
         }
     }
 
@@ -697,12 +704,13 @@ impl OpenAIClient {
 
         let response = request.send().await?;
         let status = response.status();
+        let headers = response.headers().clone();
         let bytes = response.bytes().await?;
 
         if status.is_success() {
             serde_json::from_slice(&bytes).map_err(OpenAIError::from)
         } else {
-            Err(parse_error_response(status, response.headers(), &bytes))
+            Err(parse_error_response(status, &headers, &bytes))
         }
     }
 
@@ -716,12 +724,13 @@ impl OpenAIClient {
 
         let response = request.send().await?;
         let status = response.status();
+        let headers = response.headers().clone();
         let bytes = response.bytes().await?;
 
         if status.is_success() {
             serde_json::from_slice(&bytes).map_err(OpenAIError::from)
         } else {
-            Err(parse_error_response(status, response.headers(), &bytes))
+            Err(parse_error_response(status, &headers, &bytes))
         }
     }
 
@@ -739,12 +748,13 @@ impl OpenAIClient {
 
         let response = request.send().await?;
         let status = response.status();
+        let headers = response.headers().clone();
         let bytes = response.bytes().await?;
 
         if status.is_success() {
             serde_json::from_slice(&bytes).map_err(OpenAIError::from)
         } else {
-            Err(parse_error_response(status, response.headers(), &bytes))
+            Err(parse_error_response(status, &headers, &bytes))
         }
     }
 
@@ -1006,13 +1016,60 @@ impl OpenAIClient {
 
         let response = request.json(body).send().await?;
         let status = response.status();
+        let headers = response.headers().clone();
         let bytes = response.bytes().await?;
 
         if status.is_success() {
             serde_json::from_slice(&bytes).map_err(OpenAIError::from)
         } else {
-            Err(parse_error_response(status, response.headers(), &bytes))
+            Err(parse_error_response(status, &headers, &bytes))
         }
+    }
+}
+
+/// Parse OpenAI's Go-style duration strings (e.g. "1s", "6m0s", "1h30m").
+fn parse_openai_reset(s: &str) -> Option<u64> {
+    let mut total_ms = 0.0;
+    let mut current_num = String::new();
+    let mut current_unit = String::new();
+
+    for c in s.chars() {
+        if c.is_ascii_digit() || c == '.' {
+            if !current_unit.is_empty() {
+                if let Ok(val) = current_num.parse::<f64>() {
+                    match current_unit.as_str() {
+                        "h" => total_ms += val * 3_600_000.0,
+                        "m" => total_ms += val * 60_000.0,
+                        "s" => total_ms += val * 1000.0,
+                        "ms" => total_ms += val,
+                        _ => {}
+                    }
+                }
+                current_num.clear();
+                current_unit.clear();
+            }
+            current_num.push(c);
+        } else if c.is_ascii_alphabetic() {
+            current_unit.push(c);
+        }
+    }
+    
+    if !current_num.is_empty() && !current_unit.is_empty() {
+        if let Ok(val) = current_num.parse::<f64>() {
+            match current_unit.as_str() {
+                "h" => total_ms += val * 3_600_000.0,
+                "m" => total_ms += val * 60_000.0,
+                "s" => total_ms += val * 1000.0,
+                "ms" => total_ms += val,
+                _ => {}
+            }
+        }
+    }
+
+    if total_ms > 0.0 {
+        Some(total_ms as u64)
+    } else {
+        None
     }
 }
 
@@ -1020,11 +1077,8 @@ impl OpenAIClient {
 fn parse_error_response(status: StatusCode, headers: &reqwest::header::HeaderMap, bytes: &Bytes) -> OpenAIError {
     let mut retry_after_ms = 30_000; // Default 30s
     if let Some(reset) = headers.get("x-ratelimit-reset-requests").and_then(|v| v.to_str().ok()) {
-        // OpenAI reset strings look like "1s", "6m0s"
-        if let Some(s) = reset.strip_suffix('s') {
-            if let Ok(secs) = s.parse::<f64>() {
-                retry_after_ms = (secs * 1000.0) as u64;
-            }
+        if let Some(ms) = parse_openai_reset(reset) {
+            retry_after_ms = ms;
         }
     } else if let Some(retry) = headers.get("retry-after").and_then(|v| v.to_str().ok()) {
         if let Ok(secs) = retry.parse::<f64>() {

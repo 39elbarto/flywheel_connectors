@@ -841,4 +841,449 @@ mod tests {
         let client = PineconeClient::new("test-api-key").unwrap();
         assert!(client.data_plane_base().is_err());
     }
+
+    // ── PineconeAuth tests ──────────────────────────────────────────────
+
+    #[test]
+    fn auth_api_key_redacted_label_short_key() {
+        let auth = PineconeAuth::ApiKey("abc".into());
+        let label = auth.redacted_label();
+        assert!(label.starts_with("api_key:"), "got: {label}");
+        assert!(label.contains("abc"), "got: {label}");
+    }
+
+    #[test]
+    fn auth_api_key_redacted_label_long_key() {
+        let auth = PineconeAuth::ApiKey("pcsk_1234567890abcdef".into());
+        let label = auth.redacted_label();
+        assert!(label.starts_with("api_key:pcsk_123"), "got: {label}");
+        assert!(label.ends_with("***"), "got: {label}");
+        assert!(!label.contains("abcdef"), "should be truncated: {label}");
+    }
+
+    #[test]
+    fn auth_credential_id_redacted_label() {
+        let cid = CredentialId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+        let auth = PineconeAuth::CredentialId(cid);
+        let label = auth.redacted_label();
+        assert!(label.starts_with("credential_id:"), "got: {label}");
+    }
+
+    #[test]
+    fn auth_api_key_is_not_secretless() {
+        let auth = PineconeAuth::ApiKey("key".into());
+        assert!(!auth.is_secretless());
+    }
+
+    #[test]
+    fn auth_credential_id_is_secretless() {
+        let cid = CredentialId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+        let auth = PineconeAuth::CredentialId(cid);
+        assert!(auth.is_secretless());
+    }
+
+    #[test]
+    fn auth_api_key_debug_redacts() {
+        let auth = PineconeAuth::ApiKey("super_secret_key_dont_show".into());
+        let debug = format!("{auth:?}");
+        assert!(debug.contains("<redacted>"), "debug: {debug}");
+        assert!(
+            !debug.contains("super_secret_key_dont_show"),
+            "key should be redacted: {debug}"
+        );
+    }
+
+    #[test]
+    fn auth_credential_id_debug() {
+        let cid = CredentialId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+        let auth = PineconeAuth::CredentialId(cid);
+        let debug = format!("{auth:?}");
+        assert!(debug.contains("CredentialId"), "debug: {debug}");
+    }
+
+    #[test]
+    fn auth_clone_api_key() {
+        let original = PineconeAuth::ApiKey("key_clone".into());
+        let cloned = original.clone();
+        drop(original);
+        assert!(!cloned.is_secretless());
+        assert!(cloned.redacted_label().contains("key_clon"));
+    }
+
+    #[test]
+    fn auth_clone_credential_id() {
+        let cid = CredentialId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+        let original = PineconeAuth::CredentialId(cid);
+        let cloned = original.clone();
+        drop(original);
+        assert!(cloned.is_secretless());
+    }
+
+    // ── PineconeClient construction tests ───────────────────────────────
+
+    #[test]
+    fn client_new_creates_with_defaults() {
+        let client = PineconeClient::new("test-key-123").unwrap();
+        let debug = format!("{client:?}");
+        assert!(debug.contains("PineconeClient"), "debug: {debug}");
+    }
+
+    #[test]
+    fn client_with_control_plane_url() {
+        let client = PineconeClient::new("key")
+            .unwrap()
+            .with_control_plane_url("http://custom-control.io");
+        let debug = format!("{client:?}");
+        assert!(
+            debug.contains("http://custom-control.io"),
+            "debug: {debug}"
+        );
+    }
+
+    #[test]
+    fn client_with_data_plane_url() {
+        let client = PineconeClient::new("key")
+            .unwrap()
+            .with_data_plane_url("http://custom-data.io");
+        let debug = format!("{client:?}");
+        assert!(
+            debug.contains("http://custom-data.io"),
+            "debug: {debug}"
+        );
+    }
+
+    #[test]
+    fn client_with_retry_config() {
+        let client = PineconeClient::new("key")
+            .unwrap()
+            .with_retry_config(5);
+        // Verify it doesn't panic; the retry config is internal
+        let debug = format!("{client:?}");
+        assert!(debug.contains("PineconeClient"), "debug: {debug}");
+    }
+
+    #[test]
+    fn client_debug_format_shows_fields() {
+        let client = PineconeClient::new("key")
+            .unwrap()
+            .with_control_plane_url("http://cp.io")
+            .with_data_plane_url("http://dp.io");
+        let debug = format!("{client:?}");
+        assert!(debug.contains("http://cp.io"), "debug: {debug}");
+        assert!(debug.contains("http://dp.io"), "debug: {debug}");
+    }
+
+    #[test]
+    fn client_data_plane_base_after_set() {
+        let client = PineconeClient::new("key")
+            .unwrap()
+            .with_data_plane_url("http://dp-test.io");
+        let base = client.data_plane_base().unwrap();
+        assert_eq!(base, "http://dp-test.io");
+    }
+
+    #[test]
+    fn client_new_with_auth_api_key() {
+        let client =
+            PineconeClient::new_with_auth(PineconeAuth::ApiKey("mykey".into())).unwrap();
+        let debug = format!("{client:?}");
+        assert!(debug.contains("PineconeClient"), "debug: {debug}");
+    }
+
+    #[test]
+    fn client_new_with_auth_credential_id() {
+        let cid = CredentialId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+        let client =
+            PineconeClient::new_with_auth(PineconeAuth::CredentialId(cid)).unwrap();
+        let debug = format!("{client:?}");
+        assert!(debug.contains("CredentialId"), "debug: {debug}");
+    }
+
+    // ── Default constant tests ──────────────────────────────────────────
+
+    #[test]
+    fn default_control_plane_url_is_pinecone() {
+        assert!(DEFAULT_CONTROL_PLANE_URL.contains("api.pinecone.io"));
+    }
+
+    // ── Additional wiremock edge cases ───────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_forbidden_returns_api_error() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/indexes"))
+            .respond_with(
+                ResponseTemplate::new(403).set_body_string("Forbidden"),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = PineconeClient::new("bad-key")
+            .unwrap()
+            .with_control_plane_url(&mock_server.uri())
+            .with_retry_config(0);
+
+        let result = client.list_indexes().await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            PineconeError::Api {
+                status_code,
+                message,
+            } => {
+                assert_eq!(status_code, Some(403));
+                assert!(message.contains("Authentication failed"), "msg: {message}");
+            }
+            e => panic!("Expected Api error, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_bad_request_returns_api_error() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/indexes"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": {
+                    "code": "INVALID_ARGUMENT",
+                    "message": "Dimension must be positive"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = PineconeClient::new("key")
+            .unwrap()
+            .with_control_plane_url(&mock_server.uri())
+            .with_retry_config(0);
+
+        let result = client.create_index("bad", 0, "cosine", None).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            PineconeError::Api {
+                status_code,
+                message,
+            } => {
+                assert_eq!(status_code, Some(400));
+                assert!(
+                    message.contains("Dimension must be positive"),
+                    "msg: {message}"
+                );
+            }
+            e => panic!("Expected Api error, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_create_index_with_spec() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/indexes"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "name": "spec-idx",
+                "dimension": 256,
+                "metric": "cosine",
+                "host": "spec-idx.svc.pinecone.io"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = PineconeClient::new("key")
+            .unwrap()
+            .with_control_plane_url(&mock_server.uri());
+
+        let spec = serde_json::json!({"serverless": {"cloud": "aws", "region": "us-east-1"}});
+        let idx = client
+            .create_index("spec-idx", 256, "cosine", Some(&spec))
+            .await
+            .unwrap();
+        assert_eq!(idx.name, "spec-idx");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_describe_index_stats_with_filter() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/describe_index_stats"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "namespaces": {},
+                "dimension": 128,
+                "index_fullness": 0.0,
+                "total_vector_count": 0
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = PineconeClient::new("key")
+            .unwrap()
+            .with_data_plane_url(&mock_server.uri());
+
+        let filter = serde_json::json!({"genre": {"$eq": "sci-fi"}});
+        let stats = client
+            .describe_index_stats(Some(&filter))
+            .await
+            .unwrap();
+        assert_eq!(stats.dimension, Some(128));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_query_by_id() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "matches": [{"id": "similar-1", "score": 0.88}],
+                "namespace": "ns1"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = PineconeClient::new("key")
+            .unwrap()
+            .with_data_plane_url(&mock_server.uri());
+
+        let result = client
+            .query(None, Some("vec-ref"), 5, Some("ns1"), None, true, true)
+            .await
+            .unwrap();
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.namespace.as_deref(), Some("ns1"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_query_with_filter() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "matches": [],
+                "namespace": ""
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = PineconeClient::new("key")
+            .unwrap()
+            .with_data_plane_url(&mock_server.uri());
+
+        let filter = serde_json::json!({"type": {"$eq": "article"}});
+        let result = client
+            .query(Some(&[0.1]), None, 3, None, Some(&filter), false, false)
+            .await
+            .unwrap();
+        assert!(result.matches.is_empty());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_fetch_with_namespace() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/vectors/fetch"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "vectors": {
+                    "v1": {"id": "v1", "values": [0.5]}
+                },
+                "namespace": "ns2"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = PineconeClient::new("key")
+            .unwrap()
+            .with_data_plane_url(&mock_server.uri());
+
+        let ids = vec!["v1".to_string()];
+        let result = client.fetch(&ids, Some("ns2")).await.unwrap();
+        assert_eq!(result.namespace.as_deref(), Some("ns2"));
+        assert_eq!(result.vectors.len(), 1);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_upsert_with_namespace() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/vectors/upsert"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "upserted_count": 1
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = PineconeClient::new("key")
+            .unwrap()
+            .with_data_plane_url(&mock_server.uri());
+
+        let vectors = vec![Vector {
+            id: "ns-v1".into(),
+            values: Some(vec![0.1]),
+            metadata: None,
+            sparse_values: None,
+        }];
+        let result = client.upsert(&vectors, Some("my-ns")).await.unwrap();
+        assert_eq!(result.upserted_count, 1);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_delete_all() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/vectors/delete"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&mock_server)
+            .await;
+
+        let client = PineconeClient::new("key")
+            .unwrap()
+            .with_data_plane_url(&mock_server.uri());
+
+        let result = client.delete(None, true, Some("ns"), None).await;
+        assert!(result.is_ok());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_delete_with_filter() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/vectors/delete"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&mock_server)
+            .await;
+
+        let client = PineconeClient::new("key")
+            .unwrap()
+            .with_data_plane_url(&mock_server.uri());
+
+        let filter = serde_json::json!({"genre": {"$eq": "horror"}});
+        let result = client.delete(None, false, None, Some(&filter)).await;
+        assert!(result.is_ok());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_empty_response_body() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("DELETE"))
+            .and(path("/indexes/empty-resp"))
+            .respond_with(ResponseTemplate::new(202))
+            .mount(&mock_server)
+            .await;
+
+        let client = PineconeClient::new("key")
+            .unwrap()
+            .with_control_plane_url(&mock_server.uri());
+
+        // delete_index calls execute_delete which returns empty body => json!({})
+        let result = client.delete_index("empty-resp").await;
+        assert!(result.is_ok());
+    }
 }

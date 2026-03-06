@@ -305,4 +305,119 @@ mod tests {
     fn error_display_api() {
         assert_eq!(GrafanaError::Api { status_code: 500, message: "Internal".into() }.to_string(), "Grafana API error (500): Internal");
     }
+
+    // ── Additional edge cases ───────────────────────────────────
+
+    #[test]
+    fn api_502_is_retryable() {
+        assert!(GrafanaError::Api { status_code: 502, message: "bad gateway".into() }.is_retryable());
+    }
+
+    #[test]
+    fn api_599_is_retryable() {
+        assert!(GrafanaError::Api { status_code: 599, message: "custom".into() }.is_retryable());
+    }
+
+    #[test]
+    fn api_499_not_retryable() {
+        assert!(!GrafanaError::Api { status_code: 499, message: "client err".into() }.is_retryable());
+    }
+
+    #[test]
+    fn json_error_not_retryable() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{bad");
+        let err = GrafanaError::Json(bad.unwrap_err());
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn retry_after_none_for_json_error() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{bad");
+        let err = GrafanaError::Json(bad.unwrap_err());
+        assert_eq!(err.retry_after(), None);
+    }
+
+    #[test]
+    fn rate_limited_zero_ms() {
+        let err = GrafanaError::RateLimited { retry_after_ms: 0 };
+        assert_eq!(err.retry_after(), Some(Duration::from_millis(0)));
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn rate_limited_large_value() {
+        let err = GrafanaError::RateLimited { retry_after_ms: 3_600_000 };
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn not_found_empty_resource() {
+        let err = GrafanaError::NotFound { resource: String::new() };
+        assert_eq!(err.to_string(), "Not found: ");
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn api_error_empty_message() {
+        let err = GrafanaError::Api { status_code: 500, message: String::new() };
+        assert_eq!(err.to_string(), "Grafana API error (500): ");
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn error_debug_format() {
+        let err = GrafanaError::Unauthorized;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Unauthorized"));
+    }
+
+    #[test]
+    fn api_error_debug_shows_fields() {
+        let err = GrafanaError::Api { status_code: 422, message: "unprocessable".into() };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("422"));
+        assert!(dbg.contains("unprocessable"));
+    }
+
+    #[test]
+    fn json_error_display_contains_error_text() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{invalid");
+        let err = GrafanaError::Json(bad.unwrap_err());
+        let display = err.to_string();
+        assert!(display.starts_with("JSON error:"));
+    }
+
+    #[test]
+    fn not_found_to_fcp_error_message_content() {
+        let err = GrafanaError::NotFound { resource: "my-special-dashboard".into() };
+        match err.to_fcp_error() {
+            FcpError::External { message, retry_after, .. } => {
+                assert!(message.contains("my-special-dashboard"));
+                assert_eq!(retry_after, None);
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rate_limited_to_fcp_error_has_retry_after() {
+        let err = GrafanaError::RateLimited { retry_after_ms: 5000 };
+        match err.to_fcp_error() {
+            FcpError::External { retry_after, .. } => {
+                assert_eq!(retry_after, Some(Duration::from_secs(5)));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_error_to_fcp_error_no_retry_after() {
+        let err = GrafanaError::Api { status_code: 500, message: "err".into() };
+        match err.to_fcp_error() {
+            FcpError::External { retry_after, .. } => {
+                assert_eq!(retry_after, None);
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
 }

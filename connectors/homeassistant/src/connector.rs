@@ -1217,4 +1217,114 @@ mod tests {
         .unwrap();
         assert_eq!(config.base_url, "http://10.0.0.1:8123/api");
     }
+
+    #[test]
+    fn doctor_result_multiple_critical_failures() {
+        let checks = vec![
+            DoctorCheck {
+                name: "a".into(),
+                passed: false,
+                message: Some("f1".into()),
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: Some("f2".into()),
+                critical: true,
+            },
+        ];
+        let r = DoctorResult::from_checks(checks);
+        assert_eq!(r.status, DoctorStatus::Unhealthy);
+        assert_eq!(r.checks.len(), 2);
+    }
+
+    #[test]
+    fn doctor_check_skip_serializing_none_message() {
+        let check = DoctorCheck {
+            name: "t".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert!(!v.as_object().unwrap().contains_key("message"));
+    }
+
+    #[test]
+    fn doctor_check_serializes_some_message() {
+        let check = DoctorCheck {
+            name: "t".into(),
+            passed: false,
+            message: Some("broken".into()),
+            critical: true,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert_eq!(v["message"], "broken");
+    }
+
+    #[test]
+    fn doctor_status_serde_healthy() {
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Healthy).unwrap(),
+            "healthy"
+        );
+    }
+
+    #[test]
+    fn doctor_status_serde_degraded() {
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Degraded).unwrap(),
+            "degraded"
+        );
+    }
+
+    #[test]
+    fn doctor_status_serde_unhealthy() {
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Unhealthy).unwrap(),
+            "unhealthy"
+        );
+    }
+
+    #[test]
+    fn connector_new_eq_default() {
+        let a = HomeAssistantConnector::new();
+        let b = HomeAssistantConnector::default();
+        assert!(a.config.is_none());
+        assert!(b.config.is_none());
+        assert_eq!(a.request_count.load(Ordering::Relaxed), 0);
+        assert_eq!(b.error_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn operations_ids_follow_naming_convention() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let id = op["id"].as_str().unwrap();
+            assert!(
+                id.starts_with("homeassistant."),
+                "op id should start with 'homeassistant.': {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn require_str_empty_string_is_ok() {
+        let input = json!({"x": ""});
+        assert_eq!(require_str(&input, "x").unwrap(), "");
+    }
+
+    #[test]
+    fn require_str_object_value() {
+        let input = json!({"x": {"nested": true}});
+        assert!(require_str(&input, "x").is_err());
+    }
+
+    #[test]
+    fn config_default_base_url() {
+        let config =
+            HomeAssistantConfig::from_params(&json!({"access_token": "tok"})).unwrap();
+        assert_eq!(config.base_url, DEFAULT_BASE_URL);
+    }
 }

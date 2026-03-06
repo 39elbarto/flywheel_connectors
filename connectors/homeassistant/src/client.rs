@@ -138,12 +138,19 @@ impl HomeAssistantClient {
     }
 
     #[instrument(skip(self), fields(url))]
-    async fn get(&self, path: &str) -> HomeAssistantResult<serde_json::Value> {
+    async fn get(
+        &self,
+        path: &str,
+        query: Option<&[(&str, String)]>,
+    ) -> HomeAssistantResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
         debug!(url = %url, "GET request");
-        let req = self
+        let mut req = self
             .add_auth(self.client.get(&url))
             .header("Accept", "application/json");
+        if let Some(q) = query {
+            req = req.query(q);
+        }
         let resp = req.send().await?;
         self.handle_response(resp).await
     }
@@ -168,12 +175,12 @@ impl HomeAssistantClient {
 
     /// List all entity states.
     pub async fn list_states(&self) -> HomeAssistantResult<serde_json::Value> {
-        self.get("/states").await
+        self.get("/states", None).await
     }
 
     /// Get a single entity state.
     pub async fn get_state(&self, entity_id: &str) -> HomeAssistantResult<serde_json::Value> {
-        self.get(&format!("/states/{entity_id}")).await
+        self.get(&format!("/states/{entity_id}"), None).await
     }
 
     /// Set an entity state.
@@ -200,7 +207,7 @@ impl HomeAssistantClient {
 
     /// List all services.
     pub async fn list_services(&self) -> HomeAssistantResult<serde_json::Value> {
-        self.get("/services").await
+        self.get("/services", None).await
     }
 
     // -- History --
@@ -214,17 +221,20 @@ impl HomeAssistantClient {
         minimal_response: Option<bool>,
         significant_changes_only: Option<bool>,
     ) -> HomeAssistantResult<serde_json::Value> {
-        let qs = build_query(&[
-            filter_entity_id.map(|e| ("filter_entity_id", e.to_string())),
-            end_time.map(|e| ("end_time", e.to_string())),
-            minimal_response
-                .filter(|v| *v)
-                .map(|_| ("minimal_response", String::new())),
-            significant_changes_only
-                .filter(|v| *v)
-                .map(|_| ("significant_changes_only", String::new())),
-        ]);
-        self.get(&format!("/history/period/{timestamp}{qs}")).await
+        let mut q = Vec::new();
+        if let Some(e) = filter_entity_id {
+            q.push(("filter_entity_id", e.to_string()));
+        }
+        if let Some(e) = end_time {
+            q.push(("end_time", e.to_string()));
+        }
+        if minimal_response.unwrap_or(false) {
+            q.push(("minimal_response", String::new()));
+        }
+        if significant_changes_only.unwrap_or(false) {
+            q.push(("significant_changes_only", String::new()));
+        }
+        self.get(&format!("/history/period/{timestamp}"), if q.is_empty() { None } else { Some(&q) }).await
     }
 
     // -- Template API for areas/devices --
@@ -249,21 +259,6 @@ impl HomeAssistantClient {
         };
         Ok(filtered)
     }
-}
-
-fn build_query(params: &[Option<(&str, String)>]) -> String {
-    let mut qs = String::new();
-    let mut sep = '?';
-    for param in params.iter().flatten() {
-        qs.push(sep);
-        qs.push_str(param.0);
-        if !param.1.is_empty() {
-            qs.push('=');
-            qs.push_str(&param.1);
-        }
-        sep = '&';
-    }
-    qs
 }
 
 #[cfg(test)]
@@ -299,38 +294,6 @@ mod tests {
     }
 
     #[test]
-    fn build_query_empty() {
-        assert_eq!(build_query(&[None, None]), "");
-    }
-
-    #[test]
-    fn build_query_one() {
-        assert_eq!(
-            build_query(&[Some(("filter_entity_id", "sensor.temp".into()))]),
-            "?filter_entity_id=sensor.temp"
-        );
-    }
-
-    #[test]
-    fn build_query_two() {
-        assert_eq!(
-            build_query(&[
-                Some(("filter_entity_id", "sensor.temp".into())),
-                Some(("end_time", "2026-03-01T00:00:00Z".into()))
-            ]),
-            "?filter_entity_id=sensor.temp&end_time=2026-03-01T00:00:00Z"
-        );
-    }
-
-    #[test]
-    fn build_query_flag_no_value() {
-        assert_eq!(
-            build_query(&[Some(("minimal_response", String::new()))]),
-            "?minimal_response"
-        );
-    }
-
-    #[test]
     fn default_base_url_has_api_prefix() {
         assert!(DEFAULT_BASE_URL.contains("/api"));
     }
@@ -360,5 +323,93 @@ mod tests {
         let dbg = format!("{client:?}");
         assert!(!dbg.contains("secret"));
         assert!(dbg.contains("HomeAssistantClient"));
+    }
+
+    #[test]
+    fn auth_clone_bearer() {
+        let auth = HomeAssistantAuth::BearerToken("tok123".into());
+        let cloned = auth.clone();
+        drop(auth);
+        assert_eq!(cloned.redacted_label(), "bearer_token:redacted");
+    }
+
+    #[test]
+    fn auth_clone_credential() {
+        let auth = HomeAssistantAuth::CredentialId(CredentialId::new());
+        let cloned = auth.clone();
+        drop(auth);
+        assert!(cloned.is_secretless());
+    }
+
+    #[test]
+    fn client_debug_contains_base_url() {
+        let client =
+            HomeAssistantClient::new(HomeAssistantAuth::BearerToken("tok".into()), None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("base_url"));
+    }
+
+    #[test]
+    fn client_new_with_credential_id() {
+        let cred = CredentialId::new();
+        let client =
+            HomeAssistantClient::new(HomeAssistantAuth::CredentialId(cred), None).unwrap();
+        assert_eq!(client.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn default_base_url_is_http() {
+        assert!(DEFAULT_BASE_URL.starts_with("http://"));
+    }
+
+    #[test]
+    fn default_base_url_contains_8123() {
+        assert!(DEFAULT_BASE_URL.contains("8123"));
+    }
+
+    #[test]
+    fn auth_bearer_is_not_secretless() {
+        let auth = HomeAssistantAuth::BearerToken("any".into());
+        assert!(!auth.is_secretless());
+    }
+
+    #[test]
+    fn auth_credential_is_secretless() {
+        let auth = HomeAssistantAuth::CredentialId(CredentialId::new());
+        assert!(auth.is_secretless());
+    }
+
+    #[test]
+    fn auth_debug_bearer_shows_tuple_name() {
+        let auth = HomeAssistantAuth::BearerToken("secret".into());
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("BearerToken"));
+    }
+
+    #[test]
+    fn auth_debug_credential_shows_id() {
+        let cred = HomeAssistantAuth::CredentialId(CredentialId::new());
+        let dbg = format!("{cred:?}");
+        assert!(dbg.contains("CredentialId"));
+    }
+
+    #[test]
+    fn client_strips_multiple_trailing_slashes() {
+        let client = HomeAssistantClient::new(
+            HomeAssistantAuth::BearerToken("k".into()),
+            Some("http://localhost:8123/api////"),
+        )
+        .unwrap();
+        assert!(!client.base_url.ends_with('/'));
+    }
+
+    #[test]
+    fn client_custom_url_preserved() {
+        let client = HomeAssistantClient::new(
+            HomeAssistantAuth::BearerToken("tok".into()),
+            Some("https://ha.example.com:443/api"),
+        )
+        .unwrap();
+        assert_eq!(client.base_url, "https://ha.example.com:443/api");
     }
 }

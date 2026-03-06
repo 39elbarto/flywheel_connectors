@@ -410,4 +410,198 @@ mod tests {
             "DuckDB API error (500): Internal"
         );
     }
+
+    #[test]
+    fn error_display_json() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("not json");
+        let e = DuckDbError::Json(bad.unwrap_err());
+        let display = e.to_string();
+        assert!(display.starts_with("JSON error:"));
+    }
+
+    #[test]
+    fn json_error_is_not_retryable() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{bad");
+        let e = DuckDbError::Json(bad.unwrap_err());
+        assert!(!e.is_retryable());
+    }
+
+    #[test]
+    fn json_error_retry_after_is_none() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{bad");
+        let e = DuckDbError::Json(bad.unwrap_err());
+        assert_eq!(e.retry_after(), None);
+    }
+
+    #[test]
+    fn api_502_is_retryable() {
+        assert!(
+            DuckDbError::Api {
+                status_code: 502,
+                message: "bad gateway".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_504_is_retryable() {
+        assert!(
+            DuckDbError::Api {
+                status_code: 504,
+                message: "timeout".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_422_not_retryable() {
+        assert!(
+            !DuckDbError::Api {
+                status_code: 422,
+                message: "unprocessable".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn rate_limited_retry_after_zero() {
+        let err = DuckDbError::RateLimited {
+            retry_after_ms: 0,
+        };
+        assert_eq!(err.retry_after(), Some(Duration::from_millis(0)));
+    }
+
+    #[test]
+    fn rate_limited_retry_after_large_value() {
+        let err = DuckDbError::RateLimited {
+            retry_after_ms: 300_000,
+        };
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(300)));
+    }
+
+    #[test]
+    fn not_found_to_fcp_error_service() {
+        match (DuckDbError::NotFound {
+            resource: "x".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External { service, .. } => assert_eq!(service, "duckdb"),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rate_limited_to_fcp_error_service() {
+        match (DuckDbError::RateLimited {
+            retry_after_ms: 1000,
+        })
+        .to_fcp_error()
+        {
+            FcpError::External { service, .. } => assert_eq!(service, "duckdb"),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_debug_trait() {
+        let err = DuckDbError::Unauthorized;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Unauthorized"));
+    }
+
+    #[test]
+    fn api_error_debug_trait() {
+        let err = DuckDbError::Api {
+            status_code: 418,
+            message: "teapot".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("418"));
+        assert!(dbg.contains("teapot"));
+    }
+
+    #[test]
+    fn not_found_debug_trait() {
+        let err = DuckDbError::NotFound {
+            resource: "my_db".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("my_db"));
+    }
+
+    #[test]
+    fn rate_limited_debug_trait() {
+        let err = DuckDbError::RateLimited {
+            retry_after_ms: 5000,
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("5000"));
+    }
+
+    #[test]
+    fn api_error_retryable_boundary_499() {
+        assert!(
+            !DuckDbError::Api {
+                status_code: 499,
+                message: "client error".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_error_retryable_boundary_599() {
+        assert!(
+            DuckDbError::Api {
+                status_code: 599,
+                message: "server error".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_error_to_fcp_error_retry_after_is_none() {
+        match (DuckDbError::Api {
+            status_code: 500,
+            message: "err".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External { retry_after, .. } => assert!(retry_after.is_none()),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unauthorized_to_fcp_error_retry_after_none() {
+        match DuckDbError::Unauthorized.to_fcp_error() {
+            FcpError::External { retry_after, .. } => assert!(retry_after.is_none()),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forbidden_to_fcp_error_retry_after_none() {
+        match DuckDbError::Forbidden.to_fcp_error() {
+            FcpError::External { retry_after, .. } => assert!(retry_after.is_none()),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn not_found_to_fcp_error_retry_after_none() {
+        match (DuckDbError::NotFound {
+            resource: "x".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External { retry_after, .. } => assert!(retry_after.is_none()),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
 }

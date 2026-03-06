@@ -909,4 +909,120 @@ mod tests {
         .unwrap();
         assert_eq!(config.graph_name, "my-graph");
     }
+
+    #[test]
+    fn config_debug_shows_auth() {
+        let config = RoamConfig::from_params(&json!({
+            "access_token": "tok123",
+        }))
+        .unwrap();
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("RoamConfig"));
+        assert!(!dbg.contains("tok123"));
+    }
+
+    #[test]
+    fn config_clone() {
+        let config = RoamConfig::from_params(&json!({
+            "access_token": "tok",
+            "graph_name": "my-graph",
+        }))
+        .unwrap();
+        let cloned = config.clone();
+        assert_eq!(cloned.graph_name, "my-graph");
+        assert_eq!(cloned.base_url, config.base_url);
+    }
+
+    #[test]
+    fn require_str_empty_object() {
+        let input = json!({});
+        assert!(require_str(&input, "page_uid").is_err());
+    }
+
+    #[test]
+    fn require_str_object_value() {
+        let input = json!({"title": {"nested": true}});
+        assert!(require_str(&input, "title").is_err());
+    }
+
+    #[test]
+    fn require_str_float_value() {
+        let input = json!({"title": 9.876});
+        assert!(require_str(&input, "title").is_err());
+    }
+
+    #[test]
+    fn operations_blocks_list_capability() {
+        let ops = operations_info();
+        let bl = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "roam.blocks.list")
+            .unwrap();
+        assert_eq!(bl["capability"], "roam.blocks.read");
+    }
+
+    #[test]
+    fn operations_pages_get_capability() {
+        let ops = operations_info();
+        let pg = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "roam.pages.get")
+            .unwrap();
+        assert_eq!(pg["capability"], "roam.pages.read");
+    }
+
+    #[test]
+    fn operations_all_have_summary() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let summary = op["summary"].as_str().unwrap();
+            assert!(!summary.is_empty(), "op {:?} has empty summary", op["id"]);
+        }
+    }
+
+    #[test]
+    fn operations_blocks_create_is_not_strict_idempotent() {
+        let ops = operations_info();
+        let bc = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "roam.blocks.create")
+            .unwrap();
+        assert_eq!(bc["idempotency"], "none");
+    }
+
+    #[test]
+    fn doctor_status_serde_roundtrip() {
+        let healthy = serde_json::to_value(DoctorStatus::Healthy).unwrap();
+        assert_eq!(healthy, "healthy");
+        let degraded = serde_json::to_value(DoctorStatus::Degraded).unwrap();
+        assert_eq!(degraded, "degraded");
+        let unhealthy = serde_json::to_value(DoctorStatus::Unhealthy).unwrap();
+        assert_eq!(unhealthy, "unhealthy");
+    }
+
+    #[test]
+    fn doctor_status_deserialize() {
+        let h: DoctorStatus = serde_json::from_value(json!("healthy")).unwrap();
+        assert_eq!(h, DoctorStatus::Healthy);
+        let d: DoctorStatus = serde_json::from_value(json!("degraded")).unwrap();
+        assert_eq!(d, DoctorStatus::Degraded);
+    }
+
+    #[test]
+    fn doctor_result_preserves_check_count() {
+        let checks = vec![
+            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
+            DoctorCheck { name: "b".into(), passed: true, message: None, critical: false },
+            DoctorCheck { name: "c".into(), passed: false, message: Some("x".into()), critical: false },
+        ];
+        let r = DoctorResult::from_checks(checks);
+        assert_eq!(r.checks.len(), 3);
+        assert_eq!(r.status, DoctorStatus::Degraded);
+    }
 }

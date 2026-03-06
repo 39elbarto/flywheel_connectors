@@ -293,4 +293,142 @@ mod tests {
     fn error_display_api() {
         assert_eq!(RedditError::Api { status_code: 500, message: "Internal".into() }.to_string(), "Reddit API error (500): Internal");
     }
+
+    // ── Additional is_retryable edge cases ──────────────────────────
+
+    #[test]
+    fn api_502_is_retryable() {
+        assert!(RedditError::Api { status_code: 502, message: "Bad Gateway".into() }.is_retryable());
+    }
+
+    #[test]
+    fn api_599_is_retryable() {
+        assert!(RedditError::Api { status_code: 599, message: "custom".into() }.is_retryable());
+    }
+
+    #[test]
+    fn api_499_not_retryable() {
+        assert!(!RedditError::Api { status_code: 499, message: "custom".into() }.is_retryable());
+    }
+
+    #[test]
+    fn api_600_not_retryable() {
+        assert!(!RedditError::Api { status_code: 600, message: "custom".into() }.is_retryable());
+    }
+
+    #[test]
+    fn json_error_not_retryable() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{bad");
+        assert!(!RedditError::Json(bad.unwrap_err()).is_retryable());
+    }
+
+    // ── retry_after edge cases ──────────────────────────────────────
+
+    #[test]
+    fn retry_after_none_for_json_error() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{bad");
+        assert_eq!(RedditError::Json(bad.unwrap_err()).retry_after(), None);
+    }
+
+    #[test]
+    fn retry_after_zero_ms() {
+        let err = RedditError::RateLimited { retry_after_ms: 0 };
+        assert_eq!(err.retry_after(), Some(Duration::from_millis(0)));
+    }
+
+    #[test]
+    fn retry_after_large_value() {
+        let err = RedditError::RateLimited { retry_after_ms: 300_000 };
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(300)));
+    }
+
+    // ── to_fcp_error additional coverage ────────────────────────────
+
+    #[test]
+    fn rate_limited_fcp_error_service() {
+        match (RedditError::RateLimited { retry_after_ms: 1000 }).to_fcp_error() {
+            FcpError::External { service, message, .. } => {
+                assert_eq!(service, "reddit");
+                assert!(message.contains("1000"));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn not_found_fcp_error_message() {
+        match (RedditError::NotFound { resource: "subreddit_xyz".into() }).to_fcp_error() {
+            FcpError::External { message, retry_after, .. } => {
+                assert!(message.contains("subreddit_xyz"));
+                assert!(retry_after.is_none());
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unauthorized_fcp_error_message() {
+        match RedditError::Unauthorized.to_fcp_error() {
+            FcpError::External { message, retry_after, .. } => {
+                assert!(message.contains("Authentication"));
+                assert!(retry_after.is_none());
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forbidden_fcp_error_message() {
+        match RedditError::Forbidden.to_fcp_error() {
+            FcpError::External { message, retry_after, .. } => {
+                assert!(message.contains("permissions"));
+                assert!(retry_after.is_none());
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    // ── Display edge cases ──────────────────────────────────────────
+
+    #[test]
+    fn error_display_not_found_empty_resource() {
+        assert_eq!(RedditError::NotFound { resource: String::new() }.to_string(), "Not found: ");
+    }
+
+    #[test]
+    fn error_display_api_empty_message() {
+        assert_eq!(RedditError::Api { status_code: 422, message: String::new() }.to_string(), "Reddit API error (422): ");
+    }
+
+    #[test]
+    fn error_display_rate_limited_zero() {
+        assert_eq!(RedditError::RateLimited { retry_after_ms: 0 }.to_string(), "Rate limited, retry after 0ms");
+    }
+
+    // ── Debug trait ─────────────────────────────────────────────────
+
+    #[test]
+    fn error_debug_unauthorized() {
+        let dbg = format!("{:?}", RedditError::Unauthorized);
+        assert!(dbg.contains("Unauthorized"));
+    }
+
+    #[test]
+    fn error_debug_rate_limited() {
+        let dbg = format!("{:?}", RedditError::RateLimited { retry_after_ms: 5000 });
+        assert!(dbg.contains("5000"));
+    }
+
+    #[test]
+    fn error_debug_api() {
+        let dbg = format!("{:?}", RedditError::Api { status_code: 503, message: "down".into() });
+        assert!(dbg.contains("503"));
+        assert!(dbg.contains("down"));
+    }
+
+    #[test]
+    fn error_debug_not_found() {
+        let dbg = format!("{:?}", RedditError::NotFound { resource: "user_x".into() });
+        assert!(dbg.contains("user_x"));
+    }
 }

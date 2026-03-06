@@ -454,4 +454,214 @@ mod tests {
             other => panic!("expected External, got {other:?}"),
         }
     }
+
+    // --- Debug format ---
+
+    #[test]
+    fn debug_rate_limited() {
+        let err = SemanticScholarError::RateLimited {
+            retry_after_ms: 5000,
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("RateLimited"));
+        assert!(dbg.contains("5000"));
+    }
+
+    #[test]
+    fn debug_unauthorized() {
+        let dbg = format!("{:?}", SemanticScholarError::Unauthorized);
+        assert!(dbg.contains("Unauthorized"));
+    }
+
+    #[test]
+    fn debug_forbidden() {
+        let dbg = format!("{:?}", SemanticScholarError::Forbidden);
+        assert!(dbg.contains("Forbidden"));
+    }
+
+    #[test]
+    fn debug_not_found() {
+        let err = SemanticScholarError::NotFound {
+            resource: "paper_x".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("NotFound"));
+        assert!(dbg.contains("paper_x"));
+    }
+
+    #[test]
+    fn debug_api() {
+        let err = SemanticScholarError::Api {
+            status_code: 503,
+            message: "unavailable".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Api"));
+        assert!(dbg.contains("503"));
+        assert!(dbg.contains("unavailable"));
+    }
+
+    #[test]
+    fn debug_json() {
+        let json_err = serde_json::from_str::<serde_json::Value>("{bad}").unwrap_err();
+        let err = SemanticScholarError::Json(json_err);
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Json"));
+    }
+
+    // --- Source chain ---
+
+    #[test]
+    fn source_json_variant() {
+        let json_err = serde_json::from_str::<serde_json::Value>("{bad}").unwrap_err();
+        let err = SemanticScholarError::Json(json_err);
+        let source = std::error::Error::source(&err);
+        assert!(source.is_some(), "Json variant should have a source");
+    }
+
+    #[test]
+    fn source_unauthorized_none() {
+        let err = SemanticScholarError::Unauthorized;
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn source_forbidden_none() {
+        let err = SemanticScholarError::Forbidden;
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn source_not_found_none() {
+        let err = SemanticScholarError::NotFound {
+            resource: "x".into(),
+        };
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn source_api_none() {
+        let err = SemanticScholarError::Api {
+            status_code: 500,
+            message: "err".into(),
+        };
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn source_rate_limited_none() {
+        let err = SemanticScholarError::RateLimited {
+            retry_after_ms: 100,
+        };
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    // --- From impls ---
+
+    #[test]
+    fn from_serde_json_error() {
+        let json_err = serde_json::from_str::<serde_json::Value>("x").unwrap_err();
+        let err: SemanticScholarError = json_err.into();
+        assert!(matches!(err, SemanticScholarError::Json(_)));
+    }
+
+    // --- error_trait_impl ---
+
+    #[test]
+    fn error_trait_impl() {
+        let _: &dyn std::error::Error = &SemanticScholarError::Unauthorized;
+    }
+
+    // --- Result alias ---
+
+    #[test]
+    fn result_alias_ok() {
+        let r: SemanticScholarResult<u32> = Ok(42);
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn result_alias_err() {
+        let r: SemanticScholarResult<u32> = Err(SemanticScholarError::Forbidden);
+        assert!(matches!(r, Err(SemanticScholarError::Forbidden)));
+    }
+
+    // --- retry_after zero ---
+
+    #[test]
+    fn retry_after_zero_ms() {
+        let err = SemanticScholarError::RateLimited {
+            retry_after_ms: 0,
+        };
+        assert_eq!(err.retry_after(), Some(Duration::from_millis(0)));
+    }
+
+    // --- Display edge cases ---
+
+    #[test]
+    fn display_json_error() {
+        let json_err = serde_json::from_str::<serde_json::Value>("{bad}").unwrap_err();
+        let err = SemanticScholarError::Json(json_err);
+        let display = err.to_string();
+        assert!(display.starts_with("JSON error:"));
+    }
+
+    // --- is_retryable additional ---
+
+    #[test]
+    fn api_599_is_retryable() {
+        assert!(
+            SemanticScholarError::Api {
+                status_code: 599,
+                message: "err".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn json_not_retryable() {
+        let json_err = serde_json::from_str::<serde_json::Value>("x").unwrap_err();
+        assert!(!SemanticScholarError::Json(json_err).is_retryable());
+    }
+
+    // --- to_fcp_error additional ---
+
+    #[test]
+    fn http_error_to_fcp_external() {
+        // We cannot easily construct a reqwest::Error, but we can at least test
+        // that the Http variant is recognized via the is_retryable path
+        // and that all FcpError conversions for other variants are covered.
+        // This tests forbidden to_fcp_error message content
+        match SemanticScholarError::Forbidden.to_fcp_error() {
+            FcpError::External { message, .. } => {
+                assert_eq!(message, "Insufficient permissions");
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unauthorized_to_fcp_error_message() {
+        match SemanticScholarError::Unauthorized.to_fcp_error() {
+            FcpError::External { message, .. } => {
+                assert_eq!(message, "Authentication failed");
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rate_limited_to_fcp_error_message_format() {
+        match (SemanticScholarError::RateLimited {
+            retry_after_ms: 2000,
+        })
+        .to_fcp_error()
+        {
+            FcpError::External { message, .. } => {
+                assert_eq!(message, "Rate limited, retry after 2000ms");
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
 }

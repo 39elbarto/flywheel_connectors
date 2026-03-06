@@ -464,4 +464,159 @@ mod tests {
             other => panic!("expected External, got {other:?}"),
         }
     }
+
+    #[test]
+    fn error_display_http() {
+        let client = reqwest::Client::new();
+        let err = client.get("://bad").build().unwrap_err();
+        let linkedin_err = LinkedInError::Http(err);
+        let display = linkedin_err.to_string();
+        assert!(display.starts_with("HTTP error:"));
+    }
+
+    #[test]
+    fn error_display_json() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{{bad");
+        let err = LinkedInError::Json(bad.unwrap_err());
+        assert!(err.to_string().starts_with("JSON error:"));
+    }
+
+    #[test]
+    fn json_error_not_retryable() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{bad");
+        let err = LinkedInError::Json(bad.unwrap_err());
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn retry_after_none_for_json_error() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{bad");
+        let err = LinkedInError::Json(bad.unwrap_err());
+        assert_eq!(err.retry_after(), None);
+    }
+
+    #[test]
+    fn rate_limited_zero_retry_after() {
+        let err = LinkedInError::RateLimited { retry_after_ms: 0 };
+        assert_eq!(err.retry_after(), Some(Duration::from_millis(0)));
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn rate_limited_large_retry_after() {
+        let err = LinkedInError::RateLimited {
+            retry_after_ms: 3_600_000,
+        };
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn api_501_is_retryable() {
+        assert!(
+            LinkedInError::Api {
+                status_code: 501,
+                message: "not implemented".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_599_is_retryable() {
+        assert!(
+            LinkedInError::Api {
+                status_code: 599,
+                message: "unknown server error".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_600_not_retryable() {
+        assert!(
+            !LinkedInError::Api {
+                status_code: 600,
+                message: "invalid".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_error_retryable_to_fcp_has_no_retry_after() {
+        match (LinkedInError::Api {
+            status_code: 500,
+            message: "err".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External { retry_after, .. } => {
+                assert!(retry_after.is_none());
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unauthorized_fcp_message_contains_auth() {
+        match LinkedInError::Unauthorized.to_fcp_error() {
+            FcpError::External { message, .. } => {
+                assert!(message.contains("Authentication"));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forbidden_fcp_message_contains_permissions() {
+        match LinkedInError::Forbidden.to_fcp_error() {
+            FcpError::External { message, .. } => {
+                assert!(message.contains("permissions"));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rate_limited_fcp_message_contains_retry() {
+        match (LinkedInError::RateLimited {
+            retry_after_ms: 1000,
+        })
+        .to_fcp_error()
+        {
+            FcpError::External { message, .. } => {
+                assert!(message.contains("1000ms"));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_debug_contains_variant_name() {
+        let err = LinkedInError::Unauthorized;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Unauthorized"));
+
+        let err2 = LinkedInError::Forbidden;
+        let dbg2 = format!("{err2:?}");
+        assert!(dbg2.contains("Forbidden"));
+    }
+
+    #[test]
+    fn not_found_display_with_special_chars() {
+        let err = LinkedInError::NotFound {
+            resource: "urn:li:person:abc/123".into(),
+        };
+        assert!(err.to_string().contains("urn:li:person:abc/123"));
+    }
+
+    #[test]
+    fn api_error_display_with_empty_message() {
+        let err = LinkedInError::Api {
+            status_code: 500,
+            message: String::new(),
+        };
+        assert_eq!(err.to_string(), "LinkedIn API error (500): ");
+    }
 }

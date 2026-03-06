@@ -1405,4 +1405,385 @@ mod tests {
         assert_eq!(result["status"], "degraded");
         assert_eq!(result["reason_code"], "credential_injection_required");
     }
+
+    // ─── Introspection metadata tests ──────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_all_ops_have_required_metadata() {
+        let connector = GitHubConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            assert!(op["capability"].as_str().is_some(), "Op {id} missing capability");
+            assert!(op["risk_level"].as_str().is_some(), "Op {id} missing risk_level");
+            assert!(op["safety_tier"].as_str().is_some(), "Op {id} missing safety_tier");
+            assert!(op["idempotency"].as_str().is_some(), "Op {id} missing idempotency");
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_risk_levels_valid() {
+        let connector = GitHubConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        let valid_risk = ["low", "medium", "high", "critical"];
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            let risk = op["risk_level"].as_str().unwrap();
+            assert!(valid_risk.contains(&risk), "Op {id} has invalid risk_level: {risk}");
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_read_ops_are_safe() {
+        let connector = GitHubConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        let read_ops = ["github.get_issue", "github.get_pull_request", "github.get_repo",
+                        "github.get_file_content", "github.search_issues", "github.search_repos",
+                        "github.search_code", "github.list_workflows"];
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            if read_ops.contains(&id) {
+                assert_eq!(
+                    op["safety_tier"].as_str().unwrap(), "safe",
+                    "Read op {id} should be safe"
+                );
+            }
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_deterministic() {
+        let connector = GitHubConnector::new();
+        let a = connector.handle_introspect().await.unwrap();
+        let b = connector.handle_introspect().await.unwrap();
+        assert_eq!(a, b, "Introspection should be deterministic");
+    }
+
+    // ─── Schema completeness tests ─────────────────────────────────
+
+    const ALL_GITHUB_OPERATIONS: &[&str] = &[
+        "github.create_issue",
+        "github.get_issue",
+        "github.search_issues",
+        "github.create_pull_request",
+        "github.get_pull_request",
+        "github.merge_pull_request",
+        "github.get_repo",
+        "github.search_repos",
+        "github.list_workflows",
+        "github.trigger_workflow",
+        "github.get_file_content",
+        "github.search_code",
+    ];
+
+    /// Helper: extract `input_schema` for a named op from introspection result.
+    fn input_schema_from_introspect(
+        result: &serde_json::Value,
+        op_name: &str,
+    ) -> Option<serde_json::Value> {
+        let ops = result["operations"].as_array()?;
+        ops.iter()
+            .find(|o| o["id"].as_str() == Some(op_name))
+            .map(|o| o["input_schema"].clone())
+    }
+
+    /// Helper: extract `output_schema` for a named op from introspection result.
+    fn output_schema_from_introspect(
+        result: &serde_json::Value,
+        op_name: &str,
+    ) -> Option<serde_json::Value> {
+        let ops = result["operations"].as_array()?;
+        ops.iter()
+            .find(|o| o["id"].as_str() == Some(op_name))
+            .map(|o| o["output_schema"].clone())
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_all_operations_have_input_schema() {
+        let connector = GitHubConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        for op in ALL_GITHUB_OPERATIONS {
+            assert!(
+                input_schema_from_introspect(&result, op).is_some(),
+                "Missing input schema for {op}"
+            );
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_all_operations_have_output_schema() {
+        let connector = GitHubConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        for op in ALL_GITHUB_OPERATIONS {
+            assert!(
+                output_schema_from_introspect(&result, op).is_some(),
+                "Missing output schema for {op}"
+            );
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_unknown_operation_returns_none_schema() {
+        let connector = GitHubConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        assert!(input_schema_from_introspect(&result, "github.nonexistent").is_none());
+        assert!(output_schema_from_introspect(&result, "github.nonexistent").is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_input_schemas_are_object_type() {
+        let connector = GitHubConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        for op in ALL_GITHUB_OPERATIONS {
+            let schema = input_schema_from_introspect(&result, op).unwrap();
+            assert_eq!(
+                schema["type"], "object",
+                "Input schema for {op} must be type=object"
+            );
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_schemas_deterministic_across_calls() {
+        let connector = GitHubConnector::new();
+        let a = connector.handle_introspect().await.unwrap();
+        let b = connector.handle_introspect().await.unwrap();
+        for op in ALL_GITHUB_OPERATIONS {
+            let a_in = input_schema_from_introspect(&a, op).unwrap();
+            let b_in = input_schema_from_introspect(&b, op).unwrap();
+            assert_eq!(a_in, b_in, "Input schema for {op} not deterministic");
+
+            let a_out = output_schema_from_introspect(&a, op).unwrap();
+            let b_out = output_schema_from_introspect(&b, op).unwrap();
+            assert_eq!(a_out, b_out, "Output schema for {op} not deterministic");
+        }
+    }
+
+    // ─── Schema required fields tests ──────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_create_issue_requires_owner_repo_title() {
+        let connector = GitHubConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let schema = input_schema_from_introspect(&result, "github.create_issue").unwrap();
+        let required = schema["required"].as_array().unwrap();
+        let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(required_strs.contains(&"owner"));
+        assert!(required_strs.contains(&"repo"));
+        assert!(required_strs.contains(&"title"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_get_issue_requires_owner_repo_issue_number() {
+        let connector = GitHubConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let schema = input_schema_from_introspect(&result, "github.get_issue").unwrap();
+        let required = schema["required"].as_array().unwrap();
+        let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(required_strs.contains(&"owner"));
+        assert!(required_strs.contains(&"repo"));
+        assert!(required_strs.contains(&"issue_number"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_get_repo_requires_owner_repo() {
+        let connector = GitHubConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let schema = input_schema_from_introspect(&result, "github.get_repo").unwrap();
+        let required = schema["required"].as_array().unwrap();
+        let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(required_strs.contains(&"owner"));
+        assert!(required_strs.contains(&"repo"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_search_issues_requires_query() {
+        let connector = GitHubConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let schema = input_schema_from_introspect(&result, "github.search_issues").unwrap();
+        let required = schema["required"].as_array().unwrap();
+        assert!(required.iter().any(|v| v.as_str() == Some("query")));
+    }
+
+    // ─── Connector default / new ───────────────────────────────────
+
+    #[test]
+    fn test_connector_new_has_no_config() {
+        let connector = GitHubConnector::new();
+        assert!(connector.config.is_none());
+        assert!(connector.client.is_none());
+    }
+
+    #[test]
+    fn test_connector_default_equals_new() {
+        let a = GitHubConnector::new();
+        let b = GitHubConnector::default();
+        assert!(a.config.is_none());
+        assert!(b.config.is_none());
+    }
+
+    // ─── Additional introspect metadata tests ─────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_delete_op_is_not_present() {
+        // GitHub connector currently has no delete operations
+        let connector = GitHubConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            assert!(!id.contains("delete"), "GitHub should not have delete ops: {id}");
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_write_ops_are_medium_or_high_risk() {
+        let connector = GitHubConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let write_ops = ["github.create_issue", "github.create_pull_request",
+                         "github.merge_pull_request", "github.trigger_workflow"];
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            if write_ops.contains(&id) {
+                let risk = op["risk_level"].as_str().unwrap();
+                assert!(risk == "medium" || risk == "high",
+                    "Write op {id} should be medium or high risk, got {risk}");
+            }
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_all_ops_have_ai_hints() {
+        let connector = GitHubConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            assert!(op["ai_hints"].is_object(), "Op {id} missing ai_hints");
+            assert!(
+                op["ai_hints"]["when_to_use"].is_string(),
+                "Op {id} missing ai_hints.when_to_use"
+            );
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_op_count() {
+        let connector = GitHubConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        assert_eq!(ops.len(), 12, "Expected 12 operations");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_search_code_requires_query() {
+        let connector = GitHubConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let op = ops.iter().find(|o| o["id"] == "github.search_code").unwrap();
+        let required = op["input_schema"]["required"].as_array().unwrap();
+        assert!(required.iter().any(|v| v == "query"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_get_file_content_requires_owner_repo_path() {
+        let connector = GitHubConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let op = ops.iter().find(|o| o["id"] == "github.get_file_content").unwrap();
+        let required = op["input_schema"]["required"].as_array().unwrap();
+        assert!(required.iter().any(|v| v == "owner"));
+        assert!(required.iter().any(|v| v == "repo"));
+        assert!(required.iter().any(|v| v == "path"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_merge_pull_request_requires_owner_repo_pull_number() {
+        let connector = GitHubConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let op = ops.iter().find(|o| o["id"] == "github.merge_pull_request").unwrap();
+        let required = op["input_schema"]["required"].as_array().unwrap();
+        assert!(required.iter().any(|v| v == "owner"));
+        assert!(required.iter().any(|v| v == "repo"));
+        assert!(required.iter().any(|v| v == "pull_number"));
+    }
+
+    // ─── Handshake tests ──────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_handshake_grants_requested_capabilities() {
+        let mut connector = GitHubConnector::new();
+        let result = connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": vec![0u8; 32],
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["github.read", "github.write"]
+            }))
+            .await
+            .unwrap();
+        let grants = result["capabilities_granted"].as_array().unwrap();
+        assert_eq!(grants.len(), 2);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_handshake_has_session_id() {
+        let mut connector = GitHubConnector::new();
+        let result = connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": vec![0u8; 32],
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["github.read"]
+            }))
+            .await
+            .unwrap();
+        assert!(result["session_id"].is_string());
+        assert!(connector.session_id.is_some());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_handshake_event_caps() {
+        let mut connector = GitHubConnector::new();
+        let result = connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": vec![0u8; 32],
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": []
+            }))
+            .await
+            .unwrap();
+        let event_caps = &result["event_caps"];
+        assert_eq!(event_caps["streaming"], true);
+        assert_eq!(event_caps["replay"], false);
+    }
+
+    // ─── Health check tests ───────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_health_not_configured_status() {
+        let connector = GitHubConnector::new();
+        let result = connector.handle_health().await.unwrap();
+        assert_eq!(result["status"], "not_configured");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_health_metrics_start_at_zero() {
+        let connector = GitHubConnector::new();
+        let result = connector.handle_health().await.unwrap();
+        assert_eq!(result["metrics"]["requests_total"], 0);
+        assert_eq!(result["metrics"]["requests_error"], 0);
+    }
 }

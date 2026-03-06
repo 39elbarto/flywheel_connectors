@@ -1552,4 +1552,421 @@ mod tests {
         let result = serde_json::from_value::<Transaction>(json);
         assert!(result.is_err());
     }
+
+    // ---- Clone with drop(original) pattern ----
+
+    #[test]
+    fn account_clone_drop_original() {
+        let original = Account {
+            account_id: "acc_drop".into(),
+            balances: AccountBalances {
+                available: Some(100.0),
+                current: Some(200.0),
+                limit: Some(5000.0),
+                iso_currency_code: Some("USD".into()),
+                unofficial_currency_code: None,
+            },
+            mask: Some("4567".into()),
+            name: "Drop Account".into(),
+            official_name: Some("Official Drop".into()),
+            subtype: Some("checking".into()),
+            account_type: Some("depository".into()),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.account_id, "acc_drop");
+        assert_eq!(cloned.balances.available, Some(100.0));
+        assert_eq!(cloned.account_type.as_deref(), Some("depository"));
+    }
+
+    #[test]
+    fn account_balances_clone_drop_original() {
+        let original = AccountBalances {
+            available: Some(999.99),
+            current: Some(1000.0),
+            limit: Some(2000.0),
+            iso_currency_code: Some("EUR".into()),
+            unofficial_currency_code: Some("DOGE".into()),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.available, Some(999.99));
+        assert_eq!(cloned.iso_currency_code.as_deref(), Some("EUR"));
+    }
+
+    #[test]
+    fn transaction_clone_drop_original() {
+        let original = Transaction {
+            transaction_id: "txn_drop".into(),
+            account_id: "acc_drop".into(),
+            amount: 42.50,
+            iso_currency_code: Some("USD".into()),
+            date: "2026-03-06".into(),
+            name: "Drop Txn".into(),
+            merchant_name: Some("Drop Shop".into()),
+            pending: false,
+            category: Some(vec!["Shopping".into(), "Clothing".into()]),
+            category_id: Some("19000".into()),
+            authorized_date: Some("2026-03-05".into()),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.transaction_id, "txn_drop");
+        assert_eq!(cloned.amount, 42.50);
+        assert_eq!(cloned.category.as_ref().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn holding_clone_drop_original() {
+        let original = Holding {
+            account_id: "acc_h_drop".into(),
+            security_id: "sec_h_drop".into(),
+            quantity: 50.0,
+            institution_price: 200.0,
+            institution_value: 10000.0,
+            cost_basis: Some(9500.0),
+            iso_currency_code: Some("USD".into()),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.security_id, "sec_h_drop");
+        assert_eq!(cloned.institution_value, 10000.0);
+    }
+
+    #[test]
+    fn security_clone_drop_original() {
+        let original = Security {
+            security_id: "sec_drop".into(),
+            name: Some("Drop Security".into()),
+            ticker_symbol: Some("DRP".into()),
+            security_type: Some("equity".into()),
+            close_price: Some(150.0),
+            iso_currency_code: Some("USD".into()),
+            isin: Some("US9999999999".into()),
+            cusip: Some("999999999".into()),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.security_id, "sec_drop");
+        assert_eq!(cloned.ticker_symbol.as_deref(), Some("DRP"));
+    }
+
+    #[test]
+    fn liability_clone_drop_original() {
+        let original = Liability {
+            account_id: Some("acc_l_drop".into()),
+            liability_type: Some("mortgage".into()),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.account_id.as_deref(), Some("acc_l_drop"));
+        assert_eq!(cloned.liability_type.as_deref(), Some("mortgage"));
+    }
+
+    #[test]
+    fn credit_liability_clone_drop_original() {
+        let original = CreditLiability {
+            account_id: Some("acc_cc_drop".into()),
+            is_overdue: Some(true),
+            last_payment_amount: Some(250.0),
+            last_statement_balance: Some(3000.0),
+            minimum_payment_amount: Some(50.0),
+            next_payment_due_date: Some("2026-04-01".into()),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.is_overdue, Some(true));
+        assert_eq!(cloned.minimum_payment_amount, Some(50.0));
+    }
+
+    #[test]
+    fn student_loan_clone_drop_original() {
+        let original = StudentLoanLiability {
+            account_id: Some("acc_sl_drop".into()),
+            disbursement_dates: Some(vec!["2020-01-01".into(), "2021-01-01".into()]),
+            interest_rate_percentage: Some(6.0),
+            loan_name: Some("Drop Loan".into()),
+            origination_principal_amount: Some(40000.0),
+            outstanding_interest_amount: Some(2000.0),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.loan_name.as_deref(), Some("Drop Loan"));
+        assert_eq!(cloned.disbursement_dates.as_ref().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn liabilities_response_clone_drop_original() {
+        let original = LiabilitiesResponse {
+            credit: Some(vec![json!({"account_id": "cc1"})]),
+            mortgage: Some(vec![json!({"account_id": "m1"})]),
+            student: None,
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.credit.as_ref().unwrap().len(), 1);
+        assert_eq!(cloned.mortgage.as_ref().unwrap().len(), 1);
+        assert!(cloned.student.is_none());
+    }
+
+    #[test]
+    fn plaid_item_clone_drop_original() {
+        let original = PlaidItem {
+            item_id: "item_drop".into(),
+            institution_id: Some("ins_drop".into()),
+            available_products: Some(vec!["auth".into()]),
+            billed_products: Some(vec!["transactions".into()]),
+            consent_expiration_time: Some("2028-01-01T00:00:00Z".into()),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.item_id, "item_drop");
+        assert_eq!(cloned.institution_id.as_deref(), Some("ins_drop"));
+    }
+
+    #[test]
+    fn link_token_response_clone_drop_original() {
+        let original = LinkTokenResponse {
+            link_token: "link-drop".into(),
+            expiration: "2026-12-31T23:59:59Z".into(),
+            request_id: Some("req_drop".into()),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.link_token, "link-drop");
+        assert_eq!(cloned.request_id.as_deref(), Some("req_drop"));
+    }
+
+    #[test]
+    fn access_token_response_clone_drop_original() {
+        let original = AccessTokenResponse {
+            access_token: "access-drop".into(),
+            item_id: "item_drop".into(),
+            request_id: Some("req_drop".into()),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.access_token, "access-drop");
+        assert_eq!(cloned.item_id, "item_drop");
+    }
+
+    #[test]
+    fn auth_numbers_clone_drop_original() {
+        let original = AuthNumbers {
+            ach: Some(vec![json!({"routing": "123456789"})]),
+            eft: None,
+            international: Some(vec![json!({"iban": "GB123"})]),
+            bacs: None,
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.ach.as_ref().unwrap().len(), 1);
+        assert_eq!(cloned.international.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn transactions_sync_response_clone_drop_original() {
+        let original = TransactionsSyncResponse {
+            added: vec![],
+            modified: vec![],
+            removed: vec![RemovedTransaction {
+                transaction_id: "txn_drop_rm".into(),
+            }],
+            next_cursor: "drop_cursor".into(),
+            has_more: true,
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.removed.len(), 1);
+        assert_eq!(cloned.next_cursor, "drop_cursor");
+        assert!(cloned.has_more);
+    }
+
+    #[test]
+    fn removed_transaction_clone_drop_original() {
+        let original = RemovedTransaction {
+            transaction_id: "txn_rm_drop".into(),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.transaction_id, "txn_rm_drop");
+    }
+
+    #[test]
+    fn plaid_api_error_clone_drop_original() {
+        let original = PlaidApiError {
+            error_type: Some("API_ERROR".into()),
+            error_code: Some("INTERNAL_SERVER_ERROR".into()),
+            error_message: Some("Something went wrong".into()),
+            display_message: Some("Please try again".into()),
+            request_id: Some("req_api_drop".into()),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.error_type.as_deref(), Some("API_ERROR"));
+        assert_eq!(
+            cloned.error_code.as_deref(),
+            Some("INTERNAL_SERVER_ERROR")
+        );
+    }
+
+    // ---- Extra unknown fields tolerance ----
+
+    #[test]
+    fn transaction_ignores_extra_fields() {
+        let json = json!({
+            "transaction_id": "txn_extra",
+            "account_id": "acc_1",
+            "amount": 5.0,
+            "iso_currency_code": "USD",
+            "date": "2026-03-01",
+            "name": "Extra Fields",
+            "pending": false,
+            "merchant_name": null,
+            "category": null,
+            "category_id": null,
+            "authorized_date": null,
+            "personal_finance_category": {"primary": "FOOD"},
+            "transaction_type": "place",
+            "location": {"city": "San Francisco"}
+        });
+        let txn: Transaction = serde_json::from_value(json).unwrap();
+        assert_eq!(txn.transaction_id, "txn_extra");
+    }
+
+    #[test]
+    fn account_ignores_extra_fields() {
+        let json = json!({
+            "account_id": "acc_extra",
+            "balances": {
+                "available": 100.0,
+                "current": 100.0,
+                "limit": null,
+                "iso_currency_code": "USD",
+                "unofficial_currency_code": null
+            },
+            "name": "Extra Account",
+            "mask": "1234",
+            "type": "depository",
+            "subtype": "checking",
+            "official_name": null,
+            "persistent_account_id": "some_id",
+            "verification_status": null
+        });
+        let account: Account = serde_json::from_value(json).unwrap();
+        assert_eq!(account.account_id, "acc_extra");
+    }
+
+    #[test]
+    fn security_missing_security_id_fails() {
+        let json = json!({
+            "name": "No ID Security",
+            "type": "equity"
+        });
+        let result = serde_json::from_value::<Security>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn plaid_item_missing_item_id_fails() {
+        let json = json!({
+            "institution_id": "ins_1"
+        });
+        let result = serde_json::from_value::<PlaidItem>(json);
+        assert!(result.is_err());
+    }
+
+    // ── Additional serde roundtrip edge cases ─────────────────────────
+
+    #[test]
+    fn account_type_uses_type_key_in_json() {
+        let acc = Account {
+            account_id: "acc1".into(),
+            balances: AccountBalances {
+                available: None,
+                current: None,
+                limit: None,
+                iso_currency_code: None,
+                unofficial_currency_code: None,
+            },
+            mask: None,
+            name: "Test".into(),
+            official_name: None,
+            subtype: None,
+            account_type: Some("depository".into()),
+        };
+        let json = serde_json::to_value(&acc).unwrap();
+        assert!(json.get("type").is_some(), "Should use 'type' key in JSON");
+        assert!(json.get("account_type").is_none(), "Should NOT use 'account_type' key");
+        assert_eq!(json["type"], "depository");
+    }
+
+    #[test]
+    fn account_balances_all_none_roundtrips() {
+        let bal = AccountBalances {
+            available: None,
+            current: None,
+            limit: None,
+            iso_currency_code: None,
+            unofficial_currency_code: None,
+        };
+        let json = serde_json::to_value(&bal).unwrap();
+        let back: AccountBalances = serde_json::from_value(json).unwrap();
+        assert!(back.available.is_none());
+        assert!(back.current.is_none());
+        assert!(back.limit.is_none());
+    }
+
+    #[test]
+    fn transactions_sync_response_empty_collections_roundtrips() {
+        let resp = TransactionsSyncResponse {
+            added: vec![],
+            modified: vec![],
+            removed: vec![],
+            next_cursor: "cursor123".into(),
+            has_more: false,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        let back: TransactionsSyncResponse = serde_json::from_value(json).unwrap();
+        assert!(back.added.is_empty());
+        assert_eq!(back.next_cursor, "cursor123");
+        assert!(!back.has_more);
+    }
+
+    #[test]
+    fn plaid_api_error_all_none_optional_fields() {
+        let json = json!({});
+        let err: PlaidApiError = serde_json::from_value(json).unwrap();
+        assert!(err.error_type.is_none());
+        assert!(err.error_code.is_none());
+        assert!(err.error_message.is_none());
+    }
+
+    #[test]
+    fn security_type_uses_rename_key() {
+        let sec = Security {
+            security_id: "sec1".into(),
+            name: Some("AAPL".into()),
+            ticker_symbol: None,
+            isin: None,
+            cusip: None,
+            close_price: None,
+            iso_currency_code: None,
+            security_type: Some("equity".into()),
+        };
+        let json = serde_json::to_value(&sec).unwrap();
+        assert!(json.get("type").is_some(), "Should use 'type' key in JSON");
+        assert!(json.get("security_type").is_none());
+    }
+
+    #[test]
+    fn liability_type_uses_rename_key() {
+        let liab = Liability {
+            account_id: Some("acc1".into()),
+            liability_type: Some("credit".into()),
+        };
+        let json = serde_json::to_value(&liab).unwrap();
+        assert!(json.get("type").is_some(), "Should use 'type' key in JSON");
+        assert!(json.get("liability_type").is_none());
+    }
 }

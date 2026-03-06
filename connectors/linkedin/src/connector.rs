@@ -883,4 +883,214 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn doctor_check_clone() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: true,
+            message: Some("ok".into()),
+            critical: false,
+        };
+        let c = check.clone();
+        assert_eq!(c.name, "test");
+        assert!(c.passed);
+        assert_eq!(c.message, Some("ok".into()));
+    }
+
+    #[test]
+    fn doctor_check_debug() {
+        let check = DoctorCheck {
+            name: "check1".into(),
+            passed: false,
+            message: None,
+            critical: true,
+        };
+        let dbg = format!("{check:?}");
+        assert!(dbg.contains("DoctorCheck"));
+        assert!(dbg.contains("check1"));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn doctor_result_clone() {
+        let r = DoctorResult::from_checks(vec![]);
+        let c = r.clone();
+        assert_eq!(c.status, DoctorStatus::Healthy);
+        assert!(c.checks.is_empty());
+    }
+
+    #[test]
+    fn doctor_result_debug() {
+        let r = DoctorResult::from_checks(vec![]);
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("DoctorResult"));
+    }
+
+    #[test]
+    fn doctor_status_serialize_all_variants() {
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Healthy).unwrap(),
+            json!("healthy")
+        );
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Degraded).unwrap(),
+            json!("degraded")
+        );
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Unhealthy).unwrap(),
+            json!("unhealthy")
+        );
+    }
+
+    #[test]
+    fn doctor_status_deserialize_all_variants() {
+        let h: DoctorStatus = serde_json::from_value(json!("healthy")).unwrap();
+        assert_eq!(h, DoctorStatus::Healthy);
+        let d: DoctorStatus = serde_json::from_value(json!("degraded")).unwrap();
+        assert_eq!(d, DoctorStatus::Degraded);
+        let u: DoctorStatus = serde_json::from_value(json!("unhealthy")).unwrap();
+        assert_eq!(u, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_check_serializes_skip_none_message() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert!(v.get("message").is_none());
+    }
+
+    #[test]
+    fn doctor_check_serializes_with_message() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: false,
+            message: Some("failure reason".into()),
+            critical: true,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert_eq!(v["message"], "failure reason");
+    }
+
+    #[test]
+    fn require_str_empty_string_returns_ok() {
+        let input = json!({"field": ""});
+        assert_eq!(require_str(&input, "field").unwrap(), "");
+    }
+
+    #[test]
+    fn require_str_boolean_value() {
+        let input = json!({"field": true});
+        assert!(require_str(&input, "field").is_err());
+    }
+
+    #[test]
+    fn require_str_array_value() {
+        let input = json!({"field": ["a", "b"]});
+        assert!(require_str(&input, "field").is_err());
+    }
+
+    #[test]
+    fn operations_posts_create_is_risky() {
+        let ops = operations_info();
+        let create = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "linkedin.posts.create")
+            .unwrap();
+        assert_eq!(create["safety_tier"], "risky");
+        assert_eq!(create["risk_level"], "high");
+    }
+
+    #[test]
+    fn operations_posts_delete_is_dangerous() {
+        let ops = operations_info();
+        let delete = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "linkedin.posts.delete")
+            .unwrap();
+        assert_eq!(delete["safety_tier"], "dangerous");
+    }
+
+    #[test]
+    fn connector_new_equals_default() {
+        let c1 = LinkedInConnector::new();
+        let c2 = LinkedInConnector::default();
+        assert!(c1.config.is_none());
+        assert!(c2.config.is_none());
+        assert_eq!(
+            c1.request_count.load(Ordering::Relaxed),
+            c2.request_count.load(Ordering::Relaxed)
+        );
+    }
+
+    #[test]
+    fn doctor_result_mixed_critical_and_noncritical_failures() {
+        let checks = vec![
+            DoctorCheck {
+                name: "a".into(),
+                passed: false,
+                message: Some("crit fail".into()),
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: Some("non-crit fail".into()),
+                critical: false,
+            },
+        ];
+        let r = DoctorResult::from_checks(checks);
+        // Critical failure takes precedence
+        assert_eq!(r.status, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_check_deserialize() {
+        let v = json!({
+            "name": "config",
+            "passed": true,
+            "message": "all good",
+            "critical": false
+        });
+        let check: DoctorCheck = serde_json::from_value(v).unwrap();
+        assert_eq!(check.name, "config");
+        assert!(check.passed);
+        assert_eq!(check.message, Some("all good".into()));
+        assert!(!check.critical);
+    }
+
+    #[test]
+    fn doctor_status_eq() {
+        assert_eq!(DoctorStatus::Healthy, DoctorStatus::Healthy);
+        assert_ne!(DoctorStatus::Healthy, DoctorStatus::Degraded);
+        assert_ne!(DoctorStatus::Degraded, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_status_copy() {
+        let status = DoctorStatus::Healthy;
+        let copied = status;
+        assert_eq!(status, copied);
+    }
+
+    #[test]
+    fn config_accepts_trimmed_access_token() {
+        let config =
+            LinkedInConfig::from_params(&json!({ "access_token": "\t  valid_token  \n" }))
+                .unwrap();
+        match &config.auth {
+            LinkedInAuth::AccessToken(t) => assert_eq!(t, "valid_token"),
+            LinkedInAuth::CredentialId(_) => panic!("expected AccessToken"),
+        }
+    }
 }

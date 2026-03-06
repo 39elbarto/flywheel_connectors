@@ -532,4 +532,94 @@ mod tests {
         let err = BoxError::RateLimited { retry_after_ms: 0 };
         assert_eq!(err.retry_after(), Some(Duration::from_millis(0)));
     }
+
+    #[test]
+    fn json_error_not_retryable() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{invalid");
+        assert!(!BoxError::Json(bad.unwrap_err()).is_retryable());
+    }
+
+    #[test]
+    fn json_error_retry_after_none() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{invalid");
+        assert_eq!(BoxError::Json(bad.unwrap_err()).retry_after(), None);
+    }
+
+    #[test]
+    fn api_501_is_retryable() {
+        assert!(
+            BoxError::Api {
+                status_code: 501,
+                message: "not impl".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn error_debug_unauthorized() {
+        let err = BoxError::Unauthorized;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Unauthorized"));
+    }
+
+    #[test]
+    fn error_debug_conflict() {
+        let err = BoxError::Conflict {
+            message: "dup".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Conflict"));
+    }
+
+    #[test]
+    fn error_debug_api_contains_code() {
+        let err = BoxError::Api {
+            status_code: 503,
+            message: "svc".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("503"));
+    }
+
+    #[test]
+    fn unauthorized_fcp_error_no_retry_after() {
+        match BoxError::Unauthorized.to_fcp_error() {
+            FcpError::External { retry_after, .. } => assert!(retry_after.is_none()),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn conflict_fcp_error_no_retry_after() {
+        match (BoxError::Conflict {
+            message: "dup".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External { retry_after, .. } => assert!(retry_after.is_none()),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rate_limited_large_value() {
+        let err = BoxError::RateLimited {
+            retry_after_ms: 3_600_000,
+        };
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(3600)));
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn conflict_fcp_error_service() {
+        match (BoxError::Conflict {
+            message: "x".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External { service, .. } => assert_eq!(service, "box"),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
 }

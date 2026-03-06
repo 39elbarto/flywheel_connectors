@@ -476,4 +476,166 @@ mod tests {
             "Envelope not modifiable: already sent"
         );
     }
+
+    #[test]
+    fn api_501_is_retryable() {
+        assert!(
+            DocuSignError::Api {
+                status_code: 501,
+                message: "not implemented".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_599_is_retryable() {
+        assert!(
+            DocuSignError::Api {
+                status_code: 599,
+                message: "edge".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_499_not_retryable() {
+        assert!(
+            !DocuSignError::Api {
+                status_code: 499,
+                message: "client".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn json_not_retryable() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{bad");
+        assert!(!DocuSignError::Json(bad.unwrap_err()).is_retryable());
+    }
+
+    #[test]
+    fn error_debug_format_api() {
+        let err = DocuSignError::Api {
+            status_code: 503,
+            message: "unavailable".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Api"));
+        assert!(dbg.contains("503"));
+    }
+
+    #[test]
+    fn error_debug_format_unauthorized() {
+        let dbg = format!("{:?}", DocuSignError::Unauthorized);
+        assert!(dbg.contains("Unauthorized"));
+    }
+
+    #[test]
+    fn error_debug_format_forbidden() {
+        let dbg = format!("{:?}", DocuSignError::Forbidden);
+        assert!(dbg.contains("Forbidden"));
+    }
+
+    #[test]
+    fn error_debug_format_envelope_not_modifiable() {
+        let err = DocuSignError::EnvelopeNotModifiable {
+            reason: "completed".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("EnvelopeNotModifiable"));
+    }
+
+    #[test]
+    fn retry_after_zero_ms() {
+        let err = DocuSignError::RateLimited {
+            retry_after_ms: 0,
+        };
+        assert_eq!(err.retry_after(), Some(Duration::from_millis(0)));
+    }
+
+    #[test]
+    fn retry_after_large_value() {
+        let err = DocuSignError::RateLimited {
+            retry_after_ms: 3_600_000,
+        };
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn api_error_retryable_has_no_retry_after() {
+        match (DocuSignError::Api {
+            status_code: 500,
+            message: "err".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External { retry_after, .. } => assert!(retry_after.is_none()),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_display_json() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{{");
+        let err = DocuSignError::Json(bad.unwrap_err());
+        let display = err.to_string();
+        assert!(display.starts_with("JSON error:"));
+    }
+
+    #[test]
+    fn api_502_is_retryable() {
+        assert!(
+            DocuSignError::Api {
+                status_code: 502,
+                message: "bad gateway".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_504_is_retryable() {
+        assert!(
+            DocuSignError::Api {
+                status_code: 504,
+                message: "gateway timeout".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_422_not_retryable() {
+        assert!(
+            !DocuSignError::Api {
+                status_code: 422,
+                message: "unprocessable".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn retry_after_none_for_json_error() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{bad");
+        assert_eq!(DocuSignError::Json(bad.unwrap_err()).retry_after(), None);
+    }
+
+    #[test]
+    fn envelope_not_modifiable_to_fcp_error_message_format() {
+        match (DocuSignError::EnvelopeNotModifiable {
+            reason: "voided".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External { message, .. } => {
+                assert!(message.contains("Envelope not modifiable"));
+                assert!(message.contains("voided"));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
 }

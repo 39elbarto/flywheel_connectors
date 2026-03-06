@@ -395,4 +395,135 @@ mod tests {
         let cred = DatadogAuth::CredentialId(CredentialId::new());
         assert!(cred.redacted_label().starts_with("credential_id:"));
     }
+
+    // ── Client construction ───────────────────────────────────────
+
+    #[test]
+    fn client_new_default_url() {
+        let auth = DatadogAuth::ApiKeys {
+            api_key: "k".into(),
+            app_key: "a".into(),
+        };
+        let client = DatadogClient::new(auth, None).unwrap();
+        assert_eq!(client.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn client_new_custom_url() {
+        let auth = DatadogAuth::ApiKeys {
+            api_key: "k".into(),
+            app_key: "a".into(),
+        };
+        let client = DatadogClient::new(auth, Some("https://custom.example.com/api/v1")).unwrap();
+        assert_eq!(client.base_url, "https://custom.example.com/api/v1");
+    }
+
+    #[test]
+    fn client_new_trims_trailing_slash() {
+        let auth = DatadogAuth::ApiKeys {
+            api_key: "k".into(),
+            app_key: "a".into(),
+        };
+        let client = DatadogClient::new(auth, Some("https://example.com/api/")).unwrap();
+        assert_eq!(client.base_url, "https://example.com/api");
+    }
+
+    #[test]
+    fn client_debug_format_redacts_keys() {
+        let auth = DatadogAuth::ApiKeys {
+            api_key: "supersecret_key".into(),
+            app_key: "supersecret_app".into(),
+        };
+        let client = DatadogClient::new(auth, None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(!dbg.contains("supersecret_key"));
+        assert!(!dbg.contains("supersecret_app"));
+        assert!(dbg.contains("DatadogClient"));
+        assert!(dbg.contains("base_url"));
+    }
+
+    #[test]
+    fn client_with_client_trims_trailing_slash() {
+        let inner = Client::new();
+        let auth = DatadogAuth::ApiKeys {
+            api_key: "k".into(),
+            app_key: "a".into(),
+        };
+        let client = DatadogClient::with_client(inner, auth, "https://example.com/");
+        assert_eq!(client.base_url, "https://example.com");
+    }
+
+    // ── Auth clone ────────────────────────────────────────────────
+
+    #[test]
+    fn auth_api_keys_clone() {
+        let auth = DatadogAuth::ApiKeys {
+            api_key: "key1".into(),
+            app_key: "app1".into(),
+        };
+        let cloned = auth.clone();
+        // Use both original and clone to verify clone correctness
+        assert_eq!(auth.redacted_label(), "api_keys:redacted");
+        assert_eq!(cloned.redacted_label(), "api_keys:redacted");
+    }
+
+    #[test]
+    fn auth_credential_id_clone() {
+        let cred = DatadogAuth::CredentialId(CredentialId::new());
+        let cloned = cred.clone();
+        assert!(cred.is_secretless());
+        assert!(cloned.is_secretless());
+    }
+
+    #[test]
+    fn auth_debug_credential_id_contains_id() {
+        let id = CredentialId::new();
+        let id_str = id.to_string();
+        let auth = DatadogAuth::CredentialId(id);
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains(&id_str));
+        assert!(dbg.contains("CredentialId"));
+    }
+
+    // ── Region edge cases ─────────────────────────────────────────
+
+    #[test]
+    fn region_parse_case_insensitive() {
+        assert_eq!(DatadogRegion::parse_region("US1"), Some(DatadogRegion::Us1));
+        assert_eq!(DatadogRegion::parse_region("Us1"), Some(DatadogRegion::Us1));
+        assert_eq!(DatadogRegion::parse_region("EU1"), Some(DatadogRegion::Eu1));
+        assert_eq!(DatadogRegion::parse_region("Eu"), Some(DatadogRegion::Eu1));
+        assert_eq!(DatadogRegion::parse_region("AP1"), Some(DatadogRegion::Ap1));
+    }
+
+    #[test]
+    fn region_parse_empty_string() {
+        assert_eq!(DatadogRegion::parse_region(""), None);
+    }
+
+    #[test]
+    fn region_parse_whitespace() {
+        assert_eq!(DatadogRegion::parse_region("  "), None);
+    }
+
+    #[test]
+    fn region_eq_and_copy() {
+        let r1 = DatadogRegion::Us1;
+        let r2 = r1; // Copy
+        assert_eq!(r1, r2);
+        assert_ne!(r1, DatadogRegion::Eu1);
+    }
+
+    #[test]
+    fn region_debug_format() {
+        let dbg = format!("{:?}", DatadogRegion::Ap1);
+        assert_eq!(dbg, "Ap1");
+    }
+
+    #[test]
+    fn default_base_url_constant() {
+        assert!(DEFAULT_BASE_URL.starts_with("https://"));
+        assert!(DEFAULT_BASE_URL.contains("datadoghq"));
+        assert!(!DEFAULT_BASE_URL.ends_with('/'));
+    }
 }

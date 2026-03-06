@@ -461,4 +461,146 @@ mod tests {
             other => panic!("expected External, got {other:?}"),
         }
     }
+
+    #[test]
+    fn api_501_is_retryable() {
+        assert!(
+            MongoDbError::Api {
+                status_code: 501,
+                message: "not implemented".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_599_is_retryable() {
+        assert!(
+            MongoDbError::Api {
+                status_code: 599,
+                message: "edge case".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_499_not_retryable() {
+        assert!(
+            !MongoDbError::Api {
+                status_code: 499,
+                message: "client error".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_600_not_retryable() {
+        assert!(
+            !MongoDbError::Api {
+                status_code: 600,
+                message: "custom".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn json_not_retryable() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{bad");
+        assert!(!MongoDbError::Json(bad.unwrap_err()).is_retryable());
+    }
+
+    #[test]
+    fn error_debug_format_api() {
+        let err = MongoDbError::Api {
+            status_code: 503,
+            message: "service unavailable".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Api"));
+        assert!(dbg.contains("503"));
+    }
+
+    #[test]
+    fn error_debug_format_unauthorized() {
+        let dbg = format!("{:?}", MongoDbError::Unauthorized);
+        assert!(dbg.contains("Unauthorized"));
+    }
+
+    #[test]
+    fn error_debug_format_forbidden() {
+        let dbg = format!("{:?}", MongoDbError::Forbidden);
+        assert!(dbg.contains("Forbidden"));
+    }
+
+    #[test]
+    fn error_debug_format_rate_limited() {
+        let err = MongoDbError::RateLimited {
+            retry_after_ms: 5000,
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("RateLimited"));
+        assert!(dbg.contains("5000"));
+    }
+
+    #[test]
+    fn error_debug_format_not_found() {
+        let err = MongoDbError::NotFound {
+            resource: "test_collection".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("NotFound"));
+        assert!(dbg.contains("test_collection"));
+    }
+
+    #[test]
+    fn retry_after_zero_ms() {
+        let err = MongoDbError::RateLimited {
+            retry_after_ms: 0,
+        };
+        assert_eq!(err.retry_after(), Some(Duration::from_millis(0)));
+    }
+
+    #[test]
+    fn retry_after_large_value() {
+        let err = MongoDbError::RateLimited {
+            retry_after_ms: 3_600_000,
+        };
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn not_found_to_fcp_error_service_is_mongodb() {
+        match (MongoDbError::NotFound {
+            resource: "x".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External { service, .. } => assert_eq!(service, "mongodb"),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_error_retryable_has_no_retry_after() {
+        match (MongoDbError::Api {
+            status_code: 500,
+            message: "err".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External { retry_after, .. } => assert!(retry_after.is_none()),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_display_json() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{{");
+        let err = MongoDbError::Json(bad.unwrap_err());
+        let display = err.to_string();
+        assert!(display.starts_with("JSON error:"));
+    }
 }

@@ -680,4 +680,174 @@ mod tests {
             .unwrap();
         assert_ne!(ep1.endpoint_id, ep2.endpoint_id);
     }
+
+    #[test]
+    fn constants_values() {
+        assert_eq!(MAX_ENDPOINTS, 100);
+        assert_eq!(MAX_EVENTS_PER_ENDPOINT, 1000);
+        assert_eq!(DEFAULT_EVENTS_LIMIT, 50);
+        assert_eq!(MAX_EVENTS_LIMIT, 100);
+    }
+
+    #[test]
+    fn store_clear_then_create_again() {
+        let mut store = WebhookStore::new();
+        store.create_endpoint("/a".into(), "s".into(), vec![]).unwrap();
+        store.clear();
+        assert_eq!(store.endpoint_count(), 0);
+        // Can create with same path after clear
+        store.create_endpoint("/a".into(), "s".into(), vec![]).unwrap();
+        assert_eq!(store.endpoint_count(), 1);
+    }
+
+    #[test]
+    fn get_endpoint_returns_correct_data() {
+        let mut store = WebhookStore::new();
+        let ep = store.create_endpoint("/hooks/verify".into(), "secret123".into(), vec!["10.0.0.0/8".into()]).unwrap();
+        let found = store.get_endpoint(&ep.endpoint_id).unwrap();
+        assert_eq!(found.signing_secret, "secret123");
+        assert_eq!(found.allowed_sources.len(), 1);
+        assert_eq!(found.allowed_sources[0], "10.0.0.0/8");
+    }
+
+    #[test]
+    fn total_event_count_across_endpoints() {
+        let mut store = WebhookStore::new();
+        let ep1 = store.create_endpoint("/a".into(), "s".into(), vec![]).unwrap();
+        let ep2 = store.create_endpoint("/b".into(), "s".into(), vec![]).unwrap();
+
+        for _ in 0..3 {
+            store.record_event(WebhookEvent::new(ep1.endpoint_id.clone(), json!({}), true, None)).unwrap();
+        }
+        for _ in 0..7 {
+            store.record_event(WebhookEvent::new(ep2.endpoint_id.clone(), json!({}), true, None)).unwrap();
+        }
+
+        assert_eq!(store.total_event_count(), 10);
+    }
+
+    #[test]
+    fn delete_endpoint_only_removes_that_endpoint() {
+        let mut store = WebhookStore::new();
+        let ep1 = store.create_endpoint("/a".into(), "s".into(), vec![]).unwrap();
+        let ep2 = store.create_endpoint("/b".into(), "s".into(), vec![]).unwrap();
+
+        store.record_event(WebhookEvent::new(ep1.endpoint_id.clone(), json!({}), true, None)).unwrap();
+        let ep2_id = ep2.endpoint_id;
+        store.record_event(WebhookEvent::new(ep2_id, json!({}), true, None)).unwrap();
+
+        store.delete_endpoint(&ep1.endpoint_id).unwrap();
+        assert_eq!(store.endpoint_count(), 1);
+        assert_eq!(store.total_event_count(), 1);
+    }
+
+    #[test]
+    fn list_endpoints_order_independent() {
+        let mut store = WebhookStore::new();
+        store.create_endpoint("/z".into(), "s".into(), vec![]).unwrap();
+        store.create_endpoint("/a".into(), "s".into(), vec![]).unwrap();
+        store.create_endpoint("/m".into(), "s".into(), vec![]).unwrap();
+        let list = store.list_endpoints();
+        assert_eq!(list.len(), 3);
+        let paths: Vec<&str> = list.iter().map(|s| s.path.as_str()).collect();
+        assert!(paths.contains(&"/z"));
+        assert!(paths.contains(&"/a"));
+        assert!(paths.contains(&"/m"));
+    }
+
+    #[test]
+    fn get_recent_events_limit_of_zero() {
+        let mut store = WebhookStore::new();
+        let ep = store.create_endpoint("/hooks/test".into(), "s".into(), vec![]).unwrap();
+        store.record_event(WebhookEvent::new(ep.endpoint_id.clone(), json!({}), true, None)).unwrap();
+        let events = store.get_recent_events(Some(&ep.endpoint_id), Some(0), None).unwrap();
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn get_recent_events_limit_of_one() {
+        let mut store = WebhookStore::new();
+        let ep = store.create_endpoint("/hooks/test".into(), "s".into(), vec![]).unwrap();
+        for _ in 0..5 {
+            store.record_event(WebhookEvent::new(ep.endpoint_id.clone(), json!({}), true, None)).unwrap();
+        }
+        let events = store.get_recent_events(Some(&ep.endpoint_id), Some(1), None).unwrap();
+        assert_eq!(events.len(), 1);
+    }
+
+    #[test]
+    fn record_event_with_source_ip() {
+        let mut store = WebhookStore::new();
+        let ep = store.create_endpoint("/hooks/test".into(), "s".into(), vec![]).unwrap();
+        let event = WebhookEvent::new(ep.endpoint_id.clone(), json!({}), true, Some("192.168.1.100".into()));
+        store.record_event(event).unwrap();
+        let events = store.get_recent_events(Some(&ep.endpoint_id), None, None).unwrap();
+        assert_eq!(events[0].source_ip, Some("192.168.1.100".into()));
+    }
+
+    #[test]
+    fn record_event_with_invalid_signature() {
+        let mut store = WebhookStore::new();
+        let ep = store.create_endpoint("/hooks/test".into(), "s".into(), vec![]).unwrap();
+        let event = WebhookEvent::new(ep.endpoint_id.clone(), json!({}), false, None);
+        store.record_event(event).unwrap();
+        let events = store.get_recent_events(Some(&ep.endpoint_id), None, None).unwrap();
+        assert!(!events[0].signature_valid);
+    }
+
+    #[test]
+    fn endpoint_count_after_multiple_creates_and_deletes() {
+        let mut store = WebhookStore::new();
+        let ep1 = store.create_endpoint("/a".into(), "s".into(), vec![]).unwrap();
+        let ep2 = store.create_endpoint("/b".into(), "s".into(), vec![]).unwrap();
+        let _ep3 = store.create_endpoint("/c".into(), "s".into(), vec![]).unwrap();
+        assert_eq!(store.endpoint_count(), 3);
+        store.delete_endpoint(&ep1.endpoint_id).unwrap();
+        assert_eq!(store.endpoint_count(), 2);
+        store.delete_endpoint(&ep2.endpoint_id).unwrap();
+        assert_eq!(store.endpoint_count(), 1);
+    }
+
+    #[test]
+    fn get_recent_events_since_ts_filters_old() {
+        let mut store = WebhookStore::new();
+        let ep = store.create_endpoint("/hooks/test".into(), "s".into(), vec![]).unwrap();
+
+        // Old event
+        let mut old = WebhookEvent::new(ep.endpoint_id.clone(), json!({"old": true}), true, None);
+        old.received_at = chrono::DateTime::parse_from_rfc3339("2020-06-01T00:00:00Z").unwrap().with_timezone(&Utc);
+        store.record_event(old).unwrap();
+
+        // Recent events
+        for _ in 0..3 {
+            store.record_event(WebhookEvent::new(ep.endpoint_id.clone(), json!({}), true, None)).unwrap();
+        }
+
+        let since = chrono::DateTime::parse_from_rfc3339("2025-01-01T00:00:00Z").unwrap().with_timezone(&Utc);
+        let events = store.get_recent_events(Some(&ep.endpoint_id), None, Some(since)).unwrap();
+        assert_eq!(events.len(), 3);
+    }
+
+    #[test]
+    fn get_recent_events_since_ts_all_old() {
+        let mut store = WebhookStore::new();
+        let ep = store.create_endpoint("/hooks/test".into(), "s".into(), vec![]).unwrap();
+
+        let mut old = WebhookEvent::new(ep.endpoint_id.clone(), json!({}), true, None);
+        old.received_at = chrono::DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z").unwrap().with_timezone(&Utc);
+        store.record_event(old).unwrap();
+
+        let since = chrono::DateTime::parse_from_rfc3339("2025-01-01T00:00:00Z").unwrap().with_timezone(&Utc);
+        let events = store.get_recent_events(Some(&ep.endpoint_id), None, Some(since)).unwrap();
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn double_delete_returns_error() {
+        let mut store = WebhookStore::new();
+        let ep = store.create_endpoint("/hooks/test".into(), "s".into(), vec![]).unwrap();
+        store.delete_endpoint(&ep.endpoint_id).unwrap();
+        let result = store.delete_endpoint(&ep.endpoint_id);
+        assert!(result.is_err());
+    }
 }

@@ -900,4 +900,226 @@ mod tests {
             );
         }
     }
+
+    // ── Additional connector coverage ────────────────────────────
+
+    #[test]
+    fn connector_new_fields() {
+        let c = SpotifyConnector::new();
+        assert!(c.config.is_none());
+        assert!(c.client.is_none());
+        assert!(c.session_id.is_none());
+        assert_eq!(c.request_count.load(Ordering::Relaxed), 0);
+        assert_eq!(c.error_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn config_default_base_url() {
+        let config = SpotifyConfig::from_params(&json!({
+            "access_token": "tok",
+        }))
+        .unwrap();
+        assert_eq!(config.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn config_error_message_both_auth() {
+        let result = SpotifyConfig::from_params(&json!({
+            "access_token": "tok",
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+        }));
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, code } => {
+                assert!(message.contains("exactly one"), "got: {message}");
+                assert_eq!(code, 1003);
+            }
+            e => panic!("expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn config_error_message_no_auth() {
+        let result = SpotifyConfig::from_params(&json!({}));
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("Missing"), "got: {message}");
+            }
+            e => panic!("expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn config_error_non_string_credential() {
+        let result = SpotifyConfig::from_params(&json!({
+            "credential_id": 42,
+        }));
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("string"), "got: {message}");
+            }
+            e => panic!("expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn config_error_invalid_uuid() {
+        let result = SpotifyConfig::from_params(&json!({
+            "credential_id": "not-a-uuid",
+        }));
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("UUID"), "got: {message}");
+            }
+            e => panic!("expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn require_str_array_value() {
+        let input = json!({"track_id": [1, 2, 3]});
+        assert!(require_str(&input, "track_id").is_err());
+    }
+
+    #[test]
+    fn require_str_bool_value() {
+        let input = json!({"track_id": true});
+        assert!(require_str(&input, "track_id").is_err());
+    }
+
+    #[test]
+    fn require_str_empty_string() {
+        let input = json!({"track_id": ""});
+        // Empty string is still a valid string
+        assert_eq!(require_str(&input, "track_id").unwrap(), "");
+    }
+
+    #[test]
+    fn operations_all_low_risk() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            assert_eq!(
+                op["risk_level"].as_str().unwrap(),
+                "low",
+                "op {} should be low risk",
+                op["id"]
+            );
+        }
+    }
+
+    #[test]
+    fn operations_all_strict_idempotency() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            assert_eq!(
+                op["idempotency"].as_str().unwrap(),
+                "strict",
+                "op {} should have strict idempotency",
+                op["id"]
+            );
+        }
+    }
+
+    #[test]
+    fn operations_all_spotify_read_capability() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            assert_eq!(
+                op["capability"].as_str().unwrap(),
+                "spotify.read",
+                "op {} should have spotify.read capability",
+                op["id"]
+            );
+        }
+    }
+
+    #[test]
+    fn doctor_status_serde_roundtrip() {
+        for status in [
+            DoctorStatus::Healthy,
+            DoctorStatus::Degraded,
+            DoctorStatus::Unhealthy,
+        ] {
+            let v = serde_json::to_value(status).unwrap();
+            let back: DoctorStatus = serde_json::from_value(v).unwrap();
+            assert_eq!(back, status);
+        }
+    }
+
+    #[test]
+    fn doctor_status_serializes_lowercase() {
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Healthy).unwrap(),
+            "healthy"
+        );
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Degraded).unwrap(),
+            "degraded"
+        );
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Unhealthy).unwrap(),
+            "unhealthy"
+        );
+    }
+
+    #[test]
+    fn doctor_check_skip_serializing_message_none() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let v = serde_json::to_string(&check).unwrap();
+        assert!(!v.contains("message"));
+    }
+
+    #[test]
+    fn doctor_check_includes_message_some() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: false,
+            message: Some("failed!".into()),
+            critical: true,
+        };
+        let v = serde_json::to_string(&check).unwrap();
+        assert!(v.contains("message"));
+        assert!(v.contains("failed!"));
+    }
+
+    #[test]
+    fn doctor_result_serde_roundtrip() {
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "cfg".into(),
+            passed: true,
+            message: None,
+            critical: true,
+        }]);
+        let v = serde_json::to_value(&r).unwrap();
+        let back: DoctorResult = serde_json::from_value(v).unwrap();
+        assert_eq!(back.status, DoctorStatus::Healthy);
+        assert_eq!(back.checks.len(), 1);
+    }
+
+    #[test]
+    fn doctor_check_clone_debug() {
+        let check = DoctorCheck {
+            name: "test_check".into(),
+            passed: true,
+            message: Some("ok".into()),
+            critical: false,
+        };
+        let cloned = check.clone();
+        assert_eq!(cloned.name, "test_check");
+        let dbg = format!("{check:?}");
+        assert!(dbg.contains("test_check"));
+    }
+
+    #[test]
+    fn doctor_result_clone_debug() {
+        let r = DoctorResult::from_checks(vec![]);
+        let cloned = r.clone();
+        assert_eq!(cloned.status, DoctorStatus::Healthy);
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("DoctorResult"));
+    }
 }

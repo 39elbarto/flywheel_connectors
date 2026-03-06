@@ -353,4 +353,232 @@ mod tests {
         .unwrap();
         assert_eq!(l.pos, Some(16384.0));
     }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn board_clone() {
+        let b = Board {
+            id: "b1".into(),
+            name: Some("Test".into()),
+            desc: None,
+            closed: Some(false),
+            url: None,
+        };
+        let c = b.clone();
+        assert_eq!(c.id, "b1");
+        assert_eq!(c.name, Some("Test".into()));
+    }
+
+    #[test]
+    fn board_debug() {
+        let b = Board {
+            id: "b1".into(),
+            name: None,
+            desc: None,
+            closed: None,
+            url: None,
+        };
+        let dbg = format!("{b:?}");
+        assert!(dbg.contains("Board"));
+    }
+
+    #[test]
+    fn board_serialize_roundtrip() {
+        let b = Board {
+            id: "b1".into(),
+            name: Some("Engineering".into()),
+            desc: Some("Main board".into()),
+            closed: Some(false),
+            url: Some("https://trello.com/b/abc".into()),
+        };
+        let v = serde_json::to_value(&b).unwrap();
+        assert_eq!(v["id"], "b1");
+        assert_eq!(v["name"], "Engineering");
+        assert_eq!(v["desc"], "Main board");
+        assert_eq!(v["closed"], false);
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn trello_list_clone() {
+        let l = TrelloList {
+            id: "l1".into(),
+            name: Some("To Do".into()),
+            closed: None,
+            pos: Some(1.0),
+        };
+        let c = l.clone();
+        assert_eq!(c.id, "l1");
+        assert_eq!(c.pos, Some(1.0));
+    }
+
+    #[test]
+    fn trello_list_debug() {
+        let l = TrelloList {
+            id: "l1".into(),
+            name: None,
+            closed: None,
+            pos: None,
+        };
+        let dbg = format!("{l:?}");
+        assert!(dbg.contains("TrelloList"));
+    }
+
+    #[test]
+    fn trello_list_serialize() {
+        let l = TrelloList {
+            id: "l1".into(),
+            name: Some("Done".into()),
+            closed: Some(true),
+            pos: Some(32768.0),
+        };
+        let v = serde_json::to_value(&l).unwrap();
+        assert_eq!(v["id"], "l1");
+        assert_eq!(v["closed"], true);
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn card_clone() {
+        let c = Card {
+            id: "c1".into(),
+            name: Some("Task".into()),
+            desc: None,
+            closed: None,
+            due: None,
+            labels: None,
+            url: None,
+            id_list: None,
+        };
+        let cl = c.clone();
+        assert_eq!(cl.id, "c1");
+    }
+
+    #[test]
+    fn card_debug() {
+        let c = Card {
+            id: "c1".into(),
+            name: None,
+            desc: None,
+            closed: None,
+            due: None,
+            labels: None,
+            url: None,
+            id_list: None,
+        };
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("Card"));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn label_clone() {
+        let l = Label {
+            id: "lbl1".into(),
+            name: Some("Bug".into()),
+            color: Some("red".into()),
+        };
+        let c = l.clone();
+        assert_eq!(c.id, "lbl1");
+    }
+
+    #[test]
+    fn label_debug() {
+        let l = Label {
+            id: "lbl1".into(),
+            name: None,
+            color: None,
+        };
+        let dbg = format!("{l:?}");
+        assert!(dbg.contains("Label"));
+    }
+
+    #[test]
+    fn label_serialize() {
+        let l = Label {
+            id: "lbl1".into(),
+            name: Some("Feature".into()),
+            color: Some("green".into()),
+        };
+        let v = serde_json::to_value(&l).unwrap();
+        assert_eq!(v["id"], "lbl1");
+        assert_eq!(v["name"], "Feature");
+        assert_eq!(v["color"], "green");
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn member_clone() {
+        let m = Member {
+            id: "m1".into(),
+            username: Some("alice".into()),
+            full_name: Some("Alice Smith".into()),
+        };
+        let c = m.clone();
+        assert_eq!(c.id, "m1");
+        assert_eq!(c.username, Some("alice".into()));
+    }
+
+    #[test]
+    fn member_debug() {
+        let m = Member {
+            id: "m1".into(),
+            username: None,
+            full_name: None,
+        };
+        let dbg = format!("{m:?}");
+        assert!(dbg.contains("Member"));
+    }
+
+    #[test]
+    fn member_serialize() {
+        let m = Member {
+            id: "m1".into(),
+            username: Some("bob".into()),
+            full_name: Some("Bob Jones".into()),
+        };
+        let v = serde_json::to_value(&m).unwrap();
+        assert_eq!(v["id"], "m1");
+        assert_eq!(v["username"], "bob");
+        assert_eq!(v["fullName"], "Bob Jones");
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn api_error_response_clone() {
+        let e = ApiErrorResponse {
+            message: Some("error".into()),
+            error: Some("UNAUTHORIZED".into()),
+        };
+        let c = e.clone();
+        assert_eq!(c.message, Some("error".into()));
+        assert_eq!(c.error, Some("UNAUTHORIZED".into()));
+    }
+
+    #[test]
+    fn api_error_response_debug() {
+        let e = ApiErrorResponse {
+            message: None,
+            error: None,
+        };
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("ApiErrorResponse"));
+    }
+
+    #[test]
+    fn card_null_fields_serialize() {
+        let c = Card {
+            id: "c1".into(),
+            name: None,
+            desc: None,
+            closed: None,
+            due: None,
+            labels: None,
+            url: None,
+            id_list: None,
+        };
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["id"], "c1");
+        assert!(v["name"].is_null());
+    }
 }

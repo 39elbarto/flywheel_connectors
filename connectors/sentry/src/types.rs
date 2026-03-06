@@ -425,4 +425,383 @@ mod tests {
         assert_eq!(p.id, Some(42));
         assert_eq!(p.slug, "frontend");
     }
+
+    // ── Clone / Debug trait tests ─────────────────────────────────
+
+    #[test]
+    fn organization_clone_and_debug() {
+        let org = Organization {
+            id: "1".into(),
+            slug: "my-org".into(),
+            name: "My Org".into(),
+        };
+        let cloned = org.clone();
+        assert_eq!(org.id, "1");
+        assert_eq!(cloned.slug, "my-org");
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("Organization"));
+        assert!(dbg.contains("my-org"));
+    }
+
+    #[test]
+    fn project_clone_and_debug() {
+        let p: Project = serde_json::from_value(json!({
+            "id": "1", "slug": "backend", "name": "Backend"
+        }))
+        .unwrap();
+        let cloned = p.clone();
+        assert_eq!(p.id, "1");
+        assert_eq!(cloned.slug, "backend");
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("Project"));
+    }
+
+    #[test]
+    fn issue_clone_and_debug() {
+        let i: Issue = serde_json::from_value(json!({
+            "id": "100", "title": "Error"
+        }))
+        .unwrap();
+        let cloned = i.clone();
+        assert_eq!(i.id, "100");
+        assert_eq!(cloned.title, "Error");
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("Issue"));
+    }
+
+    #[test]
+    fn event_clone_and_debug() {
+        let e: Event = serde_json::from_value(json!({
+            "title": "TestEvent"
+        }))
+        .unwrap();
+        let cloned = e.clone();
+        assert!(e.event_id.is_none());
+        assert_eq!(cloned.title.as_deref(), Some("TestEvent"));
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("Event"));
+    }
+
+    #[test]
+    fn release_clone_and_debug() {
+        let r: Release = serde_json::from_value(json!({
+            "version": "1.0.0"
+        }))
+        .unwrap();
+        let cloned = r.clone();
+        assert_eq!(r.version, "1.0.0");
+        assert_eq!(cloned.version, "1.0.0");
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("Release"));
+    }
+
+    #[test]
+    fn deploy_clone_and_debug() {
+        let d: Deploy = serde_json::from_value(json!({
+            "environment": "prod"
+        }))
+        .unwrap();
+        let cloned = d.clone();
+        assert!(d.id.is_none());
+        assert_eq!(cloned.environment.as_deref(), Some("prod"));
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("Deploy"));
+    }
+
+    #[test]
+    fn alert_rule_clone_and_debug() {
+        let a: AlertRule = serde_json::from_value(json!({"name": "rule1"})).unwrap();
+        let cloned = a.clone();
+        assert_eq!(a.name, "rule1");
+        assert_eq!(cloned.name, "rule1");
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("AlertRule"));
+    }
+
+    #[test]
+    fn discover_result_clone_and_debug() {
+        let d = DiscoverResult {
+            data: vec![json!({"count": 1})],
+            meta: None,
+        };
+        let cloned = d.clone();
+        assert!(d.meta.is_none());
+        assert_eq!(cloned.data.len(), 1);
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("DiscoverResult"));
+    }
+
+    #[test]
+    fn transaction_clone_and_debug() {
+        let t: Transaction = serde_json::from_value(json!({
+            "transaction": "/api/users"
+        }))
+        .unwrap();
+        let cloned = t.clone();
+        assert!(t.event_id.is_none());
+        assert_eq!(cloned.transaction.as_deref(), Some("/api/users"));
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("Transaction"));
+    }
+
+    // ── Default vec behavior ──────────────────────────────────────
+
+    #[test]
+    fn project_defaults_all_booleans_false() {
+        let p: Project = serde_json::from_value(json!({
+            "id": "1", "slug": "s", "name": "n"
+        }))
+        .unwrap();
+        assert!(!p.is_bookmarked);
+        assert!(!p.is_member);
+        assert!(!p.has_access);
+    }
+
+    #[test]
+    fn alert_rule_defaults_empty_vecs_all() {
+        let a: AlertRule = serde_json::from_value(json!({"name": "rule"})).unwrap();
+        assert!(a.conditions.is_empty());
+        assert!(a.actions.is_empty());
+        assert!(a.filters.is_empty());
+    }
+
+    // ── Null field handling ───────────────────────────────────────
+
+    #[test]
+    fn issue_with_null_fields() {
+        let i: Issue = serde_json::from_value(json!({
+            "id": "1",
+            "title": "err",
+            "culprit": null,
+            "level": null,
+            "status": null,
+            "project": null,
+        }))
+        .unwrap();
+        assert!(i.culprit.is_none());
+        assert!(i.level.is_none());
+        assert!(i.status.is_none());
+        assert!(i.project.is_none());
+    }
+
+    #[test]
+    fn event_with_null_fields() {
+        let e: Event = serde_json::from_value(json!({
+            "eventId": null,
+            "title": null,
+            "tags": null,
+            "entries": null,
+        }))
+        .unwrap();
+        assert!(e.event_id.is_none());
+        assert!(e.title.is_none());
+        assert!(e.tags.is_none());
+        assert!(e.entries.is_none());
+    }
+
+    #[test]
+    fn release_with_null_fields() {
+        let r: Release = serde_json::from_value(json!({
+            "version": "1.0",
+            "shortVersion": null,
+            "lastDeploy": null,
+            "projects": null,
+        }))
+        .unwrap();
+        assert!(r.short_version.is_none());
+        assert!(r.last_deploy.is_none());
+        assert!(r.projects.is_none());
+    }
+
+    #[test]
+    fn deploy_minimal() {
+        let d: Deploy = serde_json::from_value(json!({})).unwrap();
+        assert!(d.id.is_none());
+        assert!(d.environment.is_none());
+        assert!(d.name.is_none());
+    }
+
+    #[test]
+    fn transaction_minimal() {
+        let t: Transaction = serde_json::from_value(json!({})).unwrap();
+        assert!(t.event_id.is_none());
+        assert!(t.transaction.is_none());
+        assert!(t.duration.is_none());
+        assert!(t.spans.is_none());
+    }
+
+    // ── Serialize roundtrips ──────────────────────────────────────
+
+    #[test]
+    fn organization_serialize_roundtrip() {
+        let org = Organization {
+            id: "42".into(),
+            slug: "test-org".into(),
+            name: "Test Org".into(),
+        };
+        let v = serde_json::to_value(&org).unwrap();
+        let back: Organization = serde_json::from_value(v).unwrap();
+        assert_eq!(back.slug, "test-org");
+    }
+
+    #[test]
+    fn project_serialize_roundtrip() {
+        let p = Project {
+            id: "1".into(),
+            slug: "api".into(),
+            name: "API".into(),
+            platform: Some("python".into()),
+            is_bookmarked: true,
+            is_member: false,
+            has_access: true,
+            date_created: None,
+            first_event: None,
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["isBookmarked"], true);
+        let back: Project = serde_json::from_value(v).unwrap();
+        assert!(back.is_bookmarked);
+    }
+
+    #[test]
+    fn issue_type_rename() {
+        let i: Issue = serde_json::from_value(json!({
+            "id": "1", "title": "err", "type": "default"
+        }))
+        .unwrap();
+        assert_eq!(i.issue_type.as_deref(), Some("default"));
+    }
+
+    #[test]
+    fn event_type_rename() {
+        let e: Event = serde_json::from_value(json!({"type": "error"})).unwrap();
+        assert_eq!(e.event_type.as_deref(), Some("error"));
+    }
+
+    #[test]
+    fn event_both_event_id_fields() {
+        let e: Event = serde_json::from_value(json!({
+            "eventId": "lower",
+            "eventID": "upper",
+        }))
+        .unwrap();
+        assert_eq!(e.event_id.as_deref(), Some("lower"));
+        assert_eq!(e.event_id_upper.as_deref(), Some("upper"));
+    }
+
+    #[test]
+    fn alert_rule_action_match_rename() {
+        let a: AlertRule = serde_json::from_value(json!({
+            "name": "rule",
+            "actionMatch": "any",
+            "filterMatch": "all",
+        }))
+        .unwrap();
+        assert_eq!(a.action_match.as_deref(), Some("any"));
+        assert_eq!(a.filter_match.as_deref(), Some("all"));
+    }
+
+    #[test]
+    fn release_short_version_rename() {
+        let r: Release = serde_json::from_value(json!({
+            "version": "v1",
+            "shortVersion": "1.0",
+        }))
+        .unwrap();
+        assert_eq!(r.short_version.as_deref(), Some("1.0"));
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["shortVersion"], "1.0");
+    }
+
+    // ── ApiErrorResponse edge cases ───────────────────────────────
+
+    #[test]
+    fn api_error_response_clone() {
+        let e = ApiErrorResponse {
+            detail: Some("Not found".into()),
+            extra_data: Some(json!({"key": "val"})),
+        };
+        let cloned = e.clone();
+        assert!(e.extra_data.is_some());
+        assert_eq!(cloned.detail.as_deref(), Some("Not found"));
+    }
+
+    #[test]
+    fn api_error_response_debug() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({"detail": "test"})).unwrap();
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("ApiErrorResponse"));
+        assert!(dbg.contains("test"));
+    }
+
+    #[test]
+    fn api_error_response_extra_data_rename() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({
+            "extraData": {"code": 42}
+        }))
+        .unwrap();
+        assert!(e.extra_data.is_some());
+        assert_eq!(e.extra_data.unwrap()["code"], 42);
+    }
+
+    // ── IssueProject / ReleaseProject edge cases ──────────────────
+
+    #[test]
+    fn issue_project_minimal() {
+        let p: IssueProject = serde_json::from_value(json!({
+            "id": "1", "slug": "s"
+        }))
+        .unwrap();
+        assert!(p.name.is_none());
+    }
+
+    #[test]
+    fn release_project_minimal() {
+        let p: ReleaseProject = serde_json::from_value(json!({"slug": "s"})).unwrap();
+        assert!(p.id.is_none());
+        assert!(p.name.is_none());
+    }
+
+    #[test]
+    fn issue_project_clone() {
+        let p = IssueProject {
+            id: "1".into(),
+            slug: "backend".into(),
+            name: Some("Backend".into()),
+        };
+        let cloned = p.clone();
+        assert_eq!(p.id, "1");
+        assert_eq!(cloned.slug, "backend");
+    }
+
+    #[test]
+    fn release_project_clone() {
+        let p = ReleaseProject {
+            id: Some(1),
+            slug: "frontend".into(),
+            name: None,
+        };
+        let cloned = p.clone();
+        assert_eq!(p.slug, "frontend");
+        assert_eq!(cloned.id, Some(1));
+    }
+
+    #[test]
+    fn discover_result_empty_data() {
+        let d: DiscoverResult = serde_json::from_value(json!({"data": []})).unwrap();
+        assert!(d.data.is_empty());
+        assert!(d.meta.is_none());
+    }
+
+    #[test]
+    fn event_tag_clone() {
+        let t = EventTag {
+            key: "env".into(),
+            value: "prod".into(),
+        };
+        let cloned = t.clone();
+        assert_eq!(t.key, "env");
+        assert_eq!(cloned.key, "env");
+        assert_eq!(cloned.value, "prod");
+    }
 }

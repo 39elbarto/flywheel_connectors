@@ -298,4 +298,86 @@ mod tests {
         // trim_end_matches removes all trailing slashes
         assert!(!client.base_url.ends_with('/'));
     }
+
+    #[test]
+    fn auth_api_key_is_not_secretless() {
+        assert!(!N8nAuth::ApiKey("key".into()).is_secretless());
+    }
+
+    #[test]
+    fn auth_credential_id_is_secretless() {
+        assert!(N8nAuth::CredentialId(CredentialId::new()).is_secretless());
+    }
+
+    #[test]
+    fn auth_debug_bearer_shows_redacted_tuple() {
+        let auth = N8nAuth::ApiKey("my-secret-key".into());
+        let dbg = format!("{auth:?}");
+        assert!(dbg.starts_with("ApiKey("));
+        assert!(dbg.contains("redacted"));
+    }
+
+    #[test]
+    fn client_debug_contains_struct_name() {
+        let client = N8nClient::new(
+            N8nAuth::ApiKey("key".into()),
+            "https://n8n.example.com/api/v1",
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("N8nClient"));
+    }
+
+    #[test]
+    fn client_debug_contains_base_url() {
+        let client = N8nClient::new(
+            N8nAuth::ApiKey("key".into()),
+            "https://custom.n8n.io/api/v1",
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("custom.n8n.io"));
+    }
+
+    #[test]
+    fn auth_clone_credential_id() {
+        let cred = N8nAuth::CredentialId(CredentialId::new());
+        #[allow(clippy::redundant_clone)]
+        let cloned = cred.clone();
+        assert!(cloned.is_secretless());
+    }
+
+    #[test]
+    fn auth_redacted_label_does_not_contain_key() {
+        let auth = N8nAuth::ApiKey("very-secret-key-value".into());
+        let label = auth.redacted_label();
+        assert!(!label.contains("very-secret-key-value"));
+    }
+
+    #[test]
+    fn client_new_with_localhost() {
+        let client = N8nClient::new(
+            N8nAuth::ApiKey("key".into()),
+            "http://127.0.0.1:5678/api/v1",
+        )
+        .unwrap();
+        assert_eq!(client.base_url, "http://127.0.0.1:5678/api/v1");
+    }
+
+    #[test]
+    fn client_new_with_port() {
+        let client = N8nClient::new(
+            N8nAuth::ApiKey("key".into()),
+            "https://n8n.example.com:8443/api/v1",
+        )
+        .unwrap();
+        assert!(client.base_url.contains("8443"));
+    }
+
+    #[test]
+    fn auth_debug_credential_does_not_say_redacted() {
+        let cred = N8nAuth::CredentialId(CredentialId::new());
+        let dbg = format!("{cred:?}");
+        assert!(!dbg.contains("redacted"));
+    }
 }

@@ -773,4 +773,191 @@ mod tests {
         assert_eq!(c.request_count.load(Ordering::Relaxed), 0);
         assert_eq!(c.error_count.load(Ordering::Relaxed), 0);
     }
+
+    // -- Additional connector tests --
+
+    #[test]
+    fn connector_new_matches_default() {
+        let c = SalesforceConnector::new();
+        assert!(c.config.is_none());
+        assert!(c.client.is_none());
+        assert!(c.session_id.is_none());
+    }
+
+    #[test]
+    fn doctor_status_serde_roundtrip() {
+        let statuses = [DoctorStatus::Healthy, DoctorStatus::Degraded, DoctorStatus::Unhealthy];
+        for s in &statuses {
+            let v = serde_json::to_value(s).unwrap();
+            let back: DoctorStatus = serde_json::from_value(v).unwrap();
+            assert_eq!(*s, back);
+        }
+    }
+
+    #[test]
+    fn doctor_status_lowercase_serialization() {
+        assert_eq!(serde_json::to_value(DoctorStatus::Healthy).unwrap(), "healthy");
+        assert_eq!(serde_json::to_value(DoctorStatus::Degraded).unwrap(), "degraded");
+        assert_eq!(serde_json::to_value(DoctorStatus::Unhealthy).unwrap(), "unhealthy");
+    }
+
+    #[test]
+    fn doctor_check_skip_serializing_none_message() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert!(!v.as_object().unwrap().contains_key("message"));
+    }
+
+    #[test]
+    fn doctor_check_serializes_some_message() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: false,
+            message: Some("failed".into()),
+            critical: true,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert_eq!(v["message"], "failed");
+        assert_eq!(v["critical"], true);
+    }
+
+    #[test]
+    fn doctor_check_clone() {
+        let check = DoctorCheck {
+            name: "x".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let cloned = check.clone();
+        assert!(check.passed);
+        assert_eq!(cloned.name, "x");
+    }
+
+    #[test]
+    fn doctor_check_debug() {
+        let check = DoctorCheck {
+            name: "x".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let dbg = format!("{check:?}");
+        assert!(dbg.contains("DoctorCheck"));
+    }
+
+    #[test]
+    fn doctor_result_clone() {
+        let r = DoctorResult::from_checks(vec![]);
+        let cloned = r.clone();
+        assert_eq!(r.status, DoctorStatus::Healthy);
+        assert!(cloned.checks.is_empty());
+    }
+
+    #[test]
+    fn doctor_result_debug() {
+        let r = DoctorResult::from_checks(vec![]);
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("DoctorResult"));
+    }
+
+    #[test]
+    fn doctor_result_deserialize() {
+        let v = json!({"status": "degraded", "checks": [{"name": "a", "passed": false, "critical": false}]});
+        let r: DoctorResult = serde_json::from_value(v).unwrap();
+        assert_eq!(r.status, DoctorStatus::Degraded);
+        assert_eq!(r.checks.len(), 1);
+    }
+
+    #[test]
+    fn operations_write_ops_not_safe() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let cap = op["capability"].as_str().unwrap();
+            if cap.to_ascii_lowercase().ends_with(".write") {
+                assert_ne!(op["safety_tier"].as_str().unwrap(), "safe", "write op {} should not be safe", op["id"]);
+            }
+        }
+    }
+
+    #[test]
+    fn operations_all_have_salesforce_prefix() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let id = op["id"].as_str().unwrap();
+            assert!(id.starts_with("salesforce."), "op {id} missing salesforce prefix");
+        }
+    }
+
+    #[test]
+    fn operations_delete_is_dangerous() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let id = op["id"].as_str().unwrap();
+            if id.contains("delete") {
+                assert_eq!(op["safety_tier"].as_str().unwrap(), "dangerous", "delete op {id} should be dangerous");
+            }
+        }
+    }
+
+    #[test]
+    fn soql_to_output_with_records_only() {
+        let data = json!({"records": [{"Id": "a"}, {"Id": "b"}]});
+        let out = soql_to_output(&data);
+        assert_eq!(out["records"].as_array().unwrap().len(), 2);
+        assert!(out.get("total_size").is_none() || out["total_size"].is_null());
+    }
+
+    #[test]
+    fn soql_to_output_preserves_total_size() {
+        let data = json!({"totalSize": 0, "done": true, "records": []});
+        let out = soql_to_output(&data);
+        assert_eq!(out["total_size"], 0);
+        assert_eq!(out["done"], true);
+    }
+
+    #[test]
+    fn extract_string_array_filters_non_strings() {
+        let input = json!({ "fields": ["Id", 42, "Name", null] });
+        let arr = extract_string_array(&input, "fields").unwrap();
+        assert_eq!(arr, vec!["Id", "Name"]);
+    }
+
+    #[test]
+    fn extract_string_array_empty_array() {
+        let input = json!({ "fields": [] });
+        let arr = extract_string_array(&input, "fields").unwrap();
+        assert!(arr.is_empty());
+    }
+
+    #[test]
+    fn require_str_empty_string_is_valid() {
+        let input = json!({ "field": "" });
+        assert_eq!(require_str(&input, "field").unwrap(), "");
+    }
+
+    #[test]
+    fn require_str_error_message_contains_field_name() {
+        let input = json!({});
+        let err = require_str(&input, "my_field").unwrap_err();
+        match err {
+            SalesforceError::Api { message, .. } => assert!(message.contains("my_field")),
+            _ => panic!("expected Api error"),
+        }
+    }
+
+    #[test]
+    fn operations_idempotency_values_valid() {
+        let valid = ["strict", "none", "idempotent"];
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let idem = op["idempotency"].as_str().unwrap();
+            assert!(valid.contains(&idem), "invalid idempotency {idem} for {:?}", op["id"]);
+        }
+    }
 }

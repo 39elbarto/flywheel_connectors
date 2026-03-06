@@ -246,4 +246,195 @@ mod tests {
         assert_eq!(f.id, Some(1));
         assert_eq!(f.key, Some("test".into()));
     }
+
+    // -- Additional types tests --
+
+    #[test]
+    fn event_row_clone() {
+        let e: EventRow = serde_json::from_value(json!({
+            "event": "$pageview",
+            "distinct_id": "user1"
+        })).unwrap();
+        let cloned = e.clone();
+        assert_eq!(e.event, Some("$pageview".into()));
+        assert_eq!(cloned.distinct_id, Some("user1".into()));
+    }
+
+    #[test]
+    fn event_row_debug() {
+        let e: EventRow = serde_json::from_value(json!({})).unwrap();
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("EventRow"));
+    }
+
+    #[test]
+    fn event_row_serialize_with_properties() {
+        let e = EventRow {
+            event: Some("$click".into()),
+            timestamp: Some("2026-01-01T00:00:00Z".into()),
+            distinct_id: Some("uid".into()),
+            properties: Some(json!({"$browser": "Firefox", "page": "/home"})),
+        };
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!(v["event"], "$click");
+        assert_eq!(v["properties"]["$browser"], "Firefox");
+    }
+
+    #[test]
+    fn event_row_null_properties() {
+        let e: EventRow = serde_json::from_value(json!({
+            "event": "test",
+            "properties": null
+        })).unwrap();
+        assert!(e.properties.is_none());
+    }
+
+    #[test]
+    fn insight_clone() {
+        let i: Insight = serde_json::from_value(json!({
+            "id": 10,
+            "name": "Test"
+        })).unwrap();
+        let cloned = i.clone();
+        assert_eq!(i.id, Some(10));
+        assert_eq!(cloned.name, Some("Test".into()));
+    }
+
+    #[test]
+    fn insight_debug() {
+        let i: Insight = serde_json::from_value(json!({})).unwrap();
+        let dbg = format!("{i:?}");
+        assert!(dbg.contains("Insight"));
+    }
+
+    #[test]
+    fn insight_serialize_roundtrip() {
+        let i = Insight {
+            id: Some(99),
+            short_id: Some("xyz".into()),
+            name: Some("My Insight".into()),
+            description: None,
+            filters: Some(json!({"events": []})),
+            last_refresh: None,
+            created_at: Some("2026-01-01".into()),
+        };
+        let v = serde_json::to_value(&i).unwrap();
+        assert_eq!(v["id"], 99);
+        assert_eq!(v["short_id"], "xyz");
+        assert!(v["description"].is_null());
+    }
+
+    #[test]
+    fn feature_flag_clone() {
+        let f: FeatureFlag = serde_json::from_value(json!({
+            "id": 5,
+            "key": "beta"
+        })).unwrap();
+        let cloned = f.clone();
+        assert_eq!(f.id, Some(5));
+        assert_eq!(cloned.key, Some("beta".into()));
+    }
+
+    #[test]
+    fn feature_flag_debug() {
+        let f: FeatureFlag = serde_json::from_value(json!({})).unwrap();
+        let dbg = format!("{f:?}");
+        assert!(dbg.contains("FeatureFlag"));
+    }
+
+    #[test]
+    fn feature_flag_rollout_zero() {
+        let f: FeatureFlag = serde_json::from_value(json!({
+            "rollout_percentage": 0.0
+        })).unwrap();
+        assert_eq!(f.rollout_percentage, Some(0.0));
+    }
+
+    #[test]
+    fn feature_flag_rollout_hundred() {
+        let f: FeatureFlag = serde_json::from_value(json!({
+            "rollout_percentage": 100.0
+        })).unwrap();
+        assert_eq!(f.rollout_percentage, Some(100.0));
+    }
+
+    #[test]
+    fn api_error_response_clone() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({
+            "detail": "err",
+            "type": "validation_error"
+        })).unwrap();
+        let cloned = e.clone();
+        assert_eq!(e.detail, Some("err".into()));
+        assert_eq!(cloned.error_type, Some("validation_error".into()));
+    }
+
+    #[test]
+    fn api_error_response_debug() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({})).unwrap();
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("ApiErrorResponse"));
+    }
+
+    #[test]
+    fn api_error_response_with_attr() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({
+            "attr": "email",
+            "detail": "Invalid email"
+        })).unwrap();
+        assert_eq!(e.attr, Some("email".into()));
+    }
+
+    #[test]
+    fn api_error_response_with_code() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({
+            "code": "permission_denied",
+            "detail": "You do not have permission"
+        })).unwrap();
+        assert_eq!(e.code, Some("permission_denied".into()));
+    }
+
+    #[test]
+    fn event_row_all_none_serializes() {
+        let e = EventRow {
+            event: None,
+            timestamp: None,
+            distinct_id: None,
+            properties: None,
+        };
+        let v = serde_json::to_value(&e).unwrap();
+        assert!(v["event"].is_null());
+        assert!(v["timestamp"].is_null());
+    }
+
+    #[test]
+    fn insight_all_none_serializes() {
+        let i = Insight {
+            id: None,
+            short_id: None,
+            name: None,
+            description: None,
+            filters: None,
+            last_refresh: None,
+            created_at: None,
+        };
+        let v = serde_json::to_value(&i).unwrap();
+        assert!(v["id"].is_null());
+    }
+
+    #[test]
+    fn feature_flag_all_none_serializes() {
+        let f = FeatureFlag {
+            id: None,
+            key: None,
+            name: None,
+            active: None,
+            filters: None,
+            created_at: None,
+            rollout_percentage: None,
+        };
+        let v = serde_json::to_value(&f).unwrap();
+        assert!(v["id"].is_null());
+        assert!(v["key"].is_null());
+    }
 }

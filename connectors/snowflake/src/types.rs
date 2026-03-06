@@ -438,4 +438,149 @@ mod tests {
         let dbg = format!("{w:?}");
         assert!(dbg.contains("WH_TEST"));
     }
+
+    #[test]
+    fn table_debug() {
+        let t = Table {
+            name: "TABLE_TEST".into(),
+            database_name: None,
+            schema_name: None,
+            kind: None,
+            created_on: None,
+            row_count: None,
+            bytes: None,
+        };
+        let dbg = format!("{t:?}");
+        assert!(dbg.contains("TABLE_TEST"));
+    }
+
+    #[test]
+    fn result_set_column_clone() {
+        let c = ResultSetColumn {
+            name: "COL1".into(),
+            col_type: Some("text".into()),
+        };
+        let cloned = ResultSetColumn::clone(&c);
+        assert_eq!(cloned.name, "COL1");
+        assert_eq!(cloned.col_type, Some("text".into()));
+    }
+
+    #[test]
+    fn result_set_column_debug() {
+        let c = ResultSetColumn {
+            name: "ID_COL".into(),
+            col_type: Some("fixed".into()),
+        };
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("ID_COL"));
+    }
+
+    #[test]
+    fn result_set_metadata_clone() {
+        let m = ResultSetMetaData {
+            num_rows: Some(42),
+            row_type: vec![ResultSetColumn {
+                name: "A".into(),
+                col_type: None,
+            }],
+        };
+        let cloned = ResultSetMetaData::clone(&m);
+        assert_eq!(cloned.num_rows, Some(42));
+        assert_eq!(cloned.row_type.len(), 1);
+    }
+
+    #[test]
+    fn result_set_metadata_debug() {
+        let m = ResultSetMetaData {
+            num_rows: Some(10),
+            row_type: vec![],
+        };
+        let dbg = format!("{m:?}");
+        assert!(dbg.contains("10"));
+    }
+
+    #[test]
+    fn statement_response_clone() {
+        let r = StatementResponse {
+            statement_handle: Some("h1".into()),
+            message: None,
+            code: None,
+            statement_status_url: None,
+            result_set_meta_data: None,
+            data: None,
+        };
+        let cloned = StatementResponse::clone(&r);
+        assert_eq!(cloned.statement_handle, Some("h1".into()));
+    }
+
+    #[test]
+    fn api_error_response_clone() {
+        let e = ApiErrorResponse {
+            message: Some("err".into()),
+            code: Some("001".into()),
+        };
+        let cloned = ApiErrorResponse::clone(&e);
+        assert_eq!(cloned.message, Some("err".into()));
+        assert_eq!(cloned.code, Some("001".into()));
+    }
+
+    #[test]
+    fn api_error_response_debug() {
+        let e = ApiErrorResponse {
+            message: Some("test error".into()),
+            code: None,
+        };
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("test error"));
+    }
+
+    #[test]
+    fn database_extra_fields_ignored() {
+        let d: Database = serde_json::from_value(json!({
+            "name": "DB1",
+            "unknown_field": 42,
+        }))
+        .unwrap();
+        assert_eq!(d.name, "DB1");
+    }
+
+    #[test]
+    fn warehouse_extra_fields_ignored() {
+        let w: Warehouse = serde_json::from_value(json!({
+            "name": "WH1",
+            "unknown": "test",
+        }))
+        .unwrap();
+        assert_eq!(w.name, "WH1");
+    }
+
+    #[test]
+    fn table_extra_fields_ignored() {
+        let t: Table = serde_json::from_value(json!({
+            "name": "T1",
+            "extra_field": true,
+        }))
+        .unwrap();
+        assert_eq!(t.name, "T1");
+    }
+
+    #[test]
+    fn warehouse_with_type_field() {
+        let w: Warehouse = serde_json::from_value(json!({
+            "name": "WH1",
+            "type": "STANDARD",
+        }))
+        .unwrap();
+        assert_eq!(w.r#type, Some("STANDARD".into()));
+    }
+
+    #[test]
+    fn result_set_column_serialize_skips_none() {
+        let c = ResultSetColumn {
+            name: "COL1".into(),
+            col_type: None,
+        };
+        let v = serde_json::to_value(&c).unwrap();
+        assert!(!v.as_object().unwrap().contains_key("type"));
+    }
 }

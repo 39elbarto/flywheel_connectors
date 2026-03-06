@@ -475,4 +475,152 @@ mod tests {
             other => panic!("expected External, got {other:?}"),
         }
     }
+
+    #[test]
+    fn error_display_json() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("not json");
+        let e = AlgoliaError::Json(bad.unwrap_err());
+        let display = e.to_string();
+        assert!(display.starts_with("JSON error:"));
+    }
+
+    #[test]
+    fn json_error_is_not_retryable() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{bad");
+        let e = AlgoliaError::Json(bad.unwrap_err());
+        assert!(!e.is_retryable());
+    }
+
+    #[test]
+    fn json_error_retry_after_is_none() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{bad");
+        let e = AlgoliaError::Json(bad.unwrap_err());
+        assert_eq!(e.retry_after(), None);
+    }
+
+    #[test]
+    fn rate_limited_retry_after_large_value() {
+        let err = AlgoliaError::RateLimited {
+            retry_after_ms: 300_000,
+        };
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(300)));
+    }
+
+    #[test]
+    fn error_debug_unauthorized() {
+        let err = AlgoliaError::Unauthorized;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Unauthorized"));
+    }
+
+    #[test]
+    fn error_debug_api() {
+        let err = AlgoliaError::Api {
+            status_code: 418,
+            message: "teapot".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("418"));
+        assert!(dbg.contains("teapot"));
+    }
+
+    #[test]
+    fn error_debug_not_found() {
+        let err = AlgoliaError::NotFound {
+            resource: "my-index".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("my-index"));
+    }
+
+    #[test]
+    fn error_debug_rate_limited() {
+        let err = AlgoliaError::RateLimited {
+            retry_after_ms: 5000,
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("5000"));
+    }
+
+    #[test]
+    fn api_error_retryable_boundary_499() {
+        assert!(
+            !AlgoliaError::Api {
+                status_code: 499,
+                message: "client error".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_error_retryable_boundary_599() {
+        assert!(
+            AlgoliaError::Api {
+                status_code: 599,
+                message: "server error".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_error_to_fcp_error_retry_after_is_none() {
+        match (AlgoliaError::Api {
+            status_code: 500,
+            message: "err".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External { retry_after, .. } => assert!(retry_after.is_none()),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unauthorized_to_fcp_error_retry_after_none() {
+        match AlgoliaError::Unauthorized.to_fcp_error() {
+            FcpError::External { retry_after, .. } => assert!(retry_after.is_none()),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forbidden_to_fcp_error_retry_after_none() {
+        match AlgoliaError::Forbidden.to_fcp_error() {
+            FcpError::External { retry_after, .. } => assert!(retry_after.is_none()),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn not_found_to_fcp_error_retry_after_none() {
+        match (AlgoliaError::NotFound {
+            resource: "x".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External { retry_after, .. } => assert!(retry_after.is_none()),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_error_display_with_special_chars() {
+        let err = AlgoliaError::Api {
+            status_code: 400,
+            message: "field \"name\" is required".into(),
+        };
+        let display = err.to_string();
+        assert!(display.contains("field \"name\" is required"));
+    }
+
+    #[test]
+    fn not_found_display_with_path() {
+        let err = AlgoliaError::NotFound {
+            resource: "/indexes/products/abc123".into(),
+        };
+        let display = err.to_string();
+        assert!(display.contains("/indexes/products/abc123"));
+    }
 }

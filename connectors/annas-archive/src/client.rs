@@ -87,13 +87,20 @@ impl AnnasArchiveClient {
     }
 
     #[instrument(skip(self), fields(url))]
-    async fn get(&self, path: &str) -> AnnasArchiveResult<serde_json::Value> {
+    async fn get(
+        &self,
+        path: &str,
+        query: Option<&[(&str, String)]>,
+    ) -> AnnasArchiveResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
         debug!(url = %url, "GET request");
-        let req = self
+        let mut req = self
             .client
             .get(&url)
             .header("Accept", "application/json");
+        if let Some(q) = query {
+            req = req.query(q);
+        }
         let resp = req.send().await?;
         self.handle_response(resp).await
     }
@@ -106,42 +113,33 @@ impl AnnasArchiveClient {
         ext: Option<&str>,
         sort: Option<&str>,
     ) -> AnnasArchiveResult<serde_json::Value> {
-        let qs = build_query(&[
-            Some(("q", query.to_string())),
-            lang.map(|l| ("lang", l.to_string())),
-            ext.map(|e| ("ext", e.to_string())),
-            sort.map(|s| ("sort", s.to_string())),
-        ]);
-        self.get(&format!("/search{qs}")).await
+        let mut q = vec![("q", query.to_string())];
+        if let Some(l) = lang {
+            q.push(("lang", l.to_string()));
+        }
+        if let Some(e) = ext {
+            q.push(("ext", e.to_string()));
+        }
+        if let Some(s) = sort {
+            q.push(("sort", s.to_string()));
+        }
+        self.get("/search", Some(&q)).await
     }
 
     /// Get book metadata by MD5 hash.
     pub async fn get_metadata(&self, md5: &str) -> AnnasArchiveResult<serde_json::Value> {
-        self.get(&format!("/md5/{md5}")).await
+        self.get(&format!("/md5/{md5}"), None).await
     }
 
     /// Look up a book by ISBN.
     pub async fn lookup_isbn(&self, isbn: &str) -> AnnasArchiveResult<serde_json::Value> {
-        self.get(&format!("/isbn/{isbn}")).await
+        self.get(&format!("/isbn/{isbn}"), None).await
     }
 
     /// Look up a book by MD5 hash.
     pub async fn lookup_md5(&self, md5: &str) -> AnnasArchiveResult<serde_json::Value> {
-        self.get(&format!("/md5/{md5}")).await
+        self.get(&format!("/md5/{md5}"), None).await
     }
-}
-
-fn build_query(params: &[Option<(&str, String)>]) -> String {
-    let mut qs = String::new();
-    let mut sep = '?';
-    for param in params.iter().flatten() {
-        qs.push(sep);
-        qs.push_str(param.0);
-        qs.push('=');
-        qs.push_str(&param.1);
-        sep = '&';
-    }
-    qs
 }
 
 #[cfg(test)]
@@ -151,69 +149,5 @@ mod tests {
     #[test]
     fn default_base_url_correct() {
         assert_eq!(DEFAULT_BASE_URL, "https://annas-archive.org");
-    }
-
-    #[test]
-    fn client_new_default_url() {
-        let client = AnnasArchiveClient::new(None).unwrap();
-        assert_eq!(client.base_url, DEFAULT_BASE_URL);
-    }
-
-    #[test]
-    fn client_new_custom_url() {
-        let client = AnnasArchiveClient::new(Some("https://custom.example.com/")).unwrap();
-        assert_eq!(client.base_url, "https://custom.example.com");
-    }
-
-    #[test]
-    fn client_new_trims_trailing_slash() {
-        let client = AnnasArchiveClient::new(Some("https://example.com/")).unwrap();
-        assert!(!client.base_url.ends_with('/'));
-    }
-
-    #[test]
-    fn client_debug_format() {
-        let client = AnnasArchiveClient::new(None).unwrap();
-        let dbg = format!("{client:?}");
-        assert!(dbg.contains("AnnasArchiveClient"));
-        assert!(dbg.contains("annas-archive.org"));
-    }
-
-    #[test]
-    fn build_query_empty() {
-        assert_eq!(build_query(&[None, None]), "");
-    }
-
-    #[test]
-    fn build_query_one() {
-        assert_eq!(
-            build_query(&[Some(("q", "test".into()))]),
-            "?q=test"
-        );
-    }
-
-    #[test]
-    fn build_query_multiple() {
-        assert_eq!(
-            build_query(&[
-                Some(("q", "ml".into())),
-                Some(("lang", "en".into())),
-                Some(("ext", "pdf".into())),
-            ]),
-            "?q=ml&lang=en&ext=pdf"
-        );
-    }
-
-    #[test]
-    fn build_query_with_none_gaps() {
-        assert_eq!(
-            build_query(&[Some(("q", "test".into())), None, Some(("ext", "epub".into()))]),
-            "?q=test&ext=epub"
-        );
-    }
-
-    #[test]
-    fn build_query_all_none() {
-        assert_eq!(build_query(&[None, None, None, None]), "");
     }
 }

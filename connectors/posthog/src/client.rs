@@ -276,4 +276,108 @@ mod tests {
         assert!(!dbg.contains("secret"));
         assert!(dbg.contains("redacted"));
     }
+
+    // -- Additional client tests --
+
+    #[test]
+    fn client_new_trims_trailing_slash() {
+        let client = PostHogClient::new(
+            PostHogAuth::ApiKey("phx_key".into()),
+            "42",
+            Some("https://posthog.example.com/api/"),
+        )
+        .unwrap();
+        assert_eq!(client.base_url, "https://posthog.example.com/api");
+    }
+
+    #[test]
+    fn client_debug_shows_project_id() {
+        let client = PostHogClient::new(
+            PostHogAuth::ApiKey("phx_key".into()),
+            "proj_999",
+            None,
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("proj_999"));
+        assert!(dbg.contains("PostHogClient"));
+    }
+
+    #[test]
+    fn client_debug_shows_credential_id() {
+        let cred = CredentialId::new();
+        let cred_str = cred.to_string();
+        let client = PostHogClient::new(
+            PostHogAuth::CredentialId(cred),
+            "1",
+            None,
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains(&cred_str));
+    }
+
+    #[test]
+    fn auth_clone() {
+        let auth = PostHogAuth::ApiKey("phx_key".into());
+        let cloned = auth.clone();
+        assert!(!auth.is_secretless());
+        assert_eq!(cloned.redacted_label(), "api_key:redacted");
+    }
+
+    #[test]
+    fn auth_credential_clone() {
+        let auth = PostHogAuth::CredentialId(CredentialId::new());
+        let cloned = auth.clone();
+        assert!(auth.is_secretless());
+        assert!(cloned.redacted_label().starts_with("credential_id:"));
+    }
+
+    #[test]
+    fn auth_credential_debug_shows_id() {
+        let cred = CredentialId::new();
+        let cred_str = cred.to_string();
+        let auth = PostHogAuth::CredentialId(cred);
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains(&cred_str));
+        assert!(dbg.contains("CredentialId"));
+    }
+
+    #[test]
+    fn default_base_url_value() {
+        assert_eq!(DEFAULT_BASE_URL, "https://app.posthog.com/api");
+    }
+
+    #[test]
+    fn client_stores_project_id() {
+        let client = PostHogClient::new(
+            PostHogAuth::ApiKey("phx_key".into()),
+            "my_project",
+            None,
+        )
+        .unwrap();
+        assert_eq!(client.project_id, "my_project");
+    }
+
+    #[test]
+    fn client_credential_default_url() {
+        let client = PostHogClient::new(
+            PostHogAuth::CredentialId(CredentialId::new()),
+            "1",
+            None,
+        )
+        .unwrap();
+        assert_eq!(client.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn client_empty_project_id() {
+        let client = PostHogClient::new(
+            PostHogAuth::ApiKey("phx_key".into()),
+            "",
+            None,
+        )
+        .unwrap();
+        assert_eq!(client.project_id, "");
+    }
 }

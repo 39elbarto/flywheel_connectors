@@ -289,4 +289,106 @@ mod tests {
         assert_eq!(cloned.application_id, "APP");
         assert_eq!(cloned.api_key, "KEY");
     }
+
+    #[test]
+    fn default_base_url_template_contains_algolia() {
+        assert!(DEFAULT_BASE_URL_TEMPLATE.contains("algolia.net"));
+    }
+
+    #[test]
+    fn default_base_url_template_is_https() {
+        assert!(DEFAULT_BASE_URL_TEMPLATE.starts_with("https://"));
+    }
+
+    #[test]
+    fn default_base_url_template_has_version() {
+        assert!(DEFAULT_BASE_URL_TEMPLATE.contains("/1"));
+    }
+
+    #[test]
+    fn client_debug_redacts_api_key() {
+        let auth = AlgoliaAuth {
+            application_id: "TESTAPP".into(),
+            api_key: "super-secret-key".into(),
+        };
+        let client = AlgoliaClient::new(auth, Some("https://example.com")).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(!dbg.contains("super-secret-key"));
+        assert!(dbg.contains("redacted"));
+        assert!(dbg.contains("TESTAPP"));
+    }
+
+    #[test]
+    fn auth_redacted_label_format() {
+        let auth = AlgoliaAuth {
+            application_id: "MY_APP".into(),
+            api_key: "secret".into(),
+        };
+        let label = auth.redacted_label();
+        assert_eq!(label, "app_id:MY_APP,api_key:redacted");
+    }
+
+    #[test]
+    fn client_default_url_uses_app_id() {
+        let auth = AlgoliaAuth {
+            application_id: "XYZ789".into(),
+            api_key: "key".into(),
+        };
+        let client = AlgoliaClient::new(auth, None).unwrap();
+        assert!(client.base_url.contains("XYZ789"));
+    }
+
+    #[test]
+    fn client_strips_multiple_trailing_slashes() {
+        let auth = AlgoliaAuth {
+            application_id: "APP".into(),
+            api_key: "KEY".into(),
+        };
+        let client = AlgoliaClient::new(auth, Some("https://example.com///")).unwrap();
+        assert!(!client.base_url.ends_with('/'));
+    }
+
+    #[test]
+    fn auth_debug_struct_format() {
+        let auth = AlgoliaAuth {
+            application_id: "A1B2C3".into(),
+            api_key: "secret".into(),
+        };
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("AlgoliaAuth"));
+        assert!(dbg.contains("A1B2C3"));
+    }
+
+    #[test]
+    fn client_custom_url_no_trailing_slash() {
+        let auth = AlgoliaAuth {
+            application_id: "APP".into(),
+            api_key: "KEY".into(),
+        };
+        let client = AlgoliaClient::new(auth, Some("https://example.com/v1")).unwrap();
+        assert_eq!(client.base_url, "https://example.com/v1");
+    }
+
+    #[test]
+    fn auth_clone_preserves_fields() {
+        let auth = AlgoliaAuth {
+            application_id: "ORIG_APP".into(),
+            api_key: "ORIG_KEY".into(),
+        };
+        let cloned = auth.clone();
+        assert_eq!(cloned.application_id, "ORIG_APP");
+        assert_eq!(cloned.api_key, "ORIG_KEY");
+        assert_eq!(auth.application_id, "ORIG_APP");
+    }
+
+    #[test]
+    fn client_debug_contains_struct_name() {
+        let auth = AlgoliaAuth {
+            application_id: "APP".into(),
+            api_key: "KEY".into(),
+        };
+        let client = AlgoliaClient::new(auth, Some("https://example.com")).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("AlgoliaClient"));
+    }
 }

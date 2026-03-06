@@ -299,4 +299,257 @@ mod tests {
     fn error_display_api() {
         assert_eq!(GitLabError::Api { status_code: 500, message: "Internal".into() }.to_string(), "GitLab API error (500): Internal");
     }
+
+    // ── Display additional ──────────────────────────────────────────
+
+    #[test]
+    fn error_display_json() {
+        let inner = serde_json::from_str::<serde_json::Value>("{bad").unwrap_err();
+        let err = GitLabError::Json(inner);
+        let s = err.to_string();
+        assert!(s.starts_with("JSON error:"), "got: {s}");
+    }
+
+    #[test]
+    fn error_display_api_empty_message() {
+        let err = GitLabError::Api { status_code: 400, message: String::new() };
+        let s = err.to_string();
+        assert!(s.contains("400"));
+    }
+
+    #[test]
+    fn error_display_not_found_empty_resource() {
+        let err = GitLabError::NotFound { resource: String::new() };
+        assert_eq!(err.to_string(), "Not found: ");
+    }
+
+    #[test]
+    fn error_display_rate_limited_zero() {
+        let err = GitLabError::RateLimited { retry_after_ms: 0 };
+        assert_eq!(err.to_string(), "Rate limited, retry after 0ms");
+    }
+
+    // ── is_retryable extended ───────────────────────────────────────
+
+    #[test]
+    fn api_503_is_retryable() {
+        assert!(GitLabError::Api { status_code: 503, message: "unavailable".into() }.is_retryable());
+    }
+
+    #[test]
+    fn api_504_is_retryable() {
+        assert!(GitLabError::Api { status_code: 504, message: "timeout".into() }.is_retryable());
+    }
+
+    #[test]
+    fn api_599_is_retryable() {
+        assert!(GitLabError::Api { status_code: 599, message: "unknown".into() }.is_retryable());
+    }
+
+    #[test]
+    fn api_422_not_retryable() {
+        assert!(!GitLabError::Api { status_code: 422, message: "unprocessable".into() }.is_retryable());
+    }
+
+    #[test]
+    fn api_401_not_retryable() {
+        assert!(!GitLabError::Api { status_code: 401, message: "unauth".into() }.is_retryable());
+    }
+
+    #[test]
+    fn api_403_not_retryable() {
+        assert!(!GitLabError::Api { status_code: 403, message: "forbidden".into() }.is_retryable());
+    }
+
+    #[test]
+    fn json_error_not_retryable() {
+        let inner = serde_json::from_str::<serde_json::Value>("nope").unwrap_err();
+        assert!(!GitLabError::Json(inner).is_retryable());
+    }
+
+    // ── retry_after extended ────────────────────────────────────────
+
+    #[test]
+    fn retry_after_rate_limited_zero() {
+        let err = GitLabError::RateLimited { retry_after_ms: 0 };
+        assert_eq!(err.retry_after(), Some(Duration::from_millis(0)));
+    }
+
+    #[test]
+    fn retry_after_rate_limited_large() {
+        let err = GitLabError::RateLimited { retry_after_ms: 3_600_000 };
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn retry_after_none_for_json() {
+        let inner = serde_json::from_str::<serde_json::Value>("bad").unwrap_err();
+        assert_eq!(GitLabError::Json(inner).retry_after(), None);
+    }
+
+    // ── to_fcp_error extended ───────────────────────────────────────
+
+    #[test]
+    fn fcp_error_rate_limited_retry_after_ms_in_message() {
+        match (GitLabError::RateLimited { retry_after_ms: 5000 }).to_fcp_error() {
+            FcpError::External { message, status_code, retryable, retry_after, .. } => {
+                assert!(message.contains("5000"));
+                assert_eq!(status_code, Some(429));
+                assert!(retryable);
+                assert_eq!(retry_after, Some(Duration::from_secs(5)));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fcp_error_unauthorized_message() {
+        match GitLabError::Unauthorized.to_fcp_error() {
+            FcpError::External { message, .. } => assert_eq!(message, "Authentication failed"),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fcp_error_forbidden_message() {
+        match GitLabError::Forbidden.to_fcp_error() {
+            FcpError::External { message, .. } => assert_eq!(message, "Insufficient permissions"),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fcp_error_not_found_message_contains_resource() {
+        match (GitLabError::NotFound { resource: "merge_request/42".into() }).to_fcp_error() {
+            FcpError::External { message, .. } => assert!(message.contains("merge_request/42")),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fcp_error_api_retryable_500_range() {
+        match (GitLabError::Api { status_code: 502, message: "bad gw".into() }).to_fcp_error() {
+            FcpError::External { retryable, retry_after, .. } => {
+                assert!(retryable);
+                assert!(retry_after.is_none());
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fcp_error_api_non_retryable_400_range() {
+        match (GitLabError::Api { status_code: 422, message: "unprocessable".into() }).to_fcp_error() {
+            FcpError::External { retryable, .. } => assert!(!retryable),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fcp_error_all_variants_have_gitlab_service() {
+        let variants: Vec<GitLabError> = vec![
+            GitLabError::Api { status_code: 400, message: "bad".into() },
+            GitLabError::RateLimited { retry_after_ms: 1000 },
+            GitLabError::Unauthorized,
+            GitLabError::Forbidden,
+            GitLabError::NotFound { resource: "x".into() },
+        ];
+        for err in variants {
+            match err.to_fcp_error() {
+                FcpError::External { service, .. } => assert_eq!(service, "gitlab"),
+                FcpError::Internal { .. } => {} // Json variant maps to Internal
+                other => panic!("unexpected variant: {other:?}"),
+            }
+        }
+    }
+
+    // ── Debug trait ─────────────────────────────────────────────────
+
+    #[test]
+    fn error_debug_unauthorized() {
+        let dbg = format!("{:?}", GitLabError::Unauthorized);
+        assert!(dbg.contains("Unauthorized"));
+    }
+
+    #[test]
+    fn error_debug_forbidden() {
+        let dbg = format!("{:?}", GitLabError::Forbidden);
+        assert!(dbg.contains("Forbidden"));
+    }
+
+    #[test]
+    fn error_debug_api() {
+        let dbg = format!("{:?}", GitLabError::Api { status_code: 500, message: "err".into() });
+        assert!(dbg.contains("Api"));
+        assert!(dbg.contains("500"));
+    }
+
+    #[test]
+    fn error_debug_rate_limited() {
+        let dbg = format!("{:?}", GitLabError::RateLimited { retry_after_ms: 10_000 });
+        assert!(dbg.contains("RateLimited"));
+        assert!(dbg.contains("10000"));
+    }
+
+    #[test]
+    fn error_debug_not_found() {
+        let dbg = format!("{:?}", GitLabError::NotFound { resource: "proj/1".into() });
+        assert!(dbg.contains("NotFound"));
+        assert!(dbg.contains("proj/1"));
+    }
+
+    #[test]
+    fn error_debug_json() {
+        let inner = serde_json::from_str::<serde_json::Value>("!!!").unwrap_err();
+        let dbg = format!("{:?}", GitLabError::Json(inner));
+        assert!(dbg.contains("Json"));
+    }
+
+    // ── From impls ──────────────────────────────────────────────────
+
+    #[test]
+    fn from_serde_json_error() {
+        let inner = serde_json::from_str::<serde_json::Value>("{bad}").unwrap_err();
+        let err: GitLabError = inner.into();
+        assert!(matches!(err, GitLabError::Json(_)));
+    }
+
+    // ── Boundary values ─────────────────────────────────────────────
+
+    #[test]
+    fn rate_limited_max_u64() {
+        let err = GitLabError::RateLimited { retry_after_ms: u64::MAX };
+        assert!(err.is_retryable());
+        assert!(err.retry_after().is_some());
+    }
+
+    #[test]
+    fn api_error_status_code_zero() {
+        let err = GitLabError::Api { status_code: 0, message: "weird".into() };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn api_error_status_code_max() {
+        let err = GitLabError::Api { status_code: u16::MAX, message: "overflow".into() };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn not_found_unicode_resource() {
+        let err = GitLabError::NotFound { resource: "project/\u{1F680}".into() };
+        let s = err.to_string();
+        assert!(s.contains('\u{1F680}'));
+        match err.to_fcp_error() {
+            FcpError::External { message, .. } => assert!(message.contains('\u{1F680}')),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_error_long_message() {
+        let long = "x".repeat(10_000);
+        let err = GitLabError::Api { status_code: 500, message: long.clone() };
+        assert!(err.to_string().contains(&long));
+    }
 }

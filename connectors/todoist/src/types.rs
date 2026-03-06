@@ -217,4 +217,186 @@ mod tests {
         assert_eq!(t.id, "t1");
         assert_eq!(t.content, Some("Test".into()));
     }
+
+    // ── Project additional tests ────────────────────────────────────
+
+    #[test]
+    fn project_clone() {
+        let p: Project = serde_json::from_value(json!({"id": "p1", "name": "Clone Test"})).unwrap();
+        #[allow(clippy::redundant_clone)]
+        let p2 = p.clone();
+        assert_eq!(p2.id, "p1");
+        assert_eq!(p2.name, Some("Clone Test".into()));
+    }
+
+    #[test]
+    fn project_debug() {
+        let p: Project = serde_json::from_value(json!({"id": "dbg_proj"})).unwrap();
+        let dbg = format!("{p:?}");
+        assert!(dbg.contains("dbg_proj"));
+    }
+
+    #[test]
+    fn project_all_none_optionals() {
+        let p: Project = serde_json::from_value(json!({"id": "x"})).unwrap();
+        assert!(p.name.is_none());
+        assert!(p.color.is_none());
+        assert!(p.comment_count.is_none());
+        assert!(p.is_shared.is_none());
+        assert!(p.is_favorite.is_none());
+        assert!(p.order.is_none());
+        assert!(p.url.is_none());
+        assert!(p.view_style.is_none());
+    }
+
+    #[test]
+    fn project_serialize_includes_all_set_fields() {
+        let p = Project {
+            id: "p1".into(),
+            name: Some("Test".into()),
+            color: Some("red".into()),
+            comment_count: Some(0),
+            is_shared: Some(true),
+            is_favorite: Some(false),
+            order: Some(99),
+            url: Some("https://todoist.com/p1".into()),
+            view_style: Some("board".into()),
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["color"], "red");
+        assert_eq!(v["order"], 99);
+        assert_eq!(v["view_style"], "board");
+    }
+
+    // ── Task additional tests ───────────────────────────────────────
+
+    #[test]
+    fn task_clone() {
+        let t: Task = serde_json::from_value(json!({"id": "t1", "content": "Clone"})).unwrap();
+        #[allow(clippy::redundant_clone)]
+        let t2 = t.clone();
+        assert_eq!(t2.id, "t1");
+        assert_eq!(t2.content, Some("Clone".into()));
+    }
+
+    #[test]
+    fn task_debug() {
+        let t: Task = serde_json::from_value(json!({"id": "dbg_task"})).unwrap();
+        let dbg = format!("{t:?}");
+        assert!(dbg.contains("dbg_task"));
+    }
+
+    #[test]
+    fn task_all_none_optionals() {
+        let t: Task = serde_json::from_value(json!({"id": "x"})).unwrap();
+        assert!(t.content.is_none());
+        assert!(t.description.is_none());
+        assert!(t.project_id.is_none());
+        assert!(t.is_completed.is_none());
+        assert!(t.priority.is_none());
+        assert!(t.due.is_none());
+        assert!(t.url.is_none());
+        assert!(t.comment_count.is_none());
+        assert!(t.order.is_none());
+    }
+
+    #[test]
+    fn task_completed_true() {
+        let t: Task = serde_json::from_value(json!({"id": "t1", "is_completed": true})).unwrap();
+        assert_eq!(t.is_completed, Some(true));
+    }
+
+    #[test]
+    fn task_priority_boundary_values() {
+        // Todoist priority: 1 (normal) to 4 (urgent)
+        let t1: Task = serde_json::from_value(json!({"id": "t1", "priority": 1})).unwrap();
+        assert_eq!(t1.priority, Some(1));
+        let t4: Task = serde_json::from_value(json!({"id": "t2", "priority": 4})).unwrap();
+        assert_eq!(t4.priority, Some(4));
+    }
+
+    #[test]
+    fn task_with_description() {
+        let t: Task = serde_json::from_value(json!({
+            "id": "t1",
+            "content": "Buy milk",
+            "description": "From the organic store"
+        })).unwrap();
+        assert_eq!(t.description, Some("From the organic store".into()));
+    }
+
+    // ── Due additional tests ────────────────────────────────────────
+
+    #[test]
+    fn due_clone() {
+        let d: Due = serde_json::from_value(json!({"date": "2026-03-15"})).unwrap();
+        #[allow(clippy::redundant_clone)]
+        let d2 = d.clone();
+        assert_eq!(d2.date, Some("2026-03-15".into()));
+    }
+
+    #[test]
+    fn due_debug() {
+        let d: Due = serde_json::from_value(json!({"date": "2026-03-15"})).unwrap();
+        let dbg = format!("{d:?}");
+        assert!(dbg.contains("2026-03-15"));
+    }
+
+    #[test]
+    fn due_serialize_roundtrip() {
+        let d = Due {
+            date: Some("2026-04-01".into()),
+            string: Some("April 1st".into()),
+            datetime: Some("2026-04-01T10:00:00Z".into()),
+            timezone: Some("UTC".into()),
+            is_recurring: Some(false),
+        };
+        let v = serde_json::to_value(&d).unwrap();
+        assert_eq!(v["timezone"], "UTC");
+        let d2: Due = serde_json::from_value(v).unwrap();
+        assert_eq!(d2.timezone, Some("UTC".into()));
+    }
+
+    #[test]
+    fn due_recurring_true() {
+        let d: Due = serde_json::from_value(json!({"is_recurring": true, "string": "every day"})).unwrap();
+        assert_eq!(d.is_recurring, Some(true));
+        assert_eq!(d.string, Some("every day".into()));
+    }
+
+    // ── ApiErrorResponse additional tests ───────────────────────────
+
+    #[test]
+    fn api_error_response_clone() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({"error": "test"})).unwrap();
+        #[allow(clippy::redundant_clone)]
+        let e2 = e.clone();
+        assert_eq!(e2.error_message, Some("test".into()));
+    }
+
+    #[test]
+    fn api_error_response_debug() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({"error": "debug_err"})).unwrap();
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("debug_err"));
+    }
+
+    #[test]
+    fn api_error_response_all_none() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({})).unwrap();
+        assert!(e.error_message.is_none());
+        assert!(e.error_code.is_none());
+        assert!(e.http_code.is_none());
+    }
+
+    #[test]
+    fn api_error_response_different_codes() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({
+            "error": "Forbidden",
+            "error_code": 403,
+            "http_code": 403
+        })).unwrap();
+        assert_eq!(e.error_code, Some(403));
+        assert_eq!(e.http_code, Some(403));
+    }
 }

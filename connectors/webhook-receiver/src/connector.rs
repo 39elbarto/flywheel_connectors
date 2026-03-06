@@ -670,4 +670,192 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn require_str_object_value() {
+        let input = json!({"path": {"nested": "val"}});
+        assert!(require_str(&input, "path").is_err());
+    }
+
+    #[test]
+    fn require_str_empty_string() {
+        let input = json!({"path": ""});
+        // Empty string is still a valid string
+        assert_eq!(require_str(&input, "path").unwrap(), "");
+    }
+
+    #[test]
+    fn operations_endpoints_create_capability() {
+        let ops = operations_info();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "webhook.endpoints.create")
+            .unwrap();
+        assert_eq!(op["capability"], "webhook.endpoints.write");
+        assert_eq!(op["risk_level"], "medium");
+        assert_eq!(op["safety_tier"], "risky");
+    }
+
+    #[test]
+    fn operations_endpoints_delete_capability() {
+        let ops = operations_info();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "webhook.endpoints.delete")
+            .unwrap();
+        assert_eq!(op["capability"], "webhook.endpoints.write");
+        assert_eq!(op["risk_level"], "high");
+        assert_eq!(op["safety_tier"], "dangerous");
+    }
+
+    #[test]
+    fn operations_endpoints_list_capability() {
+        let ops = operations_info();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "webhook.endpoints.list")
+            .unwrap();
+        assert_eq!(op["capability"], "webhook.endpoints.read");
+    }
+
+    #[test]
+    fn operations_events_recent_capability() {
+        let ops = operations_info();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "webhook.events.recent")
+            .unwrap();
+        assert_eq!(op["capability"], "webhook.events.read");
+    }
+
+    #[test]
+    fn doctor_result_multiple_critical_failures() {
+        let checks = vec![
+            DoctorCheck {
+                name: "a".into(),
+                passed: false,
+                message: Some("fail a".into()),
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: Some("fail b".into()),
+                critical: true,
+            },
+        ];
+        let r = DoctorResult::from_checks(checks);
+        assert_eq!(r.status, DoctorStatus::Unhealthy);
+        assert_eq!(r.checks.len(), 2);
+    }
+
+    #[test]
+    fn doctor_check_serializes_message_when_some() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: false,
+            message: Some("error detail".into()),
+            critical: true,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert_eq!(v["message"], "error detail");
+    }
+
+    #[test]
+    fn doctor_check_skips_message_when_none() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert!(v.get("message").is_none());
+    }
+
+    #[test]
+    fn doctor_status_serialize_lowercase() {
+        let v = serde_json::to_value(DoctorStatus::Healthy).unwrap();
+        assert_eq!(v, "healthy");
+        let v = serde_json::to_value(DoctorStatus::Degraded).unwrap();
+        assert_eq!(v, "degraded");
+        let v = serde_json::to_value(DoctorStatus::Unhealthy).unwrap();
+        assert_eq!(v, "unhealthy");
+    }
+
+    #[test]
+    fn doctor_status_deserialize_lowercase() {
+        let s: DoctorStatus = serde_json::from_value(json!("healthy")).unwrap();
+        assert_eq!(s, DoctorStatus::Healthy);
+        let s: DoctorStatus = serde_json::from_value(json!("degraded")).unwrap();
+        assert_eq!(s, DoctorStatus::Degraded);
+        let s: DoctorStatus = serde_json::from_value(json!("unhealthy")).unwrap();
+        assert_eq!(s, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_result_clone() {
+        let r = DoctorResult::from_checks(vec![
+            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
+        ]);
+        #[allow(clippy::redundant_clone)]
+        let cloned = r.clone();
+        assert_eq!(cloned.status, DoctorStatus::Healthy);
+        assert_eq!(cloned.checks.len(), 1);
+    }
+
+    #[test]
+    fn doctor_result_debug() {
+        let r = DoctorResult::from_checks(vec![]);
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("DoctorResult"));
+    }
+
+    #[test]
+    fn doctor_check_debug() {
+        let check = DoctorCheck {
+            name: "config".into(),
+            passed: true,
+            message: None,
+            critical: true,
+        };
+        let dbg = format!("{check:?}");
+        assert!(dbg.contains("DoctorCheck"));
+    }
+
+    #[test]
+    fn doctor_check_clone() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: false,
+            message: Some("msg".into()),
+            critical: true,
+        };
+        #[allow(clippy::redundant_clone)]
+        let cloned = check.clone();
+        assert_eq!(cloned.name, "test");
+        assert!(!cloned.passed);
+        assert_eq!(cloned.message, Some("msg".into()));
+        assert!(cloned.critical);
+    }
+
+    #[test]
+    fn doctor_result_deserialize_roundtrip() {
+        let r = DoctorResult::from_checks(vec![
+            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
+            DoctorCheck { name: "b".into(), passed: false, message: Some("warn".into()), critical: false },
+        ]);
+        let s = serde_json::to_string(&r).unwrap();
+        let r2: DoctorResult = serde_json::from_str(&s).unwrap();
+        assert_eq!(r2.status, DoctorStatus::Degraded);
+        assert_eq!(r2.checks.len(), 2);
+    }
 }

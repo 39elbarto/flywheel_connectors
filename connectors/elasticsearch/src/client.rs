@@ -336,4 +336,144 @@ mod tests {
         let cred = ElasticsearchAuth::CredentialId(CredentialId::new());
         assert!(cred.redacted_label().starts_with("credential_id:"));
     }
+
+    #[test]
+    fn auth_redacted_label_credential_id_no_redacted() {
+        let cred = ElasticsearchAuth::CredentialId(CredentialId::new());
+        let label = cred.redacted_label();
+        assert!(!label.contains("redacted"));
+    }
+
+    #[test]
+    fn auth_debug_credential_id_shows_id() {
+        let id = CredentialId::new();
+        let auth = ElasticsearchAuth::CredentialId(id);
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("CredentialId"));
+        assert!(dbg.contains(&id.to_string()));
+    }
+
+    #[test]
+    fn auth_debug_apikey_does_not_leak() {
+        let auth = ElasticsearchAuth::ApiKey("super-secret-api-key-12345".into());
+        let dbg = format!("{auth:?}");
+        assert!(!dbg.contains("super-secret-api-key-12345"));
+        assert!(dbg.contains("ApiKey"));
+        assert!(dbg.contains("<redacted>"));
+    }
+
+    #[test]
+    fn auth_clone() {
+        let auth = ElasticsearchAuth::ApiKey("key".into());
+        let cloned = auth.clone();
+        assert_eq!(auth.redacted_label(), "api_key:redacted");
+        assert!(!cloned.is_secretless());
+    }
+
+    #[test]
+    fn client_new_default_url() {
+        let client = ElasticsearchClient::new(ElasticsearchAuth::ApiKey("k".into()), None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains(DEFAULT_BASE_URL));
+    }
+
+    #[test]
+    fn client_new_custom_url() {
+        let client = ElasticsearchClient::new(
+            ElasticsearchAuth::ApiKey("k".into()),
+            Some("https://my-es.example.com:9243"),
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("https://my-es.example.com:9243"));
+    }
+
+    #[test]
+    fn client_new_trims_trailing_slash() {
+        let client = ElasticsearchClient::new(
+            ElasticsearchAuth::ApiKey("k".into()),
+            Some("https://example.com/"),
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("https://example.com"));
+        assert!(!dbg.contains("https://example.com/\""));
+    }
+
+    #[test]
+    fn client_new_trims_multiple_trailing_slashes() {
+        let client = ElasticsearchClient::new(
+            ElasticsearchAuth::ApiKey("k".into()),
+            Some("https://example.com///"),
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(!dbg.contains("///"));
+    }
+
+    #[test]
+    fn client_debug_shows_struct() {
+        let client = ElasticsearchClient::new(
+            ElasticsearchAuth::ApiKey("k".into()),
+            None,
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("ElasticsearchClient"));
+        assert!(dbg.contains("auth"));
+        assert!(dbg.contains("base_url"));
+    }
+
+    #[test]
+    fn client_debug_redacts_auth() {
+        let client = ElasticsearchClient::new(
+            ElasticsearchAuth::ApiKey("my-secret-key".into()),
+            None,
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(!dbg.contains("my-secret-key"));
+        assert!(dbg.contains("redacted"));
+    }
+
+    #[test]
+    fn default_base_url_value() {
+        assert_eq!(DEFAULT_BASE_URL, "https://localhost:9200");
+    }
+
+    #[test]
+    fn client_with_credential_id_auth() {
+        let client = ElasticsearchClient::new(
+            ElasticsearchAuth::CredentialId(CredentialId::new()),
+            None,
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("CredentialId"));
+    }
+
+    #[test]
+    fn client_with_client_trims_trailing_slash() {
+        let http_client = Client::new();
+        let client = ElasticsearchClient::with_client(
+            http_client,
+            ElasticsearchAuth::ApiKey("k".into()),
+            "https://es.example.com/",
+        );
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("https://es.example.com"));
+        assert!(!dbg.contains("https://es.example.com/\""));
+    }
+
+    #[test]
+    fn client_with_client_preserves_base_url() {
+        let http_client = Client::new();
+        let client = ElasticsearchClient::with_client(
+            http_client,
+            ElasticsearchAuth::ApiKey("k".into()),
+            "https://custom-es:9200",
+        );
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("https://custom-es:9200"));
+    }
 }

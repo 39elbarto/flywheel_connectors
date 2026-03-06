@@ -3016,6 +3016,478 @@ mod tests {
 
     // ─── Manifest interface hash determinism ───────────────────────────
 
+    // ─── TelegramConfig serde and validation tests ────────────────
+
+    #[test]
+    fn test_telegram_config_default_values() {
+        let config: TelegramConfig = serde_json::from_value(json!({})).unwrap();
+        assert!(config.credential.is_none());
+        assert!(config.credential_id.is_none());
+        assert!(config.base_url.is_none());
+        assert_eq!(config.poll_timeout, 30); // default_poll_timeout()
+        assert!(config.allowed_updates.is_empty());
+    }
+
+    #[test]
+    fn test_telegram_config_serde_roundtrip() {
+        let config: TelegramConfig = serde_json::from_value(json!({
+            "credential": "123456:ABCtest",
+            "base_url": "https://custom.api.tg",
+            "poll_timeout": 15,
+            "allowed_updates": ["message", "callback_query"]
+        }))
+        .unwrap();
+        assert_eq!(config.credential.as_deref(), Some("123456:ABCtest"));
+        assert_eq!(config.base_url.as_deref(), Some("https://custom.api.tg"));
+        assert_eq!(config.poll_timeout, 15);
+        assert_eq!(config.allowed_updates.len(), 2);
+    }
+
+    #[test]
+    fn test_telegram_config_resolve_auth_mode_token() {
+        let config: TelegramConfig = serde_json::from_value(json!({
+            "credential": "123456:ABCtest"
+        }))
+        .unwrap();
+        let mode = config.resolve_auth_mode().unwrap();
+        assert_eq!(mode, TelegramAuthConfig::BotToken);
+    }
+
+    #[test]
+    fn test_telegram_config_resolve_auth_mode_credential_id() {
+        let config: TelegramConfig = serde_json::from_value(json!({
+            "credential_id": "11223344-5566-7788-99aa-bbccddeeff00"
+        }))
+        .unwrap();
+        let mode = config.resolve_auth_mode().unwrap();
+        assert!(matches!(mode, TelegramAuthConfig::CredentialId(_)));
+    }
+
+    #[test]
+    fn test_telegram_config_resolve_auth_mode_both_fails() {
+        let config: TelegramConfig = serde_json::from_value(json!({
+            "credential": "123456:ABCtest",
+            "credential_id": "11223344-5566-7788-99aa-bbccddeeff00"
+        }))
+        .unwrap();
+        let err = config.resolve_auth_mode().unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn test_telegram_config_resolve_auth_mode_neither_fails() {
+        let config: TelegramConfig = serde_json::from_value(json!({})).unwrap();
+        let err = config.resolve_auth_mode().unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn test_telegram_config_resolve_auth_mode_empty_credential_fails() {
+        let config: TelegramConfig = serde_json::from_value(json!({
+            "credential": ""
+        }))
+        .unwrap();
+        let err = config.resolve_auth_mode().unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn test_telegram_config_resolve_auth_mode_whitespace_credential_fails() {
+        let config: TelegramConfig = serde_json::from_value(json!({
+            "credential": "   "
+        }))
+        .unwrap();
+        let err = config.resolve_auth_mode().unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn test_normalize_base_url_default() {
+        let config: TelegramConfig = serde_json::from_value(json!({})).unwrap();
+        let url = config.normalize_base_url().unwrap();
+        assert_eq!(url, DEFAULT_TELEGRAM_BASE_URL);
+    }
+
+    #[test]
+    fn test_normalize_base_url_custom() {
+        let config: TelegramConfig = serde_json::from_value(json!({
+            "base_url": "http://localhost:8080/"
+        }))
+        .unwrap();
+        let url = config.normalize_base_url().unwrap();
+        assert_eq!(url, "http://localhost:8080"); // trailing slash stripped
+    }
+
+    #[test]
+    fn test_normalize_base_url_empty_fails() {
+        let config: TelegramConfig = serde_json::from_value(json!({
+            "base_url": ""
+        }))
+        .unwrap();
+        let err = config.normalize_base_url().unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn test_normalize_base_url_invalid_scheme_fails() {
+        let config: TelegramConfig = serde_json::from_value(json!({
+            "base_url": "ftp://example.com"
+        }))
+        .unwrap();
+        let err = config.normalize_base_url().unwrap_err();
+        if let FcpError::InvalidRequest { message, .. } = err {
+            assert!(message.contains("http or https"));
+        }
+    }
+
+    #[test]
+    fn test_normalize_base_url_not_a_url_fails() {
+        let config: TelegramConfig = serde_json::from_value(json!({
+            "base_url": "not a url"
+        }))
+        .unwrap();
+        assert!(config.normalize_base_url().is_err());
+    }
+
+    #[test]
+    fn test_validate_runtime_settings_default_ok() {
+        let config: TelegramConfig = serde_json::from_value(json!({})).unwrap();
+        assert!(config.validate_runtime_settings().is_ok());
+    }
+
+    #[test]
+    fn test_validate_runtime_settings_min_timeout() {
+        let config: TelegramConfig = serde_json::from_value(json!({
+            "poll_timeout": 1
+        }))
+        .unwrap();
+        assert!(config.validate_runtime_settings().is_ok());
+    }
+
+    #[test]
+    fn test_validate_runtime_settings_max_timeout() {
+        let config: TelegramConfig = serde_json::from_value(json!({
+            "poll_timeout": 50
+        }))
+        .unwrap();
+        assert!(config.validate_runtime_settings().is_ok());
+    }
+
+    #[test]
+    fn test_validate_runtime_settings_timeout_too_low() {
+        let config: TelegramConfig = serde_json::from_value(json!({
+            "poll_timeout": 0
+        }))
+        .unwrap();
+        let err = config.validate_runtime_settings().unwrap_err();
+        if let FcpError::InvalidRequest { message, .. } = err {
+            assert!(message.contains("poll_timeout"));
+        }
+    }
+
+    #[test]
+    fn test_validate_runtime_settings_timeout_too_high() {
+        let config: TelegramConfig = serde_json::from_value(json!({
+            "poll_timeout": 51
+        }))
+        .unwrap();
+        let err = config.validate_runtime_settings().unwrap_err();
+        if let FcpError::InvalidRequest { message, .. } = err {
+            assert!(message.contains("poll_timeout"));
+        }
+    }
+
+    #[test]
+    fn test_validate_runtime_settings_allowed_updates_valid() {
+        let config: TelegramConfig = serde_json::from_value(json!({
+            "allowed_updates": ["message", "callback_query", "channel_post"]
+        }))
+        .unwrap();
+        assert!(config.validate_runtime_settings().is_ok());
+    }
+
+    #[test]
+    fn test_validate_runtime_settings_allowed_updates_empty_entry() {
+        let config: TelegramConfig = serde_json::from_value(json!({
+            "allowed_updates": ["message", ""]
+        }))
+        .unwrap();
+        let err = config.validate_runtime_settings().unwrap_err();
+        if let FcpError::InvalidRequest { message, .. } = err {
+            assert!(message.contains("empty"));
+        }
+    }
+
+    #[test]
+    fn test_validate_runtime_settings_allowed_updates_duplicate() {
+        let config: TelegramConfig = serde_json::from_value(json!({
+            "allowed_updates": ["message", "message"]
+        }))
+        .unwrap();
+        let err = config.validate_runtime_settings().unwrap_err();
+        if let FcpError::InvalidRequest { message, .. } = err {
+            assert!(message.contains("duplicate"));
+        }
+    }
+
+    #[test]
+    fn test_validate_runtime_settings_allowed_updates_unsupported() {
+        let config: TelegramConfig = serde_json::from_value(json!({
+            "allowed_updates": ["message", "nonexistent_type"]
+        }))
+        .unwrap();
+        let err = config.validate_runtime_settings().unwrap_err();
+        if let FcpError::InvalidRequest { message, .. } = err {
+            assert!(message.contains("unsupported"));
+        }
+    }
+
+    #[test]
+    fn test_config_auth_label_token() {
+        let config: TelegramConfig = serde_json::from_value(json!({
+            "credential": "123456:ABCtest"
+        }))
+        .unwrap();
+        assert_eq!(config.auth_label(), "bot_token");
+    }
+
+    #[test]
+    fn test_config_auth_label_credential_id() {
+        let config: TelegramConfig = serde_json::from_value(json!({
+            "credential_id": "11223344-5566-7788-99aa-bbccddeeff00"
+        }))
+        .unwrap();
+        assert_eq!(config.auth_label(), "credential_id");
+    }
+
+    // ─── DoctorResult / DoctorStatus / DoctorCheck serde tests ──────
+
+    #[test]
+    fn test_doctor_status_serde_roundtrip() {
+        let statuses = [
+            (DoctorStatus::Healthy, "\"healthy\""),
+            (DoctorStatus::Degraded, "\"degraded\""),
+            (DoctorStatus::Unhealthy, "\"unhealthy\""),
+        ];
+        for (status, expected_json) in statuses {
+            let serialized = serde_json::to_string(&status).unwrap();
+            assert_eq!(serialized, expected_json);
+            let back: DoctorStatus = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(back, status);
+        }
+    }
+
+    #[test]
+    fn test_doctor_check_serde_roundtrip() {
+        let check = DoctorCheck {
+            name: "test_check".into(),
+            passed: true,
+            message: Some("All good".into()),
+            critical: false,
+        };
+        let json_str = serde_json::to_string(&check).unwrap();
+        let back: DoctorCheck = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(back.name, "test_check");
+        assert!(back.passed);
+        assert_eq!(back.message.as_deref(), Some("All good"));
+        assert!(!back.critical);
+    }
+
+    #[test]
+    fn test_doctor_check_skip_serializing_none_message() {
+        let check = DoctorCheck {
+            name: "no_msg".into(),
+            passed: false,
+            message: None,
+            critical: true,
+        };
+        let json_str = serde_json::to_string(&check).unwrap();
+        assert!(!json_str.contains("message"));
+    }
+
+    #[test]
+    fn test_doctor_result_from_checks_healthy() {
+        let checks = vec![
+            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
+            DoctorCheck { name: "b".into(), passed: true, message: None, critical: false },
+        ];
+        let result = DoctorResult::from_checks(checks);
+        assert_eq!(result.status, DoctorStatus::Healthy);
+    }
+
+    #[test]
+    fn test_doctor_result_from_checks_degraded() {
+        let checks = vec![
+            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
+            DoctorCheck { name: "b".into(), passed: false, message: None, critical: false },
+        ];
+        let result = DoctorResult::from_checks(checks);
+        assert_eq!(result.status, DoctorStatus::Degraded);
+    }
+
+    #[test]
+    fn test_doctor_result_from_checks_unhealthy() {
+        let checks = vec![
+            DoctorCheck { name: "a".into(), passed: false, message: None, critical: true },
+        ];
+        let result = DoctorResult::from_checks(checks);
+        assert_eq!(result.status, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn test_doctor_result_serde_roundtrip() {
+        let result = DoctorResult {
+            status: DoctorStatus::Degraded,
+            checks: vec![
+                DoctorCheck { name: "c1".into(), passed: true, message: None, critical: true },
+                DoctorCheck { name: "c2".into(), passed: false, message: Some("warn".into()), critical: false },
+            ],
+        };
+        let json_str = serde_json::to_string(&result).unwrap();
+        let back: DoctorResult = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(back.status, DoctorStatus::Degraded);
+        assert_eq!(back.checks.len(), 2);
+    }
+
+    // ─── TelegramPollingCursorState serde tests ────────────────────
+
+    #[test]
+    fn test_polling_cursor_state_serde_roundtrip() {
+        let state = TelegramPollingCursorState {
+            offset: Some(42),
+            last_poll_count: 5,
+            updated_at: 1700000000,
+        };
+        let json_str = serde_json::to_string(&state).unwrap();
+        let back: TelegramPollingCursorState = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(back.offset, Some(42));
+        assert_eq!(back.last_poll_count, 5);
+        assert_eq!(back.updated_at, 1700000000);
+    }
+
+    #[test]
+    fn test_polling_cursor_state_none_offset() {
+        let state = TelegramPollingCursorState {
+            offset: None,
+            last_poll_count: 0,
+            updated_at: 0,
+        };
+        let json_str = serde_json::to_string(&state).unwrap();
+        assert!(json_str.contains("null"));
+        let back: TelegramPollingCursorState = serde_json::from_str(&json_str).unwrap();
+        assert!(back.offset.is_none());
+    }
+
+    // ─── TelegramPollingCursor unit tests ──────────────────────────
+
+    #[test]
+    fn test_polling_cursor_new_without_path() {
+        let cursor = TelegramPollingCursor::new(None);
+        assert!(cursor.offset().is_none());
+        assert!(cursor.state_path.is_none());
+    }
+
+    #[test]
+    fn test_polling_cursor_advance_monotonic() {
+        let mut cursor = TelegramPollingCursor::new(None);
+        cursor.advance_if_newer(10);
+        assert_eq!(cursor.offset(), Some(11));
+        cursor.advance_if_newer(5); // should not regress
+        assert_eq!(cursor.offset(), Some(11));
+        cursor.advance_if_newer(11);
+        assert_eq!(cursor.offset(), Some(12));
+    }
+
+    // ─── is_telegram_or_local_base_url edge cases ──────────────────
+
+    #[test]
+    fn test_is_telegram_or_local_url_telegram() {
+        assert!(is_telegram_or_local_base_url("https://api.telegram.org"));
+    }
+
+    #[test]
+    fn test_is_telegram_or_local_url_localhost() {
+        assert!(is_telegram_or_local_base_url("http://localhost:8080"));
+    }
+
+    #[test]
+    fn test_is_telegram_or_local_url_127_0_0_1() {
+        assert!(is_telegram_or_local_base_url("http://127.0.0.1:9090"));
+    }
+
+    #[test]
+    fn test_is_telegram_or_local_url_custom_domain_rejected() {
+        assert!(!is_telegram_or_local_base_url("https://evil.example.com"));
+    }
+
+    #[test]
+    fn test_is_telegram_or_local_url_empty() {
+        assert!(!is_telegram_or_local_base_url(""));
+    }
+
+    #[test]
+    fn test_is_telegram_or_local_url_not_a_url() {
+        assert!(!is_telegram_or_local_base_url("not a url"));
+    }
+
+    // ─── validate_bot_token_syntax additional tests ─────────────────
+
+    #[test]
+    fn test_validate_bot_token_too_short_suffix() {
+        assert!(validate_bot_token_syntax("123:abc").is_err());
+    }
+
+    #[test]
+    fn test_validate_bot_token_no_colon() {
+        assert!(validate_bot_token_syntax("123456ABCDEFGHIJKLMNOPQRSTUVWXyz012345").is_err());
+    }
+
+    #[test]
+    fn test_validate_bot_token_empty() {
+        assert!(validate_bot_token_syntax("").is_err());
+    }
+
+    // ─── KNOWN_ALLOWED_UPDATES constant test ────────────────────────
+
+    #[test]
+    fn test_known_allowed_updates_count() {
+        // Telegram documents exactly these update types
+        assert_eq!(KNOWN_ALLOWED_UPDATES.len(), 14);
+    }
+
+    #[test]
+    fn test_known_allowed_updates_contains_expected() {
+        assert!(KNOWN_ALLOWED_UPDATES.contains(&"message"));
+        assert!(KNOWN_ALLOWED_UPDATES.contains(&"edited_message"));
+        assert!(KNOWN_ALLOWED_UPDATES.contains(&"callback_query"));
+        assert!(KNOWN_ALLOWED_UPDATES.contains(&"channel_post"));
+        assert!(KNOWN_ALLOWED_UPDATES.contains(&"poll"));
+    }
+
+    // ─── TelegramConnector default / new tests ──────────────────────
+
+    #[test]
+    fn test_connector_default_equals_new() {
+        let a = TelegramConnector::new();
+        let b = TelegramConnector::default();
+        // Both should have no config and no client
+        assert!(a.config.is_none());
+        assert!(b.config.is_none());
+    }
+
+    // ─── Constants tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_poll_timeout_bounds_constants() {
+        assert_eq!(MIN_POLL_TIMEOUT_SECS, 1);
+        assert_eq!(MAX_POLL_TIMEOUT_SECS, 50);
+    }
+
+    #[test]
+    fn test_default_poll_timeout_value() {
+        assert_eq!(default_poll_timeout(), 30);
+    }
+
     #[test]
     fn test_manifest_parses_as_valid_toml_and_is_deterministic() {
         let manifest_str = include_str!("../manifest.toml");

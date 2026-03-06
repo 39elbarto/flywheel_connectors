@@ -127,10 +127,17 @@ impl RedditClient {
     }
 
     #[instrument(skip(self), fields(url))]
-    async fn get(&self, path: &str) -> RedditResult<serde_json::Value> {
+    async fn get(
+        &self,
+        path: &str,
+        query: Option<&[(&str, String)]>,
+    ) -> RedditResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
         debug!(url = %url, "GET request");
-        let req = self.add_auth(self.client.get(&url));
+        let mut req = self.add_auth(self.client.get(&url));
+        if let Some(q) = query {
+            req = req.query(q);
+        }
         let resp = req.send().await?;
         self.handle_response(resp).await
     }
@@ -162,20 +169,24 @@ impl RedditClient {
             || "/search".to_string(),
             |sr| format!("/r/{sr}/search"),
         );
-        let mut qs = format!("?q={}&restrict_sr=on", urlencoded(params.query));
+        let mut q = vec![
+            ("q".to_string(), params.query.to_string()),
+            ("restrict_sr".to_string(), "on".to_string()),
+        ];
         if let Some(s) = params.sort {
-            write_param(&mut qs, "sort", s);
+            q.push(("sort".to_string(), s.to_string()));
         }
         if let Some(t) = params.time_range {
-            write_param(&mut qs, "t", t);
+            q.push(("t".to_string(), t.to_string()));
         }
         if let Some(l) = params.limit {
-            write_param(&mut qs, "limit", &l.to_string());
+            q.push(("limit".to_string(), l.to_string()));
         }
         if let Some(a) = params.after {
-            write_param(&mut qs, "after", a);
+            q.push(("after".to_string(), a.to_string()));
         }
-        self.get(&format!("{base}{qs}")).await
+        let q_refs: Vec<(&str, String)> = q.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+        self.get(&base, Some(&q_refs)).await
     }
 
     // -- Subreddit new --
@@ -187,11 +198,14 @@ impl RedditClient {
         limit: Option<i64>,
         after: Option<&str>,
     ) -> RedditResult<serde_json::Value> {
-        let qs = build_query(&[
-            limit.map(|l| ("limit", l.to_string())),
-            after.map(|a| ("after", a.to_string())),
-        ]);
-        self.get(&format!("/r/{subreddit}/new{qs}")).await
+        let mut q = Vec::new();
+        if let Some(l) = limit {
+            q.push(("limit", l.to_string()));
+        }
+        if let Some(a) = after {
+            q.push(("after", a.to_string()));
+        }
+        self.get(&format!("/r/{subreddit}/new"), if q.is_empty() { None } else { Some(&q) }).await
     }
 
     // -- Post thread --
@@ -204,11 +218,14 @@ impl RedditClient {
         comment_limit: Option<i64>,
     ) -> RedditResult<serde_json::Value> {
         let post_id = post_fullname.strip_prefix("t3_").unwrap_or(post_fullname);
-        let qs = build_query(&[
-            sort.map(|s| ("sort", s.to_string())),
-            comment_limit.map(|l| ("limit", l.to_string())),
-        ]);
-        self.get(&format!("/comments/{post_id}{qs}")).await
+        let mut q = Vec::new();
+        if let Some(s) = sort {
+            q.push(("sort", s.to_string()));
+        }
+        if let Some(l) = comment_limit {
+            q.push(("limit", l.to_string()));
+        }
+        self.get(&format!("/comments/{post_id}"), if q.is_empty() { None } else { Some(&q) }).await
     }
 
     // -- Create post --
@@ -363,26 +380,6 @@ fn urlencoded(s: &str) -> String {
         .replace('#', "%23")
 }
 
-fn write_param(qs: &mut String, key: &str, value: &str) {
-    qs.push('&');
-    qs.push_str(key);
-    qs.push('=');
-    qs.push_str(value);
-}
-
-fn build_query(params: &[Option<(&str, String)>]) -> String {
-    let mut qs = String::new();
-    let mut sep = '?';
-    for param in params.iter().flatten() {
-        qs.push(sep);
-        qs.push_str(param.0);
-        qs.push('=');
-        qs.push_str(&param.1);
-        sep = '&';
-    }
-    qs
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,20 +413,176 @@ mod tests {
     }
 
     #[test]
-    fn build_query_empty() {
-        assert_eq!(build_query(&[None, None]), "");
+    fn urlencoded_percent() {
+        assert_eq!(urlencoded("100%"), "100%25");
     }
 
     #[test]
-    fn build_query_one() {
-        assert_eq!(build_query(&[Some(("limit", "25".into()))]), "?limit=25");
+    fn urlencoded_plus() {
+        assert_eq!(urlencoded("a+b"), "a%2Bb");
     }
 
     #[test]
-    fn build_query_two() {
-        assert_eq!(
-            build_query(&[Some(("limit", "25".into())), Some(("after", "t3_x".into()))]),
-            "?limit=25&after=t3_x"
-        );
+    fn urlencoded_hash() {
+        assert_eq!(urlencoded("test#anchor"), "test%23anchor");
     }
+
+    #[test]
+    fn urlencoded_empty() {
+        assert_eq!(urlencoded(""), "");
+    }
+
+    #[test]
+    fn urlencoded_no_special() {
+        assert_eq!(urlencoded("simple"), "simple");
+    }
+
+    #[test]
+    fn urlencoded_all_special() {
+        let encoded = urlencoded("% + & = #");
+        assert!(encoded.contains("%25"));
+        assert!(encoded.contains("%2B"));
+        assert!(encoded.contains("%26"));
+        assert!(encoded.contains("%3D"));
+        assert!(encoded.contains("%23"));
+    }
+
+    #[test]
+    fn client_new_default_url() {
+        let client = RedditClient::new(RedditAuth::BearerToken("tok".into()), None).unwrap();
+        assert_eq!(client.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn client_new_custom_url() {
+        let client = RedditClient::new(
+            RedditAuth::BearerToken("tok".into()),
+            Some("https://custom.example.com/api/"),
+        )
+        .unwrap();
+        assert_eq!(client.base_url, "https://custom.example.com/api");
+    }
+
+    #[test]
+    fn client_trims_trailing_slash() {
+        let client = RedditClient::new(
+            RedditAuth::BearerToken("tok".into()),
+            Some("https://example.com///"),
+        )
+        .unwrap();
+        assert_eq!(client.base_url, "https://example.com");
+    }
+
+    #[test]
+    fn client_debug_redacts_bearer() {
+        let client = RedditClient::new(RedditAuth::BearerToken("super-secret".into()), None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(!dbg.contains("super-secret"));
+        assert!(dbg.contains("redacted"));
+        assert!(dbg.contains("RedditClient"));
+    }
+
+    #[test]
+    fn client_debug_shows_base_url() {
+        let client = RedditClient::new(RedditAuth::BearerToken("tok".into()), None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains(DEFAULT_BASE_URL));
+    }
+
+    #[test]
+    fn auth_debug_credential_id() {
+        let id = CredentialId::new();
+        let auth = RedditAuth::CredentialId(id);
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("CredentialId"));
+    }
+
+    #[test]
+    fn auth_credential_redacted_label() {
+        let id = CredentialId::new();
+        let auth = RedditAuth::CredentialId(id);
+        let label = auth.redacted_label();
+        assert!(label.starts_with("credential_id:"));
+    }
+
+    #[test]
+    fn auth_clone() {
+        let auth = RedditAuth::BearerToken("tok".into());
+        #[allow(clippy::redundant_clone)]
+        let cloned = auth.clone();
+        assert_eq!(cloned.redacted_label(), "bearer_token:redacted");
+    }
+
+    #[test]
+    fn search_params_struct_fields() {
+        let params = SearchParams {
+            query: "rust",
+            subreddit: Some("programming"),
+            sort: Some("new"),
+            time_range: Some("week"),
+            limit: Some(25),
+            after: Some("t3_abc"),
+        };
+        assert_eq!(params.query, "rust");
+        assert_eq!(params.subreddit, Some("programming"));
+        assert_eq!(params.sort, Some("new"));
+        assert_eq!(params.time_range, Some("week"));
+        assert_eq!(params.limit, Some(25));
+        assert_eq!(params.after, Some("t3_abc"));
+    }
+
+    #[test]
+    fn search_params_minimal() {
+        let params = SearchParams {
+            query: "test",
+            subreddit: None,
+            sort: None,
+            time_range: None,
+            limit: None,
+            after: None,
+        };
+        assert_eq!(params.query, "test");
+        assert!(params.subreddit.is_none());
+    }
+
+    #[test]
+    fn create_post_params_struct_fields() {
+        let params = CreatePostParams {
+            subreddit: "rust",
+            kind: "self",
+            title: "Hello",
+            text: Some("Body text"),
+            url: None,
+            nsfw: false,
+            spoiler: true,
+        };
+        assert_eq!(params.subreddit, "rust");
+        assert_eq!(params.kind, "self");
+        assert_eq!(params.title, "Hello");
+        assert_eq!(params.text, Some("Body text"));
+        assert!(params.url.is_none());
+        assert!(!params.nsfw);
+        assert!(params.spoiler);
+    }
+
+    #[test]
+    fn create_post_params_link() {
+        let params = CreatePostParams {
+            subreddit: "pics",
+            kind: "link",
+            title: "Photo",
+            text: None,
+            url: Some("https://example.com/img.png"),
+            nsfw: true,
+            spoiler: false,
+        };
+        assert_eq!(params.url, Some("https://example.com/img.png"));
+        assert!(params.nsfw);
+    }
+
+    #[test]
+    fn default_base_url_value() {
+        assert_eq!(DEFAULT_BASE_URL, "https://oauth.reddit.com");
+    }
+
 }

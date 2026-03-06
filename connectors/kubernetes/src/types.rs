@@ -345,4 +345,147 @@ mod tests {
         assert_eq!(v["status"]["phase"], "Running");
         assert_eq!(v["status"]["pod_ip"], "10.0.0.1");
     }
+
+    #[test]
+    fn namespace_clone() {
+        let ns: Namespace = serde_json::from_value(json!({
+            "name": "test",
+            "status": "Active",
+        }))
+        .unwrap();
+        let ns2 = ns.clone();
+        assert_eq!(ns.name, ns2.name);
+        assert_eq!(ns.status, ns2.status);
+    }
+
+    #[test]
+    fn namespace_debug() {
+        let ns: Namespace = serde_json::from_value(json!({"name": "test"})).unwrap();
+        let dbg = format!("{ns:?}");
+        assert!(dbg.contains("Namespace"));
+    }
+
+    #[test]
+    fn pod_clone() {
+        let p: Pod = serde_json::from_value(json!({"name": "nginx"})).unwrap();
+        let p2 = p.clone();
+        assert_eq!(p.name, p2.name);
+    }
+
+    #[test]
+    fn pod_debug() {
+        let p: Pod = serde_json::from_value(json!({"name": "nginx"})).unwrap();
+        let dbg = format!("{p:?}");
+        assert!(dbg.contains("Pod"));
+    }
+
+    #[test]
+    fn pod_status_minimal() {
+        let s: PodStatus = serde_json::from_value(json!({})).unwrap();
+        assert!(s.phase.is_none());
+        assert!(s.conditions.is_none());
+        assert!(s.container_statuses.is_none());
+        assert!(s.host_ip.is_none());
+        assert!(s.pod_ip.is_none());
+    }
+
+    #[test]
+    fn pod_status_clone() {
+        let s: PodStatus = serde_json::from_value(json!({"phase": "Running"})).unwrap();
+        let s2 = s.clone();
+        assert_eq!(s.phase, s2.phase);
+    }
+
+    #[test]
+    fn container_status_clone() {
+        let c: ContainerStatus = serde_json::from_value(json!({"name": "app"})).unwrap();
+        let c2 = c.clone();
+        assert_eq!(c.name, c2.name);
+    }
+
+    #[test]
+    fn deployment_clone() {
+        let d: Deployment = serde_json::from_value(json!({"name": "web"})).unwrap();
+        let d2 = d.clone();
+        assert_eq!(d.name, d2.name);
+    }
+
+    #[test]
+    fn deployment_debug() {
+        let d: Deployment = serde_json::from_value(json!({"name": "web"})).unwrap();
+        let dbg = format!("{d:?}");
+        assert!(dbg.contains("Deployment"));
+    }
+
+    #[test]
+    fn deployment_spec_minimal() {
+        let s: DeploymentSpec = serde_json::from_value(json!({})).unwrap();
+        assert!(s.replicas.is_none());
+        assert!(s.selector.is_none());
+    }
+
+    #[test]
+    fn scale_clone() {
+        let s: Scale = serde_json::from_value(json!({"kind": "Scale"})).unwrap();
+        let s2 = s.clone();
+        assert_eq!(s.kind, s2.kind);
+    }
+
+    #[test]
+    fn scale_spec_minimal() {
+        let s: ScaleSpec = serde_json::from_value(json!({})).unwrap();
+        assert!(s.replicas.is_none());
+    }
+
+    #[test]
+    fn scale_status_minimal() {
+        let s: ScaleStatus = serde_json::from_value(json!({})).unwrap();
+        assert!(s.replicas.is_none());
+    }
+
+    #[test]
+    fn api_error_response_clone() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({
+            "message": "not found",
+            "reason": "NotFound",
+            "code": 404,
+        }))
+        .unwrap();
+        let e2 = e.clone();
+        assert_eq!(e.message, e2.message);
+        assert_eq!(e.code, e2.code);
+    }
+
+    #[test]
+    fn api_error_response_debug() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({"message": "err"})).unwrap();
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("ApiErrorResponse"));
+    }
+
+    #[test]
+    fn pod_status_with_conditions() {
+        let s: PodStatus = serde_json::from_value(json!({
+            "phase": "Running",
+            "conditions": [
+                {"type": "Ready", "status": "True"},
+                {"type": "ContainersReady", "status": "True"},
+            ],
+        }))
+        .unwrap();
+        assert_eq!(s.conditions.as_ref().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn scale_serialize_roundtrip() {
+        let s = Scale {
+            kind: Some("Scale".into()),
+            metadata: None,
+            spec: Some(ScaleSpec { replicas: Some(5) }),
+            status: Some(ScaleStatus { replicas: Some(5) }),
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["spec"]["replicas"], 5);
+        assert_eq!(v["status"]["replicas"], 5);
+    }
 }

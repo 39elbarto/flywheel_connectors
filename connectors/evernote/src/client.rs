@@ -298,4 +298,76 @@ mod tests {
         let cloned = auth.clone();
         assert_eq!(auth.redacted_label(), cloned.redacted_label());
     }
+
+    #[test]
+    fn auth_clone_credential_id() {
+        let cred = EvernoteAuth::CredentialId(CredentialId::new());
+        #[allow(clippy::redundant_clone)]
+        let cloned = cred.clone();
+        assert!(cloned.is_secretless());
+    }
+
+    #[test]
+    fn client_debug_contains_struct_name() {
+        let client = EvernoteClient::new(EvernoteAuth::BearerToken("tok".into()), None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("EvernoteClient"));
+    }
+
+    #[test]
+    fn client_debug_contains_base_url() {
+        let client = EvernoteClient::new(
+            EvernoteAuth::BearerToken("tok".into()),
+            Some("https://custom.api.com"),
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("custom.api.com"));
+    }
+
+    #[test]
+    fn client_new_multiple_trailing_slashes() {
+        let client = EvernoteClient::new(
+            EvernoteAuth::BearerToken("tok".into()),
+            Some("https://example.com///"),
+        )
+        .unwrap();
+        assert!(!client.base_url.ends_with('/'));
+    }
+
+    #[test]
+    fn auth_debug_bearer_shows_tuple() {
+        let auth = EvernoteAuth::BearerToken("secret-value".into());
+        let dbg = format!("{auth:?}");
+        assert!(dbg.starts_with("BearerToken("));
+    }
+
+    #[test]
+    fn auth_redacted_label_does_not_leak_token() {
+        let auth = EvernoteAuth::BearerToken("super-secret-token-value".into());
+        let label = auth.redacted_label();
+        assert!(!label.contains("super-secret-token-value"));
+    }
+
+    #[test]
+    fn default_base_url_starts_with_https() {
+        assert!(DEFAULT_BASE_URL.starts_with("https://"));
+    }
+
+    #[test]
+    fn client_new_with_localhost() {
+        let client = EvernoteClient::new(
+            EvernoteAuth::BearerToken("tok".into()),
+            Some("http://127.0.0.1:8080/api"),
+        )
+        .unwrap();
+        assert_eq!(client.base_url, "http://127.0.0.1:8080/api");
+    }
+
+    #[test]
+    fn auth_debug_credential_does_not_say_redacted() {
+        let cred = EvernoteAuth::CredentialId(CredentialId::new());
+        let dbg = format!("{cred:?}");
+        assert!(!dbg.contains("redacted"));
+    }
 }

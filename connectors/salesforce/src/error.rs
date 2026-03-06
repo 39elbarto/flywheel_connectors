@@ -299,4 +299,132 @@ mod tests {
     fn error_display_api() {
         assert_eq!(SalesforceError::Api { status_code: 500, message: "Internal".into() }.to_string(), "Salesforce API error (500): Internal");
     }
+
+    // -- Additional error tests --
+
+    #[test]
+    fn api_599_is_retryable() {
+        assert!(SalesforceError::Api { status_code: 599, message: "err".into() }.is_retryable());
+    }
+
+    #[test]
+    fn api_501_is_retryable() {
+        assert!(SalesforceError::Api { status_code: 501, message: "not implemented".into() }.is_retryable());
+    }
+
+    #[test]
+    fn api_499_not_retryable() {
+        assert!(!SalesforceError::Api { status_code: 499, message: "err".into() }.is_retryable());
+    }
+
+    #[test]
+    fn api_600_not_retryable() {
+        assert!(!SalesforceError::Api { status_code: 600, message: "err".into() }.is_retryable());
+    }
+
+    #[test]
+    fn api_422_not_retryable() {
+        assert!(!SalesforceError::Api { status_code: 422, message: "unprocessable".into() }.is_retryable());
+    }
+
+    #[test]
+    fn rate_limited_zero_ms() {
+        let err = SalesforceError::RateLimited { retry_after_ms: 0 };
+        assert!(err.is_retryable());
+        assert_eq!(err.retry_after(), Some(Duration::from_millis(0)));
+    }
+
+    #[test]
+    fn rate_limited_large_value() {
+        let err = SalesforceError::RateLimited { retry_after_ms: 3_600_000 };
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn not_found_empty_resource() {
+        let err = SalesforceError::NotFound { resource: String::new() };
+        assert_eq!(err.to_string(), "Not found: ");
+        assert!(!err.is_retryable());
+        assert_eq!(err.retry_after(), None);
+    }
+
+    #[test]
+    fn api_error_empty_message() {
+        let err = SalesforceError::Api { status_code: 400, message: String::new() };
+        assert_eq!(err.to_string(), "Salesforce API error (400): ");
+    }
+
+    #[test]
+    fn error_debug_format() {
+        let err = SalesforceError::Unauthorized;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Unauthorized"));
+    }
+
+    #[test]
+    fn error_debug_not_found() {
+        let err = SalesforceError::NotFound { resource: "lead".into() };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("NotFound"));
+        assert!(dbg.contains("lead"));
+    }
+
+    #[test]
+    fn error_debug_rate_limited() {
+        let err = SalesforceError::RateLimited { retry_after_ms: 1000 };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("RateLimited"));
+        assert!(dbg.contains("1000"));
+    }
+
+    #[test]
+    fn to_fcp_error_rate_limited_message_contains_ms() {
+        match (SalesforceError::RateLimited { retry_after_ms: 5000 }).to_fcp_error() {
+            FcpError::External { message, .. } => {
+                assert!(message.contains("5000"));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_not_found_retry_after_is_none() {
+        match (SalesforceError::NotFound { resource: "x".into() }).to_fcp_error() {
+            FcpError::External { retry_after, .. } => {
+                assert!(retry_after.is_none());
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_api_retryable_has_no_retry_after() {
+        match (SalesforceError::Api { status_code: 502, message: "bad gw".into() }).to_fcp_error() {
+            FcpError::External { retryable, retry_after, .. } => {
+                assert!(retryable);
+                assert!(retry_after.is_none());
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_unauthorized_message() {
+        match SalesforceError::Unauthorized.to_fcp_error() {
+            FcpError::External { message, .. } => {
+                assert_eq!(message, "Authentication failed");
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_forbidden_message() {
+        match SalesforceError::Forbidden.to_fcp_error() {
+            FcpError::External { message, .. } => {
+                assert_eq!(message, "Insufficient permissions");
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
 }

@@ -361,4 +361,126 @@ mod tests {
         assert!(encoded.contains("%27"));
         assert!(encoded.contains('+'));
     }
+
+    // -- Additional client tests --
+
+    #[test]
+    fn client_new_default_url() {
+        let client = SalesforceClient::new(
+            SalesforceAuth::AccessToken("tok".into()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(client.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn client_new_custom_url() {
+        let client = SalesforceClient::new(
+            SalesforceAuth::AccessToken("tok".into()),
+            Some("https://myorg.salesforce.com/"),
+        )
+        .unwrap();
+        assert_eq!(client.base_url, "https://myorg.salesforce.com");
+    }
+
+    #[test]
+    fn client_new_trims_trailing_slash() {
+        let client = SalesforceClient::new(
+            SalesforceAuth::AccessToken("tok".into()),
+            Some("https://example.com/"),
+        )
+        .unwrap();
+        assert_eq!(client.base_url, "https://example.com");
+    }
+
+    #[test]
+    fn client_with_client_trims_slash() {
+        let inner = Client::builder().build().unwrap();
+        let client = SalesforceClient::with_client(
+            inner,
+            SalesforceAuth::AccessToken("tok".into()),
+            "https://x.com/",
+        );
+        assert_eq!(client.base_url, "https://x.com");
+    }
+
+    #[test]
+    fn client_debug_redacts_token() {
+        let client = SalesforceClient::new(
+            SalesforceAuth::AccessToken("super_secret_token_123".into()),
+            None,
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(!dbg.contains("super_secret_token_123"));
+        assert!(dbg.contains("redacted"));
+        assert!(dbg.contains("SalesforceClient"));
+        assert!(dbg.contains(DEFAULT_BASE_URL));
+    }
+
+    #[test]
+    fn client_debug_shows_credential_id() {
+        let cred = CredentialId::new();
+        let cred_str = cred.to_string();
+        let client = SalesforceClient::new(
+            SalesforceAuth::CredentialId(cred),
+            None,
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains(&cred_str));
+    }
+
+    #[test]
+    fn auth_clone() {
+        let auth = SalesforceAuth::AccessToken("tok".into());
+        let cloned = auth.clone();
+        assert!(!auth.is_secretless());
+        assert_eq!(cloned.redacted_label(), "access_token:redacted");
+    }
+
+    #[test]
+    fn auth_credential_debug_shows_id() {
+        let cred = CredentialId::new();
+        let cred_str = cred.to_string();
+        let auth = SalesforceAuth::CredentialId(cred);
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains(&cred_str));
+        assert!(dbg.contains("CredentialId"));
+    }
+
+    #[test]
+    fn urlencoding_empty_string() {
+        assert_eq!(urlencoding_encode(""), "");
+    }
+
+    #[test]
+    fn urlencoding_unreserved_chars_pass_through() {
+        let input = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~";
+        assert_eq!(urlencoding_encode(input), input);
+    }
+
+    #[test]
+    fn urlencoding_percent_encoded() {
+        let encoded = urlencoding_encode("a=b&c=d");
+        assert!(encoded.contains("%3D"));
+        assert!(encoded.contains("%26"));
+    }
+
+    #[test]
+    fn urlencoding_slash_encoded() {
+        let encoded = urlencoding_encode("/path/to");
+        assert!(encoded.contains("%2F"));
+    }
+
+    #[test]
+    fn default_base_url_value() {
+        assert_eq!(DEFAULT_BASE_URL, "https://login.salesforce.com");
+    }
+
+    #[test]
+    fn api_path_value() {
+        assert_eq!(API_PATH, "/services/data/v59.0");
+    }
 }

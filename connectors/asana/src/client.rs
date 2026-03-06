@@ -370,4 +370,119 @@ mod tests {
             "test-value_1.0~beta"
         );
     }
+
+    // ── Additional client coverage ───────────────────────────────
+
+    #[test]
+    fn auth_debug_credential_id() {
+        let cred = AsanaAuth::CredentialId(CredentialId::new());
+        let dbg = format!("{cred:?}");
+        assert!(dbg.contains("CredentialId"));
+    }
+
+    #[test]
+    fn auth_clone() {
+        let auth = AsanaAuth::PersonalAccessToken("secret".into());
+        #[allow(clippy::redundant_clone)]
+        let auth2 = auth.clone();
+        assert_eq!(auth2.redacted_label(), "personal_access_token:redacted");
+    }
+
+    #[test]
+    fn auth_credential_id_clone() {
+        let id = CredentialId::new();
+        let auth = AsanaAuth::CredentialId(id);
+        #[allow(clippy::redundant_clone)]
+        let auth2 = auth.clone();
+        assert!(auth2.is_secretless());
+    }
+
+    #[test]
+    fn client_debug_contains_base_url() {
+        let client =
+            AsanaClient::new(AsanaAuth::PersonalAccessToken("tok".into()), None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("AsanaClient"));
+        assert!(dbg.contains(DEFAULT_BASE_URL));
+    }
+
+    #[test]
+    fn client_custom_url_trimmed() {
+        let client = AsanaClient::new(
+            AsanaAuth::PersonalAccessToken("tok".into()),
+            Some("https://api.example.com/api/1.0/"),
+        )
+        .unwrap();
+        assert!(!client.base_url.ends_with('/'));
+    }
+
+    #[test]
+    fn default_base_url_constant() {
+        assert_eq!(DEFAULT_BASE_URL, "https://app.asana.com/api/1.0");
+    }
+
+    #[test]
+    fn url_encode_empty_string() {
+        assert_eq!(urlencoding::encode(""), "");
+    }
+
+    #[test]
+    fn url_encode_all_special() {
+        let result = urlencoding::encode("a&b=c+d#e%f");
+        assert!(result.contains("%26")); // &
+        assert!(result.contains("%3D")); // =
+        assert!(result.contains("%2B")); // +
+        assert!(result.contains("%23")); // #
+        assert!(result.contains("%25")); // %
+    }
+
+    #[test]
+    fn url_encode_unicode() {
+        let result = urlencoding::encode("café");
+        // The non-ASCII bytes get percent-encoded
+        assert!(result.contains('%'));
+        assert!(result.starts_with("caf"));
+    }
+
+    #[test]
+    fn client_with_credential_id_auth() {
+        let client = AsanaClient::new(
+            AsanaAuth::CredentialId(CredentialId::new()),
+            None,
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("CredentialId"));
+    }
+
+    #[test]
+    fn url_encode_multiple_spaces() {
+        let result = urlencoding::encode("a b c d");
+        assert_eq!(result, "a%20b%20c%20d");
+    }
+
+    #[test]
+    fn url_encode_numbers_and_letters() {
+        assert_eq!(urlencoding::encode("ABC123xyz"), "ABC123xyz");
+    }
+
+    #[test]
+    fn url_encode_tilde_preserved() {
+        assert_eq!(urlencoding::encode("~user"), "~user");
+    }
+
+    #[test]
+    fn url_encode_dot_preserved() {
+        assert_eq!(urlencoding::encode("file.txt"), "file.txt");
+    }
+
+    #[test]
+    fn url_encode_dash_preserved() {
+        assert_eq!(urlencoding::encode("my-task"), "my-task");
+    }
+
+    #[test]
+    fn url_encode_underscore_preserved() {
+        assert_eq!(urlencoding::encode("my_task"), "my_task");
+    }
 }

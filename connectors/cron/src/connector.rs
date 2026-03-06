@@ -1290,4 +1290,178 @@ mod tests {
         assert!(!c.executions[0].triggered_at.is_empty());
         assert!(c.executions[0].triggered_at.contains('T'));
     }
+
+    // -- DoctorStatus serde --
+
+    #[test]
+    fn doctor_status_serializes_to_lowercase() {
+        assert_eq!(serde_json::to_value(DoctorStatus::Healthy).unwrap(), "healthy");
+        assert_eq!(serde_json::to_value(DoctorStatus::Degraded).unwrap(), "degraded");
+        assert_eq!(serde_json::to_value(DoctorStatus::Unhealthy).unwrap(), "unhealthy");
+    }
+
+    #[test]
+    fn doctor_status_deserializes_from_lowercase() {
+        let h: DoctorStatus = serde_json::from_value(json!("healthy")).unwrap();
+        assert_eq!(h, DoctorStatus::Healthy);
+        let d: DoctorStatus = serde_json::from_value(json!("degraded")).unwrap();
+        assert_eq!(d, DoctorStatus::Degraded);
+        let u: DoctorStatus = serde_json::from_value(json!("unhealthy")).unwrap();
+        assert_eq!(u, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_status_copy_and_eq() {
+        let s = DoctorStatus::Healthy;
+        let s2 = s;
+        assert_eq!(s, s2);
+    }
+
+    #[test]
+    fn doctor_check_skip_serializing_message_none() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let v = serde_json::to_string(&check).unwrap();
+        assert!(!v.contains("message"));
+    }
+
+    #[test]
+    fn doctor_check_serializes_message_some() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: false,
+            message: Some("failure reason".into()),
+            critical: true,
+        };
+        let v = serde_json::to_string(&check).unwrap();
+        assert!(v.contains("failure reason"));
+    }
+
+    #[test]
+    fn doctor_result_preserves_checks() {
+        let checks = vec![
+            DoctorCheck {
+                name: "check_a".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "check_b".into(),
+                passed: false,
+                message: Some("warn".into()),
+                critical: false,
+            },
+        ];
+        let r = DoctorResult::from_checks(checks);
+        assert_eq!(r.checks.len(), 2);
+        assert_eq!(r.checks[0].name, "check_a");
+        assert_eq!(r.checks[1].name, "check_b");
+    }
+
+    // -- Operations info edge cases --
+
+    #[test]
+    fn operations_all_have_summary() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let summary = op["summary"].as_str().unwrap();
+            assert!(!summary.is_empty(), "op {:?} has empty summary", op["id"]);
+        }
+    }
+
+    #[test]
+    fn operations_schedules_create_is_risky() {
+        let ops = operations_info();
+        let create_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "cron.schedules.create")
+            .unwrap();
+        assert_eq!(create_op["safety_tier"], "risky");
+        assert_eq!(create_op["risk_level"], "medium");
+    }
+
+    #[test]
+    fn operations_schedules_list_is_strict_idempotent() {
+        let ops = operations_info();
+        let list_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "cron.schedules.list")
+            .unwrap();
+        assert_eq!(list_op["idempotency"], "strict");
+    }
+
+    #[test]
+    fn operations_trigger_idempotency_none() {
+        let ops = operations_info();
+        let trigger_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "cron.trigger")
+            .unwrap();
+        assert_eq!(trigger_op["idempotency"], "none");
+    }
+
+    // -- Connector accessors / state --
+
+    #[test]
+    fn connector_new_zero_request_count() {
+        let c = CronConnector::new();
+        assert_eq!(c.request_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn connector_new_zero_error_count() {
+        let c = CronConnector::new();
+        assert_eq!(c.error_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn create_schedule_empty_target_operation() {
+        let mut c = CronConnector::new();
+        c.configured = true;
+        // An empty target_operation is accepted (validation not enforced on content)
+        let result = c.invoke_schedules_create(&json!({
+            "name": "empty-target",
+            "expression": "0 * * * *",
+            "target_operation": ""
+        }));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn delete_then_list_is_empty() {
+        let mut c = CronConnector::new();
+        c.configured = true;
+        let s = c
+            .invoke_schedules_create(&json!({
+                "name": "temp",
+                "expression": "0 * * * *",
+                "target_operation": "op.test"
+            }))
+            .unwrap();
+        let sid = s["schedule_id"].as_str().unwrap();
+        c.invoke_schedules_delete(&json!({ "schedule_id": sid }))
+            .unwrap();
+        let list = c.invoke_schedules_list().unwrap();
+        assert_eq!(list["schedules"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn executions_list_filter_nonexistent_schedule() {
+        let c = CronConnector::new();
+        let result = c
+            .invoke_executions_list(&json!({ "schedule_id": "sched_ghost" }))
+            .unwrap();
+        assert_eq!(result["executions"].as_array().unwrap().len(), 0);
+    }
 }

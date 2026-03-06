@@ -193,4 +193,319 @@ mod tests {
         };
         assert!(err.to_string().contains("Rate limited"));
     }
+
+    // ── Display exhaustive ──────────────────────────────────────────
+
+    #[test]
+    fn error_display_service_unavailable() {
+        let err = AnnasArchiveError::ServiceUnavailable;
+        assert_eq!(err.to_string(), "Service unavailable");
+    }
+
+    #[test]
+    fn error_display_json() {
+        let inner = serde_json::from_str::<serde_json::Value>("{{bad").unwrap_err();
+        let err = AnnasArchiveError::Json(inner);
+        let s = err.to_string();
+        assert!(s.starts_with("JSON error:"), "got: {s}");
+    }
+
+    #[test]
+    fn error_display_api_with_empty_message() {
+        let err = AnnasArchiveError::Api {
+            status_code: 400,
+            message: String::new(),
+        };
+        let s = err.to_string();
+        assert!(s.contains("400"));
+    }
+
+    #[test]
+    fn error_display_not_found_empty_resource() {
+        let err = AnnasArchiveError::NotFound {
+            resource: String::new(),
+        };
+        assert!(err.to_string().contains("Not found:"));
+    }
+
+    // ── retry_after edge cases ──────────────────────────────────────
+
+    #[test]
+    fn retry_after_rate_limited_zero_ms() {
+        let err = AnnasArchiveError::RateLimited { retry_after_ms: 0 };
+        assert_eq!(err.retry_after(), Some(Duration::from_millis(0)));
+    }
+
+    #[test]
+    fn retry_after_rate_limited_large_value() {
+        let err = AnnasArchiveError::RateLimited {
+            retry_after_ms: 3_600_000,
+        };
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn retry_after_json_error_is_none() {
+        let inner = serde_json::from_str::<serde_json::Value>("bad").unwrap_err();
+        let err = AnnasArchiveError::Json(inner);
+        assert!(err.retry_after().is_none());
+    }
+
+    #[test]
+    fn retry_after_api_error_is_none() {
+        let err = AnnasArchiveError::Api {
+            status_code: 503,
+            message: "down".into(),
+        };
+        assert!(err.retry_after().is_none());
+    }
+
+    // ── is_retryable edge cases ─────────────────────────────────────
+
+    #[test]
+    fn api_500_is_not_retryable() {
+        // Api variant is not retryable regardless of status code in this connector
+        let err = AnnasArchiveError::Api {
+            status_code: 500,
+            message: "server error".into(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn api_503_is_not_retryable() {
+        let err = AnnasArchiveError::Api {
+            status_code: 503,
+            message: "gateway".into(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn api_422_is_not_retryable() {
+        let err = AnnasArchiveError::Api {
+            status_code: 422,
+            message: "unprocessable".into(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    // ── to_fcp_error exhaustive ─────────────────────────────────────
+
+    #[test]
+    fn fcp_error_json_is_internal() {
+        let inner = serde_json::from_str::<serde_json::Value>("[bad").unwrap_err();
+        let err = AnnasArchiveError::Json(inner);
+        let fcp = err.to_fcp_error();
+        match fcp {
+            FcpError::Internal { message } => {
+                assert!(message.starts_with("JSON error:"));
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fcp_error_api_has_status_code() {
+        let err = AnnasArchiveError::Api {
+            status_code: 502,
+            message: "bad gateway".into(),
+        };
+        let fcp = err.to_fcp_error();
+        match fcp {
+            FcpError::External {
+                service,
+                status_code,
+                message,
+                retryable,
+                retry_after,
+            } => {
+                assert_eq!(service, "annas-archive");
+                assert_eq!(status_code, Some(502));
+                assert_eq!(message, "bad gateway");
+                assert!(!retryable);
+                assert!(retry_after.is_none());
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fcp_error_rate_limited_has_retry_after() {
+        let err = AnnasArchiveError::RateLimited {
+            retry_after_ms: 5000,
+        };
+        let fcp = err.to_fcp_error();
+        match fcp {
+            FcpError::External {
+                status_code,
+                retryable,
+                retry_after,
+                ..
+            } => {
+                assert_eq!(status_code, Some(429));
+                assert!(retryable);
+                assert_eq!(retry_after, Some(Duration::from_secs(5)));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fcp_error_not_found_has_resource() {
+        let err = AnnasArchiveError::NotFound {
+            resource: "md5:deadbeef".into(),
+        };
+        match err.to_fcp_error() {
+            FcpError::ResourceNotFound { resource } => {
+                assert_eq!(resource, "md5:deadbeef");
+            }
+            other => panic!("expected ResourceNotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fcp_error_service_unavailable_has_retry_after() {
+        let err = AnnasArchiveError::ServiceUnavailable;
+        match err.to_fcp_error() {
+            FcpError::External {
+                service,
+                status_code,
+                retryable,
+                retry_after,
+                message,
+            } => {
+                assert_eq!(service, "annas-archive");
+                assert_eq!(status_code, Some(503));
+                assert!(retryable);
+                assert_eq!(retry_after, Some(Duration::from_secs(5)));
+                assert_eq!(message, "Service unavailable");
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fcp_error_api_non_retryable() {
+        let err = AnnasArchiveError::Api {
+            status_code: 400,
+            message: "bad request".into(),
+        };
+        match err.to_fcp_error() {
+            FcpError::External { retryable, .. } => assert!(!retryable),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    // ── Debug trait ─────────────────────────────────────────────────
+
+    #[test]
+    fn error_debug_api() {
+        let err = AnnasArchiveError::Api {
+            status_code: 404,
+            message: "gone".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Api"));
+        assert!(dbg.contains("404"));
+    }
+
+    #[test]
+    fn error_debug_rate_limited() {
+        let err = AnnasArchiveError::RateLimited {
+            retry_after_ms: 10_000,
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("RateLimited"));
+        assert!(dbg.contains("10000"));
+    }
+
+    #[test]
+    fn error_debug_not_found() {
+        let err = AnnasArchiveError::NotFound {
+            resource: "isbn:abc".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("NotFound"));
+        assert!(dbg.contains("isbn:abc"));
+    }
+
+    #[test]
+    fn error_debug_service_unavailable() {
+        let dbg = format!("{:?}", AnnasArchiveError::ServiceUnavailable);
+        assert!(dbg.contains("ServiceUnavailable"));
+    }
+
+    #[test]
+    fn error_debug_json() {
+        let inner = serde_json::from_str::<serde_json::Value>("nope").unwrap_err();
+        let err = AnnasArchiveError::Json(inner);
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Json"));
+    }
+
+    // ── From impls ──────────────────────────────────────────────────
+
+    #[test]
+    fn from_serde_json_error() {
+        let inner = serde_json::from_str::<serde_json::Value>("{bad}").unwrap_err();
+        let err: AnnasArchiveError = inner.into();
+        assert!(matches!(err, AnnasArchiveError::Json(_)));
+    }
+
+    // ── Boundary values ─────────────────────────────────────────────
+
+    #[test]
+    fn rate_limited_max_u64() {
+        let err = AnnasArchiveError::RateLimited {
+            retry_after_ms: u64::MAX,
+        };
+        assert!(err.is_retryable());
+        // retry_after should still return Some (even if the duration is huge)
+        assert!(err.retry_after().is_some());
+    }
+
+    #[test]
+    fn api_error_status_code_zero() {
+        let err = AnnasArchiveError::Api {
+            status_code: 0,
+            message: "weird".into(),
+        };
+        assert!(!err.is_retryable());
+        let s = err.to_string();
+        assert!(s.contains('0'));
+    }
+
+    #[test]
+    fn api_error_status_code_max() {
+        let err = AnnasArchiveError::Api {
+            status_code: u16::MAX,
+            message: "overflow".into(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn not_found_with_unicode_resource() {
+        let err = AnnasArchiveError::NotFound {
+            resource: "isbn:\u{1F4DA}".into(),
+        };
+        assert!(err.to_string().contains("\u{1F4DA}"));
+        match err.to_fcp_error() {
+            FcpError::ResourceNotFound { resource } => {
+                assert!(resource.contains("\u{1F4DA}"));
+            }
+            other => panic!("expected ResourceNotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_error_with_long_message() {
+        let long_msg = "x".repeat(10_000);
+        let err = AnnasArchiveError::Api {
+            status_code: 500,
+            message: long_msg.clone(),
+        };
+        assert!(err.to_string().contains(&long_msg));
+    }
 }

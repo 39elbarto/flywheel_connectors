@@ -342,4 +342,125 @@ mod tests {
         assert!(dbg.contains("Block"));
         assert!(dbg.contains("hello"));
     }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn page_clone() {
+        let p = Page {
+            name: "test".into(),
+            uuid: "u1".into(),
+            original_name: Some("Test".into()),
+            created_at: Some(1000),
+            updated_at: Some(2000),
+            properties: None,
+        };
+        let p2 = p.clone();
+        assert_eq!(p2.name, "test");
+        assert_eq!(p2.original_name, Some("Test".into()));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn block_clone() {
+        let b = Block {
+            uuid: "b1".into(),
+            content: Some("text".into()),
+            left: None,
+            parent: None,
+            children: Some(vec![json!({"uuid": "c1"})]),
+            properties: None,
+        };
+        let b2 = b.clone();
+        assert_eq!(b2.uuid, "b1");
+        assert_eq!(b2.children.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn page_with_null_properties() {
+        let p: Page = serde_json::from_value(json!({
+            "name": "test",
+            "uuid": "u1",
+            "properties": null
+        }))
+        .unwrap();
+        assert!(p.properties.is_none());
+    }
+
+    #[test]
+    fn block_with_empty_children() {
+        let b: Block = serde_json::from_value(json!({
+            "uuid": "b1",
+            "children": []
+        }))
+        .unwrap();
+        assert!(b.children.unwrap().is_empty());
+    }
+
+    #[test]
+    fn page_list_clone() {
+        let pl = PageList {
+            pages: vec![json!({"name": "p1"})],
+        };
+        #[allow(clippy::redundant_clone)]
+        let pl2 = pl.clone();
+        assert_eq!(pl2.pages.len(), 1);
+    }
+
+    #[test]
+    fn block_list_clone() {
+        let bl = BlockList {
+            blocks: vec![json!({"uuid": "b1"})],
+        };
+        #[allow(clippy::redundant_clone)]
+        let bl2 = bl.clone();
+        assert_eq!(bl2.blocks.len(), 1);
+    }
+
+    #[test]
+    fn insert_block_request_clone() {
+        let req = InsertBlockRequest {
+            page: "p1".into(),
+            content: "hello".into(),
+        };
+        #[allow(clippy::redundant_clone)]
+        let req2 = req.clone();
+        assert_eq!(req2.page, "p1");
+    }
+
+    #[test]
+    fn block_create_response_clone() {
+        let r = BlockCreateResponse {
+            uuid: "new1".into(),
+        };
+        #[allow(clippy::redundant_clone)]
+        let r2 = r.clone();
+        assert_eq!(r2.uuid, "new1");
+    }
+
+    #[test]
+    fn api_error_response_clone() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({
+            "error": "something"
+        }))
+        .unwrap();
+        #[allow(clippy::redundant_clone)]
+        let e2 = e.clone();
+        assert_eq!(e2.error, Some("something".into()));
+    }
+
+    #[test]
+    fn page_with_all_fields_roundtrip() {
+        let p = Page {
+            name: "my page".into(),
+            uuid: "uuid-1".into(),
+            original_name: Some("My Page".into()),
+            created_at: Some(1_000_000),
+            updated_at: Some(2_000_000),
+            properties: Some(json!({"tag": "value"})),
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        let p2: Page = serde_json::from_value(v).unwrap();
+        assert_eq!(p2.name, "my page");
+        assert_eq!(p2.properties.unwrap()["tag"], "value");
+    }
 }

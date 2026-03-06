@@ -357,4 +357,164 @@ mod tests {
         .unwrap();
         assert_eq!(t.id, Some("t1".into()));
     }
+
+    #[test]
+    fn workflow_clone() {
+        let w = Workflow {
+            id: "w1".into(),
+            name: Some("Test".into()),
+            active: Some(true),
+            created_at: None,
+            updated_at: None,
+            tags: Some(vec![Tag { id: Some("t1".into()), name: Some("dev".into()) }]),
+        };
+        let cloned = Workflow::clone(&w);
+        assert_eq!(cloned.id, "w1");
+        assert_eq!(cloned.name, Some("Test".into()));
+        assert_eq!(cloned.tags.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn workflow_debug() {
+        let w = Workflow {
+            id: "w1".into(),
+            name: Some("Debug Test".into()),
+            active: None,
+            created_at: None,
+            updated_at: None,
+            tags: None,
+        };
+        let dbg = format!("{w:?}");
+        assert!(dbg.contains("w1"));
+        assert!(dbg.contains("Debug Test"));
+    }
+
+    #[test]
+    fn tag_clone() {
+        let t = Tag { id: Some("t1".into()), name: Some("prod".into()) };
+        let cloned = Tag::clone(&t);
+        assert_eq!(cloned.id, Some("t1".into()));
+        assert_eq!(cloned.name, Some("prod".into()));
+    }
+
+    #[test]
+    fn tag_debug() {
+        let t = Tag { id: Some("t1".into()), name: Some("dev".into()) };
+        let dbg = format!("{t:?}");
+        assert!(dbg.contains("t1"));
+        assert!(dbg.contains("dev"));
+    }
+
+    #[test]
+    fn execution_clone() {
+        let e = Execution {
+            id: "e1".into(),
+            finished: Some(true),
+            mode: Some("trigger".into()),
+            started_at: None,
+            stopped_at: None,
+            workflow_id: Some("w1".into()),
+            status: Some("success".into()),
+            retry_of: None,
+            retry_success_id: None,
+        };
+        let cloned = Execution::clone(&e);
+        assert_eq!(cloned.id, "e1");
+        assert_eq!(cloned.status, Some("success".into()));
+    }
+
+    #[test]
+    fn execution_debug() {
+        let e = Execution {
+            id: "e99".into(),
+            finished: None,
+            mode: None,
+            started_at: None,
+            stopped_at: None,
+            workflow_id: None,
+            status: None,
+            retry_of: None,
+            retry_success_id: None,
+        };
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("e99"));
+    }
+
+    #[test]
+    fn list_response_clone() {
+        let lr = ListResponse::<Workflow> {
+            data: vec![Workflow {
+                id: "w1".into(),
+                name: None,
+                active: None,
+                created_at: None,
+                updated_at: None,
+                tags: None,
+            }],
+            next_cursor: Some("cursor1".into()),
+        };
+        let cloned = ListResponse::clone(&lr);
+        assert_eq!(cloned.data.len(), 1);
+        assert_eq!(cloned.next_cursor, Some("cursor1".into()));
+    }
+
+    #[test]
+    fn list_response_debug() {
+        let lr = ListResponse::<Workflow> {
+            data: vec![],
+            next_cursor: None,
+        };
+        let dbg = format!("{lr:?}");
+        assert!(dbg.contains("ListResponse"));
+    }
+
+    #[test]
+    fn api_error_response_clone() {
+        let e = ApiErrorResponse {
+            message: Some("err".into()),
+            code: Some("E001".into()),
+        };
+        let cloned = ApiErrorResponse::clone(&e);
+        assert_eq!(cloned.message, Some("err".into()));
+        assert_eq!(cloned.code, Some("E001".into()));
+    }
+
+    #[test]
+    fn api_error_response_debug() {
+        let e = ApiErrorResponse {
+            message: Some("test error".into()),
+            code: None,
+        };
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("test error"));
+    }
+
+    #[test]
+    fn workflow_null_fields_become_none() {
+        let w: Workflow = serde_json::from_value(json!({
+            "id": "1",
+            "name": null,
+            "active": null,
+            "createdAt": null,
+            "updatedAt": null,
+            "tags": null,
+        }))
+        .unwrap();
+        assert!(w.name.is_none());
+        assert!(w.active.is_none());
+        assert!(w.created_at.is_none());
+        assert!(w.updated_at.is_none());
+        assert!(w.tags.is_none());
+    }
+
+    #[test]
+    fn list_response_serialize_roundtrip() {
+        let lr = ListResponse::<Workflow> {
+            data: vec![],
+            next_cursor: Some("xyz".into()),
+        };
+        let v = serde_json::to_value(&lr).unwrap();
+        assert_eq!(v["nextCursor"], "xyz");
+        assert!(v["data"].as_array().unwrap().is_empty());
+    }
 }

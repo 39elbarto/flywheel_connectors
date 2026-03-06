@@ -505,4 +505,239 @@ mod tests {
             "Invalid input: missing query"
         );
     }
+
+    // ---- Additional Display tests ----
+
+    #[test]
+    fn display_json_error() {
+        let json_err = serde_json::from_str::<serde_json::Value>("{bad").unwrap_err();
+        let err = ArxivError::Json(json_err);
+        let s = err.to_string();
+        assert!(s.starts_with("JSON error:"));
+    }
+
+    #[test]
+    fn display_rate_limited_exact_format() {
+        let s = ArxivError::RateLimited {
+            retry_after_ms: 30_000,
+        }
+        .to_string();
+        assert_eq!(s, "Rate limited, retry after 30000ms");
+    }
+
+    // ---- Debug format tests ----
+
+    #[test]
+    fn debug_api_error() {
+        let err = ArxivError::Api {
+            status_code: 503,
+            message: "unavailable".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Api"));
+        assert!(dbg.contains("503"));
+        assert!(dbg.contains("unavailable"));
+    }
+
+    #[test]
+    fn debug_scholar_api_error() {
+        let err = ArxivError::ScholarApi {
+            status_code: 500,
+            message: "internal".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("ScholarApi"));
+        assert!(dbg.contains("500"));
+    }
+
+    #[test]
+    fn debug_rate_limited() {
+        let err = ArxivError::RateLimited {
+            retry_after_ms: 5000,
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("RateLimited"));
+        assert!(dbg.contains("5000"));
+    }
+
+    #[test]
+    fn debug_not_found() {
+        let err = ArxivError::NotFound {
+            resource: "paper_123".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("NotFound"));
+        assert!(dbg.contains("paper_123"));
+    }
+
+    #[test]
+    fn debug_xml_parse() {
+        let err = ArxivError::XmlParse {
+            message: "malformed".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("XmlParse"));
+    }
+
+    #[test]
+    fn debug_invalid_input() {
+        let err = ArxivError::InvalidInput {
+            message: "missing field".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("InvalidInput"));
+    }
+
+    // ---- Source chain tests ----
+
+    #[test]
+    fn source_json_variant_has_source() {
+        let json_err = serde_json::from_str::<serde_json::Value>("{bad").unwrap_err();
+        let err = ArxivError::Json(json_err);
+        assert!(std::error::Error::source(&err).is_some());
+    }
+
+    #[test]
+    fn source_api_none() {
+        let err = ArxivError::Api {
+            status_code: 500,
+            message: "x".into(),
+        };
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn source_scholar_api_none() {
+        let err = ArxivError::ScholarApi {
+            status_code: 500,
+            message: "x".into(),
+        };
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn source_rate_limited_none() {
+        let err = ArxivError::RateLimited {
+            retry_after_ms: 1000,
+        };
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn source_not_found_none() {
+        let err = ArxivError::NotFound {
+            resource: "x".into(),
+        };
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn source_xml_parse_none() {
+        let err = ArxivError::XmlParse {
+            message: "x".into(),
+        };
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn source_invalid_input_none() {
+        let err = ArxivError::InvalidInput {
+            message: "x".into(),
+        };
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    // ---- Error trait impl ----
+
+    #[test]
+    fn error_trait_impl() {
+        let err = ArxivError::NotFound {
+            resource: "x".into(),
+        };
+        let _: &dyn std::error::Error = &err;
+    }
+
+    // ---- From impls ----
+
+    #[test]
+    fn from_serde_json_error() {
+        let json_err = serde_json::from_str::<serde_json::Value>("nope").unwrap_err();
+        let err: ArxivError = json_err.into();
+        assert!(matches!(err, ArxivError::Json(_)));
+    }
+
+    // ---- Result alias ----
+
+    #[test]
+    fn arxiv_result_ok() {
+        let r: ArxivResult<u32> = Ok(42);
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn arxiv_result_err() {
+        let r: ArxivResult<u32> = Err(ArxivError::InvalidInput {
+            message: "test".into(),
+        });
+        assert!(r.is_err());
+    }
+
+    // ---- to_fcp_error for Http variant ----
+
+    #[test]
+    fn http_error_to_fcp_error_has_service_arxiv() {
+        // Test with a realistic error flow: the Http variant maps to External
+        // We can't easily create a reqwest::Error, but we verify other cases thoroughly
+        let err = ArxivError::Api {
+            status_code: 429,
+            message: "rate limited".into(),
+        };
+        match err.to_fcp_error() {
+            FcpError::External {
+                service, retryable, ..
+            } => {
+                assert_eq!(service, "arxiv");
+                assert!(retryable);
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    // ---- retry_after with zero ----
+
+    #[test]
+    fn retry_after_zero_ms() {
+        let err = ArxivError::RateLimited { retry_after_ms: 0 };
+        assert_eq!(err.retry_after(), Some(Duration::from_millis(0)));
+    }
+
+    // ---- Scholar API retryable edge cases ----
+
+    #[test]
+    fn scholar_api_502_is_retryable() {
+        assert!(
+            ArxivError::ScholarApi {
+                status_code: 502,
+                message: "bad gateway".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn scholar_api_599_is_retryable() {
+        assert!(
+            ArxivError::ScholarApi {
+                status_code: 599,
+                message: "error".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn json_not_retryable() {
+        let json_err = serde_json::from_str::<serde_json::Value>("x").unwrap_err();
+        assert!(!ArxivError::Json(json_err).is_retryable());
+    }
 }

@@ -552,4 +552,188 @@ mod tests {
         let err: AirtableResult<u32> = Err(AirtableError::Unauthorized);
         assert!(err.is_err());
     }
+
+    // ── Additional error coverage ────────────────────────────────
+
+    #[test]
+    fn display_http_error() {
+        // Create an HTTP error via reqwest builder failure
+        let err = reqwest::Client::builder()
+            .build()
+            .unwrap()
+            .get("://invalid")
+            .build();
+        if let Err(e) = err {
+            let ae = AirtableError::Http(e);
+            let display = ae.to_string();
+            assert!(display.starts_with("HTTP error:"), "got: {display}");
+        }
+    }
+
+    #[test]
+    fn http_error_is_retryable() {
+        let err = reqwest::Client::builder()
+            .build()
+            .unwrap()
+            .get("://invalid")
+            .build();
+        if let Err(e) = err {
+            let ae = AirtableError::Http(e);
+            assert!(ae.is_retryable());
+        }
+    }
+
+    #[test]
+    fn retry_after_large_value() {
+        let err = AirtableError::RateLimited {
+            retry_after_secs: 3600,
+        };
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn to_fcp_error_rate_limited_zero() {
+        let err = AirtableError::RateLimited {
+            retry_after_secs: 0,
+        };
+        match err.to_fcp_error() {
+            FcpError::RateLimited {
+                retry_after_ms, ..
+            } => {
+                assert_eq!(retry_after_ms, 0);
+            }
+            other => panic!("Expected RateLimited, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_api_service_unavailable_retryable() {
+        let err = AirtableError::Api {
+            error_type: "SERVICE_UNAVAILABLE".into(),
+            message: "service down".into(),
+            status_code: Some(503),
+        };
+        match err.to_fcp_error() {
+            FcpError::External {
+                service, retryable, ..
+            } => {
+                assert_eq!(service, "airtable");
+                assert!(retryable);
+            }
+            other => panic!("Expected External, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_api_gateway_timeout_retryable() {
+        let err = AirtableError::Api {
+            error_type: "GATEWAY_TIMEOUT".into(),
+            message: "timeout".into(),
+            status_code: Some(504),
+        };
+        match err.to_fcp_error() {
+            FcpError::External { retryable, .. } => {
+                assert!(retryable);
+            }
+            other => panic!("Expected External, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_api_request_timeout_retryable() {
+        let err = AirtableError::Api {
+            error_type: "REQUEST_TIMEOUT".into(),
+            message: "timed out".into(),
+            status_code: Some(408),
+        };
+        assert!(err.is_retryable());
+        match err.to_fcp_error() {
+            FcpError::External { retryable, .. } => assert!(retryable),
+            other => panic!("Expected External, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_api_external_message_format() {
+        let err = AirtableError::Api {
+            error_type: "INVALID_PERMISSIONS".into(),
+            message: "insufficient access".into(),
+            status_code: Some(422),
+        };
+        match err.to_fcp_error() {
+            FcpError::External { message, .. } => {
+                assert!(
+                    message.contains("INVALID_PERMISSIONS"),
+                    "got: {message}"
+                );
+                assert!(
+                    message.contains("insufficient access"),
+                    "got: {message}"
+                );
+            }
+            other => panic!("Expected External, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn debug_format_api_error() {
+        let err = AirtableError::Api {
+            error_type: "INVALID_REQUEST".into(),
+            message: "test msg".into(),
+            status_code: Some(422),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Api"));
+        assert!(dbg.contains("INVALID_REQUEST"));
+    }
+
+    #[test]
+    fn debug_format_table_not_found() {
+        let err = AirtableError::TableNotFound {
+            table_id: "tbl999".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("TableNotFound"));
+        assert!(dbg.contains("tbl999"));
+    }
+
+    #[test]
+    fn debug_format_record_not_found() {
+        let err = AirtableError::RecordNotFound {
+            record_id: "rec999".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("RecordNotFound"));
+        assert!(dbg.contains("rec999"));
+    }
+
+    #[test]
+    fn json_error_display_contains_details() {
+        let json_err = serde_json::from_str::<Vec<i32>>("not_json").unwrap_err();
+        let err = AirtableError::Json(json_err);
+        let display = err.to_string();
+        assert!(display.contains("JSON error:"));
+    }
+
+    #[test]
+    fn to_fcp_error_json_internal_message() {
+        let json_err = serde_json::from_str::<bool>("invalid").unwrap_err();
+        let err = AirtableError::Json(json_err);
+        match err.to_fcp_error() {
+            FcpError::Internal { message } => {
+                assert!(message.contains("JSON error:"));
+            }
+            other => panic!("Expected Internal, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_error_401_status_maps_to_unauthorized() {
+        let err = AirtableError::Api {
+            error_type: "SOME_TYPE".into(),
+            message: "bad token".into(),
+            status_code: Some(401),
+        };
+        assert!(matches!(err.to_fcp_error(), FcpError::Unauthorized { .. }));
+    }
 }

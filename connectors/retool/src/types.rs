@@ -259,4 +259,191 @@ mod tests {
         assert_eq!(re["custom_field"], "custom_value");
         assert_eq!(re["tags"], json!(["a", "b"]));
     }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn workflow_clone() {
+        let w = Workflow {
+            id: "wf1".into(),
+            name: Some("Test".into()),
+            folder_id: None,
+            is_enabled: Some(true),
+            extra: json!({}),
+        };
+        let c = w.clone();
+        assert_eq!(c.id, "wf1");
+        assert_eq!(c.name, Some("Test".into()));
+    }
+
+    #[test]
+    fn workflow_debug() {
+        let w = Workflow {
+            id: "wf1".into(),
+            name: None,
+            folder_id: None,
+            is_enabled: None,
+            extra: json!({}),
+        };
+        let dbg = format!("{w:?}");
+        assert!(dbg.contains("Workflow"));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn workflows_list_response_clone() {
+        let r = WorkflowsListResponse {
+            data: vec![json!({"id": "wf1"})],
+            total_count: Some(1),
+            next_token: None,
+            has_more: Some(false),
+        };
+        let c = r.clone();
+        assert_eq!(c.data.len(), 1);
+        assert_eq!(c.total_count, Some(1));
+    }
+
+    #[test]
+    fn workflows_list_response_debug() {
+        let r = WorkflowsListResponse {
+            data: vec![],
+            total_count: None,
+            next_token: None,
+            has_more: None,
+        };
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("WorkflowsListResponse"));
+    }
+
+    #[test]
+    fn workflows_list_response_serialize() {
+        let r = WorkflowsListResponse {
+            data: vec![json!({"id": "wf1"})],
+            total_count: Some(1),
+            next_token: Some("tok_next".into()),
+            has_more: Some(true),
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["data"].as_array().unwrap().len(), 1);
+        assert_eq!(v["totalCount"], 1);
+        assert_eq!(v["nextToken"], "tok_next");
+        assert_eq!(v["hasMore"], true);
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn workflow_run_response_clone() {
+        let r = WorkflowRunResponse {
+            data: Some(json!({"result": "ok"})),
+            workflow_id: Some("wf1".into()),
+            success: Some(true),
+            extra: json!({}),
+        };
+        let c = r.clone();
+        assert!(c.data.is_some());
+        assert_eq!(c.success, Some(true));
+    }
+
+    #[test]
+    fn workflow_run_response_debug() {
+        let r = WorkflowRunResponse {
+            data: None,
+            workflow_id: None,
+            success: None,
+            extra: json!({}),
+        };
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("WorkflowRunResponse"));
+    }
+
+    #[test]
+    fn workflow_run_response_serialize() {
+        let r = WorkflowRunResponse {
+            data: Some(json!(42)),
+            workflow_id: Some("wf_abc".into()),
+            success: Some(true),
+            extra: json!({}),
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["data"], 42);
+        assert_eq!(v["workflowId"], "wf_abc");
+        assert_eq!(v["success"], true);
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn api_error_response_clone() {
+        let e = ApiErrorResponse {
+            message: Some("err".into()),
+            error: Some("ERR".into()),
+            status: Some(500),
+        };
+        let c = e.clone();
+        assert_eq!(c.message, Some("err".into()));
+        assert_eq!(c.error, Some("ERR".into()));
+        assert_eq!(c.status, Some(500));
+    }
+
+    #[test]
+    fn api_error_response_debug() {
+        let e = ApiErrorResponse {
+            message: None,
+            error: None,
+            status: None,
+        };
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("ApiErrorResponse"));
+    }
+
+    #[test]
+    fn api_error_detail_none_when_all_none() {
+        let e = ApiErrorResponse {
+            message: None,
+            error: None,
+            status: None,
+        };
+        assert!(e.detail().is_none());
+    }
+
+    #[test]
+    fn api_error_detail_prefers_message() {
+        let e = ApiErrorResponse {
+            message: Some("primary".into()),
+            error: Some("fallback".into()),
+            status: None,
+        };
+        assert_eq!(e.detail(), Some("primary".into()));
+    }
+
+    #[test]
+    fn api_error_detail_falls_back_to_error() {
+        let e = ApiErrorResponse {
+            message: None,
+            error: Some("fallback error".into()),
+            status: None,
+        };
+        assert_eq!(e.detail(), Some("fallback error".into()));
+    }
+
+    #[test]
+    fn workflow_is_enabled_false() {
+        let w: Workflow = serde_json::from_value(json!({
+            "id": "wf1",
+            "isEnabled": false,
+        }))
+        .unwrap();
+        assert_eq!(w.is_enabled, Some(false));
+    }
+
+    #[test]
+    fn workflow_run_response_with_extra_fields() {
+        let r: WorkflowRunResponse = serde_json::from_value(json!({
+            "data": {"count": 5},
+            "success": true,
+            "executionTime": 1234
+        }))
+        .unwrap();
+        assert!(r.success.unwrap());
+        let re = serde_json::to_value(&r).unwrap();
+        assert_eq!(re["executionTime"], 1234);
+    }
 }

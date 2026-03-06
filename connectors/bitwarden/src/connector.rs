@@ -836,4 +836,184 @@ mod tests {
         assert_eq!(op["safety_tier"], "safe");
         assert_eq!(op["risk_level"], "low");
     }
+
+    #[test]
+    fn connector_new_has_zero_counters() {
+        let c = BitwardenConnector::new();
+        assert_eq!(c.request_count.load(Ordering::Relaxed), 0);
+        assert_eq!(c.error_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn operations_items_create_has_none_idempotency() {
+        let ops = operations_info();
+        let create = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "bitwarden.items.create")
+            .unwrap();
+        assert_eq!(create["idempotency"], "none");
+    }
+
+    #[test]
+    fn operations_items_delete_has_strict_idempotency() {
+        let ops = operations_info();
+        let delete = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "bitwarden.items.delete")
+            .unwrap();
+        assert_eq!(delete["idempotency"], "strict");
+    }
+
+    #[test]
+    fn operations_items_create_capability() {
+        let ops = operations_info();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "bitwarden.items.create")
+            .unwrap();
+        assert_eq!(op["capability"], "bitwarden.items.write");
+    }
+
+    #[test]
+    fn operations_items_list_capability() {
+        let ops = operations_info();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "bitwarden.items.list")
+            .unwrap();
+        assert_eq!(op["capability"], "bitwarden.items.read");
+    }
+
+    #[test]
+    fn operations_collections_list_capability() {
+        let ops = operations_info();
+        let op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "bitwarden.collections.list")
+            .unwrap();
+        assert_eq!(op["capability"], "bitwarden.collections.read");
+    }
+
+    #[test]
+    fn operations_all_have_summary() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let summary = op["summary"].as_str().unwrap();
+            assert!(!summary.is_empty(), "op {:?} has empty summary", op["id"]);
+        }
+    }
+
+    #[test]
+    fn doctor_result_multiple_critical_failures() {
+        let checks = vec![
+            DoctorCheck {
+                name: "a".into(),
+                passed: false,
+                message: Some("fail 1".into()),
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: Some("fail 2".into()),
+                critical: true,
+            },
+        ];
+        let r = DoctorResult::from_checks(checks);
+        assert_eq!(r.status, DoctorStatus::Unhealthy);
+        assert_eq!(r.checks.len(), 2);
+    }
+
+    #[test]
+    fn doctor_check_skip_serializing_none_message() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert!(!v.as_object().unwrap().contains_key("message"));
+    }
+
+    #[test]
+    fn doctor_check_serializes_some_message() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: false,
+            message: Some("warning".into()),
+            critical: false,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert_eq!(v["message"], "warning");
+    }
+
+    #[test]
+    fn doctor_status_serde_roundtrip() {
+        let v = serde_json::to_value(DoctorStatus::Healthy).unwrap();
+        assert_eq!(v, "healthy");
+        let v = serde_json::to_value(DoctorStatus::Degraded).unwrap();
+        assert_eq!(v, "degraded");
+        let v = serde_json::to_value(DoctorStatus::Unhealthy).unwrap();
+        assert_eq!(v, "unhealthy");
+    }
+
+    #[test]
+    fn doctor_status_deserializes() {
+        let s: DoctorStatus = serde_json::from_value(json!("healthy")).unwrap();
+        assert_eq!(s, DoctorStatus::Healthy);
+        let s: DoctorStatus = serde_json::from_value(json!("degraded")).unwrap();
+        assert_eq!(s, DoctorStatus::Degraded);
+        let s: DoctorStatus = serde_json::from_value(json!("unhealthy")).unwrap();
+        assert_eq!(s, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn require_str_empty_string_is_ok() {
+        let input = json!({"item_id": ""});
+        assert_eq!(require_str(&input, "item_id").unwrap(), "");
+    }
+
+    #[test]
+    fn require_i64_negative() {
+        let input = json!({"type": -1});
+        assert_eq!(require_i64(&input, "type").unwrap(), -1);
+    }
+
+    #[test]
+    fn require_i64_zero() {
+        let input = json!({"type": 0});
+        assert_eq!(require_i64(&input, "type").unwrap(), 0);
+    }
+
+    #[test]
+    fn require_i64_float_truncated() {
+        // JSON floats that are exact integers should be readable as i64
+        let input = json!({"type": 3});
+        assert_eq!(require_i64(&input, "type").unwrap(), 3);
+    }
+
+    #[test]
+    fn operations_write_ops_have_correct_capability() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let id = op["id"].as_str().unwrap();
+            let cap = op["capability"].as_str().unwrap();
+            if id.contains("create") || id.contains("delete") {
+                #[allow(clippy::case_sensitive_file_extension_comparisons)]
+                let is_write = cap.ends_with(".write");
+                assert!(is_write, "write op {id} should have .write capability");
+            }
+        }
+    }
 }

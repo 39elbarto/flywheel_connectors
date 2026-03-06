@@ -1044,4 +1044,143 @@ mod tests {
             .unwrap();
         assert_eq!(pi.id, "pi_no_idem");
     }
+
+    // --- StripeAuth tests ---
+
+    #[test]
+    fn auth_secret_key_redacted_label() {
+        let auth = StripeAuth::SecretKey("sk_live_abc123".into());
+        assert_eq!(auth.redacted_label(), "secret_key:redacted");
+    }
+
+    #[test]
+    fn auth_credential_id_redacted_label() {
+        let cred_id =
+            fcp_core::CredentialId::parse("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let auth = StripeAuth::CredentialId(cred_id);
+        let label = auth.redacted_label();
+        assert!(label.starts_with("credential_id:"));
+        assert!(label.contains("550e8400"));
+    }
+
+    #[test]
+    fn auth_secret_key_not_secretless() {
+        let auth = StripeAuth::SecretKey("sk_test".into());
+        assert!(!auth.is_secretless());
+    }
+
+    #[test]
+    fn auth_credential_id_is_secretless() {
+        let cred_id =
+            fcp_core::CredentialId::parse("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let auth = StripeAuth::CredentialId(cred_id);
+        assert!(auth.is_secretless());
+    }
+
+    #[test]
+    fn auth_debug_secret_key_redacted() {
+        let auth = StripeAuth::SecretKey("sk_live_super_secret".into());
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("SecretKey"));
+        assert!(dbg.contains("<redacted>"));
+        assert!(!dbg.contains("sk_live_super_secret"));
+    }
+
+    #[test]
+    fn auth_debug_credential_id() {
+        let cred_id =
+            fcp_core::CredentialId::parse("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let auth = StripeAuth::CredentialId(cred_id);
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("CredentialId"));
+    }
+
+    #[test]
+    fn auth_clone_secret_key() {
+        let original = StripeAuth::SecretKey("sk_test_clone".into());
+        let cloned = original.clone();
+        drop(original);
+        assert!(!cloned.is_secretless());
+        assert_eq!(cloned.redacted_label(), "secret_key:redacted");
+    }
+
+    #[test]
+    fn auth_clone_credential_id() {
+        let cred_id =
+            fcp_core::CredentialId::parse("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let original = StripeAuth::CredentialId(cred_id);
+        let cloned = original.clone();
+        drop(original);
+        assert!(cloned.is_secretless());
+    }
+
+    // --- Client construction tests ---
+
+    #[test]
+    fn client_default_api_url() {
+        let client = StripeClient::new("sk_test").unwrap();
+        assert_eq!(client.api_url(), DEFAULT_API_URL);
+    }
+
+    #[test]
+    fn client_custom_api_url() {
+        let client = StripeClient::new("sk_test")
+            .unwrap()
+            .with_api_url("https://custom.stripe.com/v1");
+        assert_eq!(client.api_url(), "https://custom.stripe.com/v1");
+    }
+
+    #[test]
+    fn client_with_retry_config() {
+        let client = StripeClient::new("sk_test")
+            .unwrap()
+            .with_retry_config(5);
+        assert_eq!(client.max_retries, 5);
+    }
+
+    #[test]
+    fn client_default_max_retries() {
+        let client = StripeClient::new("sk_test").unwrap();
+        assert_eq!(client.max_retries, 2);
+    }
+
+    #[test]
+    fn client_auth_accessor() {
+        let client = StripeClient::new("sk_test_key").unwrap();
+        assert!(!client.auth().is_secretless());
+    }
+
+    #[test]
+    fn client_new_with_auth_secret_key() {
+        let client =
+            StripeClient::new_with_auth(StripeAuth::SecretKey("sk_key".into())).unwrap();
+        assert!(!client.auth().is_secretless());
+        assert_eq!(client.api_url(), DEFAULT_API_URL);
+    }
+
+    #[test]
+    fn client_new_with_auth_credential_id() {
+        let cred_id =
+            fcp_core::CredentialId::parse("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let client =
+            StripeClient::new_with_auth(StripeAuth::CredentialId(cred_id)).unwrap();
+        assert!(client.auth().is_secretless());
+    }
+
+    #[test]
+    fn default_api_url_constant() {
+        assert_eq!(DEFAULT_API_URL, "https://api.stripe.com/v1");
+    }
+
+    // --- Client builder chaining ---
+
+    #[test]
+    fn client_builder_chain() {
+        let client = StripeClient::new("sk_test")
+            .unwrap()
+            .with_api_url("https://test.com/v1")
+            .with_retry_config(0);
+        assert_eq!(client.api_url(), "https://test.com/v1");
+        assert_eq!(client.max_retries, 0);
+    }
 }

@@ -334,4 +334,205 @@ mod tests {
         assert_eq!(v["id"], "d-template1");
         assert_eq!(v["generation"], "dynamic");
     }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn contact_clone() {
+        let c = Contact {
+            id: Some("c1".into()),
+            email: Some("test@example.com".into()),
+            first_name: Some("Test".into()),
+            last_name: None,
+        };
+        let cl = c.clone();
+        assert_eq!(cl.id, Some("c1".into()));
+        assert_eq!(cl.email, Some("test@example.com".into()));
+    }
+
+    #[test]
+    fn contact_debug() {
+        let c = Contact {
+            id: None,
+            email: None,
+            first_name: None,
+            last_name: None,
+        };
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("Contact"));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn contact_list_clone() {
+        let l = ContactList {
+            id: Some("l1".into()),
+            name: Some("VIP".into()),
+            contact_count: Some(100),
+        };
+        let cl = l.clone();
+        assert_eq!(cl.contact_count, Some(100));
+    }
+
+    #[test]
+    fn contact_list_debug() {
+        let l = ContactList {
+            id: None,
+            name: None,
+            contact_count: None,
+        };
+        let dbg = format!("{l:?}");
+        assert!(dbg.contains("ContactList"));
+    }
+
+    #[test]
+    fn contact_list_serialize_skips_none() {
+        let l = ContactList {
+            id: Some("l1".into()),
+            name: None,
+            contact_count: None,
+        };
+        let v = serde_json::to_value(&l).unwrap();
+        assert_eq!(v["id"], "l1");
+        assert!(v.get("name").is_none());
+        assert!(v.get("contact_count").is_none());
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn template_clone() {
+        let t = Template {
+            id: Some("t1".into()),
+            name: Some("Welcome".into()),
+            generation: Some("dynamic".into()),
+        };
+        let cl = t.clone();
+        assert_eq!(cl.name, Some("Welcome".into()));
+    }
+
+    #[test]
+    fn template_debug() {
+        let t = Template {
+            id: None,
+            name: None,
+            generation: None,
+        };
+        let dbg = format!("{t:?}");
+        assert!(dbg.contains("Template"));
+    }
+
+    #[test]
+    fn template_serialize_skips_none() {
+        let t = Template {
+            id: None,
+            name: Some("Test".into()),
+            generation: None,
+        };
+        let v = serde_json::to_value(&t).unwrap();
+        assert!(v.get("id").is_none());
+        assert_eq!(v["name"], "Test");
+        assert!(v.get("generation").is_none());
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn email_personalization_clone() {
+        let p = EmailPersonalization {
+            to: vec![EmailAddress {
+                email: "a@b.com".into(),
+                name: None,
+            }],
+            subject: Some("Hello".into()),
+        };
+        let cl = p.clone();
+        assert_eq!(cl.to.len(), 1);
+        assert_eq!(cl.subject, Some("Hello".into()));
+    }
+
+    #[test]
+    fn email_personalization_debug() {
+        let p = EmailPersonalization {
+            to: vec![],
+            subject: None,
+        };
+        let dbg = format!("{p:?}");
+        assert!(dbg.contains("EmailPersonalization"));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn email_address_clone() {
+        let a = EmailAddress {
+            email: "test@example.com".into(),
+            name: Some("Test".into()),
+        };
+        let cl = a.clone();
+        assert_eq!(cl.email, "test@example.com");
+    }
+
+    #[test]
+    fn email_address_debug() {
+        let a = EmailAddress {
+            email: "a@b.com".into(),
+            name: None,
+        };
+        let dbg = format!("{a:?}");
+        assert!(dbg.contains("EmailAddress"));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn api_error_item_clone() {
+        let e = ApiErrorItem {
+            message: Some("err".into()),
+            field: Some("to".into()),
+            help: None,
+        };
+        let cl = e.clone();
+        assert_eq!(cl.message, Some("err".into()));
+    }
+
+    #[test]
+    fn api_error_item_debug() {
+        let e = ApiErrorItem {
+            message: None,
+            field: None,
+            help: None,
+        };
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("ApiErrorItem"));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn api_error_response_clone() {
+        let e = ApiErrorResponse {
+            errors: Some(vec![ApiErrorItem {
+                message: Some("bad".into()),
+                field: None,
+                help: None,
+            }]),
+        };
+        let cl = e.clone();
+        assert_eq!(cl.errors.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn api_error_response_debug() {
+        let e = ApiErrorResponse { errors: None };
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("ApiErrorResponse"));
+    }
+
+    #[test]
+    fn email_personalization_serialize_skips_none_subject() {
+        let p = EmailPersonalization {
+            to: vec![EmailAddress {
+                email: "a@b.com".into(),
+                name: None,
+            }],
+            subject: None,
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert!(v.get("subject").is_none());
+    }
 }

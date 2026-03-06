@@ -859,4 +859,70 @@ mod tests {
         let exec_op = ops.as_array().unwrap().iter().find(|o| o["id"] == "zapier.zaps.execute").unwrap();
         assert_eq!(exec_op["capability"].as_str().unwrap(), "zapier.zaps.write");
     }
+
+    #[test]
+    fn doctor_status_serializes_lowercase() {
+        assert_eq!(serde_json::to_value(DoctorStatus::Healthy).unwrap(), "healthy");
+        assert_eq!(serde_json::to_value(DoctorStatus::Degraded).unwrap(), "degraded");
+        assert_eq!(serde_json::to_value(DoctorStatus::Unhealthy).unwrap(), "unhealthy");
+    }
+
+    #[test]
+    fn doctor_status_deserializes() {
+        let s: DoctorStatus = serde_json::from_value(json!("healthy")).unwrap();
+        assert_eq!(s, DoctorStatus::Healthy);
+    }
+
+    #[test]
+    fn require_str_nested_object() {
+        let input = json!({"action_id": {"nested": true}});
+        assert!(require_str(&input, "action_id").is_err());
+    }
+
+    #[test]
+    fn require_str_empty_string_is_valid() {
+        let input = json!({"action_id": ""});
+        assert_eq!(require_str(&input, "action_id").unwrap(), "");
+    }
+
+    #[test]
+    fn operations_execute_is_risky() {
+        let ops = operations_info();
+        let exec_op = ops.as_array().unwrap().iter().find(|o| o["id"] == "zapier.zaps.execute").unwrap();
+        assert_eq!(exec_op["safety_tier"], "risky");
+        assert_eq!(exec_op["risk_level"], "medium");
+    }
+
+    #[test]
+    fn operations_list_is_safe() {
+        let ops = operations_info();
+        let list_op = ops.as_array().unwrap().iter().find(|o| o["id"] == "zapier.zaps.list").unwrap();
+        assert_eq!(list_op["safety_tier"], "safe");
+        assert_eq!(list_op["risk_level"], "low");
+    }
+
+    #[test]
+    fn doctor_check_debug_format() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let dbg = format!("{check:?}");
+        assert!(dbg.contains("DoctorCheck"));
+    }
+
+    #[test]
+    fn doctor_result_debug_format() {
+        let r = DoctorResult::from_checks(vec![]);
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("DoctorResult"));
+    }
+
+    #[test]
+    fn connector_new_session_is_none() {
+        let c = ZapierConnector::new();
+        assert!(c.session_id.is_none());
+    }
 }

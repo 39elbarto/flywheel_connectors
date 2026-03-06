@@ -1047,4 +1047,141 @@ mod tests {
         assert_eq!(c.request_count.load(Ordering::Relaxed), 0);
         assert_eq!(c.error_count.load(Ordering::Relaxed), 0);
     }
+
+    // ── DoctorCheck skip_serializing_if ───────────────────────────
+
+    #[test]
+    fn doctor_check_message_none_omitted() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert!(!v.as_object().unwrap().contains_key("message"));
+    }
+
+    #[test]
+    fn doctor_check_message_some_present() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: false,
+            message: Some("err".into()),
+            critical: true,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert_eq!(v["message"], "err");
+    }
+
+    // ── DoctorStatus serde ────────────────────────────────────────
+
+    #[test]
+    fn doctor_status_serializes_lowercase() {
+        assert_eq!(serde_json::to_value(DoctorStatus::Healthy).unwrap(), "healthy");
+        assert_eq!(serde_json::to_value(DoctorStatus::Degraded).unwrap(), "degraded");
+        assert_eq!(serde_json::to_value(DoctorStatus::Unhealthy).unwrap(), "unhealthy");
+    }
+
+    #[test]
+    fn doctor_status_deserializes_lowercase() {
+        let s: DoctorStatus = serde_json::from_value(json!("healthy")).unwrap();
+        assert_eq!(s, DoctorStatus::Healthy);
+        let s: DoctorStatus = serde_json::from_value(json!("degraded")).unwrap();
+        assert_eq!(s, DoctorStatus::Degraded);
+        let s: DoctorStatus = serde_json::from_value(json!("unhealthy")).unwrap();
+        assert_eq!(s, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_status_copy_eq() {
+        let s = DoctorStatus::Healthy;
+        let s2 = s;
+        assert_eq!(s, s2);
+    }
+
+    // ── DoctorResult serialization roundtrip ──────────────────────
+
+    #[test]
+    fn doctor_result_roundtrip() {
+        let r = DoctorResult::from_checks(vec![
+            DoctorCheck { name: "c1".into(), passed: true, message: None, critical: true },
+            DoctorCheck { name: "c2".into(), passed: false, message: Some("warn".into()), critical: false },
+        ]);
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["status"], "degraded");
+        let back: DoctorResult = serde_json::from_value(v).unwrap();
+        assert_eq!(back.status, DoctorStatus::Degraded);
+        assert_eq!(back.checks.len(), 2);
+    }
+
+    // ── operations_info additional checks ─────────────────────────
+
+    #[test]
+    fn operations_contain_expected_ids() {
+        let ops = operations_info();
+        let ids: Vec<&str> = ops.as_array().unwrap().iter().filter_map(|o| o["id"].as_str()).collect();
+        assert!(ids.contains(&"sentry.list_projects"));
+        assert!(ids.contains(&"sentry.list_issues"));
+        assert!(ids.contains(&"sentry.get_issue"));
+        assert!(ids.contains(&"sentry.update_issue"));
+        assert!(ids.contains(&"sentry.delete_issue"));
+        assert!(ids.contains(&"sentry.discover_query"));
+        assert!(ids.contains(&"sentry.list_alert_rules"));
+        assert!(ids.contains(&"sentry.create_alert_rule"));
+    }
+
+    #[test]
+    fn operations_delete_is_dangerous() {
+        for op in operations_info().as_array().unwrap() {
+            if op["id"].as_str().unwrap().contains("delete") {
+                assert_eq!(op["safety_tier"], "dangerous", "delete ops should be dangerous");
+                assert_eq!(op["risk_level"], "high", "delete ops should be high risk");
+            }
+        }
+    }
+
+    #[test]
+    fn operations_admin_capability_for_dangerous_ops() {
+        for op in operations_info().as_array().unwrap() {
+            if op["safety_tier"] == "dangerous" {
+                assert_eq!(op["capability"], "sentry.admin", "{} should require admin", op["id"]);
+            }
+        }
+    }
+
+    // ── require_str edge cases ────────────────────────────────────
+
+    #[test]
+    fn require_str_empty_string() {
+        let input = json!({"f": ""});
+        assert_eq!(require_str(&input, "f").unwrap(), "");
+    }
+
+    #[test]
+    fn require_str_boolean_value() {
+        let input = json!({"f": true});
+        assert!(require_str(&input, "f").is_err());
+    }
+
+    #[test]
+    fn require_str_array_value() {
+        let input = json!({"f": [1, 2, 3]});
+        assert!(require_str(&input, "f").is_err());
+    }
+
+    // ── Config edge cases ─────────────────────────────────────────
+
+    #[test]
+    fn config_default_base_url_when_none() {
+        let config = SentryConfig::from_params(&json!({"auth_token": "tok"})).unwrap();
+        assert_eq!(config.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn config_auth_token_debug_safe() {
+        let config = SentryConfig::from_params(&json!({"auth_token": "secret_tok"})).unwrap();
+        let dbg = format!("{config:?}");
+        assert!(!dbg.contains("secret_tok"));
+    }
 }

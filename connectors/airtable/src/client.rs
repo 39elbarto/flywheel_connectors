@@ -844,4 +844,170 @@ mod tests {
             e => panic!("Expected Api error, got: {e:?}"),
         }
     }
+
+    // ── Auth unit tests ──────────────────────────────────────────
+
+    #[test]
+    fn auth_token_debug_redacts() {
+        let auth = AirtableAuth::Token("super-secret-token".into());
+        let dbg = format!("{auth:?}");
+        assert!(!dbg.contains("super-secret"));
+        assert!(dbg.contains("redacted"));
+    }
+
+    #[test]
+    fn auth_credential_id_debug_shows_id() {
+        let id = CredentialId::new();
+        let auth = AirtableAuth::CredentialId(id);
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("CredentialId"));
+        assert!(dbg.contains(&id.to_string()));
+    }
+
+    #[test]
+    fn auth_token_redacted_label() {
+        let auth = AirtableAuth::Token("my-token".into());
+        assert_eq!(auth.redacted_label(), "token:redacted");
+    }
+
+    #[test]
+    fn auth_credential_id_redacted_label() {
+        let id = CredentialId::new();
+        let auth = AirtableAuth::CredentialId(id);
+        let label = auth.redacted_label();
+        assert!(label.starts_with("credential_id:"));
+        assert!(label.contains(&id.to_string()));
+    }
+
+    #[test]
+    fn auth_token_is_not_secretless() {
+        let auth = AirtableAuth::Token("tok".into());
+        assert!(!auth.is_secretless());
+    }
+
+    #[test]
+    fn auth_credential_id_is_secretless() {
+        let auth = AirtableAuth::CredentialId(CredentialId::new());
+        assert!(auth.is_secretless());
+    }
+
+    #[test]
+    fn auth_clone() {
+        let auth = AirtableAuth::Token("test".into());
+        #[allow(clippy::redundant_clone)]
+        let auth2 = auth.clone();
+        assert_eq!(auth2.redacted_label(), "token:redacted");
+    }
+
+    #[test]
+    fn auth_credential_id_clone() {
+        let id = CredentialId::new();
+        let auth = AirtableAuth::CredentialId(id);
+        #[allow(clippy::redundant_clone)]
+        let auth2 = auth.clone();
+        assert!(auth2.is_secretless());
+        assert_eq!(auth2.redacted_label(), auth.redacted_label());
+    }
+
+    // ── Client construction tests ────────────────────────────────
+
+    #[test]
+    fn client_new_creates_with_defaults() {
+        let client = AirtableClient::new("test_token").unwrap();
+        assert_eq!(client.base_url, DEFAULT_BASE_URL);
+        assert_eq!(client.max_retries, 3);
+        assert_eq!(client.total_requests(), 0);
+    }
+
+    #[test]
+    fn client_with_base_url() {
+        let client = AirtableClient::new("tok")
+            .unwrap()
+            .with_base_url("https://custom.example.com");
+        assert_eq!(client.base_url, "https://custom.example.com");
+    }
+
+    #[test]
+    fn client_with_retry_config() {
+        let client = AirtableClient::new("tok")
+            .unwrap()
+            .with_retry_config(5, 2000, 120_000);
+        assert_eq!(client.max_retries, 5);
+        assert_eq!(client.initial_delay_ms, 2000);
+        assert_eq!(client.max_delay_ms, 120_000);
+    }
+
+    #[test]
+    fn client_debug_redacts_token() {
+        let client = AirtableClient::new("my-secret-api-token").unwrap();
+        let dbg = format!("{client:?}");
+        assert!(!dbg.contains("my-secret-api-token"));
+        assert!(dbg.contains("redacted"));
+        assert!(dbg.contains("AirtableClient"));
+        assert!(dbg.contains("base_url"));
+    }
+
+    #[test]
+    fn client_debug_shows_base_url() {
+        let client = AirtableClient::new("tok")
+            .unwrap()
+            .with_base_url("https://test.example.com");
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("https://test.example.com"));
+    }
+
+    #[test]
+    fn client_debug_shows_max_retries() {
+        let client = AirtableClient::new("tok")
+            .unwrap()
+            .with_retry_config(7, 500, 30_000);
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains('7'));
+    }
+
+    #[test]
+    fn client_new_with_auth_token() {
+        let client = AirtableClient::new_with_auth(AirtableAuth::Token("tok".into())).unwrap();
+        assert_eq!(client.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn client_new_with_auth_credential_id() {
+        let client =
+            AirtableClient::new_with_auth(AirtableAuth::CredentialId(CredentialId::new())).unwrap();
+        assert_eq!(client.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn client_total_requests_starts_at_zero() {
+        let client = AirtableClient::new("tok").unwrap();
+        assert_eq!(client.total_requests(), 0);
+    }
+
+    #[test]
+    fn default_base_url_constant() {
+        assert_eq!(DEFAULT_BASE_URL, "https://api.airtable.com/v0");
+    }
+
+    #[test]
+    fn client_chained_builders() {
+        let client = AirtableClient::new("tok")
+            .unwrap()
+            .with_base_url("https://example.com")
+            .with_retry_config(1, 100, 500);
+        assert_eq!(client.base_url, "https://example.com");
+        assert_eq!(client.max_retries, 1);
+        assert_eq!(client.initial_delay_ms, 100);
+        assert_eq!(client.max_delay_ms, 500);
+    }
+
+    #[test]
+    fn client_retry_config_zero_retries() {
+        let client = AirtableClient::new("tok")
+            .unwrap()
+            .with_retry_config(0, 0, 0);
+        assert_eq!(client.max_retries, 0);
+        assert_eq!(client.initial_delay_ms, 0);
+        assert_eq!(client.max_delay_ms, 0);
+    }
 }

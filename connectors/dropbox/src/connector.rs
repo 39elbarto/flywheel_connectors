@@ -1065,4 +1065,91 @@ mod tests {
         assert!(c.config.is_none());
         assert!(c.client.is_none());
     }
+
+    #[test]
+    fn connector_new_has_zero_counters() {
+        let c = DropboxConnector::new();
+        assert_eq!(c.request_count.load(Ordering::Relaxed), 0);
+        assert_eq!(c.error_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn doctor_status_serializes_lowercase() {
+        assert_eq!(serde_json::to_value(DoctorStatus::Healthy).unwrap(), "healthy");
+        assert_eq!(serde_json::to_value(DoctorStatus::Degraded).unwrap(), "degraded");
+        assert_eq!(serde_json::to_value(DoctorStatus::Unhealthy).unwrap(), "unhealthy");
+    }
+
+    #[test]
+    fn doctor_status_deserializes() {
+        let s: DoctorStatus = serde_json::from_value(json!("healthy")).unwrap();
+        assert_eq!(s, DoctorStatus::Healthy);
+    }
+
+    #[test]
+    fn require_str_nested_object() {
+        let input = json!({"path": {"nested": true}});
+        assert!(require_str(&input, "path").is_err());
+    }
+
+    #[test]
+    fn operations_files_move_capability() {
+        let ops = operations_info();
+        let mv = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "dropbox.files.move")
+            .unwrap();
+        assert_eq!(mv["capability"], "dropbox.files.write");
+    }
+
+    #[test]
+    fn operations_files_copy_capability() {
+        let ops = operations_info();
+        let cp = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "dropbox.files.copy")
+            .unwrap();
+        assert_eq!(cp["capability"], "dropbox.files.write");
+    }
+
+    #[test]
+    fn operations_search_capability() {
+        let ops = operations_info();
+        let search = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "dropbox.files.search")
+            .unwrap();
+        assert_eq!(search["capability"], "dropbox.files.read");
+        assert_eq!(search["safety_tier"], "safe");
+    }
+
+    #[test]
+    fn operations_space_usage_capability() {
+        let ops = operations_info();
+        let sp = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "dropbox.account.get_space_usage")
+            .unwrap();
+        assert_eq!(sp["capability"], "dropbox.account.read");
+    }
+
+    #[test]
+    fn doctor_check_debug() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let dbg = format!("{check:?}");
+        assert!(dbg.contains("DoctorCheck"));
+    }
 }

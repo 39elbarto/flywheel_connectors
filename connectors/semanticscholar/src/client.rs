@@ -152,12 +152,19 @@ impl SemanticScholarClient {
     }
 
     #[instrument(skip(self), fields(url))]
-    async fn get(&self, path: &str) -> SemanticScholarResult<serde_json::Value> {
+    async fn get(
+        &self,
+        path: &str,
+        query: Option<&[(&str, String)]>,
+    ) -> SemanticScholarResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
         debug!(url = %url, "GET request");
-        let req = self
+        let mut req = self
             .add_auth(self.client.get(&url))
             .header("Accept", "application/json");
+        if let Some(q) = query {
+            req = req.query(q);
+        }
         let resp = req.send().await?;
         self.handle_response(resp).await
     }
@@ -173,13 +180,17 @@ impl SemanticScholarClient {
         fields: Option<&str>,
     ) -> SemanticScholarResult<serde_json::Value> {
         let f = fields.unwrap_or(DEFAULT_PAPER_SEARCH_FIELDS);
-        let qs = build_query(&[
-            Some(("query", query.to_string())),
-            Some(("fields", f.to_string())),
-            limit.map(|l| ("limit", l.to_string())),
-            offset.map(|o| ("offset", o.to_string())),
-        ]);
-        self.get(&format!("/paper/search{qs}")).await
+        let mut q = vec![
+            ("query", query.to_string()),
+            ("fields", f.to_string()),
+        ];
+        if let Some(l) = limit {
+            q.push(("limit", l.to_string()));
+        }
+        if let Some(o) = offset {
+            q.push(("offset", o.to_string()));
+        }
+        self.get("/paper/search", Some(&q)).await
     }
 
     /// Get paper details by ID.
@@ -189,8 +200,7 @@ impl SemanticScholarClient {
         fields: Option<&str>,
     ) -> SemanticScholarResult<serde_json::Value> {
         let f = fields.unwrap_or(DEFAULT_PAPER_DETAIL_FIELDS);
-        let qs = build_query(&[Some(("fields", f.to_string()))]);
-        self.get(&format!("/paper/{paper_id}{qs}")).await
+        self.get(&format!("/paper/{paper_id}"), Some(&[("fields", f.to_string())])).await
     }
 
     /// Get citations of a paper.
@@ -201,11 +211,11 @@ impl SemanticScholarClient {
         fields: Option<&str>,
     ) -> SemanticScholarResult<serde_json::Value> {
         let f = fields.unwrap_or(DEFAULT_CITATION_FIELDS);
-        let qs = build_query(&[
-            Some(("fields", f.to_string())),
-            limit.map(|l| ("limit", l.to_string())),
-        ]);
-        self.get(&format!("/paper/{paper_id}/citations{qs}")).await
+        let mut q = vec![("fields", f.to_string())];
+        if let Some(l) = limit {
+            q.push(("limit", l.to_string()));
+        }
+        self.get(&format!("/paper/{paper_id}/citations"), Some(&q)).await
     }
 
     /// Get references of a paper.
@@ -216,12 +226,11 @@ impl SemanticScholarClient {
         fields: Option<&str>,
     ) -> SemanticScholarResult<serde_json::Value> {
         let f = fields.unwrap_or(DEFAULT_CITATION_FIELDS);
-        let qs = build_query(&[
-            Some(("fields", f.to_string())),
-            limit.map(|l| ("limit", l.to_string())),
-        ]);
-        self.get(&format!("/paper/{paper_id}/references{qs}"))
-            .await
+        let mut q = vec![("fields", f.to_string())];
+        if let Some(l) = limit {
+            q.push(("limit", l.to_string()));
+        }
+        self.get(&format!("/paper/{paper_id}/references"), Some(&q)).await
     }
 
     /// Get recommended papers based on a seed paper.
@@ -232,12 +241,11 @@ impl SemanticScholarClient {
         fields: Option<&str>,
     ) -> SemanticScholarResult<serde_json::Value> {
         let f = fields.unwrap_or(DEFAULT_CITATION_FIELDS);
-        let qs = build_query(&[
-            Some(("fields", f.to_string())),
-            limit.map(|l| ("limit", l.to_string())),
-        ]);
-        self.get(&format!("/paper/{paper_id}/recommendations{qs}"))
-            .await
+        let mut q = vec![("fields", f.to_string())];
+        if let Some(l) = limit {
+            q.push(("limit", l.to_string()));
+        }
+        self.get(&format!("/paper/{paper_id}/recommendations"), Some(&q)).await
     }
 
     // -- Authors --
@@ -249,8 +257,7 @@ impl SemanticScholarClient {
         fields: Option<&str>,
     ) -> SemanticScholarResult<serde_json::Value> {
         let f = fields.unwrap_or(DEFAULT_AUTHOR_FIELDS);
-        let qs = build_query(&[Some(("fields", f.to_string()))]);
-        self.get(&format!("/author/{author_id}{qs}")).await
+        self.get(&format!("/author/{author_id}"), Some(&[("fields", f.to_string())])).await
     }
 
     /// Get papers by an author.
@@ -261,25 +268,12 @@ impl SemanticScholarClient {
         fields: Option<&str>,
     ) -> SemanticScholarResult<serde_json::Value> {
         let f = fields.unwrap_or(DEFAULT_AUTHOR_PAPERS_FIELDS);
-        let qs = build_query(&[
-            Some(("fields", f.to_string())),
-            limit.map(|l| ("limit", l.to_string())),
-        ]);
-        self.get(&format!("/author/{author_id}/papers{qs}")).await
+        let mut q = vec![("fields", f.to_string())];
+        if let Some(l) = limit {
+            q.push(("limit", l.to_string()));
+        }
+        self.get(&format!("/author/{author_id}/papers"), Some(&q)).await
     }
-}
-
-fn build_query(params: &[Option<(&str, String)>]) -> String {
-    let mut qs = String::new();
-    let mut sep = '?';
-    for param in params.iter().flatten() {
-        qs.push(sep);
-        qs.push_str(param.0);
-        qs.push('=');
-        qs.push_str(&param.1);
-        sep = '&';
-    }
-    qs
 }
 
 #[cfg(test)]
@@ -319,55 +313,6 @@ mod tests {
     fn auth_redacted_label_none() {
         let auth = SemanticScholarAuth::None;
         assert_eq!(auth.redacted_label(), "none");
-    }
-
-    #[test]
-    fn build_query_empty() {
-        assert_eq!(build_query(&[None, None]), "");
-    }
-
-    #[test]
-    fn build_query_one() {
-        assert_eq!(
-            build_query(&[Some(("query", "test".into()))]),
-            "?query=test"
-        );
-    }
-
-    #[test]
-    fn build_query_two() {
-        assert_eq!(
-            build_query(&[
-                Some(("query", "test".into())),
-                Some(("limit", "10".into()))
-            ]),
-            "?query=test&limit=10"
-        );
-    }
-
-    #[test]
-    fn build_query_with_none_gaps() {
-        assert_eq!(
-            build_query(&[Some(("query", "test".into())), None, Some(("limit", "5".into()))]),
-            "?query=test&limit=5"
-        );
-    }
-
-    #[test]
-    fn build_query_all_none() {
-        assert_eq!(build_query(&[None, None, None]), "");
-    }
-
-    #[test]
-    fn build_query_three_params() {
-        assert_eq!(
-            build_query(&[
-                Some(("query", "ml".into())),
-                Some(("limit", "10".into())),
-                Some(("offset", "0".into())),
-            ]),
-            "?query=ml&limit=10&offset=0"
-        );
     }
 
     #[test]
@@ -440,5 +385,111 @@ mod tests {
         let dbg = format!("{client:?}");
         assert!(dbg.contains("SemanticScholarClient"));
         assert!(!dbg.contains("secret"));
+    }
+
+    // --- Auth clone ---
+
+    #[test]
+    fn auth_clone_api_key() {
+        let original = SemanticScholarAuth::ApiKey("key123".into());
+        let cloned = original.clone();
+        drop(original);
+        assert!(cloned.has_key());
+        assert_eq!(cloned.redacted_label(), "api_key:redacted");
+    }
+
+    #[test]
+    fn auth_clone_none() {
+        let original = SemanticScholarAuth::None;
+        let cloned = original.clone();
+        drop(original);
+        assert!(!cloned.has_key());
+    }
+
+    // --- Constants content checks ---
+
+    #[test]
+    fn default_base_url_is_https() {
+        assert!(DEFAULT_BASE_URL.starts_with("https://"));
+    }
+
+    #[test]
+    fn default_paper_search_fields_contains_abstract() {
+        assert!(DEFAULT_PAPER_SEARCH_FIELDS.contains("abstract"));
+    }
+
+    #[test]
+    fn default_paper_detail_fields_contains_venue() {
+        assert!(DEFAULT_PAPER_DETAIL_FIELDS.contains("venue"));
+    }
+
+    #[test]
+    fn default_citation_fields_contains_year() {
+        assert!(DEFAULT_CITATION_FIELDS.contains("year"));
+    }
+
+    #[test]
+    fn default_author_fields_contains_hindex() {
+        assert!(DEFAULT_AUTHOR_FIELDS.contains("hIndex"));
+    }
+
+    #[test]
+    fn default_author_papers_fields_contains_year() {
+        assert!(DEFAULT_AUTHOR_PAPERS_FIELDS.contains("year"));
+    }
+
+    // --- Client with multiple trailing slashes ---
+
+    #[test]
+    fn client_new_multiple_trailing_slashes() {
+        let client = SemanticScholarClient::new(
+            SemanticScholarAuth::None,
+            Some("https://example.com///"),
+        )
+        .unwrap();
+        // trim_end_matches('/') removes all trailing slashes
+        assert!(!client.base_url.ends_with('/'));
+    }
+
+    // --- Auth Debug format details ---
+
+    #[test]
+    fn auth_debug_api_key_shows_redacted() {
+        let auth = SemanticScholarAuth::ApiKey("super_secret_key_123".into());
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("<redacted>"));
+        assert!(!dbg.contains("super_secret_key_123"));
+    }
+
+    // --- Client debug shows base_url ---
+
+    #[test]
+    fn client_debug_shows_base_url() {
+        let client = SemanticScholarClient::new(
+            SemanticScholarAuth::None,
+            Some("https://custom.example.com/api"),
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("custom.example.com"));
+    }
+
+    // --- Client stores auth correctly ---
+
+    #[test]
+    fn client_stores_api_key_auth() {
+        let client =
+            SemanticScholarClient::new(SemanticScholarAuth::ApiKey("my_key".into()), None)
+                .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("ApiKey"));
+        assert!(!dbg.contains("my_key"));
+    }
+
+    #[test]
+    fn client_stores_none_auth() {
+        let client = SemanticScholarClient::new(SemanticScholarAuth::None, None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("None"));
     }
 }

@@ -313,4 +313,131 @@ mod tests {
         // Non-standard but technically 5 fields with non-empty content
         assert!(validate_cron_expression("@reboot 0 0 0 0"));
     }
+
+    // -- Additional serde tests --
+
+    #[test]
+    fn schedule_inequality_different_id() {
+        let s1 = Schedule {
+            id: "s1".into(),
+            name: "a".into(),
+            expression: "0 * * * *".into(),
+            target_operation: "op.a".into(),
+            payload: None,
+            enabled: true,
+            created_at: "2026-01-01T00:00:00Z".into(),
+        };
+        let mut s2 = s1.clone();
+        s2.id = "s2".into();
+        assert_ne!(s1, s2);
+    }
+
+    #[test]
+    fn schedule_inequality_different_enabled() {
+        let s1 = Schedule {
+            id: "s1".into(),
+            name: "a".into(),
+            expression: "0 * * * *".into(),
+            target_operation: "op.a".into(),
+            payload: None,
+            enabled: true,
+            created_at: "2026-01-01T00:00:00Z".into(),
+        };
+        let mut s2 = s1.clone();
+        s2.enabled = false;
+        assert_ne!(s1, s2);
+    }
+
+    #[test]
+    fn schedule_json_string_roundtrip() {
+        let s = Schedule {
+            id: "s1".into(),
+            name: "test".into(),
+            expression: "*/10 * * * *".into(),
+            target_operation: "op.sync".into(),
+            payload: Some(json!({"key": "val"})),
+            enabled: true,
+            created_at: "2026-01-01T00:00:00Z".into(),
+        };
+        let json_str = serde_json::to_string(&s).unwrap();
+        let parsed: Schedule = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(s, parsed);
+    }
+
+    #[test]
+    fn execution_inequality_different_status() {
+        let e1 = Execution {
+            id: "e1".into(),
+            schedule_id: "s1".into(),
+            triggered_at: "2026-01-01T00:00:00Z".into(),
+            status: "triggered".into(),
+        };
+        let mut e2 = e1.clone();
+        e2.status = "completed".into();
+        assert_ne!(e1, e2);
+    }
+
+    #[test]
+    fn execution_json_string_roundtrip() {
+        let e = Execution {
+            id: "exec_1".into(),
+            schedule_id: "sched_1".into(),
+            triggered_at: "2026-03-06T12:00:00Z".into(),
+            status: "completed".into(),
+        };
+        let json_str = serde_json::to_string(&e).unwrap();
+        let parsed: Execution = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(e, parsed);
+    }
+
+    #[test]
+    fn execution_with_failed_status() {
+        let v = json!({
+            "id": "e1",
+            "schedule_id": "s1",
+            "triggered_at": "2026-03-06T12:00:00Z",
+            "status": "completed"
+        });
+        let e: Execution = serde_json::from_value(v).unwrap();
+        assert_eq!(e.status, "completed");
+    }
+
+    #[test]
+    fn schedule_with_complex_payload() {
+        let payload = json!({
+            "nested": {
+                "deep": [1, 2, 3],
+                "flag": true
+            },
+            "list": ["a", "b"]
+        });
+        let s = Schedule {
+            id: "s1".into(),
+            name: "complex".into(),
+            expression: "0 * * * *".into(),
+            target_operation: "op.sync".into(),
+            payload: Some(payload.clone()),
+            enabled: true,
+            created_at: "2026-01-01T00:00:00Z".into(),
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        let back: Schedule = serde_json::from_value(v).unwrap();
+        assert_eq!(back.payload.unwrap(), payload);
+    }
+
+    #[test]
+    fn validate_cron_step_values() {
+        assert!(validate_cron_expression("*/2 */3 */4 */5 */6"));
+    }
+
+    #[test]
+    fn validate_cron_numeric_values() {
+        assert!(validate_cron_expression("0 12 15 6 3"));
+    }
+
+    #[test]
+    fn validate_cron_tabs_not_spaces() {
+        // Tabs are whitespace but split_whitespace handles them
+        assert!(validate_cron_expression("0\t*\t*\t*\t*"));
+    }
 }

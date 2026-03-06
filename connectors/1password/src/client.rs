@@ -287,4 +287,96 @@ mod tests {
         assert!(!dbg.contains("my-secret"));
         assert!(dbg.contains("redacted"));
     }
+
+    #[test]
+    fn auth_bearer_clone() {
+        let auth = OnePasswordAuth::BearerToken("tok".into());
+        let cloned = auth.clone();
+        assert_eq!(auth.redacted_label(), cloned.redacted_label());
+    }
+
+    #[test]
+    fn auth_credential_clone() {
+        let auth = OnePasswordAuth::CredentialId(CredentialId::new());
+        let cloned = auth.clone();
+        assert!(auth.is_secretless());
+        assert!(cloned.is_secretless());
+    }
+
+    #[test]
+    fn auth_debug_bearer_shows_tuple_name() {
+        let auth = OnePasswordAuth::BearerToken("x".into());
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("BearerToken"));
+    }
+
+    #[test]
+    fn auth_debug_credential_shows_id() {
+        let cred = OnePasswordAuth::CredentialId(CredentialId::new());
+        let dbg = format!("{cred:?}");
+        assert!(dbg.contains("CredentialId"));
+    }
+
+    #[test]
+    fn default_base_url_value() {
+        assert_eq!(DEFAULT_BASE_URL, "https://localhost:8080");
+    }
+
+    #[test]
+    fn default_base_url_is_https() {
+        assert!(DEFAULT_BASE_URL.starts_with("https://"));
+    }
+
+    #[test]
+    fn auth_redacted_label_never_contains_token() {
+        let auth = OnePasswordAuth::BearerToken("my-super-secret-1password-token".into());
+        let label = auth.redacted_label();
+        assert!(!label.contains("my-super-secret-1password-token"));
+    }
+
+    #[test]
+    fn auth_is_secretless_false_for_bearer() {
+        assert!(!OnePasswordAuth::BearerToken("tok".into()).is_secretless());
+    }
+
+    #[test]
+    fn auth_is_secretless_true_for_credential() {
+        assert!(OnePasswordAuth::CredentialId(CredentialId::new()).is_secretless());
+    }
+
+    #[test]
+    fn client_new_with_empty_url() {
+        let client =
+            OnePasswordClient::new(OnePasswordAuth::BearerToken("tok".into()), Some("")).unwrap();
+        assert_eq!(client.base_url, "");
+    }
+
+    #[test]
+    fn client_new_preserves_path_in_base_url() {
+        let client = OnePasswordClient::new(
+            OnePasswordAuth::BearerToken("tok".into()),
+            Some("https://proxy.example.com/1password"),
+        )
+        .unwrap();
+        assert_eq!(client.base_url, "https://proxy.example.com/1password");
+    }
+
+    #[test]
+    fn client_debug_shows_base_url() {
+        let client = OnePasswordClient::new(
+            OnePasswordAuth::BearerToken("tok".into()),
+            Some("https://connect.mysite.com"),
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("connect.mysite.com"));
+    }
+
+    #[test]
+    fn client_debug_contains_struct_name() {
+        let client =
+            OnePasswordClient::new(OnePasswordAuth::BearerToken("tok".into()), None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("OnePasswordClient"));
+    }
 }

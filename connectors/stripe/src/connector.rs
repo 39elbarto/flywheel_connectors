@@ -2529,4 +2529,181 @@ mod tests {
             .expect("compute interface hash");
         assert_eq!(computed, computed2);
     }
+
+    // --- sanitize_idempotency_component tests ---
+
+    #[test]
+    fn sanitize_replaces_special_chars() {
+        let result = sanitize_idempotency_component("hello world!", "fallback");
+        // trim_matches('-') removes trailing dashes
+        assert_eq!(result, "hello-world");
+    }
+
+    #[test]
+    fn sanitize_preserves_dots_underscores_dashes() {
+        let result = sanitize_idempotency_component("a.b_c-d", "fallback");
+        assert_eq!(result, "a.b_c-d");
+    }
+
+    #[test]
+    fn sanitize_empty_uses_fallback() {
+        let result = sanitize_idempotency_component("", "my_fallback");
+        assert_eq!(result, "my_fallback");
+    }
+
+    #[test]
+    fn sanitize_all_special_uses_fallback() {
+        let result = sanitize_idempotency_component("@#$%", "fb");
+        assert_eq!(result, "fb");
+    }
+
+    #[test]
+    fn sanitize_truncates_to_64() {
+        let long = "a".repeat(100);
+        let result = sanitize_idempotency_component(&long, "fb");
+        assert_eq!(result.len(), 64);
+    }
+
+    // --- non_empty_trimmed tests ---
+
+    #[test]
+    fn non_empty_trimmed_with_value() {
+        assert_eq!(non_empty_trimmed(Some("hello")), Some("hello"));
+    }
+
+    #[test]
+    fn non_empty_trimmed_with_whitespace() {
+        assert_eq!(non_empty_trimmed(Some("  hello  ")), Some("hello"));
+    }
+
+    #[test]
+    fn non_empty_trimmed_empty_string() {
+        assert_eq!(non_empty_trimmed(Some("")), None);
+    }
+
+    #[test]
+    fn non_empty_trimmed_whitespace_only() {
+        assert_eq!(non_empty_trimmed(Some("   ")), None);
+    }
+
+    #[test]
+    fn non_empty_trimmed_none() {
+        assert_eq!(non_empty_trimmed(None), None);
+    }
+
+    // --- derive_invoke_idempotency_key edge cases ---
+
+    #[test]
+    fn derive_idempotency_key_operation_id_priority_over_request_id() {
+        let params = json!({
+            "operation_id": "op-1",
+            "request_id": "req-2"
+        });
+        let key = derive_invoke_idempotency_key("stripe.create_customer", &params);
+        // operation_id is checked first, then request_id; operation_id wins
+        assert!(key.is_some());
+        assert!(key.unwrap().contains("op-1"));
+    }
+
+    #[test]
+    fn derive_idempotency_key_explicit_always_wins() {
+        let params = json!({
+            "idempotency_key": "my-key",
+            "operation_id": "op-1",
+            "request_id": "req-2"
+        });
+        let key = derive_invoke_idempotency_key("stripe.create_customer", &params);
+        assert_eq!(key.as_deref(), Some("my-key"));
+    }
+
+    // --- Connector default ---
+
+    #[test]
+    fn connector_new_creates_unconfigured() {
+        let c = StripeConnector::new();
+        assert!(c.client.is_none());
+    }
+
+    #[test]
+    fn connector_default_impl() {
+        let c = StripeConnector::default();
+        assert!(c.client.is_none());
+    }
+
+    // --- Introspect operations details ---
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_read_ops_are_safe() {
+        let connector = StripeConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+
+        let read_ops = ["stripe.get_customer", "stripe.list_customers", "stripe.get_payment_intent",
+            "stripe.get_subscription", "stripe.list_subscriptions", "stripe.get_invoice",
+            "stripe.list_invoices", "stripe.get_balance"];
+        for op_id in read_ops {
+            let op = ops.iter().find(|o| o["id"] == op_id);
+            if let Some(op) = op {
+                assert_eq!(
+                    op["risk_level"], "low",
+                    "{op_id} should be low risk"
+                );
+            }
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_ops_have_input_schema() {
+        let connector = StripeConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        for op in ops {
+            assert!(
+                op.get("input_schema").is_some(),
+                "op {} missing input_schema",
+                op["id"]
+            );
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_ops_have_output_schema() {
+        let connector = StripeConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        for op in ops {
+            assert!(
+                op.get("output_schema").is_some(),
+                "op {} missing output_schema",
+                op["id"]
+            );
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_ops_have_summary() {
+        let connector = StripeConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        for op in ops {
+            let summary = op["summary"].as_str().unwrap_or("");
+            assert!(
+                !summary.is_empty(),
+                "op {} has empty summary",
+                op["id"]
+            );
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_unique_op_ids() {
+        let connector = StripeConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let ids: Vec<&str> = ops.iter().filter_map(|o| o["id"].as_str()).collect();
+        let mut unique = ids.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(ids.len(), unique.len(), "duplicate operation IDs found");
+    }
 }

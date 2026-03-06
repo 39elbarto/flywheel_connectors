@@ -457,4 +457,206 @@ mod tests {
         .unwrap();
         assert_eq!(c.id, "math.CO");
     }
+
+    // ---- ArxivPaper additional tests ----
+
+    #[test]
+    fn arxiv_paper_clone_and_drop() {
+        let original = ArxivPaper {
+            arxiv_id: "2301.00000".into(),
+            title: "Clone Test".into(),
+            summary: "S".into(),
+            authors: vec!["A".into()],
+            published: "2023-01-01".into(),
+            updated: "2023-01-02".into(),
+            primary_category: Some("cs.AI".into()),
+            categories: vec!["cs.AI".into()],
+            pdf_url: None,
+            doi: None,
+            comment: None,
+            journal_ref: None,
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.arxiv_id, "2301.00000");
+        assert_eq!(cloned.title, "Clone Test");
+    }
+
+    #[test]
+    fn arxiv_paper_debug() {
+        let p = ArxivPaper {
+            arxiv_id: "debug_test".into(),
+            title: "T".into(),
+            summary: "S".into(),
+            authors: vec![],
+            published: String::new(),
+            updated: String::new(),
+            primary_category: None,
+            categories: vec![],
+            pdf_url: None,
+            doi: None,
+            comment: None,
+            journal_ref: None,
+        };
+        let dbg = format!("{p:?}");
+        assert!(dbg.contains("ArxivPaper"));
+        assert!(dbg.contains("debug_test"));
+    }
+
+    #[test]
+    fn arxiv_paper_with_all_optional_fields() {
+        let p = ArxivPaper {
+            arxiv_id: "2301.99999".into(),
+            title: "Full Paper".into(),
+            summary: "All fields".into(),
+            authors: vec!["Alice".into(), "Bob".into()],
+            published: "2023-01-01T00:00:00Z".into(),
+            updated: "2023-01-02T00:00:00Z".into(),
+            primary_category: Some("cs.CL".into()),
+            categories: vec!["cs.CL".into(), "cs.AI".into()],
+            pdf_url: Some("https://arxiv.org/pdf/2301.99999".into()),
+            doi: Some("10.1234/full".into()),
+            comment: Some("10 pages, 5 figures".into()),
+            journal_ref: Some("Nature 2023".into()),
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert!(v.get("comment").is_some());
+        assert!(v.get("journal_ref").is_some());
+        assert_eq!(v["doi"], "10.1234/full");
+    }
+
+    // ---- ScholarPaper additional tests ----
+
+    #[test]
+    fn scholar_paper_clone_and_drop() {
+        let original: ScholarPaper = serde_json::from_value(json!({
+            "paperId": "clone_test",
+            "title": "T"
+        }))
+        .unwrap();
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.paper_id, Some("clone_test".into()));
+    }
+
+    #[test]
+    fn scholar_paper_debug() {
+        let p: ScholarPaper = serde_json::from_value(json!({"paperId": "dbg"})).unwrap();
+        let dbg = format!("{p:?}");
+        assert!(dbg.contains("ScholarPaper"));
+    }
+
+    // ---- ScholarAuthorRef additional tests ----
+
+    #[test]
+    fn scholar_author_ref_clone_and_drop() {
+        let original = ScholarAuthorRef {
+            author_id: Some("a1".into()),
+            name: Some("Test".into()),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.author_id, Some("a1".into()));
+    }
+
+    #[test]
+    fn scholar_author_ref_debug() {
+        let a = ScholarAuthorRef {
+            author_id: None,
+            name: None,
+        };
+        let dbg = format!("{a:?}");
+        assert!(dbg.contains("ScholarAuthorRef"));
+    }
+
+    // ---- ScholarSearchResponse additional tests ----
+
+    #[test]
+    fn scholar_search_response_minimal() {
+        let r: ScholarSearchResponse = serde_json::from_value(json!({})).unwrap();
+        assert!(r.total.is_none());
+        assert!(r.offset.is_none());
+        assert!(r.data.is_none());
+    }
+
+    #[test]
+    fn scholar_search_response_clone_and_drop() {
+        let original: ScholarSearchResponse = serde_json::from_value(json!({
+            "total": 5,
+            "data": []
+        }))
+        .unwrap();
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.total, Some(5));
+    }
+
+    // ---- ScholarCitationsResponse additional tests ----
+
+    #[test]
+    fn scholar_citations_response_roundtrip() {
+        let r: ScholarCitationsResponse = serde_json::from_value(json!({
+            "offset": 0,
+            "data": [{"citingPaper": {"paperId": "p1"}}]
+        }))
+        .unwrap();
+        assert_eq!(r.data.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn scholar_citations_response_empty() {
+        let r: ScholarCitationsResponse = serde_json::from_value(json!({})).unwrap();
+        assert!(r.offset.is_none());
+        assert!(r.data.is_none());
+    }
+
+    // ---- ScholarAuthorSearchResponse additional tests ----
+
+    #[test]
+    fn scholar_author_search_response_minimal() {
+        let r: ScholarAuthorSearchResponse = serde_json::from_value(json!({})).unwrap();
+        assert!(r.total.is_none());
+        assert!(r.data.is_none());
+    }
+
+    // ---- ArxivCategory additional tests ----
+
+    #[test]
+    fn arxiv_category_clone_and_drop() {
+        let original = cat("cs.AI", "Artificial Intelligence", "cs");
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.id, "cs.AI");
+        assert_eq!(cloned.name, "Artificial Intelligence");
+        assert_eq!(cloned.group, "cs");
+    }
+
+    #[test]
+    fn arxiv_category_debug() {
+        let c = cat("stat.ML", "Machine Learning", "stat");
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("ArxivCategory"));
+        assert!(dbg.contains("stat.ML"));
+    }
+
+    #[test]
+    fn arxiv_categories_has_physics_groups() {
+        let cats = arxiv_categories();
+        let physics_cats = cats.iter().filter(|c| c.group == "physics").count();
+        assert!(physics_cats > 5);
+    }
+
+    #[test]
+    fn arxiv_categories_has_econ_group() {
+        let cats = arxiv_categories();
+        let econ_cats = cats.iter().filter(|c| c.group == "econ").count();
+        assert!(econ_cats >= 3);
+    }
+
+    #[test]
+    fn arxiv_categories_has_stat_group() {
+        let cats = arxiv_categories();
+        let stat_cats = cats.iter().filter(|c| c.group == "stat").count();
+        assert!(stat_cats >= 5);
+    }
 }

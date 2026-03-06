@@ -411,4 +411,76 @@ mod tests {
         let cloned = auth.clone();
         assert!(cloned.is_secretless());
     }
+
+    #[test]
+    fn client_with_credential_id() {
+        let client = DropboxClient::new(
+            DropboxAuth::CredentialId(CredentialId::new()),
+            None,
+            None,
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("CredentialId"));
+    }
+
+    #[test]
+    fn auth_bearer_is_not_secretless() {
+        let auth = DropboxAuth::BearerToken("anything".into());
+        assert!(!auth.is_secretless());
+    }
+
+    #[test]
+    fn auth_credential_is_secretless() {
+        let auth = DropboxAuth::CredentialId(CredentialId::new());
+        assert!(auth.is_secretless());
+    }
+
+    #[test]
+    fn default_base_url_starts_with_https() {
+        assert!(DEFAULT_BASE_URL.starts_with("https"));
+    }
+
+    #[test]
+    fn default_content_url_starts_with_https() {
+        assert!(DEFAULT_CONTENT_URL.starts_with("https"));
+    }
+
+    #[test]
+    fn default_base_url_does_not_end_with_slash() {
+        assert!(!DEFAULT_BASE_URL.ends_with('/'));
+    }
+
+    #[test]
+    fn default_content_url_does_not_end_with_slash() {
+        assert!(!DEFAULT_CONTENT_URL.ends_with('/'));
+    }
+
+    #[test]
+    fn client_debug_contains_dropbox_client() {
+        let client =
+            DropboxClient::new(DropboxAuth::BearerToken("tok".into()), None, None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("DropboxClient"));
+    }
+
+    #[test]
+    fn auth_credential_redacted_label_format() {
+        let id = CredentialId::new();
+        let expected = format!("credential_id:{id}");
+        let auth = DropboxAuth::CredentialId(id);
+        assert_eq!(auth.redacted_label(), expected);
+    }
+
+    #[test]
+    fn client_debug_does_not_leak_token() {
+        let client = DropboxClient::new(
+            DropboxAuth::BearerToken("super-secret-token-xyz".into()),
+            None,
+            None,
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(!dbg.contains("super-secret-token-xyz"));
+    }
 }

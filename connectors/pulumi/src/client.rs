@@ -127,11 +127,18 @@ impl PulumiClient {
     }
 
     #[instrument(skip(self), fields(url))]
-    async fn get(&self, path: &str) -> PulumiResult<serde_json::Value> {
+    async fn get(
+        &self,
+        path: &str,
+        query: Option<&[(&str, String)]>,
+    ) -> PulumiResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
         debug!(url = %url, "GET request");
-        let req = self.add_auth(self.client.get(&url))
+        let mut req = self.add_auth(self.client.get(&url))
             .header("Accept", "application/json");
+        if let Some(q) = query {
+            req = req.query(q);
+        }
         let resp = req.send().await?;
         self.handle_response(resp).await
     }
@@ -165,11 +172,14 @@ impl PulumiClient {
         organization: Option<&str>,
         project: Option<&str>,
     ) -> PulumiResult<serde_json::Value> {
-        let qs = build_query(&[
-            organization.map(|o| ("organization", o.to_string())),
-            project.map(|p| ("project", p.to_string())),
-        ]);
-        self.get(&format!("/stacks{qs}")).await
+        let mut q = Vec::new();
+        if let Some(o) = organization {
+            q.push(("organization", o.to_string()));
+        }
+        if let Some(p) = project {
+            q.push(("project", p.to_string()));
+        }
+        self.get("/stacks", if q.is_empty() { None } else { Some(&q) }).await
     }
 
     /// Get a stack by organization, project, and stack name.
@@ -179,7 +189,7 @@ impl PulumiClient {
         project: &str,
         stack: &str,
     ) -> PulumiResult<serde_json::Value> {
-        self.get(&format!("/stacks/{organization}/{project}/{stack}")).await
+        self.get(&format!("/stacks/{organization}/{project}/{stack}"), None).await
     }
 
     /// Create a new stack.
@@ -210,7 +220,7 @@ impl PulumiClient {
         project: &str,
         stack: &str,
     ) -> PulumiResult<serde_json::Value> {
-        self.get(&format!("/stacks/{organization}/{project}/{stack}/export")).await
+        self.get(&format!("/stacks/{organization}/{project}/{stack}/export"), None).await
     }
 
     // -- Deployments --
@@ -222,21 +232,8 @@ impl PulumiClient {
         project: &str,
         stack: &str,
     ) -> PulumiResult<serde_json::Value> {
-        self.get(&format!("/stacks/{organization}/{project}/{stack}/updates")).await
+        self.get(&format!("/stacks/{organization}/{project}/{stack}/updates"), None).await
     }
-}
-
-fn build_query(params: &[Option<(&str, String)>]) -> String {
-    let mut qs = String::new();
-    let mut sep = '?';
-    for param in params.iter().flatten() {
-        qs.push(sep);
-        qs.push_str(param.0);
-        qs.push('=');
-        qs.push_str(&param.1);
-        sep = '&';
-    }
-    qs
 }
 
 #[cfg(test)]
@@ -270,38 +267,6 @@ mod tests {
         let cred = PulumiAuth::CredentialId(CredentialId::new());
         let label = cred.redacted_label();
         assert!(label.starts_with("credential_id:"));
-    }
-
-    #[test]
-    fn build_query_empty() {
-        assert_eq!(build_query(&[None, None]), "");
-    }
-
-    #[test]
-    fn build_query_one() {
-        assert_eq!(
-            build_query(&[Some(("organization", "myorg".into()))]),
-            "?organization=myorg"
-        );
-    }
-
-    #[test]
-    fn build_query_two() {
-        assert_eq!(
-            build_query(&[
-                Some(("organization", "myorg".into())),
-                Some(("project", "myproject".into())),
-            ]),
-            "?organization=myorg&project=myproject"
-        );
-    }
-
-    #[test]
-    fn build_query_mixed() {
-        assert_eq!(
-            build_query(&[Some(("organization", "myorg".into())), None]),
-            "?organization=myorg"
-        );
     }
 
     #[test]
@@ -340,5 +305,94 @@ mod tests {
         assert!(!dbg.contains("secret"));
         assert!(dbg.contains("redacted"));
         assert!(dbg.contains("PulumiClient"));
+    }
+
+    #[test]
+    fn auth_clone_bearer() {
+        let bearer = PulumiAuth::BearerToken("pul-abc".into());
+        let cloned = bearer.clone();
+        assert_eq!(cloned.redacted_label(), "bearer_token:redacted");
+        assert_eq!(bearer.redacted_label(), "bearer_token:redacted");
+        assert!(!cloned.is_secretless());
+    }
+
+    #[test]
+    fn auth_clone_credential() {
+        let cred = PulumiAuth::CredentialId(CredentialId::new());
+        let cloned = cred.clone();
+        assert!(cloned.is_secretless());
+        assert!(cred.is_secretless());
+    }
+
+    #[test]
+    fn auth_debug_credential_id_shows_id() {
+        let id = CredentialId::new();
+        let id_str = id.to_string();
+        let auth = PulumiAuth::CredentialId(id);
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("CredentialId"));
+        assert!(dbg.contains(&id_str));
+    }
+
+    #[test]
+    fn client_new_trims_trailing_slash() {
+        let client = PulumiClient::new(
+            PulumiAuth::BearerToken("tok".into()),
+            Some("https://api.pulumi.com/api/"),
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(!dbg.contains("api/\""));
+    }
+
+    #[test]
+    fn client_new_trims_multiple_trailing_slashes() {
+        let client = PulumiClient::new(
+            PulumiAuth::BearerToken("tok".into()),
+            Some("https://api.pulumi.com/api///"),
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(!dbg.contains("api/"));
+    }
+
+    #[test]
+    fn client_debug_shows_base_url() {
+        let client = PulumiClient::new(
+            PulumiAuth::BearerToken("tok".into()),
+            Some("https://my-pulumi.example.com/api"),
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("https://my-pulumi.example.com/api"));
+    }
+
+    #[test]
+    fn auth_bearer_not_secretless() {
+        let auth = PulumiAuth::BearerToken(String::new());
+        assert!(!auth.is_secretless());
+    }
+
+    #[test]
+    fn auth_credential_is_secretless() {
+        let auth = PulumiAuth::CredentialId(CredentialId::new());
+        assert!(auth.is_secretless());
+    }
+
+    #[test]
+    fn auth_bearer_debug_hides_empty_token() {
+        let auth = PulumiAuth::BearerToken(String::new());
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("redacted"));
+        assert!(dbg.contains("BearerToken"));
+    }
+
+    #[test]
+    fn auth_redacted_label_for_credential() {
+        let cred = PulumiAuth::CredentialId(CredentialId::new());
+        let label = cred.redacted_label();
+        assert!(label.starts_with("credential_id:"));
+        // Check it contains a UUID-like string
+        assert!(label.len() > "credential_id:".len());
     }
 }

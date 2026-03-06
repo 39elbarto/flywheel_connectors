@@ -323,4 +323,323 @@ mod tests {
         assert_eq!(v["name"], "Do thing");
         assert_eq!(v["column_values"][0]["id"], "col1");
     }
+
+    #[test]
+    fn board_clone() {
+        let b = Board {
+            id: "b1".into(),
+            name: Some("Board".into()),
+            description: Some("Desc".into()),
+            state: Some("active".into()),
+            board_kind: Some("public".into()),
+        };
+        let b2 = b.clone();
+        assert_eq!(b.id, b2.id);
+        assert_eq!(b.name, b2.name);
+        assert_eq!(b.description, b2.description);
+    }
+
+    #[test]
+    fn board_debug() {
+        let b = Board {
+            id: "b1".into(),
+            name: None,
+            description: None,
+            state: None,
+            board_kind: None,
+        };
+        let dbg = format!("{b:?}");
+        assert!(dbg.contains("Board"));
+        assert!(dbg.contains("b1"));
+    }
+
+    #[test]
+    fn board_null_fields_serialize() {
+        let b = Board {
+            id: "b1".into(),
+            name: None,
+            description: None,
+            state: None,
+            board_kind: None,
+        };
+        let v = serde_json::to_value(&b).unwrap();
+        assert!(v["name"].is_null());
+        assert!(v["description"].is_null());
+    }
+
+    #[test]
+    fn board_json_string_roundtrip() {
+        let b = Board {
+            id: "b1".into(),
+            name: Some("Test".into()),
+            description: None,
+            state: Some("active".into()),
+            board_kind: None,
+        };
+        let s = serde_json::to_string(&b).unwrap();
+        let b2: Board = serde_json::from_str(&s).unwrap();
+        assert_eq!(b2.id, "b1");
+        assert_eq!(b2.name, Some("Test".into()));
+    }
+
+    #[test]
+    fn item_clone() {
+        let i = Item {
+            id: "i1".into(),
+            name: Some("Item".into()),
+            state: None,
+            column_values: vec![],
+        };
+        let i2 = i.clone();
+        assert_eq!(i.id, i2.id);
+        assert_eq!(i.column_values.len(), i2.column_values.len());
+    }
+
+    #[test]
+    fn item_debug() {
+        let i = Item {
+            id: "i1".into(),
+            name: None,
+            state: None,
+            column_values: vec![],
+        };
+        let dbg = format!("{i:?}");
+        assert!(dbg.contains("Item"));
+    }
+
+    #[test]
+    fn item_json_string_roundtrip() {
+        let i = Item {
+            id: "i1".into(),
+            name: Some("Test".into()),
+            state: Some("active".into()),
+            column_values: vec![ColumnValue {
+                id: Some("c1".into()),
+                text: Some("t".into()),
+                value: None,
+            }],
+        };
+        let s = serde_json::to_string(&i).unwrap();
+        let i2: Item = serde_json::from_str(&s).unwrap();
+        assert_eq!(i2.column_values.len(), 1);
+    }
+
+    #[test]
+    fn column_value_clone() {
+        let cv = ColumnValue {
+            id: Some("c1".into()),
+            text: Some("t".into()),
+            value: Some("v".into()),
+        };
+        let cv2 = cv.clone();
+        assert_eq!(cv.id, cv2.id);
+    }
+
+    #[test]
+    fn column_value_debug() {
+        let cv = ColumnValue {
+            id: None,
+            text: None,
+            value: None,
+        };
+        let dbg = format!("{cv:?}");
+        assert!(dbg.contains("ColumnValue"));
+    }
+
+    #[test]
+    fn column_value_json_string_roundtrip() {
+        let cv = ColumnValue {
+            id: Some("status".into()),
+            text: Some("Done".into()),
+            value: Some("{\"index\":2}".into()),
+        };
+        let s = serde_json::to_string(&cv).unwrap();
+        let cv2: ColumnValue = serde_json::from_str(&s).unwrap();
+        assert_eq!(cv2.text, Some("Done".into()));
+    }
+
+    #[test]
+    fn update_clone() {
+        let u = Update {
+            id: Some("u1".into()),
+            text_body: Some("body".into()),
+            creator: Some(UpdateCreator {
+                name: Some("Alice".into()),
+            }),
+            created_at: Some("2026-01-01".into()),
+        };
+        let u2 = u.clone();
+        assert_eq!(u.id, u2.id);
+        assert_eq!(
+            u.creator.as_ref().unwrap().name,
+            u2.creator.as_ref().unwrap().name
+        );
+    }
+
+    #[test]
+    fn update_debug() {
+        let u = Update {
+            id: None,
+            text_body: None,
+            creator: None,
+            created_at: None,
+        };
+        let dbg = format!("{u:?}");
+        assert!(dbg.contains("Update"));
+    }
+
+    #[test]
+    fn update_json_string_roundtrip() {
+        let u = Update {
+            id: Some("u1".into()),
+            text_body: Some("body".into()),
+            creator: None,
+            created_at: None,
+        };
+        let s = serde_json::to_string(&u).unwrap();
+        let u2: Update = serde_json::from_str(&s).unwrap();
+        assert_eq!(u2.id, Some("u1".into()));
+    }
+
+    #[test]
+    fn update_creator_clone() {
+        let c = UpdateCreator {
+            name: Some("Bob".into()),
+        };
+        let c2 = c.clone();
+        assert_eq!(c.name, c2.name);
+    }
+
+    #[test]
+    fn update_creator_debug() {
+        let c = UpdateCreator { name: None };
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("UpdateCreator"));
+    }
+
+    #[test]
+    fn update_creator_minimal() {
+        let c: UpdateCreator = serde_json::from_value(json!({})).unwrap();
+        assert!(c.name.is_none());
+    }
+
+    #[test]
+    fn graphql_response_clone() {
+        let r = GraphQLResponse {
+            data: Some(json!({})),
+            errors: None,
+        };
+        let r2 = r.clone();
+        assert_eq!(r.data, r2.data);
+    }
+
+    #[test]
+    fn graphql_response_debug() {
+        let r = GraphQLResponse {
+            data: None,
+            errors: None,
+        };
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("GraphQLResponse"));
+    }
+
+    #[test]
+    fn graphql_response_with_both_data_and_errors() {
+        let r: GraphQLResponse = serde_json::from_value(json!({
+            "data": {"boards": []},
+            "errors": [{"message": "partial error"}],
+        }))
+        .unwrap();
+        assert!(r.data.is_some());
+        assert!(r.errors.is_some());
+        assert_eq!(r.errors.unwrap()[0].message, "partial error");
+    }
+
+    #[test]
+    fn graphql_error_clone() {
+        let e = GraphQLError {
+            message: "err".into(),
+        };
+        let e2 = e.clone();
+        assert_eq!(e.message, e2.message);
+    }
+
+    #[test]
+    fn graphql_error_debug() {
+        let e = GraphQLError {
+            message: "err".into(),
+        };
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("GraphQLError"));
+    }
+
+    #[test]
+    fn graphql_response_multiple_errors() {
+        let r: GraphQLResponse = serde_json::from_value(json!({
+            "errors": [
+                {"message": "first error"},
+                {"message": "second error"},
+            ],
+        }))
+        .unwrap();
+        let errors = r.errors.unwrap();
+        assert_eq!(errors.len(), 2);
+        assert_eq!(errors[1].message, "second error");
+    }
+
+    #[test]
+    fn api_error_response_clone() {
+        let e = ApiErrorResponse {
+            error_message: Some("msg".into()),
+            error_code: Some("code".into()),
+        };
+        let e2 = e.clone();
+        assert_eq!(e.error_message, e2.error_message);
+    }
+
+    #[test]
+    fn api_error_response_debug() {
+        let e = ApiErrorResponse {
+            error_message: None,
+            error_code: None,
+        };
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("ApiErrorResponse"));
+    }
+
+    #[test]
+    fn api_error_response_extra_fields_ignored() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({
+            "error_message": "Bad",
+            "extra_field": "ignored",
+        }))
+        .unwrap();
+        assert_eq!(e.error_message, Some("Bad".into()));
+    }
+
+    #[test]
+    fn item_multiple_column_values() {
+        let i: Item = serde_json::from_value(json!({
+            "id": "item_1",
+            "column_values": [
+                {"id": "c1", "text": "A"},
+                {"id": "c2", "text": "B"},
+                {"id": "c3", "text": "C"},
+            ]
+        }))
+        .unwrap();
+        assert_eq!(i.column_values.len(), 3);
+        assert_eq!(i.column_values[2].id, Some("c3".into()));
+    }
+
+    #[test]
+    fn column_value_extra_fields_ignored() {
+        let cv: ColumnValue = serde_json::from_value(json!({
+            "id": "c1",
+            "text": "t",
+            "extra": true,
+        }))
+        .unwrap();
+        assert_eq!(cv.id, Some("c1".into()));
+    }
 }

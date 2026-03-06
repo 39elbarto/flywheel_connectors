@@ -619,4 +619,131 @@ mod tests {
             other => panic!("expected Internal, got {other:?}"),
         }
     }
+
+    // --- is_retryable additional ---
+
+    #[test]
+    fn is_retryable_api_599() {
+        assert!(
+            StripeError::Api {
+                message: "err".into(),
+                status_code: Some(599),
+                error_type: None,
+            }
+            .is_retryable()
+        );
+    }
+
+    // --- to_fcp_error for rate_limited with zero ---
+
+    #[test]
+    fn to_fcp_error_rate_limited_zero() {
+        let err = StripeError::RateLimited { retry_after_ms: 0 };
+        match err.to_fcp_error() {
+            FcpError::RateLimited { retry_after_ms, .. } => {
+                assert_eq!(retry_after_ms, 0);
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+    }
+
+    // --- to_fcp_error external retryable flag ---
+
+    #[test]
+    fn to_fcp_error_api_502_retryable() {
+        let err = StripeError::Api {
+            message: "bad gw".into(),
+            status_code: Some(502),
+            error_type: None,
+        };
+        match err.to_fcp_error() {
+            FcpError::External {
+                retryable,
+                status_code,
+                ..
+            } => {
+                assert!(retryable);
+                assert_eq!(status_code, Some(502));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    // --- Display exact format ---
+
+    #[test]
+    fn display_api_exact() {
+        let err = StripeError::Api {
+            message: "Card declined".into(),
+            status_code: Some(402),
+            error_type: Some("card_error".into()),
+        };
+        assert_eq!(err.to_string(), "Stripe API error: Card declined");
+    }
+
+    #[test]
+    fn display_rate_limited_exact() {
+        let err = StripeError::RateLimited {
+            retry_after_ms: 5000,
+        };
+        assert_eq!(err.to_string(), "Rate limited");
+    }
+
+    #[test]
+    fn display_not_found_exact() {
+        let err = StripeError::NotFound {
+            resource: "pi_abc".into(),
+        };
+        assert_eq!(err.to_string(), "Not found: pi_abc");
+    }
+
+    // --- to_fcp_error not_found resource preserved ---
+
+    #[test]
+    fn to_fcp_error_not_found_resource_preserved() {
+        let err = StripeError::NotFound {
+            resource: "sub_xyz_123".into(),
+        };
+        match err.to_fcp_error() {
+            FcpError::ResourceNotFound { resource } => {
+                assert_eq!(resource, "sub_xyz_123");
+            }
+            other => panic!("expected ResourceNotFound, got {other:?}"),
+        }
+    }
+
+    // --- to_fcp_error api with error_type ---
+
+    #[test]
+    fn to_fcp_error_api_with_error_type_preserved_in_external() {
+        let err = StripeError::Api {
+            message: "expired card".into(),
+            status_code: Some(402),
+            error_type: Some("card_error".into()),
+        };
+        match err.to_fcp_error() {
+            FcpError::External {
+                message,
+                status_code,
+                retryable,
+                service,
+                ..
+            } => {
+                assert_eq!(service, "stripe");
+                assert_eq!(message, "expired card");
+                assert_eq!(status_code, Some(402));
+                assert!(!retryable);
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    // --- StripeResult with complex type ---
+
+    #[test]
+    fn stripe_result_with_string() {
+        let r: StripeResult<String> = Ok("hello".into());
+        assert!(r.is_ok());
+        assert_eq!(r.as_ref().unwrap(), "hello");
+    }
 }

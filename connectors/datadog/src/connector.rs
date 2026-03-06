@@ -802,4 +802,197 @@ mod tests {
         assert!(c.client.is_none());
         assert!(c.session_id.is_none());
     }
+
+    #[test]
+    fn connector_new_counters_zero() {
+        let c = DatadogConnector::new();
+        assert_eq!(c.request_count.load(Ordering::Relaxed), 0);
+        assert_eq!(c.error_count.load(Ordering::Relaxed), 0);
+    }
+
+    // ── DoctorCheck skip_serializing_if ───────────────────────────
+
+    #[test]
+    fn doctor_check_message_none_omitted() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        // skip_serializing_if = "Option::is_none" means the key should not appear
+        assert!(!v.as_object().unwrap().contains_key("message"));
+    }
+
+    #[test]
+    fn doctor_check_message_some_present() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: false,
+            message: Some("error msg".into()),
+            critical: true,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert_eq!(v["message"], "error msg");
+    }
+
+    // ── DoctorStatus serde ────────────────────────────────────────
+
+    #[test]
+    fn doctor_status_serializes_lowercase() {
+        let v = serde_json::to_value(DoctorStatus::Healthy).unwrap();
+        assert_eq!(v, "healthy");
+        let v = serde_json::to_value(DoctorStatus::Degraded).unwrap();
+        assert_eq!(v, "degraded");
+        let v = serde_json::to_value(DoctorStatus::Unhealthy).unwrap();
+        assert_eq!(v, "unhealthy");
+    }
+
+    #[test]
+    fn doctor_status_deserializes_lowercase() {
+        let s: DoctorStatus = serde_json::from_value(json!("healthy")).unwrap();
+        assert_eq!(s, DoctorStatus::Healthy);
+        let s: DoctorStatus = serde_json::from_value(json!("degraded")).unwrap();
+        assert_eq!(s, DoctorStatus::Degraded);
+        let s: DoctorStatus = serde_json::from_value(json!("unhealthy")).unwrap();
+        assert_eq!(s, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_status_copy_eq() {
+        let s = DoctorStatus::Healthy;
+        let s2 = s; // Copy
+        assert_eq!(s, s2);
+    }
+
+    // ── DoctorResult serialization ────────────────────────────────
+
+    #[test]
+    fn doctor_result_roundtrip() {
+        let r = DoctorResult::from_checks(vec![
+            DoctorCheck { name: "c1".into(), passed: true, message: None, critical: true },
+            DoctorCheck { name: "c2".into(), passed: false, message: Some("warn".into()), critical: false },
+        ]);
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["status"], "degraded");
+        assert_eq!(v["checks"].as_array().unwrap().len(), 2);
+        let back: DoctorResult = serde_json::from_value(v).unwrap();
+        assert_eq!(back.status, DoctorStatus::Degraded);
+        assert_eq!(back.checks.len(), 2);
+    }
+
+    // ── Config region variants ────────────────────────────────────
+
+    #[test]
+    fn config_with_region_us3() {
+        let config = DatadogConfig::from_params(&json!({
+            "api_key": "k", "app_key": "a", "region": "us3",
+        }))
+        .unwrap();
+        assert_eq!(config.base_url, "https://api.us3.datadoghq.com/api/v1");
+    }
+
+    #[test]
+    fn config_with_region_us5() {
+        let config = DatadogConfig::from_params(&json!({
+            "api_key": "k", "app_key": "a", "region": "us5",
+        }))
+        .unwrap();
+        assert_eq!(config.base_url, "https://api.us5.datadoghq.com/api/v1");
+    }
+
+    // ── operations_info edge cases ────────────────────────────────
+
+    #[test]
+    fn operations_contain_expected_ids() {
+        let ops = operations_info();
+        let ids: Vec<&str> = ops.as_array().unwrap().iter().filter_map(|o| o["id"].as_str()).collect();
+        assert!(ids.contains(&"datadog.events.create"));
+        assert!(ids.contains(&"datadog.events.list"));
+        assert!(ids.contains(&"datadog.logs.search"));
+        assert!(ids.contains(&"datadog.metrics.query"));
+        assert!(ids.contains(&"datadog.metrics.submit"));
+        assert!(ids.contains(&"datadog.monitors.create"));
+        assert!(ids.contains(&"datadog.monitors.delete"));
+        assert!(ids.contains(&"datadog.monitors.list"));
+    }
+
+    #[test]
+    fn operations_all_have_idempotency() {
+        for op in operations_info().as_array().unwrap() {
+            assert!(op.get("idempotency").is_some(), "op {:?} missing idempotency", op["id"]);
+        }
+    }
+
+    #[test]
+    fn operations_safety_tiers_valid() {
+        let valid = ["safe", "risky", "dangerous"];
+        for op in operations_info().as_array().unwrap() {
+            let st = op["safety_tier"].as_str().unwrap();
+            assert!(valid.contains(&st), "invalid safety_tier: {st}");
+        }
+    }
+
+    #[test]
+    fn operations_delete_is_dangerous() {
+        for op in operations_info().as_array().unwrap() {
+            if op["id"].as_str().unwrap().contains("delete") {
+                assert_eq!(op["safety_tier"], "dangerous", "delete ops should be dangerous");
+                assert_eq!(op["risk_level"], "high", "delete ops should be high risk");
+            }
+        }
+    }
+
+    // ── require_str / require_i64 edge cases ──────────────────────
+
+    #[test]
+    fn require_str_null_value() {
+        assert!(require_str(&json!({"q": null}), "q").is_err());
+    }
+
+    #[test]
+    fn require_str_empty_string() {
+        // Empty string is still a valid string
+        assert_eq!(require_str(&json!({"q": ""}), "q").unwrap(), "");
+    }
+
+    #[test]
+    fn require_i64_negative() {
+        assert_eq!(require_i64(&json!({"n": -100}), "n").unwrap(), -100);
+    }
+
+    #[test]
+    fn require_i64_zero() {
+        assert_eq!(require_i64(&json!({"n": 0}), "n").unwrap(), 0);
+    }
+
+    #[test]
+    fn require_i64_null_value() {
+        assert!(require_i64(&json!({"n": null}), "n").is_err());
+    }
+
+    #[test]
+    fn require_i64_float_truncated() {
+        // serde_json as_i64 returns None for 1.5
+        assert!(require_i64(&json!({"n": 1.5}), "n").is_err());
+    }
+
+    // ── DoctorResult edge cases ───────────────────────────────────
+
+    #[test]
+    fn doctor_empty_checks_healthy() {
+        let r = DoctorResult::from_checks(vec![]);
+        assert_eq!(r.status, DoctorStatus::Healthy);
+        assert!(r.checks.is_empty());
+    }
+
+    #[test]
+    fn doctor_multiple_critical_failures() {
+        let r = DoctorResult::from_checks(vec![
+            DoctorCheck { name: "a".into(), passed: false, message: None, critical: true },
+            DoctorCheck { name: "b".into(), passed: false, message: None, critical: true },
+        ]);
+        assert_eq!(r.status, DoctorStatus::Unhealthy);
+    }
 }

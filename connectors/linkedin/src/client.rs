@@ -344,4 +344,78 @@ mod tests {
         .unwrap();
         assert!(!client.base_url.ends_with('/'));
     }
+
+    #[test]
+    fn auth_access_token_clone() {
+        let auth = LinkedInAuth::AccessToken("my-token".into());
+        let cloned = LinkedInAuth::clone(&auth);
+        assert!(!cloned.is_secretless());
+        assert_eq!(cloned.redacted_label(), "access_token:redacted");
+    }
+
+    #[test]
+    fn auth_credential_id_clone() {
+        let auth = LinkedInAuth::CredentialId(CredentialId::new());
+        let cloned = LinkedInAuth::clone(&auth);
+        assert!(cloned.is_secretless());
+    }
+
+    #[test]
+    fn client_debug_contains_base_url() {
+        let client = LinkedInClient::new(
+            LinkedInAuth::AccessToken("tok".into()),
+            Some("https://custom.linkedin.com/v2"),
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("custom.linkedin.com"));
+    }
+
+    #[test]
+    fn client_debug_contains_struct_name() {
+        let client = LinkedInClient::new(LinkedInAuth::AccessToken("tok".into()), None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("LinkedInClient"));
+    }
+
+    #[test]
+    fn auth_debug_access_token_contains_type_name() {
+        let auth = LinkedInAuth::AccessToken("secret".into());
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("AccessToken"));
+    }
+
+    #[test]
+    fn default_base_url_starts_with_https() {
+        assert!(DEFAULT_BASE_URL.starts_with("https://"));
+    }
+
+    #[test]
+    fn client_with_empty_custom_url() {
+        let client = LinkedInClient::new(
+            LinkedInAuth::AccessToken("tok".into()),
+            Some(""),
+        )
+        .unwrap();
+        assert!(client.base_url.is_empty());
+    }
+
+    #[test]
+    fn auth_credential_debug_does_not_contain_redacted() {
+        let cred = LinkedInAuth::CredentialId(CredentialId::new());
+        let dbg = format!("{cred:?}");
+        // CredentialId debug shows the UUID, not "redacted"
+        assert!(!dbg.contains("<redacted>"));
+    }
+
+    #[test]
+    fn client_multiple_trailing_slashes_stripped() {
+        let client = LinkedInClient::new(
+            LinkedInAuth::AccessToken("tok".into()),
+            Some("https://api.linkedin.com////"),
+        )
+        .unwrap();
+        // trim_end_matches('/') removes all trailing slashes
+        assert!(!client.base_url.ends_with('/'));
+    }
 }

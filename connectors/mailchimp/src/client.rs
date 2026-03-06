@@ -357,4 +357,113 @@ mod tests {
             MailchimpClient::new(MailchimpAuth::ApiKey("key-us3".into()), None).unwrap();
         assert_eq!(client.base_url(), "https://us3.api.mailchimp.com/3.0");
     }
+
+    // -- Additional client tests --
+
+    #[test]
+    fn client_credential_default_url() {
+        let client = MailchimpClient::new(
+            MailchimpAuth::CredentialId(CredentialId::new()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(client.base_url(), "https://us1.api.mailchimp.com/3.0");
+    }
+
+    #[test]
+    fn client_credential_custom_url() {
+        let client = MailchimpClient::new(
+            MailchimpAuth::CredentialId(CredentialId::new()),
+            Some("https://custom.api.mailchimp.com/3.0/"),
+        )
+        .unwrap();
+        assert_eq!(client.base_url(), "https://custom.api.mailchimp.com/3.0");
+    }
+
+    #[test]
+    fn client_debug_shows_credential_id() {
+        let cred = CredentialId::new();
+        let cred_str = cred.to_string();
+        let client = MailchimpClient::new(
+            MailchimpAuth::CredentialId(cred),
+            None,
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains(&cred_str));
+        assert!(dbg.contains("MailchimpClient"));
+    }
+
+    #[test]
+    fn auth_clone() {
+        let auth = MailchimpAuth::ApiKey("key-us1".into());
+        let cloned = auth.clone();
+        assert!(!auth.is_secretless());
+        assert_eq!(cloned.redacted_label(), "api_key:redacted");
+    }
+
+    #[test]
+    fn auth_credential_clone() {
+        let auth = MailchimpAuth::CredentialId(CredentialId::new());
+        let cloned = auth.clone();
+        assert!(auth.is_secretless());
+        assert!(cloned.redacted_label().starts_with("credential_id:"));
+    }
+
+    #[test]
+    fn auth_credential_debug_shows_id() {
+        let cred = CredentialId::new();
+        let cred_str = cred.to_string();
+        let auth = MailchimpAuth::CredentialId(cred);
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains(&cred_str));
+        assert!(dbg.contains("CredentialId"));
+    }
+
+    #[test]
+    fn extract_dc_multiple_dashes() {
+        assert_eq!(extract_dc("abc-def-us5"), Some("us5"));
+    }
+
+    #[test]
+    fn extract_dc_single_char() {
+        assert_eq!(extract_dc("key-a"), Some("a"));
+    }
+
+    #[test]
+    fn base_url_for_dc_us21() {
+        assert_eq!(base_url_for_dc("us21"), "https://us21.api.mailchimp.com/3.0");
+    }
+
+    #[test]
+    fn client_no_dc_in_key_defaults_us1() {
+        // A key with no dash: rsplit returns the whole string
+        let client = MailchimpClient::new(
+            MailchimpAuth::ApiKey("nodash".into()),
+            None,
+        )
+        .unwrap();
+        // extract_dc("nodash") returns Some("nodash")
+        assert!(client.base_url().contains("nodash"));
+    }
+
+    #[test]
+    fn client_key_trailing_dash_defaults_us1() {
+        // A key ending with dash: extract_dc returns None, defaults to us1
+        let client = MailchimpClient::new(
+            MailchimpAuth::ApiKey("mykey-".into()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(client.base_url(), "https://us1.api.mailchimp.com/3.0");
+    }
+
+    #[test]
+    fn base_url_prefix_suffix() {
+        // Verify the combined URL format
+        let url = base_url_for_dc("eu2");
+        assert!(url.starts_with("https://"));
+        assert!(url.ends_with(".api.mailchimp.com/3.0"));
+        assert!(url.contains("eu2"));
+    }
 }

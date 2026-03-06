@@ -842,4 +842,119 @@ mod tests {
         assert!(c.config.is_none());
         assert!(c.client.is_none());
     }
+
+    #[test]
+    fn connector_request_count_starts_at_zero() {
+        let c = AlgoliaConnector::new();
+        assert_eq!(c.request_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn connector_error_count_starts_at_zero() {
+        let c = AlgoliaConnector::new();
+        assert_eq!(c.error_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn doctor_check_serializes_with_message() {
+        let check = DoctorCheck {
+            name: "test_check".into(),
+            passed: false,
+            message: Some("failure reason".into()),
+            critical: true,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert_eq!(v["name"], "test_check");
+        assert_eq!(v["passed"], false);
+        assert_eq!(v["message"], "failure reason");
+        assert_eq!(v["critical"], true);
+    }
+
+    #[test]
+    fn doctor_check_serializes_without_message() {
+        let check = DoctorCheck {
+            name: "ok_check".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert_eq!(v["name"], "ok_check");
+        assert_eq!(v["passed"], true);
+        assert!(!v.as_object().unwrap().contains_key("message"));
+    }
+
+    #[test]
+    fn doctor_status_serde_roundtrip() {
+        let statuses = [DoctorStatus::Healthy, DoctorStatus::Degraded, DoctorStatus::Unhealthy];
+        for status in &statuses {
+            let v = serde_json::to_value(status).unwrap();
+            let back: DoctorStatus = serde_json::from_value(v).unwrap();
+            assert_eq!(*status, back);
+        }
+    }
+
+    #[test]
+    fn doctor_result_clone() {
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "x".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        }]);
+        let c = r.clone();
+        assert_eq!(c.status, DoctorStatus::Healthy);
+        assert_eq!(c.checks.len(), 1);
+        assert_eq!(r.status, DoctorStatus::Healthy);
+    }
+
+    #[test]
+    #[allow(clippy::case_sensitive_file_extension_comparisons)]
+    fn write_operations_not_safe() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let cap = op["capability"].as_str().unwrap();
+            if cap.ends_with(".write") {
+                let tier = op["safety_tier"].as_str().unwrap();
+                assert_ne!(tier, "safe", "write op {} should not be safe", op["id"]);
+            }
+        }
+    }
+
+    #[test]
+    fn operations_records_delete_is_dangerous() {
+        let ops = operations_info();
+        let del_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "algolia.records.delete")
+            .unwrap();
+        assert_eq!(del_op["safety_tier"], "dangerous");
+        assert_eq!(del_op["risk_level"], "high");
+    }
+
+    #[test]
+    fn operations_search_summary() {
+        let ops = operations_info();
+        let search_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "algolia.search")
+            .unwrap();
+        assert!(search_op["summary"].as_str().unwrap().len() > 5);
+    }
+
+    #[test]
+    fn require_str_object_value() {
+        let input = json!({"index_name": {"nested": true}});
+        assert!(require_str(&input, "index_name").is_err());
+    }
+
+    #[test]
+    fn require_str_float_value() {
+        let input = json!({"index_name": 9.87});
+        assert!(require_str(&input, "index_name").is_err());
+    }
 }

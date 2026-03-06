@@ -950,4 +950,271 @@ mod tests {
         let val: serde_json::Value = serde_json::to_value(&m).unwrap();
         assert!(val["score"].is_null());
     }
+
+    // ── Clone with drop(original) pattern ───────────────────────────────
+
+    #[test]
+    fn index_clone_drop_original() {
+        let original = Index {
+            name: "drop-idx".into(),
+            dimension: 768,
+            metric: "cosine".into(),
+            host: Some("host.io".into()),
+            status: Some(IndexStatus {
+                ready: Some(true),
+                state: Some("Ready".into()),
+            }),
+            spec: Some(json!({"pod": {"pods": 2}})),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.name, "drop-idx");
+        assert_eq!(cloned.dimension, 768);
+        assert!(cloned.status.unwrap().ready.unwrap());
+    }
+
+    #[test]
+    fn index_status_clone_drop_original() {
+        let original = IndexStatus {
+            ready: Some(false),
+            state: Some("ScalingUp".into()),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.ready, Some(false));
+        assert_eq!(cloned.state.as_deref(), Some("ScalingUp"));
+    }
+
+    #[test]
+    fn index_stats_clone_drop_original() {
+        let mut ns = HashMap::new();
+        ns.insert("ns1".to_string(), NamespaceStats { vector_count: 500 });
+        let original = IndexStats {
+            namespaces: Some(ns),
+            dimension: Some(256),
+            index_fullness: 0.42,
+            total_vector_count: 500,
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.total_vector_count, 500);
+        assert_eq!(cloned.namespaces.unwrap()["ns1"].vector_count, 500);
+    }
+
+    #[test]
+    fn namespace_stats_clone_preserves_fields() {
+        let original = NamespaceStats { vector_count: 1234 };
+        let cloned = original.clone();
+        assert_eq!(original.vector_count, cloned.vector_count);
+        assert_eq!(cloned.vector_count, 1234);
+    }
+
+    #[test]
+    fn vector_clone_drop_original() {
+        let original = Vector {
+            id: "drop-v".into(),
+            values: Some(vec![0.1, 0.2, 0.3]),
+            metadata: Some(json!({"key": "val"})),
+            sparse_values: Some(SparseValues {
+                indices: vec![0, 5],
+                values: vec![0.5, 0.9],
+            }),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.id, "drop-v");
+        assert_eq!(cloned.values.unwrap().len(), 3);
+        assert_eq!(cloned.sparse_values.unwrap().indices.len(), 2);
+    }
+
+    #[test]
+    fn sparse_values_clone_drop_original() {
+        let original = SparseValues {
+            indices: vec![1, 2, 3],
+            values: vec![0.1, 0.2, 0.3],
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.indices, vec![1, 2, 3]);
+        assert_eq!(cloned.values.len(), 3);
+    }
+
+    #[test]
+    fn match_clone_drop_original() {
+        let original = Match {
+            id: "drop-m".into(),
+            score: Some(0.99),
+            values: Some(vec![1.0]),
+            metadata: Some(json!({"tag": "test"})),
+            sparse_values: None,
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.id, "drop-m");
+        assert!((cloned.score.unwrap() - 0.99).abs() < 0.001);
+    }
+
+    #[test]
+    fn query_response_clone_drop_original() {
+        let original = QueryResponse {
+            matches: vec![Match {
+                id: "m1".into(),
+                score: Some(0.8),
+                values: None,
+                metadata: None,
+                sparse_values: None,
+            }],
+            namespace: Some("drop-ns".into()),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.matches.len(), 1);
+        assert_eq!(cloned.namespace.as_deref(), Some("drop-ns"));
+    }
+
+    #[test]
+    fn fetch_response_clone_drop_original() {
+        let mut vectors = HashMap::new();
+        vectors.insert(
+            "v1".to_string(),
+            Vector {
+                id: "v1".into(),
+                values: Some(vec![0.5]),
+                metadata: None,
+                sparse_values: None,
+            },
+        );
+        let original = FetchResponse {
+            vectors,
+            namespace: Some("drop-ns".into()),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.vectors.len(), 1);
+    }
+
+    #[test]
+    fn upsert_response_clone_preserves_fields() {
+        let original = UpsertResponse {
+            upserted_count: 42,
+        };
+        let cloned = original.clone();
+        assert_eq!(original.upserted_count, cloned.upserted_count);
+        assert_eq!(cloned.upserted_count, 42);
+    }
+
+    #[test]
+    fn list_indexes_response_clone_drop_original() {
+        let original = ListIndexesResponse {
+            indexes: vec![Index {
+                name: "drop-list".into(),
+                dimension: 64,
+                metric: "cosine".into(),
+                host: None,
+                status: None,
+                spec: None,
+            }],
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.indexes.len(), 1);
+        assert_eq!(cloned.indexes[0].name, "drop-list");
+    }
+
+    #[test]
+    fn api_error_response_clone_drop_original() {
+        let original = ApiErrorResponse {
+            status: Some(400),
+            error: Some(ApiErrorDetail {
+                code: Some("INVALID".into()),
+                message: Some("bad input".into()),
+            }),
+            message: Some("Bad request".into()),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.status, Some(400));
+        assert_eq!(
+            cloned.error.unwrap().code.as_deref(),
+            Some("INVALID")
+        );
+    }
+
+    #[test]
+    fn api_error_detail_clone_drop_original() {
+        let original = ApiErrorDetail {
+            code: Some("EXCEEDED".into()),
+            message: Some("Limit hit".into()),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.code.as_deref(), Some("EXCEEDED"));
+        assert_eq!(cloned.message.as_deref(), Some("Limit hit"));
+    }
+
+    // ── Additional serde edge cases ─────────────────────────────────────
+
+    #[test]
+    fn index_missing_required_name_fails() {
+        let json = json!({"dimension": 128, "metric": "cosine"});
+        assert!(serde_json::from_value::<Index>(json).is_err());
+    }
+
+    #[test]
+    fn index_missing_required_dimension_fails() {
+        let json = json!({"name": "idx", "metric": "cosine"});
+        assert!(serde_json::from_value::<Index>(json).is_err());
+    }
+
+    #[test]
+    fn index_missing_required_metric_fails() {
+        let json = json!({"name": "idx", "dimension": 128});
+        assert!(serde_json::from_value::<Index>(json).is_err());
+    }
+
+    #[test]
+    fn vector_missing_required_id_fails() {
+        let json = json!({"values": [0.1, 0.2]});
+        assert!(serde_json::from_value::<Vector>(json).is_err());
+    }
+
+    #[test]
+    fn match_missing_required_id_fails() {
+        let json = json!({"score": 0.9});
+        assert!(serde_json::from_value::<Match>(json).is_err());
+    }
+
+    #[test]
+    fn sparse_values_missing_required_fields_fails() {
+        let json = json!({"indices": [1, 2]});
+        assert!(serde_json::from_value::<SparseValues>(json).is_err());
+    }
+
+    #[test]
+    fn sparse_values_only_values_fails() {
+        let json = json!({"values": [0.1, 0.2]});
+        assert!(serde_json::from_value::<SparseValues>(json).is_err());
+    }
+
+    #[test]
+    fn namespace_stats_roundtrip() {
+        let ns = NamespaceStats { vector_count: 999 };
+        let json_str = serde_json::to_string(&ns).unwrap();
+        let back: NamespaceStats = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(back.vector_count, 999);
+    }
+
+    #[test]
+    fn match_score_negative() {
+        let json = json!({"id": "neg", "score": -0.5});
+        let m: Match = serde_json::from_value(json).unwrap();
+        assert!((m.score.unwrap() - (-0.5)).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn match_score_zero() {
+        let json = json!({"id": "zero", "score": 0.0});
+        let m: Match = serde_json::from_value(json).unwrap();
+        assert!((m.score.unwrap()).abs() < f64::EPSILON);
+    }
 }

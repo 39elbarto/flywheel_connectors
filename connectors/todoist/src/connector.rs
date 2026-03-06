@@ -741,4 +741,200 @@ mod tests {
         assert!(c.client.is_none());
         assert!(c.session_id.is_none());
     }
+
+    #[test]
+    fn connector_default_counters() {
+        let c = TodoistConnector::default();
+        assert_eq!(c.request_count.load(Ordering::Relaxed), 0);
+        assert_eq!(c.error_count.load(Ordering::Relaxed), 0);
+    }
+
+    // ── DoctorStatus serde ──────────────────────────────────────────
+
+    #[test]
+    fn doctor_status_healthy_serde() {
+        let v = serde_json::to_value(DoctorStatus::Healthy).unwrap();
+        assert_eq!(v, "healthy");
+        let ds: DoctorStatus = serde_json::from_value(v).unwrap();
+        assert_eq!(ds, DoctorStatus::Healthy);
+    }
+
+    #[test]
+    fn doctor_status_degraded_serde() {
+        let v = serde_json::to_value(DoctorStatus::Degraded).unwrap();
+        assert_eq!(v, "degraded");
+    }
+
+    #[test]
+    fn doctor_status_unhealthy_serde() {
+        let v = serde_json::to_value(DoctorStatus::Unhealthy).unwrap();
+        assert_eq!(v, "unhealthy");
+    }
+
+    #[test]
+    fn doctor_status_eq() {
+        assert_eq!(DoctorStatus::Healthy, DoctorStatus::Healthy);
+        assert_ne!(DoctorStatus::Healthy, DoctorStatus::Degraded);
+        assert_ne!(DoctorStatus::Degraded, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_status_copy() {
+        let s = DoctorStatus::Degraded;
+        let s2 = s;
+        assert_eq!(s, s2);
+    }
+
+    // ── DoctorCheck serde ───────────────────────────────────────────
+
+    #[test]
+    fn doctor_check_skip_none_message() {
+        let c = DoctorCheck { name: "test".into(), passed: true, message: None, critical: false };
+        let v = serde_json::to_value(&c).unwrap();
+        assert!(!v.as_object().unwrap().contains_key("message"));
+    }
+
+    #[test]
+    fn doctor_check_includes_some_message() {
+        let c = DoctorCheck { name: "test".into(), passed: false, message: Some("fail".into()), critical: true };
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["message"], "fail");
+    }
+
+    #[test]
+    fn doctor_check_roundtrip() {
+        let c = DoctorCheck { name: "cfg".into(), passed: true, message: None, critical: true };
+        let v = serde_json::to_value(&c).unwrap();
+        let c2: DoctorCheck = serde_json::from_value(v).unwrap();
+        assert_eq!(c2.name, "cfg");
+        assert!(c2.passed);
+    }
+
+    // ── DoctorResult serde ──────────────────────────────────────────
+
+    #[test]
+    fn doctor_result_roundtrip() {
+        let r = DoctorResult::from_checks(vec![
+            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
+        ]);
+        let v = serde_json::to_value(&r).unwrap();
+        let r2: DoctorResult = serde_json::from_value(v).unwrap();
+        assert_eq!(r2.status, DoctorStatus::Healthy);
+        assert_eq!(r2.checks.len(), 1);
+    }
+
+    #[test]
+    fn doctor_result_unhealthy_overrides_degraded() {
+        let r = DoctorResult::from_checks(vec![
+            DoctorCheck { name: "a".into(), passed: false, message: None, critical: true },
+            DoctorCheck { name: "b".into(), passed: false, message: None, critical: false },
+        ]);
+        assert_eq!(r.status, DoctorStatus::Unhealthy);
+    }
+
+    // ── Config edge cases ───────────────────────────────────────────
+
+    #[test]
+    fn config_error_both_code() {
+        let result = TodoistConfig::from_params(&json!({
+            "api_token": "tok",
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+        }));
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { code, message } => {
+                assert_eq!(code, 1003);
+                assert!(message.contains("exactly one"));
+            }
+            e => panic!("expected InvalidRequest, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn config_error_none_code() {
+        let result = TodoistConfig::from_params(&json!({}));
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { code, message } => {
+                assert_eq!(code, 1003);
+                assert!(message.contains("Missing"));
+            }
+            e => panic!("expected InvalidRequest, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn config_default_base_url() {
+        let config = TodoistConfig::from_params(&json!({"api_token": "tok"})).unwrap();
+        assert_eq!(config.base_url, DEFAULT_BASE_URL);
+    }
+
+    // ── require_str edge cases ──────────────────────────────────────
+
+    #[test]
+    fn require_str_empty_string() {
+        let input = json!({"field": ""});
+        assert_eq!(require_str(&input, "field").unwrap(), "");
+    }
+
+    #[test]
+    fn require_str_boolean() {
+        let input = json!({"flag": true});
+        assert!(require_str(&input, "flag").is_err());
+    }
+
+    #[test]
+    fn require_str_array() {
+        let input = json!({"arr": [1, 2]});
+        assert!(require_str(&input, "arr").is_err());
+    }
+
+    #[test]
+    fn require_str_error_message() {
+        let input = json!({});
+        match require_str(&input, "content").unwrap_err() {
+            TodoistError::Api { status_code, message } => {
+                assert_eq!(status_code, 400);
+                assert!(message.contains("content"));
+            }
+            e => panic!("expected Api error, got {e:?}"),
+        }
+    }
+
+    // ── operations edge cases ───────────────────────────────────────
+
+    #[test]
+    fn operations_projects_list_safe() {
+        let ops = operations_info();
+        let op = ops.as_array().unwrap().iter()
+            .find(|o| o["id"] == "todoist.projects.list").unwrap();
+        assert_eq!(op["safety_tier"], "safe");
+        assert_eq!(op["risk_level"], "low");
+    }
+
+    #[test]
+    fn operations_tasks_delete_dangerous() {
+        let ops = operations_info();
+        let op = ops.as_array().unwrap().iter()
+            .find(|o| o["id"] == "todoist.tasks.delete").unwrap();
+        assert_eq!(op["safety_tier"], "dangerous");
+        assert_eq!(op["risk_level"], "high");
+    }
+
+    #[test]
+    fn operations_valid_idempotency_values() {
+        let valid = ["strict", "best_effort", "none"];
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let idem = op["idempotency"].as_str().unwrap();
+            assert!(valid.contains(&idem), "invalid idempotency {idem} for {:?}", op["id"]);
+        }
+    }
+
+    #[test]
+    fn operations_all_prefixed_todoist() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let id = op["id"].as_str().unwrap();
+            assert!(id.starts_with("todoist."), "op {id} missing todoist. prefix");
+        }
+    }
 }

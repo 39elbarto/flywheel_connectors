@@ -372,4 +372,188 @@ mod tests {
             Some("DWZX6FOBBGSQPDYMM3Q4CWQVGE".into())
         );
     }
+
+    #[test]
+    fn vault_clone() {
+        let v: Vault = serde_json::from_value(json!({"id": "v1", "name": "V"})).unwrap();
+        let v2 = v.clone();
+        assert_eq!(v.id, v2.id);
+        assert_eq!(v.name, v2.name);
+    }
+
+    #[test]
+    fn vault_debug() {
+        let v: Vault = serde_json::from_value(json!({"id": "v1", "name": "V"})).unwrap();
+        let dbg = format!("{v:?}");
+        assert!(dbg.contains("Vault"));
+    }
+
+    #[test]
+    fn item_clone() {
+        let i: Item = serde_json::from_value(json!({"id": "i1"})).unwrap();
+        let i2 = i.clone();
+        assert_eq!(i.id, i2.id);
+    }
+
+    #[test]
+    fn item_debug() {
+        let i: Item = serde_json::from_value(json!({"id": "i1"})).unwrap();
+        let dbg = format!("{i:?}");
+        assert!(dbg.contains("Item"));
+    }
+
+    #[test]
+    fn vault_ref_clone() {
+        let vr: VaultRef = serde_json::from_value(json!({"id": "v1"})).unwrap();
+        let vr2 = vr.clone();
+        assert_eq!(vr.id, vr2.id);
+    }
+
+    #[test]
+    fn item_url_clone() {
+        let u: ItemUrl = serde_json::from_value(json!({"href": "https://a.com"})).unwrap();
+        let u2 = u.clone();
+        assert_eq!(u.href, u2.href);
+    }
+
+    #[test]
+    fn item_url_minimal() {
+        let u: ItemUrl =
+            serde_json::from_value(json!({"href": "https://example.com"})).unwrap();
+        assert!(u.label.is_none());
+        assert!(u.primary.is_none());
+    }
+
+    #[test]
+    fn item_field_clone() {
+        let f: ItemField = serde_json::from_value(json!({"id": "f1"})).unwrap();
+        let f2 = f.clone();
+        assert_eq!(f.id, f2.id);
+    }
+
+    #[test]
+    fn section_ref_clone() {
+        let s: SectionRef = serde_json::from_value(json!({"id": "sec1"})).unwrap();
+        let s2 = s.clone();
+        assert_eq!(s.id, s2.id);
+    }
+
+    #[test]
+    fn section_ref_debug() {
+        let s: SectionRef = serde_json::from_value(json!({"id": "sec1"})).unwrap();
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("SectionRef"));
+    }
+
+    #[test]
+    fn item_section_clone() {
+        let s: ItemSection = serde_json::from_value(json!({"id": "sec1"})).unwrap();
+        let s2 = s.clone();
+        assert_eq!(s.id, s2.id);
+    }
+
+    #[test]
+    fn create_item_request_clone() {
+        let req = CreateItemRequest {
+            vault: VaultRef {
+                id: "v1".into(),
+                name: None,
+            },
+            category: "LOGIN".into(),
+            title: "Test".into(),
+            tags: None,
+            fields: vec![],
+            sections: vec![],
+        };
+        let req2 = req.clone();
+        assert_eq!(req.title, req2.title);
+        assert_eq!(req.category, req2.category);
+    }
+
+    #[test]
+    fn api_error_response_clone() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({
+            "status": 400,
+            "message": "err"
+        }))
+        .unwrap();
+        let e2 = e.clone();
+        assert_eq!(e.status, e2.status);
+        assert_eq!(e.message, e2.message);
+    }
+
+    #[test]
+    fn api_error_response_debug() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({"message": "err"})).unwrap();
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("ApiErrorResponse"));
+    }
+
+    #[test]
+    fn vault_serialize_preserves_type_rename() {
+        let v = Vault {
+            id: "v1".into(),
+            name: "V".into(),
+            vault_type: Some("USER_CREATED".into()),
+            description: None,
+            attribute_version: None,
+            content_version: None,
+            items: None,
+            created_at: None,
+            updated_at: None,
+        };
+        let val = serde_json::to_value(&v).unwrap();
+        assert_eq!(val["type"], "USER_CREATED");
+    }
+
+    #[test]
+    fn item_with_state_archived() {
+        let i: Item = serde_json::from_value(json!({
+            "id": "item-1",
+            "state": "ARCHIVED",
+        }))
+        .unwrap();
+        assert_eq!(i.state, Some("ARCHIVED".into()));
+    }
+
+    #[test]
+    fn item_with_version() {
+        let i: Item = serde_json::from_value(json!({
+            "id": "item-1",
+            "version": 7,
+        }))
+        .unwrap();
+        assert_eq!(i.version, Some(7));
+    }
+
+    #[test]
+    fn item_field_with_section_ref() {
+        let f: ItemField = serde_json::from_value(json!({
+            "id": "f1",
+            "section": {"id": "sec1"},
+        }))
+        .unwrap();
+        assert_eq!(f.section.as_ref().unwrap().id, "sec1");
+    }
+
+    #[test]
+    fn create_item_request_with_sections() {
+        let req = CreateItemRequest {
+            vault: VaultRef {
+                id: "v1".into(),
+                name: None,
+            },
+            category: "LOGIN".into(),
+            title: "Test".into(),
+            tags: Some(vec!["tag1".into()]),
+            fields: vec![],
+            sections: vec![ItemSection {
+                id: "sec1".into(),
+                label: Some("Custom".into()),
+            }],
+        };
+        let v = serde_json::to_value(&req).unwrap();
+        assert_eq!(v["sections"][0]["id"], "sec1");
+        assert_eq!(v["sections"][0]["label"], "Custom");
+    }
 }

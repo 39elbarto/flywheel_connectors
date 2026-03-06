@@ -436,4 +436,105 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0]["uid"], "only");
     }
+
+    #[test]
+    fn auth_clone_bearer_token() {
+        let auth = RoamAuth::BearerToken("tok123".into());
+        let cloned = auth.clone();
+        // Use original after clone to prevent redundant_clone
+        assert!(!auth.is_secretless());
+        match cloned {
+            RoamAuth::BearerToken(t) => assert_eq!(t, "tok123"),
+            RoamAuth::CredentialId(_) => panic!("expected BearerToken"),
+        }
+    }
+
+    #[test]
+    fn auth_clone_credential_id() {
+        let cred = RoamAuth::CredentialId(CredentialId::new());
+        let cloned = cred.clone();
+        // Use original after clone
+        assert!(cred.is_secretless());
+        assert!(cloned.is_secretless());
+    }
+
+    #[test]
+    fn graph_url_empty_endpoint() {
+        let client = RoamClient::new(
+            RoamAuth::BearerToken("tok".into()),
+            "graph",
+            Some("http://localhost:8080"),
+        )
+        .unwrap();
+        assert_eq!(client.graph_url(""), "http://localhost:8080/graph");
+    }
+
+    #[test]
+    fn graph_url_root_endpoint() {
+        let client = RoamClient::new(
+            RoamAuth::BearerToken("tok".into()),
+            "graph",
+            Some("http://localhost:8080"),
+        )
+        .unwrap();
+        assert_eq!(client.graph_url("/"), "http://localhost:8080/graph/");
+    }
+
+    #[test]
+    fn client_new_with_credential_id() {
+        let client = RoamClient::new(
+            RoamAuth::CredentialId(CredentialId::new()),
+            "my-graph",
+            None,
+        )
+        .unwrap();
+        assert_eq!(client.graph_name(), "my-graph");
+    }
+
+    #[test]
+    fn unwrap_query_result_mixed_array() {
+        let data = json!([
+            [{"uid": "p1"}],
+            {"uid": "p2"},
+            [{"uid": "p3"}]
+        ]);
+        let result = unwrap_query_result(&data);
+        assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn unwrap_query_result_result_key_flat() {
+        let data = json!({"result": [{"uid": "p1"}, {"uid": "p2"}]});
+        let result = unwrap_query_result(&data);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn unwrap_query_result_empty_inner_arrays() {
+        let data = json!([[], []]);
+        let result = unwrap_query_result(&data);
+        // Each inner empty array has no first() element, so filtered out
+        assert_eq!(result.len(), 0);
+    }
+
+    #[test]
+    fn unwrap_query_result_number() {
+        let data = json!(42);
+        let result = unwrap_query_result(&data);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn unwrap_query_result_string() {
+        let data = json!("hello");
+        let result = unwrap_query_result(&data);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn unwrap_query_result_bool() {
+        let data = json!(true);
+        let result = unwrap_query_result(&data);
+        assert!(result.is_empty());
+    }
 }

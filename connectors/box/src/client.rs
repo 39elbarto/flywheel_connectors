@@ -369,4 +369,88 @@ mod tests {
         // Trailing slash should be stripped
         assert!(!dbg.contains("2.0/\""));
     }
+
+    #[test]
+    fn client_with_credential_id() {
+        let client =
+            BoxClient::new(BoxAuth::CredentialId(CredentialId::new()), None, None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("CredentialId"));
+    }
+
+    #[test]
+    fn auth_bearer_is_not_secretless() {
+        let auth = BoxAuth::BearerToken("anything".into());
+        assert!(!auth.is_secretless());
+    }
+
+    #[test]
+    fn auth_credential_is_secretless() {
+        let auth = BoxAuth::CredentialId(CredentialId::new());
+        assert!(auth.is_secretless());
+    }
+
+    #[test]
+    fn default_base_url_starts_with_https() {
+        assert!(DEFAULT_BASE_URL.starts_with("https"));
+    }
+
+    #[test]
+    fn default_upload_url_starts_with_https() {
+        assert!(DEFAULT_UPLOAD_URL.starts_with("https"));
+    }
+
+    #[test]
+    fn default_base_url_does_not_end_with_slash() {
+        assert!(!DEFAULT_BASE_URL.ends_with('/'));
+    }
+
+    #[test]
+    fn default_upload_url_does_not_end_with_slash() {
+        assert!(!DEFAULT_UPLOAD_URL.ends_with('/'));
+    }
+
+    #[test]
+    fn client_default_urls() {
+        let client = BoxClient::new(BoxAuth::BearerToken("tok".into()), None, None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("api.box.com"));
+        assert!(dbg.contains("upload.box.com"));
+    }
+
+    #[test]
+    fn auth_credential_redacted_label_format() {
+        let id = CredentialId::new();
+        let expected = format!("credential_id:{id}");
+        let auth = BoxAuth::CredentialId(id);
+        assert_eq!(auth.redacted_label(), expected);
+    }
+
+    #[test]
+    fn client_debug_does_not_leak_token() {
+        let client = BoxClient::new(
+            BoxAuth::BearerToken("secret-box-token".into()),
+            None,
+            None,
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(!dbg.contains("secret-box-token"));
+    }
+
+    #[test]
+    fn auth_bearer_clone() {
+        let auth = BoxAuth::BearerToken("tok".into());
+        #[allow(clippy::redundant_clone)]
+        let cloned = auth.clone();
+        assert!(!cloned.is_secretless());
+    }
+
+    #[test]
+    fn auth_credential_clone() {
+        let auth = BoxAuth::CredentialId(CredentialId::new());
+        #[allow(clippy::redundant_clone)]
+        let cloned = auth.clone();
+        assert!(cloned.is_secretless());
+    }
 }

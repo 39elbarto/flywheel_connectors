@@ -372,4 +372,90 @@ mod tests {
         let dbg = format!("{cred:?}");
         assert!(dbg.contains("CredentialId"));
     }
+
+    #[test]
+    fn client_debug_contains_struct_name() {
+        let client = TrelloClient::new(
+            TrelloAuth::ApiKeyToken {
+                api_key: "k".into(),
+                token: "t".into(),
+            },
+            None,
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("TrelloClient"));
+    }
+
+    #[test]
+    fn client_debug_contains_base_url() {
+        let client = TrelloClient::new(
+            TrelloAuth::ApiKeyToken {
+                api_key: "k".into(),
+                token: "t".into(),
+            },
+            Some("https://custom.trello.com/1"),
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("custom.trello.com"));
+    }
+
+    #[test]
+    fn auth_debug_api_key_token_contains_type() {
+        let auth = TrelloAuth::ApiKeyToken {
+            api_key: "k".into(),
+            token: "t".into(),
+        };
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("ApiKeyToken"));
+    }
+
+    #[test]
+    fn default_base_url_starts_with_https() {
+        assert!(DEFAULT_BASE_URL.starts_with("https://"));
+    }
+
+    #[test]
+    fn default_base_url_is_trello_v1() {
+        assert_eq!(DEFAULT_BASE_URL, "https://api.trello.com/1");
+    }
+
+    #[test]
+    fn auth_api_key_token_clone() {
+        let auth = TrelloAuth::ApiKeyToken {
+            api_key: "my-key".into(),
+            token: "my-token".into(),
+        };
+        let cloned = TrelloAuth::clone(&auth);
+        assert!(!cloned.is_secretless());
+        assert_eq!(cloned.redacted_label(), "api_key_token:redacted");
+    }
+
+    #[test]
+    fn auth_credential_id_clone() {
+        let auth = TrelloAuth::CredentialId(CredentialId::new());
+        let cloned = TrelloAuth::clone(&auth);
+        assert!(cloned.is_secretless());
+    }
+
+    #[test]
+    fn client_strips_multiple_trailing_slashes() {
+        let client = TrelloClient::new(
+            TrelloAuth::ApiKeyToken {
+                api_key: "k".into(),
+                token: "t".into(),
+            },
+            Some("https://api.trello.com/1///"),
+        )
+        .unwrap();
+        assert!(!client.base_url.ends_with('/'));
+    }
+
+    #[test]
+    fn auth_credential_debug_does_not_contain_redacted_tag() {
+        let cred = TrelloAuth::CredentialId(CredentialId::new());
+        let dbg = format!("{cred:?}");
+        assert!(!dbg.contains("<redacted>"));
+    }
 }

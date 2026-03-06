@@ -492,4 +492,117 @@ mod tests {
     #[test] fn connector_default() { let c = TerraformConnector::default(); assert!(c.config.is_none()); assert!(c.client.is_none()); assert!(c.session_id.is_none()); }
     #[test] fn ops_apply_destroy_best_effort() { for op in operations_info().as_array().unwrap() { let id = op["id"].as_str().unwrap(); if id=="terraform.apply"||id=="terraform.destroy" { assert_eq!(op["idempotency"].as_str().unwrap(),"best_effort"); } } }
     #[test] fn ops_strict_idempotency() { let s = ["terraform.init","terraform.validate","terraform.plan","terraform.show_plan","terraform.state_list","terraform.state_show","terraform.output","terraform.detect_drift","terraform.list_modules","terraform.import"]; for op in operations_info().as_array().unwrap() { let id = op["id"].as_str().unwrap(); if s.contains(&id) { assert_eq!(op["idempotency"].as_str().unwrap(),"strict"); } } }
+
+    #[test]
+    fn doctor_result_multiple_critical_failures() {
+        let checks = vec![
+            DoctorCheck { name: "a".into(), passed: false, message: Some("f1".into()), critical: true },
+            DoctorCheck { name: "b".into(), passed: false, message: Some("f2".into()), critical: true },
+        ];
+        let r = DoctorResult::from_checks(checks);
+        assert_eq!(r.status, DoctorStatus::Unhealthy);
+        assert_eq!(r.checks.len(), 2);
+    }
+
+    #[test]
+    fn doctor_check_skip_serializing_none_message() {
+        let check = DoctorCheck { name: "t".into(), passed: true, message: None, critical: false };
+        let v = serde_json::to_value(&check).unwrap();
+        assert!(!v.as_object().unwrap().contains_key("message"));
+    }
+
+    #[test]
+    fn doctor_check_serializes_some_message() {
+        let check = DoctorCheck { name: "t".into(), passed: false, message: Some("broken".into()), critical: true };
+        let v = serde_json::to_value(&check).unwrap();
+        assert_eq!(v["message"], "broken");
+    }
+
+    #[test]
+    fn doctor_status_serde_healthy() {
+        assert_eq!(serde_json::to_value(DoctorStatus::Healthy).unwrap(), "healthy");
+    }
+
+    #[test]
+    fn doctor_status_serde_degraded() {
+        assert_eq!(serde_json::to_value(DoctorStatus::Degraded).unwrap(), "degraded");
+    }
+
+    #[test]
+    fn doctor_status_serde_unhealthy() {
+        assert_eq!(serde_json::to_value(DoctorStatus::Unhealthy).unwrap(), "unhealthy");
+    }
+
+    #[test]
+    fn connector_new_eq_default() {
+        let a = TerraformConnector::new();
+        let b = TerraformConnector::default();
+        assert!(a.config.is_none());
+        assert!(b.config.is_none());
+        assert_eq!(a.request_count.load(Ordering::Relaxed), 0);
+        assert_eq!(b.error_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn ops_summaries_non_empty() {
+        for op in operations_info().as_array().unwrap() {
+            let s = op["summary"].as_str().unwrap();
+            assert!(!s.is_empty(), "empty summary for {}", op["id"]);
+        }
+    }
+
+    #[test]
+    fn ops_ids_follow_naming_convention() {
+        for op in operations_info().as_array().unwrap() {
+            let id = op["id"].as_str().unwrap();
+            assert!(id.starts_with("terraform."), "op id should start with 'terraform.': {id}");
+        }
+    }
+
+    #[test]
+    fn ops_plan_capability_count() {
+        let count = operations_info().as_array().unwrap().iter()
+            .filter(|o| o["capability"].as_str() == Some("terraform.plan")).count();
+        // init, validate, plan, show_plan, detect_drift, list_modules = 6
+        assert_eq!(count, 6);
+    }
+
+    #[test]
+    fn ops_state_capability_count() {
+        let count = operations_info().as_array().unwrap().iter()
+            .filter(|o| o["capability"].as_str() == Some("terraform.state")).count();
+        // state_list, state_show, output = 3
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn ops_apply_capability_count() {
+        let count = operations_info().as_array().unwrap().iter()
+            .filter(|o| o["capability"].as_str() == Some("terraform.apply")).count();
+        // apply, destroy = 2
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn ops_import_is_risky() {
+        for op in operations_info().as_array().unwrap() {
+            if op["id"].as_str() == Some("terraform.import") {
+                assert_eq!(op["safety_tier"].as_str().unwrap(), "risky");
+                assert_eq!(op["risk_level"].as_str().unwrap(), "medium");
+            }
+        }
+    }
+
+    #[test]
+    fn require_str_empty_string_is_ok() {
+        // Empty string is still a valid string value
+        let input = json!({"x": ""});
+        assert_eq!(require_str(&input, "x").unwrap(), "");
+    }
+
+    #[test]
+    fn config_default_base_url() {
+        let c = TerraformConfig::from_params(&json!({"api_token": "t"})).unwrap();
+        assert_eq!(c.base_url, DEFAULT_BASE_URL);
+    }
 }

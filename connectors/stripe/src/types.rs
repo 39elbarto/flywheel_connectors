@@ -710,4 +710,349 @@ mod tests {
         assert_eq!(pi_b.amount, 2500);
         assert_eq!(pi_b.status, "requires_capture");
     }
+
+    // --- Clone and drop tests ---
+
+    #[test]
+    fn customer_clone_and_drop() {
+        let original = Customer {
+            id: "cus_drop".into(),
+            object: "customer".into(),
+            email: Some("drop@test.com".into()),
+            name: Some("Drop Test".into()),
+            created: Some(1_700_000_000),
+            livemode: Some(true),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.id, "cus_drop");
+        assert_eq!(cloned.email.as_deref(), Some("drop@test.com"));
+    }
+
+    #[test]
+    fn payment_intent_clone_and_drop() {
+        let original = PaymentIntent {
+            id: "pi_drop".into(),
+            object: "payment_intent".into(),
+            amount: 4200,
+            currency: "usd".into(),
+            status: "processing".into(),
+            customer: Some("cus_x".into()),
+            created: Some(1_700_000_000),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.id, "pi_drop");
+        assert_eq!(cloned.amount, 4200);
+    }
+
+    #[test]
+    fn refund_clone_and_drop() {
+        let original = Refund {
+            id: "re_drop".into(),
+            object: "refund".into(),
+            amount: 300,
+            currency: "eur".into(),
+            status: "succeeded".into(),
+            payment_intent: Some("pi_1".into()),
+            created: Some(1_700_000_000),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.id, "re_drop");
+        assert_eq!(cloned.amount, 300);
+    }
+
+    #[test]
+    fn subscription_clone_and_drop() {
+        let original = Subscription {
+            id: "sub_drop".into(),
+            object: "subscription".into(),
+            status: "active".into(),
+            customer: Some("cus_x".into()),
+            current_period_start: Some(1_700_000_000),
+            current_period_end: Some(1_702_592_000),
+            created: Some(1_700_000_000),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.id, "sub_drop");
+        assert_eq!(cloned.status, "active");
+    }
+
+    #[test]
+    fn invoice_clone_and_drop() {
+        let original = Invoice {
+            id: "in_drop".into(),
+            object: "invoice".into(),
+            amount_due: Some(5000),
+            currency: Some("usd".into()),
+            status: Some("paid".into()),
+            customer: Some("cus_x".into()),
+            created: Some(1_700_000_000),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.id, "in_drop");
+        assert_eq!(cloned.amount_due, Some(5000));
+    }
+
+    #[test]
+    fn deleted_resource_clone_and_drop() {
+        let original = DeletedResource {
+            id: "cus_del_drop".into(),
+            object: "customer".into(),
+            deleted: true,
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.id, "cus_del_drop");
+        assert!(cloned.deleted);
+    }
+
+    #[test]
+    fn balance_clone_and_drop() {
+        let original = Balance {
+            object: "balance".into(),
+            available: vec![BalanceAmount {
+                amount: 1000,
+                currency: "usd".into(),
+            }],
+            pending: vec![],
+            livemode: Some(false),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.available.len(), 1);
+        assert_eq!(cloned.available[0].amount, 1000);
+    }
+
+    #[test]
+    fn balance_amount_clone_and_drop() {
+        let original = BalanceAmount {
+            amount: 999,
+            currency: "gbp".into(),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.amount, 999);
+        assert_eq!(cloned.currency, "gbp");
+    }
+
+    #[test]
+    fn webhook_event_clone_and_drop() {
+        let original = StripeWebhookEvent {
+            id: "evt_drop".into(),
+            object: "event".into(),
+            event_type: "charge.succeeded".into(),
+            created: 1_700_000_000,
+            livemode: Some(false),
+            data: StripeWebhookEventData {
+                object: json!({"id": "ch_123"}),
+            },
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.id, "evt_drop");
+        assert_eq!(cloned.event_type, "charge.succeeded");
+    }
+
+    #[test]
+    fn webhook_event_data_clone_and_drop() {
+        let original = StripeWebhookEventData {
+            object: json!({"id": "obj_drop", "amount": 42}),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.object["id"], "obj_drop");
+    }
+
+    #[test]
+    fn api_error_response_clone_and_drop() {
+        let original = ApiErrorResponse {
+            error: Some(ApiErrorDetail {
+                message: Some("err".into()),
+                error_type: Some("api_error".into()),
+                code: Some("resource_missing".into()),
+            }),
+        };
+        let cloned = original.clone();
+        drop(original);
+        let detail = cloned.error.unwrap();
+        assert_eq!(detail.message.as_deref(), Some("err"));
+    }
+
+    // --- Debug format ---
+
+    #[test]
+    fn payment_intent_debug() {
+        let pi = PaymentIntent {
+            id: "pi_dbg".into(),
+            object: "payment_intent".into(),
+            amount: 100,
+            currency: "usd".into(),
+            status: "succeeded".into(),
+            customer: None,
+            created: None,
+        };
+        let dbg = format!("{pi:?}");
+        assert!(dbg.contains("PaymentIntent"));
+        assert!(dbg.contains("pi_dbg"));
+    }
+
+    #[test]
+    fn refund_debug() {
+        let r = Refund {
+            id: "re_dbg".into(),
+            object: "refund".into(),
+            amount: 50,
+            currency: "eur".into(),
+            status: "pending".into(),
+            payment_intent: None,
+            created: None,
+        };
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("Refund"));
+        assert!(dbg.contains("re_dbg"));
+    }
+
+    #[test]
+    fn subscription_debug() {
+        let s = Subscription {
+            id: "sub_dbg".into(),
+            object: "subscription".into(),
+            status: "trialing".into(),
+            customer: None,
+            current_period_start: None,
+            current_period_end: None,
+            created: None,
+        };
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("Subscription"));
+        assert!(dbg.contains("sub_dbg"));
+    }
+
+    #[test]
+    fn invoice_debug() {
+        let i = Invoice {
+            id: "in_dbg".into(),
+            object: "invoice".into(),
+            amount_due: None,
+            currency: None,
+            status: None,
+            customer: None,
+            created: None,
+        };
+        let dbg = format!("{i:?}");
+        assert!(dbg.contains("Invoice"));
+        assert!(dbg.contains("in_dbg"));
+    }
+
+    #[test]
+    fn deleted_resource_debug() {
+        let d = DeletedResource {
+            id: "cus_dbg_del".into(),
+            object: "customer".into(),
+            deleted: true,
+        };
+        let dbg = format!("{d:?}");
+        assert!(dbg.contains("DeletedResource"));
+        assert!(dbg.contains("cus_dbg_del"));
+    }
+
+    #[test]
+    fn balance_debug() {
+        let b = Balance {
+            object: "balance".into(),
+            available: vec![],
+            pending: vec![],
+            livemode: None,
+        };
+        let dbg = format!("{b:?}");
+        assert!(dbg.contains("Balance"));
+    }
+
+    #[test]
+    fn webhook_event_debug() {
+        let e = StripeWebhookEvent {
+            id: "evt_dbg".into(),
+            object: "event".into(),
+            event_type: "test.event".into(),
+            created: 0,
+            livemode: None,
+            data: StripeWebhookEventData {
+                object: json!({}),
+            },
+        };
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("StripeWebhookEvent"));
+        assert!(dbg.contains("evt_dbg"));
+    }
+
+    // --- Webhook event with livemode none ---
+
+    #[test]
+    fn webhook_event_livemode_none() {
+        let json_str = r#"{"id":"evt_1","object":"event","type":"test","created":0,"data":{"object":{}}}"#;
+        let event: StripeWebhookEvent = serde_json::from_str(json_str).unwrap();
+        assert!(event.livemode.is_none());
+    }
+
+    // --- PaymentIntent roundtrip ---
+
+    #[test]
+    fn payment_intent_roundtrip() {
+        let original = PaymentIntent {
+            id: "pi_rt".into(),
+            object: "payment_intent".into(),
+            amount: 5000,
+            currency: "jpy".into(),
+            status: "requires_capture".into(),
+            customer: Some("cus_rt".into()),
+            created: Some(1_700_000_000),
+        };
+        let serialized = serde_json::to_string(&original).unwrap();
+        let deserialized: PaymentIntent = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.id, "pi_rt");
+        assert_eq!(deserialized.amount, 5000);
+        assert_eq!(deserialized.currency, "jpy");
+    }
+
+    // --- Subscription roundtrip ---
+
+    #[test]
+    fn subscription_roundtrip() {
+        let original = Subscription {
+            id: "sub_rt".into(),
+            object: "subscription".into(),
+            status: "active".into(),
+            customer: Some("cus_1".into()),
+            current_period_start: Some(1_700_000_000),
+            current_period_end: Some(1_702_592_000),
+            created: Some(1_700_000_000),
+        };
+        let serialized = serde_json::to_string(&original).unwrap();
+        let deserialized: Subscription = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.id, "sub_rt");
+        assert_eq!(deserialized.current_period_start, Some(1_700_000_000));
+    }
+
+    // --- Invoice roundtrip ---
+
+    #[test]
+    fn invoice_roundtrip() {
+        let original = Invoice {
+            id: "in_rt".into(),
+            object: "invoice".into(),
+            amount_due: Some(9999),
+            currency: Some("chf".into()),
+            status: Some("open".into()),
+            customer: Some("cus_rt".into()),
+            created: Some(1_700_000_000),
+        };
+        let serialized = serde_json::to_string(&original).unwrap();
+        let deserialized: Invoice = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.amount_due, Some(9999));
+        assert_eq!(deserialized.currency.as_deref(), Some("chf"));
+    }
 }

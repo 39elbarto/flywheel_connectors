@@ -891,4 +891,107 @@ mod tests {
         let unhealthy = serde_json::to_value(DoctorStatus::Unhealthy).unwrap();
         assert_eq!(unhealthy, "unhealthy");
     }
+
+    #[test]
+    fn doctor_status_deserialize() {
+        let h: DoctorStatus = serde_json::from_value(json!("healthy")).unwrap();
+        assert_eq!(h, DoctorStatus::Healthy);
+        let d: DoctorStatus = serde_json::from_value(json!("degraded")).unwrap();
+        assert_eq!(d, DoctorStatus::Degraded);
+        let u: DoctorStatus = serde_json::from_value(json!("unhealthy")).unwrap();
+        assert_eq!(u, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_status_copy_and_eq() {
+        let s = DoctorStatus::Healthy;
+        let s2 = s;
+        assert_eq!(s, s2);
+    }
+
+    #[test]
+    fn doctor_result_preserves_check_count() {
+        let checks = vec![
+            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
+            DoctorCheck { name: "b".into(), passed: true, message: None, critical: false },
+            DoctorCheck { name: "c".into(), passed: true, message: None, critical: false },
+        ];
+        let r = DoctorResult::from_checks(checks);
+        assert_eq!(r.checks.len(), 3);
+        assert_eq!(r.status, DoctorStatus::Healthy);
+    }
+
+    #[test]
+    fn connector_new_zero_counters() {
+        let c = AmplitudeConnector::new();
+        assert_eq!(c.request_count.load(Ordering::Relaxed), 0);
+        assert_eq!(c.error_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn config_debug_format() {
+        let config = AmplitudeConfig::from_params(&json!({
+            "api_key": "test-key",
+            "secret_key": "test-secret",
+        }))
+        .unwrap();
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("AmplitudeConfig"));
+        assert!(!dbg.contains("test-key"));
+        assert!(!dbg.contains("test-secret"));
+    }
+
+    #[test]
+    fn config_clone() {
+        let config = AmplitudeConfig::from_params(&json!({
+            "api_key": "key",
+            "secret_key": "secret",
+            "base_url": "https://custom.com",
+        }))
+        .unwrap();
+        let cloned = config.clone();
+        // Use original after clone
+        assert_eq!(config.auth.api_key, "key");
+        assert_eq!(cloned.auth.api_key, "key");
+        assert_eq!(cloned.base_url, Some("https://custom.com".into()));
+    }
+
+    #[test]
+    fn require_str_empty_string() {
+        let input = json!({"chart_id": ""});
+        assert_eq!(require_str(&input, "chart_id").unwrap(), "");
+    }
+
+    #[test]
+    fn require_str_float_value() {
+        let input = json!({"chart_id": 9.876});
+        assert!(require_str(&input, "chart_id").is_err());
+    }
+
+    #[test]
+    fn operations_all_have_summary() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let summary = op["summary"].as_str().unwrap();
+            assert!(!summary.is_empty(), "op {:?} has empty summary", op["id"]);
+        }
+    }
+
+    #[test]
+    fn operations_all_strict_idempotency() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            assert_eq!(op["idempotency"], "strict", "op {:?} should be strict", op["id"]);
+        }
+    }
+
+    #[test]
+    fn config_base_url_none_when_not_provided() {
+        let config = AmplitudeConfig::from_params(&json!({
+            "api_key": "key",
+            "secret_key": "secret",
+        }))
+        .unwrap();
+        assert!(config.base_url.is_none());
+    }
 }

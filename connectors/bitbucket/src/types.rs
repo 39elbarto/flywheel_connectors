@@ -477,4 +477,307 @@ mod tests {
         assert_eq!(v["slug"], "team");
         assert_eq!(v["name"], "Team Workspace");
     }
+
+    #[test]
+    fn user_clone() {
+        let u = User {
+            uuid: Some("{u1}".into()),
+            username: Some("joe".into()),
+            display_name: Some("Joe".into()),
+            nickname: Some("j".into()),
+        };
+        let c = u.clone();
+        assert_eq!(c.uuid, Some("{u1}".into()));
+        assert_eq!(c.username, Some("joe".into()));
+        // Use original too to prove both exist
+        assert_eq!(u.display_name, Some("Joe".into()));
+    }
+
+    #[test]
+    fn user_debug() {
+        let u = User {
+            uuid: None,
+            username: Some("test".into()),
+            display_name: None,
+            nickname: None,
+        };
+        let dbg = format!("{u:?}");
+        assert!(dbg.contains("test"));
+    }
+
+    #[test]
+    fn repository_clone() {
+        let r = Repository {
+            uuid: Some("{r1}".into()),
+            full_name: Some("team/repo".into()),
+            name: Some("repo".into()),
+            description: None,
+            is_private: Some(false),
+            language: Some("rust".into()),
+        };
+        let c = r.clone();
+        assert_eq!(c.full_name, Some("team/repo".into()));
+        assert_eq!(c.is_private, Some(false));
+        // Use original too
+        assert_eq!(r.uuid, Some("{r1}".into()));
+    }
+
+    #[test]
+    fn repository_debug() {
+        let r = Repository {
+            uuid: None,
+            full_name: Some("team/repo".into()),
+            name: None,
+            description: None,
+            is_private: None,
+            language: None,
+        };
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("team/repo"));
+    }
+
+    #[test]
+    fn pull_request_clone() {
+        let pr = PullRequest {
+            id: Some(1),
+            title: Some("PR".into()),
+            state: Some("OPEN".into()),
+            author: None,
+            source: None,
+            destination: None,
+        };
+        let c = pr.clone();
+        assert_eq!(c.id, Some(1));
+        assert_eq!(c.title, Some("PR".into()));
+        assert_eq!(pr.state, Some("OPEN".into()));
+    }
+
+    #[test]
+    fn pipeline_clone() {
+        let p = Pipeline {
+            uuid: Some("{p1}".into()),
+            state: Some(json!({"name": "RUNNING"})),
+            build_number: Some(42),
+        };
+        let c = p.clone();
+        assert_eq!(c.uuid, Some("{p1}".into()));
+        assert_eq!(c.build_number, Some(42));
+        assert!(p.state.is_some());
+    }
+
+    #[test]
+    fn pipeline_debug() {
+        let p = Pipeline {
+            uuid: Some("{p1}".into()),
+            state: None,
+            build_number: Some(99),
+        };
+        let dbg = format!("{p:?}");
+        assert!(dbg.contains("99"));
+    }
+
+    #[test]
+    fn workspace_clone() {
+        let w = Workspace {
+            uuid: Some("{w1}".into()),
+            slug: Some("ws".into()),
+            name: Some("Workspace".into()),
+        };
+        let c = w.clone();
+        assert_eq!(c.slug, Some("ws".into()));
+        assert_eq!(w.name, Some("Workspace".into()));
+    }
+
+    #[test]
+    fn branch_clone() {
+        let b = Branch {
+            name: Some("main".into()),
+            target: Some(CommitRef {
+                hash: Some("abc".into()),
+                message: Some("msg".into()),
+            }),
+        };
+        let c = b.clone();
+        assert_eq!(c.name, Some("main".into()));
+        assert!(c.target.is_some());
+        assert_eq!(b.name, Some("main".into()));
+    }
+
+    #[test]
+    fn commit_ref_clone() {
+        let cr = CommitRef {
+            hash: Some("deadbeef".into()),
+            message: Some("commit msg".into()),
+        };
+        let c = cr.clone();
+        assert_eq!(c.hash, Some("deadbeef".into()));
+        assert_eq!(cr.message, Some("commit msg".into()));
+    }
+
+    #[test]
+    fn commit_ref_minimal() {
+        let cr: CommitRef = serde_json::from_value(json!({})).unwrap();
+        assert!(cr.hash.is_none());
+        assert!(cr.message.is_none());
+    }
+
+    #[test]
+    fn user_ref_minimal() {
+        let ur: UserRef = serde_json::from_value(json!({})).unwrap();
+        assert!(ur.display_name.is_none());
+        assert!(ur.uuid.is_none());
+    }
+
+    #[test]
+    fn branch_ref_minimal() {
+        let br: BranchRef = serde_json::from_value(json!({})).unwrap();
+        assert!(br.branch.is_none());
+        assert!(br.repository.is_none());
+    }
+
+    #[test]
+    fn repo_ref_minimal() {
+        let rr: RepoRef = serde_json::from_value(json!({})).unwrap();
+        assert!(rr.full_name.is_none());
+    }
+
+    #[test]
+    fn branch_name_minimal() {
+        let bn: BranchName = serde_json::from_value(json!({})).unwrap();
+        assert!(bn.name.is_none());
+    }
+
+    #[test]
+    fn api_error_detail_clone() {
+        let d = ApiErrorDetail {
+            message: Some("err".into()),
+            detail: Some("detail".into()),
+        };
+        let c = d.clone();
+        assert_eq!(c.message, Some("err".into()));
+        assert_eq!(c.detail, Some("detail".into()));
+        assert_eq!(d.message, Some("err".into()));
+    }
+
+    #[test]
+    fn api_error_response_clone() {
+        let r = ApiErrorResponse {
+            error: Some(ApiErrorDetail {
+                message: Some("msg".into()),
+                detail: None,
+            }),
+        };
+        let c = r.clone();
+        assert!(c.error.is_some());
+        assert!(r.error.is_some());
+    }
+
+    #[test]
+    fn api_error_detail_debug() {
+        let d = ApiErrorDetail {
+            message: Some("test msg".into()),
+            detail: None,
+        };
+        let dbg = format!("{d:?}");
+        assert!(dbg.contains("test msg"));
+    }
+
+    #[test]
+    fn user_ref_clone() {
+        let ur = UserRef {
+            display_name: Some("Alice".into()),
+            uuid: Some("{u1}".into()),
+        };
+        let c = ur.clone();
+        assert_eq!(c.display_name, Some("Alice".into()));
+        assert_eq!(ur.uuid, Some("{u1}".into()));
+    }
+
+    #[test]
+    fn branch_ref_clone() {
+        let br = BranchRef {
+            branch: Some(BranchName {
+                name: Some("feat".into()),
+            }),
+            repository: Some(RepoRef {
+                full_name: Some("t/r".into()),
+            }),
+        };
+        let c = br.clone();
+        assert!(c.branch.is_some());
+        assert!(c.repository.is_some());
+        assert!(br.branch.is_some());
+    }
+
+    #[test]
+    fn pipeline_serialize_roundtrip() {
+        let p = Pipeline {
+            uuid: Some("{p-ser}".into()),
+            state: Some(json!({"name": "COMPLETED"})),
+            build_number: Some(77),
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["uuid"], "{p-ser}");
+        assert_eq!(v["build_number"], 77);
+        let back: Pipeline = serde_json::from_value(v).unwrap();
+        assert_eq!(back.uuid, Some("{p-ser}".into()));
+    }
+
+    #[test]
+    fn branch_serialize_roundtrip() {
+        let b = Branch {
+            name: Some("develop".into()),
+            target: Some(CommitRef {
+                hash: Some("abc123".into()),
+                message: None,
+            }),
+        };
+        let v = serde_json::to_value(&b).unwrap();
+        assert_eq!(v["name"], "develop");
+        let back: Branch = serde_json::from_value(v).unwrap();
+        assert_eq!(back.name, Some("develop".into()));
+    }
+
+    #[test]
+    fn user_serialize_roundtrip() {
+        let u = User {
+            uuid: Some("{u-ser}".into()),
+            username: Some("jtest".into()),
+            display_name: Some("J Test".into()),
+            nickname: None,
+        };
+        let v = serde_json::to_value(&u).unwrap();
+        assert_eq!(v["username"], "jtest");
+        let back: User = serde_json::from_value(v).unwrap();
+        assert_eq!(back.username, Some("jtest".into()));
+    }
+
+    #[test]
+    fn repository_is_private_false() {
+        let r: Repository = serde_json::from_value(json!({
+            "is_private": false,
+        }))
+        .unwrap();
+        assert_eq!(r.is_private, Some(false));
+    }
+
+    #[test]
+    fn pull_request_declined_state() {
+        let pr: PullRequest = serde_json::from_value(json!({
+            "id": 99,
+            "state": "DECLINED",
+        }))
+        .unwrap();
+        assert_eq!(pr.state, Some("DECLINED".into()));
+    }
+
+    #[test]
+    fn pull_request_merged_state() {
+        let pr: PullRequest = serde_json::from_value(json!({
+            "id": 100,
+            "state": "MERGED",
+        }))
+        .unwrap();
+        assert_eq!(pr.state, Some("MERGED".into()));
+    }
 }

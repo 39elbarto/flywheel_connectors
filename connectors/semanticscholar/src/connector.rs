@@ -1022,4 +1022,135 @@ mod tests {
             .iter()
             .any(|o| o["id"].as_str() == Some("semanticscholar.author.papers")));
     }
+
+    // --- DoctorStatus serde ---
+
+    #[test]
+    fn doctor_status_healthy_serde() {
+        let v = serde_json::to_value(DoctorStatus::Healthy).unwrap();
+        assert_eq!(v, "healthy");
+        let back: DoctorStatus = serde_json::from_value(v).unwrap();
+        assert_eq!(back, DoctorStatus::Healthy);
+    }
+
+    #[test]
+    fn doctor_status_degraded_serde() {
+        let v = serde_json::to_value(DoctorStatus::Degraded).unwrap();
+        assert_eq!(v, "degraded");
+    }
+
+    #[test]
+    fn doctor_status_unhealthy_serde() {
+        let v = serde_json::to_value(DoctorStatus::Unhealthy).unwrap();
+        assert_eq!(v, "unhealthy");
+    }
+
+    // --- DoctorStatus clone and debug ---
+
+    #[test]
+    fn doctor_status_clone_and_drop() {
+        let original = DoctorStatus::Healthy;
+        let cloned = original;
+        assert_eq!(cloned, DoctorStatus::Healthy);
+    }
+
+    #[test]
+    fn doctor_status_debug() {
+        let dbg = format!("{:?}", DoctorStatus::Degraded);
+        assert!(dbg.contains("Degraded"));
+    }
+
+    // --- DoctorCheck clone and debug ---
+
+    #[test]
+    fn doctor_check_clone_and_drop() {
+        let original = DoctorCheck {
+            name: "test_check".into(),
+            passed: true,
+            message: Some("ok".into()),
+            critical: false,
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.name, "test_check");
+        assert!(cloned.passed);
+        assert_eq!(cloned.message, Some("ok".into()));
+    }
+
+    #[test]
+    fn doctor_check_debug() {
+        let check = DoctorCheck {
+            name: "dbg_check".into(),
+            passed: false,
+            message: None,
+            critical: true,
+        };
+        let dbg = format!("{check:?}");
+        assert!(dbg.contains("DoctorCheck"));
+        assert!(dbg.contains("dbg_check"));
+    }
+
+    // --- DoctorResult clone and debug ---
+
+    #[test]
+    fn doctor_result_clone_and_drop() {
+        let original = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "a".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        }]);
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.status, DoctorStatus::Healthy);
+        assert_eq!(cloned.checks.len(), 1);
+    }
+
+    #[test]
+    fn doctor_result_debug() {
+        let r = DoctorResult::from_checks(vec![]);
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("DoctorResult"));
+    }
+
+    // --- require_str error message ---
+
+    #[test]
+    fn require_str_error_message_contains_field_name() {
+        let input = json!({});
+        let err = require_str(&input, "paper_id").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("paper_id"));
+    }
+
+    // --- SemanticScholarConfig clone and debug ---
+
+    #[test]
+    fn config_clone_and_drop() {
+        let config = SemanticScholarConfig::from_params(&json!({
+            "api_key": "test_key",
+            "base_url": "https://example.com/v1",
+        }))
+        .unwrap();
+        let cloned = config.clone();
+        drop(config);
+        assert!(cloned.auth.has_key());
+        assert_eq!(cloned.base_url, "https://example.com/v1");
+    }
+
+    #[test]
+    fn config_debug() {
+        let config = SemanticScholarConfig::from_params(&json!({})).unwrap();
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("SemanticScholarConfig"));
+    }
+
+    // --- Connector request/error counts ---
+
+    #[test]
+    fn connector_initial_counts_zero() {
+        let c = SemanticScholarConnector::new();
+        assert_eq!(c.request_count.load(Ordering::Relaxed), 0);
+        assert_eq!(c.error_count.load(Ordering::Relaxed), 0);
+    }
 }

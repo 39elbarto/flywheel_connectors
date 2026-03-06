@@ -294,4 +294,87 @@ mod tests {
         assert!(!dbg.contains("secret"));
         assert!(dbg.contains("redacted"));
     }
+
+    #[test]
+    fn client_trims_trailing_slashes() {
+        let client = TodoistClient::new(
+            TodoistAuth::BearerToken("tok".into()),
+            Some("https://api.todoist.com/rest/v2///"),
+        )
+        .unwrap();
+        assert_eq!(client.base_url, "https://api.todoist.com/rest/v2");
+    }
+
+    #[test]
+    fn client_debug_shows_base_url() {
+        let client = TodoistClient::new(TodoistAuth::BearerToken("tok".into()), None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains(DEFAULT_BASE_URL));
+    }
+
+    #[test]
+    fn client_debug_contains_struct_name() {
+        let client = TodoistClient::new(TodoistAuth::BearerToken("tok".into()), None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("TodoistClient"));
+    }
+
+    #[test]
+    fn auth_debug_credential_id() {
+        let id = CredentialId::new();
+        let auth = TodoistAuth::CredentialId(id);
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("CredentialId"));
+    }
+
+    #[test]
+    fn auth_clone_bearer() {
+        let auth = TodoistAuth::BearerToken("tok".into());
+        #[allow(clippy::redundant_clone)]
+        let cloned = auth.clone();
+        assert_eq!(cloned.redacted_label(), "bearer_token:redacted");
+    }
+
+    #[test]
+    fn auth_clone_credential() {
+        let auth = TodoistAuth::CredentialId(CredentialId::new());
+        #[allow(clippy::redundant_clone)]
+        let cloned = auth.clone();
+        assert!(cloned.is_secretless());
+    }
+
+    #[test]
+    fn default_base_url_value() {
+        assert_eq!(DEFAULT_BASE_URL, "https://api.todoist.com/rest/v2");
+    }
+
+    #[test]
+    fn auth_bearer_not_secretless() {
+        let auth = TodoistAuth::BearerToken("token".into());
+        assert!(!auth.is_secretless());
+    }
+
+    #[test]
+    fn auth_credential_is_secretless() {
+        let auth = TodoistAuth::CredentialId(CredentialId::new());
+        assert!(auth.is_secretless());
+    }
+
+    #[test]
+    fn auth_bearer_debug_no_token_leak() {
+        let auth = TodoistAuth::BearerToken("my-super-long-api-token-12345".into());
+        let dbg = format!("{auth:?}");
+        assert!(!dbg.contains("my-super-long-api-token-12345"));
+        assert!(dbg.contains("BearerToken"));
+    }
+
+    #[test]
+    fn client_custom_url_no_trailing_slash() {
+        let client = TodoistClient::new(
+            TodoistAuth::BearerToken("tok".into()),
+            Some("https://custom.example.com"),
+        )
+        .unwrap();
+        assert_eq!(client.base_url, "https://custom.example.com");
+    }
 }

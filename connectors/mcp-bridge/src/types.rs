@@ -419,4 +419,223 @@ mod tests {
         assert!(!v.as_object().unwrap().contains_key("blob"));
         assert_eq!(v["text"], "hello");
     }
+
+    #[test]
+    fn mcp_tool_clone() {
+        let t = McpTool {
+            name: "read_file".into(),
+            description: Some("Read a file".into()),
+            input_schema: Some(json!({"type": "object"})),
+        };
+        let cloned = McpTool::clone(&t);
+        assert_eq!(cloned.name, "read_file");
+        assert_eq!(cloned.description, Some("Read a file".into()));
+    }
+
+    #[test]
+    fn mcp_tool_debug() {
+        let t = McpTool {
+            name: "ping".into(),
+            description: None,
+            input_schema: None,
+        };
+        let dbg = format!("{t:?}");
+        assert!(dbg.contains("ping"));
+    }
+
+    #[test]
+    fn mcp_resource_clone() {
+        let r = McpResource {
+            uri: "res://x".into(),
+            name: Some("data".into()),
+            description: None,
+            mime_type: Some("text/plain".into()),
+        };
+        let cloned = McpResource::clone(&r);
+        assert_eq!(cloned.uri, "res://x");
+        assert_eq!(cloned.name, Some("data".into()));
+    }
+
+    #[test]
+    fn mcp_resource_debug() {
+        let r = McpResource {
+            uri: "res://test".into(),
+            name: None,
+            description: None,
+            mime_type: None,
+        };
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("res://test"));
+    }
+
+    #[test]
+    fn resource_content_clone() {
+        let c = ResourceContent {
+            uri: Some("res://x".into()),
+            mime_type: None,
+            text: Some("data".into()),
+            blob: None,
+        };
+        let cloned = ResourceContent::clone(&c);
+        assert_eq!(cloned.text, Some("data".into()));
+    }
+
+    #[test]
+    fn tool_content_clone() {
+        let c = ToolContent {
+            content_type: "text".into(),
+            text: Some("result".into()),
+            extra: json!({}),
+        };
+        let cloned = ToolContent::clone(&c);
+        assert_eq!(cloned.content_type, "text");
+        assert_eq!(cloned.text, Some("result".into()));
+    }
+
+    #[test]
+    fn mcp_prompt_clone() {
+        let p = McpPrompt {
+            name: "summarize".into(),
+            description: Some("Summarize text".into()),
+            arguments: Some(vec![PromptArgument {
+                name: "text".into(),
+                description: None,
+                required: Some(true),
+            }]),
+        };
+        let cloned = McpPrompt::clone(&p);
+        assert_eq!(cloned.name, "summarize");
+        assert_eq!(cloned.arguments.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn prompt_argument_clone() {
+        let a = PromptArgument {
+            name: "lang".into(),
+            description: Some("Language".into()),
+            required: Some(false),
+        };
+        let cloned = PromptArgument::clone(&a);
+        assert_eq!(cloned.name, "lang");
+        assert_eq!(cloned.required, Some(false));
+    }
+
+    #[test]
+    fn jsonrpc_request_clone() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0",
+            id: 42,
+            method: "test".into(),
+            params: json!({}),
+        };
+        let cloned = JsonRpcRequest::clone(&req);
+        assert_eq!(cloned.id, 42);
+        assert_eq!(cloned.method, "test");
+    }
+
+    #[test]
+    fn jsonrpc_response_clone() {
+        let r: JsonRpcResponse = serde_json::from_value(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"ok": true}
+        }))
+        .unwrap();
+        let cloned = JsonRpcResponse::clone(&r);
+        assert!(cloned.result.is_some());
+        assert!(cloned.error.is_none());
+    }
+
+    #[test]
+    fn jsonrpc_error_clone() {
+        let e: JsonRpcError = serde_json::from_value(json!({
+            "code": -32600,
+            "message": "Invalid"
+        }))
+        .unwrap();
+        let cloned = JsonRpcError::clone(&e);
+        assert_eq!(cloned.code, -32600);
+    }
+
+    #[test]
+    fn api_error_response_clone() {
+        let e = ApiErrorResponse {
+            message: Some("err".into()),
+            error: Some("404".into()),
+        };
+        let cloned = ApiErrorResponse::clone(&e);
+        assert_eq!(cloned.message, Some("err".into()));
+        assert_eq!(cloned.error, Some("404".into()));
+    }
+
+    #[test]
+    fn mcp_prompt_serialize_skips_none() {
+        let p = McpPrompt {
+            name: "test".into(),
+            description: None,
+            arguments: None,
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert!(!v.as_object().unwrap().contains_key("description"));
+        assert!(!v.as_object().unwrap().contains_key("arguments"));
+    }
+
+    #[test]
+    fn prompt_argument_serialize_skips_none() {
+        let a = PromptArgument {
+            name: "input".into(),
+            description: None,
+            required: None,
+        };
+        let v = serde_json::to_value(&a).unwrap();
+        assert!(!v.as_object().unwrap().contains_key("description"));
+        assert!(!v.as_object().unwrap().contains_key("required"));
+    }
+
+    #[test]
+    fn jsonrpc_request_with_params() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0",
+            id: 5,
+            method: "tools/call".into(),
+            params: json!({"name": "test", "arguments": {}}),
+        };
+        let v = serde_json::to_value(&req).unwrap();
+        assert_eq!(v["params"]["name"], "test");
+    }
+
+    #[test]
+    fn jsonrpc_response_null_result() {
+        let r: JsonRpcResponse = serde_json::from_value(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": null
+        }))
+        .unwrap();
+        // null result deserializes as None
+        assert!(r.result.is_none());
+    }
+
+    #[test]
+    fn tool_content_debug() {
+        let c = ToolContent {
+            content_type: "text".into(),
+            text: Some("result".into()),
+            extra: json!({}),
+        };
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("text"));
+    }
+
+    #[test]
+    fn resource_content_debug() {
+        let c = ResourceContent {
+            uri: Some("res://x".into()),
+            mime_type: None,
+            text: None,
+            blob: None,
+        };
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("res://x"));
+    }
 }

@@ -332,4 +332,80 @@ mod tests {
         let h2 = auth.basic_auth_header();
         assert_eq!(h1, h2);
     }
+
+    #[test]
+    fn auth_redacted_label_exactly_four_chars() {
+        let auth = AmplitudeAuth {
+            api_key: "abcd".into(),
+            secret_key: "sec".into(),
+        };
+        let label = auth.redacted_label();
+        assert!(label.contains("abcd"));
+        assert!(label.contains("redacted"));
+    }
+
+    #[test]
+    fn auth_redacted_label_one_char_key() {
+        let auth = AmplitudeAuth {
+            api_key: "x".into(),
+            secret_key: "sec".into(),
+        };
+        let label = auth.redacted_label();
+        assert!(label.contains("x..."));
+    }
+
+    #[test]
+    fn auth_redacted_label_empty_key() {
+        let auth = AmplitudeAuth {
+            api_key: String::new(),
+            secret_key: "sec".into(),
+        };
+        let label = auth.redacted_label();
+        assert!(label.contains("...,secret_key:redacted"));
+    }
+
+    #[test]
+    fn auth_basic_auth_header_unicode() {
+        let auth = AmplitudeAuth {
+            api_key: "key\u{00e9}".into(),
+            secret_key: "sec\u{00e9}".into(),
+        };
+        let header = auth.basic_auth_header();
+        assert!(header.starts_with("Basic "));
+    }
+
+    #[test]
+    fn client_debug_does_not_leak_keys() {
+        let auth = AmplitudeAuth {
+            api_key: "MY_SECRET_KEY".into(),
+            secret_key: "MY_SECRET_SECRET".into(),
+        };
+        let client = AmplitudeClient::new(auth, None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(!dbg.contains("MY_SECRET_KEY"));
+        assert!(!dbg.contains("MY_SECRET_SECRET"));
+        assert!(dbg.contains("AmplitudeClient"));
+    }
+
+    #[test]
+    fn client_stores_base_url() {
+        let auth = AmplitudeAuth {
+            api_key: "K".into(),
+            secret_key: "S".into(),
+        };
+        let client = AmplitudeClient::new(auth, Some("https://custom.api.com/v2")).unwrap();
+        assert_eq!(client.base_url, "https://custom.api.com/v2");
+    }
+
+    #[test]
+    fn auth_debug_struct_format() {
+        let auth = AmplitudeAuth {
+            api_key: "key".into(),
+            secret_key: "sec".into(),
+        };
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("AmplitudeAuth"));
+        assert!(dbg.contains("api_key"));
+        assert!(dbg.contains("secret_key"));
+    }
 }

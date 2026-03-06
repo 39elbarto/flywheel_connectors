@@ -297,4 +297,136 @@ mod tests {
             "Pulumi API error (500): Internal"
         );
     }
+
+    // ── Additional edge cases ───────────────────────────────────
+
+    #[test]
+    fn api_502_is_retryable() {
+        assert!(PulumiError::Api { status_code: 502, message: "bad gateway".into() }.is_retryable());
+    }
+
+    #[test]
+    fn api_599_is_retryable() {
+        assert!(PulumiError::Api { status_code: 599, message: "custom".into() }.is_retryable());
+    }
+
+    #[test]
+    fn api_499_not_retryable() {
+        assert!(!PulumiError::Api { status_code: 499, message: "client err".into() }.is_retryable());
+    }
+
+    #[test]
+    fn api_404_not_retryable() {
+        assert!(!PulumiError::Api { status_code: 404, message: "not found".into() }.is_retryable());
+    }
+
+    #[test]
+    fn json_error_not_retryable() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{bad");
+        let err = PulumiError::Json(bad.unwrap_err());
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn retry_after_none_for_json_error() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{bad");
+        let err = PulumiError::Json(bad.unwrap_err());
+        assert_eq!(err.retry_after(), None);
+    }
+
+    #[test]
+    fn rate_limited_zero_ms() {
+        let err = PulumiError::RateLimited { retry_after_ms: 0 };
+        assert_eq!(err.retry_after(), Some(Duration::from_millis(0)));
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn rate_limited_large_value() {
+        let err = PulumiError::RateLimited { retry_after_ms: 3_600_000 };
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn not_found_empty_resource() {
+        let err = PulumiError::NotFound { resource: String::new() };
+        assert_eq!(err.to_string(), "Not found: ");
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn api_error_empty_message() {
+        let err = PulumiError::Api { status_code: 500, message: String::new() };
+        assert_eq!(err.to_string(), "Pulumi API error (500): ");
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn error_debug_format() {
+        let err = PulumiError::Unauthorized;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Unauthorized"));
+    }
+
+    #[test]
+    fn api_error_debug_shows_fields() {
+        let err = PulumiError::Api { status_code: 422, message: "unprocessable".into() };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("422"));
+        assert!(dbg.contains("unprocessable"));
+    }
+
+    #[test]
+    fn not_found_to_fcp_error_message_content() {
+        let err = PulumiError::NotFound { resource: "myorg/myproj/staging".into() };
+        match err.to_fcp_error() {
+            FcpError::External { message, retry_after, .. } => {
+                assert!(message.contains("myorg/myproj/staging"));
+                assert_eq!(retry_after, None);
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rate_limited_to_fcp_error_has_retry_after() {
+        let err = PulumiError::RateLimited { retry_after_ms: 5000 };
+        match err.to_fcp_error() {
+            FcpError::External { retry_after, .. } => {
+                assert_eq!(retry_after, Some(Duration::from_secs(5)));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_error_to_fcp_error_no_retry_after() {
+        let err = PulumiError::Api { status_code: 500, message: "err".into() };
+        match err.to_fcp_error() {
+            FcpError::External { retry_after, .. } => {
+                assert_eq!(retry_after, None);
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unauthorized_fcp_error_message() {
+        match PulumiError::Unauthorized.to_fcp_error() {
+            FcpError::External { message, .. } => {
+                assert_eq!(message, "Authentication failed");
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forbidden_fcp_error_message() {
+        match PulumiError::Forbidden.to_fcp_error() {
+            FcpError::External { message, .. } => {
+                assert_eq!(message, "Insufficient permissions");
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
 }

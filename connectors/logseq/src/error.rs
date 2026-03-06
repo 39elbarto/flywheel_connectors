@@ -523,4 +523,115 @@ mod tests {
         let err = LogseqError::RateLimited { retry_after_ms: 0 };
         assert_eq!(err.retry_after(), Some(Duration::from_millis(0)));
     }
+
+    #[test]
+    fn api_error_not_retryable_403() {
+        assert!(
+            !LogseqError::Api {
+                status_code: 403,
+                message: "forbidden".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_error_retryable_501() {
+        assert!(
+            LogseqError::Api {
+                status_code: 501,
+                message: "not implemented".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn error_debug_contains_variant_name() {
+        let err = LogseqError::Unauthorized;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Unauthorized"));
+    }
+
+    #[test]
+    fn error_debug_api_contains_status() {
+        let err = LogseqError::Api {
+            status_code: 502,
+            message: "bad gw".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("502"));
+    }
+
+    #[test]
+    fn server_unreachable_fcp_error_no_status_code() {
+        match (LogseqError::ServerUnreachable {
+            url: "http://example.com".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External { status_code, .. } => {
+                assert!(status_code.is_none());
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rate_limited_large_value() {
+        let err = LogseqError::RateLimited {
+            retry_after_ms: 3_600_000,
+        };
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(3600)));
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn json_error_not_retryable() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{invalid");
+        let err = LogseqError::Json(bad.unwrap_err());
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn json_error_retry_after_none() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{invalid");
+        let err = LogseqError::Json(bad.unwrap_err());
+        assert_eq!(err.retry_after(), None);
+    }
+
+    #[test]
+    fn api_error_fcp_error_has_no_retry_after() {
+        match (LogseqError::Api {
+            status_code: 500,
+            message: "err".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External { retry_after, .. } => {
+                assert!(retry_after.is_none());
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unauthorized_fcp_error_has_no_retry_after() {
+        match LogseqError::Unauthorized.to_fcp_error() {
+            FcpError::External { retry_after, .. } => {
+                assert!(retry_after.is_none());
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forbidden_fcp_error_has_no_retry_after() {
+        match LogseqError::Forbidden.to_fcp_error() {
+            FcpError::External { retry_after, .. } => {
+                assert!(retry_after.is_none());
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
 }

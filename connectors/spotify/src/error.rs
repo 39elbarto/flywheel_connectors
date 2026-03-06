@@ -410,4 +410,240 @@ mod tests {
             "Spotify API error (500): Internal"
         );
     }
+
+    // ── Additional error coverage ────────────────────────────────
+
+    #[test]
+    fn api_502_is_retryable() {
+        assert!(
+            SpotifyError::Api {
+                status_code: 502,
+                message: "bad gateway".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_504_is_retryable() {
+        assert!(
+            SpotifyError::Api {
+                status_code: 504,
+                message: "gateway timeout".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_599_is_retryable() {
+        assert!(
+            SpotifyError::Api {
+                status_code: 599,
+                message: "server error".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_404_not_retryable() {
+        assert!(
+            !SpotifyError::Api {
+                status_code: 404,
+                message: "not found".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_401_not_retryable() {
+        assert!(
+            !SpotifyError::Api {
+                status_code: 401,
+                message: "unauthorized".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_403_not_retryable() {
+        assert!(
+            !SpotifyError::Api {
+                status_code: 403,
+                message: "forbidden".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn json_error_not_retryable() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("bad");
+        assert!(!SpotifyError::Json(bad.unwrap_err()).is_retryable());
+    }
+
+    #[test]
+    fn retry_after_zero_ms() {
+        let err = SpotifyError::RateLimited {
+            retry_after_ms: 0,
+        };
+        assert_eq!(err.retry_after(), Some(Duration::from_millis(0)));
+    }
+
+    #[test]
+    fn retry_after_large_value() {
+        let err = SpotifyError::RateLimited {
+            retry_after_ms: 120_000,
+        };
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(120)));
+    }
+
+    #[test]
+    fn retry_after_none_for_json_error() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("bad");
+        assert_eq!(SpotifyError::Json(bad.unwrap_err()).retry_after(), None);
+    }
+
+    #[test]
+    fn rate_limited_to_fcp_error_has_retry_after() {
+        match (SpotifyError::RateLimited {
+            retry_after_ms: 5000,
+        })
+        .to_fcp_error()
+        {
+            FcpError::External {
+                retry_after,
+                retryable,
+                status_code,
+                service,
+                ..
+            } => {
+                assert_eq!(retry_after, Some(Duration::from_secs(5)));
+                assert!(retryable);
+                assert_eq!(status_code, Some(429));
+                assert_eq!(service, "spotify");
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_error_to_fcp_error_no_retry_after() {
+        match (SpotifyError::Api {
+            status_code: 500,
+            message: "err".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External { retry_after, .. } => {
+                assert!(retry_after.is_none());
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unauthorized_fcp_error_message() {
+        match SpotifyError::Unauthorized.to_fcp_error() {
+            FcpError::External { message, .. } => {
+                assert_eq!(message, "Authentication failed");
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forbidden_fcp_error_message() {
+        match SpotifyError::Forbidden.to_fcp_error() {
+            FcpError::External { message, .. } => {
+                assert_eq!(message, "Insufficient permissions");
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn not_found_fcp_error_message_format() {
+        match (SpotifyError::NotFound {
+            resource: "playlist_xyz".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External { message, .. } => {
+                assert_eq!(message, "Not found: playlist_xyz");
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn debug_format_all_variants() {
+        let variants: Vec<SpotifyError> = vec![
+            SpotifyError::Unauthorized,
+            SpotifyError::Forbidden,
+            SpotifyError::NotFound {
+                resource: "x".into(),
+            },
+            SpotifyError::RateLimited {
+                retry_after_ms: 1000,
+            },
+            SpotifyError::Api {
+                status_code: 500,
+                message: "err".into(),
+            },
+        ];
+        for v in &variants {
+            let dbg = format!("{v:?}");
+            assert!(!dbg.is_empty());
+        }
+    }
+
+    #[test]
+    fn error_implements_std_error() {
+        let err: Box<dyn std::error::Error> = Box::new(SpotifyError::Unauthorized);
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn json_error_source_chain() {
+        let json_err = serde_json::from_str::<i32>("bad").unwrap_err();
+        let err = SpotifyError::Json(json_err);
+        let dyn_err: &dyn std::error::Error = &err;
+        assert!(dyn_err.source().is_some());
+    }
+
+    #[test]
+    fn result_type_alias_ok() {
+        let ok: SpotifyResult<i32> = Ok(42);
+        assert!(matches!(ok, Ok(42)));
+    }
+
+    #[test]
+    fn result_type_alias_err() {
+        let err: SpotifyResult<i32> = Err(SpotifyError::Unauthorized);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn error_display_http() {
+        let req_err = reqwest::Client::builder()
+            .build()
+            .unwrap()
+            .get("://invalid")
+            .build();
+        if let Err(e) = req_err {
+            let se = SpotifyError::Http(e);
+            assert!(se.to_string().starts_with("HTTP error:"));
+        }
+    }
+
+    #[test]
+    fn error_display_json() {
+        let json_err = serde_json::from_str::<i32>("bad").unwrap_err();
+        let se = SpotifyError::Json(json_err);
+        assert!(se.to_string().starts_with("JSON error:"));
+    }
 }

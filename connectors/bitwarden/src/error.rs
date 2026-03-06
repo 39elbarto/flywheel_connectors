@@ -410,4 +410,141 @@ mod tests {
             "Bitwarden API error (500): Internal"
         );
     }
+
+    #[test]
+    fn error_display_http() {
+        // Create an HTTP error via JSON parse of bad URL (reqwest error)
+        let err = reqwest::Client::new().get("://bad").build().unwrap_err();
+        let bw_err = BitwardenError::Http(err);
+        let display = bw_err.to_string();
+        assert!(display.starts_with("HTTP error:"));
+    }
+
+    #[test]
+    fn error_display_json() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{invalid");
+        let err = BitwardenError::Json(bad.unwrap_err());
+        let display = err.to_string();
+        assert!(display.starts_with("JSON error:"));
+    }
+
+    #[test]
+    fn error_debug_contains_variant_name() {
+        let err = BitwardenError::Unauthorized;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Unauthorized"));
+    }
+
+    #[test]
+    fn error_debug_api_contains_fields() {
+        let err = BitwardenError::Api {
+            status_code: 422,
+            message: "Unprocessable".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("422"));
+        assert!(dbg.contains("Unprocessable"));
+    }
+
+    #[test]
+    fn api_502_is_retryable() {
+        assert!(
+            BitwardenError::Api {
+                status_code: 502,
+                message: "bad gateway".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_504_is_retryable() {
+        assert!(
+            BitwardenError::Api {
+                status_code: 504,
+                message: "gateway timeout".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_422_not_retryable() {
+        assert!(
+            !BitwardenError::Api {
+                status_code: 422,
+                message: "unprocessable".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn json_not_retryable() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{bad");
+        assert!(!BitwardenError::Json(bad.unwrap_err()).is_retryable());
+    }
+
+    #[test]
+    fn retry_after_none_for_json_error() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{bad");
+        assert_eq!(BitwardenError::Json(bad.unwrap_err()).retry_after(), None);
+    }
+
+    #[test]
+    fn rate_limited_retry_after_zero() {
+        let err = BitwardenError::RateLimited { retry_after_ms: 0 };
+        assert_eq!(err.retry_after(), Some(Duration::from_millis(0)));
+    }
+
+    #[test]
+    fn rate_limited_retry_after_large_value() {
+        let err = BitwardenError::RateLimited {
+            retry_after_ms: 300_000,
+        };
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(300)));
+    }
+
+    #[test]
+    fn api_error_to_fcp_has_no_retry_after() {
+        match (BitwardenError::Api {
+            status_code: 500,
+            message: "err".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External { retry_after, .. } => {
+                assert_eq!(retry_after, None);
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rate_limited_to_fcp_error_message_contains_ms() {
+        match (BitwardenError::RateLimited {
+            retry_after_ms: 5000,
+        })
+        .to_fcp_error()
+        {
+            FcpError::External { message, .. } => {
+                assert!(message.contains("5000"));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn not_found_to_fcp_error_has_no_retry_after() {
+        match (BitwardenError::NotFound {
+            resource: "x".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External { retry_after, .. } => {
+                assert_eq!(retry_after, None);
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
 }

@@ -313,4 +313,128 @@ mod tests {
         let cred = GrafanaAuth::CredentialId(CredentialId::new());
         assert!(cred.redacted_label().starts_with("credential_id:"));
     }
+
+    #[test]
+    fn auth_clone_bearer() {
+        let bearer = GrafanaAuth::BearerToken("tok".into());
+        let cloned = bearer.clone();
+        // Use both to ensure neither is "dropped without use"
+        assert_eq!(cloned.redacted_label(), "bearer_token:redacted");
+        assert_eq!(bearer.redacted_label(), "bearer_token:redacted");
+        assert!(!cloned.is_secretless());
+    }
+
+    #[test]
+    fn auth_clone_credential() {
+        let cred = GrafanaAuth::CredentialId(CredentialId::new());
+        let cloned = cred.clone();
+        // Use both to prevent redundant_clone lint
+        assert!(cloned.is_secretless());
+        assert!(cred.is_secretless());
+    }
+
+    #[test]
+    fn auth_debug_credential_id_shows_id() {
+        let id = CredentialId::new();
+        let id_str = id.to_string();
+        let auth = GrafanaAuth::CredentialId(id);
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("CredentialId"));
+        assert!(dbg.contains(&id_str));
+    }
+
+    #[test]
+    fn client_new_default_url() {
+        let client = GrafanaClient::new(GrafanaAuth::BearerToken("tok".into()), None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains(DEFAULT_BASE_URL));
+    }
+
+    #[test]
+    fn client_new_custom_url() {
+        let client = GrafanaClient::new(
+            GrafanaAuth::BearerToken("tok".into()),
+            Some("http://localhost:3000/api"),
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("http://localhost:3000/api"));
+    }
+
+    #[test]
+    fn client_new_trims_trailing_slash() {
+        let client = GrafanaClient::new(
+            GrafanaAuth::BearerToken("tok".into()),
+            Some("http://localhost:3000/api/"),
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("http://localhost:3000/api"));
+        assert!(!dbg.contains("api/\""));
+    }
+
+    #[test]
+    fn client_new_trims_multiple_trailing_slashes() {
+        let client = GrafanaClient::new(
+            GrafanaAuth::BearerToken("tok".into()),
+            Some("http://localhost:3000/api///"),
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        // trim_end_matches removes all trailing slashes
+        assert!(!dbg.contains("api/\""));
+    }
+
+    #[test]
+    fn client_debug_redacts_token() {
+        let client = GrafanaClient::new(
+            GrafanaAuth::BearerToken("supersecret".into()),
+            None,
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(!dbg.contains("supersecret"));
+        assert!(dbg.contains("GrafanaClient"));
+        assert!(dbg.contains("redacted"));
+    }
+
+    #[test]
+    fn client_debug_shows_base_url() {
+        let client = GrafanaClient::new(
+            GrafanaAuth::BearerToken("tok".into()),
+            Some("https://my-grafana.example.com/api"),
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("https://my-grafana.example.com/api"));
+    }
+
+    #[test]
+    fn client_with_client_trims_slash() {
+        let http_client = Client::new();
+        let client = GrafanaClient::with_client(
+            http_client,
+            GrafanaAuth::BearerToken("tok".into()),
+            "https://example.com/api/",
+        );
+        let dbg = format!("{client:?}");
+        assert!(!dbg.contains("api/\""));
+    }
+
+    #[test]
+    fn default_base_url_value() {
+        assert_eq!(DEFAULT_BASE_URL, "https://grafana.com/api");
+    }
+
+    #[test]
+    fn auth_bearer_not_secretless() {
+        let auth = GrafanaAuth::BearerToken(String::new());
+        assert!(!auth.is_secretless());
+    }
+
+    #[test]
+    fn auth_credential_is_secretless() {
+        let auth = GrafanaAuth::CredentialId(CredentialId::new());
+        assert!(auth.is_secretless());
+    }
 }

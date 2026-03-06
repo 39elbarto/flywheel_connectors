@@ -359,4 +359,91 @@ mod tests {
             other => panic!("expected External, got {other:?}"),
         }
     }
+
+    #[test]
+    fn error_debug_format_unauthorized() {
+        let dbg = format!("{:?}", N8nError::Unauthorized);
+        assert!(dbg.contains("Unauthorized"));
+    }
+
+    #[test]
+    fn error_debug_format_forbidden() {
+        let dbg = format!("{:?}", N8nError::Forbidden);
+        assert!(dbg.contains("Forbidden"));
+    }
+
+    #[test]
+    fn error_debug_format_not_found() {
+        let dbg = format!("{:?}", N8nError::NotFound { resource: "wf".into() });
+        assert!(dbg.contains("NotFound"));
+        assert!(dbg.contains("wf"));
+    }
+
+    #[test]
+    fn error_debug_format_rate_limited() {
+        let dbg = format!("{:?}", N8nError::RateLimited { retry_after_ms: 100 });
+        assert!(dbg.contains("RateLimited"));
+        assert!(dbg.contains("100"));
+    }
+
+    #[test]
+    fn error_debug_format_api() {
+        let dbg = format!("{:?}", N8nError::Api { status_code: 418, message: "teapot".into() });
+        assert!(dbg.contains("Api"));
+        assert!(dbg.contains("418"));
+    }
+
+    #[test]
+    fn api_error_599_is_retryable() {
+        assert!(N8nError::Api { status_code: 599, message: "custom".into() }.is_retryable());
+    }
+
+    #[test]
+    fn api_error_504_is_retryable() {
+        assert!(N8nError::Api { status_code: 504, message: "timeout".into() }.is_retryable());
+    }
+
+    #[test]
+    fn rate_limited_large_retry_after() {
+        let err = N8nError::RateLimited { retry_after_ms: 3_600_000 };
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn unauthorized_fcp_error_retry_after_none() {
+        match N8nError::Unauthorized.to_fcp_error() {
+            FcpError::External { retry_after, .. } => assert!(retry_after.is_none()),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forbidden_fcp_error_retry_after_none() {
+        match N8nError::Forbidden.to_fcp_error() {
+            FcpError::External { retry_after, .. } => assert!(retry_after.is_none()),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn json_error_not_retryable() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{invalid");
+        assert!(!N8nError::Json(bad.unwrap_err()).is_retryable());
+    }
+
+    #[test]
+    fn not_found_fcp_error_retry_after_none() {
+        match (N8nError::NotFound { resource: "x".into() }).to_fcp_error() {
+            FcpError::External { retry_after, .. } => assert!(retry_after.is_none()),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_error_fcp_retry_after_is_none() {
+        match (N8nError::Api { status_code: 502, message: "gw".into() }).to_fcp_error() {
+            FcpError::External { retry_after, .. } => assert!(retry_after.is_none()),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
 }

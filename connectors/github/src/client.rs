@@ -959,4 +959,187 @@ mod tests {
             .is_retryable()
         );
     }
+
+    // ─── GitHubAuth tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_github_auth_token_debug_redacted() {
+        let auth = GitHubAuth::Token("ghp_super_secret_token_12345".into());
+        let debug = format!("{auth:?}");
+        assert!(debug.contains("REDACTED"));
+        assert!(!debug.contains("ghp_super_secret_token_12345"));
+    }
+
+    #[test]
+    fn test_github_auth_credential_id_debug_shows_id() {
+        let auth = GitHubAuth::CredentialId(
+            CredentialId::parse("11223344-5566-7788-99aa-bbccddeeff00").unwrap(),
+        );
+        let debug = format!("{auth:?}");
+        assert!(debug.contains("CredentialId"));
+        assert!(debug.contains("11223344"));
+    }
+
+    #[test]
+    fn test_github_auth_redacted_label_token() {
+        let auth = GitHubAuth::Token("secret".into());
+        assert_eq!(auth.redacted_label(), "token");
+    }
+
+    #[test]
+    fn test_github_auth_redacted_label_credential_id() {
+        let auth = GitHubAuth::CredentialId(
+            CredentialId::parse("11223344-5566-7788-99aa-bbccddeeff00").unwrap(),
+        );
+        assert_eq!(auth.redacted_label(), "credential_id");
+    }
+
+    #[test]
+    fn test_github_auth_is_secretless_token() {
+        let auth = GitHubAuth::Token("test".into());
+        assert!(!auth.is_secretless());
+    }
+
+    #[test]
+    fn test_github_auth_is_secretless_credential_id() {
+        let auth = GitHubAuth::CredentialId(
+            CredentialId::parse("11223344-5566-7788-99aa-bbccddeeff00").unwrap(),
+        );
+        assert!(auth.is_secretless());
+    }
+
+    #[test]
+    fn test_github_auth_clone() {
+        let original = GitHubAuth::Token("my_token".into());
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.redacted_label(), "token");
+    }
+
+    // ─── GitHubClient construction tests ────────────────────────────
+
+    #[test]
+    fn test_github_client_new() {
+        let client = GitHubClient::new("ghp_test_token_123");
+        assert!(client.is_ok());
+    }
+
+    #[test]
+    fn test_github_client_new_with_auth() {
+        let auth = GitHubAuth::Token("test_token".into());
+        let client = GitHubClient::new_with_auth(auth);
+        assert!(client.is_ok());
+    }
+
+    #[test]
+    fn test_github_client_debug_redacted() {
+        let client = GitHubClient::new("ghp_super_secret").unwrap();
+        let debug = format!("{client:?}");
+        assert!(debug.contains("GitHubClient"));
+        assert!(debug.contains("REDACTED"));
+        assert!(!debug.contains("ghp_super_secret"));
+    }
+
+    #[test]
+    fn test_github_client_with_base_url() {
+        let client = GitHubClient::new("token")
+            .unwrap()
+            .with_base_url("https://github.example.com/api/v3");
+        let debug = format!("{client:?}");
+        assert!(debug.contains("github.example.com"));
+    }
+
+    #[test]
+    fn test_github_client_with_retry_config() {
+        let client = GitHubClient::new("token")
+            .unwrap()
+            .with_retry_config(5, 500, 30_000);
+        let debug = format!("{client:?}");
+        assert!(debug.contains("max_retries"));
+    }
+
+    #[test]
+    fn test_github_client_total_requests_initial() {
+        let client = GitHubClient::new("token").unwrap();
+        assert_eq!(client.total_requests(), 0);
+    }
+
+    #[test]
+    fn test_github_client_default_base_url() {
+        assert_eq!(DEFAULT_BASE_URL, "https://api.github.com");
+    }
+
+    // ─── urlencoding additional tests ───────────────────────────────
+
+    #[test]
+    fn test_urlencoding_empty_string() {
+        assert_eq!(urlencoding::encode(""), "");
+    }
+
+    #[test]
+    fn test_urlencoding_only_safe_chars() {
+        assert_eq!(urlencoding::encode("abc-def_ghi.jkl~mno"), "abc-def_ghi.jkl~mno");
+    }
+
+    #[test]
+    fn test_urlencoding_special_chars() {
+        assert_eq!(urlencoding::encode("a&b=c"), "a%26b%3Dc");
+    }
+
+    #[test]
+    fn test_urlencoding_unicode() {
+        let encoded = urlencoding::encode("hello 世界");
+        assert!(encoded.contains('%'));
+        assert!(encoded.starts_with("hello%20"));
+    }
+
+    #[test]
+    fn test_urlencoding_percent_encoding() {
+        assert_eq!(urlencoding::encode("100%"), "100%25");
+    }
+
+    #[test]
+    fn test_urlencoding_plus_sign() {
+        assert_eq!(urlencoding::encode("a+b"), "a%2Bb");
+    }
+
+    #[test]
+    fn test_urlencoding_slash() {
+        assert_eq!(urlencoding::encode("path/to/file"), "path%2Fto%2Ffile");
+    }
+
+    #[test]
+    fn test_urlencoding_hash() {
+        assert_eq!(urlencoding::encode("a#b"), "a%23b");
+    }
+
+    #[test]
+    fn test_urlencoding_question_mark() {
+        assert_eq!(urlencoding::encode("q?a=1"), "q%3Fa%3D1");
+    }
+
+    // ─── parse_error_response tests ─────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_server_error_500() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/repos/octocat/hello-world"))
+            .respond_with(ResponseTemplate::new(500).set_body_json(serde_json::json!({
+                "message": "Internal Server Error"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = GitHubClient::new("test_token")
+            .unwrap()
+            .with_base_url(mock_server.uri())
+            .with_retry_config(1, 10, 100);
+
+        let result = client.get_repo("octocat", "hello-world").await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.is_retryable());
+    }
 }

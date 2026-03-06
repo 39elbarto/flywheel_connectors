@@ -423,4 +423,314 @@ mod tests {
         .unwrap();
         assert_eq!(p.publication_date, Some("2023-01-15".into()));
     }
+
+    // --- Clone and Drop tests ---
+
+    #[test]
+    fn paper_clone_and_drop() {
+        let original = Paper {
+            paper_id: "p_clone".into(),
+            title: Some("Clone Test".into()),
+            paper_abstract: Some("Abstract".into()),
+            year: Some(2024),
+            venue: Some("ICML".into()),
+            citation_count: Some(100),
+            reference_count: Some(50),
+            influential_citation_count: Some(10),
+            is_open_access: Some(true),
+            url: Some("https://example.com".into()),
+            authors: Some(vec![AuthorSummary {
+                author_id: Some("a1".into()),
+                name: Some("Author".into()),
+            }]),
+            external_ids: None,
+            tldr: None,
+            fields_of_study: Some(vec!["CS".into()]),
+            publication_types: None,
+            publication_date: Some("2024-01-01".into()),
+            journal: None,
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.paper_id, "p_clone");
+        assert_eq!(cloned.title, Some("Clone Test".into()));
+        assert_eq!(cloned.year, Some(2024));
+        assert_eq!(cloned.citation_count, Some(100));
+    }
+
+    #[test]
+    fn author_summary_clone_and_drop() {
+        let original = AuthorSummary {
+            author_id: Some("a_clone".into()),
+            name: Some("Author Clone".into()),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.author_id, Some("a_clone".into()));
+        assert_eq!(cloned.name, Some("Author Clone".into()));
+    }
+
+    #[test]
+    fn author_clone_and_drop() {
+        let original = Author {
+            author_id: "a_full_clone".into(),
+            name: Some("Full Clone".into()),
+            h_index: Some(42),
+            citation_count: Some(10000),
+            paper_count: Some(200),
+            url: Some("https://example.com/author".into()),
+            affiliations: Some(vec!["MIT".into()]),
+            aliases: Some(vec!["FC".into()]),
+            external_ids: None,
+            homepage: Some("https://homepage.com".into()),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.author_id, "a_full_clone");
+        assert_eq!(cloned.h_index, Some(42));
+        assert_eq!(cloned.affiliations.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn citation_edge_clone_and_drop() {
+        let original = CitationEdge {
+            paper: Some(Paper {
+                paper_id: "ce_clone".into(),
+                title: Some("Edge".into()),
+                paper_abstract: None,
+                year: None,
+                venue: None,
+                citation_count: None,
+                reference_count: None,
+                influential_citation_count: None,
+                is_open_access: None,
+                url: None,
+                authors: None,
+                external_ids: None,
+                tldr: None,
+                fields_of_study: None,
+                publication_types: None,
+                publication_date: None,
+                journal: None,
+            }),
+            contexts: Some(vec!["ctx".into()]),
+            intents: Some(vec!["background".into()]),
+            is_influential: Some(false),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.paper.as_ref().unwrap().paper_id, "ce_clone");
+        assert_eq!(cloned.is_influential, Some(false));
+    }
+
+    #[test]
+    fn search_response_clone_and_drop() {
+        let original = SearchResponse {
+            total: Some(100),
+            offset: Some(0),
+            next: Some(10),
+            data: vec![json!({"paperId": "p1"})],
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.total, Some(100));
+        assert_eq!(cloned.data.len(), 1);
+    }
+
+    #[test]
+    fn citation_list_response_clone_and_drop() {
+        let original = CitationListResponse {
+            offset: Some(0),
+            next: Some(50),
+            data: vec![json!({"citingPaper": {"paperId": "p1"}})],
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.next, Some(50));
+    }
+
+    #[test]
+    fn author_papers_response_clone_and_drop() {
+        let original = AuthorPapersResponse {
+            offset: Some(0),
+            next: None,
+            data: vec![],
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert!(cloned.data.is_empty());
+        assert!(cloned.next.is_none());
+    }
+
+    #[test]
+    fn recommendations_response_clone_and_drop() {
+        let original = RecommendationsResponse {
+            recommended_papers: vec![json!({"paperId": "r1"})],
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.recommended_papers.len(), 1);
+    }
+
+    #[test]
+    fn api_error_response_clone_and_drop() {
+        let original = ApiErrorResponse {
+            error: Some("Bad Request".into()),
+            message: Some("Invalid ID".into()),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.error, Some("Bad Request".into()));
+        assert_eq!(cloned.message, Some("Invalid ID".into()));
+    }
+
+    // --- Debug format tests ---
+
+    #[test]
+    fn paper_debug() {
+        let p: Paper = serde_json::from_value(json!({"paperId": "dbg_p"})).unwrap();
+        let dbg = format!("{p:?}");
+        assert!(dbg.contains("Paper"));
+        assert!(dbg.contains("dbg_p"));
+    }
+
+    #[test]
+    fn author_debug() {
+        let a: Author = serde_json::from_value(json!({"authorId": "dbg_a"})).unwrap();
+        let dbg = format!("{a:?}");
+        assert!(dbg.contains("Author"));
+        assert!(dbg.contains("dbg_a"));
+    }
+
+    #[test]
+    fn citation_edge_debug() {
+        let c: CitationEdge = serde_json::from_value(json!({
+            "citingPaper": {"paperId": "dbg_ce"},
+        }))
+        .unwrap();
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("CitationEdge"));
+    }
+
+    #[test]
+    fn search_response_debug() {
+        let s: SearchResponse =
+            serde_json::from_value(json!({"total": 0, "data": []})).unwrap();
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("SearchResponse"));
+    }
+
+    #[test]
+    fn api_error_response_debug() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({})).unwrap();
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("ApiErrorResponse"));
+    }
+
+    // --- Paper all optional fields set ---
+
+    #[test]
+    fn paper_with_all_fields() {
+        let p: Paper = serde_json::from_value(json!({
+            "paperId": "p_full",
+            "title": "Full Paper",
+            "abstract": "Abstract text",
+            "year": 2025,
+            "venue": "NeurIPS",
+            "citationCount": 999,
+            "referenceCount": 50,
+            "influentialCitationCount": 100,
+            "isOpenAccess": true,
+            "url": "https://example.com/paper",
+            "authors": [{"authorId": "a1", "name": "Alice"}],
+            "externalIds": {"DOI": "10.1234"},
+            "tldr": {"text": "summary"},
+            "fieldsOfStudy": ["CS", "AI"],
+            "publicationTypes": ["Conference"],
+            "publicationDate": "2025-06-15",
+            "journal": {"name": "Nature"}
+        }))
+        .unwrap();
+        assert_eq!(p.paper_id, "p_full");
+        assert_eq!(p.reference_count, Some(50));
+        assert_eq!(p.influential_citation_count, Some(100));
+        assert_eq!(p.publication_types.as_ref().unwrap().len(), 1);
+        assert_eq!(p.fields_of_study.as_ref().unwrap().len(), 2);
+    }
+
+    // --- Author with all fields ---
+
+    #[test]
+    fn author_with_all_fields() {
+        let a: Author = serde_json::from_value(json!({
+            "authorId": "a_full",
+            "name": "Full Author",
+            "hIndex": 100,
+            "citationCount": 50000,
+            "paperCount": 500,
+            "url": "https://example.com/author",
+            "affiliations": ["MIT", "Stanford"],
+            "aliases": ["FA", "F. Author"],
+            "externalIds": {"DBLP": ["123"]},
+            "homepage": "https://author.com"
+        }))
+        .unwrap();
+        assert_eq!(a.author_id, "a_full");
+        assert_eq!(a.h_index, Some(100));
+        assert_eq!(a.paper_count, Some(500));
+        assert_eq!(a.affiliations.as_ref().unwrap().len(), 2);
+        assert_eq!(a.aliases.as_ref().unwrap().len(), 2);
+        assert!(a.external_ids.is_some());
+    }
+
+    // --- CitationEdge minimal ---
+
+    #[test]
+    fn citation_edge_minimal() {
+        let c: CitationEdge = serde_json::from_value(json!({})).unwrap();
+        assert!(c.paper.is_none());
+        assert!(c.contexts.is_none());
+        assert!(c.intents.is_none());
+        assert!(c.is_influential.is_none());
+    }
+
+    // --- Roundtrip for Author ---
+
+    #[test]
+    fn author_roundtrip_preserves_camel_case() {
+        let a: Author = serde_json::from_value(json!({
+            "authorId": "rt_a",
+            "hIndex": 10,
+            "paperCount": 20,
+        }))
+        .unwrap();
+        let v = serde_json::to_value(&a).unwrap();
+        assert!(v.get("authorId").is_some());
+        assert!(v.get("hIndex").is_some());
+        assert!(v.get("paperCount").is_some());
+    }
+
+    // --- CitationListResponse empty ---
+
+    #[test]
+    fn citation_list_response_empty() {
+        let c: CitationListResponse = serde_json::from_value(json!({
+            "data": [],
+        }))
+        .unwrap();
+        assert!(c.data.is_empty());
+        assert!(c.offset.is_none());
+        assert!(c.next.is_none());
+    }
+
+    // --- AuthorPapersResponse empty ---
+
+    #[test]
+    fn author_papers_response_empty() {
+        let a: AuthorPapersResponse = serde_json::from_value(json!({
+            "data": [],
+        }))
+        .unwrap();
+        assert!(a.data.is_empty());
+    }
 }

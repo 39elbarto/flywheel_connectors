@@ -331,4 +331,102 @@ mod tests {
         let encoded = BASE64.encode("myuser:mysecret");
         assert_eq!(encoded, "bXl1c2VyOm15c2VjcmV0");
     }
+
+    #[test]
+    fn auth_clone() {
+        let auth = MixpanelAuth::ServiceAccount {
+            username: "u".into(),
+            secret: "s".into(),
+        };
+        let auth2 = auth.clone();
+        assert_eq!(auth.redacted_label(), auth2.redacted_label());
+    }
+
+    #[test]
+    fn auth_credential_debug_shows_id() {
+        let cred = MixpanelAuth::CredentialId(CredentialId::new());
+        let dbg = format!("{cred:?}");
+        assert!(dbg.contains("CredentialId"));
+    }
+
+    #[test]
+    fn client_new_trailing_slash_stripped() {
+        let client = MixpanelClient::new(
+            MixpanelAuth::ServiceAccount {
+                username: "u".into(),
+                secret: "s".into(),
+            },
+            "1",
+            Some("https://example.com///"),
+        )
+        .unwrap();
+        assert!(!client.base_url.ends_with('/'));
+    }
+
+    #[test]
+    fn client_debug_shows_base_url() {
+        let client = MixpanelClient::new(
+            MixpanelAuth::ServiceAccount {
+                username: "u".into(),
+                secret: "s".into(),
+            },
+            "12345",
+            None,
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("MixpanelClient"));
+        assert!(dbg.contains("mixpanel.com"));
+    }
+
+    #[test]
+    fn client_debug_shows_project_id() {
+        let client = MixpanelClient::new(
+            MixpanelAuth::ServiceAccount {
+                username: "u".into(),
+                secret: "s".into(),
+            },
+            "proj_42",
+            None,
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("proj_42"));
+    }
+
+    #[test]
+    fn default_base_url_is_https() {
+        assert!(DEFAULT_BASE_URL.starts_with("https://"));
+    }
+
+    #[test]
+    fn default_base_url_no_trailing_slash() {
+        assert!(!DEFAULT_BASE_URL.ends_with('/'));
+    }
+
+    #[test]
+    fn auth_service_account_redacted_label_format() {
+        let auth = MixpanelAuth::ServiceAccount {
+            username: "test_user".into(),
+            secret: "test_secret".into(),
+        };
+        let label = auth.redacted_label();
+        assert_eq!(label, "service_account:test_user:redacted");
+    }
+
+    #[test]
+    fn base64_encoding_empty_string() {
+        let encoded = BASE64.encode("");
+        assert_eq!(encoded, "");
+    }
+
+    #[test]
+    fn base64_encoding_special_chars() {
+        let encoded = BASE64.encode("user:p@ss:w0rd!");
+        assert!(!encoded.is_empty());
+        // Should be valid base64 (only contains [A-Za-z0-9+/=])
+        assert!(encoded
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '='));
+    }
 }

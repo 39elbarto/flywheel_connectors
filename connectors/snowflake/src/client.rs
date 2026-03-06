@@ -393,4 +393,134 @@ mod tests {
         assert!(client.database.is_none());
         assert!(client.schema.is_none());
     }
+
+    #[test]
+    fn auth_debug_contains_struct_name() {
+        let auth = SnowflakeAuth {
+            access_token: "secret".into(),
+            account_identifier: "acc".into(),
+        };
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("SnowflakeAuth"));
+    }
+
+    #[test]
+    fn auth_debug_shows_account_identifier() {
+        let auth = SnowflakeAuth {
+            access_token: "secret".into(),
+            account_identifier: "my_account_xyz".into(),
+        };
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("my_account_xyz"));
+    }
+
+    #[test]
+    fn client_debug_contains_struct_name() {
+        let auth = SnowflakeAuth {
+            access_token: "T".into(),
+            account_identifier: "A".into(),
+        };
+        let client =
+            SnowflakeClient::new(auth, Some("https://example.com"), None, None, None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("SnowflakeClient"));
+    }
+
+    #[test]
+    fn client_debug_does_not_leak_token() {
+        let auth = SnowflakeAuth {
+            access_token: "super-secret-token-12345".into(),
+            account_identifier: "A".into(),
+        };
+        let client =
+            SnowflakeClient::new(auth, Some("https://example.com"), None, None, None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(!dbg.contains("super-secret-token-12345"));
+    }
+
+    #[test]
+    fn auth_redacted_label_format() {
+        let auth = SnowflakeAuth {
+            access_token: "token".into(),
+            account_identifier: "test_acc".into(),
+        };
+        let label = auth.redacted_label();
+        assert_eq!(label, "account:test_acc,token:redacted");
+    }
+
+    #[test]
+    fn client_new_multiple_trailing_slashes() {
+        let auth = SnowflakeAuth {
+            access_token: "T".into(),
+            account_identifier: "A".into(),
+        };
+        let client =
+            SnowflakeClient::new(auth, Some("https://example.com///"), None, None, None).unwrap();
+        assert!(!client.base_url.ends_with('/'));
+    }
+
+    #[test]
+    fn client_new_with_warehouse_only() {
+        let auth = SnowflakeAuth {
+            access_token: "T".into(),
+            account_identifier: "A".into(),
+        };
+        let client = SnowflakeClient::new(
+            auth,
+            Some("https://example.com"),
+            Some("MY_WH".into()),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(client.warehouse, Some("MY_WH".into()));
+        assert!(client.database.is_none());
+        assert!(client.schema.is_none());
+    }
+
+    #[test]
+    fn client_new_with_database_only() {
+        let auth = SnowflakeAuth {
+            access_token: "T".into(),
+            account_identifier: "A".into(),
+        };
+        let client = SnowflakeClient::new(
+            auth,
+            Some("https://example.com"),
+            None,
+            Some("MY_DB".into()),
+            None,
+        )
+        .unwrap();
+        assert!(client.warehouse.is_none());
+        assert_eq!(client.database, Some("MY_DB".into()));
+    }
+
+    #[test]
+    fn client_new_with_schema_only() {
+        let auth = SnowflakeAuth {
+            access_token: "T".into(),
+            account_identifier: "A".into(),
+        };
+        let client = SnowflakeClient::new(
+            auth,
+            Some("https://example.com"),
+            None,
+            None,
+            Some("PUBLIC".into()),
+        )
+        .unwrap();
+        assert_eq!(client.schema, Some("PUBLIC".into()));
+    }
+
+    #[test]
+    fn client_default_url_uses_account_identifier() {
+        let auth = SnowflakeAuth {
+            access_token: "T".into(),
+            account_identifier: "xy12345.us-east-1".into(),
+        };
+        let client = SnowflakeClient::new(auth, None, None, None, None).unwrap();
+        assert!(client.base_url.contains("xy12345.us-east-1"));
+        assert!(client.base_url.contains("snowflakecomputing.com"));
+    }
 }

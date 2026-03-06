@@ -267,4 +267,198 @@ mod tests {
         .unwrap();
         assert_eq!(c.id, "c1");
     }
+
+    // -- Additional types tests --
+
+    #[test]
+    fn audience_clone() {
+        let a: Audience = serde_json::from_value(json!({
+            "id": "a1",
+            "name": "List",
+            "member_count": 100
+        })).unwrap();
+        let cloned = a.clone();
+        assert_eq!(a.id, "a1");
+        assert_eq!(cloned.name, Some("List".into()));
+    }
+
+    #[test]
+    fn audience_debug() {
+        let a: Audience = serde_json::from_value(json!({"id": "x"})).unwrap();
+        let dbg = format!("{a:?}");
+        assert!(dbg.contains("Audience"));
+    }
+
+    #[test]
+    fn audience_serialize() {
+        let a = Audience {
+            id: "a1".into(),
+            name: Some("My List".into()),
+            member_count: Some(50),
+            web_id: None,
+        };
+        let v = serde_json::to_value(&a).unwrap();
+        assert_eq!(v["id"], "a1");
+        assert_eq!(v["name"], "My List");
+        assert_eq!(v["member_count"], 50);
+        assert!(v["web_id"].is_null());
+    }
+
+    #[test]
+    fn audience_zero_members() {
+        let a: Audience = serde_json::from_value(json!({
+            "id": "a1",
+            "member_count": 0
+        })).unwrap();
+        assert_eq!(a.member_count, Some(0));
+    }
+
+    #[test]
+    fn member_clone() {
+        let m: Member = serde_json::from_value(json!({
+            "id": "m1",
+            "email_address": "a@b.com"
+        })).unwrap();
+        let cloned = m.clone();
+        assert_eq!(m.id, Some("m1".into()));
+        assert_eq!(cloned.email_address, Some("a@b.com".into()));
+    }
+
+    #[test]
+    fn member_debug() {
+        let m: Member = serde_json::from_value(json!({})).unwrap();
+        let dbg = format!("{m:?}");
+        assert!(dbg.contains("Member"));
+    }
+
+    #[test]
+    fn member_serialize() {
+        let m = Member {
+            id: Some("m1".into()),
+            email_address: Some("user@example.com".into()),
+            status: Some("subscribed".into()),
+            list_id: None,
+            full_name: None,
+        };
+        let v = serde_json::to_value(&m).unwrap();
+        assert_eq!(v["id"], "m1");
+        assert_eq!(v["status"], "subscribed");
+        assert!(v["list_id"].is_null());
+    }
+
+    #[test]
+    fn member_all_statuses() {
+        for status in &["subscribed", "unsubscribed", "cleaned", "pending", "transactional"] {
+            let m: Member = serde_json::from_value(json!({"status": status})).unwrap();
+            assert_eq!(m.status.as_deref(), Some(*status));
+        }
+    }
+
+    #[test]
+    fn campaign_clone() {
+        let c: Campaign = serde_json::from_value(json!({
+            "id": "c1",
+            "type": "regular"
+        })).unwrap();
+        let cloned = c.clone();
+        assert_eq!(c.id, "c1");
+        assert_eq!(cloned.campaign_type, Some("regular".into()));
+    }
+
+    #[test]
+    fn campaign_debug() {
+        let c: Campaign = serde_json::from_value(json!({"id": "x"})).unwrap();
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("Campaign"));
+    }
+
+    #[test]
+    fn campaign_types() {
+        for ctype in &["regular", "plaintext", "rss", "variate", "absplit"] {
+            let c: Campaign = serde_json::from_value(json!({"id": "x", "type": ctype})).unwrap();
+            assert_eq!(c.campaign_type.as_deref(), Some(*ctype));
+        }
+    }
+
+    #[test]
+    fn campaign_settings_minimal() {
+        let s: CampaignSettings = serde_json::from_value(json!({})).unwrap();
+        assert!(s.subject_line.is_none());
+        assert!(s.from_name.is_none());
+        assert!(s.reply_to.is_none());
+        assert!(s.title.is_none());
+    }
+
+    #[test]
+    fn campaign_settings_clone() {
+        let s: CampaignSettings = serde_json::from_value(json!({
+            "subject_line": "Hello"
+        })).unwrap();
+        let cloned = s.clone();
+        assert_eq!(s.subject_line, Some("Hello".into()));
+        assert_eq!(cloned.subject_line, Some("Hello".into()));
+    }
+
+    #[test]
+    fn campaign_settings_debug() {
+        let s: CampaignSettings = serde_json::from_value(json!({})).unwrap();
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("CampaignSettings"));
+    }
+
+    #[test]
+    fn campaign_settings_serialize() {
+        let s = CampaignSettings {
+            subject_line: Some("Subject".into()),
+            from_name: Some("Sender".into()),
+            reply_to: Some("reply@test.com".into()),
+            title: Some("Title".into()),
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["subject_line"], "Subject");
+        assert_eq!(v["from_name"], "Sender");
+    }
+
+    #[test]
+    fn api_error_response_clone() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({
+            "detail": "err",
+            "title": "Error"
+        })).unwrap();
+        let cloned = e.clone();
+        assert_eq!(e.detail, Some("err".into()));
+        assert_eq!(cloned.title, Some("Error".into()));
+    }
+
+    #[test]
+    fn api_error_response_debug() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({})).unwrap();
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("ApiErrorResponse"));
+    }
+
+    #[test]
+    fn api_error_response_with_instance() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({
+            "instance": "abc-123-instance"
+        })).unwrap();
+        assert_eq!(e.instance, Some("abc-123-instance".into()));
+    }
+
+    #[test]
+    fn api_error_response_status_numeric() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({
+            "status": 429
+        })).unwrap();
+        assert_eq!(e.status, Some(429));
+    }
+
+    #[test]
+    fn audience_large_member_count() {
+        let a: Audience = serde_json::from_value(json!({
+            "id": "big",
+            "member_count": 999_999
+        })).unwrap();
+        assert_eq!(a.member_count, Some(999_999));
+    }
 }

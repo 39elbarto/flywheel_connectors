@@ -305,4 +305,126 @@ mod tests {
     fn error_display_api() {
         assert_eq!(HubSpotError::Api { status_code: 500, message: "Internal".into() }.to_string(), "HubSpot API error (500): Internal");
     }
+
+    // ── Additional is_retryable ─────────────────────────────────────
+
+    #[test]
+    fn api_502_is_retryable() {
+        assert!(HubSpotError::Api { status_code: 502, message: "Bad Gateway".into() }.is_retryable());
+    }
+
+    #[test]
+    fn api_599_is_retryable() {
+        assert!(HubSpotError::Api { status_code: 599, message: "custom".into() }.is_retryable());
+    }
+
+    #[test]
+    fn api_499_not_retryable() {
+        assert!(!HubSpotError::Api { status_code: 499, message: "custom".into() }.is_retryable());
+    }
+
+    #[test]
+    fn json_error_not_retryable() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{bad");
+        assert!(!HubSpotError::Json(bad.unwrap_err()).is_retryable());
+    }
+
+    // ── Additional retry_after ──────────────────────────────────────
+
+    #[test]
+    fn retry_after_none_for_json_error() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{bad");
+        assert_eq!(HubSpotError::Json(bad.unwrap_err()).retry_after(), None);
+    }
+
+    #[test]
+    fn retry_after_zero_ms() {
+        let err = HubSpotError::RateLimited { retry_after_ms: 0 };
+        assert_eq!(err.retry_after(), Some(Duration::from_millis(0)));
+    }
+
+    #[test]
+    fn retry_after_large_value() {
+        let err = HubSpotError::RateLimited { retry_after_ms: 300_000 };
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(300)));
+    }
+
+    // ── Additional to_fcp_error ─────────────────────────────────────
+
+    #[test]
+    fn rate_limited_fcp_error_service() {
+        match (HubSpotError::RateLimited { retry_after_ms: 1000 }).to_fcp_error() {
+            FcpError::External { service, message, .. } => {
+                assert_eq!(service, "hubspot");
+                assert!(message.contains("1000"));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn not_found_fcp_error_retry_after_none() {
+        match (HubSpotError::NotFound { resource: "deal_x".into() }).to_fcp_error() {
+            FcpError::External { message, retry_after, .. } => {
+                assert!(message.contains("deal_x"));
+                assert!(retry_after.is_none());
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forbidden_fcp_error_message() {
+        match HubSpotError::Forbidden.to_fcp_error() {
+            FcpError::External { message, retry_after, .. } => {
+                assert!(message.contains("permissions"));
+                assert!(retry_after.is_none());
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    // ── Display edge cases ──────────────────────────────────────────
+
+    #[test]
+    fn error_display_not_found_empty() {
+        assert_eq!(HubSpotError::NotFound { resource: String::new() }.to_string(), "Not found: ");
+    }
+
+    #[test]
+    fn error_display_api_empty_message() {
+        assert_eq!(HubSpotError::Api { status_code: 422, message: String::new() }.to_string(), "HubSpot API error (422): ");
+    }
+
+    #[test]
+    fn error_display_rate_limited_zero() {
+        assert_eq!(HubSpotError::RateLimited { retry_after_ms: 0 }.to_string(), "Rate limited, retry after 0ms");
+    }
+
+    // ── Debug trait ─────────────────────────────────────────────────
+
+    #[test]
+    fn error_debug_unauthorized() {
+        let dbg = format!("{:?}", HubSpotError::Unauthorized);
+        assert!(dbg.contains("Unauthorized"));
+    }
+
+    #[test]
+    fn error_debug_rate_limited() {
+        let dbg = format!("{:?}", HubSpotError::RateLimited { retry_after_ms: 5000 });
+        assert!(dbg.contains("5000"));
+    }
+
+    #[test]
+    fn error_debug_api() {
+        let dbg = format!("{:?}", HubSpotError::Api { status_code: 503, message: "down".into() });
+        assert!(dbg.contains("503"));
+        assert!(dbg.contains("down"));
+    }
+
+    #[test]
+    fn error_debug_not_found() {
+        let dbg = format!("{:?}", HubSpotError::NotFound { resource: "contact_42".into() });
+        assert!(dbg.contains("contact_42"));
+    }
 }

@@ -332,4 +332,290 @@ mod tests {
         assert_eq!(p.id, Some("p1".into()));
         assert_eq!(p.name, Some("Test".into()));
     }
+
+    // ── Additional type coverage ─────────────────────────────────
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn user_profile_clone() {
+        let p = UserProfile {
+            id: Some("u1".into()),
+            display_name: Some("User".into()),
+            email: Some("u@e.com".into()),
+            followers: Some(Followers { total: Some(10) }),
+            images: Some(vec![Image {
+                url: Some("http://img".into()),
+                height: Some(300),
+                width: Some(300),
+            }]),
+        };
+        let cloned = p.clone();
+        assert_eq!(cloned.id, Some("u1".into()));
+        assert_eq!(cloned.followers.unwrap().total, Some(10));
+        assert_eq!(cloned.images.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn user_profile_debug() {
+        let p = UserProfile {
+            id: Some("u1".into()),
+            display_name: None,
+            email: None,
+            followers: None,
+            images: None,
+        };
+        let dbg = format!("{p:?}");
+        assert!(dbg.contains("UserProfile"));
+        assert!(dbg.contains("u1"));
+    }
+
+    #[test]
+    fn followers_minimal() {
+        let f: Followers = serde_json::from_value(json!({})).unwrap();
+        assert!(f.total.is_none());
+    }
+
+    #[test]
+    fn followers_clone_debug() {
+        let f = Followers { total: Some(42) };
+        let cloned = f.clone();
+        assert_eq!(cloned.total, Some(42));
+        let dbg = format!("{f:?}");
+        assert!(dbg.contains("42"));
+    }
+
+    #[test]
+    fn image_clone_debug() {
+        let i = Image {
+            url: Some("http://img".into()),
+            height: Some(640),
+            width: Some(480),
+        };
+        let cloned = i.clone();
+        assert_eq!(cloned.height, Some(640));
+        assert_eq!(cloned.width, Some(480));
+        let dbg = format!("{i:?}");
+        assert!(dbg.contains("640"));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn track_clone() {
+        let t = Track {
+            id: Some("t1".into()),
+            name: Some("Song".into()),
+            artists: None,
+            album: None,
+            duration_ms: Some(180_000),
+            explicit: Some(false),
+            uri: None,
+        };
+        let cloned = t.clone();
+        assert_eq!(cloned.id, Some("t1".into()));
+        assert_eq!(cloned.duration_ms, Some(180_000));
+    }
+
+    #[test]
+    fn track_debug() {
+        let t = Track {
+            id: Some("t1".into()),
+            name: Some("Song".into()),
+            artists: None,
+            album: None,
+            duration_ms: None,
+            explicit: None,
+            uri: None,
+        };
+        let dbg = format!("{t:?}");
+        assert!(dbg.contains("Track"));
+        assert!(dbg.contains("Song"));
+    }
+
+    #[test]
+    fn artist_ref_minimal() {
+        let a: ArtistRef = serde_json::from_value(json!({})).unwrap();
+        assert!(a.id.is_none());
+        assert!(a.name.is_none());
+    }
+
+    #[test]
+    fn artist_ref_clone_debug() {
+        let a = ArtistRef {
+            id: Some("a1".into()),
+            name: Some("Miles Davis".into()),
+        };
+        let cloned = a.clone();
+        assert_eq!(cloned.name, Some("Miles Davis".into()));
+        let dbg = format!("{a:?}");
+        assert!(dbg.contains("Miles Davis"));
+    }
+
+    #[test]
+    fn album_ref_minimal() {
+        let a: AlbumRef = serde_json::from_value(json!({})).unwrap();
+        assert!(a.id.is_none());
+        assert!(a.name.is_none());
+        assert!(a.release_date.is_none());
+    }
+
+    #[test]
+    fn album_ref_clone_debug() {
+        let a = AlbumRef {
+            id: Some("alb1".into()),
+            name: Some("Album".into()),
+            release_date: Some("2024-01-01".into()),
+        };
+        let cloned = a.clone();
+        assert_eq!(cloned.release_date, Some("2024-01-01".into()));
+        let dbg = format!("{a:?}");
+        assert!(dbg.contains("Album"));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn playlist_clone() {
+        let p = Playlist {
+            id: Some("p1".into()),
+            name: Some("My Playlist".into()),
+            description: Some("desc".into()),
+            owner: Some(ArtistRef {
+                id: Some("u1".into()),
+                name: Some("User".into()),
+            }),
+            tracks: Some(PlaylistTracks { total: Some(10) }),
+        };
+        let cloned = p.clone();
+        assert_eq!(cloned.name, Some("My Playlist".into()));
+        assert_eq!(cloned.tracks.unwrap().total, Some(10));
+    }
+
+    #[test]
+    fn playlist_debug() {
+        let p = Playlist {
+            id: Some("p1".into()),
+            name: Some("Test".into()),
+            description: None,
+            owner: None,
+            tracks: None,
+        };
+        let dbg = format!("{p:?}");
+        assert!(dbg.contains("Playlist"));
+        assert!(dbg.contains("Test"));
+    }
+
+    #[test]
+    fn playlist_tracks_minimal() {
+        let pt: PlaylistTracks = serde_json::from_value(json!({})).unwrap();
+        assert!(pt.total.is_none());
+    }
+
+    #[test]
+    fn playlist_tracks_clone_debug() {
+        let pt = PlaylistTracks { total: Some(99) };
+        let cloned = pt.clone();
+        assert_eq!(cloned.total, Some(99));
+        let dbg = format!("{pt:?}");
+        assert!(dbg.contains("99"));
+    }
+
+    #[test]
+    fn api_error_clone_debug() {
+        let e = ApiError {
+            status: Some(500),
+            message: Some("Internal".into()),
+        };
+        let cloned = e.clone();
+        assert_eq!(cloned.status, Some(500));
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("500"));
+    }
+
+    #[test]
+    fn api_error_minimal() {
+        let e: ApiError = serde_json::from_value(json!({})).unwrap();
+        assert!(e.status.is_none());
+        assert!(e.message.is_none());
+    }
+
+    #[test]
+    fn api_error_response_clone_debug() {
+        let e = ApiErrorResponse {
+            error: Some(ApiError {
+                status: Some(401),
+                message: Some("Invalid".into()),
+            }),
+        };
+        let cloned = e.clone();
+        let inner = cloned.error.unwrap();
+        assert_eq!(inner.status, Some(401));
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("ApiErrorResponse"));
+    }
+
+    #[test]
+    fn user_profile_serialize_full() {
+        let p = UserProfile {
+            id: Some("u1".into()),
+            display_name: Some("Test".into()),
+            email: Some("t@t.com".into()),
+            followers: Some(Followers { total: Some(5) }),
+            images: Some(vec![]),
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["id"], "u1");
+        assert_eq!(v["followers"]["total"], 5);
+    }
+
+    #[test]
+    fn track_with_multiple_artists() {
+        let t: Track = serde_json::from_value(json!({
+            "id": "t1",
+            "artists": [
+                {"id": "a1", "name": "Artist 1"},
+                {"id": "a2", "name": "Artist 2"},
+                {"id": "a3", "name": "Artist 3"}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(t.artists.as_ref().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn playlist_serialize_roundtrip() {
+        let p = Playlist {
+            id: Some("p1".into()),
+            name: Some("Test".into()),
+            description: None,
+            owner: None,
+            tracks: Some(PlaylistTracks { total: Some(0) }),
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        let back: Playlist = serde_json::from_value(v).unwrap();
+        assert_eq!(back.id, Some("p1".into()));
+        assert_eq!(back.tracks.unwrap().total, Some(0));
+    }
+
+    #[test]
+    fn image_serialize_roundtrip() {
+        let i = Image {
+            url: Some("https://img.example.com/pic.jpg".into()),
+            height: None,
+            width: None,
+        };
+        let v = serde_json::to_value(&i).unwrap();
+        let back: Image = serde_json::from_value(v).unwrap();
+        assert_eq!(
+            back.url,
+            Some("https://img.example.com/pic.jpg".into())
+        );
+        assert!(back.height.is_none());
+    }
+
+    #[test]
+    fn followers_serialize_roundtrip() {
+        let f = Followers { total: Some(0) };
+        let v = serde_json::to_value(&f).unwrap();
+        let back: Followers = serde_json::from_value(v).unwrap();
+        assert_eq!(back.total, Some(0));
+    }
 }

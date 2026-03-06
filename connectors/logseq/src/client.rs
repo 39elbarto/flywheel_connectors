@@ -295,4 +295,85 @@ mod tests {
         let cloned = auth.clone();
         assert!(cloned.is_secretless());
     }
+
+    #[test]
+    fn client_new_with_credential_id() {
+        let client =
+            LogseqClient::new(LogseqAuth::CredentialId(CredentialId::new()), None).unwrap();
+        assert_eq!(client.base_url(), DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn client_debug_contains_base_url() {
+        let client = LogseqClient::new(LogseqAuth::BearerToken("tok".into()), None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("localhost:12315"));
+    }
+
+    #[test]
+    fn client_trims_multiple_trailing_slashes() {
+        let client = LogseqClient::new(
+            LogseqAuth::BearerToken("tok".into()),
+            Some("http://localhost:12315/api///"),
+        )
+        .unwrap();
+        // Only the last slash should be trimmed by trim_end_matches
+        assert!(!client.base_url().ends_with('/'));
+    }
+
+    #[test]
+    fn auth_bearer_debug_contains_bearer_token_label() {
+        let auth = LogseqAuth::BearerToken("super-secret".into());
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("BearerToken"));
+        assert!(!dbg.contains("super-secret"));
+    }
+
+    #[test]
+    fn auth_credential_redacted_label_contains_uuid() {
+        let id = CredentialId::new();
+        let label_expected = format!("credential_id:{id}");
+        let auth = LogseqAuth::CredentialId(id);
+        assert_eq!(auth.redacted_label(), label_expected);
+    }
+
+    #[test]
+    fn client_custom_base_url_no_trailing_slash() {
+        let client = LogseqClient::new(
+            LogseqAuth::BearerToken("tok".into()),
+            Some("http://myhost:8080/logseq"),
+        )
+        .unwrap();
+        assert_eq!(client.base_url(), "http://myhost:8080/logseq");
+    }
+
+    #[test]
+    fn default_base_url_starts_with_http() {
+        assert!(DEFAULT_BASE_URL.starts_with("http"));
+    }
+
+    #[test]
+    fn default_base_url_contains_api() {
+        assert!(DEFAULT_BASE_URL.contains("/api"));
+    }
+
+    #[test]
+    fn auth_bearer_is_not_secretless() {
+        let auth = LogseqAuth::BearerToken("anything".into());
+        assert!(!auth.is_secretless());
+    }
+
+    #[test]
+    fn auth_credential_is_secretless() {
+        let auth = LogseqAuth::CredentialId(CredentialId::new());
+        assert!(auth.is_secretless());
+    }
+
+    #[test]
+    fn client_debug_does_not_leak_bearer_token() {
+        let client =
+            LogseqClient::new(LogseqAuth::BearerToken("my-token-xyz".into()), None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(!dbg.contains("my-token-xyz"));
+    }
 }

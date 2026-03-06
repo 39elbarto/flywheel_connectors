@@ -227,4 +227,254 @@ mod tests {
         let e: ApiErrorResponse = serde_json::from_value(json!({})).unwrap();
         assert!(e.message.is_none());
     }
+
+    // ── CrmObject additional tests ──────────────────────────────────
+
+    #[test]
+    fn crm_object_serialize_roundtrip() {
+        let o = CrmObject {
+            id: Some("456".into()),
+            properties: Some(json!({"name": "Acme"})),
+            created_at: Some("2026-01-01T00:00:00Z".into()),
+            updated_at: None,
+            archived: Some(false),
+        };
+        let v = serde_json::to_value(&o).unwrap();
+        assert_eq!(v["id"], "456");
+        assert_eq!(v["properties"]["name"], "Acme");
+        let o2: CrmObject = serde_json::from_value(v).unwrap();
+        assert_eq!(o2.id, Some("456".into()));
+    }
+
+    #[test]
+    fn crm_object_clone() {
+        let o: CrmObject = serde_json::from_value(json!({"id": "c1"})).unwrap();
+        #[allow(clippy::redundant_clone)]
+        let o2 = o.clone();
+        assert_eq!(o2.id, Some("c1".into()));
+    }
+
+    #[test]
+    fn crm_object_debug() {
+        let o: CrmObject = serde_json::from_value(json!({"id": "dbg"})).unwrap();
+        let dbg = format!("{o:?}");
+        assert!(dbg.contains("dbg"));
+    }
+
+    #[test]
+    fn crm_object_archived_true() {
+        let o: CrmObject = serde_json::from_value(json!({"archived": true})).unwrap();
+        assert_eq!(o.archived, Some(true));
+    }
+
+    // ── CrmListResponse additional tests ────────────────────────────
+
+    #[test]
+    fn crm_list_response_no_paging() {
+        let r: CrmListResponse = serde_json::from_value(json!({"results": [{"id": "1"}]})).unwrap();
+        assert_eq!(r.results.len(), 1);
+        assert!(r.paging.is_none());
+    }
+
+    #[test]
+    fn crm_list_response_clone() {
+        let r: CrmListResponse = serde_json::from_value(json!({"results": []})).unwrap();
+        #[allow(clippy::redundant_clone)]
+        let r2 = r.clone();
+        assert!(r2.results.is_empty());
+    }
+
+    #[test]
+    fn crm_list_response_debug() {
+        let r: CrmListResponse = serde_json::from_value(json!({"results": []})).unwrap();
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("CrmListResponse"));
+    }
+
+    #[test]
+    fn crm_list_response_default_results() {
+        // results uses #[serde(default)] so omitting works
+        let r: CrmListResponse = serde_json::from_value(json!({})).unwrap();
+        assert!(r.results.is_empty());
+    }
+
+    // ── Paging tests ────────────────────────────────────────────────
+
+    #[test]
+    fn paging_roundtrip() {
+        let p: Paging = serde_json::from_value(json!({
+            "next": {"after": "abc", "link": "https://api.hubapi.com/next"}
+        })).unwrap();
+        assert_eq!(p.next.as_ref().unwrap().after.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn paging_empty() {
+        let p: Paging = serde_json::from_value(json!({})).unwrap();
+        assert!(p.next.is_none());
+    }
+
+    #[test]
+    fn paging_clone() {
+        let p: Paging = serde_json::from_value(json!({"next": {"after": "x"}})).unwrap();
+        #[allow(clippy::redundant_clone)]
+        let p2 = p.clone();
+        assert_eq!(p2.next.unwrap().after, Some("x".into()));
+    }
+
+    // ── PagingNext tests ────────────────────────────────────────────
+
+    #[test]
+    fn paging_next_minimal() {
+        let pn: PagingNext = serde_json::from_value(json!({})).unwrap();
+        assert!(pn.after.is_none());
+        assert!(pn.link.is_none());
+    }
+
+    #[test]
+    fn paging_next_serialize_roundtrip() {
+        let pn = PagingNext { after: Some("cur".into()), link: Some("http://link".into()) };
+        let v = serde_json::to_value(&pn).unwrap();
+        assert_eq!(v["after"], "cur");
+        let pn2: PagingNext = serde_json::from_value(v).unwrap();
+        assert_eq!(pn2.after, Some("cur".into()));
+    }
+
+    // ── Pipeline additional tests ───────────────────────────────────
+
+    #[test]
+    fn pipeline_clone() {
+        let p: Pipeline = serde_json::from_value(json!({"id": "p1", "label": "Sales"})).unwrap();
+        #[allow(clippy::redundant_clone)]
+        let p2 = p.clone();
+        assert_eq!(p2.id, Some("p1".into()));
+    }
+
+    #[test]
+    fn pipeline_debug() {
+        let p: Pipeline = serde_json::from_value(json!({"id": "dbg_pipe"})).unwrap();
+        let dbg = format!("{p:?}");
+        assert!(dbg.contains("dbg_pipe"));
+    }
+
+    #[test]
+    fn pipeline_serialize_roundtrip() {
+        let p = Pipeline {
+            id: Some("default".into()),
+            label: Some("Sales".into()),
+            display_order: Some(0),
+            stages: vec![PipelineStage {
+                id: Some("s1".into()),
+                label: Some("New".into()),
+                display_order: Some(0),
+                metadata: None,
+            }],
+            created_at: None,
+            updated_at: None,
+            archived: Some(false),
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["displayOrder"], 0);
+        assert_eq!(v["stages"][0]["label"], "New");
+    }
+
+    // ── PipelineStage additional tests ──────────────────────────────
+
+    #[test]
+    fn pipeline_stage_minimal() {
+        let s: PipelineStage = serde_json::from_value(json!({})).unwrap();
+        assert!(s.id.is_none());
+        assert!(s.metadata.is_none());
+    }
+
+    #[test]
+    fn pipeline_stage_with_metadata() {
+        let s: PipelineStage = serde_json::from_value(json!({
+            "id": "s1", "metadata": {"probability": 0.5}
+        })).unwrap();
+        assert_eq!(s.metadata.unwrap()["probability"], 0.5);
+    }
+
+    // ── PipelineListResponse additional ─────────────────────────────
+
+    #[test]
+    fn pipeline_list_response_empty() {
+        let r: PipelineListResponse = serde_json::from_value(json!({"results": []})).unwrap();
+        assert!(r.results.is_empty());
+    }
+
+    #[test]
+    fn pipeline_list_response_clone() {
+        let r: PipelineListResponse = serde_json::from_value(json!({"results": []})).unwrap();
+        #[allow(clippy::redundant_clone)]
+        let r2 = r.clone();
+        assert!(r2.results.is_empty());
+    }
+
+    // ── WebhookEvent additional tests ───────────────────────────────
+
+    #[test]
+    fn webhook_event_clone() {
+        let e: WebhookEvent = serde_json::from_value(json!({"eventId": 42})).unwrap();
+        #[allow(clippy::redundant_clone)]
+        let e2 = e.clone();
+        assert_eq!(e2.event_id, Some(42));
+    }
+
+    #[test]
+    fn webhook_event_debug() {
+        let e: WebhookEvent = serde_json::from_value(json!({"eventId": 99})).unwrap();
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("99"));
+    }
+
+    #[test]
+    fn webhook_event_serialize_roundtrip() {
+        let e = WebhookEvent {
+            event_id: Some(1),
+            subscription_id: Some(100),
+            portal_id: Some(12345),
+            occurred_at: Some(1700000000),
+            subscription_type: Some("contact.creation".into()),
+            object_id: Some(999),
+            property_name: None,
+            property_value: None,
+            change_source: Some("CRM".into()),
+        };
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!(v["eventId"], 1);
+        assert_eq!(v["subscriptionType"], "contact.creation");
+        let e2: WebhookEvent = serde_json::from_value(v).unwrap();
+        assert_eq!(e2.event_id, Some(1));
+    }
+
+    // ── ApiErrorResponse additional tests ───────────────────────────
+
+    #[test]
+    fn api_error_response_clone() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({"message": "err"})).unwrap();
+        #[allow(clippy::redundant_clone)]
+        let e2 = e.clone();
+        assert_eq!(e2.message, Some("err".into()));
+    }
+
+    #[test]
+    fn api_error_response_debug() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({"message": "debug"})).unwrap();
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("debug"));
+    }
+
+    #[test]
+    fn api_error_response_all_fields() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({
+            "message": "err",
+            "status": "error",
+            "category": "VALIDATION_ERROR",
+            "correlationId": "corr-123"
+        })).unwrap();
+        assert_eq!(e.status.as_deref(), Some("error"));
+        assert_eq!(e.category.as_deref(), Some("VALIDATION_ERROR"));
+        assert_eq!(e.correlation_id.as_deref(), Some("corr-123"));
+    }
 }

@@ -845,4 +845,157 @@ mod tests {
             other => panic!("expected External, got {other:?}"),
         }
     }
+
+    // ── Additional edge cases ───────────────────────────────────────────
+
+    #[test]
+    fn api_error_with_all_fields_set() {
+        let err = PlaidError::Api {
+            message: "Product not ready".into(),
+            status_code: Some(400),
+            error_type: Some("INVALID_REQUEST".into()),
+            error_code: Some("PRODUCT_NOT_READY".into()),
+        };
+        assert!(!err.is_retryable());
+        let display = err.to_string();
+        assert!(display.contains("Product not ready"));
+    }
+
+    #[test]
+    fn api_error_empty_message() {
+        let err = PlaidError::Api {
+            message: String::new(),
+            status_code: Some(500),
+            error_type: None,
+            error_code: None,
+        };
+        assert_eq!(err.to_string(), "Plaid API error: ");
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn rate_limit_max_u64() {
+        let err = PlaidError::RateLimit {
+            retry_after_ms: u64::MAX,
+        };
+        let dur = err.retry_after().unwrap();
+        assert_eq!(dur.as_millis(), u128::from(u64::MAX));
+        let fcp = err.to_fcp_error();
+        match fcp {
+            FcpError::RateLimited { retry_after_ms, .. } => {
+                assert_eq!(retry_after_ms, u64::MAX);
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_config_empty_string() {
+        let err = PlaidError::InvalidConfig(String::new());
+        assert_eq!(err.to_string(), "Invalid configuration: ");
+        let fcp = err.to_fcp_error();
+        match fcp {
+            FcpError::Internal { message } => {
+                assert!(message.contains("Plaid configuration error: "));
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn is_retryable_api_504() {
+        let err = PlaidError::Api {
+            message: "gateway timeout".into(),
+            status_code: Some(504),
+            error_type: None,
+            error_code: None,
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn not_retryable_api_499_boundary() {
+        let err = PlaidError::Api {
+            message: "edge".into(),
+            status_code: Some(499),
+            error_type: None,
+            error_code: None,
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn not_retryable_api_600_boundary() {
+        let err = PlaidError::Api {
+            message: "edge".into(),
+            status_code: Some(600),
+            error_type: None,
+            error_code: None,
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn to_fcp_error_api_with_error_type_preserved_in_external() {
+        let err = PlaidError::Api {
+            message: "some error".into(),
+            status_code: Some(400),
+            error_type: Some("INVALID_REQUEST".into()),
+            error_code: Some("MISSING_FIELDS".into()),
+        };
+        let fcp = err.to_fcp_error();
+        match fcp {
+            FcpError::External { message, .. } => {
+                assert_eq!(message, "some error");
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn display_format_consistency() {
+        let variants: Vec<PlaidError> = vec![
+            PlaidError::Api {
+                message: "a".into(),
+                status_code: Some(400),
+                error_type: None,
+                error_code: None,
+            },
+            PlaidError::InvalidConfig("b".into()),
+            PlaidError::RateLimit {
+                retry_after_ms: 100,
+            },
+        ];
+        for v in &variants {
+            let display = format!("{v}");
+            assert!(!display.is_empty(), "Display should not be empty");
+        }
+    }
+
+    #[test]
+    fn debug_format_shows_variant_name() {
+        let err = PlaidError::Api {
+            message: "debug test".into(),
+            status_code: Some(500),
+            error_type: Some("API_ERROR".into()),
+            error_code: Some("INTERNAL_ERROR".into()),
+        };
+        let debug = format!("{err:?}");
+        assert!(debug.contains("Api"), "debug: {debug}");
+        assert!(debug.contains("API_ERROR"), "debug: {debug}");
+        assert!(debug.contains("INTERNAL_ERROR"), "debug: {debug}");
+    }
+
+    #[test]
+    fn retry_after_http_is_none() {
+        // HTTP errors are retryable but don't have retry_after
+        // We test via Api variant since we can't easily construct reqwest::Error
+        let err = PlaidError::Api {
+            message: "network".into(),
+            status_code: None,
+            error_type: None,
+            error_code: None,
+        };
+        assert!(err.retry_after().is_none());
+    }
 }

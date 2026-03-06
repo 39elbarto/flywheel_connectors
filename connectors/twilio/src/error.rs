@@ -709,4 +709,111 @@ mod tests {
             other => panic!("expected External, got: {other:?}"),
         }
     }
+
+    // ── Additional edge cases ───────────────────────────────────────────
+
+    #[test]
+    fn api_error_with_all_fields_set() {
+        let err = TwilioError::Api {
+            message: "Queue overflow".into(),
+            status_code: Some(503),
+            error_code: Some("30010".into()),
+        };
+        assert!(err.is_retryable());
+        let fcp = err.to_fcp_error();
+        match fcp {
+            FcpError::External {
+                service,
+                message,
+                retryable,
+                ..
+            } => {
+                assert_eq!(service, "twilio");
+                assert_eq!(message, "Queue overflow");
+                assert!(retryable);
+            }
+            other => panic!("expected External, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn not_found_with_empty_resource_display() {
+        let err = TwilioError::NotFound {
+            resource: String::new(),
+        };
+        assert_eq!(format!("{err}"), "Not found: ");
+    }
+
+    #[test]
+    fn rate_limited_with_one_ms() {
+        let err = TwilioError::RateLimited { retry_after_ms: 1 };
+        let dur = err.retry_after().unwrap();
+        assert_eq!(dur.as_millis(), 1);
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn api_with_unicode_message() {
+        let err = TwilioError::Api {
+            message: "Error: \u{1F6D1} service down".into(),
+            status_code: Some(500),
+            error_code: None,
+        };
+        let display = format!("{err}");
+        assert!(display.contains("\u{1F6D1}"));
+    }
+
+    #[test]
+    fn fcp_api_404_maps_to_external_not_retryable() {
+        let err = TwilioError::Api {
+            message: "resource gone".into(),
+            status_code: Some(404),
+            error_code: None,
+        };
+        let fcp = err.to_fcp_error();
+        match fcp {
+            FcpError::External {
+                retryable,
+                status_code,
+                ..
+            } => {
+                assert!(!retryable);
+                assert_eq!(status_code, Some(404));
+            }
+            other => panic!("expected External, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fcp_api_422_maps_to_external_not_retryable() {
+        let err = TwilioError::Api {
+            message: "unprocessable entity".into(),
+            status_code: Some(422),
+            error_code: Some("21611".into()),
+        };
+        let fcp = err.to_fcp_error();
+        match fcp {
+            FcpError::External {
+                retryable,
+                status_code,
+                service,
+                ..
+            } => {
+                assert!(!retryable);
+                assert_eq!(status_code, Some(422));
+                assert_eq!(service, "twilio");
+            }
+            other => panic!("expected External, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn is_retryable_api_504_gateway_timeout() {
+        let err = TwilioError::Api {
+            message: "gateway timeout".into(),
+            status_code: Some(504),
+            error_code: None,
+        };
+        assert!(err.is_retryable());
+    }
 }

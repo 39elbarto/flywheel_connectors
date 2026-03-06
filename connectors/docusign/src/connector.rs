@@ -1155,4 +1155,84 @@ mod tests {
         .unwrap();
         assert_eq!(config.base_url, DEFAULT_BASE_URL);
     }
+
+    #[test]
+    fn doctor_result_multiple_critical_failures_count() {
+        let checks = vec![
+            DoctorCheck {
+                name: "a".into(),
+                passed: false,
+                message: Some("f1".into()),
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: Some("f2".into()),
+                critical: true,
+            },
+        ];
+        let r = DoctorResult::from_checks(checks);
+        assert_eq!(r.status, DoctorStatus::Unhealthy);
+        assert_eq!(r.checks.len(), 2);
+    }
+
+    #[test]
+    fn doctor_status_serde_healthy() {
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Healthy).unwrap(),
+            "healthy"
+        );
+    }
+
+    #[test]
+    fn doctor_status_serde_degraded() {
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Degraded).unwrap(),
+            "degraded"
+        );
+    }
+
+    #[test]
+    fn doctor_status_serde_unhealthy() {
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Unhealthy).unwrap(),
+            "unhealthy"
+        );
+    }
+
+    #[test]
+    fn connector_new_eq_default() {
+        let a = DocuSignConnector::new();
+        let b = DocuSignConnector::default();
+        assert!(a.config.is_none());
+        assert!(b.config.is_none());
+        assert_eq!(a.request_count.load(Ordering::Relaxed), 0);
+        assert_eq!(b.error_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn base64_encode_six_bytes() {
+        // "abcdef" -> YWJjZGVm
+        assert_eq!(base64_encode(b"abcdef"), "YWJjZGVm");
+    }
+
+    #[test]
+    fn base64_encode_binary_data() {
+        let data: [u8; 4] = [0xFF, 0x00, 0xAB, 0xCD];
+        let encoded = base64_encode(&data);
+        assert_eq!(encoded.len(), 8); // 4 bytes -> 8 base64 chars
+    }
+
+    #[test]
+    fn require_str_empty_string_is_ok() {
+        let input = json!({"x": ""});
+        assert_eq!(require_str(&input, "x").unwrap(), "");
+    }
+
+    #[test]
+    fn require_str_object_value() {
+        let input = json!({"x": {"nested": true}});
+        assert!(require_str(&input, "x").is_err());
+    }
 }

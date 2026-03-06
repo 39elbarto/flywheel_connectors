@@ -747,4 +747,286 @@ mod tests {
         assert_eq!(dests["safety_tier"], "safe");
         assert_eq!(dests["risk_level"], "low");
     }
+
+    #[test]
+    fn connector_new_request_count_zero() {
+        let c = SegmentConnector::new();
+        assert_eq!(c.request_count.load(Ordering::Relaxed), 0);
+        assert_eq!(c.error_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn doctor_check_skip_serializing_none_message() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert!(!v.as_object().unwrap().contains_key("message"));
+    }
+
+    #[test]
+    fn doctor_check_includes_message_when_present() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: false,
+            message: Some("failure reason".into()),
+            critical: true,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert_eq!(v["message"], "failure reason");
+    }
+
+    #[test]
+    fn doctor_check_serde_roundtrip() {
+        let check = DoctorCheck {
+            name: "config".into(),
+            passed: true,
+            message: Some("ok".into()),
+            critical: true,
+        };
+        let s = serde_json::to_string(&check).unwrap();
+        let check2: DoctorCheck = serde_json::from_str(&s).unwrap();
+        assert_eq!(check2.name, "config");
+        assert!(check2.passed);
+        assert_eq!(check2.message, Some("ok".into()));
+        assert!(check2.critical);
+    }
+
+    #[test]
+    fn doctor_status_serde_healthy() {
+        let v = serde_json::to_value(DoctorStatus::Healthy).unwrap();
+        assert_eq!(v, "healthy");
+        let ds: DoctorStatus = serde_json::from_value(json!("healthy")).unwrap();
+        assert_eq!(ds, DoctorStatus::Healthy);
+    }
+
+    #[test]
+    fn doctor_status_serde_degraded() {
+        let v = serde_json::to_value(DoctorStatus::Degraded).unwrap();
+        assert_eq!(v, "degraded");
+        let ds: DoctorStatus = serde_json::from_value(json!("degraded")).unwrap();
+        assert_eq!(ds, DoctorStatus::Degraded);
+    }
+
+    #[test]
+    fn doctor_status_serde_unhealthy() {
+        let v = serde_json::to_value(DoctorStatus::Unhealthy).unwrap();
+        assert_eq!(v, "unhealthy");
+        let ds: DoctorStatus = serde_json::from_value(json!("unhealthy")).unwrap();
+        assert_eq!(ds, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_result_serde_roundtrip() {
+        let r = DoctorResult::from_checks(vec![
+            DoctorCheck {
+                name: "a".into(),
+                passed: true,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: Some("issue".into()),
+                critical: false,
+            },
+        ]);
+        let s = serde_json::to_string(&r).unwrap();
+        let r2: DoctorResult = serde_json::from_str(&s).unwrap();
+        assert_eq!(r2.status, DoctorStatus::Degraded);
+        assert_eq!(r2.checks.len(), 2);
+    }
+
+    #[test]
+    fn doctor_check_clone() {
+        let check = DoctorCheck {
+            name: "x".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let check2 = check.clone();
+        assert_eq!(check.name, check2.name);
+    }
+
+    #[test]
+    fn doctor_check_debug() {
+        let check = DoctorCheck {
+            name: "y".into(),
+            passed: false,
+            message: None,
+            critical: true,
+        };
+        let dbg = format!("{check:?}");
+        assert!(dbg.contains("DoctorCheck"));
+    }
+
+    #[test]
+    fn doctor_result_clone() {
+        let r = DoctorResult::from_checks(vec![]);
+        let r2 = r.clone();
+        assert_eq!(r.status, r2.status);
+    }
+
+    #[test]
+    fn doctor_result_debug() {
+        let r = DoctorResult::from_checks(vec![]);
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("DoctorResult"));
+    }
+
+    #[test]
+    fn require_str_array_value() {
+        let input = json!({"source_id": [1, 2, 3]});
+        assert!(require_str(&input, "source_id").is_err());
+    }
+
+    #[test]
+    fn require_str_bool_value() {
+        let input = json!({"source_id": true});
+        assert!(require_str(&input, "source_id").is_err());
+    }
+
+    #[test]
+    fn require_str_empty_string() {
+        let input = json!({"source_id": ""});
+        assert_eq!(require_str(&input, "source_id").unwrap(), "");
+    }
+
+    #[test]
+    fn operations_sources_list_capability() {
+        let ops = operations_info();
+        let sl = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "segment.sources.list")
+            .unwrap();
+        assert_eq!(sl["capability"], "segment.sources.read");
+    }
+
+    #[test]
+    fn operations_destinations_list_capability() {
+        let ops = operations_info();
+        let dl = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "segment.destinations.list")
+            .unwrap();
+        assert_eq!(dl["capability"], "segment.destinations.read");
+    }
+
+    #[test]
+    fn operations_track_capability() {
+        let ops = operations_info();
+        let t = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "segment.track")
+            .unwrap();
+        assert_eq!(t["capability"], "segment.track.write");
+    }
+
+    #[test]
+    fn operations_read_ops_are_strict_idempotent() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let cap = op["capability"].as_str().unwrap();
+            if cap.split('.').next_back() == Some("read") {
+                assert_eq!(
+                    op["idempotency"], "strict",
+                    "read op {} should be strict",
+                    op["id"]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn operations_track_idempotency_is_none() {
+        let ops = operations_info();
+        let t = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "segment.track")
+            .unwrap();
+        assert_eq!(t["idempotency"], "none");
+    }
+
+    #[test]
+    fn doctor_result_multiple_critical_failures() {
+        let checks = vec![
+            DoctorCheck {
+                name: "a".into(),
+                passed: false,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: None,
+                critical: true,
+            },
+        ];
+        let r = DoctorResult::from_checks(checks);
+        assert_eq!(r.status, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_result_mixed_critical_and_non_critical_failures() {
+        let checks = vec![
+            DoctorCheck {
+                name: "a".into(),
+                passed: false,
+                message: None,
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: None,
+                critical: false,
+            },
+        ];
+        let r = DoctorResult::from_checks(checks);
+        assert_eq!(r.status, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_status_copy() {
+        let s = DoctorStatus::Healthy;
+        let s2 = s;
+        assert_eq!(s, s2);
+    }
+
+    #[test]
+    fn doctor_status_eq() {
+        assert_eq!(DoctorStatus::Healthy, DoctorStatus::Healthy);
+        assert_ne!(DoctorStatus::Healthy, DoctorStatus::Degraded);
+        assert_ne!(DoctorStatus::Degraded, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn write_operations_not_safe() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let cap = op["capability"].as_str().unwrap();
+            if cap.split('.').next_back() == Some("write") {
+                assert_ne!(
+                    op["safety_tier"].as_str().unwrap(),
+                    "safe",
+                    "write op {} should not be safe",
+                    op["id"]
+                );
+            }
+        }
+    }
 }

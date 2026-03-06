@@ -517,4 +517,178 @@ mod tests {
         .unwrap();
         assert_eq!(l.uris.as_ref().unwrap().len(), 2);
     }
+
+    #[test]
+    fn collection_clone() {
+        let c: Collection = serde_json::from_value(json!({
+            "id": "c1",
+            "name": "Test",
+        }))
+        .unwrap();
+        let c2 = c.clone();
+        assert_eq!(c.id, c2.id);
+        assert_eq!(c.name, c2.name);
+    }
+
+    #[test]
+    fn collection_debug() {
+        let c: Collection = serde_json::from_value(json!({
+            "id": "c1",
+            "name": "Test",
+        }))
+        .unwrap();
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("Collection"));
+        assert!(dbg.contains("c1"));
+    }
+
+    #[test]
+    fn item_clone() {
+        let i: Item = serde_json::from_value(json!({
+            "id": "i1",
+            "name": "Test",
+        }))
+        .unwrap();
+        let i2 = i.clone();
+        assert_eq!(i.id, i2.id);
+    }
+
+    #[test]
+    fn item_debug() {
+        let i: Item = serde_json::from_value(json!({
+            "id": "i1",
+            "name": "Test",
+        }))
+        .unwrap();
+        let dbg = format!("{i:?}");
+        assert!(dbg.contains("Item"));
+    }
+
+    #[test]
+    fn login_clone() {
+        let l: Login = serde_json::from_value(json!({
+            "username": "u",
+            "password": "p",
+        }))
+        .unwrap();
+        let l2 = l.clone();
+        assert_eq!(l.username, l2.username);
+    }
+
+    #[test]
+    fn card_minimal() {
+        let c: Card = serde_json::from_value(json!({})).unwrap();
+        assert!(c.cardholder_name.is_none());
+        assert!(c.brand.is_none());
+        assert!(c.number.is_none());
+    }
+
+    #[test]
+    fn card_clone() {
+        let c: Card = serde_json::from_value(json!({"brand": "Visa"})).unwrap();
+        let c2 = c.clone();
+        assert_eq!(c.brand, c2.brand);
+    }
+
+    #[test]
+    fn identity_minimal() {
+        let i: Identity = serde_json::from_value(json!({})).unwrap();
+        assert!(i.title.is_none());
+        assert!(i.first_name.is_none());
+        assert!(i.email.is_none());
+    }
+
+    #[test]
+    fn identity_clone() {
+        let i: Identity = serde_json::from_value(json!({"email": "a@b.com"})).unwrap();
+        let i2 = i.clone();
+        assert_eq!(i.email, i2.email);
+    }
+
+    #[test]
+    fn secure_note_minimal() {
+        let s: SecureNote = serde_json::from_value(json!({})).unwrap();
+        assert!(s.note_type.is_none());
+    }
+
+    #[test]
+    fn item_field_minimal() {
+        let f: ItemField = serde_json::from_value(json!({})).unwrap();
+        assert!(f.name.is_none());
+        assert!(f.value.is_none());
+        assert!(f.field_type.is_none());
+    }
+
+    #[test]
+    fn login_uri_minimal() {
+        let u: LoginUri = serde_json::from_value(json!({})).unwrap();
+        assert!(u.uri.is_none());
+        assert!(u.match_type.is_none());
+    }
+
+    #[test]
+    fn list_response_clone() {
+        let lr: ListResponse = serde_json::from_value(json!({
+            "object": "list",
+            "data": [{"id": "1"}]
+        }))
+        .unwrap();
+        let lr2 = lr.clone();
+        assert_eq!(lr.data.len(), lr2.data.len());
+    }
+
+    #[test]
+    fn api_error_response_debug() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({
+            "message": "Test error"
+        }))
+        .unwrap();
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("ApiErrorResponse"));
+    }
+
+    #[test]
+    fn collection_serialize_preserves_rename() {
+        let c = Collection {
+            id: "c1".into(),
+            name: "Test".into(),
+            organization_id: Some("org-1".into()),
+            external_id: Some("ext-1".into()),
+        };
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["organizationId"], "org-1");
+        assert_eq!(v["externalId"], "ext-1");
+    }
+
+    #[test]
+    fn item_serialize_preserves_renames() {
+        let i: Item = serde_json::from_value(json!({
+            "id": "i1",
+            "name": "N",
+            "type": 1,
+            "folderId": "f1",
+            "organizationId": "o1",
+            "collectionIds": ["c1"],
+            "revisionDate": "2026-01-01T00:00:00Z",
+            "creationDate": "2025-01-01T00:00:00Z",
+        }))
+        .unwrap();
+        let v = serde_json::to_value(&i).unwrap();
+        assert_eq!(v["type"], 1);
+        assert_eq!(v["folderId"], "f1");
+        assert_eq!(v["organizationId"], "o1");
+        assert_eq!(v["revisionDate"], "2026-01-01T00:00:00Z");
+        assert_eq!(v["creationDate"], "2025-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn item_with_reprompt() {
+        let i: Item = serde_json::from_value(json!({
+            "id": "i7",
+            "name": "Reprompt Item",
+            "reprompt": 1,
+        }))
+        .unwrap();
+        assert_eq!(i.reprompt, Some(1));
+    }
 }

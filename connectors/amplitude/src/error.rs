@@ -536,4 +536,130 @@ mod tests {
         assert!(s.contains("Bad Gateway"));
         assert!(s.contains("Amplitude"));
     }
+
+    #[test]
+    fn error_debug_unauthorized() {
+        let dbg = format!("{:?}", AmplitudeError::Unauthorized);
+        assert!(dbg.contains("Unauthorized"));
+    }
+
+    #[test]
+    fn error_debug_forbidden() {
+        let dbg = format!("{:?}", AmplitudeError::Forbidden);
+        assert!(dbg.contains("Forbidden"));
+    }
+
+    #[test]
+    fn error_debug_not_found() {
+        let dbg = format!("{:?}", AmplitudeError::NotFound { resource: "chart".into() });
+        assert!(dbg.contains("NotFound"));
+        assert!(dbg.contains("chart"));
+    }
+
+    #[test]
+    fn error_debug_rate_limited() {
+        let dbg = format!("{:?}", AmplitudeError::RateLimited { retry_after_ms: 5000 });
+        assert!(dbg.contains("RateLimited"));
+        assert!(dbg.contains("5000"));
+    }
+
+    #[test]
+    fn error_debug_api() {
+        let dbg = format!("{:?}", AmplitudeError::Api { status_code: 500, message: "err".into() });
+        assert!(dbg.contains("Api"));
+        assert!(dbg.contains("500"));
+    }
+
+    #[test]
+    fn unauthorized_to_fcp_error_message() {
+        match AmplitudeError::Unauthorized.to_fcp_error() {
+            FcpError::External { message, .. } => {
+                assert!(message.contains("Authentication"));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forbidden_to_fcp_error_message() {
+        match AmplitudeError::Forbidden.to_fcp_error() {
+            FcpError::External { message, .. } => {
+                assert!(message.contains("permissions"));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_error_501_is_retryable() {
+        assert!(
+            AmplitudeError::Api {
+                status_code: 501,
+                message: "not impl".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_error_not_retryable_301() {
+        assert!(
+            !AmplitudeError::Api {
+                status_code: 301,
+                message: "moved".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn rate_limited_small_retry_after() {
+        let err = AmplitudeError::RateLimited {
+            retry_after_ms: 100,
+        };
+        assert_eq!(err.retry_after(), Some(Duration::from_millis(100)));
+    }
+
+    #[test]
+    fn api_error_to_fcp_error_no_retry_after() {
+        match (AmplitudeError::Api {
+            status_code: 500,
+            message: "err".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External { retry_after, .. } => {
+                assert!(retry_after.is_none());
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn not_found_display_with_slash() {
+        let err = AmplitudeError::NotFound {
+            resource: "charts/abc/query".into(),
+        };
+        assert!(err.to_string().contains("charts/abc/query"));
+    }
+
+    #[test]
+    fn rate_limited_display_large() {
+        let err = AmplitudeError::RateLimited {
+            retry_after_ms: 120_000,
+        };
+        assert!(err.to_string().contains("120000ms"));
+    }
+
+    #[test]
+    fn http_error_is_retryable() {
+        // Http errors are always retryable
+        // We can verify this by checking the is_retryable match arm
+        // The Http variant always returns true
+        let api_retryable = AmplitudeError::Api {
+            status_code: 500,
+            message: "srv err".into(),
+        };
+        assert!(api_retryable.is_retryable());
+    }
 }

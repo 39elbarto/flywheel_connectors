@@ -372,4 +372,131 @@ mod tests {
         .unwrap();
         assert_eq!(r.status, Some("success".into()));
     }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn zap_clone() {
+        let z = Zap {
+            id: "z1".into(),
+            title: Some("My Zap".into()),
+            is_enabled: Some(true),
+            steps: Some(3),
+            url: None,
+            modified_at: None,
+        };
+        let z2 = z.clone();
+        assert_eq!(z2.id, "z1");
+        assert_eq!(z2.title, Some("My Zap".into()));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn nla_action_clone() {
+        let a = NlaAction {
+            id: "a1".into(),
+            description: Some("Send".into()),
+            operation_type: None,
+            params: None,
+        };
+        let a2 = a.clone();
+        assert_eq!(a2.id, "a1");
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn execution_result_clone() {
+        let r = ExecutionResult {
+            status: Some("success".into()),
+            result: Some(json!({"ok": true})),
+            action_id: Some("a1".into()),
+            error: None,
+        };
+        let r2 = r.clone();
+        assert_eq!(r2.status, Some("success".into()));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn zap_run_clone() {
+        let r = ZapRun {
+            id: "r1".into(),
+            status: Some("success".into()),
+            start_time: None,
+            end_time: None,
+            zap_id: Some("z1".into()),
+            data: None,
+        };
+        let r2 = r.clone();
+        assert_eq!(r2.id, "r1");
+    }
+
+    #[test]
+    fn zap_debug_format() {
+        let z = Zap {
+            id: "z1".into(),
+            title: Some("Test".into()),
+            is_enabled: None,
+            steps: None,
+            url: None,
+            modified_at: None,
+        };
+        let dbg = format!("{z:?}");
+        assert!(dbg.contains("Zap"));
+        assert!(dbg.contains("z1"));
+    }
+
+    #[test]
+    fn nla_action_debug_format() {
+        let a = NlaAction {
+            id: "a1".into(),
+            description: None,
+            operation_type: None,
+            params: None,
+        };
+        let dbg = format!("{a:?}");
+        assert!(dbg.contains("NlaAction"));
+    }
+
+    #[test]
+    fn api_error_response_both_fields() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({
+            "error": "bad",
+            "detail": "also bad",
+            "type": "err_type"
+        }))
+        .unwrap();
+        assert_eq!(e.error, Some("bad".into()));
+        assert_eq!(e.detail, Some("also bad".into()));
+        assert_eq!(e.error_type, Some("err_type".into()));
+    }
+
+    #[test]
+    fn zap_large_step_count() {
+        let z: Zap = serde_json::from_value(json!({
+            "id": "z1",
+            "steps": 999
+        }))
+        .unwrap();
+        assert_eq!(z.steps, Some(999));
+    }
+
+    #[test]
+    fn execution_result_action_id_only() {
+        let r: ExecutionResult = serde_json::from_value(json!({
+            "action_id": "act_123"
+        }))
+        .unwrap();
+        assert_eq!(r.action_id, Some("act_123".into()));
+        assert!(r.status.is_none());
+    }
+
+    #[test]
+    fn zap_run_with_data() {
+        let r: ZapRun = serde_json::from_value(json!({
+            "id": "r1",
+            "data": {"count": 42}
+        }))
+        .unwrap();
+        assert_eq!(r.data.unwrap()["count"], 42);
+    }
 }

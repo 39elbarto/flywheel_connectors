@@ -680,4 +680,199 @@ mod tests {
         assert_eq!(c.request_count.load(Ordering::Relaxed), 0);
         assert_eq!(c.error_count.load(Ordering::Relaxed), 0);
     }
+
+    // ── DoctorStatus serde ──────────────────────────────────────────
+
+    #[test]
+    fn doctor_status_healthy_serde() {
+        let v = serde_json::to_value(DoctorStatus::Healthy).unwrap();
+        assert_eq!(v, "healthy");
+        let ds: DoctorStatus = serde_json::from_value(v).unwrap();
+        assert_eq!(ds, DoctorStatus::Healthy);
+    }
+
+    #[test]
+    fn doctor_status_degraded_serde() {
+        let v = serde_json::to_value(DoctorStatus::Degraded).unwrap();
+        assert_eq!(v, "degraded");
+        let ds: DoctorStatus = serde_json::from_value(v).unwrap();
+        assert_eq!(ds, DoctorStatus::Degraded);
+    }
+
+    #[test]
+    fn doctor_status_unhealthy_serde() {
+        let v = serde_json::to_value(DoctorStatus::Unhealthy).unwrap();
+        assert_eq!(v, "unhealthy");
+        let ds: DoctorStatus = serde_json::from_value(v).unwrap();
+        assert_eq!(ds, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_status_eq() {
+        assert_eq!(DoctorStatus::Healthy, DoctorStatus::Healthy);
+        assert_ne!(DoctorStatus::Healthy, DoctorStatus::Degraded);
+    }
+
+    #[test]
+    fn doctor_status_copy() {
+        let s = DoctorStatus::Healthy;
+        let s2 = s;
+        assert_eq!(s, s2);
+    }
+
+    // ── DoctorCheck serde ───────────────────────────────────────────
+
+    #[test]
+    fn doctor_check_skip_none_message() {
+        let c = DoctorCheck { name: "test".into(), passed: true, message: None, critical: false };
+        let v = serde_json::to_value(&c).unwrap();
+        assert!(!v.as_object().unwrap().contains_key("message"));
+    }
+
+    #[test]
+    fn doctor_check_includes_some_message() {
+        let c = DoctorCheck { name: "test".into(), passed: false, message: Some("fail".into()), critical: true };
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["message"], "fail");
+    }
+
+    #[test]
+    fn doctor_check_roundtrip() {
+        let c = DoctorCheck { name: "cfg".into(), passed: true, message: None, critical: true };
+        let v = serde_json::to_value(&c).unwrap();
+        let c2: DoctorCheck = serde_json::from_value(v).unwrap();
+        assert_eq!(c2.name, "cfg");
+        assert!(c2.passed);
+        assert!(c2.critical);
+    }
+
+    // ── DoctorResult serde ──────────────────────────────────────────
+
+    #[test]
+    fn doctor_result_roundtrip() {
+        let r = DoctorResult::from_checks(vec![
+            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
+        ]);
+        let v = serde_json::to_value(&r).unwrap();
+        let r2: DoctorResult = serde_json::from_value(v).unwrap();
+        assert_eq!(r2.status, DoctorStatus::Healthy);
+        assert_eq!(r2.checks.len(), 1);
+    }
+
+    // ── extract_listing edge cases ──────────────────────────────────
+
+    #[test]
+    fn extract_listing_null_after() {
+        let data = json!({
+            "data": { "children": [{"kind": "t3", "data": {"name": "t3_x"}}], "after": null }
+        });
+        let result = extract_listing(&data);
+        assert!(result["next_after"].is_null());
+        assert_eq!(result["posts"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn extract_listing_string_after() {
+        let data = json!({
+            "data": { "children": [], "after": "t3_cursor" }
+        });
+        let result = extract_listing(&data);
+        assert_eq!(result["next_after"], "t3_cursor");
+    }
+
+    // ── require_str edge cases ──────────────────────────────────────
+
+    #[test]
+    fn require_str_empty_string() {
+        let input = json!({"query": ""});
+        // Empty string is a valid string, should succeed
+        assert_eq!(require_str(&input, "query").unwrap(), "");
+    }
+
+    #[test]
+    fn require_str_boolean_value() {
+        let input = json!({"flag": true});
+        assert!(require_str(&input, "flag").is_err());
+    }
+
+    #[test]
+    fn require_str_array_value() {
+        let input = json!({"items": [1, 2, 3]});
+        assert!(require_str(&input, "items").is_err());
+    }
+
+    // ── Config edge cases ───────────────────────────────────────────
+
+    #[test]
+    fn config_default_base_url() {
+        let config = RedditConfig::from_params(&json!({ "bearer_token": "tok" })).unwrap();
+        assert_eq!(config.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn config_error_both_message_content() {
+        let result = RedditConfig::from_params(&json!({
+            "bearer_token": "tok",
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+        }));
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { code, .. } => assert_eq!(code, 1003),
+            e => panic!("expected InvalidRequest, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn config_error_none_message_content() {
+        let result = RedditConfig::from_params(&json!({}));
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { code, .. } => assert_eq!(code, 1003),
+            e => panic!("expected InvalidRequest, got {e:?}"),
+        }
+    }
+
+    // ── operations_info edge cases ──────────────────────────────────
+
+    #[test]
+    fn operations_search_is_idempotent() {
+        let ops = operations_info();
+        let search_op = ops.as_array().unwrap().iter()
+            .find(|o| o["id"] == "reddit.search_posts").unwrap();
+        assert_eq!(search_op["idempotency"], "strict");
+    }
+
+    #[test]
+    fn operations_create_post_is_dangerous() {
+        let ops = operations_info();
+        let op = ops.as_array().unwrap().iter()
+            .find(|o| o["id"] == "reddit.create_post").unwrap();
+        assert_eq!(op["safety_tier"], "dangerous");
+        assert_eq!(op["risk_level"], "high");
+    }
+
+    #[test]
+    fn operations_stream_is_risky() {
+        let ops = operations_info();
+        let op = ops.as_array().unwrap().iter()
+            .find(|o| o["id"] == "reddit.stream_subreddit_new").unwrap();
+        assert_eq!(op["safety_tier"], "risky");
+    }
+
+    #[test]
+    fn operations_all_prefixed_reddit() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let id = op["id"].as_str().unwrap();
+            assert!(id.starts_with("reddit."), "op {id} missing reddit. prefix");
+        }
+    }
+
+    #[test]
+    fn operations_valid_idempotency_values() {
+        let valid = ["strict", "best_effort", "none"];
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let idem = op["idempotency"].as_str().unwrap();
+            assert!(valid.contains(&idem), "invalid idempotency {idem} for {:?}", op["id"]);
+        }
+    }
 }

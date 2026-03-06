@@ -869,4 +869,270 @@ mod tests {
         assert!(c.client.is_none());
         assert!(c.session_id.is_none());
     }
+
+    // ── Additional connector coverage ────────────────────────────
+
+    #[test]
+    fn connector_new_fields() {
+        let c = AsanaConnector::new();
+        assert!(c.config.is_none());
+        assert!(c.client.is_none());
+        assert!(c.session_id.is_none());
+        assert_eq!(c.request_count.load(Ordering::Relaxed), 0);
+        assert_eq!(c.error_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn config_default_base_url() {
+        let config = AsanaConfig::from_params(&json!({
+            "access_token": "tok",
+        }))
+        .unwrap();
+        assert_eq!(config.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn config_error_message_both_auth() {
+        let result = AsanaConfig::from_params(&json!({
+            "access_token": "tok",
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+        }));
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, code } => {
+                assert!(message.contains("exactly one"), "got: {message}");
+                assert_eq!(code, 1003);
+            }
+            e => panic!("expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn config_error_message_no_auth() {
+        let result = AsanaConfig::from_params(&json!({}));
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("Missing"), "got: {message}");
+            }
+            e => panic!("expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn config_error_non_string_credential() {
+        let result = AsanaConfig::from_params(&json!({
+            "credential_id": 42,
+        }));
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("string"), "got: {message}");
+            }
+            e => panic!("expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn config_error_invalid_uuid() {
+        let result = AsanaConfig::from_params(&json!({
+            "credential_id": "not-a-uuid",
+        }));
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("UUID"), "got: {message}");
+            }
+            e => panic!("expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn require_str_array_value() {
+        let input = json!({"task_gid": [1, 2, 3]});
+        assert!(require_str(&input, "task_gid").is_err());
+    }
+
+    #[test]
+    fn require_str_bool_value() {
+        let input = json!({"task_gid": true});
+        assert!(require_str(&input, "task_gid").is_err());
+    }
+
+    #[test]
+    fn require_str_empty_string() {
+        let input = json!({"task_gid": ""});
+        assert_eq!(require_str(&input, "task_gid").unwrap(), "");
+    }
+
+    #[test]
+    fn operations_write_ops_are_risky_or_dangerous() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let cap = op["capability"].as_str().unwrap();
+            if cap.contains("write") {
+                let tier = op["safety_tier"].as_str().unwrap();
+                assert!(
+                    tier == "risky" || tier == "dangerous",
+                    "write op {} should be risky or dangerous, got {tier}",
+                    op["id"]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn operations_delete_is_dangerous() {
+        let ops = operations_info();
+        let delete_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"].as_str() == Some("asana.tasks.delete"))
+            .unwrap();
+        assert_eq!(delete_op["safety_tier"].as_str().unwrap(), "dangerous");
+        assert_eq!(delete_op["risk_level"].as_str().unwrap(), "high");
+    }
+
+    #[test]
+    fn operations_create_is_medium_risk() {
+        let ops = operations_info();
+        let create_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"].as_str() == Some("asana.tasks.create"))
+            .unwrap();
+        assert_eq!(create_op["risk_level"].as_str().unwrap(), "medium");
+        assert_eq!(create_op["safety_tier"].as_str().unwrap(), "risky");
+    }
+
+    #[test]
+    fn operations_update_is_medium_risk() {
+        let ops = operations_info();
+        let update_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"].as_str() == Some("asana.tasks.update"))
+            .unwrap();
+        assert_eq!(update_op["risk_level"].as_str().unwrap(), "medium");
+    }
+
+    #[test]
+    fn operations_all_strict_or_none_idempotency() {
+        let ops = operations_info();
+        let valid = ["strict", "none"];
+        for op in ops.as_array().unwrap() {
+            let idem = op["idempotency"].as_str().unwrap();
+            assert!(
+                valid.contains(&idem),
+                "op {} has invalid idempotency: {idem}",
+                op["id"]
+            );
+        }
+    }
+
+    #[test]
+    fn doctor_status_serde_roundtrip() {
+        for status in [
+            DoctorStatus::Healthy,
+            DoctorStatus::Degraded,
+            DoctorStatus::Unhealthy,
+        ] {
+            let v = serde_json::to_value(status).unwrap();
+            let back: DoctorStatus = serde_json::from_value(v).unwrap();
+            assert_eq!(back, status);
+        }
+    }
+
+    #[test]
+    fn doctor_status_serializes_lowercase() {
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Healthy).unwrap(),
+            "healthy"
+        );
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Degraded).unwrap(),
+            "degraded"
+        );
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Unhealthy).unwrap(),
+            "unhealthy"
+        );
+    }
+
+    #[test]
+    fn doctor_check_skip_serializing_message_none() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let v = serde_json::to_string(&check).unwrap();
+        assert!(!v.contains("message"));
+    }
+
+    #[test]
+    fn doctor_check_includes_message_some() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: false,
+            message: Some("failed!".into()),
+            critical: true,
+        };
+        let v = serde_json::to_string(&check).unwrap();
+        assert!(v.contains("message"));
+        assert!(v.contains("failed!"));
+    }
+
+    #[test]
+    fn doctor_result_serde_roundtrip() {
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "cfg".into(),
+            passed: true,
+            message: None,
+            critical: true,
+        }]);
+        let v = serde_json::to_value(&r).unwrap();
+        let back: DoctorResult = serde_json::from_value(v).unwrap();
+        assert_eq!(back.status, DoctorStatus::Healthy);
+        assert_eq!(back.checks.len(), 1);
+    }
+
+    #[test]
+    fn doctor_check_clone_debug() {
+        let check = DoctorCheck {
+            name: "test_check".into(),
+            passed: true,
+            message: Some("ok".into()),
+            critical: false,
+        };
+        let cloned = check.clone();
+        assert_eq!(cloned.name, "test_check");
+        let dbg = format!("{check:?}");
+        assert!(dbg.contains("test_check"));
+    }
+
+    #[test]
+    fn doctor_result_clone_debug() {
+        let r = DoctorResult::from_checks(vec![]);
+        let cloned = r.clone();
+        assert_eq!(cloned.status, DoctorStatus::Healthy);
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("DoctorResult"));
+    }
+
+    #[test]
+    fn operations_capabilities_map_correctly() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let id = op["id"].as_str().unwrap();
+            let cap = op["capability"].as_str().unwrap();
+            if id.contains("workspaces") {
+                assert_eq!(cap, "asana.workspaces.read");
+            } else if id.contains("projects") {
+                assert_eq!(cap, "asana.projects.read");
+            } else if id.contains("sections") {
+                assert_eq!(cap, "asana.sections.read");
+            }
+        }
+    }
 }

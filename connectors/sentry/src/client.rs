@@ -474,4 +474,153 @@ mod tests {
         let cred = SentryAuth::CredentialId(CredentialId::new());
         assert!(cred.is_secretless());
     }
+
+    // ── Auth label ────────────────────────────────────────────────
+
+    #[test]
+    fn auth_bearer_token_redacted_label() {
+        let auth = SentryAuth::BearerToken("sntrys_secret".into());
+        assert_eq!(auth.redacted_label(), "bearer_token:redacted");
+    }
+
+    #[test]
+    fn auth_credential_id_label() {
+        let cred = SentryAuth::CredentialId(CredentialId::new());
+        assert!(cred.redacted_label().starts_with("credential_id:"));
+    }
+
+    // ── Auth clone ────────────────────────────────────────────────
+
+    #[test]
+    fn auth_bearer_clone() {
+        let auth = SentryAuth::BearerToken("tok".into());
+        let cloned = auth.clone();
+        assert_eq!(auth.redacted_label(), "bearer_token:redacted");
+        assert_eq!(cloned.redacted_label(), "bearer_token:redacted");
+        assert!(!cloned.is_secretless());
+    }
+
+    #[test]
+    fn auth_credential_id_clone() {
+        let cred = SentryAuth::CredentialId(CredentialId::new());
+        let cloned = cred.clone();
+        assert!(cred.is_secretless());
+        assert!(cloned.is_secretless());
+    }
+
+    #[test]
+    fn auth_debug_credential_id_contains_id() {
+        let id = CredentialId::new();
+        let id_str = id.to_string();
+        let auth = SentryAuth::CredentialId(id);
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains(&id_str));
+        assert!(dbg.contains("CredentialId"));
+    }
+
+    #[test]
+    fn auth_debug_bearer_no_leak() {
+        let auth = SentryAuth::BearerToken("sntrys_very_secret_token_12345".into());
+        let dbg = format!("{auth:?}");
+        assert!(!dbg.contains("sntrys_very_secret"));
+        assert!(!dbg.contains("12345"));
+        assert!(dbg.contains("BearerToken"));
+    }
+
+    // ── Client construction ───────────────────────────────────────
+
+    #[test]
+    fn client_new_default_url() {
+        let client = SentryClient::new(SentryAuth::BearerToken("tok".into()), None).unwrap();
+        assert_eq!(client.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn client_new_custom_url() {
+        let client = SentryClient::new(
+            SentryAuth::BearerToken("tok".into()),
+            Some("https://sentry.example.com/api/0"),
+        )
+        .unwrap();
+        assert_eq!(client.base_url, "https://sentry.example.com/api/0");
+    }
+
+    #[test]
+    fn client_new_trims_trailing_slash() {
+        let client = SentryClient::new(
+            SentryAuth::BearerToken("tok".into()),
+            Some("https://sentry.example.com/api/0/"),
+        )
+        .unwrap();
+        assert_eq!(client.base_url, "https://sentry.example.com/api/0");
+    }
+
+    #[test]
+    fn client_debug_redacts_token() {
+        let client = SentryClient::new(SentryAuth::BearerToken("supersecret".into()), None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(!dbg.contains("supersecret"));
+        assert!(dbg.contains("SentryClient"));
+        assert!(dbg.contains("base_url"));
+    }
+
+    #[test]
+    fn client_with_client_trims_trailing_slash() {
+        let inner = Client::new();
+        let auth = SentryAuth::BearerToken("tok".into());
+        let client = SentryClient::with_client(inner, auth, "https://example.com/");
+        assert_eq!(client.base_url, "https://example.com");
+    }
+
+    #[test]
+    fn client_new_with_credential_id() {
+        let client = SentryClient::new(
+            SentryAuth::CredentialId(CredentialId::new()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(client.base_url, DEFAULT_BASE_URL);
+    }
+
+    // ── DEFAULT_BASE_URL ──────────────────────────────────────────
+
+    #[test]
+    fn default_base_url_constant() {
+        assert!(DEFAULT_BASE_URL.starts_with("https://"));
+        assert!(DEFAULT_BASE_URL.contains("sentry.io"));
+        assert!(!DEFAULT_BASE_URL.ends_with('/'));
+    }
+
+    // ── urlencoded edge cases ─────────────────────────────────────
+
+    #[test]
+    fn url_encode_spaces() {
+        assert_eq!(urlencoded("my version"), "my%20version");
+    }
+
+    #[test]
+    fn url_encode_percent() {
+        assert_eq!(urlencoded("100%"), "100%25");
+    }
+
+    #[test]
+    fn url_encode_at_sign() {
+        assert_eq!(urlencoded("user@host"), "user%40host");
+    }
+
+    #[test]
+    fn url_encode_empty_string() {
+        assert_eq!(urlencoded(""), "");
+    }
+
+    #[test]
+    fn url_encode_no_special_chars() {
+        assert_eq!(urlencoded("abc123"), "abc123");
+    }
+
+    #[test]
+    fn url_encode_multiple_specials() {
+        let result = urlencoded("a@b+c d%e");
+        assert_eq!(result, "a%40b%2Bc%20d%25e");
+    }
 }

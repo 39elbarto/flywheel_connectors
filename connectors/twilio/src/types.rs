@@ -992,4 +992,310 @@ mod tests {
         let json = json!({"next_page_uri": null});
         assert!(serde_json::from_value::<PhoneNumberListResponse>(json).is_err());
     }
+
+    // ── Clone with drop(original) pattern ───────────────────────────────
+
+    #[test]
+    fn twilio_message_clone_drop_original() {
+        let original = TwilioMessage {
+            sid: "SM_drop".into(),
+            status: "delivered".into(),
+            to: "+1".into(),
+            from: "+2".into(),
+            body: Some("cloned body".into()),
+            date_created: Some("2026-01-01".into()),
+            date_updated: None,
+            date_sent: None,
+            price: Some("-0.01".into()),
+            price_unit: Some("USD".into()),
+            num_media: Some("0".into()),
+            num_segments: Some("1".into()),
+            direction: Some("outbound-api".into()),
+            uri: Some("/uri".into()),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.sid, "SM_drop");
+        assert_eq!(cloned.body.as_deref(), Some("cloned body"));
+        assert_eq!(cloned.price.as_deref(), Some("-0.01"));
+        assert_eq!(cloned.direction.as_deref(), Some("outbound-api"));
+    }
+
+    #[test]
+    fn twilio_call_clone_drop_original() {
+        let original = TwilioCall {
+            sid: "CA_drop".into(),
+            status: "completed".into(),
+            to: "+1".into(),
+            from: "+2".into(),
+            duration: Some("60".into()),
+            date_created: Some("2026-01-01".into()),
+            date_updated: None,
+            start_time: Some("2026-01-01T00:00:00Z".into()),
+            end_time: Some("2026-01-01T00:01:00Z".into()),
+            price: Some("-0.05".into()),
+            price_unit: Some("USD".into()),
+            direction: Some("inbound".into()),
+            uri: None,
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.sid, "CA_drop");
+        assert_eq!(cloned.duration.as_deref(), Some("60"));
+    }
+
+    #[test]
+    fn twilio_recording_clone_drop_original() {
+        let original = TwilioRecording {
+            sid: "RE_drop".into(),
+            call_sid: Some("CA_drop".into()),
+            duration: Some("30".into()),
+            date_created: Some("2026-01-01".into()),
+            date_updated: None,
+            status: Some("completed".into()),
+            channels: Some(1),
+            source: Some("RecordVerb".into()),
+            uri: Some("/uri".into()),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.sid, "RE_drop");
+        assert_eq!(cloned.channels, Some(1));
+    }
+
+    #[test]
+    fn twilio_account_clone_drop_original() {
+        let original = TwilioAccount {
+            sid: "AC_drop".into(),
+            friendly_name: Some("Drop Test".into()),
+            status: Some("active".into()),
+            account_type: Some("Full".into()),
+            date_created: Some("2020-01-01".into()),
+            date_updated: Some("2026-01-01".into()),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.sid, "AC_drop");
+        assert_eq!(cloned.account_type.as_deref(), Some("Full"));
+    }
+
+    #[test]
+    fn phone_number_clone_drop_original() {
+        let original = PhoneNumber {
+            sid: Some("PN_drop".into()),
+            phone_number: Some("+15559999999".into()),
+            friendly_name: Some("Drop Number".into()),
+            capabilities: Some(PhoneNumberCapabilities {
+                sms: Some(true),
+                mms: Some(false),
+                voice: Some(true),
+                fax: Some(false),
+            }),
+            date_created: Some("2026-01-01".into()),
+            date_updated: None,
+            status: Some("in-use".into()),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.sid.as_deref(), Some("PN_drop"));
+        let caps = cloned.capabilities.unwrap();
+        assert!(caps.sms.unwrap());
+        assert!(!caps.fax.unwrap());
+    }
+
+    #[test]
+    fn capabilities_clone_preserves_fields() {
+        let original = PhoneNumberCapabilities {
+            sms: Some(true),
+            mms: Some(true),
+            voice: Some(false),
+            fax: None,
+        };
+        let cloned = original.clone();
+        assert_eq!(original.sms, cloned.sms);
+        assert_eq!(original.mms, cloned.mms);
+        assert_eq!(original.voice, cloned.voice);
+        assert_eq!(original.fax, cloned.fax);
+        assert!(cloned.sms.unwrap());
+    }
+
+    #[test]
+    fn message_list_response_clone_drop_original() {
+        let original = MessageListResponse {
+            messages: vec![json!({"sid": "SM1"}), json!({"sid": "SM2"})],
+            next_page_uri: Some("/next".into()),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.messages.len(), 2);
+        assert_eq!(cloned.next_page_uri.as_deref(), Some("/next"));
+    }
+
+    #[test]
+    fn recording_list_response_clone_drop_original() {
+        let original = RecordingListResponse {
+            recordings: vec![json!({"sid": "RE1"})],
+            next_page_uri: None,
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.recordings.len(), 1);
+    }
+
+    #[test]
+    fn phone_number_list_response_clone_drop_original() {
+        let original = PhoneNumberListResponse {
+            incoming_phone_numbers: vec![json!({"sid": "PN1"})],
+            next_page_uri: Some("/page2".into()),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.incoming_phone_numbers.len(), 1);
+        assert_eq!(cloned.next_page_uri.as_deref(), Some("/page2"));
+    }
+
+    #[test]
+    fn api_error_response_clone_drop_original() {
+        let original = ApiErrorResponse {
+            code: Some(21211),
+            message: Some("Invalid phone number".into()),
+            status: Some(400),
+            more_info: Some("https://twilio.com/errors/21211".into()),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.code, Some(21211));
+        assert_eq!(cloned.message.as_deref(), Some("Invalid phone number"));
+    }
+
+    // ── Additional serde roundtrip edge cases ─────────────────────────
+
+    #[test]
+    fn message_with_all_none_optional_fields_roundtrips() {
+        let msg = TwilioMessage {
+            sid: "SM1".into(),
+            status: "sent".into(),
+            to: "+15551234567".into(),
+            from: "+15559876543".into(),
+            body: None,
+            date_created: None,
+            date_updated: None,
+            date_sent: None,
+            price: None,
+            price_unit: None,
+            num_media: None,
+            num_segments: None,
+            direction: None,
+            uri: None,
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        let back: TwilioMessage = serde_json::from_value(json).unwrap();
+        assert_eq!(back.sid, "SM1");
+        assert_eq!(back.status, "sent");
+        assert!(back.body.is_none());
+    }
+
+    #[test]
+    fn call_with_all_none_optional_fields_roundtrips() {
+        let call = TwilioCall {
+            sid: "CA1".into(),
+            status: "queued".into(),
+            to: "+15551234567".into(),
+            from: "+15559876543".into(),
+            duration: None,
+            date_created: None,
+            date_updated: None,
+            start_time: None,
+            end_time: None,
+            price: None,
+            price_unit: None,
+            direction: None,
+            uri: None,
+        };
+        let json = serde_json::to_value(&call).unwrap();
+        let back: TwilioCall = serde_json::from_value(json).unwrap();
+        assert_eq!(back.sid, "CA1");
+        assert!(back.duration.is_none());
+    }
+
+    #[test]
+    fn recording_with_all_none_optional_fields_roundtrips() {
+        let rec = TwilioRecording {
+            sid: "RE1".into(),
+            call_sid: None,
+            duration: None,
+            date_created: None,
+            date_updated: None,
+            status: None,
+            channels: None,
+            source: None,
+            uri: None,
+        };
+        let json = serde_json::to_value(&rec).unwrap();
+        let back: TwilioRecording = serde_json::from_value(json).unwrap();
+        assert_eq!(back.sid, "RE1");
+        assert!(back.call_sid.is_none());
+    }
+
+    #[test]
+    fn account_type_field_is_renamed_in_json() {
+        let acc = TwilioAccount {
+            sid: "AC1".into(),
+            friendly_name: Some("Test".into()),
+            status: Some("active".into()),
+            account_type: Some("Full".into()),
+            date_created: None,
+            date_updated: None,
+        };
+        let json = serde_json::to_value(&acc).unwrap();
+        assert!(json.get("type").is_some(), "Should use 'type' key in JSON");
+        assert!(json.get("account_type").is_none(), "Should NOT use 'account_type' key");
+    }
+
+    #[test]
+    fn api_error_response_all_none_deserializes() {
+        let json = json!({});
+        let resp: ApiErrorResponse = serde_json::from_value(json).unwrap();
+        assert!(resp.code.is_none());
+        assert!(resp.message.is_none());
+    }
+
+    #[test]
+    fn phone_number_capabilities_all_none_roundtrips() {
+        let caps = PhoneNumberCapabilities {
+            sms: None,
+            mms: None,
+            voice: None,
+            fax: None,
+        };
+        let json = serde_json::to_value(&caps).unwrap();
+        let back: PhoneNumberCapabilities = serde_json::from_value(json).unwrap();
+        assert!(back.sms.is_none());
+        assert!(back.fax.is_none());
+    }
+
+    #[test]
+    fn message_tolerates_extra_unknown_fields() {
+        let json = json!({
+            "sid": "SMextra",
+            "status": "delivered",
+            "to": "+15551234567",
+            "from": "+15559876543",
+            "unknown_field_xyz": "should be ignored",
+            "another_unknown": 42
+        });
+        let msg: TwilioMessage = serde_json::from_value(json).unwrap();
+        assert_eq!(msg.sid, "SMextra");
+    }
+
+    #[test]
+    fn message_list_response_empty_deserializes() {
+        let json = json!({
+            "messages": [],
+            "next_page_uri": null
+        });
+        let resp: MessageListResponse = serde_json::from_value(json).unwrap();
+        assert!(resp.messages.is_empty());
+        assert!(resp.next_page_uri.is_none());
+    }
 }

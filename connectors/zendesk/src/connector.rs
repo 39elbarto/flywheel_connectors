@@ -1373,4 +1373,462 @@ mod tests {
                 .contains("testco.zendesk.com")
         );
     }
+
+    // ─── DoctorStatus serde tests ─────────────────────────────────
+
+    #[test]
+    fn test_doctor_status_pass_serde() {
+        let val = serde_json::to_value(DoctorStatus::Pass).unwrap();
+        assert_eq!(val, "pass");
+        let back: DoctorStatus = serde_json::from_value(val).unwrap();
+        assert_eq!(back, DoctorStatus::Pass);
+    }
+
+    #[test]
+    fn test_doctor_status_warn_serde() {
+        let val = serde_json::to_value(DoctorStatus::Warn).unwrap();
+        assert_eq!(val, "warn");
+        let back: DoctorStatus = serde_json::from_value(val).unwrap();
+        assert_eq!(back, DoctorStatus::Warn);
+    }
+
+    #[test]
+    fn test_doctor_status_fail_serde() {
+        let val = serde_json::to_value(DoctorStatus::Fail).unwrap();
+        assert_eq!(val, "fail");
+        let back: DoctorStatus = serde_json::from_value(val).unwrap();
+        assert_eq!(back, DoctorStatus::Fail);
+    }
+
+    #[test]
+    fn test_doctor_status_clone() {
+        let original = DoctorStatus::Warn;
+        let cloned = original;
+        assert_eq!(cloned, DoctorStatus::Warn);
+    }
+
+    #[test]
+    fn test_doctor_status_debug() {
+        let s = format!("{:?}", DoctorStatus::Pass);
+        assert!(s.contains("Pass"));
+    }
+
+    #[test]
+    fn test_doctor_status_eq() {
+        assert_eq!(DoctorStatus::Pass, DoctorStatus::Pass);
+        assert_ne!(DoctorStatus::Pass, DoctorStatus::Fail);
+        assert_ne!(DoctorStatus::Warn, DoctorStatus::Fail);
+    }
+
+    // ─── DoctorCheck serde tests ──────────────────────────────────
+
+    #[test]
+    fn test_doctor_check_serde_roundtrip() {
+        let check = DoctorCheck {
+            name: "test_check".into(),
+            status: DoctorStatus::Pass,
+            message: "All good".into(),
+        };
+        let val = serde_json::to_value(&check).unwrap();
+        assert_eq!(val["name"], "test_check");
+        assert_eq!(val["status"], "pass");
+        assert_eq!(val["message"], "All good");
+    }
+
+    #[test]
+    fn test_doctor_check_debug() {
+        let check = DoctorCheck {
+            name: "config".into(),
+            status: DoctorStatus::Fail,
+            message: "Not configured".into(),
+        };
+        let dbg = format!("{check:?}");
+        assert!(dbg.contains("DoctorCheck"));
+        assert!(dbg.contains("config"));
+    }
+
+    // ─── DoctorResult serde tests ─────────────────────────────────
+
+    #[test]
+    fn test_doctor_result_serde_roundtrip() {
+        let result = DoctorResult {
+            status: DoctorStatus::Warn,
+            checks: vec![
+                DoctorCheck {
+                    name: "config".into(),
+                    status: DoctorStatus::Pass,
+                    message: "ok".into(),
+                },
+                DoctorCheck {
+                    name: "auth".into(),
+                    status: DoctorStatus::Warn,
+                    message: "direct token".into(),
+                },
+            ],
+        };
+        let val = serde_json::to_value(&result).unwrap();
+        assert_eq!(val["status"], "warn");
+        assert_eq!(val["checks"].as_array().unwrap().len(), 2);
+        assert_eq!(val["checks"][0]["name"], "config");
+        assert_eq!(val["checks"][1]["status"], "warn");
+    }
+
+    #[test]
+    fn test_doctor_result_empty_checks() {
+        let result = DoctorResult {
+            status: DoctorStatus::Pass,
+            checks: vec![],
+        };
+        let val = serde_json::to_value(&result).unwrap();
+        assert_eq!(val["status"], "pass");
+        assert!(val["checks"].as_array().unwrap().is_empty());
+    }
+
+    // ─── Introspect metadata tests ────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_all_ops_have_required_metadata() {
+        let connector = ZendeskConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        for op in ops {
+            assert!(op["id"].is_string(), "op missing id: {op}");
+            assert!(op["summary"].is_string(), "op missing summary");
+            assert!(op["input_schema"].is_object(), "op missing input_schema");
+            assert!(op["output_schema"].is_object(), "op missing output_schema");
+            assert!(op["capability"].is_string(), "op missing capability");
+            assert!(op["risk_level"].is_string(), "op missing risk_level");
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_risk_levels_valid() {
+        let connector = ZendeskConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let valid_levels = ["low", "medium", "high", "critical"];
+        for op in ops {
+            let level = op["risk_level"].as_str().unwrap();
+            assert!(valid_levels.contains(&level), "Invalid risk_level for {}: {level}", op["id"]);
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_read_ops_are_safe() {
+        let connector = ZendeskConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let read_ops = ["zendesk.get_ticket", "zendesk.search_tickets",
+                        "zendesk.list_ticket_comments", "zendesk.search_articles",
+                        "zendesk.get_article", "zendesk.search_users"];
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            if read_ops.contains(&id) {
+                assert_eq!(op["risk_level"], "low", "Read op {id} should be low risk");
+            }
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_delete_op_is_high_risk() {
+        let connector = ZendeskConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let delete_op = ops.iter().find(|o| o["id"] == "zendesk.delete_ticket").unwrap();
+        assert_eq!(delete_op["risk_level"], "high");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_deterministic() {
+        let connector = ZendeskConnector::new();
+        let a = connector.handle_introspect().await.unwrap();
+        let b = connector.handle_introspect().await.unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_input_schemas_are_object_type() {
+        let connector = ZendeskConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            assert_eq!(
+                op["input_schema"]["type"], "object",
+                "Input schema for {id} must be type=object"
+            );
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_create_ticket_requires_subject() {
+        let connector = ZendeskConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let op = ops.iter().find(|o| o["id"] == "zendesk.create_ticket").unwrap();
+        let required = op["input_schema"]["required"].as_array().unwrap();
+        assert!(required.iter().any(|v| v == "subject"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_get_ticket_requires_ticket_id() {
+        let connector = ZendeskConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let op = ops.iter().find(|o| o["id"] == "zendesk.get_ticket").unwrap();
+        let required = op["input_schema"]["required"].as_array().unwrap();
+        assert!(required.iter().any(|v| v == "ticket_id"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_search_tickets_requires_query() {
+        let connector = ZendeskConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let op = ops.iter().find(|o| o["id"] == "zendesk.search_tickets").unwrap();
+        let required = op["input_schema"]["required"].as_array().unwrap();
+        assert!(required.iter().any(|v| v == "query"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_introspect_apply_macro_requires_ticket_id_and_macro_id() {
+        let connector = ZendeskConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        let op = ops.iter().find(|o| o["id"] == "zendesk.apply_macro").unwrap();
+        let required = op["input_schema"]["required"].as_array().unwrap();
+        assert!(required.iter().any(|v| v == "ticket_id"));
+        assert!(required.iter().any(|v| v == "macro_id"));
+    }
+
+    // ─── Connector new/default ────────────────────────────────────
+
+    #[test]
+    fn test_connector_new_has_no_config() {
+        let connector = ZendeskConnector::new();
+        assert!(connector.config.is_none());
+        assert!(connector.client.is_none());
+        assert!(connector.verifier.is_none());
+        assert!(connector.session_id.is_none());
+    }
+
+    #[test]
+    fn test_connector_default_equals_new() {
+        let a = ZendeskConnector::new();
+        let b = ZendeskConnector::default();
+        assert!(a.config.is_none());
+        assert!(b.config.is_none());
+        assert!(a.client.is_none());
+        assert!(b.client.is_none());
+    }
+
+    // ─── ZendeskConfig from_params edge cases ─────────────────────
+
+    #[test]
+    fn test_config_from_params_missing_subdomain() {
+        let params = json!({ "email": "a@b.com", "api_token": "t" });
+        let result = ZendeskConfig::from_params(&params);
+        match result {
+            Err(FcpError::InvalidRequest { message, .. }) => {
+                assert!(message.contains("subdomain"));
+            }
+            Err(e) => panic!("Expected InvalidRequest, got: {e:?}"),
+            Ok(_) => panic!("Expected error, got Ok"),
+        }
+    }
+
+    #[test]
+    fn test_config_from_params_token_auth() {
+        let params = json!({
+            "subdomain": "acme",
+            "email": "user@acme.com",
+            "api_token": "secret"
+        });
+        match ZendeskConfig::from_params(&params) {
+            Ok(config) => {
+                assert!(!config.auth.is_secretless());
+                assert_eq!(config.auth.subdomain(), "acme");
+                assert!(config.base_url.is_none());
+            }
+            Err(e) => panic!("Expected Ok, got: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn test_config_from_params_credential_id_auth() {
+        let cred_id = uuid::Uuid::new_v4().to_string();
+        let params = json!({
+            "subdomain": "corp",
+            "credential_id": cred_id
+        });
+        match ZendeskConfig::from_params(&params) {
+            Ok(config) => {
+                assert!(config.auth.is_secretless());
+                assert_eq!(config.auth.subdomain(), "corp");
+            }
+            Err(e) => panic!("Expected Ok, got: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn test_config_from_params_with_base_url() {
+        let params = json!({
+            "subdomain": "test",
+            "email": "u@t.com",
+            "api_token": "t",
+            "base_url": "http://localhost:9999/api/v2"
+        });
+        match ZendeskConfig::from_params(&params) {
+            Ok(config) => {
+                assert_eq!(config.base_url.as_deref(), Some("http://localhost:9999/api/v2"));
+            }
+            Err(e) => panic!("Expected Ok, got: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn test_config_from_params_no_auth() {
+        let params = json!({ "subdomain": "x" });
+        let result = ZendeskConfig::from_params(&params);
+        match result {
+            Err(FcpError::InvalidRequest { message, .. }) => {
+                assert!(message.contains("Missing auth"));
+            }
+            Err(e) => panic!("Expected InvalidRequest, got: {e:?}"),
+            Ok(_) => panic!("Expected error, got Ok"),
+        }
+    }
+
+    #[test]
+    fn test_config_from_params_conflicting_auth() {
+        let cred_id = uuid::Uuid::new_v4().to_string();
+        let params = json!({
+            "subdomain": "x",
+            "email": "u@t.com",
+            "api_token": "t",
+            "credential_id": cred_id
+        });
+        let result = ZendeskConfig::from_params(&params);
+        match result {
+            Err(FcpError::InvalidRequest { message, .. }) => {
+                assert!(message.contains("Conflicting auth"));
+            }
+            Err(e) => panic!("Expected InvalidRequest, got: {e:?}"),
+            Ok(_) => panic!("Expected error, got Ok"),
+        }
+    }
+
+    #[test]
+    fn test_config_from_params_email_only() {
+        let params = json!({ "subdomain": "x", "email": "u@t.com" });
+        let result = ZendeskConfig::from_params(&params);
+        match result {
+            Err(FcpError::InvalidRequest { message, .. }) => {
+                assert!(message.contains("email") || message.contains("api_token"));
+            }
+            Err(e) => panic!("Expected InvalidRequest, got: {e:?}"),
+            Ok(_) => panic!("Expected error, got Ok"),
+        }
+    }
+
+    #[test]
+    fn test_config_from_params_api_token_only() {
+        let params = json!({ "subdomain": "x", "api_token": "t" });
+        let result = ZendeskConfig::from_params(&params);
+        match result {
+            Err(FcpError::InvalidRequest { message, .. }) => {
+                assert!(message.contains("api_token") || message.contains("email"));
+            }
+            Err(e) => panic!("Expected InvalidRequest, got: {e:?}"),
+            Ok(_) => panic!("Expected error, got Ok"),
+        }
+    }
+
+    #[test]
+    fn test_config_from_params_invalid_credential_id() {
+        let params = json!({ "subdomain": "x", "credential_id": "not-a-uuid" });
+        let result = ZendeskConfig::from_params(&params);
+        match result {
+            Err(FcpError::InvalidRequest { message, .. }) => {
+                assert!(message.contains("credential_id"));
+            }
+            Err(e) => panic!("Expected InvalidRequest, got: {e:?}"),
+            Ok(_) => panic!("Expected error, got Ok"),
+        }
+    }
+
+    // ─── Handshake details ────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_handshake_grants_requested_capabilities() {
+        let mut connector = ZendeskConnector::new();
+        let result = connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": vec![0u8; 32],
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["zendesk.read", "zendesk.write"]
+            }))
+            .await
+            .unwrap();
+        let grants = result["capabilities_granted"].as_array().unwrap();
+        assert_eq!(grants.len(), 2);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_handshake_has_session_id() {
+        let mut connector = ZendeskConnector::new();
+        let result = connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": vec![0u8; 32],
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["zendesk.read"]
+            }))
+            .await
+            .unwrap();
+        assert!(result["session_id"].is_string());
+        assert!(connector.session_id.is_some());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_handshake_event_caps() {
+        let mut connector = ZendeskConnector::new();
+        let result = connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": vec![0u8; 32],
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": []
+            }))
+            .await
+            .unwrap();
+        let event_caps = &result["event_caps"];
+        assert_eq!(event_caps["streaming"], true);
+        assert_eq!(event_caps["replay"], false);
+        assert_eq!(event_caps["min_buffer_events"], 50);
+        assert_eq!(event_caps["requires_ack"], false);
+    }
+
+    // ─── Health check details ─────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_health_not_configured_no_auth_mode() {
+        let connector = ZendeskConnector::new();
+        let result = connector.handle_health().await.unwrap();
+        assert_eq!(result["status"], "not_configured");
+        assert!(result.get("auth_mode").is_none());
+        assert!(result.get("api_domain").is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_health_metrics_zero_initially() {
+        let connector = ZendeskConnector::new();
+        let result = connector.handle_health().await.unwrap();
+        assert_eq!(result["metrics"]["requests_total"], 0);
+        assert_eq!(result["metrics"]["requests_error"], 0);
+    }
 }

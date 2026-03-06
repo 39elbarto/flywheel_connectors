@@ -282,4 +282,263 @@ mod tests {
         assert_eq!(t.id, "t1");
         assert_eq!(t.name, Some("Test".into()));
     }
+
+    // ── Clone / Debug trait tests ─────────────────────────────────
+
+    #[test]
+    fn space_clone() {
+        let s = Space {
+            id: "s1".into(),
+            name: Some("eng".into()),
+            private: Some(true),
+            color: None,
+        };
+        let cloned = s.clone();
+        assert_eq!(s.id, "s1");
+        assert_eq!(cloned.id, "s1");
+        assert_eq!(cloned.private, Some(true));
+    }
+
+    #[test]
+    fn space_debug() {
+        let s: Space = serde_json::from_value(json!({"id": "s1", "name": "Dev"})).unwrap();
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("Space"));
+        assert!(dbg.contains("Dev"));
+    }
+
+    #[test]
+    fn list_clone_and_debug() {
+        let l = List {
+            id: "l1".into(),
+            name: Some("Backlog".into()),
+            content: None,
+            task_count: Some(42),
+            archived: Some(false),
+        };
+        let cloned = l.clone();
+        assert_eq!(l.id, "l1");
+        assert_eq!(cloned.task_count, Some(42));
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("List"));
+        assert!(dbg.contains("Backlog"));
+    }
+
+    #[test]
+    fn task_clone_and_debug() {
+        let t: Task = serde_json::from_value(json!({
+            "id": "t1",
+            "name": "Test Task",
+        }))
+        .unwrap();
+        let cloned = t.clone();
+        assert_eq!(t.id, "t1");
+        assert_eq!(cloned.name.as_deref(), Some("Test Task"));
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("Task"));
+    }
+
+    #[test]
+    fn task_status_clone_and_debug() {
+        let s = TaskStatus {
+            status: Some("done".into()),
+            color: Some("#000".into()),
+            status_type: Some("closed".into()),
+        };
+        let cloned = s.clone();
+        assert_eq!(s.color.as_deref(), Some("#000"));
+        assert_eq!(cloned.status.as_deref(), Some("done"));
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("TaskStatus"));
+    }
+
+    #[test]
+    fn task_priority_clone_and_debug() {
+        let p = TaskPriority {
+            id: Some("3".into()),
+            priority: Some("normal".into()),
+            color: Some("#6fddff".into()),
+        };
+        let cloned = p.clone();
+        assert_eq!(p.id.as_deref(), Some("3"));
+        assert_eq!(cloned.priority.as_deref(), Some("normal"));
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("TaskPriority"));
+    }
+
+    #[test]
+    fn task_list_clone_and_debug() {
+        let l = TaskList {
+            id: Some("l1".into()),
+            name: Some("Sprint".into()),
+        };
+        let cloned = l.clone();
+        assert_eq!(l.id.as_deref(), Some("l1"));
+        assert_eq!(cloned.name.as_deref(), Some("Sprint"));
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("TaskList"));
+    }
+
+    // ── Null field handling ───────────────────────────────────────
+
+    #[test]
+    fn space_with_null_fields() {
+        let s: Space = serde_json::from_value(json!({
+            "id": "s1",
+            "name": null,
+            "private": null,
+            "color": null,
+        }))
+        .unwrap();
+        assert!(s.name.is_none());
+        assert!(s.private.is_none());
+        assert!(s.color.is_none());
+    }
+
+    #[test]
+    fn list_with_null_fields() {
+        let l: List = serde_json::from_value(json!({
+            "id": "l1",
+            "name": null,
+            "content": null,
+            "task_count": null,
+            "archived": null,
+        }))
+        .unwrap();
+        assert!(l.name.is_none());
+        assert!(l.task_count.is_none());
+        assert!(l.archived.is_none());
+    }
+
+    #[test]
+    fn task_with_null_nested() {
+        let t: Task = serde_json::from_value(json!({
+            "id": "t1",
+            "status": null,
+            "priority": null,
+            "list": null,
+        }))
+        .unwrap();
+        assert!(t.status.is_none());
+        assert!(t.priority.is_none());
+        assert!(t.list.is_none());
+    }
+
+    // ── Serialize roundtrips ──────────────────────────────────────
+
+    #[test]
+    fn space_serialize_roundtrip() {
+        let s = Space {
+            id: "s1".into(),
+            name: Some("Test".into()),
+            private: Some(true),
+            color: Some("#ff0000".into()),
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        let back: Space = serde_json::from_value(v).unwrap();
+        assert_eq!(back.id, "s1");
+        assert_eq!(back.private, Some(true));
+    }
+
+    #[test]
+    fn list_serialize_roundtrip() {
+        let l = List {
+            id: "l1".into(),
+            name: Some("Sprint 3".into()),
+            content: Some("desc".into()),
+            task_count: Some(10),
+            archived: Some(false),
+        };
+        let v = serde_json::to_value(&l).unwrap();
+        let back: List = serde_json::from_value(v).unwrap();
+        assert_eq!(back.task_count, Some(10));
+    }
+
+    #[test]
+    fn task_status_type_rename() {
+        let s: TaskStatus = serde_json::from_value(json!({
+            "type": "custom"
+        }))
+        .unwrap();
+        assert_eq!(s.status_type.as_deref(), Some("custom"));
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["type"], "custom");
+        // Ensure the Rust field name is not in the output
+        assert!(v.get("status_type").is_none());
+    }
+
+    #[test]
+    fn task_status_minimal() {
+        let s: TaskStatus = serde_json::from_value(json!({})).unwrap();
+        assert!(s.status.is_none());
+        assert!(s.color.is_none());
+        assert!(s.status_type.is_none());
+    }
+
+    #[test]
+    fn task_priority_minimal() {
+        let p: TaskPriority = serde_json::from_value(json!({})).unwrap();
+        assert!(p.id.is_none());
+        assert!(p.priority.is_none());
+        assert!(p.color.is_none());
+    }
+
+    #[test]
+    fn task_list_minimal() {
+        let l: TaskList = serde_json::from_value(json!({})).unwrap();
+        assert!(l.id.is_none());
+        assert!(l.name.is_none());
+    }
+
+    // ── ApiErrorResponse edge cases ───────────────────────────────
+
+    #[test]
+    fn api_error_response_clone() {
+        let e = ApiErrorResponse {
+            err: Some("error".into()),
+            ecode: Some("ITEM_NOT_FOUND".into()),
+        };
+        let cloned = e.clone();
+        assert_eq!(e.ecode.as_deref(), Some("ITEM_NOT_FOUND"));
+        assert_eq!(cloned.err.as_deref(), Some("error"));
+    }
+
+    #[test]
+    fn api_error_response_debug() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({"err": "test"})).unwrap();
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("ApiErrorResponse"));
+        assert!(dbg.contains("test"));
+    }
+
+    #[test]
+    fn api_error_response_ecode_rename() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({
+            "ECODE": "OAUTH_017"
+        }))
+        .unwrap();
+        assert_eq!(e.ecode.as_deref(), Some("OAUTH_017"));
+    }
+
+    // ── Large task count ──────────────────────────────────────────
+
+    #[test]
+    fn list_large_task_count() {
+        let l: List = serde_json::from_value(json!({
+            "id": "l1",
+            "task_count": 999999,
+        }))
+        .unwrap();
+        assert_eq!(l.task_count, Some(999_999));
+    }
+
+    #[test]
+    fn task_with_url() {
+        let t: Task = serde_json::from_value(json!({
+            "id": "t1",
+            "url": "https://app.clickup.com/t/task_abc123",
+        }))
+        .unwrap();
+        assert_eq!(t.url.as_deref(), Some("https://app.clickup.com/t/task_abc123"));
+    }
 }

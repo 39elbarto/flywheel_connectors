@@ -579,4 +579,69 @@ mod tests {
         let ts = epoch_timestamp();
         assert!(ts.parse::<u64>().is_ok(), "timestamp should be numeric: {ts}");
     }
+
+    #[test]
+    fn epoch_timestamp_is_positive() {
+        let ts: u64 = epoch_timestamp().parse().unwrap();
+        assert!(ts > 0);
+    }
+
+    #[test]
+    fn default_base_url_is_https() {
+        assert!(DEFAULT_BASE_URL.starts_with("https://"));
+    }
+
+    #[test]
+    fn default_base_url_value() {
+        assert_eq!(DEFAULT_BASE_URL, "https://kubernetes.default.svc");
+    }
+
+    #[test]
+    fn auth_debug_bearer_shows_tuple_name() {
+        let auth = KubernetesAuth::BearerToken("x".into());
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("BearerToken"));
+    }
+
+    #[test]
+    fn auth_redacted_label_never_contains_token() {
+        let auth = KubernetesAuth::BearerToken("super-secret-k8s-token-12345".into());
+        let label = auth.redacted_label();
+        assert!(!label.contains("super-secret-k8s-token-12345"));
+    }
+
+    #[test]
+    fn client_new_with_empty_url() {
+        let client =
+            KubernetesClient::new(KubernetesAuth::BearerToken("tok".into()), Some("")).unwrap();
+        assert_eq!(client.base_url, "");
+    }
+
+    #[test]
+    fn client_new_preserves_path_in_base_url() {
+        let client = KubernetesClient::new(
+            KubernetesAuth::BearerToken("tok".into()),
+            Some("https://proxy.example.com/k8s/api"),
+        )
+        .unwrap();
+        assert_eq!(client.base_url, "https://proxy.example.com/k8s/api");
+    }
+
+    #[test]
+    fn auth_is_secretless_false_for_bearer() {
+        assert!(!KubernetesAuth::BearerToken("tok".into()).is_secretless());
+    }
+
+    #[test]
+    fn auth_is_secretless_true_for_credential() {
+        assert!(KubernetesAuth::CredentialId(CredentialId::new()).is_secretless());
+    }
+
+    #[test]
+    fn client_debug_contains_struct_name() {
+        let client =
+            KubernetesClient::new(KubernetesAuth::BearerToken("tok".into()), None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("KubernetesClient"));
+    }
 }

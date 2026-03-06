@@ -878,4 +878,94 @@ mod tests {
         .unwrap();
         assert_eq!(config.base_url, DEFAULT_BASE_URL);
     }
+
+    #[test]
+    fn doctor_status_serializes_lowercase() {
+        let v = serde_json::to_value(DoctorStatus::Healthy).unwrap();
+        assert_eq!(v, "healthy");
+        let v2 = serde_json::to_value(DoctorStatus::Degraded).unwrap();
+        assert_eq!(v2, "degraded");
+        let v3 = serde_json::to_value(DoctorStatus::Unhealthy).unwrap();
+        assert_eq!(v3, "unhealthy");
+    }
+
+    #[test]
+    fn doctor_status_deserializes() {
+        let s: DoctorStatus = serde_json::from_value(json!("healthy")).unwrap();
+        assert_eq!(s, DoctorStatus::Healthy);
+    }
+
+    #[test]
+    fn doctor_check_debug_format() {
+        let check = DoctorCheck {
+            name: "test_check".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let dbg = format!("{check:?}");
+        assert!(dbg.contains("test_check"));
+    }
+
+    #[test]
+    fn doctor_result_debug_format() {
+        let r = DoctorResult::from_checks(vec![]);
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("DoctorResult"));
+    }
+
+    #[test]
+    fn require_str_nested_object() {
+        let input = json!({"name": {"nested": true}});
+        assert!(require_str(&input, "name").is_err());
+    }
+
+    #[test]
+    fn operations_blocks_create_is_risky() {
+        let ops = operations_info();
+        let bc = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "logseq.blocks.create")
+            .unwrap();
+        assert_eq!(bc["safety_tier"], "risky");
+        assert_eq!(bc["risk_level"], "medium");
+    }
+
+    #[test]
+    fn operations_blocks_create_not_idempotent() {
+        let ops = operations_info();
+        let bc = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "logseq.blocks.create")
+            .unwrap();
+        assert_eq!(bc["idempotency"], "none");
+    }
+
+    #[test]
+    fn operations_pages_list_is_strict() {
+        let ops = operations_info();
+        let pl = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "logseq.pages.list")
+            .unwrap();
+        assert_eq!(pl["idempotency"], "strict");
+    }
+
+    #[test]
+    fn connector_new_request_count_zero() {
+        let c = LogseqConnector::new();
+        assert_eq!(c.request_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn connector_new_error_count_zero() {
+        let c = LogseqConnector::new();
+        assert_eq!(c.error_count.load(Ordering::Relaxed), 0);
+    }
 }

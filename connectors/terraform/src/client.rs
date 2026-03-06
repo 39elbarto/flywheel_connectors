@@ -405,4 +405,76 @@ mod tests {
         .unwrap();
         assert!(!client.base_url.ends_with('/'));
     }
+
+    #[test]
+    fn auth_clone_bearer() {
+        let auth = TerraformAuth::BearerToken("tok123".into());
+        let cloned = auth.clone();
+        drop(auth);
+        assert_eq!(cloned.redacted_label(), "bearer_token:redacted");
+    }
+
+    #[test]
+    fn auth_clone_credential() {
+        let auth = TerraformAuth::CredentialId(CredentialId::new());
+        let cloned = auth.clone();
+        drop(auth);
+        assert!(cloned.is_secretless());
+    }
+
+    #[test]
+    fn client_debug_contains_base_url() {
+        let client =
+            TerraformClient::new(TerraformAuth::BearerToken("tok".into()), None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("TerraformClient"));
+        assert!(dbg.contains("base_url"));
+    }
+
+    #[test]
+    fn client_custom_url_no_trailing_slash() {
+        let client = TerraformClient::new(
+            TerraformAuth::BearerToken("tok".into()),
+            Some("https://tfe.example.com/api/v2"),
+        )
+        .unwrap();
+        assert_eq!(client.base_url, "https://tfe.example.com/api/v2");
+    }
+
+    #[test]
+    fn client_new_with_credential_id() {
+        let cred = CredentialId::new();
+        let client =
+            TerraformClient::new(TerraformAuth::CredentialId(cred), None).unwrap();
+        assert_eq!(client.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn default_base_url_contains_terraform() {
+        assert!(DEFAULT_BASE_URL.contains("terraform"));
+    }
+
+    #[test]
+    fn default_base_url_is_https() {
+        assert!(DEFAULT_BASE_URL.starts_with("https://"));
+    }
+
+    #[test]
+    fn default_base_url_contains_api_v2() {
+        assert!(DEFAULT_BASE_URL.contains("/api/v2"));
+    }
+
+    #[test]
+    fn auth_debug_bearer_shows_tuple_name() {
+        let auth = TerraformAuth::BearerToken("secret".into());
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("BearerToken"));
+    }
+
+    #[test]
+    fn auth_debug_credential_shows_id() {
+        let cred = TerraformAuth::CredentialId(CredentialId::new());
+        let dbg = format!("{cred:?}");
+        assert!(dbg.contains("CredentialId"));
+    }
 }

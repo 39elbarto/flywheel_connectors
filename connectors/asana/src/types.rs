@@ -399,4 +399,245 @@ mod tests {
         assert!(e.message.is_none());
         assert!(e.help.is_none());
     }
+
+    // ── Additional type coverage ─────────────────────────────────
+
+    #[test]
+    fn resource_ref_clone_debug() {
+        let r = ResourceRef {
+            gid: "123".into(),
+            name: Some("Test".into()),
+        };
+        let cloned = r.clone();
+        assert_eq!(cloned.gid, "123");
+        assert_eq!(cloned.name, Some("Test".into()));
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("ResourceRef"));
+        assert!(dbg.contains("123"));
+    }
+
+    #[test]
+    fn resource_ref_serialize_roundtrip() {
+        let r = ResourceRef {
+            gid: "456".into(),
+            name: None,
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["gid"], "456");
+        let back: ResourceRef = serde_json::from_value(v).unwrap();
+        assert_eq!(back.gid, "456");
+        assert!(back.name.is_none());
+    }
+
+    #[test]
+    fn workspace_clone_debug() {
+        let w = Workspace {
+            gid: "ws1".into(),
+            name: Some("Acme".into()),
+            is_organization: Some(true),
+        };
+        let cloned = w.clone();
+        assert_eq!(cloned.gid, "ws1");
+        assert_eq!(cloned.is_organization, Some(true));
+        let dbg = format!("{w:?}");
+        assert!(dbg.contains("Workspace"));
+        assert!(dbg.contains("Acme"));
+    }
+
+    #[test]
+    fn project_clone_debug() {
+        let p = Project {
+            gid: "p1".into(),
+            name: Some("Proj".into()),
+            notes: Some("n".into()),
+            color: Some("blue".into()),
+            archived: Some(false),
+            workspace: None,
+        };
+        let cloned = p.clone();
+        assert_eq!(cloned.gid, "p1");
+        assert_eq!(cloned.color, Some("blue".into()));
+        let dbg = format!("{p:?}");
+        assert!(dbg.contains("Project"));
+        assert!(dbg.contains("Proj"));
+    }
+
+    #[test]
+    fn project_archived_true() {
+        let json = json!({"gid": "p1", "archived": true});
+        let p: Project = serde_json::from_value(json).unwrap();
+        assert_eq!(p.archived, Some(true));
+    }
+
+    #[test]
+    fn task_clone_debug() {
+        let t = Task {
+            gid: "t1".into(),
+            name: Some("Task".into()),
+            notes: None,
+            completed: Some(false),
+            assignee: None,
+            projects: None,
+            due_on: None,
+        };
+        let cloned = t.clone();
+        assert_eq!(cloned.gid, "t1");
+        assert_eq!(cloned.completed, Some(false));
+        let dbg = format!("{t:?}");
+        assert!(dbg.contains("Task"));
+        assert!(dbg.contains("t1"));
+    }
+
+    #[test]
+    fn task_with_assignee_and_projects() {
+        let t = Task {
+            gid: "t1".into(),
+            name: Some("Task A".into()),
+            notes: Some("notes here".into()),
+            completed: Some(true),
+            assignee: Some(ResourceRef {
+                gid: "u1".into(),
+                name: Some("Bob".into()),
+            }),
+            projects: Some(vec![
+                ResourceRef {
+                    gid: "p1".into(),
+                    name: Some("P1".into()),
+                },
+                ResourceRef {
+                    gid: "p2".into(),
+                    name: None,
+                },
+            ]),
+            due_on: Some("2026-06-15".into()),
+        };
+        let v = serde_json::to_value(&t).unwrap();
+        assert_eq!(v["assignee"]["name"], "Bob");
+        assert_eq!(v["projects"][1]["gid"], "p2");
+        assert_eq!(v["due_on"], "2026-06-15");
+    }
+
+    #[test]
+    fn section_clone_debug() {
+        let s = Section {
+            gid: "s1".into(),
+            name: Some("In Progress".into()),
+        };
+        let cloned = s.clone();
+        assert_eq!(cloned.gid, "s1");
+        assert_eq!(cloned.name, Some("In Progress".into()));
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("Section"));
+        assert!(dbg.contains("In Progress"));
+    }
+
+    #[test]
+    fn section_serialize_roundtrip() {
+        let s = Section {
+            gid: "s1".into(),
+            name: Some("Done".into()),
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        let back: Section = serde_json::from_value(v).unwrap();
+        assert_eq!(back.gid, "s1");
+        assert_eq!(back.name, Some("Done".into()));
+    }
+
+    #[test]
+    fn api_error_response_clone_debug() {
+        let e = ApiErrorResponse {
+            errors: Some(vec![ApiError {
+                message: Some("err".into()),
+                help: Some("fix it".into()),
+            }]),
+        };
+        let cloned = e.clone();
+        let errs = cloned.errors.unwrap();
+        assert_eq!(errs.len(), 1);
+        assert_eq!(errs[0].message, Some("err".into()));
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("ApiErrorResponse"));
+    }
+
+    #[test]
+    fn api_error_clone_debug() {
+        let e = ApiError {
+            message: Some("msg".into()),
+            help: Some("h".into()),
+        };
+        let cloned = e.clone();
+        assert_eq!(cloned.help, Some("h".into()));
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("ApiError"));
+    }
+
+    #[test]
+    fn workspace_organization_false() {
+        let json = json!({"gid": "w1", "is_organization": false});
+        let w: Workspace = serde_json::from_value(json).unwrap();
+        assert_eq!(w.is_organization, Some(false));
+    }
+
+    #[test]
+    fn task_empty_projects_list() {
+        let json = json!({"gid": "t1", "projects": []});
+        let t: Task = serde_json::from_value(json).unwrap();
+        assert!(t.projects.is_some());
+        assert!(t.projects.unwrap().is_empty());
+    }
+
+    #[test]
+    fn project_with_workspace_ref() {
+        let p = Project {
+            gid: "p1".into(),
+            name: None,
+            notes: None,
+            color: None,
+            archived: None,
+            workspace: Some(ResourceRef {
+                gid: "ws1".into(),
+                name: Some("Workspace".into()),
+            }),
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["workspace"]["gid"], "ws1");
+    }
+
+    #[test]
+    fn api_error_help_only() {
+        let e: ApiError = serde_json::from_value(json!({"help": "Try again"})).unwrap();
+        assert!(e.message.is_none());
+        assert_eq!(e.help, Some("Try again".into()));
+    }
+
+    #[test]
+    fn task_due_on_none() {
+        let t: Task = serde_json::from_value(json!({"gid": "t1"})).unwrap();
+        assert!(t.due_on.is_none());
+    }
+
+    #[test]
+    fn task_serialize_null_optionals() {
+        let t = Task {
+            gid: "t1".into(),
+            name: None,
+            notes: None,
+            completed: None,
+            assignee: None,
+            projects: None,
+            due_on: None,
+        };
+        let v = serde_json::to_value(&t).unwrap();
+        // gid should always be present
+        assert_eq!(v["gid"], "t1");
+    }
+
+    #[test]
+    fn api_error_response_single_error() {
+        let json = json!({"errors": [{"message": "Only one"}]});
+        let e: ApiErrorResponse = serde_json::from_value(json).unwrap();
+        let errs = e.errors.unwrap();
+        assert_eq!(errs.len(), 1);
+        assert_eq!(errs[0].message, Some("Only one".into()));
+    }
 }

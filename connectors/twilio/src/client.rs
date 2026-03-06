@@ -859,4 +859,474 @@ mod tests {
         };
         assert!(!err.is_retryable());
     }
+
+    // ── TwilioAuth tests ────────────────────────────────────────────────
+
+    #[test]
+    fn auth_token_redacted_label() {
+        let auth = TwilioAuth::Token {
+            account_sid: "ACtest".into(),
+            auth_token: "secret123".into(),
+        };
+        assert_eq!(auth.redacted_label(), "token");
+    }
+
+    #[test]
+    fn auth_credential_id_redacted_label() {
+        let auth = TwilioAuth::CredentialId {
+            account_sid: "ACtest".into(),
+            credential_id: CredentialId::parse(&uuid::Uuid::new_v4().to_string()).unwrap(),
+        };
+        assert_eq!(auth.redacted_label(), "credential_id");
+    }
+
+    #[test]
+    fn auth_token_is_not_secretless() {
+        let auth = TwilioAuth::Token {
+            account_sid: "ACtest".into(),
+            auth_token: "token".into(),
+        };
+        assert!(!auth.is_secretless());
+    }
+
+    #[test]
+    fn auth_credential_id_is_secretless() {
+        let auth = TwilioAuth::CredentialId {
+            account_sid: "ACtest".into(),
+            credential_id: CredentialId::parse(&uuid::Uuid::new_v4().to_string()).unwrap(),
+        };
+        assert!(auth.is_secretless());
+    }
+
+    #[test]
+    fn auth_account_sid_from_token() {
+        let auth = TwilioAuth::Token {
+            account_sid: "ACabc123".into(),
+            auth_token: "tok".into(),
+        };
+        assert_eq!(auth.account_sid(), "ACabc123");
+    }
+
+    #[test]
+    fn auth_account_sid_from_credential_id() {
+        let auth = TwilioAuth::CredentialId {
+            account_sid: "ACxyz789".into(),
+            credential_id: CredentialId::parse(&uuid::Uuid::new_v4().to_string()).unwrap(),
+        };
+        assert_eq!(auth.account_sid(), "ACxyz789");
+    }
+
+    #[test]
+    fn auth_token_debug_redacts_auth_token() {
+        let auth = TwilioAuth::Token {
+            account_sid: "ACdebug".into(),
+            auth_token: "super_secret_should_not_appear".into(),
+        };
+        let debug = format!("{auth:?}");
+        assert!(debug.contains("ACdebug"), "debug: {debug}");
+        assert!(debug.contains("[REDACTED]"), "debug: {debug}");
+        assert!(
+            !debug.contains("super_secret_should_not_appear"),
+            "debug: {debug}"
+        );
+    }
+
+    #[test]
+    fn auth_credential_id_debug_shows_id() {
+        let cid = uuid::Uuid::new_v4();
+        let auth = TwilioAuth::CredentialId {
+            account_sid: "ACdebug2".into(),
+            credential_id: CredentialId::parse(&cid.to_string()).unwrap(),
+        };
+        let debug = format!("{auth:?}");
+        assert!(debug.contains("ACdebug2"), "debug: {debug}");
+        assert!(debug.contains("CredentialId"), "debug: {debug}");
+    }
+
+    #[test]
+    fn auth_clone_token() {
+        let original = TwilioAuth::Token {
+            account_sid: "ACclone".into(),
+            auth_token: "tok_clone".into(),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.account_sid(), "ACclone");
+        assert_eq!(cloned.redacted_label(), "token");
+    }
+
+    #[test]
+    fn auth_clone_credential_id() {
+        let original = TwilioAuth::CredentialId {
+            account_sid: "ACclone2".into(),
+            credential_id: CredentialId::parse(&uuid::Uuid::new_v4().to_string()).unwrap(),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.account_sid(), "ACclone2");
+        assert!(cloned.is_secretless());
+    }
+
+    // ── TwilioClient construction tests ─────────────────────────────────
+
+    #[test]
+    fn client_new_builds_with_default_base_url() {
+        let client = TwilioClient::new("ACtest123", "auth_tok").unwrap();
+        assert_eq!(client.account_sid(), "ACtest123");
+    }
+
+    #[test]
+    fn client_with_base_url_overrides() {
+        let client = TwilioClient::new("ACtest123", "tok")
+            .unwrap()
+            .with_base_url("http://localhost:8888");
+        assert_eq!(client.account_sid(), "ACtest123");
+        let debug = format!("{client:?}");
+        assert!(
+            debug.contains("http://localhost:8888"),
+            "debug: {debug}"
+        );
+    }
+
+    #[test]
+    fn client_with_retry_config() {
+        let client = TwilioClient::new("ACtest", "tok")
+            .unwrap()
+            .with_retry_config(5);
+        let debug = format!("{client:?}");
+        assert!(debug.contains("max_retries: 5"), "debug: {debug}");
+    }
+
+    #[test]
+    fn client_debug_format_contains_key_fields() {
+        let client = TwilioClient::new("ACfmt", "tok")
+            .unwrap()
+            .with_base_url("http://test.local")
+            .with_retry_config(3);
+        let debug = format!("{client:?}");
+        assert!(debug.contains("TwilioClient"), "debug: {debug}");
+        assert!(debug.contains("ACfmt"), "debug: {debug}");
+        assert!(debug.contains("http://test.local"), "debug: {debug}");
+        assert!(debug.contains("max_retries: 3"), "debug: {debug}");
+    }
+
+    #[test]
+    fn client_new_with_auth_token_mode() {
+        let client = TwilioClient::new_with_auth(TwilioAuth::Token {
+            account_sid: "ACnew".into(),
+            auth_token: "tok_new".into(),
+        })
+        .unwrap();
+        assert_eq!(client.account_sid(), "ACnew");
+    }
+
+    #[test]
+    fn client_new_with_auth_credential_id_mode() {
+        let cid = CredentialId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+        let client = TwilioClient::new_with_auth(TwilioAuth::CredentialId {
+            account_sid: "ACcred".into(),
+            credential_id: cid,
+        })
+        .unwrap();
+        assert_eq!(client.account_sid(), "ACcred");
+    }
+
+    #[test]
+    fn client_default_retry_is_two() {
+        let client = TwilioClient::new("ACtest", "tok").unwrap();
+        let debug = format!("{client:?}");
+        assert!(debug.contains("max_retries: 2"), "debug: {debug}");
+    }
+
+    #[test]
+    fn client_base_url_includes_account_sid() {
+        let client = TwilioClient::new("ACurl123", "tok").unwrap();
+        let debug = format!("{client:?}");
+        assert!(debug.contains("ACurl123"), "debug: {debug}");
+        // The base URL should contain the default API base + account SID
+        let expected_url = format!("{DEFAULT_API_BASE}/ACurl123");
+        assert!(debug.contains(&expected_url), "debug: {debug}");
+    }
+
+    // ── Default API base constant ───────────────────────────────────────
+
+    #[test]
+    fn default_api_base_is_twilio() {
+        assert!(DEFAULT_API_BASE.contains("api.twilio.com"));
+        assert!(DEFAULT_API_BASE.contains("2010-04-01"));
+        assert!(DEFAULT_API_BASE.contains("Accounts"));
+    }
+
+    // ── Wiremock edge case tests ────────────────────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_list_recordings() {
+        let mock_server = MockServer::start().await;
+        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
+
+        Mock::given(method("GET"))
+            .and(path(
+                "/2010-04-01/Accounts/ACtest123/Recordings.json",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "recordings": [
+                    {"sid": "RE1", "duration": "30"},
+                    {"sid": "RE2", "duration": "60"}
+                ],
+                "next_page_uri": null
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&base);
+        let result = client.list_recordings(None, None, None).await.unwrap();
+        assert_eq!(result.recordings.len(), 2);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_forbidden_returns_unauthorized() {
+        let mock_server = MockServer::start().await;
+        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/2010-04-01/Accounts/ACtest123.json"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&base);
+        let result = client.get_account().await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), TwilioError::Unauthorized));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_api_error_with_error_body() {
+        let mock_server = MockServer::start().await;
+        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/2010-04-01/Accounts/ACtest123/Messages.json"))
+            .respond_with(
+                ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                    "code": 21211,
+                    "message": "Invalid 'To' Phone Number"
+                })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&base);
+        let result = client.list_messages(None, None, None, None, None).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            TwilioError::Api {
+                message,
+                status_code,
+                error_code,
+            } => {
+                assert_eq!(message, "Invalid 'To' Phone Number");
+                assert_eq!(status_code, Some(400));
+                assert_eq!(error_code, Some("21211".to_string()));
+            }
+            e => panic!("Expected Api error, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_server_error_no_retry() {
+        let mock_server = MockServer::start().await;
+        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/2010-04-01/Accounts/ACtest123.json"))
+            .respond_with(
+                ResponseTemplate::new(503).set_body_string("Service Unavailable"),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&base);
+        let result = client.get_account().await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            TwilioError::Api {
+                status_code,
+                message,
+                ..
+            } => {
+                assert_eq!(status_code, Some(503));
+                assert!(message.contains("503"), "msg: {message}");
+            }
+            e => panic!("Expected Api error, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_send_message_with_media_url() {
+        let mock_server = MockServer::start().await;
+        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/2010-04-01/Accounts/ACtest123/Messages.json"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "sid": "SMmedia",
+                "status": "queued",
+                "to": "+15551111111",
+                "from": "+15552222222",
+                "body": "With media",
+                "num_media": "1"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&base);
+        let media = vec!["https://example.com/image.png".to_string()];
+        let msg = client
+            .send_message("+15551111111", "+15552222222", "With media", Some(&media), None)
+            .await
+            .unwrap();
+        assert_eq!(msg.sid, "SMmedia");
+        assert_eq!(msg.num_media.as_deref(), Some("1"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_send_message_with_callback() {
+        let mock_server = MockServer::start().await;
+        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/2010-04-01/Accounts/ACtest123/Messages.json"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "sid": "SMcb",
+                "status": "queued",
+                "to": "+15551111111",
+                "from": "+15552222222",
+                "body": "With callback"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&base);
+        let msg = client
+            .send_message(
+                "+15551111111",
+                "+15552222222",
+                "With callback",
+                None,
+                Some("https://example.com/callback"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(msg.sid, "SMcb");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_create_call_with_all_options() {
+        let mock_server = MockServer::start().await;
+        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/2010-04-01/Accounts/ACtest123/Calls.json"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "sid": "CAfull",
+                "status": "queued",
+                "to": "+15551111111",
+                "from": "+15552222222"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&base);
+        let call = client
+            .create_call(
+                "+15551111111",
+                "+15552222222",
+                "https://example.com/twiml",
+                Some("https://example.com/status"),
+                Some(30),
+                Some(true),
+            )
+            .await
+            .unwrap();
+        assert_eq!(call.sid, "CAfull");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_list_messages_with_filters() {
+        let mock_server = MockServer::start().await;
+        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/2010-04-01/Accounts/ACtest123/Messages.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "messages": [{"sid": "SMfiltered"}],
+                "next_page_uri": null
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&base);
+        let result = client
+            .list_messages(
+                Some("+15551111111"),
+                Some("+15552222222"),
+                Some("2026-03-01"),
+                Some(10),
+                Some(0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.messages.len(), 1);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_list_phone_numbers_with_filter() {
+        let mock_server = MockServer::start().await;
+        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
+
+        Mock::given(method("GET"))
+            .and(path(
+                "/2010-04-01/Accounts/ACtest123/IncomingPhoneNumbers.json",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "incoming_phone_numbers": [
+                    {"sid": "PNfiltered", "phone_number": "+15551234567"}
+                ],
+                "next_page_uri": null
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&base);
+        let result = client
+            .list_phone_numbers(Some("+15551234567"), Some(10))
+            .await
+            .unwrap();
+        assert_eq!(result.incoming_phone_numbers.len(), 1);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_list_recordings_with_filters() {
+        let mock_server = MockServer::start().await;
+        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
+
+        Mock::given(method("GET"))
+            .and(path(
+                "/2010-04-01/Accounts/ACtest123/Recordings.json",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "recordings": [{"sid": "REfiltered"}],
+                "next_page_uri": null
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = test_client(&base);
+        let result = client
+            .list_recordings(Some("CA123"), Some("2026-03-01"), Some(5))
+            .await
+            .unwrap();
+        assert_eq!(result.recordings.len(), 1);
+    }
 }

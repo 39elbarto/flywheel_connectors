@@ -536,4 +536,248 @@ mod tests {
         assert_eq!(v["id"], "plan-1");
         assert_eq!(v["resource-additions"], 2);
     }
+
+    // -- Clone trait tests --
+
+    #[test]
+    fn workspace_clone() {
+        let w = Workspace {
+            id: "ws-1".into(),
+            name: Some("prod".into()),
+            description: None,
+            terraform_version: Some("1.7.0".into()),
+            auto_apply: Some(false),
+            working_directory: None,
+            resource_count: Some(10),
+            updated_at: None,
+        };
+        let cloned = w.clone();
+        drop(w);
+        assert_eq!(cloned.id, "ws-1");
+        assert_eq!(cloned.name, Some("prod".into()));
+    }
+
+    #[test]
+    fn run_clone() {
+        let r = Run {
+            id: "run-1".into(),
+            status: Some("applied".into()),
+            message: None,
+            has_changes: Some(true),
+            is_destroy: Some(false),
+            created_at: None,
+            plan_only: Some(false),
+            auto_apply: None,
+        };
+        let cloned = r.clone();
+        drop(r);
+        assert_eq!(cloned.id, "run-1");
+        assert_eq!(cloned.has_changes, Some(true));
+    }
+
+    #[test]
+    fn plan_clone() {
+        let p = Plan {
+            id: "plan-1".into(),
+            status: Some("finished".into()),
+            has_changes: None,
+            resource_additions: Some(3),
+            resource_changes: None,
+            resource_destructions: None,
+            log_read_url: None,
+        };
+        let cloned = p.clone();
+        drop(p);
+        assert_eq!(cloned.id, "plan-1");
+        assert_eq!(cloned.resource_additions, Some(3));
+    }
+
+    #[test]
+    fn state_version_clone() {
+        let sv = StateVersion {
+            id: "sv-1".into(),
+            serial: Some(1),
+            terraform_version: None,
+            created_at: None,
+            resources_processed: Some(true),
+        };
+        let cloned = sv.clone();
+        drop(sv);
+        assert_eq!(cloned.id, "sv-1");
+    }
+
+    #[test]
+    fn state_resource_clone() {
+        let sr = StateResource {
+            address: Some("aws_instance.web".into()),
+            name: Some("web".into()),
+            resource_type: Some("aws_instance".into()),
+            module: None,
+            provider: None,
+        };
+        let cloned = sr.clone();
+        drop(sr);
+        assert_eq!(cloned.address, Some("aws_instance.web".into()));
+    }
+
+    #[test]
+    fn configuration_version_clone() {
+        let cv = ConfigurationVersion {
+            id: "cv-1".into(),
+            status: Some("uploaded".into()),
+            source: None,
+            upload_url: None,
+        };
+        let cloned = cv.clone();
+        drop(cv);
+        assert_eq!(cloned.id, "cv-1");
+    }
+
+    #[test]
+    fn module_ref_clone() {
+        let m = ModuleRef {
+            source: Some("hashicorp/consul/aws".into()),
+            version: Some("0.1.0".into()),
+            key: None,
+        };
+        let cloned = m.clone();
+        drop(m);
+        assert_eq!(cloned.source, Some("hashicorp/consul/aws".into()));
+    }
+
+    #[test]
+    fn output_value_clone() {
+        let o = OutputValue {
+            name: Some("endpoint".into()),
+            value: Some(json!("https://api.example.com")),
+            sensitive: Some(false),
+            output_type: Some("string".into()),
+        };
+        let cloned = o.clone();
+        drop(o);
+        assert_eq!(cloned.name, Some("endpoint".into()));
+    }
+
+    #[test]
+    fn resource_change_clone() {
+        let rc = ResourceChange {
+            address: Some("aws_instance.web".into()),
+            resource_type: Some("aws_instance".into()),
+            actions: Some(vec!["create".into()]),
+            name: None,
+            module: None,
+        };
+        let cloned = rc.clone();
+        drop(rc);
+        assert_eq!(cloned.actions.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn diagnostic_clone() {
+        let d = Diagnostic {
+            severity: Some("error".into()),
+            summary: Some("Missing".into()),
+            detail: None,
+        };
+        let cloned = d.clone();
+        drop(d);
+        assert_eq!(cloned.severity, Some("error".into()));
+    }
+
+    #[test]
+    fn drift_resource_clone() {
+        let dr = DriftResource {
+            address: Some("aws_instance.web".into()),
+            resource_type: None,
+            change_type: Some("update".into()),
+        };
+        let cloned = dr.clone();
+        drop(dr);
+        assert_eq!(cloned.change_type, Some("update".into()));
+    }
+
+    // -- Debug trait tests --
+
+    #[test]
+    fn workspace_debug() {
+        let w: Workspace = serde_json::from_value(json!({"id": "ws-dbg"})).unwrap();
+        let dbg = format!("{w:?}");
+        assert!(dbg.contains("Workspace"));
+        assert!(dbg.contains("ws-dbg"));
+    }
+
+    #[test]
+    fn run_debug() {
+        let r: Run = serde_json::from_value(json!({"id": "run-dbg"})).unwrap();
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("Run"));
+    }
+
+    #[test]
+    fn plan_debug() {
+        let p: Plan = serde_json::from_value(json!({"id": "plan-dbg"})).unwrap();
+        let dbg = format!("{p:?}");
+        assert!(dbg.contains("Plan"));
+    }
+
+    #[test]
+    fn state_version_debug() {
+        let sv: StateVersion = serde_json::from_value(json!({"id": "sv-dbg"})).unwrap();
+        let dbg = format!("{sv:?}");
+        assert!(dbg.contains("StateVersion"));
+    }
+
+    #[test]
+    fn configuration_version_minimal() {
+        let cv: ConfigurationVersion =
+            serde_json::from_value(json!({"id": "cv-x"})).unwrap();
+        assert_eq!(cv.id, "cv-x");
+        assert!(cv.status.is_none());
+        assert!(cv.upload_url.is_none());
+    }
+
+    #[test]
+    fn output_value_minimal() {
+        let o: OutputValue = serde_json::from_value(json!({})).unwrap();
+        assert!(o.name.is_none());
+        assert!(o.value.is_none());
+        assert!(o.sensitive.is_none());
+    }
+
+    #[test]
+    fn resource_change_minimal() {
+        let rc: ResourceChange = serde_json::from_value(json!({})).unwrap();
+        assert!(rc.address.is_none());
+        assert!(rc.actions.is_none());
+    }
+
+    #[test]
+    fn diagnostic_minimal() {
+        let d: Diagnostic = serde_json::from_value(json!({})).unwrap();
+        assert!(d.severity.is_none());
+        assert!(d.summary.is_none());
+        assert!(d.detail.is_none());
+    }
+
+    #[test]
+    fn drift_resource_minimal() {
+        let dr: DriftResource = serde_json::from_value(json!({})).unwrap();
+        assert!(dr.address.is_none());
+        assert!(dr.resource_type.is_none());
+        assert!(dr.change_type.is_none());
+    }
+
+    #[test]
+    fn state_version_serialize_roundtrip() {
+        let sv = StateVersion {
+            id: "sv-1".into(),
+            serial: Some(5),
+            terraform_version: Some("1.7.0".into()),
+            created_at: None,
+            resources_processed: Some(true),
+        };
+        let v = serde_json::to_value(&sv).unwrap();
+        assert_eq!(v["id"], "sv-1");
+        assert_eq!(v["serial"], 5);
+    }
 }

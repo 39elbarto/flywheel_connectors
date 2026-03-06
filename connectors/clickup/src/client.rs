@@ -272,4 +272,84 @@ mod tests {
         assert!(!dbg.contains("secret"));
         assert!(dbg.contains("redacted"));
     }
+
+    // ── Client construction edge cases ────────────────────────────
+
+    #[test]
+    fn client_new_trims_trailing_slash() {
+        let client = ClickUpClient::new(
+            ClickUpAuth::ApiToken("tok".into()),
+            Some("https://test.example.com/api/v2/"),
+        )
+        .unwrap();
+        assert_eq!(client.base_url, "https://test.example.com/api/v2");
+    }
+
+    #[test]
+    fn client_debug_contains_base_url() {
+        let client =
+            ClickUpClient::new(ClickUpAuth::ApiToken("tok".into()), None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("ClickUpClient"));
+        assert!(dbg.contains("base_url"));
+        assert!(dbg.contains("clickup.com"));
+    }
+
+    // ── Auth clone ────────────────────────────────────────────────
+
+    #[test]
+    fn auth_api_token_clone() {
+        let auth = ClickUpAuth::ApiToken("mytoken".into());
+        let cloned = auth.clone();
+        assert_eq!(auth.redacted_label(), "api_token:redacted");
+        assert_eq!(cloned.redacted_label(), "api_token:redacted");
+        assert!(!cloned.is_secretless());
+    }
+
+    #[test]
+    fn auth_credential_id_clone() {
+        let cred = ClickUpAuth::CredentialId(CredentialId::new());
+        let cloned = cred.clone();
+        assert!(cred.is_secretless());
+        assert!(cloned.is_secretless());
+        assert!(cloned.redacted_label().starts_with("credential_id:"));
+    }
+
+    #[test]
+    fn auth_debug_credential_id_contains_id() {
+        let id = CredentialId::new();
+        let id_str = id.to_string();
+        let auth = ClickUpAuth::CredentialId(id);
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains(&id_str));
+        assert!(dbg.contains("CredentialId"));
+    }
+
+    // ── DEFAULT_BASE_URL ──────────────────────────────────────────
+
+    #[test]
+    fn default_base_url_constant() {
+        assert!(DEFAULT_BASE_URL.starts_with("https://"));
+        assert!(DEFAULT_BASE_URL.contains("clickup"));
+        assert!(!DEFAULT_BASE_URL.ends_with('/'));
+    }
+
+    #[test]
+    fn client_new_with_credential_id() {
+        let client = ClickUpClient::new(
+            ClickUpAuth::CredentialId(CredentialId::new()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(client.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn auth_debug_api_token_no_leak() {
+        let auth = ClickUpAuth::ApiToken("pk_12345678_ABCDEFGHIJKLMNOP".into());
+        let dbg = format!("{auth:?}");
+        assert!(!dbg.contains("pk_12345678"));
+        assert!(!dbg.contains("ABCDEFGHIJKLMNOP"));
+        assert!(dbg.contains("ApiToken"));
+    }
 }

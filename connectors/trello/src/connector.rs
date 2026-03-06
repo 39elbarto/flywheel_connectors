@@ -943,4 +943,231 @@ mod tests {
         assert!(c.client.is_none());
         assert!(c.session_id.is_none());
     }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn doctor_check_clone() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: true,
+            message: Some("ok".into()),
+            critical: false,
+        };
+        let c = check.clone();
+        assert_eq!(c.name, "test");
+        assert!(c.passed);
+    }
+
+    #[test]
+    fn doctor_check_debug() {
+        let check = DoctorCheck {
+            name: "check1".into(),
+            passed: false,
+            message: None,
+            critical: true,
+        };
+        let dbg = format!("{check:?}");
+        assert!(dbg.contains("DoctorCheck"));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn doctor_result_clone() {
+        let r = DoctorResult::from_checks(vec![]);
+        let c = r.clone();
+        assert_eq!(c.status, DoctorStatus::Healthy);
+    }
+
+    #[test]
+    fn doctor_result_debug() {
+        let r = DoctorResult::from_checks(vec![]);
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("DoctorResult"));
+    }
+
+    #[test]
+    fn doctor_status_serialize_all_variants() {
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Healthy).unwrap(),
+            json!("healthy")
+        );
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Degraded).unwrap(),
+            json!("degraded")
+        );
+        assert_eq!(
+            serde_json::to_value(DoctorStatus::Unhealthy).unwrap(),
+            json!("unhealthy")
+        );
+    }
+
+    #[test]
+    fn doctor_status_deserialize_all_variants() {
+        let h: DoctorStatus = serde_json::from_value(json!("healthy")).unwrap();
+        assert_eq!(h, DoctorStatus::Healthy);
+        let d: DoctorStatus = serde_json::from_value(json!("degraded")).unwrap();
+        assert_eq!(d, DoctorStatus::Degraded);
+        let u: DoctorStatus = serde_json::from_value(json!("unhealthy")).unwrap();
+        assert_eq!(u, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_check_skip_none_message() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert!(v.get("message").is_none());
+    }
+
+    #[test]
+    fn doctor_check_with_message() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: false,
+            message: Some("failure".into()),
+            critical: true,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert_eq!(v["message"], "failure");
+    }
+
+    #[test]
+    fn require_str_empty_string_returns_ok() {
+        let input = json!({"field": ""});
+        assert_eq!(require_str(&input, "field").unwrap(), "");
+    }
+
+    #[test]
+    fn require_str_boolean_value() {
+        let input = json!({"field": true});
+        assert!(require_str(&input, "field").is_err());
+    }
+
+    #[test]
+    fn require_str_array_value() {
+        let input = json!({"field": ["a", "b"]});
+        assert!(require_str(&input, "field").is_err());
+    }
+
+    #[test]
+    fn connector_new_equals_default() {
+        let c1 = TrelloConnector::new();
+        let c2 = TrelloConnector::default();
+        assert!(c1.config.is_none());
+        assert!(c2.config.is_none());
+    }
+
+    #[test]
+    fn doctor_result_mixed_failures() {
+        let checks = vec![
+            DoctorCheck {
+                name: "a".into(),
+                passed: false,
+                message: Some("crit".into()),
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: Some("non-crit".into()),
+                critical: false,
+            },
+        ];
+        let r = DoctorResult::from_checks(checks);
+        assert_eq!(r.status, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_check_deserialize() {
+        let v = json!({
+            "name": "config",
+            "passed": true,
+            "message": "ok",
+            "critical": false
+        });
+        let check: DoctorCheck = serde_json::from_value(v).unwrap();
+        assert_eq!(check.name, "config");
+        assert!(check.passed);
+    }
+
+    #[test]
+    fn doctor_status_eq() {
+        assert_eq!(DoctorStatus::Healthy, DoctorStatus::Healthy);
+        assert_ne!(DoctorStatus::Healthy, DoctorStatus::Degraded);
+    }
+
+    #[test]
+    fn doctor_status_copy() {
+        let status = DoctorStatus::Unhealthy;
+        let copied = status;
+        assert_eq!(status, copied);
+    }
+
+    #[test]
+    fn cards_create_is_risky() {
+        let ops = operations_info();
+        let create = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "trello.cards.create")
+            .unwrap();
+        assert_eq!(create["safety_tier"], "risky");
+        assert_eq!(create["risk_level"], "medium");
+    }
+
+    #[test]
+    fn cards_delete_is_dangerous() {
+        let ops = operations_info();
+        let delete = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "trello.cards.delete")
+            .unwrap();
+        assert_eq!(delete["safety_tier"], "dangerous");
+        assert_eq!(delete["risk_level"], "high");
+    }
+
+    #[test]
+    fn cards_update_is_risky() {
+        let ops = operations_info();
+        let update = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "trello.cards.update")
+            .unwrap();
+        assert_eq!(update["safety_tier"], "risky");
+    }
+
+    #[test]
+    #[allow(clippy::case_sensitive_file_extension_comparisons)]
+    fn write_operations_are_not_safe() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let cap = op["capability"].as_str().unwrap();
+            if cap.ends_with(".write") {
+                assert_ne!(
+                    op["safety_tier"].as_str().unwrap(),
+                    "safe",
+                    "write op {} should not be safe",
+                    op["id"]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn config_rejects_whitespace_token() {
+        let result = TrelloConfig::from_params(&json!({
+            "api_key": "key",
+            "token": "   ",
+        }));
+        assert!(result.is_err());
+    }
 }

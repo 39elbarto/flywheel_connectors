@@ -967,4 +967,176 @@ mod tests {
         assert!(c.client.is_none());
         assert!(c.session_id.is_none());
     }
+
+    #[test]
+    fn connector_new_has_no_config() {
+        let c = BitbucketConnector::new();
+        assert!(c.config.is_none());
+        assert!(c.client.is_none());
+    }
+
+    #[test]
+    fn connector_request_count_starts_at_zero() {
+        let c = BitbucketConnector::new();
+        assert_eq!(c.request_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn connector_error_count_starts_at_zero() {
+        let c = BitbucketConnector::new();
+        assert_eq!(c.error_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn config_rejects_three_auth_methods() {
+        let result = BitbucketConfig::from_params(&json!({
+            "access_token": "tok",
+            "username": "u",
+            "app_password": "p",
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_rejects_access_token_plus_app_password() {
+        let result = BitbucketConfig::from_params(&json!({
+            "access_token": "tok",
+            "username": "u",
+            "app_password": "p",
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_rejects_app_password_plus_credential_id() {
+        let result = BitbucketConfig::from_params(&json!({
+            "username": "u",
+            "app_password": "p",
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_trims_app_password_username() {
+        let config = BitbucketConfig::from_params(&json!({
+            "username": "  user  ",
+            "app_password": "pass",
+        }))
+        .unwrap();
+        match &config.auth {
+            BitbucketAuth::AppPassword { username, .. } => assert_eq!(username, "user"),
+            _ => panic!("expected AppPassword"),
+        }
+    }
+
+    #[test]
+    fn doctor_check_serializes_with_message() {
+        let check = DoctorCheck {
+            name: "test_check".into(),
+            passed: false,
+            message: Some("failure reason".into()),
+            critical: true,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert_eq!(v["name"], "test_check");
+        assert_eq!(v["passed"], false);
+        assert_eq!(v["message"], "failure reason");
+        assert_eq!(v["critical"], true);
+    }
+
+    #[test]
+    fn doctor_check_serializes_without_message() {
+        let check = DoctorCheck {
+            name: "ok_check".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert_eq!(v["name"], "ok_check");
+        assert_eq!(v["passed"], true);
+        // message should be skipped when None
+        assert!(!v.as_object().unwrap().contains_key("message"));
+    }
+
+    #[test]
+    fn doctor_status_serde_roundtrip() {
+        let statuses = [DoctorStatus::Healthy, DoctorStatus::Degraded, DoctorStatus::Unhealthy];
+        for status in &statuses {
+            let v = serde_json::to_value(status).unwrap();
+            let back: DoctorStatus = serde_json::from_value(v).unwrap();
+            assert_eq!(*status, back);
+        }
+    }
+
+    #[test]
+    fn doctor_result_clone() {
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "x".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        }]);
+        let c = r.clone();
+        assert_eq!(c.status, DoctorStatus::Healthy);
+        assert_eq!(c.checks.len(), 1);
+        assert_eq!(r.status, DoctorStatus::Healthy);
+    }
+
+    #[test]
+    fn operations_write_ops_not_safe() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let cap = op["capability"].as_str().unwrap();
+            if cap.contains("write") {
+                let tier = op["safety_tier"].as_str().unwrap();
+                assert_ne!(tier, "safe", "write op {} should not be safe", op["id"]);
+            }
+        }
+    }
+
+    #[test]
+    fn operations_create_pr_is_risky() {
+        let ops = operations_info();
+        let create_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "bitbucket.pull_requests.create")
+            .unwrap();
+        assert_eq!(create_op["safety_tier"], "risky");
+        assert_eq!(create_op["risk_level"], "medium");
+    }
+
+    #[test]
+    fn operations_user_get_summary() {
+        let ops = operations_info();
+        let user_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "bitbucket.user.get")
+            .unwrap();
+        assert!(user_op["summary"].as_str().unwrap().len() > 5);
+    }
+
+    #[test]
+    fn require_str_boolean_value() {
+        let input = json!({"workspace": true});
+        assert!(require_str(&input, "workspace").is_err());
+    }
+
+    #[test]
+    fn require_str_array_value() {
+        let input = json!({"workspace": ["a", "b"]});
+        assert!(require_str(&input, "workspace").is_err());
+    }
+
+    #[test]
+    fn require_str_object_value() {
+        let input = json!({"workspace": {"nested": true}});
+        assert!(require_str(&input, "workspace").is_err());
+    }
 }

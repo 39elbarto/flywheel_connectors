@@ -410,4 +410,202 @@ mod tests {
             "Bitbucket API error (500): Internal"
         );
     }
+
+    #[test]
+    fn error_display_http() {
+        // Build a reqwest error via a bad URL parse
+        let err = reqwest::Client::builder().build().unwrap();
+        let _client = err; // just to confirm it builds
+        // We can't easily make a reqwest::Error but we test the json path
+        let json_err: Result<serde_json::Value, _> = serde_json::from_str("not json");
+        let e = BitbucketError::Json(json_err.unwrap_err());
+        let display = e.to_string();
+        assert!(display.starts_with("JSON error:"));
+    }
+
+    #[test]
+    fn json_error_is_not_retryable() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{bad");
+        let e = BitbucketError::Json(bad.unwrap_err());
+        assert!(!e.is_retryable());
+    }
+
+    #[test]
+    fn json_error_retry_after_is_none() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{bad");
+        let e = BitbucketError::Json(bad.unwrap_err());
+        assert_eq!(e.retry_after(), None);
+    }
+
+    #[test]
+    fn api_502_is_retryable() {
+        assert!(
+            BitbucketError::Api {
+                status_code: 502,
+                message: "bad gateway".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_504_is_retryable() {
+        assert!(
+            BitbucketError::Api {
+                status_code: 504,
+                message: "timeout".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_422_not_retryable() {
+        assert!(
+            !BitbucketError::Api {
+                status_code: 422,
+                message: "unprocessable".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn rate_limited_retry_after_zero() {
+        let err = BitbucketError::RateLimited {
+            retry_after_ms: 0,
+        };
+        assert_eq!(err.retry_after(), Some(Duration::from_millis(0)));
+    }
+
+    #[test]
+    fn rate_limited_retry_after_large_value() {
+        let err = BitbucketError::RateLimited {
+            retry_after_ms: 300_000,
+        };
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(300)));
+    }
+
+    #[test]
+    fn not_found_to_fcp_error_service() {
+        match (BitbucketError::NotFound {
+            resource: "x".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External { service, .. } => assert_eq!(service, "bitbucket"),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rate_limited_to_fcp_error_service() {
+        match (BitbucketError::RateLimited {
+            retry_after_ms: 1000,
+        })
+        .to_fcp_error()
+        {
+            FcpError::External { service, .. } => assert_eq!(service, "bitbucket"),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_debug_trait() {
+        let err = BitbucketError::Unauthorized;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Unauthorized"));
+    }
+
+    #[test]
+    fn api_error_debug_trait() {
+        let err = BitbucketError::Api {
+            status_code: 418,
+            message: "teapot".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("418"));
+        assert!(dbg.contains("teapot"));
+    }
+
+    #[test]
+    fn not_found_debug_trait() {
+        let err = BitbucketError::NotFound {
+            resource: "my-repo".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("my-repo"));
+    }
+
+    #[test]
+    fn rate_limited_debug_trait() {
+        let err = BitbucketError::RateLimited {
+            retry_after_ms: 5000,
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("5000"));
+    }
+
+    #[test]
+    fn api_error_retryable_boundary_499() {
+        assert!(
+            !BitbucketError::Api {
+                status_code: 499,
+                message: "client error".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_error_retryable_boundary_599() {
+        assert!(
+            BitbucketError::Api {
+                status_code: 599,
+                message: "server error".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_error_to_fcp_error_retry_after_is_none() {
+        match (BitbucketError::Api {
+            status_code: 500,
+            message: "err".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External { retry_after, .. } => assert!(retry_after.is_none()),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unauthorized_to_fcp_error_retry_after_none() {
+        match BitbucketError::Unauthorized.to_fcp_error() {
+            FcpError::External { retry_after, .. } => assert!(retry_after.is_none()),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forbidden_to_fcp_error_retry_after_none() {
+        match BitbucketError::Forbidden.to_fcp_error() {
+            FcpError::External { retry_after, .. } => assert!(retry_after.is_none()),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn not_found_to_fcp_error_retry_after_none() {
+        match (BitbucketError::NotFound {
+            resource: "x".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External { retry_after, .. } => assert!(retry_after.is_none()),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
 }

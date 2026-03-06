@@ -296,4 +296,71 @@ mod tests {
         assert_eq!(id2, 2);
         assert_eq!(id3, 3);
     }
+
+    #[test]
+    fn next_id_starts_at_one() {
+        let auth = McpAuth { api_key: None };
+        let client = McpClient::new(auth, "https://example.com").unwrap();
+        assert_eq!(client.next_id(), 1);
+    }
+
+    #[test]
+    fn client_debug_contains_struct_name() {
+        let auth = McpAuth { api_key: None };
+        let client = McpClient::new(auth, "https://example.com").unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("McpClient"));
+    }
+
+    #[test]
+    fn auth_debug_contains_struct_name() {
+        let auth = McpAuth { api_key: None };
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("McpAuth"));
+    }
+
+    #[test]
+    fn client_new_multiple_trailing_slashes() {
+        let auth = McpAuth { api_key: None };
+        let client = McpClient::new(auth, "https://example.com///").unwrap();
+        assert!(!client.base_url.ends_with('/'));
+    }
+
+    #[test]
+    fn auth_redacted_label_with_some_key() {
+        let auth = McpAuth {
+            api_key: Some("key".into()),
+        };
+        assert_eq!(auth.redacted_label(), "api_key:redacted");
+    }
+
+    #[test]
+    fn auth_redacted_label_with_none_key() {
+        let auth = McpAuth { api_key: None };
+        assert_eq!(auth.redacted_label(), "api_key:none");
+    }
+
+    #[test]
+    fn client_new_with_localhost_port() {
+        let auth = McpAuth { api_key: None };
+        let client = McpClient::new(auth, "http://127.0.0.1:3000").unwrap();
+        assert_eq!(client.base_url, "http://127.0.0.1:3000");
+    }
+
+    #[test]
+    fn auth_debug_some_key_shows_redacted() {
+        let auth = McpAuth {
+            api_key: Some("my-super-secret-key".into()),
+        };
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("redacted"));
+        assert!(!dbg.contains("my-super-secret-key"));
+    }
+
+    #[test]
+    fn client_new_preserves_path() {
+        let auth = McpAuth { api_key: None };
+        let client = McpClient::new(auth, "https://example.com/api/v1").unwrap();
+        assert_eq!(client.base_url, "https://example.com/api/v1");
+    }
 }

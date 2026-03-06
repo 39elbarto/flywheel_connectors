@@ -127,11 +127,18 @@ impl IntercomClient {
     }
 
     #[instrument(skip(self), fields(url))]
-    async fn get(&self, path: &str) -> IntercomResult<serde_json::Value> {
+    async fn get(
+        &self,
+        path: &str,
+        query: Option<&[(&str, String)]>,
+    ) -> IntercomResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
         debug!(url = %url, "GET request");
-        let req = self.add_auth(self.client.get(&url))
+        let mut req = self.add_auth(self.client.get(&url))
             .header("Accept", "application/json");
+        if let Some(q) = query {
+            req = req.query(q);
+        }
         let resp = req.send().await?;
         self.handle_response(resp).await
     }
@@ -165,11 +172,14 @@ impl IntercomClient {
         per_page: Option<i64>,
         starting_after: Option<&str>,
     ) -> IntercomResult<serde_json::Value> {
-        let qs = build_query(&[
-            per_page.map(|p| ("per_page", p.to_string())),
-            starting_after.map(|s| ("starting_after", s.to_string())),
-        ]);
-        self.get(&format!("/contacts{qs}")).await
+        let mut q = Vec::new();
+        if let Some(p) = per_page {
+            q.push(("per_page", p.to_string()));
+        }
+        if let Some(s) = starting_after {
+            q.push(("starting_after", s.to_string()));
+        }
+        self.get("/contacts", if q.is_empty() { None } else { Some(&q) }).await
     }
 
     /// Create a contact.
@@ -196,11 +206,14 @@ impl IntercomClient {
         per_page: Option<i64>,
         starting_after: Option<&str>,
     ) -> IntercomResult<serde_json::Value> {
-        let qs = build_query(&[
-            per_page.map(|p| ("per_page", p.to_string())),
-            starting_after.map(|s| ("starting_after", s.to_string())),
-        ]);
-        self.get(&format!("/conversations{qs}")).await
+        let mut q = Vec::new();
+        if let Some(p) = per_page {
+            q.push(("per_page", p.to_string()));
+        }
+        if let Some(s) = starting_after {
+            q.push(("starting_after", s.to_string()));
+        }
+        self.get("/conversations", if q.is_empty() { None } else { Some(&q) }).await
     }
 
     /// Reply to a conversation.
@@ -216,21 +229,8 @@ impl IntercomClient {
 
     /// List all tags.
     pub async fn list_tags(&self) -> IntercomResult<serde_json::Value> {
-        self.get("/tags").await
+        self.get("/tags", None).await
     }
-}
-
-fn build_query(params: &[Option<(&str, String)>]) -> String {
-    let mut qs = String::new();
-    let mut sep = '?';
-    for param in params.iter().flatten() {
-        qs.push(sep);
-        qs.push_str(param.0);
-        qs.push('=');
-        qs.push_str(&param.1);
-        sep = '&';
-    }
-    qs
 }
 
 #[cfg(test)]
@@ -260,20 +260,120 @@ mod tests {
     }
 
     #[test]
-    fn build_query_empty() {
-        assert_eq!(build_query(&[None, None]), "");
+    fn auth_redacted_label_credential_id() {
+        let cred = IntercomAuth::CredentialId(CredentialId::new());
+        let label = cred.redacted_label();
+        assert!(label.starts_with("credential_id:"));
+        assert!(!label.contains("redacted"));
     }
 
     #[test]
-    fn build_query_one() {
-        assert_eq!(build_query(&[Some(("per_page", "50".into()))]), "?per_page=50");
+    fn auth_debug_credential_id_shows_id() {
+        let id = CredentialId::new();
+        let auth = IntercomAuth::CredentialId(id);
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("CredentialId"));
+        assert!(dbg.contains(&id.to_string()));
     }
 
     #[test]
-    fn build_query_two() {
-        assert_eq!(
-            build_query(&[Some(("per_page", "50".into())), Some(("starting_after", "abc".into()))]),
-            "?per_page=50&starting_after=abc"
-        );
+    fn auth_debug_bearer_does_not_leak() {
+        let auth = IntercomAuth::BearerToken("super-secret-token-12345".into());
+        let dbg = format!("{auth:?}");
+        assert!(!dbg.contains("super-secret-token-12345"));
+        assert!(dbg.contains("BearerToken"));
+        assert!(dbg.contains("<redacted>"));
     }
+
+    #[test]
+    fn auth_clone() {
+        let auth = IntercomAuth::BearerToken("tok".into());
+        let cloned = auth.clone();
+        assert_eq!(auth.redacted_label(), "bearer_token:redacted");
+        assert!(!cloned.is_secretless());
+    }
+
+    #[test]
+    fn client_new_default_url() {
+        let client = IntercomClient::new(IntercomAuth::BearerToken("tok".into()), None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains(DEFAULT_BASE_URL));
+    }
+
+    #[test]
+    fn client_new_custom_url() {
+        let client = IntercomClient::new(
+            IntercomAuth::BearerToken("tok".into()),
+            Some("https://custom.example.com"),
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("https://custom.example.com"));
+    }
+
+    #[test]
+    fn client_new_trims_trailing_slash() {
+        let client = IntercomClient::new(
+            IntercomAuth::BearerToken("tok".into()),
+            Some("https://example.com/"),
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("https://example.com"));
+        assert!(!dbg.contains("https://example.com/\""));
+    }
+
+    #[test]
+    fn client_new_trims_multiple_trailing_slashes() {
+        let client = IntercomClient::new(
+            IntercomAuth::BearerToken("tok".into()),
+            Some("https://example.com///"),
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        // trim_end_matches removes all trailing slashes
+        assert!(!dbg.contains("///"));
+    }
+
+    #[test]
+    fn client_debug_shows_struct() {
+        let client = IntercomClient::new(
+            IntercomAuth::BearerToken("tok".into()),
+            None,
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("IntercomClient"));
+        assert!(dbg.contains("auth"));
+        assert!(dbg.contains("base_url"));
+    }
+
+    #[test]
+    fn client_debug_redacts_auth() {
+        let client = IntercomClient::new(
+            IntercomAuth::BearerToken("my-secret".into()),
+            None,
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(!dbg.contains("my-secret"));
+        assert!(dbg.contains("redacted"));
+    }
+
+    #[test]
+    fn default_base_url_value() {
+        assert_eq!(DEFAULT_BASE_URL, "https://api.intercom.io");
+    }
+
+    #[test]
+    fn client_with_credential_id_auth() {
+        let client = IntercomClient::new(
+            IntercomAuth::CredentialId(CredentialId::new()),
+            None,
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("CredentialId"));
+    }
+
 }

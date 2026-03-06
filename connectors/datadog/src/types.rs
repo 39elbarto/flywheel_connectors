@@ -320,4 +320,278 @@ mod tests {
         let e: ApiErrorResponse = serde_json::from_value(json!({})).unwrap();
         assert!(e.errors.is_empty());
     }
+
+    // ── Clone / Debug trait tests ─────────────────────────────────
+
+    #[test]
+    fn event_clone() {
+        let e = Event {
+            id: Some(1),
+            title: Some("t".into()),
+            text: None,
+            date_happened: None,
+            priority: None,
+            alert_type: None,
+            tags: vec!["a".into()],
+            host: None,
+            source: None,
+            url: None,
+        };
+        let cloned = e.clone();
+        assert_eq!(e.id, Some(1));
+        assert_eq!(cloned.id, Some(1));
+        assert_eq!(cloned.tags.len(), 1);
+    }
+
+    #[test]
+    fn event_debug() {
+        let e: Event = serde_json::from_value(json!({"title": "test"})).unwrap();
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("Event"));
+        assert!(dbg.contains("test"));
+    }
+
+    #[test]
+    fn monitor_clone_and_debug() {
+        let m: Monitor = serde_json::from_value(json!({
+            "id": 99,
+            "name": "Test Monitor",
+        }))
+        .unwrap();
+        let cloned = m.clone();
+        assert_eq!(m.id, Some(99));
+        assert_eq!(cloned.id, Some(99));
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("Monitor"));
+        assert!(dbg.contains("Test Monitor"));
+    }
+
+    #[test]
+    fn log_content_clone_and_debug() {
+        let c: LogContent = serde_json::from_value(json!({
+            "message": "hello",
+            "service": "api",
+        }))
+        .unwrap();
+        let cloned = c.clone();
+        assert_eq!(c.service.as_deref(), Some("api"));
+        assert_eq!(cloned.message.as_deref(), Some("hello"));
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("LogContent"));
+    }
+
+    #[test]
+    fn metric_series_clone_and_debug() {
+        let s: MetricSeries = serde_json::from_value(json!({
+            "metric": "test.metric",
+            "pointlist": [[1.0, 2.0]],
+        }))
+        .unwrap();
+        let cloned = s.clone();
+        assert_eq!(s.pointlist.len(), 1);
+        assert_eq!(cloned.metric.as_deref(), Some("test.metric"));
+        let dbg = format!("{cloned:?}");
+        assert!(dbg.contains("MetricSeries"));
+    }
+
+    // ── Default vec behavior ──────────────────────────────────────
+
+    #[test]
+    fn event_tags_default_empty() {
+        let e: Event = serde_json::from_value(json!({"title": "no tags"})).unwrap();
+        assert!(e.tags.is_empty());
+    }
+
+    #[test]
+    fn event_list_response_events_default_empty() {
+        let r: EventListResponse = serde_json::from_value(json!({})).unwrap();
+        assert!(r.events.is_empty());
+    }
+
+    #[test]
+    fn metrics_query_response_series_default_empty() {
+        let r: MetricsQueryResponse = serde_json::from_value(json!({})).unwrap();
+        assert!(r.series.is_empty());
+    }
+
+    #[test]
+    fn metric_submit_series_points_default_empty() {
+        let s: MetricSubmitSeries = serde_json::from_value(json!({"metric": "m"})).unwrap();
+        assert!(s.points.is_empty());
+        assert!(s.tags.is_empty());
+    }
+
+    #[test]
+    fn monitor_tags_default_empty() {
+        let m: Monitor = serde_json::from_value(json!({})).unwrap();
+        assert!(m.tags.is_empty());
+    }
+
+    #[test]
+    fn log_content_tags_default_empty() {
+        let c: LogContent = serde_json::from_value(json!({})).unwrap();
+        assert!(c.tags.is_empty());
+    }
+
+    #[test]
+    fn log_search_response_logs_default_empty() {
+        let r: LogSearchResponse = serde_json::from_value(json!({})).unwrap();
+        assert!(r.logs.is_empty());
+    }
+
+    // ── Serialize roundtrips ──────────────────────────────────────
+
+    #[test]
+    fn event_create_response_roundtrip() {
+        let r = EventCreateResponse {
+            event: Some(Event {
+                id: Some(10),
+                title: Some("ev".into()),
+                text: None,
+                date_happened: None,
+                priority: None,
+                alert_type: None,
+                tags: vec![],
+                host: None,
+                source: None,
+                url: None,
+            }),
+            status: Some("ok".into()),
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["status"], "ok");
+        assert_eq!(v["event"]["id"], 10);
+        let back: EventCreateResponse = serde_json::from_value(v).unwrap();
+        assert_eq!(back.status.as_deref(), Some("ok"));
+    }
+
+    #[test]
+    fn log_search_response_roundtrip() {
+        let r = LogSearchResponse {
+            logs: vec![LogEntry {
+                id: Some("log1".into()),
+                content: Some(LogContent {
+                    timestamp: None,
+                    message: Some("msg".into()),
+                    host: None,
+                    service: None,
+                    status: None,
+                    tags: vec![],
+                    attributes: None,
+                }),
+            }],
+            next_log_id: Some("cursor".into()),
+            status: Some("done".into()),
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["logs"][0]["id"], "log1");
+        assert_eq!(v["next_log_id"], "cursor");
+    }
+
+    #[test]
+    fn metric_submit_response_roundtrip() {
+        let r = MetricSubmitResponse { status: Some("ok".into()) };
+        let v = serde_json::to_value(&r).unwrap();
+        let back: MetricSubmitResponse = serde_json::from_value(v).unwrap();
+        assert_eq!(back.status.as_deref(), Some("ok"));
+    }
+
+    #[test]
+    fn metrics_query_response_roundtrip() {
+        let r = MetricsQueryResponse {
+            status: Some("ok".into()),
+            series: vec![],
+            from_date: Some(1000),
+            to_date: Some(2000),
+            query: Some("avg:cpu{*}".into()),
+            group_by: Some(vec!["host".into()]),
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["query"], "avg:cpu{*}");
+        let back: MetricsQueryResponse = serde_json::from_value(v).unwrap();
+        assert_eq!(back.from_date, Some(1000));
+    }
+
+    // ── Edge cases ────────────────────────────────────────────────
+
+    #[test]
+    fn event_with_null_fields() {
+        let e: Event = serde_json::from_value(json!({
+            "id": null,
+            "title": null,
+            "text": null,
+        }))
+        .unwrap();
+        assert!(e.id.is_none());
+        assert!(e.title.is_none());
+    }
+
+    #[test]
+    fn monitor_with_options_json() {
+        let m: Monitor = serde_json::from_value(json!({
+            "id": 1,
+            "options": {"thresholds": {"critical": 90.0}},
+            "creator": {"name": "admin", "email": "a@b.com"},
+        }))
+        .unwrap();
+        assert!(m.options.is_some());
+        assert!(m.creator.is_some());
+    }
+
+    #[test]
+    fn api_error_response_single_error() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({"errors": ["one"]})).unwrap();
+        assert_eq!(e.errors.len(), 1);
+        assert_eq!(e.errors[0], "one");
+    }
+
+    #[test]
+    fn log_entry_minimal() {
+        let l: LogEntry = serde_json::from_value(json!({})).unwrap();
+        assert!(l.id.is_none());
+        assert!(l.content.is_none());
+    }
+
+    #[test]
+    fn metric_series_minimal() {
+        let s: MetricSeries = serde_json::from_value(json!({})).unwrap();
+        assert!(s.metric.is_none());
+        assert!(s.pointlist.is_empty());
+        assert!(s.tag_set.is_none());
+    }
+
+    #[test]
+    fn metric_submit_series_type_rename() {
+        let s = MetricSubmitSeries {
+            metric: "test".into(),
+            points: vec![],
+            metric_type: Some("count".into()),
+            tags: vec![],
+            host: None,
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        // The field is serialized as "type", not "metric_type"
+        assert_eq!(v["type"], "count");
+        assert!(v.get("metric_type").is_none());
+    }
+
+    #[test]
+    fn monitor_type_rename() {
+        let m: Monitor = serde_json::from_value(json!({
+            "type": "metric alert"
+        }))
+        .unwrap();
+        assert_eq!(m.monitor_type.as_deref(), Some("metric alert"));
+        let v = serde_json::to_value(&m).unwrap();
+        assert_eq!(v["type"], "metric alert");
+    }
+
+    #[test]
+    fn metric_series_tag_set_rename() {
+        let s: MetricSeries = serde_json::from_value(json!({
+            "tag_set": ["env:prod", "region:us"]
+        }))
+        .unwrap();
+        assert_eq!(s.tag_set.as_ref().unwrap().len(), 2);
+    }
 }

@@ -1017,4 +1017,144 @@ mod tests {
         let config = MongoDbConfig::from_params(&json!({ "api_key": "k" })).unwrap();
         assert_eq!(config.data_source, "Cluster0");
     }
+
+    #[test]
+    fn doctor_result_multiple_critical_failures() {
+        let checks = vec![
+            DoctorCheck {
+                name: "a".into(),
+                passed: false,
+                message: Some("fail".into()),
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: Some("fail2".into()),
+                critical: true,
+            },
+        ];
+        let r = DoctorResult::from_checks(checks);
+        assert_eq!(r.status, DoctorStatus::Unhealthy);
+        assert_eq!(r.checks.len(), 2);
+    }
+
+    #[test]
+    fn doctor_check_skip_serializing_none_message() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert!(!v.as_object().unwrap().contains_key("message"));
+    }
+
+    #[test]
+    fn doctor_check_serializes_some_message() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: false,
+            message: Some("broken".into()),
+            critical: true,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert_eq!(v["message"], "broken");
+    }
+
+    #[test]
+    fn doctor_status_serde_healthy() {
+        let v = serde_json::to_value(DoctorStatus::Healthy).unwrap();
+        assert_eq!(v, "healthy");
+    }
+
+    #[test]
+    fn doctor_status_serde_degraded() {
+        let v = serde_json::to_value(DoctorStatus::Degraded).unwrap();
+        assert_eq!(v, "degraded");
+    }
+
+    #[test]
+    fn doctor_status_serde_unhealthy() {
+        let v = serde_json::to_value(DoctorStatus::Unhealthy).unwrap();
+        assert_eq!(v, "unhealthy");
+    }
+
+    #[test]
+    fn connector_new_eq_default() {
+        let a = MongoDbConnector::new();
+        let b = MongoDbConnector::default();
+        assert!(a.config.is_none());
+        assert!(b.config.is_none());
+        assert_eq!(
+            a.request_count.load(Ordering::Relaxed),
+            b.request_count.load(Ordering::Relaxed)
+        );
+    }
+
+    #[test]
+    fn operations_read_count() {
+        let ops = operations_info();
+        let count = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|o| o["capability"].as_str() == Some("mongodb.read"))
+            .count();
+        assert_eq!(count, 3); // find_one, find, aggregate
+    }
+
+    #[test]
+    fn operations_write_count() {
+        let ops = operations_info();
+        let count = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|o| o["capability"].as_str() == Some("mongodb.write"))
+            .count();
+        assert_eq!(count, 6);
+    }
+
+    #[test]
+    fn operations_summaries_non_empty() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let s = op["summary"].as_str().unwrap();
+            assert!(!s.is_empty(), "empty summary for {}", op["id"]);
+        }
+    }
+
+    #[test]
+    fn operations_ids_follow_naming_convention() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let id = op["id"].as_str().unwrap();
+            assert!(
+                id.starts_with("mongodb."),
+                "op id should start with 'mongodb.': {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn operations_capabilities_valid() {
+        let valid = ["mongodb.read", "mongodb.write"];
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let cap = op["capability"].as_str().unwrap();
+            assert!(valid.contains(&cap), "invalid capability: {cap}");
+        }
+    }
+
+    #[test]
+    fn operations_idempotency_values_valid() {
+        let valid = ["strict", "best_effort", "none"];
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let v = op["idempotency"].as_str().unwrap();
+            assert!(valid.contains(&v), "invalid idempotency: {v}");
+        }
+    }
 }

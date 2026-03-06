@@ -498,4 +498,339 @@ mod tests {
         assert_eq!(cloned.id, "rec1");
         assert_eq!(rec.id, "rec1");
     }
+
+    // ── Additional type coverage ─────────────────────────────────
+
+    #[test]
+    fn base_serialize_no_permission_level() {
+        let base = Base {
+            id: "app1".into(),
+            name: "Test".into(),
+            permission_level: None,
+        };
+        let v = serde_json::to_value(&base).unwrap();
+        // With #[serde(default)], None should serialize as null
+        assert!(v.get("permissionLevel").is_some());
+    }
+
+    #[test]
+    fn list_bases_response_debug() {
+        let resp = ListBasesResponse {
+            bases: vec![],
+            offset: None,
+        };
+        let dbg = format!("{resp:?}");
+        assert!(dbg.contains("ListBasesResponse"));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn table_schema_clone() {
+        let schema = TableSchema {
+            id: "tbl1".into(),
+            name: "Tasks".into(),
+            description: Some("desc".into()),
+            fields: vec![],
+            views: vec![],
+            primary_field_id: Some("fld1".into()),
+        };
+        let cloned = schema.clone();
+        assert_eq!(cloned.id, "tbl1");
+        assert_eq!(cloned.description, Some("desc".into()));
+        assert_eq!(cloned.primary_field_id, Some("fld1".into()));
+    }
+
+    #[test]
+    fn field_schema_roundtrip() {
+        let field = FieldSchema {
+            id: "fld1".into(),
+            name: "Status".into(),
+            field_type: "singleSelect".into(),
+            description: Some("Current status".into()),
+            options: Some(json!({"choices": [{"name": "Done"}]})),
+        };
+        let v = serde_json::to_value(&field).unwrap();
+        let back: FieldSchema = serde_json::from_value(v).unwrap();
+        assert_eq!(back.field_type, "singleSelect");
+        assert!(back.options.is_some());
+    }
+
+    #[test]
+    fn field_schema_minimal_deser() {
+        let json = json!({"id": "fld1", "name": "Name", "type": "singleLineText"});
+        let field: FieldSchema = serde_json::from_value(json).unwrap();
+        assert!(field.description.is_none());
+        assert!(field.options.is_none());
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn view_schema_clone() {
+        let view = ViewSchema {
+            id: "viw1".into(),
+            name: "Grid".into(),
+            view_type: "grid".into(),
+        };
+        let cloned = view.clone();
+        assert_eq!(cloned.id, "viw1");
+        assert_eq!(cloned.view_type, "grid");
+    }
+
+    #[test]
+    fn view_schema_roundtrip() {
+        let view = ViewSchema {
+            id: "viw1".into(),
+            name: "Kanban".into(),
+            view_type: "kanban".into(),
+        };
+        let v = serde_json::to_value(&view).unwrap();
+        assert_eq!(v["type"], "kanban");
+        let back: ViewSchema = serde_json::from_value(v).unwrap();
+        assert_eq!(back.view_type, "kanban");
+    }
+
+    #[test]
+    fn record_debug() {
+        let rec = Record {
+            id: "rec123".into(),
+            fields: json!({"Name": "Test"}),
+            created_time: Some("2026-01-01".into()),
+        };
+        let dbg = format!("{rec:?}");
+        assert!(dbg.contains("rec123"));
+    }
+
+    #[test]
+    fn record_empty_fields() {
+        let rec = Record {
+            id: "rec1".into(),
+            fields: json!({}),
+            created_time: None,
+        };
+        let v = serde_json::to_value(&rec).unwrap();
+        assert!(v["fields"].as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn list_records_response_clone() {
+        let resp = ListRecordsResponse {
+            records: vec![Record {
+                id: "rec1".into(),
+                fields: json!({"x": 1}),
+                created_time: None,
+            }],
+            offset: Some("off1".into()),
+        };
+        let cloned = resp.clone();
+        assert_eq!(cloned.records.len(), 1);
+        assert_eq!(cloned.offset, Some("off1".into()));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn create_records_response_clone() {
+        let resp = CreateRecordsResponse {
+            records: vec![],
+        };
+        let cloned = resp.clone();
+        assert!(cloned.records.is_empty());
+    }
+
+    #[test]
+    fn create_records_response_debug() {
+        let resp = CreateRecordsResponse {
+            records: vec![Record {
+                id: "rec1".into(),
+                fields: json!({}),
+                created_time: None,
+            }],
+        };
+        let dbg = format!("{resp:?}");
+        assert!(dbg.contains("CreateRecordsResponse"));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn delete_record_response_clone() {
+        let resp = DeleteRecordResponse {
+            id: "rec1".into(),
+            deleted: true,
+        };
+        let cloned = resp.clone();
+        assert_eq!(cloned.id, "rec1");
+        assert!(cloned.deleted);
+    }
+
+    #[test]
+    fn delete_record_response_debug() {
+        let resp = DeleteRecordResponse {
+            id: "rec1".into(),
+            deleted: false,
+        };
+        let dbg = format!("{resp:?}");
+        assert!(dbg.contains("DeleteRecordResponse"));
+        assert!(dbg.contains("rec1"));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn sort_spec_clone() {
+        let spec = SortSpec {
+            field: "Name".into(),
+            direction: "desc".into(),
+        };
+        let cloned = spec.clone();
+        assert_eq!(cloned.field, "Name");
+        assert_eq!(cloned.direction, "desc");
+    }
+
+    #[test]
+    fn sort_spec_debug() {
+        let spec = SortSpec {
+            field: "Status".into(),
+            direction: "asc".into(),
+        };
+        let dbg = format!("{spec:?}");
+        assert!(dbg.contains("SortSpec"));
+        assert!(dbg.contains("Status"));
+    }
+
+    #[test]
+    fn attachment_download_debug() {
+        let dl = AttachmentDownload {
+            data: "base64".into(),
+            content_type: "text/plain".into(),
+            filename: Some("file.txt".into()),
+        };
+        let dbg = format!("{dl:?}");
+        assert!(dbg.contains("AttachmentDownload"));
+        assert!(dbg.contains("file.txt"));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn attachment_download_clone() {
+        let dl = AttachmentDownload {
+            data: "abc".into(),
+            content_type: "image/png".into(),
+            filename: None,
+        };
+        let cloned = dl.clone();
+        assert_eq!(cloned.data, "abc");
+        assert!(cloned.filename.is_none());
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn airtable_api_error_clone() {
+        let err = AirtableApiError {
+            error: Some(AirtableErrorDetail {
+                error_type: Some("BAD".into()),
+                message: Some("msg".into()),
+            }),
+        };
+        let cloned = err.clone();
+        let detail = cloned.error.unwrap();
+        assert_eq!(detail.error_type, Some("BAD".into()));
+        assert_eq!(detail.message, Some("msg".into()));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn airtable_error_detail_clone() {
+        let detail = AirtableErrorDetail {
+            error_type: Some("X".into()),
+            message: None,
+        };
+        let cloned = detail.clone();
+        assert_eq!(cloned.error_type, Some("X".into()));
+        assert!(cloned.message.is_none());
+    }
+
+    #[test]
+    fn base_schema_response_debug() {
+        let resp = BaseSchemaResponse {
+            tables: vec![],
+        };
+        let dbg = format!("{resp:?}");
+        assert!(dbg.contains("BaseSchemaResponse"));
+    }
+
+    #[test]
+    fn list_records_response_debug() {
+        let resp = ListRecordsResponse {
+            records: vec![],
+            offset: None,
+        };
+        let dbg = format!("{resp:?}");
+        assert!(dbg.contains("ListRecordsResponse"));
+    }
+
+    #[test]
+    fn multiple_records_deser() {
+        let json = json!({
+            "records": [
+                {"id": "rec1", "fields": {"A": 1}},
+                {"id": "rec2", "fields": {"A": 2}},
+                {"id": "rec3", "fields": {"A": 3}}
+            ]
+        });
+        let resp: ListRecordsResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.records.len(), 3);
+        assert_eq!(resp.records[2].id, "rec3");
+    }
+
+    #[test]
+    fn sort_spec_serialize_uses_default_direction() {
+        let spec = SortSpec {
+            field: "Created".into(),
+            direction: "asc".into(),
+        };
+        let v = serde_json::to_value(&spec).unwrap();
+        assert_eq!(v["direction"], "asc");
+    }
+
+    #[test]
+    fn table_schema_with_description() {
+        let json = json!({
+            "id": "tbl1",
+            "name": "Projects",
+            "description": "All team projects"
+        });
+        let schema: TableSchema = serde_json::from_value(json).unwrap();
+        assert_eq!(schema.description, Some("All team projects".into()));
+    }
+
+    #[test]
+    fn attachment_download_skip_serializing_filename_none() {
+        let dl = AttachmentDownload {
+            data: "d".into(),
+            content_type: "c".into(),
+            filename: None,
+        };
+        let serialized = serde_json::to_string(&dl).unwrap();
+        assert!(!serialized.contains("filename"));
+    }
+
+    #[test]
+    fn attachment_download_includes_filename_some() {
+        let dl = AttachmentDownload {
+            data: "d".into(),
+            content_type: "c".into(),
+            filename: Some("test.pdf".into()),
+        };
+        let serialized = serde_json::to_string(&dl).unwrap();
+        assert!(serialized.contains("filename"));
+        assert!(serialized.contains("test.pdf"));
+    }
+
+    #[test]
+    fn base_with_all_permission_levels() {
+        for level in ["create", "editor", "commenter", "read", "owner"] {
+            let json = json!({"id": "app1", "name": "B", "permissionLevel": level});
+            let base: Base = serde_json::from_value(json).unwrap();
+            assert_eq!(base.permission_level.as_deref(), Some(level));
+        }
+    }
 }

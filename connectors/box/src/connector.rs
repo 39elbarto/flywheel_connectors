@@ -945,4 +945,99 @@ mod tests {
         assert_eq!(config.base_url, "https://custom.api.box.com");
         assert_eq!(config.upload_url, "https://custom.upload.box.com");
     }
+
+    #[test]
+    fn doctor_status_serializes_lowercase() {
+        assert_eq!(serde_json::to_value(DoctorStatus::Healthy).unwrap(), "healthy");
+        assert_eq!(serde_json::to_value(DoctorStatus::Degraded).unwrap(), "degraded");
+        assert_eq!(serde_json::to_value(DoctorStatus::Unhealthy).unwrap(), "unhealthy");
+    }
+
+    #[test]
+    fn doctor_status_deserializes() {
+        let s: DoctorStatus = serde_json::from_value(json!("healthy")).unwrap();
+        assert_eq!(s, DoctorStatus::Healthy);
+        let s2: DoctorStatus = serde_json::from_value(json!("degraded")).unwrap();
+        assert_eq!(s2, DoctorStatus::Degraded);
+    }
+
+    #[test]
+    fn require_str_nested_object_is_err() {
+        let input = json!({"file_id": {"nested": true}});
+        assert!(require_str(&input, "file_id").is_err());
+    }
+
+    #[test]
+    fn require_str_empty_string_is_valid() {
+        let input = json!({"file_id": ""});
+        assert_eq!(require_str(&input, "file_id").unwrap(), "");
+    }
+
+    #[test]
+    fn connector_new_has_zero_counters() {
+        let c = BoxConnector::new();
+        assert_eq!(c.request_count.load(Ordering::Relaxed), 0);
+        assert_eq!(c.error_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn operations_write_ops_are_not_safe() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let cap = op["capability"].as_str().unwrap();
+            #[allow(clippy::case_sensitive_file_extension_comparisons)]
+            if cap.ends_with(".write") {
+                assert_ne!(
+                    op["safety_tier"].as_str().unwrap(),
+                    "safe",
+                    "write op {} should not be safe",
+                    op["id"]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn doctor_check_debug_format() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let dbg = format!("{check:?}");
+        assert!(dbg.contains("DoctorCheck"));
+    }
+
+    #[test]
+    fn doctor_result_debug_format() {
+        let r = DoctorResult::from_checks(vec![]);
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("DoctorResult"));
+    }
+
+    #[test]
+    fn operations_files_upload_is_risky() {
+        let ops = operations_info();
+        let up_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "box.files.upload")
+            .unwrap();
+        assert_eq!(up_op["safety_tier"], "risky");
+        assert_eq!(up_op["risk_level"], "medium");
+    }
+
+    #[test]
+    fn operations_files_get_capability_correct() {
+        let ops = operations_info();
+        let get_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "box.files.get")
+            .unwrap();
+        assert_eq!(get_op["capability"], "box.files.read");
+    }
 }

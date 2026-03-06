@@ -312,4 +312,73 @@ mod tests {
         let cloned = auth.clone();
         assert!(cloned.is_secretless());
     }
+
+    #[test]
+    fn client_with_credential_id() {
+        let client =
+            ZapierClient::new(ZapierAuth::CredentialId(CredentialId::new()), None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("CredentialId"));
+    }
+
+    #[test]
+    fn auth_bearer_is_not_secretless() {
+        let auth = ZapierAuth::BearerToken("key".into());
+        assert!(!auth.is_secretless());
+    }
+
+    #[test]
+    fn auth_credential_is_secretless() {
+        let auth = ZapierAuth::CredentialId(CredentialId::new());
+        assert!(auth.is_secretless());
+    }
+
+    #[test]
+    fn default_base_url_starts_with_https() {
+        assert!(DEFAULT_BASE_URL.starts_with("https"));
+    }
+
+    #[test]
+    fn default_base_url_does_not_end_with_slash() {
+        assert!(!DEFAULT_BASE_URL.ends_with('/'));
+    }
+
+    #[test]
+    fn client_debug_contains_zapier_client() {
+        let client =
+            ZapierClient::new(ZapierAuth::BearerToken("tok".into()), None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("ZapierClient"));
+    }
+
+    #[test]
+    fn auth_credential_redacted_label_format() {
+        let id = CredentialId::new();
+        let expected = format!("credential_id:{id}");
+        let auth = ZapierAuth::CredentialId(id);
+        assert_eq!(auth.redacted_label(), expected);
+    }
+
+    #[test]
+    fn client_debug_does_not_leak_api_key() {
+        let client =
+            ZapierClient::new(ZapierAuth::BearerToken("sk_live_xyz123".into()), None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(!dbg.contains("sk_live_xyz123"));
+    }
+
+    #[test]
+    fn auth_debug_bearer_contains_redacted() {
+        let auth = ZapierAuth::BearerToken("my-key".into());
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("redacted"));
+        assert!(!dbg.contains("my-key"));
+    }
+
+    #[test]
+    fn auth_debug_credential_contains_credential_id() {
+        let auth = ZapierAuth::CredentialId(CredentialId::new());
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("CredentialId"));
+    }
 }

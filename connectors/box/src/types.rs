@@ -468,4 +468,301 @@ mod tests {
         assert_eq!(v["type"], "collaboration");
         assert!(v.get("collab_type").is_none());
     }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn box_file_clone() {
+        let f = BoxFile {
+            id: "1".into(),
+            file_type: Some("file".into()),
+            name: Some("test.txt".into()),
+            size: Some(512),
+            created_at: None,
+            modified_at: None,
+            description: Some("desc".into()),
+            sha1: None,
+            parent: None,
+            owned_by: None,
+            shared_link: None,
+        };
+        let f2 = f.clone();
+        assert_eq!(f2.id, "1");
+        assert_eq!(f2.name, Some("test.txt".into()));
+        assert_eq!(f2.size, Some(512));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn box_folder_clone() {
+        let f = BoxFolder {
+            id: "0".into(),
+            folder_type: Some("folder".into()),
+            name: Some("Root".into()),
+            created_at: None,
+            modified_at: None,
+            description: None,
+            size: None,
+            parent: None,
+            owned_by: None,
+            item_collection: None,
+        };
+        let f2 = f.clone();
+        assert_eq!(f2.id, "0");
+        assert_eq!(f2.name, Some("Root".into()));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn mini_folder_clone() {
+        let mf = MiniFolder {
+            id: "0".into(),
+            folder_type: Some("folder".into()),
+            name: Some("All Files".into()),
+            sequence_id: None,
+            etag: None,
+        };
+        let mf2 = mf.clone();
+        assert_eq!(mf2.id, "0");
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn mini_user_clone() {
+        let mu = MiniUser {
+            id: "u1".into(),
+            user_type: Some("user".into()),
+            name: Some("Alice".into()),
+            login: Some("alice@test.com".into()),
+        };
+        let mu2 = mu.clone();
+        assert_eq!(mu2.id, "u1");
+        assert_eq!(mu2.login, Some("alice@test.com".into()));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn collaboration_clone() {
+        let c = Collaboration {
+            id: "c1".into(),
+            collab_type: Some("collaboration".into()),
+            role: Some("editor".into()),
+            status: Some("accepted".into()),
+            created_at: None,
+            modified_at: None,
+            accessible_by: None,
+            item: None,
+        };
+        let c2 = c.clone();
+        assert_eq!(c2.id, "c1");
+        assert_eq!(c2.role, Some("editor".into()));
+    }
+
+    #[test]
+    fn box_file_debug_format() {
+        let f: BoxFile = serde_json::from_value(json!({"id": "f1"})).unwrap();
+        let dbg = format!("{f:?}");
+        assert!(dbg.contains("BoxFile"));
+        assert!(dbg.contains("f1"));
+    }
+
+    #[test]
+    fn box_folder_debug_format() {
+        let f: BoxFolder = serde_json::from_value(json!({"id": "d1"})).unwrap();
+        let dbg = format!("{f:?}");
+        assert!(dbg.contains("BoxFolder"));
+    }
+
+    #[test]
+    fn collaboration_debug_format() {
+        let c: Collaboration = serde_json::from_value(json!({"id": "c1"})).unwrap();
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("Collaboration"));
+    }
+
+    #[test]
+    fn box_file_zero_size() {
+        let f: BoxFile = serde_json::from_value(json!({
+            "id": "f1",
+            "size": 0,
+        }))
+        .unwrap();
+        assert_eq!(f.size, Some(0));
+    }
+
+    #[test]
+    fn box_file_with_shared_link() {
+        let f: BoxFile = serde_json::from_value(json!({
+            "id": "f1",
+            "shared_link": {"url": "https://box.com/s/abc", "access": "open"}
+        }))
+        .unwrap();
+        assert!(f.shared_link.is_some());
+        assert_eq!(f.shared_link.unwrap()["access"], "open");
+    }
+
+    #[test]
+    fn box_file_with_description() {
+        let f: BoxFile = serde_json::from_value(json!({
+            "id": "f1",
+            "description": "A test file"
+        }))
+        .unwrap();
+        assert_eq!(f.description, Some("A test file".into()));
+    }
+
+    #[test]
+    fn box_folder_serialize_preserves_type_rename() {
+        let f = BoxFolder {
+            id: "0".into(),
+            folder_type: Some("folder".into()),
+            name: None,
+            created_at: None,
+            modified_at: None,
+            description: None,
+            size: None,
+            parent: None,
+            owned_by: None,
+            item_collection: None,
+        };
+        let v = serde_json::to_value(&f).unwrap();
+        assert_eq!(v["type"], "folder");
+        assert!(v.get("folder_type").is_none());
+    }
+
+    #[test]
+    fn mini_user_serialize_preserves_type_rename() {
+        let mu = MiniUser {
+            id: "u1".into(),
+            user_type: Some("user".into()),
+            name: Some("Test".into()),
+            login: None,
+        };
+        let v = serde_json::to_value(&mu).unwrap();
+        assert_eq!(v["type"], "user");
+        assert!(v.get("user_type").is_none());
+    }
+
+    #[test]
+    fn order_entry_minimal() {
+        let o: OrderEntry = serde_json::from_value(json!({})).unwrap();
+        assert!(o.by.is_none());
+        assert!(o.direction.is_none());
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn order_entry_clone() {
+        let o = OrderEntry {
+            by: Some("name".into()),
+            direction: Some("ASC".into()),
+        };
+        let o2 = o.clone();
+        assert_eq!(o2.by, Some("name".into()));
+    }
+
+    #[test]
+    fn api_error_response_with_request_id() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({
+            "type": "error",
+            "status": 500,
+            "message": "Internal server error",
+            "request_id": "req_xyz"
+        }))
+        .unwrap();
+        assert_eq!(e.request_id, Some("req_xyz".into()));
+        assert_eq!(e.status, Some(500));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn api_error_response_clone() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({
+            "type": "error",
+            "status": 409,
+            "message": "Conflict",
+            "code": "item_name_in_use"
+        }))
+        .unwrap();
+        let e2 = e.clone();
+        assert_eq!(e2.code, Some("item_name_in_use".into()));
+        assert_eq!(e2.status, Some(409));
+    }
+
+    #[test]
+    fn box_file_extra_fields_ignored() {
+        let f: BoxFile = serde_json::from_value(json!({
+            "id": "f1",
+            "unknown_field": "should be ignored"
+        }))
+        .unwrap();
+        assert_eq!(f.id, "f1");
+    }
+
+    #[test]
+    fn collaboration_with_item() {
+        let c: Collaboration = serde_json::from_value(json!({
+            "id": "c1",
+            "item": {"type": "file", "id": "f1", "name": "doc.pdf"}
+        }))
+        .unwrap();
+        assert!(c.item.is_some());
+        assert_eq!(c.item.unwrap()["id"], "f1");
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn collaboration_list_clone() {
+        let cl = CollaborationList {
+            total_count: Some(2),
+            entries: vec![json!({"id": "c1"}), json!({"id": "c2"})],
+        };
+        let cl2 = cl.clone();
+        assert_eq!(cl2.total_count, Some(2));
+        assert_eq!(cl2.entries.len(), 2);
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn upload_response_clone() {
+        let ur = UploadResponse {
+            total_count: Some(1),
+            entries: vec![json!({"id": "f1"})],
+        };
+        let ur2 = ur.clone();
+        assert_eq!(ur2.total_count, Some(1));
+        assert_eq!(ur2.entries.len(), 1);
+    }
+
+    #[test]
+    fn mini_folder_minimal() {
+        let mf: MiniFolder = serde_json::from_value(json!({"id": "0"})).unwrap();
+        assert_eq!(mf.id, "0");
+        assert!(mf.folder_type.is_none());
+        assert!(mf.name.is_none());
+        assert!(mf.sequence_id.is_none());
+        assert!(mf.etag.is_none());
+    }
+
+    #[test]
+    fn mini_user_minimal() {
+        let mu: MiniUser = serde_json::from_value(json!({"id": "u1"})).unwrap();
+        assert_eq!(mu.id, "u1");
+        assert!(mu.user_type.is_none());
+        assert!(mu.name.is_none());
+        assert!(mu.login.is_none());
+    }
+
+    #[test]
+    fn folder_items_with_multiple_orders() {
+        let fi: FolderItems = serde_json::from_value(json!({
+            "entries": [],
+            "order": [
+                {"by": "name", "direction": "ASC"},
+                {"by": "date", "direction": "DESC"}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(fi.order.as_ref().unwrap().len(), 2);
+        assert_eq!(fi.order.as_ref().unwrap()[1].direction, Some("DESC".into()));
+    }
 }

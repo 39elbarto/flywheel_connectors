@@ -807,6 +807,278 @@ mod tests {
             .is_retryable()
         );
         assert!(!AnthropicError::InvalidApiKey.is_retryable());
-        // assert!(!AnthropicError::NotConfigured.is_retryable()); // Removed as it doesn't exist
+    }
+
+    // ---- Auth tests ----
+
+    #[test]
+    fn auth_api_key_redacted_label() {
+        let auth = AnthropicAuth::ApiKey("secret-key".into());
+        assert_eq!(auth.redacted_label(), "api_key:redacted");
+    }
+
+    #[test]
+    fn auth_credential_id_redacted_label() {
+        let cred_id = fcp_core::CredentialId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+        let auth = AnthropicAuth::CredentialId(cred_id);
+        let label = auth.redacted_label();
+        assert!(label.starts_with("credential_id:"));
+    }
+
+    #[test]
+    fn auth_api_key_not_secretless() {
+        let auth = AnthropicAuth::ApiKey("key".into());
+        assert!(!auth.is_secretless());
+    }
+
+    #[test]
+    fn auth_credential_id_is_secretless() {
+        let cred_id = fcp_core::CredentialId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+        let auth = AnthropicAuth::CredentialId(cred_id);
+        assert!(auth.is_secretless());
+    }
+
+    #[test]
+    fn auth_debug_api_key_redacted() {
+        let auth = AnthropicAuth::ApiKey("super-secret".into());
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("redacted"));
+        assert!(!dbg.contains("super-secret"));
+    }
+
+    #[test]
+    fn auth_debug_credential_id() {
+        let cred_id = fcp_core::CredentialId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+        let auth = AnthropicAuth::CredentialId(cred_id);
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("CredentialId"));
+    }
+
+    #[test]
+    fn auth_clone_api_key() {
+        let original = AnthropicAuth::ApiKey("clone-me".into());
+        let cloned = original.clone();
+        drop(original);
+        assert!(!cloned.is_secretless());
+        assert_eq!(cloned.redacted_label(), "api_key:redacted");
+    }
+
+    // ---- Client construction tests ----
+
+    #[test]
+    fn client_new_default_base_url() {
+        let client = AnthropicClient::new("test-key").unwrap();
+        assert_eq!(client.total_input_tokens(), 0);
+        assert_eq!(client.total_output_tokens(), 0);
+    }
+
+    #[test]
+    fn client_with_base_url_changes_url() {
+        let client = AnthropicClient::new("key")
+            .unwrap()
+            .with_base_url("https://custom.api.com");
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("custom.api.com"));
+    }
+
+    #[test]
+    fn client_with_retry_config() {
+        let client = AnthropicClient::new("key")
+            .unwrap()
+            .with_retry_config(5, 100, 60_000);
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("max_retries: 5"));
+    }
+
+    #[test]
+    fn client_debug_format() {
+        let client = AnthropicClient::new("secret-key").unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("AnthropicClient"));
+        assert!(dbg.contains("redacted"));
+        assert!(!dbg.contains("secret-key"));
+    }
+
+    #[test]
+    fn client_reset_token_counts() {
+        let client = AnthropicClient::new("key").unwrap();
+        client.total_input_tokens.store(100, std::sync::atomic::Ordering::Relaxed);
+        client.total_output_tokens.store(50, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(client.total_input_tokens(), 100);
+        assert_eq!(client.total_output_tokens(), 50);
+        client.reset_token_counts();
+        assert_eq!(client.total_input_tokens(), 0);
+        assert_eq!(client.total_output_tokens(), 0);
+    }
+
+    #[test]
+    fn client_track_usage() {
+        let client = AnthropicClient::new("key").unwrap();
+        let usage = Usage {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+        };
+        client.track_usage(&usage);
+        assert_eq!(client.total_input_tokens(), 100);
+        assert_eq!(client.total_output_tokens(), 50);
+        client.track_usage(&usage);
+        assert_eq!(client.total_input_tokens(), 200);
+        assert_eq!(client.total_output_tokens(), 100);
+    }
+
+    #[test]
+    fn client_auth_accessor() {
+        let client = AnthropicClient::new("test-key").unwrap();
+        assert!(!client.auth().is_secretless());
+    }
+
+    // ---- SSE parsing additional tests ----
+
+    #[test]
+    fn parse_sse_event_message_stop() {
+        let event = parse_sse_event("event: message_stop\ndata: {\"type\":\"message_stop\"}\n");
+        let event = event.unwrap().unwrap();
+        assert!(matches!(event, StreamEvent::MessageStop));
+    }
+
+    #[test]
+    fn parse_sse_event_content_block_stop() {
+        let event = parse_sse_event(
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n",
+        );
+        let event = event.unwrap().unwrap();
+        match event {
+            StreamEvent::ContentBlockStop { index } => assert_eq!(index, 0),
+            _ => panic!("expected ContentBlockStop"),
+        }
+    }
+
+    #[test]
+    fn parse_sse_event_error() {
+        let event = parse_sse_event(
+            "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"fail\"}}\n",
+        );
+        let event = event.unwrap().unwrap();
+        match event {
+            StreamEvent::Error { error } => {
+                assert_eq!(error.error_type, "api_error");
+                assert_eq!(error.message, "fail");
+            }
+            _ => panic!("expected Error"),
+        }
+    }
+
+    #[test]
+    fn parse_sse_event_no_data() {
+        let event = parse_sse_event("event: ping\n");
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn parse_sse_event_empty_string() {
+        let event = parse_sse_event("");
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn parse_sse_event_message_start() {
+        let event = parse_sse_event(
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-20250514\",\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n",
+        );
+        let event = event.unwrap().unwrap();
+        match event {
+            StreamEvent::MessageStart { message } => {
+                assert_eq!(message.id, "msg_1");
+                assert_eq!(message.role, crate::types::Role::Assistant);
+            }
+            _ => panic!("expected MessageStart"),
+        }
+    }
+
+    // ---- parse_error_response tests ----
+
+    #[test]
+    fn parse_error_response_429() {
+        let bytes = bytes::Bytes::from(
+            r#"{"error":{"type":"rate_limit_error","message":"Rate limit exceeded"}}"#,
+        );
+        let err = parse_error_response(StatusCode::TOO_MANY_REQUESTS, &bytes);
+        assert!(matches!(err, AnthropicError::RateLimited { .. }));
+    }
+
+    #[test]
+    fn parse_error_response_529() {
+        let bytes =
+            bytes::Bytes::from(r#"{"error":{"type":"overloaded_error","message":"Overloaded"}}"#);
+        let err = parse_error_response(StatusCode::from_u16(529).unwrap(), &bytes);
+        assert!(matches!(err, AnthropicError::Overloaded { .. }));
+    }
+
+    #[test]
+    fn parse_error_response_401() {
+        let bytes = bytes::Bytes::from(
+            r#"{"error":{"type":"authentication_error","message":"Invalid key"}}"#,
+        );
+        let err = parse_error_response(StatusCode::UNAUTHORIZED, &bytes);
+        assert!(matches!(err, AnthropicError::InvalidApiKey));
+    }
+
+    #[test]
+    fn parse_error_response_context_length() {
+        let bytes = bytes::Bytes::from(
+            r#"{"error":{"type":"invalid_request_error","message":"context length exceeded"}}"#,
+        );
+        let err = parse_error_response(StatusCode::BAD_REQUEST, &bytes);
+        assert!(matches!(
+            err,
+            AnthropicError::ContextLengthExceeded { .. }
+        ));
+    }
+
+    #[test]
+    fn parse_error_response_generic_api_error() {
+        let bytes = bytes::Bytes::from(
+            r#"{"error":{"type":"not_found_error","message":"Model not found"}}"#,
+        );
+        let err = parse_error_response(StatusCode::NOT_FOUND, &bytes);
+        match err {
+            AnthropicError::Api {
+                error_type,
+                message,
+                status_code,
+            } => {
+                assert_eq!(error_type, "not_found_error");
+                assert_eq!(message, "Model not found");
+                assert_eq!(status_code, Some(404));
+            }
+            _ => panic!("expected Api error"),
+        }
+    }
+
+    #[test]
+    fn parse_error_response_unparseable() {
+        let bytes = bytes::Bytes::from("not json");
+        let err = parse_error_response(StatusCode::INTERNAL_SERVER_ERROR, &bytes);
+        match err {
+            AnthropicError::Api {
+                error_type,
+                message,
+                status_code,
+            } => {
+                assert_eq!(error_type, "unknown");
+                assert_eq!(message, "not json");
+                assert_eq!(status_code, Some(500));
+            }
+            _ => panic!("expected Api error"),
+        }
+    }
+
+    // ---- DEFAULT_BASE_URL ----
+
+    #[test]
+    fn default_base_url_is_anthropic() {
+        assert_eq!(DEFAULT_BASE_URL, "https://api.anthropic.com");
     }
 }

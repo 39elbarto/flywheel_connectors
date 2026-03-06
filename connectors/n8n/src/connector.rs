@@ -885,4 +885,138 @@ mod tests {
         .unwrap();
         assert_eq!(config.base_url, "https://n8n.example.com/api/v1");
     }
+
+    #[test]
+    fn connector_new_zero_counters() {
+        let c = N8nConnector::new();
+        assert_eq!(c.request_count.load(Ordering::Relaxed), 0);
+        assert_eq!(c.error_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn doctor_status_serde_roundtrip_healthy() {
+        let v = serde_json::to_value(DoctorStatus::Healthy).unwrap();
+        assert_eq!(v, "healthy");
+        let back: DoctorStatus = serde_json::from_value(v).unwrap();
+        assert_eq!(back, DoctorStatus::Healthy);
+    }
+
+    #[test]
+    fn doctor_status_serde_roundtrip_degraded() {
+        let v = serde_json::to_value(DoctorStatus::Degraded).unwrap();
+        assert_eq!(v, "degraded");
+        let back: DoctorStatus = serde_json::from_value(v).unwrap();
+        assert_eq!(back, DoctorStatus::Degraded);
+    }
+
+    #[test]
+    fn doctor_status_serde_roundtrip_unhealthy() {
+        let v = serde_json::to_value(DoctorStatus::Unhealthy).unwrap();
+        assert_eq!(v, "unhealthy");
+        let back: DoctorStatus = serde_json::from_value(v).unwrap();
+        assert_eq!(back, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_status_copy() {
+        let s = DoctorStatus::Healthy;
+        let copied = s;
+        assert_eq!(s, copied);
+    }
+
+    #[test]
+    fn doctor_status_debug() {
+        let dbg = format!("{:?}", DoctorStatus::Degraded);
+        assert!(dbg.contains("Degraded"));
+    }
+
+    #[test]
+    fn doctor_result_deserializes() {
+        let v = json!({
+            "status": "unhealthy",
+            "checks": [
+                {"name": "config", "passed": false, "message": "fail", "critical": true}
+            ]
+        });
+        let r: DoctorResult = serde_json::from_value(v).unwrap();
+        assert_eq!(r.status, DoctorStatus::Unhealthy);
+        assert_eq!(r.checks.len(), 1);
+        assert!(!r.checks[0].passed);
+    }
+
+    #[test]
+    fn doctor_check_deserializes() {
+        let v = json!({"name": "test", "passed": true, "critical": false});
+        let c: DoctorCheck = serde_json::from_value(v).unwrap();
+        assert_eq!(c.name, "test");
+        assert!(c.passed);
+        assert!(!c.critical);
+        assert!(c.message.is_none());
+    }
+
+    #[test]
+    fn doctor_check_clone() {
+        let c = DoctorCheck {
+            name: "config".into(),
+            passed: true,
+            message: Some("ok".into()),
+            critical: true,
+        };
+        let cloned = DoctorCheck::clone(&c);
+        assert_eq!(cloned.name, "config");
+        assert_eq!(cloned.message, Some("ok".into()));
+    }
+
+    #[test]
+    fn doctor_result_clone() {
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "a".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        }]);
+        let cloned = DoctorResult::clone(&r);
+        assert_eq!(cloned.status, DoctorStatus::Healthy);
+        assert_eq!(cloned.checks.len(), 1);
+    }
+
+    #[test]
+    fn config_rejects_boolean_base_url() {
+        let result = N8nConfig::from_params(&json!({
+            "api_key": "key",
+            "base_url": true,
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_rejects_null_api_key() {
+        let result = N8nConfig::from_params(&json!({
+            "api_key": null,
+            "base_url": "https://n8n.example.com/api/v1",
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn require_str_with_empty_string() {
+        let input = json!({"id": ""});
+        // Empty strings are valid string values, require_str just checks type
+        assert_eq!(require_str(&input, "id").unwrap(), "");
+    }
+
+    #[test]
+    fn require_str_with_object_value() {
+        let input = json!({"id": {"nested": "value"}});
+        assert!(require_str(&input, "id").is_err());
+    }
+
+    #[test]
+    fn operations_summaries_non_empty() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let summary = op["summary"].as_str().unwrap();
+            assert!(!summary.is_empty(), "op {} has empty summary", op["id"]);
+        }
+    }
 }

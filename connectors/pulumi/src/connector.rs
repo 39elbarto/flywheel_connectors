@@ -743,4 +743,254 @@ mod tests {
         assert!(c.client.is_none());
         assert!(c.session_id.is_none());
     }
+
+    #[test]
+    fn connector_new_equals_default() {
+        let c = PulumiConnector::new();
+        assert!(c.config.is_none());
+        assert!(c.client.is_none());
+        assert!(c.session_id.is_none());
+        assert_eq!(c.request_count.load(Ordering::Relaxed), 0);
+        assert_eq!(c.error_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn doctor_check_skip_serializing_message_none() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert!(v.get("message").is_none(), "message should be skipped when None");
+    }
+
+    #[test]
+    fn doctor_check_serializes_message_some() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: false,
+            message: Some("error detail".into()),
+            critical: true,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert_eq!(v["message"], "error detail");
+    }
+
+    #[test]
+    fn doctor_check_roundtrip() {
+        let check = DoctorCheck {
+            name: "connectivity".into(),
+            passed: true,
+            message: Some("All good".into()),
+            critical: false,
+        };
+        let serialized = serde_json::to_string(&check).unwrap();
+        let back: DoctorCheck = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(back.name, "connectivity");
+        assert_eq!(back.message, Some("All good".into()));
+    }
+
+    #[test]
+    fn doctor_status_values_serialize_lowercase() {
+        assert_eq!(serde_json::to_value(DoctorStatus::Healthy).unwrap(), "healthy");
+        assert_eq!(serde_json::to_value(DoctorStatus::Degraded).unwrap(), "degraded");
+        assert_eq!(serde_json::to_value(DoctorStatus::Unhealthy).unwrap(), "unhealthy");
+    }
+
+    #[test]
+    fn doctor_status_debug() {
+        assert!(format!("{:?}", DoctorStatus::Healthy).contains("Healthy"));
+        assert!(format!("{:?}", DoctorStatus::Degraded).contains("Degraded"));
+        assert!(format!("{:?}", DoctorStatus::Unhealthy).contains("Unhealthy"));
+    }
+
+    #[test]
+    fn doctor_status_clone_copy() {
+        let s = DoctorStatus::Healthy;
+        let c = s;
+        assert_eq!(s, c);
+    }
+
+    #[test]
+    fn doctor_status_serde_roundtrip() {
+        for status in [DoctorStatus::Healthy, DoctorStatus::Degraded, DoctorStatus::Unhealthy] {
+            let s = serde_json::to_string(&status).unwrap();
+            let back: DoctorStatus = serde_json::from_str(&s).unwrap();
+            assert_eq!(back, status);
+        }
+    }
+
+    #[test]
+    fn doctor_result_multiple_critical_failures() {
+        let result = DoctorResult::from_checks(vec![
+            DoctorCheck { name: "a".into(), passed: false, message: None, critical: true },
+            DoctorCheck { name: "b".into(), passed: false, message: None, critical: true },
+        ]);
+        assert_eq!(result.status, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_result_empty_checks() {
+        let r = DoctorResult::from_checks(vec![]);
+        assert_eq!(r.status, DoctorStatus::Healthy);
+    }
+
+    #[test]
+    fn doctor_result_serializes_with_message() {
+        let result = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "x".into(),
+            passed: false,
+            message: Some("detail".into()),
+            critical: false,
+        }]);
+        let v = serde_json::to_value(&result).unwrap();
+        assert_eq!(v["status"], "degraded");
+        assert_eq!(v["checks"][0]["message"], "detail");
+    }
+
+    #[test]
+    fn operations_delete_is_dangerous() {
+        let ops = operations_info();
+        let delete_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "pulumi.stacks.delete")
+            .unwrap();
+        assert_eq!(delete_op["safety_tier"], "dangerous");
+        assert_eq!(delete_op["risk_level"], "high");
+    }
+
+    #[test]
+    fn operations_create_is_risky() {
+        let ops = operations_info();
+        let create_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "pulumi.stacks.create")
+            .unwrap();
+        assert_eq!(create_op["safety_tier"], "risky");
+        assert_eq!(create_op["risk_level"], "medium");
+    }
+
+    #[test]
+    fn operations_export_capability() {
+        let ops = operations_info();
+        let export_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "pulumi.stacks.export")
+            .unwrap();
+        assert_eq!(export_op["capability"], "pulumi.stacks.read");
+    }
+
+    #[test]
+    fn operations_all_have_idempotency() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            assert!(op.get("idempotency").is_some(), "op {:?} missing idempotency", op["id"]);
+        }
+    }
+
+    #[test]
+    fn require_str_with_empty_string() {
+        let input = json!({"organization": ""});
+        assert_eq!(require_str(&input, "organization").unwrap(), "");
+    }
+
+    #[test]
+    fn require_str_with_array_value() {
+        let input = json!({"organization": [1, 2, 3]});
+        assert!(require_str(&input, "organization").is_err());
+    }
+
+    #[test]
+    fn require_str_with_object_value() {
+        let input = json!({"organization": {"nested": true}});
+        assert!(require_str(&input, "organization").is_err());
+    }
+
+    #[test]
+    fn require_str_with_bool_value() {
+        let input = json!({"organization": true});
+        assert!(require_str(&input, "organization").is_err());
+    }
+
+    #[test]
+    fn require_str_error_contains_field_name() {
+        let input = json!({});
+        let err = require_str(&input, "project").unwrap_err();
+        match err {
+            PulumiError::Api { message, .. } => {
+                assert!(message.contains("project"));
+            }
+            e => panic!("expected Api, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn config_rejects_both_auth_error_message() {
+        let result = PulumiConfig::from_params(&json!({
+            "access_token": "tok",
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+        }));
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("exactly one"));
+            }
+            e => panic!("expected InvalidRequest, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn config_no_auth_error_message() {
+        let result = PulumiConfig::from_params(&json!({}));
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("access_token") || message.contains("credential_id"));
+            }
+            e => panic!("expected InvalidRequest, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn config_non_string_credential_error_message() {
+        let result = PulumiConfig::from_params(&json!({"credential_id": 42}));
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("must be a string"));
+            }
+            e => panic!("expected InvalidRequest, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn config_invalid_uuid_credential_error_message() {
+        let result = PulumiConfig::from_params(&json!({"credential_id": "not-valid"}));
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("valid UUID"));
+            }
+            e => panic!("expected InvalidRequest, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn config_default_base_url_when_absent() {
+        let config = PulumiConfig::from_params(&json!({"access_token": "tok"})).unwrap();
+        assert_eq!(config.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn config_trims_access_token() {
+        let config = PulumiConfig::from_params(&json!({"access_token": "  pul-abc  "})).unwrap();
+        match &config.auth {
+            PulumiAuth::BearerToken(t) => assert_eq!(t, "pul-abc"),
+            PulumiAuth::CredentialId(_) => panic!("expected BearerToken"),
+        }
+    }
 }

@@ -947,4 +947,54 @@ mod tests {
         let v = serde_json::to_value(&check).unwrap();
         assert!(!v.as_object().unwrap().contains_key("message"));
     }
+
+    #[test]
+    fn doctor_check_serializes_some_message() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: false,
+            message: Some("warning".into()),
+            critical: false,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert_eq!(v["message"], "warning");
+    }
+
+    #[test]
+    fn doctor_status_serde_roundtrip() {
+        let v = serde_json::to_value(DoctorStatus::Healthy).unwrap();
+        assert_eq!(v, "healthy");
+        let v = serde_json::to_value(DoctorStatus::Degraded).unwrap();
+        assert_eq!(v, "degraded");
+        let v = serde_json::to_value(DoctorStatus::Unhealthy).unwrap();
+        assert_eq!(v, "unhealthy");
+    }
+
+    #[test]
+    fn doctor_status_deserializes() {
+        let s: DoctorStatus = serde_json::from_value(json!("healthy")).unwrap();
+        assert_eq!(s, DoctorStatus::Healthy);
+        let s: DoctorStatus = serde_json::from_value(json!("degraded")).unwrap();
+        assert_eq!(s, DoctorStatus::Degraded);
+        let s: DoctorStatus = serde_json::from_value(json!("unhealthy")).unwrap();
+        assert_eq!(s, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn require_str_empty_string_is_ok() {
+        let input = json!({"vault_id": ""});
+        assert_eq!(require_str(&input, "vault_id").unwrap(), "");
+    }
+
+    #[test]
+    fn require_str_object_value() {
+        let input = json!({"vault_id": {"nested": "val"}});
+        assert!(require_str(&input, "vault_id").is_err());
+    }
+
+    #[test]
+    fn require_str_float_value() {
+        let input = json!({"vault_id": 9.876});
+        assert!(require_str(&input, "vault_id").is_err());
+    }
 }

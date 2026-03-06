@@ -327,4 +327,192 @@ mod tests {
         assert!(dbg.contains("WebhookEvent"));
         assert!(dbg.contains("ep_abc"));
     }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn endpoint_clone() {
+        let ep = WebhookEndpoint::new("/hooks/test".into(), "secret".into(), vec!["10.0.0.0/8".into()]);
+        let cloned = ep.clone();
+        assert_eq!(cloned.endpoint_id, ep.endpoint_id);
+        assert_eq!(cloned.path, "/hooks/test");
+        assert_eq!(cloned.signing_secret, "secret");
+        assert_eq!(cloned.allowed_sources.len(), 1);
+        assert!(cloned.active);
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn event_clone() {
+        let evt = WebhookEvent::new("ep_1".into(), json!({"key": "val"}), true, Some("1.2.3.4".into()));
+        let cloned = evt.clone();
+        assert_eq!(cloned.event_id, evt.event_id);
+        assert_eq!(cloned.endpoint_id, "ep_1");
+        assert_eq!(cloned.payload["key"], "val");
+        assert!(cloned.signature_valid);
+        assert_eq!(cloned.source_ip, Some("1.2.3.4".into()));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn endpoint_summary_clone() {
+        let ep = WebhookEndpoint::new("/hooks/test".into(), "s".into(), vec![]);
+        let summary = EndpointSummary::from_endpoint(&ep, 5);
+        let cloned = summary.clone();
+        assert_eq!(cloned.endpoint_id, summary.endpoint_id);
+        assert_eq!(cloned.event_count, 5);
+    }
+
+    #[test]
+    fn endpoint_summary_debug() {
+        let ep = WebhookEndpoint::new("/hooks/test".into(), "s".into(), vec![]);
+        let summary = EndpointSummary::from_endpoint(&ep, 0);
+        let dbg = format!("{summary:?}");
+        assert!(dbg.contains("EndpointSummary"));
+    }
+
+    #[test]
+    fn endpoint_with_multiple_allowed_sources() {
+        let ep = WebhookEndpoint::new(
+            "/hooks/multi".into(),
+            "s".into(),
+            vec!["10.0.0.0/8".into(), "172.16.0.0/12".into(), "192.168.0.0/16".into()],
+        );
+        assert_eq!(ep.allowed_sources.len(), 3);
+        let json = serde_json::to_value(&ep).unwrap();
+        assert_eq!(json["allowed_sources"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn endpoint_deserialization_with_allowed_sources() {
+        let json = json!({
+            "endpoint_id": "ep_test",
+            "path": "/hooks/github",
+            "signing_secret": "secret123",
+            "allowed_sources": ["10.0.0.0/8", "192.168.0.0/16"],
+            "url": "http://localhost:8080/hooks/github",
+            "created_at": "2026-01-15T10:30:00Z",
+            "active": true,
+        });
+        let ep: WebhookEndpoint = serde_json::from_value(json).unwrap();
+        assert_eq!(ep.allowed_sources.len(), 2);
+        assert_eq!(ep.allowed_sources[0], "10.0.0.0/8");
+    }
+
+    #[test]
+    fn endpoint_inactive_deserialization() {
+        let json = json!({
+            "endpoint_id": "ep_test",
+            "path": "/hooks/test",
+            "signing_secret": "s",
+            "url": "http://localhost:8080/hooks/test",
+            "created_at": "2026-01-15T10:30:00Z",
+            "active": false,
+        });
+        let ep: WebhookEndpoint = serde_json::from_value(json).unwrap();
+        assert!(!ep.active);
+    }
+
+    #[test]
+    fn event_with_complex_payload() {
+        let payload = json!({
+            "action": "push",
+            "repository": {"id": 123, "name": "my-repo"},
+            "commits": [{"sha": "abc123"}, {"sha": "def456"}],
+        });
+        let evt = WebhookEvent::new("ep_1".into(), payload, true, None);
+        assert_eq!(evt.payload["action"], "push");
+        assert_eq!(evt.payload["commits"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn event_with_null_payload() {
+        let evt = WebhookEvent::new("ep_1".into(), json!(null), true, None);
+        assert!(evt.payload.is_null());
+    }
+
+    #[test]
+    fn event_with_array_payload() {
+        let evt = WebhookEvent::new("ep_1".into(), json!([1, 2, 3]), true, None);
+        assert!(evt.payload.is_array());
+        assert_eq!(evt.payload.as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn event_serialization_with_headers() {
+        let mut evt = WebhookEvent::new("ep_1".into(), json!({"x": 1}), true, Some("10.0.0.1".into()));
+        evt.headers.insert("content-type".into(), "application/json".into());
+        evt.headers.insert("x-hub-signature".into(), "sha256=abc".into());
+        let json = serde_json::to_value(&evt).unwrap();
+        assert_eq!(json["headers"]["content-type"], "application/json");
+        assert_eq!(json["headers"]["x-hub-signature"], "sha256=abc");
+        assert_eq!(json["source_ip"], "10.0.0.1");
+    }
+
+    #[test]
+    fn event_deserialization_with_headers() {
+        let json = json!({
+            "event_id": "evt_test",
+            "endpoint_id": "ep_abc",
+            "received_at": "2026-01-15T10:30:00Z",
+            "headers": {"content-type": "application/json"},
+            "payload": {},
+            "signature_valid": true,
+            "source_ip": "192.168.1.1",
+        });
+        let evt: WebhookEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(evt.headers.get("content-type").unwrap(), "application/json");
+        assert_eq!(evt.source_ip, Some("192.168.1.1".into()));
+    }
+
+    #[test]
+    fn endpoint_json_string_roundtrip() {
+        let ep = WebhookEndpoint::new("/hooks/stripe".into(), "whsec_xyz".into(), vec!["1.2.3.4/32".into()]);
+        let s = serde_json::to_string(&ep).unwrap();
+        let ep2: WebhookEndpoint = serde_json::from_str(&s).unwrap();
+        assert_eq!(ep2.endpoint_id, ep.endpoint_id);
+        assert_eq!(ep2.path, "/hooks/stripe");
+        assert_eq!(ep2.signing_secret, "whsec_xyz");
+        assert_eq!(ep2.allowed_sources.len(), 1);
+    }
+
+    #[test]
+    fn event_json_string_roundtrip() {
+        let evt = WebhookEvent::new("ep_test".into(), json!({"key": "val"}), false, Some("10.0.0.1".into()));
+        let s = serde_json::to_string(&evt).unwrap();
+        let evt2: WebhookEvent = serde_json::from_str(&s).unwrap();
+        assert_eq!(evt2.event_id, evt.event_id);
+        assert_eq!(evt2.endpoint_id, "ep_test");
+        assert!(!evt2.signature_valid);
+        assert_eq!(evt2.source_ip, Some("10.0.0.1".into()));
+    }
+
+    #[test]
+    fn endpoint_summary_json_string_roundtrip() {
+        let ep = WebhookEndpoint::new("/hooks/test".into(), "s".into(), vec![]);
+        let summary = EndpointSummary::from_endpoint(&ep, 42);
+        let s = serde_json::to_string(&summary).unwrap();
+        let summary2: EndpointSummary = serde_json::from_str(&s).unwrap();
+        assert_eq!(summary2.event_count, 42);
+        assert_eq!(summary2.path, "/hooks/test");
+    }
+
+    #[test]
+    fn endpoint_summary_preserves_url() {
+        let ep = WebhookEndpoint::new("/api/webhooks".into(), "s".into(), vec![]);
+        let summary = EndpointSummary::from_endpoint(&ep, 0);
+        assert_eq!(summary.url, "http://localhost:8080/api/webhooks");
+    }
+
+    #[test]
+    fn endpoint_summary_preserves_created_at() {
+        let ep = WebhookEndpoint::new("/hooks/test".into(), "s".into(), vec![]);
+        let summary = EndpointSummary::from_endpoint(&ep, 0);
+        assert_eq!(summary.created_at, ep.created_at);
+    }
+
+    #[test]
+    fn event_empty_headers_default() {
+        let evt = WebhookEvent::new("ep_1".into(), json!({}), true, None);
+        assert!(evt.headers.is_empty());
+    }
 }

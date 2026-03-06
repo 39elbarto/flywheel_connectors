@@ -727,4 +727,425 @@ mod tests {
         };
         assert!(!err.is_retryable());
     }
+
+    // ── PlaidClient construction tests ──────────────────────────────────
+
+    #[test]
+    fn client_new_succeeds() {
+        let client = PlaidClient::new("test_id", "test_secret").unwrap();
+        // Just verify it doesn't panic
+        let _ = format!("{:p}", &client);
+    }
+
+    #[test]
+    fn client_with_base_url_overrides() {
+        let client = PlaidClient::new("id", "sec")
+            .unwrap()
+            .with_base_url("http://custom.plaid.io");
+        // Verify the builder chain works
+        let _ = format!("{:p}", &client);
+    }
+
+    #[test]
+    fn client_with_retry_config() {
+        let client = PlaidClient::new("id", "sec")
+            .unwrap()
+            .with_retry_config(5);
+        let _ = format!("{:p}", &client);
+    }
+
+    #[test]
+    fn client_auth_body_injects_credentials() {
+        let client = PlaidClient::new("my_client_id", "my_secret").unwrap();
+        let mut body = serde_json::json!({"access_token": "tok123"});
+        client.auth_body(&mut body);
+        assert_eq!(body["client_id"], "my_client_id");
+        assert_eq!(body["secret"], "my_secret");
+        // Original fields preserved
+        assert_eq!(body["access_token"], "tok123");
+    }
+
+    #[test]
+    fn client_auth_body_on_non_object_is_noop() {
+        let client = PlaidClient::new("id", "sec").unwrap();
+        let mut body = serde_json::json!("just a string");
+        client.auth_body(&mut body);
+        // Should be unchanged since it's not an object
+        assert_eq!(body, serde_json::json!("just a string"));
+    }
+
+    #[test]
+    fn client_auth_body_overwrites_existing_credentials() {
+        let client = PlaidClient::new("new_id", "new_sec").unwrap();
+        let mut body = serde_json::json!({
+            "client_id": "old_id",
+            "secret": "old_sec"
+        });
+        client.auth_body(&mut body);
+        assert_eq!(body["client_id"], "new_id");
+        assert_eq!(body["secret"], "new_sec");
+    }
+
+    // ── Default base URL constant ───────────────────────────────────────
+
+    #[test]
+    fn default_base_url_is_sandbox() {
+        assert_eq!(DEFAULT_BASE_URL, "https://sandbox.plaid.com");
+    }
+
+    // ── Additional wiremock API edge case tests ─────────────────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn test_link_token_create_with_user() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/link/token/create"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "link_token": "link-sandbox-user",
+                "expiration": "2026-03-02T00:00:00Z",
+                "request_id": "req-u"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = PlaidClient::new("id", "sec")
+            .unwrap()
+            .with_base_url(&mock_server.uri());
+
+        let user = serde_json::json!({"client_user_id": "custom-user-123"});
+        let result = client
+            .link_token_create(
+                "TestApp",
+                &["transactions".to_string(), "auth".to_string()],
+                &["US".to_string(), "CA".to_string()],
+                "en",
+                Some(&user),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.link_token, "link-sandbox-user");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_transactions_get() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/transactions/get"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "accounts": [],
+                "transactions": [
+                    {"transaction_id": "tx1", "amount": 10.0}
+                ],
+                "total_transactions": 1
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = PlaidClient::new("id", "sec")
+            .unwrap()
+            .with_base_url(&mock_server.uri());
+
+        let result = client
+            .transactions_get("access-tok", "2026-01-01", "2026-03-01", None)
+            .await
+            .unwrap();
+        assert!(result.get("transactions").is_some());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_transactions_get_with_options() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/transactions/get"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "accounts": [],
+                "transactions": [],
+                "total_transactions": 0
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = PlaidClient::new("id", "sec")
+            .unwrap()
+            .with_base_url(&mock_server.uri());
+
+        let opts = serde_json::json!({"count": 100, "offset": 0});
+        let result = client
+            .transactions_get("access-tok", "2026-01-01", "2026-03-01", Some(&opts))
+            .await
+            .unwrap();
+        assert_eq!(result["total_transactions"], 0);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_transactions_sync_with_cursor() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/transactions/sync"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "added": [],
+                "modified": [],
+                "removed": [],
+                "next_cursor": "cursor-next",
+                "has_more": true
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = PlaidClient::new("id", "sec")
+            .unwrap()
+            .with_base_url(&mock_server.uri());
+
+        let result = client
+            .transactions_sync("access-tok", Some("cursor-prev"), Some(50))
+            .await
+            .unwrap();
+        assert_eq!(result.next_cursor, "cursor-next");
+        assert!(result.has_more);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_identity_get() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/identity/get"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "accounts": [
+                    {"account_id": "acc1", "owners": [{"names": ["John Doe"]}]}
+                ]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = PlaidClient::new("id", "sec")
+            .unwrap()
+            .with_base_url(&mock_server.uri());
+
+        let result = client.identity_get("access-tok").await.unwrap();
+        assert_eq!(result.len(), 1);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_investments_holdings_get() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/investments/holdings/get"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "accounts": [],
+                "holdings": [],
+                "securities": []
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = PlaidClient::new("id", "sec")
+            .unwrap()
+            .with_base_url(&mock_server.uri());
+
+        let result = client.investments_holdings_get("access-tok").await.unwrap();
+        assert!(result.get("holdings").is_some());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_liabilities_get() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/liabilities/get"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "accounts": [
+                    {
+                        "account_id": "acc1",
+                        "balances": {
+                            "available": null, "current": 500.0,
+                            "limit": 1000.0, "iso_currency_code": "USD",
+                            "unofficial_currency_code": null
+                        },
+                        "mask": "1234",
+                        "name": "Credit Card",
+                        "official_name": null,
+                        "subtype": "credit card",
+                        "type": "credit"
+                    }
+                ],
+                "liabilities": {
+                    "credit": [{"account_id": "acc1"}],
+                    "mortgage": null,
+                    "student": null
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = PlaidClient::new("id", "sec")
+            .unwrap()
+            .with_base_url(&mock_server.uri());
+
+        let (accounts, liabilities) = client.liabilities_get("access-tok").await.unwrap();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].account_id, "acc1");
+        assert!(liabilities.credit.is_some());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_accounts_get_with_options() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/accounts/get"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "accounts": [],
+                "item": {
+                    "item_id": "item-opt",
+                    "institution_id": "ins_1"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = PlaidClient::new("id", "sec")
+            .unwrap()
+            .with_base_url(&mock_server.uri());
+
+        let opts = serde_json::json!({"account_ids": ["acc1"]});
+        let (accounts, item) = client
+            .accounts_get("access-tok", Some(&opts))
+            .await
+            .unwrap();
+        assert!(accounts.is_empty());
+        assert_eq!(item.item_id, "item-opt");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_accounts_balance_get_with_options() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/accounts/balance/get"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "accounts": []
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = PlaidClient::new("id", "sec")
+            .unwrap()
+            .with_base_url(&mock_server.uri());
+
+        let opts = serde_json::json!({"account_ids": ["acc1"]});
+        let accounts = client
+            .accounts_balance_get("access-tok", Some(&opts))
+            .await
+            .unwrap();
+        assert!(accounts.is_empty());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_forbidden_returns_api_error() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/accounts/get"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "error_type": "INVALID_INPUT",
+                "error_code": "ACCESS_NOT_GRANTED",
+                "error_message": "Not authorized for this product"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = PlaidClient::new("id", "sec")
+            .unwrap()
+            .with_base_url(&mock_server.uri())
+            .with_retry_config(0);
+
+        let result = client.accounts_get("access-tok", None).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            PlaidError::Api {
+                status_code,
+                error_type,
+                error_code,
+                message,
+            } => {
+                assert_eq!(status_code, Some(403));
+                assert_eq!(error_type.as_deref(), Some("INVALID_INPUT"));
+                assert_eq!(error_code.as_deref(), Some("ACCESS_NOT_GRANTED"));
+                assert!(message.contains("Not authorized"), "msg: {message}");
+            }
+            e => panic!("Expected Api error, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_client_error_with_plaid_body() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/auth/get"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error_type": "INVALID_REQUEST",
+                "error_code": "INVALID_FIELD",
+                "error_message": "Invalid access_token"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = PlaidClient::new("id", "sec")
+            .unwrap()
+            .with_base_url(&mock_server.uri())
+            .with_retry_config(0);
+
+        let result = client.auth_get("bad-token").await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            PlaidError::Api {
+                message,
+                error_type,
+                error_code,
+                ..
+            } => {
+                assert_eq!(message, "Invalid access_token");
+                assert_eq!(error_type.as_deref(), Some("INVALID_REQUEST"));
+                assert_eq!(error_code.as_deref(), Some("INVALID_FIELD"));
+            }
+            e => panic!("Expected Api error, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_unauthorized_without_error_body() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/accounts/get"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&mock_server)
+            .await;
+
+        let client = PlaidClient::new("id", "sec")
+            .unwrap()
+            .with_base_url(&mock_server.uri())
+            .with_retry_config(0);
+
+        let result = client.accounts_get("access-tok", None).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            PlaidError::Api {
+                status_code,
+                message,
+                ..
+            } => {
+                assert_eq!(status_code, Some(401));
+                assert!(message.contains("Authentication failed"), "msg: {message}");
+            }
+            e => panic!("Expected Api error, got: {e:?}"),
+        }
+    }
 }

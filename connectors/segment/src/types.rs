@@ -271,4 +271,230 @@ mod tests {
         assert_eq!(v["name"], "Amplitude");
         assert_eq!(v["connection_mode"], "device");
     }
+
+    #[test]
+    fn source_clone() {
+        let s = Source {
+            id: "s1".into(),
+            name: Some("Website".into()),
+            slug: Some("website".into()),
+            enabled: Some(true),
+        };
+        let s2 = s.clone();
+        assert_eq!(s.id, s2.id);
+        assert_eq!(s.name, s2.name);
+        assert_eq!(s.slug, s2.slug);
+        assert_eq!(s.enabled, s2.enabled);
+    }
+
+    #[test]
+    fn source_debug() {
+        let s = Source {
+            id: "s1".into(),
+            name: None,
+            slug: None,
+            enabled: None,
+        };
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("Source"));
+        assert!(dbg.contains("s1"));
+    }
+
+    #[test]
+    fn source_enabled_false() {
+        let s: Source = serde_json::from_value(json!({
+            "id": "s1",
+            "enabled": false,
+        }))
+        .unwrap();
+        assert_eq!(s.enabled, Some(false));
+    }
+
+    #[test]
+    fn source_json_string_roundtrip() {
+        let s = Source {
+            id: "src".into(),
+            name: Some("N".into()),
+            slug: None,
+            enabled: Some(true),
+        };
+        let st = serde_json::to_string(&s).unwrap();
+        let s2: Source = serde_json::from_str(&st).unwrap();
+        assert_eq!(s2.id, "src");
+        assert_eq!(s2.name, Some("N".into()));
+    }
+
+    #[test]
+    fn destination_clone() {
+        let d = Destination {
+            id: "d1".into(),
+            name: Some("Amp".into()),
+            enabled: Some(true),
+            connection_mode: Some("cloud".into()),
+        };
+        let d2 = d.clone();
+        assert_eq!(d.id, d2.id);
+        assert_eq!(d.connection_mode, d2.connection_mode);
+    }
+
+    #[test]
+    fn destination_debug() {
+        let d = Destination {
+            id: "d1".into(),
+            name: None,
+            enabled: None,
+            connection_mode: None,
+        };
+        let dbg = format!("{d:?}");
+        assert!(dbg.contains("Destination"));
+    }
+
+    #[test]
+    fn destination_json_string_roundtrip() {
+        let d = Destination {
+            id: "d1".into(),
+            name: Some("GA".into()),
+            enabled: Some(false),
+            connection_mode: None,
+        };
+        let st = serde_json::to_string(&d).unwrap();
+        let d2: Destination = serde_json::from_str(&st).unwrap();
+        assert_eq!(d2.id, "d1");
+        assert_eq!(d2.enabled, Some(false));
+    }
+
+    #[test]
+    fn track_event_clone() {
+        let t = TrackEvent {
+            user_id: "u1".into(),
+            event: "click".into(),
+            properties: Some(json!({"x": 1})),
+        };
+        let t2 = t.clone();
+        assert_eq!(t.user_id, t2.user_id);
+        assert_eq!(t.event, t2.event);
+        assert_eq!(t.properties, t2.properties);
+    }
+
+    #[test]
+    fn track_event_debug() {
+        let t = TrackEvent {
+            user_id: "u1".into(),
+            event: "e".into(),
+            properties: None,
+        };
+        let dbg = format!("{t:?}");
+        assert!(dbg.contains("TrackEvent"));
+    }
+
+    #[test]
+    fn track_event_json_string_roundtrip() {
+        let t = TrackEvent {
+            user_id: "u1".into(),
+            event: "purchase".into(),
+            properties: Some(json!({"amount": 42})),
+        };
+        let st = serde_json::to_string(&t).unwrap();
+        let t2: TrackEvent = serde_json::from_str(&st).unwrap();
+        assert_eq!(t2.event, "purchase");
+        assert!(t2.properties.is_some());
+    }
+
+    #[test]
+    fn track_response_clone() {
+        let r = TrackResponse { success: true };
+        let r2 = r.clone();
+        assert_eq!(r.success, r2.success);
+    }
+
+    #[test]
+    fn track_response_debug() {
+        let r = TrackResponse { success: false };
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("TrackResponse"));
+    }
+
+    #[test]
+    fn track_response_json_string_roundtrip() {
+        let r = TrackResponse { success: true };
+        let st = serde_json::to_string(&r).unwrap();
+        let r2: TrackResponse = serde_json::from_str(&st).unwrap();
+        assert!(r2.success);
+    }
+
+    #[test]
+    fn api_error_clone() {
+        let e = ApiError {
+            message: Some("msg".into()),
+            code: Some("ERR".into()),
+        };
+        let e2 = e.clone();
+        assert_eq!(e.message, e2.message);
+        assert_eq!(e.code, e2.code);
+    }
+
+    #[test]
+    fn api_error_debug() {
+        let e = ApiError {
+            message: None,
+            code: None,
+        };
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("ApiError"));
+    }
+
+    #[test]
+    fn api_error_response_clone() {
+        let e = ApiErrorResponse {
+            error: Some(ApiError {
+                message: Some("m".into()),
+                code: None,
+            }),
+        };
+        let e2 = e.clone();
+        assert_eq!(
+            e.error.as_ref().unwrap().message,
+            e2.error.as_ref().unwrap().message
+        );
+    }
+
+    #[test]
+    fn api_error_response_debug() {
+        let e = ApiErrorResponse { error: None };
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("ApiErrorResponse"));
+    }
+
+    #[test]
+    fn api_error_response_extra_fields_ignored() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({
+            "error": {"message": "x", "code": "y"},
+            "extra": "ignored",
+        }))
+        .unwrap();
+        assert_eq!(e.error.as_ref().unwrap().message, Some("x".into()));
+    }
+
+    #[test]
+    fn source_null_name_serializes() {
+        let s = Source {
+            id: "s".into(),
+            name: None,
+            slug: None,
+            enabled: None,
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        assert!(v["name"].is_null());
+    }
+
+    #[test]
+    fn track_event_empty_properties_object() {
+        let t = TrackEvent {
+            user_id: "u".into(),
+            event: "e".into(),
+            properties: Some(json!({})),
+        };
+        let v = serde_json::to_value(&t).unwrap();
+        assert!(v["properties"].is_object());
+    }
 }

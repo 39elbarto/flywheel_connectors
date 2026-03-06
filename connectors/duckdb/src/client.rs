@@ -315,4 +315,86 @@ mod tests {
         .unwrap();
         assert!(!client.base_url.ends_with('/'));
     }
+
+    #[test]
+    fn auth_debug_credential_id_format() {
+        let cred = DuckDbAuth::CredentialId(CredentialId::new());
+        let dbg = format!("{cred:?}");
+        assert!(dbg.contains("CredentialId"));
+        assert!(!dbg.contains("redacted"));
+    }
+
+    #[test]
+    fn client_debug_contains_base_url() {
+        let client = DuckDbClient::new(
+            DuckDbAuth::ServiceToken("tok".into()),
+            Some("https://custom.example.com/v0"),
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("custom.example.com"));
+    }
+
+    #[test]
+    fn client_new_with_credential_id() {
+        let client = DuckDbClient::new(
+            DuckDbAuth::CredentialId(CredentialId::new()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(client.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn client_debug_credential_id() {
+        let client = DuckDbClient::new(
+            DuckDbAuth::CredentialId(CredentialId::new()),
+            None,
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("CredentialId"));
+        assert!(dbg.contains("DuckDbClient"));
+    }
+
+    #[test]
+    fn auth_service_token_is_not_secretless() {
+        let auth = DuckDbAuth::ServiceToken("tok".into());
+        assert!(!auth.is_secretless());
+    }
+
+    #[test]
+    fn auth_credential_id_is_secretless() {
+        let auth = DuckDbAuth::CredentialId(CredentialId::new());
+        assert!(auth.is_secretless());
+    }
+
+    #[test]
+    fn client_custom_url_no_trailing_slash() {
+        let client = DuckDbClient::new(
+            DuckDbAuth::ServiceToken("tok".into()),
+            Some("https://example.com/api"),
+        )
+        .unwrap();
+        assert_eq!(client.base_url, "https://example.com/api");
+    }
+
+    #[test]
+    fn auth_credential_id_secretless_verified() {
+        let cred_id = CredentialId::new();
+        let auth = DuckDbAuth::CredentialId(cred_id);
+        assert!(auth.is_secretless());
+        let label = auth.redacted_label();
+        assert!(label.starts_with("credential_id:"));
+    }
+
+    #[test]
+    fn default_base_url_is_https() {
+        assert!(DEFAULT_BASE_URL.starts_with("https://"));
+    }
+
+    #[test]
+    fn default_base_url_has_v0() {
+        assert!(DEFAULT_BASE_URL.contains("/v0"));
+    }
 }

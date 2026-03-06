@@ -412,4 +412,133 @@ mod tests {
             "PostHog API error (500): Internal"
         );
     }
+
+    // -- Additional error tests --
+
+    #[test]
+    fn api_599_is_retryable() {
+        assert!(PostHogError::Api { status_code: 599, message: "err".into() }.is_retryable());
+    }
+
+    #[test]
+    fn api_501_is_retryable() {
+        assert!(PostHogError::Api { status_code: 501, message: "not impl".into() }.is_retryable());
+    }
+
+    #[test]
+    fn api_499_not_retryable() {
+        assert!(!PostHogError::Api { status_code: 499, message: "err".into() }.is_retryable());
+    }
+
+    #[test]
+    fn api_600_not_retryable() {
+        assert!(!PostHogError::Api { status_code: 600, message: "err".into() }.is_retryable());
+    }
+
+    #[test]
+    fn api_422_not_retryable() {
+        assert!(!PostHogError::Api { status_code: 422, message: "unprocessable".into() }.is_retryable());
+    }
+
+    #[test]
+    fn rate_limited_zero_ms() {
+        let err = PostHogError::RateLimited { retry_after_ms: 0 };
+        assert!(err.is_retryable());
+        assert_eq!(err.retry_after(), Some(Duration::from_millis(0)));
+    }
+
+    #[test]
+    fn rate_limited_large_value() {
+        let err = PostHogError::RateLimited { retry_after_ms: 3_600_000 };
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn not_found_empty_resource() {
+        let err = PostHogError::NotFound { resource: String::new() };
+        assert_eq!(err.to_string(), "Not found: ");
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn api_error_empty_message() {
+        let err = PostHogError::Api { status_code: 400, message: String::new() };
+        assert_eq!(err.to_string(), "PostHog API error (400): ");
+    }
+
+    #[test]
+    fn error_debug_unauthorized() {
+        let err = PostHogError::Unauthorized;
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Unauthorized"));
+    }
+
+    #[test]
+    fn error_debug_not_found() {
+        let err = PostHogError::NotFound { resource: "flag".into() };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("NotFound"));
+        assert!(dbg.contains("flag"));
+    }
+
+    #[test]
+    fn error_debug_rate_limited() {
+        let err = PostHogError::RateLimited { retry_after_ms: 2000 };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("RateLimited"));
+        assert!(dbg.contains("2000"));
+    }
+
+    #[test]
+    fn to_fcp_error_rate_limited_message_contains_ms() {
+        match (PostHogError::RateLimited { retry_after_ms: 5000 }).to_fcp_error() {
+            FcpError::External { message, .. } => assert!(message.contains("5000")),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_not_found_retry_after_is_none() {
+        match (PostHogError::NotFound { resource: "x".into() }).to_fcp_error() {
+            FcpError::External { retry_after, .. } => assert!(retry_after.is_none()),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_api_retryable_has_no_retry_after() {
+        match (PostHogError::Api { status_code: 502, message: "bad gw".into() }).to_fcp_error() {
+            FcpError::External { retryable, retry_after, .. } => {
+                assert!(retryable);
+                assert!(retry_after.is_none());
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_unauthorized_message() {
+        match PostHogError::Unauthorized.to_fcp_error() {
+            FcpError::External { message, .. } => assert_eq!(message, "Authentication failed"),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_forbidden_message() {
+        match PostHogError::Forbidden.to_fcp_error() {
+            FcpError::External { message, .. } => assert_eq!(message, "Insufficient permissions"),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_502_is_retryable() {
+        assert!(PostHogError::Api { status_code: 502, message: "bad gateway".into() }.is_retryable());
+    }
+
+    #[test]
+    fn api_404_not_retryable() {
+        assert!(!PostHogError::Api { status_code: 404, message: "not found".into() }.is_retryable());
+    }
 }

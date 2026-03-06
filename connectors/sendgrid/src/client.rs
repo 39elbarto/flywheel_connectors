@@ -324,4 +324,73 @@ mod tests {
         let cloned = auth.clone();
         assert!(cloned.is_secretless());
     }
+
+    #[test]
+    fn client_debug_contains_struct_name() {
+        let client = SendGridClient::new(SendGridAuth::ApiKey("SG.key".into()), None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("SendGridClient"));
+    }
+
+    #[test]
+    fn client_debug_contains_base_url() {
+        let client = SendGridClient::new(
+            SendGridAuth::ApiKey("SG.key".into()),
+            Some("https://custom.sendgrid.com/v3"),
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("custom.sendgrid.com"));
+    }
+
+    #[test]
+    fn auth_debug_contains_api_key_type() {
+        let auth = SendGridAuth::ApiKey("SG.secret".into());
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("ApiKey"));
+    }
+
+    #[test]
+    fn auth_debug_credential_id_contains_type() {
+        let cred = SendGridAuth::CredentialId(CredentialId::new());
+        let dbg = format!("{cred:?}");
+        assert!(dbg.contains("CredentialId"));
+    }
+
+    #[test]
+    fn default_base_url_starts_with_https() {
+        assert!(DEFAULT_BASE_URL.starts_with("https://"));
+    }
+
+    #[test]
+    fn default_base_url_is_sendgrid_v3() {
+        assert_eq!(DEFAULT_BASE_URL, "https://api.sendgrid.com/v3");
+    }
+
+    #[test]
+    fn client_strips_multiple_trailing_slashes() {
+        let client = SendGridClient::new(
+            SendGridAuth::ApiKey("SG.key".into()),
+            Some("https://api.sendgrid.com/v3///"),
+        )
+        .unwrap();
+        assert!(!client.base_url.ends_with('/'));
+    }
+
+    #[test]
+    fn client_with_empty_custom_url() {
+        let client = SendGridClient::new(
+            SendGridAuth::ApiKey("SG.key".into()),
+            Some(""),
+        )
+        .unwrap();
+        assert!(client.base_url.is_empty());
+    }
+
+    #[test]
+    fn auth_credential_debug_does_not_contain_redacted_tag() {
+        let cred = SendGridAuth::CredentialId(CredentialId::new());
+        let dbg = format!("{cred:?}");
+        assert!(!dbg.contains("<redacted>"));
+    }
 }

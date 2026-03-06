@@ -454,4 +454,287 @@ mod tests {
         let err = AnthropicError::InvalidApiKey;
         let _: &dyn std::error::Error = &err;
     }
+
+    // ---- Additional Display tests ----
+
+    #[test]
+    fn display_http_includes_http_error() {
+        // We can only test that the format works with a real reqwest error
+        // by triggering one, but we can test the other variants more thoroughly.
+        let err = AnthropicError::Api {
+            error_type: "server_error".into(),
+            message: "internal server error".into(),
+            status_code: Some(500),
+        };
+        let s = err.to_string();
+        assert!(s.contains("server_error"));
+        assert!(s.contains("internal server error"));
+    }
+
+    #[test]
+    fn display_api_error_no_status() {
+        let err = AnthropicError::Api {
+            error_type: "unknown".into(),
+            message: "something went wrong".into(),
+            status_code: None,
+        };
+        let s = err.to_string();
+        assert!(s.contains("unknown"));
+        assert!(s.contains("something went wrong"));
+    }
+
+    // ---- is_retryable additional cases ----
+
+    #[test]
+    fn is_retryable_api_502() {
+        assert!(
+            AnthropicError::Api {
+                error_type: "api_error".into(),
+                message: "bad gateway".into(),
+                status_code: Some(502),
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn is_retryable_api_503() {
+        assert!(
+            AnthropicError::Api {
+                error_type: "api_error".into(),
+                message: "service unavailable".into(),
+                status_code: Some(503),
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn is_retryable_api_599() {
+        assert!(
+            AnthropicError::Api {
+                error_type: "api_error".into(),
+                message: "server error".into(),
+                status_code: Some(599),
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn not_retryable_api_none_status() {
+        assert!(
+            !AnthropicError::Api {
+                error_type: "x".into(),
+                message: "x".into(),
+                status_code: None,
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn not_retryable_api_403() {
+        assert!(
+            !AnthropicError::Api {
+                error_type: "x".into(),
+                message: "x".into(),
+                status_code: Some(403),
+            }
+            .is_retryable()
+        );
+    }
+
+    // ---- retry_after additional cases ----
+
+    #[test]
+    fn retry_after_zero_ms() {
+        let err = AnthropicError::RateLimited { retry_after_ms: 0 };
+        assert_eq!(err.retry_after(), Some(Duration::from_millis(0)));
+    }
+
+    #[test]
+    fn retry_after_context_length_none() {
+        assert_eq!(
+            AnthropicError::ContextLengthExceeded {
+                message: "x".into()
+            }
+            .retry_after(),
+            None
+        );
+    }
+
+    #[test]
+    fn retry_after_json_none() {
+        let json_err = serde_json::from_str::<serde_json::Value>("x").unwrap_err();
+        assert_eq!(AnthropicError::Json(json_err).retry_after(), None);
+    }
+
+    // ---- to_fcp_error additional cases ----
+
+    #[test]
+    fn to_fcp_error_api_none_status_external() {
+        let err = AnthropicError::Api {
+            error_type: "unknown_error".into(),
+            message: "something".into(),
+            status_code: None,
+        };
+        match err.to_fcp_error() {
+            FcpError::External {
+                service,
+                status_code,
+                retryable,
+                message,
+                ..
+            } => {
+                assert_eq!(service, "anthropic");
+                assert_eq!(status_code, None);
+                assert!(!retryable);
+                assert!(message.contains("unknown_error"));
+                assert!(message.contains("something"));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_fcp_error_api_403_external() {
+        let err = AnthropicError::Api {
+            error_type: "forbidden_error".into(),
+            message: "no access".into(),
+            status_code: Some(403),
+        };
+        match err.to_fcp_error() {
+            FcpError::External {
+                service,
+                status_code,
+                ..
+            } => {
+                assert_eq!(service, "anthropic");
+                assert_eq!(status_code, Some(403));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    // ---- Debug format ----
+
+    #[test]
+    fn debug_api_error() {
+        let err = AnthropicError::Api {
+            error_type: "test_type".into(),
+            message: "test_msg".into(),
+            status_code: Some(418),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Api"));
+        assert!(dbg.contains("test_type"));
+        assert!(dbg.contains("418"));
+    }
+
+    #[test]
+    fn debug_rate_limited() {
+        let err = AnthropicError::RateLimited {
+            retry_after_ms: 7777,
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("RateLimited"));
+        assert!(dbg.contains("7777"));
+    }
+
+    #[test]
+    fn debug_overloaded() {
+        let err = AnthropicError::Overloaded {
+            retry_after_ms: 9999,
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Overloaded"));
+        assert!(dbg.contains("9999"));
+    }
+
+    #[test]
+    fn debug_invalid_api_key() {
+        let dbg = format!("{:?}", AnthropicError::InvalidApiKey);
+        assert!(dbg.contains("InvalidApiKey"));
+    }
+
+    #[test]
+    fn debug_context_length() {
+        let err = AnthropicError::ContextLengthExceeded {
+            message: "ctx_msg".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("ContextLengthExceeded"));
+        assert!(dbg.contains("ctx_msg"));
+    }
+
+    // ---- Source chain ----
+
+    #[test]
+    fn source_json_variant() {
+        let json_err = serde_json::from_str::<serde_json::Value>("{bad}").unwrap_err();
+        let err = AnthropicError::Json(json_err);
+        let source = std::error::Error::source(&err);
+        assert!(source.is_some());
+    }
+
+    #[test]
+    fn source_invalid_api_key_none() {
+        let err = AnthropicError::InvalidApiKey;
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn source_api_none() {
+        let err = AnthropicError::Api {
+            error_type: "x".into(),
+            message: "x".into(),
+            status_code: None,
+        };
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn source_rate_limited_none() {
+        let err = AnthropicError::RateLimited {
+            retry_after_ms: 100,
+        };
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn source_overloaded_none() {
+        let err = AnthropicError::Overloaded {
+            retry_after_ms: 100,
+        };
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn source_context_length_none() {
+        let err = AnthropicError::ContextLengthExceeded {
+            message: "x".into(),
+        };
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    // ---- Overloaded display with large value ----
+
+    #[test]
+    fn display_overloaded_large_value() {
+        let err = AnthropicError::Overloaded {
+            retry_after_ms: 120_000,
+        };
+        assert!(err.to_string().contains("120000ms"));
+    }
+
+    // ---- Rate limited display with exact format ----
+
+    #[test]
+    fn display_rate_limited_exact() {
+        let err = AnthropicError::RateLimited {
+            retry_after_ms: 30_000,
+        };
+        assert_eq!(err.to_string(), "Rate limited, retry after 30000ms");
+    }
 }

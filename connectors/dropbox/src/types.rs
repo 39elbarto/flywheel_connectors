@@ -395,4 +395,127 @@ mod tests {
         assert_eq!(r.entries.len(), 50);
         assert_eq!(r.has_more, Some(true));
     }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn file_metadata_clone() {
+        let f = FileMetadata {
+            tag: Some("file".into()),
+            name: "test.txt".into(),
+            path_lower: None,
+            path_display: None,
+            id: None,
+            client_modified: None,
+            server_modified: None,
+            rev: None,
+            size: Some(42),
+            content_hash: None,
+            is_downloadable: None,
+        };
+        let f2 = f.clone();
+        assert_eq!(f2.name, "test.txt");
+        assert_eq!(f2.size, Some(42));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn folder_metadata_clone() {
+        let f = FolderMetadata {
+            tag: Some("folder".into()),
+            name: "Test".into(),
+            path_lower: None,
+            path_display: None,
+            id: None,
+        };
+        let f2 = f.clone();
+        assert_eq!(f2.name, "Test");
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn list_folder_result_clone() {
+        let r = ListFolderResult {
+            entries: vec![json!({"name": "a"})],
+            cursor: Some("cur".into()),
+            has_more: Some(false),
+        };
+        let r2 = r.clone();
+        assert_eq!(r2.entries.len(), 1);
+        assert_eq!(r2.cursor, Some("cur".into()));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn deleted_metadata_clone() {
+        let d = DeletedMetadata {
+            tag: Some("deleted".into()),
+            name: "gone.txt".into(),
+            path_lower: None,
+            path_display: None,
+        };
+        let d2 = d.clone();
+        assert_eq!(d2.name, "gone.txt");
+    }
+
+    #[test]
+    fn file_metadata_debug_format() {
+        let f: FileMetadata = serde_json::from_value(json!({"name": "x.txt"})).unwrap();
+        let dbg = format!("{f:?}");
+        assert!(dbg.contains("FileMetadata"));
+        assert!(dbg.contains("x.txt"));
+    }
+
+    #[test]
+    fn folder_metadata_debug_format() {
+        let f: FolderMetadata = serde_json::from_value(json!({"name": "Docs"})).unwrap();
+        let dbg = format!("{f:?}");
+        assert!(dbg.contains("FolderMetadata"));
+    }
+
+    #[test]
+    fn shared_link_metadata_clone() {
+        let s = SharedLinkMetadata {
+            tag: None,
+            url: "https://example.com".into(),
+            name: Some("link".into()),
+            path_lower: None,
+            link_permissions: None,
+        };
+        #[allow(clippy::redundant_clone)]
+        let s2 = s.clone();
+        assert_eq!(s2.url, "https://example.com");
+    }
+
+    #[test]
+    fn api_error_response_clone() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({
+            "error_summary": "path/not_found"
+        }))
+        .unwrap();
+        #[allow(clippy::redundant_clone)]
+        let e2 = e.clone();
+        assert_eq!(e2.error_summary, Some("path/not_found".into()));
+    }
+
+    #[test]
+    fn file_metadata_zero_size() {
+        let f: FileMetadata = serde_json::from_value(json!({
+            "name": "empty.txt",
+            "size": 0
+        }))
+        .unwrap();
+        assert_eq!(f.size, Some(0));
+    }
+
+    #[test]
+    fn list_shared_links_result_clone() {
+        let r = ListSharedLinksResult {
+            links: vec![json!({"url": "https://example.com"})],
+            has_more: Some(false),
+            cursor: None,
+        };
+        #[allow(clippy::redundant_clone)]
+        let r2 = r.clone();
+        assert_eq!(r2.links.len(), 1);
+    }
 }

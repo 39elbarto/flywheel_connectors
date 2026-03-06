@@ -881,4 +881,218 @@ mod tests {
         assert!(c.config.is_none());
         assert!(c.client.is_none());
     }
+
+    #[test]
+    fn connector_default_counters() {
+        let c = HubSpotConnector::default();
+        assert_eq!(c.request_count.load(Ordering::Relaxed), 0);
+        assert_eq!(c.error_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn connector_default_session() {
+        let c = HubSpotConnector::default();
+        assert!(c.session_id.is_none());
+    }
+
+    // ── DoctorStatus serde ──────────────────────────────────────────
+
+    #[test]
+    fn doctor_status_healthy_serde() {
+        let v = serde_json::to_value(DoctorStatus::Healthy).unwrap();
+        assert_eq!(v, "healthy");
+        let ds: DoctorStatus = serde_json::from_value(v).unwrap();
+        assert_eq!(ds, DoctorStatus::Healthy);
+    }
+
+    #[test]
+    fn doctor_status_degraded_serde() {
+        let v = serde_json::to_value(DoctorStatus::Degraded).unwrap();
+        assert_eq!(v, "degraded");
+    }
+
+    #[test]
+    fn doctor_status_unhealthy_serde() {
+        let v = serde_json::to_value(DoctorStatus::Unhealthy).unwrap();
+        assert_eq!(v, "unhealthy");
+    }
+
+    #[test]
+    fn doctor_status_eq() {
+        assert_eq!(DoctorStatus::Healthy, DoctorStatus::Healthy);
+        assert_ne!(DoctorStatus::Healthy, DoctorStatus::Degraded);
+        assert_ne!(DoctorStatus::Degraded, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_status_copy() {
+        let s = DoctorStatus::Degraded;
+        let s2 = s;
+        assert_eq!(s, s2);
+    }
+
+    // ── DoctorCheck serde ───────────────────────────────────────────
+
+    #[test]
+    fn doctor_check_skip_none_message() {
+        let c = DoctorCheck { name: "test".into(), passed: true, message: None, critical: false };
+        let v = serde_json::to_value(&c).unwrap();
+        assert!(!v.as_object().unwrap().contains_key("message"));
+    }
+
+    #[test]
+    fn doctor_check_includes_some_message() {
+        let c = DoctorCheck { name: "test".into(), passed: false, message: Some("fail".into()), critical: true };
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["message"], "fail");
+    }
+
+    #[test]
+    fn doctor_check_roundtrip() {
+        let c = DoctorCheck { name: "cfg".into(), passed: true, message: None, critical: true };
+        let v = serde_json::to_value(&c).unwrap();
+        let c2: DoctorCheck = serde_json::from_value(v).unwrap();
+        assert_eq!(c2.name, "cfg");
+        assert!(c2.passed);
+    }
+
+    // ── DoctorResult serde ──────────────────────────────────────────
+
+    #[test]
+    fn doctor_result_roundtrip() {
+        let r = DoctorResult::from_checks(vec![
+            DoctorCheck { name: "a".into(), passed: true, message: None, critical: true },
+        ]);
+        let v = serde_json::to_value(&r).unwrap();
+        let r2: DoctorResult = serde_json::from_value(v).unwrap();
+        assert_eq!(r2.status, DoctorStatus::Healthy);
+        assert_eq!(r2.checks.len(), 1);
+    }
+
+    #[test]
+    fn doctor_result_serializes_message_none() {
+        let r = DoctorResult::from_checks(vec![
+            DoctorCheck { name: "cfg".into(), passed: true, message: None, critical: true },
+        ]);
+        let v = serde_json::to_value(&r).unwrap();
+        assert!(v["checks"][0].as_object().unwrap().get("message").is_none()
+            || v["checks"][0]["message"].is_null());
+    }
+
+    // ── Config edge cases ───────────────────────────────────────────
+
+    #[test]
+    fn config_error_both_code() {
+        let result = HubSpotConfig::from_params(&json!({
+            "access_token": "tok",
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+        }));
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { code, message } => {
+                assert_eq!(code, 1003);
+                assert!(message.contains("exactly one"));
+            }
+            e => panic!("expected InvalidRequest, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn config_error_none_code() {
+        let result = HubSpotConfig::from_params(&json!({}));
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { code, message } => {
+                assert_eq!(code, 1003);
+                assert!(message.contains("Missing"));
+            }
+            e => panic!("expected InvalidRequest, got {e:?}"),
+        }
+    }
+
+    // ── require_str edge cases ──────────────────────────────────────
+
+    #[test]
+    fn require_str_empty_string() {
+        let input = json!({"field": ""});
+        assert_eq!(require_str(&input, "field").unwrap(), "");
+    }
+
+    #[test]
+    fn require_str_boolean() {
+        let input = json!({"flag": true});
+        assert!(require_str(&input, "flag").is_err());
+    }
+
+    #[test]
+    fn require_str_array() {
+        let input = json!({"arr": [1, 2]});
+        assert!(require_str(&input, "arr").is_err());
+    }
+
+    // ── extract_string_array edge cases ─────────────────────────────
+
+    #[test]
+    fn extract_string_array_not_array() {
+        let input = json!({"props": "not_array"});
+        assert!(extract_string_array(&input, "props").is_none());
+    }
+
+    #[test]
+    fn extract_string_array_all_non_strings() {
+        let input = json!({"tags": [1, 2, null, true]});
+        let arr = extract_string_array(&input, "tags").unwrap();
+        assert!(arr.is_empty());
+    }
+
+    // ── operations edge cases ───────────────────────────────────────
+
+    #[test]
+    fn operations_contacts_list_is_safe() {
+        let ops = operations_info();
+        let op = ops.as_array().unwrap().iter()
+            .find(|o| o["id"] == "hubspot.contacts.list").unwrap();
+        assert_eq!(op["safety_tier"], "safe");
+        assert_eq!(op["risk_level"], "low");
+    }
+
+    #[test]
+    fn operations_contacts_delete_is_dangerous() {
+        let ops = operations_info();
+        let op = ops.as_array().unwrap().iter()
+            .find(|o| o["id"] == "hubspot.contacts.delete").unwrap();
+        assert_eq!(op["safety_tier"], "dangerous");
+        assert_eq!(op["risk_level"], "high");
+    }
+
+    #[test]
+    fn operations_valid_idempotency_values() {
+        let valid = ["strict", "best_effort", "none"];
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let idem = op["idempotency"].as_str().unwrap();
+            assert!(valid.contains(&idem), "invalid idempotency {idem} for {:?}", op["id"]);
+        }
+    }
+
+    #[test]
+    fn operations_expected_ids_present() {
+        let ops = operations_info();
+        let ids: Vec<&str> = ops.as_array().unwrap().iter()
+            .filter_map(|o| o["id"].as_str()).collect();
+        let expected = [
+            "hubspot.contacts.list",
+            "hubspot.contacts.get",
+            "hubspot.contacts.create",
+            "hubspot.contacts.update",
+            "hubspot.contacts.delete",
+            "hubspot.companies.list",
+            "hubspot.deals.list",
+            "hubspot.deals.create",
+            "hubspot.pipelines.list",
+            "hubspot.analytics.report",
+            "hubspot.events.stream",
+        ];
+        for e in &expected {
+            assert!(ids.contains(e), "missing expected operation {e}");
+        }
+    }
 }

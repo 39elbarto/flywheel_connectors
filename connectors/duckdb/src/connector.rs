@@ -899,4 +899,165 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn connector_new_has_no_config() {
+        let c = DuckDbConnector::new();
+        assert!(c.config.is_none());
+        assert!(c.client.is_none());
+    }
+
+    #[test]
+    fn connector_request_count_starts_at_zero() {
+        let c = DuckDbConnector::new();
+        assert_eq!(c.request_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn connector_error_count_starts_at_zero() {
+        let c = DuckDbConnector::new();
+        assert_eq!(c.error_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn doctor_check_serializes_with_message() {
+        let check = DoctorCheck {
+            name: "test_check".into(),
+            passed: false,
+            message: Some("failure reason".into()),
+            critical: true,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert_eq!(v["name"], "test_check");
+        assert_eq!(v["passed"], false);
+        assert_eq!(v["message"], "failure reason");
+        assert_eq!(v["critical"], true);
+    }
+
+    #[test]
+    fn doctor_check_serializes_without_message() {
+        let check = DoctorCheck {
+            name: "ok_check".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert_eq!(v["name"], "ok_check");
+        assert_eq!(v["passed"], true);
+        assert!(!v.as_object().unwrap().contains_key("message"));
+    }
+
+    #[test]
+    fn doctor_status_serde_roundtrip() {
+        let statuses = [DoctorStatus::Healthy, DoctorStatus::Degraded, DoctorStatus::Unhealthy];
+        for status in &statuses {
+            let v = serde_json::to_value(status).unwrap();
+            let back: DoctorStatus = serde_json::from_value(v).unwrap();
+            assert_eq!(*status, back);
+        }
+    }
+
+    #[test]
+    fn doctor_result_clone() {
+        let r = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "x".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        }]);
+        let c = r.clone();
+        assert_eq!(c.status, DoctorStatus::Healthy);
+        assert_eq!(c.checks.len(), 1);
+        assert_eq!(r.status, DoctorStatus::Healthy);
+    }
+
+    #[test]
+    fn operations_query_execute_is_risky() {
+        let ops = operations_info();
+        let query_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "duckdb.query.execute")
+            .unwrap();
+        assert_eq!(query_op["safety_tier"], "risky");
+        assert_eq!(query_op["risk_level"], "high");
+    }
+
+    #[test]
+    fn operations_shares_create_is_risky() {
+        let ops = operations_info();
+        let share_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "duckdb.shares.create")
+            .unwrap();
+        assert_eq!(share_op["safety_tier"], "risky");
+        assert_eq!(share_op["risk_level"], "medium");
+    }
+
+    #[test]
+    fn operations_databases_list_summary() {
+        let ops = operations_info();
+        let db_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "duckdb.databases.list")
+            .unwrap();
+        assert!(db_op["summary"].as_str().unwrap().len() > 5);
+    }
+
+    #[test]
+    fn require_str_boolean_value() {
+        let input = json!({"database": true});
+        assert!(require_str(&input, "database").is_err());
+    }
+
+    #[test]
+    fn require_str_array_value() {
+        let input = json!({"database": ["a", "b"]});
+        assert!(require_str(&input, "database").is_err());
+    }
+
+    #[test]
+    fn require_str_object_value() {
+        let input = json!({"database": {"nested": true}});
+        assert!(require_str(&input, "database").is_err());
+    }
+
+    #[test]
+    fn doctor_result_multiple_critical_failures() {
+        let checks = vec![
+            DoctorCheck {
+                name: "a".into(),
+                passed: false,
+                message: Some("fail a".into()),
+                critical: true,
+            },
+            DoctorCheck {
+                name: "b".into(),
+                passed: false,
+                message: Some("fail b".into()),
+                critical: true,
+            },
+        ];
+        let r = DoctorResult::from_checks(checks);
+        assert_eq!(r.status, DoctorStatus::Unhealthy);
+        assert_eq!(r.checks.len(), 2);
+    }
+
+    #[test]
+    fn config_with_database_and_custom_url() {
+        let config = DuckDbConfig::from_params(&json!({
+            "service_token": "tok",
+            "base_url": "https://custom.motherduck.com/v0",
+            "database": "my_db",
+        }))
+        .unwrap();
+        assert_eq!(config.base_url, "https://custom.motherduck.com/v0");
+        assert_eq!(config.default_database, Some("my_db".into()));
+    }
 }

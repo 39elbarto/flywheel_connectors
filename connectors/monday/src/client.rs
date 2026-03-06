@@ -305,4 +305,65 @@ mod tests {
         assert!(!dbg.contains("secret"));
         assert!(dbg.contains("redacted"));
     }
+
+    #[test]
+    fn auth_clone() {
+        let auth = MondayAuth::ApiToken("tok".into());
+        let auth2 = auth.clone();
+        assert_eq!(auth.redacted_label(), auth2.redacted_label());
+    }
+
+    #[test]
+    fn auth_credential_debug_shows_id() {
+        let cred = MondayAuth::CredentialId(CredentialId::new());
+        let dbg = format!("{cred:?}");
+        assert!(dbg.contains("CredentialId"));
+    }
+
+    #[test]
+    fn client_new_trailing_slash_stripped() {
+        let client = MondayClient::new(
+            MondayAuth::ApiToken("tok".into()),
+            Some("https://example.com///"),
+        )
+        .unwrap();
+        assert!(!client.base_url.ends_with('/'));
+    }
+
+    #[test]
+    fn client_debug_shows_base_url() {
+        let client = MondayClient::new(MondayAuth::ApiToken("tok".into()), None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("MondayClient"));
+        assert!(dbg.contains("monday.com"));
+    }
+
+    #[test]
+    fn default_base_url_is_https() {
+        assert!(DEFAULT_BASE_URL.starts_with("https://"));
+    }
+
+    #[test]
+    fn default_base_url_no_trailing_slash() {
+        assert!(!DEFAULT_BASE_URL.ends_with('/'));
+    }
+
+    #[test]
+    fn auth_api_token_not_in_label() {
+        let auth = MondayAuth::ApiToken("super-secret-123".into());
+        let label = auth.redacted_label();
+        assert!(!label.contains("super-secret-123"));
+    }
+
+    #[test]
+    fn auth_api_token_not_secretless() {
+        let auth = MondayAuth::ApiToken("tok".into());
+        assert!(!auth.is_secretless());
+    }
+
+    #[test]
+    fn auth_credential_id_is_secretless() {
+        let auth = MondayAuth::CredentialId(CredentialId::new());
+        assert!(auth.is_secretless());
+    }
 }

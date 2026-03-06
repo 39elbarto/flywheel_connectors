@@ -416,4 +416,130 @@ mod tests {
         assert!(!dbg.contains("supersecret"));
         assert!(dbg.contains("user"));
     }
+
+    #[test]
+    fn auth_access_token_redacted_label_value() {
+        let auth = BitbucketAuth::AccessToken("my_token_xyz".into());
+        let label = auth.redacted_label();
+        assert_eq!(label, "access_token:redacted");
+        assert!(!label.contains("my_token_xyz"));
+    }
+
+    #[test]
+    fn auth_app_password_redacted_label_contains_username() {
+        let auth = BitbucketAuth::AppPassword {
+            username: "myuser".into(),
+            app_password: "mypass".into(),
+        };
+        let label = auth.redacted_label();
+        assert!(label.contains("myuser"));
+        assert!(label.contains("redacted"));
+        assert!(!label.contains("mypass"));
+    }
+
+    #[test]
+    fn auth_credential_id_secretless_verified() {
+        let cred_id = CredentialId::new();
+        let auth = BitbucketAuth::CredentialId(cred_id);
+        assert!(auth.is_secretless());
+        let label = auth.redacted_label();
+        assert!(label.starts_with("credential_id:"));
+    }
+
+    #[test]
+    fn client_strips_trailing_slash() {
+        let client = BitbucketClient::new(
+            BitbucketAuth::AccessToken("tok".into()),
+            Some("https://example.com/api///"),
+        )
+        .unwrap();
+        assert!(!client.base_url.ends_with('/'));
+    }
+
+    #[test]
+    fn client_debug_contains_base_url() {
+        let client = BitbucketClient::new(
+            BitbucketAuth::AccessToken("tok".into()),
+            Some("https://custom.example.com/v2"),
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("custom.example.com"));
+    }
+
+    #[test]
+    fn auth_debug_credential_id_format() {
+        let cred = BitbucketAuth::CredentialId(CredentialId::new());
+        let dbg = format!("{cred:?}");
+        assert!(dbg.contains("CredentialId"));
+        assert!(!dbg.contains("redacted"));
+    }
+
+    #[test]
+    fn default_base_url_is_https() {
+        assert!(DEFAULT_BASE_URL.starts_with("https://"));
+    }
+
+    #[test]
+    fn default_base_url_contains_bitbucket() {
+        assert!(DEFAULT_BASE_URL.contains("bitbucket.org"));
+    }
+
+    #[test]
+    fn default_base_url_has_v2() {
+        assert!(DEFAULT_BASE_URL.contains("/2.0"));
+    }
+
+    #[test]
+    fn client_new_with_credential_id() {
+        let client = BitbucketClient::new(
+            BitbucketAuth::CredentialId(CredentialId::new()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(client.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn client_debug_credential_id() {
+        let client = BitbucketClient::new(
+            BitbucketAuth::CredentialId(CredentialId::new()),
+            None,
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("CredentialId"));
+        assert!(dbg.contains("BitbucketClient"));
+    }
+
+    #[test]
+    fn auth_app_password_is_not_secretless() {
+        let auth = BitbucketAuth::AppPassword {
+            username: "u".into(),
+            app_password: "p".into(),
+        };
+        assert!(!auth.is_secretless());
+    }
+
+    #[test]
+    fn auth_access_token_is_not_secretless() {
+        let auth = BitbucketAuth::AccessToken("tok".into());
+        assert!(!auth.is_secretless());
+    }
+
+    #[test]
+    fn auth_credential_id_is_secretless() {
+        let auth = BitbucketAuth::CredentialId(CredentialId::new());
+        assert!(auth.is_secretless());
+    }
+
+    #[test]
+    fn client_custom_url_no_trailing_slash() {
+        let client = BitbucketClient::new(
+            BitbucketAuth::AccessToken("tok".into()),
+            Some("https://example.com/api"),
+        )
+        .unwrap();
+        assert_eq!(client.base_url, "https://example.com/api");
+    }
 }

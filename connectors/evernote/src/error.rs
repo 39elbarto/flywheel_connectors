@@ -483,4 +483,89 @@ mod tests {
             other => panic!("expected External, got {other:?}"),
         }
     }
+
+    #[test]
+    fn error_debug_format_unauthorized() {
+        let dbg = format!("{:?}", EvernoteError::Unauthorized);
+        assert!(dbg.contains("Unauthorized"));
+    }
+
+    #[test]
+    fn error_debug_format_forbidden() {
+        let dbg = format!("{:?}", EvernoteError::Forbidden);
+        assert!(dbg.contains("Forbidden"));
+    }
+
+    #[test]
+    fn error_debug_format_not_found() {
+        let dbg = format!("{:?}", EvernoteError::NotFound { resource: "note".into() });
+        assert!(dbg.contains("NotFound"));
+        assert!(dbg.contains("note"));
+    }
+
+    #[test]
+    fn error_debug_format_rate_limited() {
+        let dbg = format!("{:?}", EvernoteError::RateLimited { retry_after_ms: 100 });
+        assert!(dbg.contains("RateLimited"));
+    }
+
+    #[test]
+    fn error_debug_format_api() {
+        let dbg = format!("{:?}", EvernoteError::Api { status_code: 418, message: "teapot".into() });
+        assert!(dbg.contains("Api"));
+        assert!(dbg.contains("418"));
+    }
+
+    #[test]
+    fn api_504_is_retryable() {
+        assert!(
+            EvernoteError::Api {
+                status_code: 504,
+                message: "timeout".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn rate_limited_large_retry_after() {
+        let err = EvernoteError::RateLimited { retry_after_ms: 7_200_000 };
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(7200)));
+    }
+
+    #[test]
+    fn json_error_not_retryable() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{invalid");
+        assert!(!EvernoteError::Json(bad.unwrap_err()).is_retryable());
+    }
+
+    #[test]
+    fn retry_after_none_for_json_error() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{bad");
+        assert_eq!(EvernoteError::Json(bad.unwrap_err()).retry_after(), None);
+    }
+
+    #[test]
+    fn unauthorized_fcp_retry_after_is_none() {
+        match EvernoteError::Unauthorized.to_fcp_error() {
+            FcpError::External { retry_after, .. } => assert!(retry_after.is_none()),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_error_fcp_retry_after_is_none() {
+        match (EvernoteError::Api { status_code: 502, message: "gw".into() }).to_fcp_error() {
+            FcpError::External { retry_after, .. } => assert!(retry_after.is_none()),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn not_found_fcp_error_retryable_false() {
+        match (EvernoteError::NotFound { resource: "nb".into() }).to_fcp_error() {
+            FcpError::External { retryable, .. } => assert!(!retryable),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
 }

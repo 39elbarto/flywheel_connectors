@@ -449,4 +449,255 @@ mod tests {
         assert_eq!(c.last_computed, Some("2025-06-01T00:00:00Z".into()));
         assert_eq!(c.last_mod, Some("2025-06-02T00:00:00Z".into()));
     }
+
+    // -- Additional ChartQueryResponse tests --
+
+    #[test]
+    fn chart_query_response_debug_format() {
+        let r = ChartQueryResponse {
+            data: json!({}),
+            x_values: None,
+            series_labels: None,
+            series_collapsed: None,
+        };
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("ChartQueryResponse"));
+    }
+
+    #[test]
+    fn chart_query_response_clone() {
+        let r = ChartQueryResponse {
+            data: json!({"series": [[1, 2]]}),
+            x_values: Some(vec!["d1".into()]),
+            series_labels: Some(vec!["Users".into()]),
+            series_collapsed: Some(vec![vec![json!(1)]]),
+        };
+        let cloned = r.clone();
+        // Use original after clone
+        assert!(r.data.is_object());
+        assert_eq!(cloned.x_values.as_ref().unwrap().len(), 1);
+        assert_eq!(cloned.series_labels.as_ref().unwrap()[0], "Users");
+    }
+
+    #[test]
+    fn chart_query_response_with_array_data() {
+        let r: ChartQueryResponse = serde_json::from_value(json!({
+            "data": [1, 2, 3]
+        }))
+        .unwrap();
+        assert!(r.data.is_array());
+    }
+
+    // -- Additional Cohort tests --
+
+    #[test]
+    fn cohort_debug_format() {
+        let c = Cohort {
+            id: "c1".into(),
+            name: "Test".into(),
+            app_id: None,
+            description: None,
+            last_computed: None,
+            last_mod: None,
+            published: None,
+            archived: None,
+            size: None,
+            created_at: None,
+            cohort_type: None,
+            owner: None,
+        };
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("Cohort"));
+        assert!(dbg.contains("c1"));
+    }
+
+    #[test]
+    fn cohort_clone() {
+        let c = Cohort {
+            id: "c1".into(),
+            name: "Power Users".into(),
+            app_id: Some(42),
+            description: Some("desc".into()),
+            last_computed: None,
+            last_mod: None,
+            published: Some(true),
+            archived: Some(false),
+            size: Some(100),
+            created_at: None,
+            cohort_type: Some("behavioral".into()),
+            owner: Some("admin".into()),
+        };
+        let cloned = c.clone();
+        // Use original after clone
+        assert_eq!(c.id, "c1");
+        assert_eq!(cloned.id, "c1");
+        assert_eq!(cloned.app_id, Some(42));
+        assert_eq!(cloned.cohort_type, Some("behavioral".into()));
+    }
+
+    #[test]
+    fn cohort_json_string_roundtrip() {
+        let c = Cohort {
+            id: "c1".into(),
+            name: "Test".into(),
+            app_id: Some(1),
+            description: None,
+            last_computed: None,
+            last_mod: None,
+            published: None,
+            archived: None,
+            size: Some(50),
+            created_at: None,
+            cohort_type: None,
+            owner: None,
+        };
+        let s = serde_json::to_string(&c).unwrap();
+        let back: Cohort = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.id, "c1");
+        assert_eq!(back.size, Some(50));
+    }
+
+    // -- Additional ExportedEvent tests --
+
+    #[test]
+    fn exported_event_debug_format() {
+        let e = ExportedEvent {
+            event_type: Some("click".into()),
+            event_time: None,
+            user_id: None,
+            device_id: None,
+            session_id: None,
+            event_properties: None,
+            user_properties: None,
+            platform: None,
+            os_name: None,
+            country: None,
+            city: None,
+            region: None,
+            ip_address: None,
+            amplitude_id: None,
+        };
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("ExportedEvent"));
+        assert!(dbg.contains("click"));
+    }
+
+    #[test]
+    fn exported_event_clone() {
+        let e = ExportedEvent {
+            event_type: Some("test".into()),
+            event_time: Some("2025-01-01".into()),
+            user_id: Some("u1".into()),
+            device_id: Some("d1".into()),
+            session_id: Some(100),
+            event_properties: Some(json!({"k": "v"})),
+            user_properties: None,
+            platform: Some("Web".into()),
+            os_name: Some("macOS".into()),
+            country: Some("US".into()),
+            city: Some("SF".into()),
+            region: Some("CA".into()),
+            ip_address: Some("1.2.3.4".into()),
+            amplitude_id: Some(999),
+        };
+        let cloned = e.clone();
+        // Use original after clone
+        assert_eq!(e.event_type, Some("test".into()));
+        assert_eq!(cloned.event_type, Some("test".into()));
+        assert_eq!(cloned.amplitude_id, Some(999));
+    }
+
+    #[test]
+    fn exported_event_with_os_name() {
+        let e: ExportedEvent = serde_json::from_value(json!({
+            "os_name": "Windows"
+        }))
+        .unwrap();
+        assert_eq!(e.os_name, Some("Windows".into()));
+    }
+
+    #[test]
+    fn exported_event_with_device_id() {
+        let e: ExportedEvent = serde_json::from_value(json!({
+            "device_id": "device_abc_123"
+        }))
+        .unwrap();
+        assert_eq!(e.device_id, Some("device_abc_123".into()));
+    }
+
+    // -- Additional ApiErrorResponse tests --
+
+    #[test]
+    fn api_error_response_debug_format() {
+        let e = ApiErrorResponse {
+            error: Some("test".into()),
+            message: None,
+            code: Some(500),
+        };
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("ApiErrorResponse"));
+    }
+
+    #[test]
+    fn api_error_response_clone() {
+        let e = ApiErrorResponse {
+            error: Some("err".into()),
+            message: Some("msg".into()),
+            code: Some(400),
+        };
+        let cloned = e.clone();
+        // Use original after clone
+        assert_eq!(e.code, Some(400));
+        assert_eq!(cloned.error, Some("err".into()));
+        assert_eq!(cloned.message, Some("msg".into()));
+        assert_eq!(cloned.code, Some(400));
+    }
+
+    #[test]
+    fn api_error_response_only_code() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({"code": 503})).unwrap();
+        assert!(e.error.is_none());
+        assert!(e.message.is_none());
+        assert_eq!(e.code, Some(503));
+    }
+
+    // -- CohortsListResponse additional --
+
+    #[test]
+    fn cohorts_list_response_debug() {
+        let r = CohortsListResponse { cohorts: vec![] };
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("CohortsListResponse"));
+    }
+
+    #[test]
+    fn cohorts_list_response_clone() {
+        let r = CohortsListResponse {
+            cohorts: vec![json!({"id": "c1"})],
+        };
+        let cloned = r.clone();
+        // Use original after clone
+        assert_eq!(r.cohorts.len(), 1);
+        assert_eq!(cloned.cohorts.len(), 1);
+    }
+
+    // -- EventsExportResponse additional --
+
+    #[test]
+    fn events_export_response_debug() {
+        let r = EventsExportResponse { data: vec![] };
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("EventsExportResponse"));
+    }
+
+    #[test]
+    fn events_export_response_clone() {
+        let r = EventsExportResponse {
+            data: vec![json!({"event_type": "test"})],
+        };
+        let cloned = r.clone();
+        // Use original after clone
+        assert_eq!(r.data.len(), 1);
+        assert_eq!(cloned.data.len(), 1);
+    }
 }

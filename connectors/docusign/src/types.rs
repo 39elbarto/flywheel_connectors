@@ -345,4 +345,206 @@ mod tests {
         assert!(e.error_code.is_none());
         assert!(e.message.is_none());
     }
+
+    // -- Clone trait tests --
+
+    #[test]
+    fn envelope_summary_clone() {
+        let e = EnvelopeSummary {
+            envelope_id: "env-1".into(),
+            status: Some("sent".into()),
+            email_subject: None,
+            sent_date_time: None,
+            created_date_time: None,
+            completed_date_time: None,
+            status_changed_date_time: None,
+            envelope_uri: None,
+        };
+        let cloned = e.clone();
+        drop(e);
+        assert_eq!(cloned.envelope_id, "env-1");
+        assert_eq!(cloned.status, Some("sent".into()));
+    }
+
+    #[test]
+    fn envelope_clone() {
+        let e = Envelope {
+            envelope_id: "env-2".into(),
+            status: Some("completed".into()),
+            email_subject: Some("Test".into()),
+            email_blurb: None,
+            sent_date_time: None,
+            created_date_time: None,
+            completed_date_time: None,
+            voided_date_time: None,
+            voided_reason: None,
+            status_changed_date_time: None,
+            envelope_uri: None,
+            recipients: None,
+            documents: None,
+        };
+        let cloned = e.clone();
+        drop(e);
+        assert_eq!(cloned.envelope_id, "env-2");
+    }
+
+    #[test]
+    fn envelope_create_response_clone() {
+        let r = EnvelopeCreateResponse {
+            envelope_id: "env-new".into(),
+            status: Some("created".into()),
+            uri: None,
+            status_date_time: None,
+        };
+        let cloned = r.clone();
+        drop(r);
+        assert_eq!(cloned.envelope_id, "env-new");
+    }
+
+    #[test]
+    fn recipient_clone() {
+        let r = Recipient {
+            recipient_id: Some("1".into()),
+            email: Some("a@b.com".into()),
+            name: Some("Alice".into()),
+            status: None,
+            routing_order: None,
+            recipient_type: None,
+        };
+        let cloned = r.clone();
+        drop(r);
+        assert_eq!(cloned.email, Some("a@b.com".into()));
+    }
+
+    #[test]
+    fn template_clone() {
+        let t = Template {
+            template_id: "tmpl-1".into(),
+            name: Some("NDA".into()),
+            description: None,
+            created: None,
+            last_modified: None,
+            uri: None,
+            shared: None,
+            folder_name: None,
+        };
+        let cloned = t.clone();
+        drop(t);
+        assert_eq!(cloned.template_id, "tmpl-1");
+    }
+
+    #[test]
+    fn connect_event_clone() {
+        let ce = ConnectEvent {
+            envelope_id: Some("env-100".into()),
+            status: Some("sent".into()),
+            event_timestamp: None,
+            envelope_status: None,
+            recipient_statuses: None,
+        };
+        let cloned = ce.clone();
+        drop(ce);
+        assert_eq!(cloned.envelope_id, Some("env-100".into()));
+    }
+
+    // -- Debug trait tests --
+
+    #[test]
+    fn envelope_summary_debug() {
+        let e: EnvelopeSummary =
+            serde_json::from_value(json!({"envelopeId": "dbg"})).unwrap();
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("EnvelopeSummary"));
+    }
+
+    #[test]
+    fn envelope_debug() {
+        let e: Envelope =
+            serde_json::from_value(json!({"envelopeId": "dbg"})).unwrap();
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("Envelope"));
+    }
+
+    #[test]
+    fn template_debug() {
+        let t: Template =
+            serde_json::from_value(json!({"templateId": "dbg"})).unwrap();
+        let dbg = format!("{t:?}");
+        assert!(dbg.contains("Template"));
+    }
+
+    #[test]
+    fn recipient_debug() {
+        let r: Recipient = serde_json::from_value(json!({})).unwrap();
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("Recipient"));
+    }
+
+    #[test]
+    fn api_error_response_debug() {
+        let e = ApiErrorResponse {
+            error_code: Some("ERR".into()),
+            message: Some("msg".into()),
+        };
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("ApiErrorResponse"));
+    }
+
+    // -- Serialization edge cases --
+
+    #[test]
+    fn envelope_voided_fields() {
+        let e: Envelope = serde_json::from_value(json!({
+            "envelopeId": "env-voided",
+            "status": "voided",
+            "voidedDateTime": "2026-02-01T00:00:00Z",
+            "voidedReason": "Cancelled by sender",
+        }))
+        .unwrap();
+        assert_eq!(e.status, Some("voided".into()));
+        assert_eq!(
+            e.voided_reason,
+            Some("Cancelled by sender".into())
+        );
+    }
+
+    #[test]
+    fn envelope_with_documents() {
+        let e: Envelope = serde_json::from_value(json!({
+            "envelopeId": "env-docs",
+            "documents": [{"documentId": "1", "name": "contract.pdf"}]
+        }))
+        .unwrap();
+        assert!(e.documents.is_some());
+    }
+
+    #[test]
+    fn recipients_response_empty() {
+        let r: RecipientsResponse = serde_json::from_value(json!({})).unwrap();
+        assert!(r.signers.is_none());
+        assert!(r.carbon_copies.is_none());
+        assert!(r.recipient_count.is_none());
+    }
+
+    #[test]
+    fn envelope_list_response_with_next_uri() {
+        let l: EnvelopeListResponse = serde_json::from_value(json!({
+            "envelopes": [],
+            "nextUri": "/envelopes?start_position=10"
+        }))
+        .unwrap();
+        assert_eq!(
+            l.next_uri,
+            Some("/envelopes?start_position=10".into())
+        );
+    }
+
+    #[test]
+    fn envelope_create_response_minimal() {
+        let r: EnvelopeCreateResponse =
+            serde_json::from_value(json!({"envelopeId": "x"})).unwrap();
+        assert_eq!(r.envelope_id, "x");
+        assert!(r.status.is_none());
+        assert!(r.uri.is_none());
+    }
 }

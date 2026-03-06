@@ -346,4 +346,100 @@ mod tests {
     fn percent_encode_no_change() {
         assert_eq!(percent_encode("simple"), "simple");
     }
+
+    // ── Additional client coverage ───────────────────────────────
+
+    #[test]
+    fn auth_debug_credential_id() {
+        let cred = SpotifyAuth::CredentialId(CredentialId::new());
+        let dbg = format!("{cred:?}");
+        assert!(dbg.contains("CredentialId"));
+    }
+
+    #[test]
+    fn auth_clone() {
+        let auth = SpotifyAuth::AccessToken("secret".into());
+        #[allow(clippy::redundant_clone)]
+        let auth2 = auth.clone();
+        assert_eq!(auth2.redacted_label(), "access_token:redacted");
+    }
+
+    #[test]
+    fn auth_credential_id_clone() {
+        let id = CredentialId::new();
+        let auth = SpotifyAuth::CredentialId(id);
+        #[allow(clippy::redundant_clone)]
+        let auth2 = auth.clone();
+        assert!(auth2.is_secretless());
+    }
+
+    #[test]
+    fn client_debug_contains_base_url() {
+        let client =
+            SpotifyClient::new(SpotifyAuth::AccessToken("tok".into()), None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("SpotifyClient"));
+        assert!(dbg.contains(DEFAULT_BASE_URL));
+    }
+
+    #[test]
+    fn client_custom_url_trimmed() {
+        let client = SpotifyClient::new(
+            SpotifyAuth::AccessToken("tok".into()),
+            Some("https://api.example.com/v1///"),
+        )
+        .unwrap();
+        // Only trailing slashes should be stripped
+        assert!(!client.base_url.ends_with('/'));
+    }
+
+    #[test]
+    fn default_base_url_constant() {
+        assert_eq!(DEFAULT_BASE_URL, "https://api.spotify.com/v1");
+    }
+
+    #[test]
+    fn percent_encode_empty_string() {
+        assert_eq!(percent_encode(""), "");
+    }
+
+    #[test]
+    fn percent_encode_all_special() {
+        let result = percent_encode("% & = + #");
+        assert!(result.contains("%25"));
+        assert!(result.contains("%26"));
+        assert!(result.contains("%3D"));
+        assert!(result.contains("%2B"));
+        assert!(result.contains("%23"));
+    }
+
+    #[test]
+    fn percent_encode_unicode_untouched() {
+        // Non-special ASCII chars pass through
+        let result = percent_encode("abc123");
+        assert_eq!(result, "abc123");
+    }
+
+    #[test]
+    fn client_with_credential_id_auth() {
+        let client = SpotifyClient::new(
+            SpotifyAuth::CredentialId(CredentialId::new()),
+            None,
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("CredentialId"));
+    }
+
+    #[test]
+    fn percent_encode_multiple_spaces() {
+        let result = percent_encode("a b c d");
+        assert_eq!(result, "a%20b%20c%20d");
+    }
+
+    #[test]
+    fn percent_encode_consecutive_specials() {
+        let result = percent_encode("&&==");
+        assert_eq!(result, "%26%26%3D%3D");
+    }
 }

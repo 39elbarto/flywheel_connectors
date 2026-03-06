@@ -608,4 +608,102 @@ mod tests {
             other => panic!("expected Api, got {other:?}"),
         }
     }
+
+    // ---- Additional arxiv_error tests ----
+
+    #[test]
+    fn arxiv_error_503() {
+        let err = ArxivClient::arxiv_error(StatusCode::SERVICE_UNAVAILABLE, "unavailable");
+        match err {
+            ArxivError::Api {
+                status_code,
+                message,
+            } => {
+                assert_eq!(status_code, 503);
+                assert_eq!(message, "unavailable");
+            }
+            other => panic!("expected Api, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arxiv_error_400() {
+        let err = ArxivClient::arxiv_error(StatusCode::BAD_REQUEST, "bad query");
+        match err {
+            ArxivError::Api {
+                status_code,
+                message,
+            } => {
+                assert_eq!(status_code, 400);
+                assert_eq!(message, "bad query");
+            }
+            other => panic!("expected Api, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arxiv_error_404_preserves_body() {
+        let err = ArxivClient::arxiv_error(StatusCode::NOT_FOUND, "paper 2301.00000 not found");
+        match err {
+            ArxivError::NotFound { resource } => {
+                assert!(resource.contains("2301.00000"));
+            }
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arxiv_error_429_retry_after_ms() {
+        let err = ArxivClient::arxiv_error(StatusCode::TOO_MANY_REQUESTS, "rate limited");
+        match err {
+            ArxivError::RateLimited { retry_after_ms } => {
+                assert_eq!(retry_after_ms, 3000);
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+    }
+
+    // ---- urlencoded edge cases ----
+
+    #[test]
+    fn urlencoded_empty_string() {
+        assert_eq!(urlencoded(""), "");
+    }
+
+    #[test]
+    fn urlencoded_multiple_special_chars() {
+        assert_eq!(urlencoded("a&b=c#d?e"), "a%26b%3Dc%23d%3Fe");
+    }
+
+    #[test]
+    fn urlencoded_preserves_dots_and_colons() {
+        assert_eq!(urlencoded("cs.AI:v2"), "cs.AI:v2");
+    }
+
+    #[test]
+    fn urlencoded_preserves_slashes() {
+        assert_eq!(urlencoded("a/b"), "a/b");
+    }
+
+    // ---- Client custom URL tests ----
+
+    #[test]
+    fn client_multiple_trailing_slashes_stripped() {
+        // only the last trailing slash is stripped
+        let c = ArxivClient::new(
+            Some("https://arxiv.test.com/"),
+            Some("https://scholar.test.com/"),
+            None,
+        )
+        .unwrap();
+        assert!(!c.arxiv_base_url.ends_with('/'));
+        assert!(!c.scholar_base_url.ends_with('/'));
+    }
+
+    #[test]
+    fn client_with_api_key_stored() {
+        let c = ArxivClient::new(None, None, Some("test-key-456".into())).unwrap();
+        assert!(c.scholar_api_key.is_some());
+        assert_eq!(c.scholar_api_key.as_deref(), Some("test-key-456"));
+    }
 }

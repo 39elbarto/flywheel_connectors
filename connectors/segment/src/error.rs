@@ -308,4 +308,173 @@ mod tests {
             "Segment API error (500): Internal"
         );
     }
+
+    #[test]
+    fn error_display_http() {
+        let err = reqwest::Client::builder()
+            .build()
+            .unwrap()
+            .get("http://invalid url with spaces")
+            .build()
+            .unwrap_err();
+        let e = SegmentError::Http(err);
+        let display = e.to_string();
+        assert!(display.starts_with("HTTP error:"), "got: {display}");
+    }
+
+    #[test]
+    fn error_display_json() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{nope");
+        let e = SegmentError::Json(bad.unwrap_err());
+        assert!(e.to_string().starts_with("JSON error:"));
+    }
+
+    #[test]
+    fn error_debug_unauthorized() {
+        let dbg = format!("{:?}", SegmentError::Unauthorized);
+        assert!(dbg.contains("Unauthorized"));
+    }
+
+    #[test]
+    fn error_debug_api_contains_fields() {
+        let err = SegmentError::Api {
+            status_code: 422,
+            message: "Unprocessable".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("422"));
+        assert!(dbg.contains("Unprocessable"));
+    }
+
+    #[test]
+    fn error_debug_not_found_contains_resource() {
+        let err = SegmentError::NotFound {
+            resource: "dest_xyz".into(),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("dest_xyz"));
+    }
+
+    #[test]
+    fn error_debug_rate_limited_contains_ms() {
+        let err = SegmentError::RateLimited {
+            retry_after_ms: 99999,
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("99999"));
+    }
+
+    #[test]
+    fn api_502_is_retryable() {
+        assert!(
+            SegmentError::Api { status_code: 502, message: "bad gateway".into() }.is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_504_is_retryable() {
+        assert!(
+            SegmentError::Api { status_code: 504, message: "gateway timeout".into() }.is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_599_is_retryable() {
+        assert!(
+            SegmentError::Api { status_code: 599, message: "custom".into() }.is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_499_not_retryable() {
+        assert!(
+            !SegmentError::Api { status_code: 499, message: "client".into() }.is_retryable()
+        );
+    }
+
+    #[test]
+    fn json_error_not_retryable() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{bad");
+        assert!(!SegmentError::Json(bad.unwrap_err()).is_retryable());
+    }
+
+    #[test]
+    fn retry_after_none_for_json_error() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{bad");
+        assert_eq!(SegmentError::Json(bad.unwrap_err()).retry_after(), None);
+    }
+
+    #[test]
+    fn retry_after_zero_ms() {
+        let err = SegmentError::RateLimited { retry_after_ms: 0 };
+        assert_eq!(err.retry_after(), Some(Duration::from_millis(0)));
+    }
+
+    #[test]
+    fn retry_after_large_value() {
+        let err = SegmentError::RateLimited {
+            retry_after_ms: 3_600_000,
+        };
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn http_error_to_fcp_error_is_retryable() {
+        let err = reqwest::Client::builder()
+            .build()
+            .unwrap()
+            .get("http://invalid url with spaces")
+            .build()
+            .unwrap_err();
+        let fcp = SegmentError::Http(err).to_fcp_error();
+        match fcp {
+            FcpError::External {
+                service, retryable, ..
+            } => {
+                assert_eq!(service, "segment");
+                assert!(retryable);
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rate_limited_to_fcp_error_message_contains_ms() {
+        match (SegmentError::RateLimited { retry_after_ms: 5000 }).to_fcp_error() {
+            FcpError::External { message, .. } => {
+                assert!(message.contains("5000"), "message: {message}");
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn not_found_to_fcp_error_retry_after_is_none() {
+        match (SegmentError::NotFound { resource: "x".into() }).to_fcp_error() {
+            FcpError::External { retry_after, .. } => {
+                assert_eq!(retry_after, None);
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unauthorized_to_fcp_error_retry_after_is_none() {
+        match SegmentError::Unauthorized.to_fcp_error() {
+            FcpError::External { retry_after, .. } => {
+                assert_eq!(retry_after, None);
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forbidden_to_fcp_error_message() {
+        match SegmentError::Forbidden.to_fcp_error() {
+            FcpError::External { message, .. } => {
+                assert_eq!(message, "Insufficient permissions");
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
 }

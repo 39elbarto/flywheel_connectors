@@ -271,4 +271,85 @@ mod tests {
         let cloned = auth.clone();
         assert!(cloned.is_secretless());
     }
+
+    #[test]
+    fn client_new_strips_multiple_trailing_slashes() {
+        let client = MetabaseClient::new(
+            MetabaseAuth::SessionToken("tok".into()),
+            "https://metabase.example.com/api///",
+        )
+        .unwrap();
+        // Only strips one trailing slash at a time, so we get "api//"
+        assert!(!client.base_url.ends_with('/'));
+    }
+
+    #[test]
+    fn client_debug_contains_base_url() {
+        let client = MetabaseClient::new(
+            MetabaseAuth::SessionToken("tok".into()),
+            "http://mb.local/api",
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("MetabaseClient"));
+        assert!(dbg.contains("mb.local"));
+    }
+
+    #[test]
+    fn client_debug_with_credential_id() {
+        let client = MetabaseClient::new(
+            MetabaseAuth::CredentialId(CredentialId::new()),
+            "http://mb.local/api",
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("CredentialId"));
+    }
+
+    #[test]
+    fn auth_debug_credential_id_shows_id() {
+        let cid = CredentialId::new();
+        let auth = MetabaseAuth::CredentialId(cid);
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("CredentialId("));
+    }
+
+    #[test]
+    fn auth_session_debug_shows_redacted() {
+        let auth = MetabaseAuth::SessionToken("my-secret-token".into());
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("SessionToken"));
+        assert!(dbg.contains("redacted"));
+        assert!(!dbg.contains("my-secret-token"));
+    }
+
+    #[test]
+    fn client_new_with_port() {
+        let client = MetabaseClient::new(
+            MetabaseAuth::SessionToken("tok".into()),
+            "http://192.168.1.100:3000/api",
+        )
+        .unwrap();
+        assert_eq!(client.base_url, "http://192.168.1.100:3000/api");
+    }
+
+    #[test]
+    fn client_new_https() {
+        let client = MetabaseClient::new(
+            MetabaseAuth::SessionToken("tok".into()),
+            "https://metabase.company.com/api/v1",
+        )
+        .unwrap();
+        assert_eq!(client.base_url, "https://metabase.company.com/api/v1");
+    }
+
+    #[test]
+    fn client_new_empty_url() {
+        let client = MetabaseClient::new(
+            MetabaseAuth::SessionToken("tok".into()),
+            "",
+        )
+        .unwrap();
+        assert_eq!(client.base_url, "");
+    }
 }

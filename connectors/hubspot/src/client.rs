@@ -410,4 +410,89 @@ mod tests {
         let cred = HubSpotAuth::CredentialId(CredentialId::new());
         assert!(cred.redacted_label().starts_with("credential_id:"));
     }
+
+    #[test]
+    fn client_new_default_url() {
+        let client = HubSpotClient::new(HubSpotAuth::BearerToken("tok".into()), None).unwrap();
+        assert_eq!(client.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn client_new_custom_url() {
+        let client = HubSpotClient::new(
+            HubSpotAuth::BearerToken("tok".into()),
+            Some("https://custom.hubapi.test/v3/"),
+        )
+        .unwrap();
+        assert_eq!(client.base_url, "https://custom.hubapi.test/v3");
+    }
+
+    #[test]
+    fn client_trims_trailing_slashes() {
+        let client = HubSpotClient::new(
+            HubSpotAuth::BearerToken("tok".into()),
+            Some("https://example.com///"),
+        )
+        .unwrap();
+        assert_eq!(client.base_url, "https://example.com");
+    }
+
+    #[test]
+    fn client_debug_redacts_bearer() {
+        let client = HubSpotClient::new(HubSpotAuth::BearerToken("super-secret-pat".into()), None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(!dbg.contains("super-secret-pat"));
+        assert!(dbg.contains("redacted"));
+        assert!(dbg.contains("HubSpotClient"));
+    }
+
+    #[test]
+    fn client_debug_shows_base_url() {
+        let client = HubSpotClient::new(HubSpotAuth::BearerToken("tok".into()), None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains(DEFAULT_BASE_URL));
+    }
+
+    #[test]
+    fn auth_debug_credential_id() {
+        let id = CredentialId::new();
+        let auth = HubSpotAuth::CredentialId(id);
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("CredentialId"));
+    }
+
+    #[test]
+    fn auth_clone() {
+        let auth = HubSpotAuth::BearerToken("tok".into());
+        #[allow(clippy::redundant_clone)]
+        let cloned = auth.clone();
+        assert_eq!(cloned.redacted_label(), "bearer_token:redacted");
+    }
+
+    #[test]
+    fn auth_clone_credential() {
+        let auth = HubSpotAuth::CredentialId(CredentialId::new());
+        #[allow(clippy::redundant_clone)]
+        let cloned = auth.clone();
+        assert!(cloned.is_secretless());
+    }
+
+    #[test]
+    fn default_base_url_value() {
+        assert_eq!(DEFAULT_BASE_URL, "https://api.hubapi.com");
+    }
+
+    #[test]
+    fn with_client_trims_slash() {
+        let client = reqwest::Client::new();
+        let hs = HubSpotClient::with_client(client, HubSpotAuth::BearerToken("t".into()), "https://test.com/");
+        assert_eq!(hs.base_url, "https://test.com");
+    }
+
+    #[test]
+    fn with_client_no_slash() {
+        let client = reqwest::Client::new();
+        let hs = HubSpotClient::with_client(client, HubSpotAuth::BearerToken("t".into()), "https://test.com");
+        assert_eq!(hs.base_url, "https://test.com");
+    }
 }

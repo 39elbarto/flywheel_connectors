@@ -878,6 +878,57 @@ mod tests {
     }
 
     #[test]
+    fn config_rejects_numeric_base_url() {
+        let result = MetabaseConfig::from_params(&json!({
+            "session_token": "tok",
+            "base_url": 12345,
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_rejects_null_base_url() {
+        let result = MetabaseConfig::from_params(&json!({
+            "session_token": "tok",
+            "base_url": null,
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_rejects_boolean_base_url() {
+        let result = MetabaseConfig::from_params(&json!({
+            "session_token": "tok",
+            "base_url": true,
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_debug_format() {
+        let config = MetabaseConfig::from_params(&json!({
+            "session_token": "tok",
+            "base_url": "http://localhost:3000/api",
+        }))
+        .unwrap();
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("MetabaseConfig"));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn config_clone() {
+        let config = MetabaseConfig::from_params(&json!({
+            "session_token": "tok",
+            "base_url": "http://localhost:3000/api",
+        }))
+        .unwrap();
+        let cloned = config.clone();
+        assert_eq!(cloned.base_url, "http://localhost:3000/api");
+    }
+
+
+    #[test]
     fn doctor_check_serializes_message_when_some() {
         let check = DoctorCheck {
             name: "test".into(),

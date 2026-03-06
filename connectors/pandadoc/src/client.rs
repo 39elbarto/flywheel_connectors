@@ -126,12 +126,19 @@ impl PandaDocClient {
         }
     }
 
-    #[instrument(skip(self), fields(url))]
-    async fn get(&self, path: &str) -> PandaDocResult<serde_json::Value> {
+    #[instrument(skip(self, query), fields(url))]
+    async fn get(
+        &self,
+        path: &str,
+        query: Option<&[(&str, String)]>,
+    ) -> PandaDocResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
         debug!(url = %url, "GET request");
-        let req = self.add_auth(self.client.get(&url))
+        let mut req = self.add_auth(self.client.get(&url))
             .header("Accept", "application/json");
+        if let Some(q) = query {
+            req = req.query(q);
+        }
         let resp = req.send().await?;
         self.handle_response(resp).await
     }
@@ -165,11 +172,14 @@ impl PandaDocClient {
         status: Option<&str>,
         count: Option<i64>,
     ) -> PandaDocResult<serde_json::Value> {
-        let qs = build_query(&[
-            status.map(|s| ("status", s.to_string())),
-            count.map(|c| ("count", c.to_string())),
-        ]);
-        self.get(&format!("/documents{qs}")).await
+        let mut query = Vec::new();
+        if let Some(s) = status {
+            query.push(("status", s.to_string()));
+        }
+        if let Some(c) = count {
+            query.push(("count", c.to_string()));
+        }
+        self.get("/documents", if query.is_empty() { None } else { Some(&query) }).await
     }
 
     /// Get a document by ID.
@@ -177,7 +187,7 @@ impl PandaDocClient {
         &self,
         document_id: &str,
     ) -> PandaDocResult<serde_json::Value> {
-        self.get(&format!("/documents/{document_id}")).await
+        self.get(&format!("/documents/{document_id}"), None).await
     }
 
     /// Create a document from a template.
@@ -209,21 +219,8 @@ impl PandaDocClient {
 
     /// List all templates.
     pub async fn list_templates(&self) -> PandaDocResult<serde_json::Value> {
-        self.get("/templates").await
+        self.get("/templates", None).await
     }
-}
-
-fn build_query(params: &[Option<(&str, String)>]) -> String {
-    let mut qs = String::new();
-    let mut sep = '?';
-    for param in params.iter().flatten() {
-        qs.push(sep);
-        qs.push_str(param.0);
-        qs.push('=');
-        qs.push_str(&param.1);
-        sep = '&';
-    }
-    qs
 }
 
 #[cfg(test)]
@@ -253,20 +250,117 @@ mod tests {
     }
 
     #[test]
-    fn build_query_empty() {
-        assert_eq!(build_query(&[None, None]), "");
+    fn auth_credential_id_redacted_label() {
+        let cred = PandaDocAuth::CredentialId(CredentialId::new());
+        let label = cred.redacted_label();
+        assert!(label.starts_with("credential_id:"));
     }
 
     #[test]
-    fn build_query_one() {
-        assert_eq!(build_query(&[Some(("status", "draft".into()))]), "?status=draft");
+    fn auth_clone_bearer() {
+        let bearer = PandaDocAuth::BearerToken("test-key".into());
+        let cloned = bearer.clone();
+        assert_eq!(cloned.redacted_label(), "bearer_token:redacted");
+        assert_eq!(bearer.redacted_label(), "bearer_token:redacted");
+        assert!(!cloned.is_secretless());
     }
 
     #[test]
-    fn build_query_two() {
-        assert_eq!(
-            build_query(&[Some(("status", "draft".into())), Some(("count", "20".into()))]),
-            "?status=draft&count=20"
-        );
+    fn auth_clone_credential() {
+        let cred = PandaDocAuth::CredentialId(CredentialId::new());
+        let cloned = cred.clone();
+        assert!(cloned.is_secretless());
+        assert!(cred.is_secretless());
+    }
+
+    #[test]
+    fn auth_debug_credential_id_shows_id() {
+        let id = CredentialId::new();
+        let id_str = id.to_string();
+        let auth = PandaDocAuth::CredentialId(id);
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("CredentialId"));
+        assert!(dbg.contains(&id_str));
+    }
+
+    #[test]
+    fn client_new_default_url() {
+        let client = PandaDocClient::new(PandaDocAuth::BearerToken("tok".into()), None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains(DEFAULT_BASE_URL));
+    }
+
+    #[test]
+    fn client_new_custom_url() {
+        let client = PandaDocClient::new(
+            PandaDocAuth::BearerToken("tok".into()),
+            Some("https://custom.pandadoc.com/v1"),
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("https://custom.pandadoc.com/v1"));
+    }
+
+    #[test]
+    fn client_new_trims_trailing_slash() {
+        let client = PandaDocClient::new(
+            PandaDocAuth::BearerToken("tok".into()),
+            Some("https://api.pandadoc.com/public/v1/"),
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(!dbg.contains("v1/\""));
+    }
+
+    #[test]
+    fn client_debug_redacts_token() {
+        let client = PandaDocClient::new(
+            PandaDocAuth::BearerToken("my-secret-api-key".into()),
+            None,
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(!dbg.contains("my-secret-api-key"));
+        assert!(dbg.contains("PandaDocClient"));
+        assert!(dbg.contains("redacted"));
+    }
+
+    #[test]
+    fn client_debug_shows_base_url() {
+        let client = PandaDocClient::new(
+            PandaDocAuth::BearerToken("tok".into()),
+            Some("https://my-pandadoc.example.com/v1"),
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("https://my-pandadoc.example.com/v1"));
+    }
+
+    #[test]
+    fn default_base_url_value() {
+        assert_eq!(DEFAULT_BASE_URL, "https://api.pandadoc.com/public/v1");
+    }
+
+    #[test]
+    fn auth_bearer_not_secretless() {
+        let auth = PandaDocAuth::BearerToken(String::new());
+        assert!(!auth.is_secretless());
+    }
+
+    #[test]
+    fn auth_credential_is_secretless() {
+        let auth = PandaDocAuth::CredentialId(CredentialId::new());
+        assert!(auth.is_secretless());
+    }
+
+    #[test]
+    fn client_new_trims_multiple_trailing_slashes() {
+        let client = PandaDocClient::new(
+            PandaDocAuth::BearerToken("tok".into()),
+            Some("https://api.pandadoc.com/v1///"),
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(!dbg.contains("v1/"));
     }
 }

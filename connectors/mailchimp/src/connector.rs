@@ -766,4 +766,228 @@ mod tests {
         assert!(c.client.is_none());
         assert!(c.session_id.is_none());
     }
+
+    // -- Additional connector tests --
+
+    #[test]
+    fn connector_new_matches_default() {
+        let c = MailchimpConnector::new();
+        assert!(c.config.is_none());
+        assert!(c.client.is_none());
+        assert!(c.session_id.is_none());
+        assert_eq!(c.request_count.load(Ordering::Relaxed), 0);
+        assert_eq!(c.error_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn doctor_status_serde_roundtrip() {
+        let statuses = [DoctorStatus::Healthy, DoctorStatus::Degraded, DoctorStatus::Unhealthy];
+        for s in &statuses {
+            let v = serde_json::to_value(s).unwrap();
+            let back: DoctorStatus = serde_json::from_value(v).unwrap();
+            assert_eq!(*s, back);
+        }
+    }
+
+    #[test]
+    fn doctor_status_lowercase_serialization() {
+        assert_eq!(serde_json::to_value(DoctorStatus::Healthy).unwrap(), "healthy");
+        assert_eq!(serde_json::to_value(DoctorStatus::Degraded).unwrap(), "degraded");
+        assert_eq!(serde_json::to_value(DoctorStatus::Unhealthy).unwrap(), "unhealthy");
+    }
+
+    #[test]
+    fn doctor_check_skip_serializing_none_message() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert!(!v.as_object().unwrap().contains_key("message"));
+    }
+
+    #[test]
+    fn doctor_check_serializes_some_message() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: false,
+            message: Some("failed".into()),
+            critical: true,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert_eq!(v["message"], "failed");
+        assert_eq!(v["critical"], true);
+    }
+
+    #[test]
+    fn doctor_check_clone() {
+        let check = DoctorCheck {
+            name: "x".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let cloned = check.clone();
+        assert!(check.passed);
+        assert_eq!(cloned.name, "x");
+    }
+
+    #[test]
+    fn doctor_check_debug() {
+        let check = DoctorCheck {
+            name: "x".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let dbg = format!("{check:?}");
+        assert!(dbg.contains("DoctorCheck"));
+    }
+
+    #[test]
+    fn doctor_result_clone() {
+        let r = DoctorResult::from_checks(vec![]);
+        let cloned = r.clone();
+        assert_eq!(r.status, DoctorStatus::Healthy);
+        assert!(cloned.checks.is_empty());
+    }
+
+    #[test]
+    fn doctor_result_debug() {
+        let r = DoctorResult::from_checks(vec![]);
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("DoctorResult"));
+    }
+
+    #[test]
+    fn doctor_result_deserialize() {
+        let v = json!({"status": "unhealthy", "checks": [{"name": "a", "passed": false, "critical": true}]});
+        let r: DoctorResult = serde_json::from_value(v).unwrap();
+        assert_eq!(r.status, DoctorStatus::Unhealthy);
+        assert_eq!(r.checks.len(), 1);
+    }
+
+    #[test]
+    fn operations_all_have_mailchimp_prefix() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let id = op["id"].as_str().unwrap();
+            assert!(id.starts_with("mailchimp."), "op {id} missing mailchimp prefix");
+        }
+    }
+
+    #[test]
+    fn operations_write_ops_not_safe() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let cap = op["capability"].as_str().unwrap();
+            if cap.to_ascii_lowercase().ends_with(".write") {
+                assert_ne!(op["safety_tier"].as_str().unwrap(), "safe", "write op {} should not be safe", op["id"]);
+            }
+        }
+    }
+
+    #[test]
+    fn operations_delete_is_dangerous() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let id = op["id"].as_str().unwrap();
+            if id.contains("delete") {
+                assert_eq!(op["safety_tier"].as_str().unwrap(), "dangerous", "delete op {id} should be dangerous");
+            }
+        }
+    }
+
+    #[test]
+    fn operations_send_is_dangerous() {
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let id = op["id"].as_str().unwrap();
+            if id.contains("send") {
+                assert_eq!(op["safety_tier"].as_str().unwrap(), "dangerous", "send op {id} should be dangerous");
+            }
+        }
+    }
+
+    #[test]
+    fn config_error_message_both_auth() {
+        let result = MailchimpConfig::from_params(&json!({
+            "api_key": "key-us1",
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+        }));
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => assert!(message.contains("exactly one")),
+            e => panic!("expected InvalidRequest, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn config_error_message_no_auth() {
+        let result = MailchimpConfig::from_params(&json!({}));
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => assert!(message.contains("Missing")),
+            e => panic!("expected InvalidRequest, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn config_error_non_string_credential() {
+        let result = MailchimpConfig::from_params(&json!({"credential_id": 12345}));
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => assert!(message.contains("string")),
+            e => panic!("expected InvalidRequest, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn config_error_invalid_uuid() {
+        let result = MailchimpConfig::from_params(&json!({"credential_id": "not-a-uuid"}));
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => assert!(message.contains("UUID")),
+            e => panic!("expected InvalidRequest, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn config_base_url_none_by_default() {
+        let config = MailchimpConfig::from_params(&json!({"api_key": "key-us1"})).unwrap();
+        assert!(config.base_url.is_none());
+    }
+
+    #[test]
+    fn require_str_empty_string_is_valid() {
+        let input = json!({"list_id": ""});
+        assert_eq!(require_str(&input, "list_id").unwrap(), "");
+    }
+
+    #[test]
+    fn require_str_error_message_contains_field_name() {
+        let input = json!({});
+        let err = require_str(&input, "campaign_id").unwrap_err();
+        match err {
+            MailchimpError::Api { message, .. } => assert!(message.contains("campaign_id")),
+            _ => panic!("expected Api error"),
+        }
+    }
+
+    #[test]
+    fn doctor_result_unhealthy_overrides_degraded() {
+        let r = DoctorResult::from_checks(vec![
+            DoctorCheck { name: "a".into(), passed: false, message: None, critical: true },
+            DoctorCheck { name: "b".into(), passed: false, message: None, critical: false },
+        ]);
+        assert_eq!(r.status, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn operations_idempotency_values_valid() {
+        let valid = ["strict", "none", "idempotent"];
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let idem = op["idempotency"].as_str().unwrap();
+            assert!(valid.contains(&idem), "invalid idempotency {idem} for {:?}", op["id"]);
+        }
+    }
 }

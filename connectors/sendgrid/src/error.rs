@@ -451,4 +451,171 @@ mod tests {
         };
         assert_eq!(err.retry_after(), Some(Duration::from_millis(100)));
     }
+
+    #[test]
+    fn error_display_http() {
+        let client = reqwest::Client::new();
+        let err = client.get("://bad").build().unwrap_err();
+        let sg_err = SendGridError::Http(err);
+        assert!(sg_err.to_string().starts_with("HTTP error:"));
+    }
+
+    #[test]
+    fn error_display_json() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{{bad");
+        let err = SendGridError::Json(bad.unwrap_err());
+        assert!(err.to_string().starts_with("JSON error:"));
+    }
+
+    #[test]
+    fn json_error_not_retryable() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{bad");
+        let err = SendGridError::Json(bad.unwrap_err());
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn retry_after_none_for_json_error() {
+        let bad: Result<serde_json::Value, _> = serde_json::from_str("{bad");
+        let err = SendGridError::Json(bad.unwrap_err());
+        assert_eq!(err.retry_after(), None);
+    }
+
+    #[test]
+    fn rate_limited_zero_retry() {
+        let err = SendGridError::RateLimited { retry_after_ms: 0 };
+        assert_eq!(err.retry_after(), Some(Duration::from_millis(0)));
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn rate_limited_large_retry() {
+        let err = SendGridError::RateLimited {
+            retry_after_ms: 3_600_000,
+        };
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn api_501_is_retryable() {
+        assert!(
+            SendGridError::Api {
+                status_code: 501,
+                message: "not implemented".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_599_is_retryable() {
+        assert!(
+            SendGridError::Api {
+                status_code: 599,
+                message: "unknown".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn api_600_not_retryable() {
+        assert!(
+            !SendGridError::Api {
+                status_code: 600,
+                message: "invalid".into()
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn http_error_to_fcp_external() {
+        let client = reqwest::Client::new();
+        let err = client.get("://bad").build().unwrap_err();
+        let sg_err = SendGridError::Http(err);
+        match sg_err.to_fcp_error() {
+            FcpError::External {
+                service, retryable, ..
+            } => {
+                assert_eq!(service, "sendgrid");
+                assert!(retryable);
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unauthorized_fcp_message_contains_auth() {
+        match SendGridError::Unauthorized.to_fcp_error() {
+            FcpError::External { message, .. } => {
+                assert!(message.contains("Authentication"));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forbidden_fcp_message_contains_permissions() {
+        match SendGridError::Forbidden.to_fcp_error() {
+            FcpError::External { message, .. } => {
+                assert!(message.contains("permissions"));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rate_limited_fcp_message_contains_ms() {
+        match (SendGridError::RateLimited {
+            retry_after_ms: 5000,
+        })
+        .to_fcp_error()
+        {
+            FcpError::External { message, .. } => {
+                assert!(message.contains("5000ms"));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_debug_variant_names() {
+        let err = SendGridError::Unauthorized;
+        assert!(format!("{err:?}").contains("Unauthorized"));
+        let err2 = SendGridError::Forbidden;
+        assert!(format!("{err2:?}").contains("Forbidden"));
+    }
+
+    #[test]
+    fn not_found_display_with_special_chars() {
+        let err = SendGridError::NotFound {
+            resource: "contact/abc+123".into(),
+        };
+        assert!(err.to_string().contains("contact/abc+123"));
+    }
+
+    #[test]
+    fn api_error_display_empty_message() {
+        let err = SendGridError::Api {
+            status_code: 500,
+            message: String::new(),
+        };
+        assert_eq!(err.to_string(), "SendGrid API error (500): ");
+    }
+
+    #[test]
+    fn api_error_retryable_no_retry_after() {
+        match (SendGridError::Api {
+            status_code: 500,
+            message: "err".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External { retry_after, .. } => {
+                assert!(retry_after.is_none());
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
 }

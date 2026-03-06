@@ -338,4 +338,207 @@ mod tests {
         assert_eq!(v["lifecycleState"], "PUBLISHED");
         assert_eq!(v["specificContent"]["text"], "hello");
     }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn profile_clone() {
+        let p = Profile {
+            id: Some("p1".into()),
+            localized_first_name: Some("Jane".into()),
+            localized_last_name: Some("Doe".into()),
+            localized_headline: None,
+        };
+        let c = p.clone();
+        assert_eq!(c.id, Some("p1".into()));
+        assert_eq!(c.localized_first_name, Some("Jane".into()));
+    }
+
+    #[test]
+    fn profile_debug() {
+        let p = Profile {
+            id: Some("p1".into()),
+            localized_first_name: None,
+            localized_last_name: None,
+            localized_headline: None,
+        };
+        let dbg = format!("{p:?}");
+        assert!(dbg.contains("Profile"));
+        assert!(dbg.contains("p1"));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn organization_clone() {
+        let o = Organization {
+            id: Some("o1".into()),
+            localized_name: Some("Corp".into()),
+            vanity_name: None,
+            localized_description: None,
+        };
+        let c = o.clone();
+        assert_eq!(c.id, Some("o1".into()));
+    }
+
+    #[test]
+    fn organization_debug() {
+        let o = Organization {
+            id: Some("o1".into()),
+            localized_name: None,
+            vanity_name: None,
+            localized_description: None,
+        };
+        let dbg = format!("{o:?}");
+        assert!(dbg.contains("Organization"));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn post_clone() {
+        let p = Post {
+            id: Some("post1".into()),
+            author: Some("urn:li:person:x".into()),
+            lifecycle_state: None,
+            specific_content: None,
+        };
+        let c = p.clone();
+        assert_eq!(c.id, Some("post1".into()));
+        assert_eq!(c.author, Some("urn:li:person:x".into()));
+    }
+
+    #[test]
+    fn post_debug() {
+        let p = Post {
+            id: Some("post1".into()),
+            author: None,
+            lifecycle_state: None,
+            specific_content: None,
+        };
+        let dbg = format!("{p:?}");
+        assert!(dbg.contains("Post"));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn share_statistic_clone() {
+        let s = ShareStatistic {
+            total_share_statistics: Some(json!({"shareCount": 5})),
+        };
+        let c = s.clone();
+        assert_eq!(c.total_share_statistics.unwrap()["shareCount"], 5);
+    }
+
+    #[test]
+    fn share_statistic_debug() {
+        let s = ShareStatistic {
+            total_share_statistics: None,
+        };
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("ShareStatistic"));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn api_error_response_clone() {
+        let e = ApiErrorResponse {
+            message: Some("error msg".into()),
+            service_error_code: Some(123),
+            status: Some(400),
+        };
+        let c = e.clone();
+        assert_eq!(c.message, Some("error msg".into()));
+        assert_eq!(c.service_error_code, Some(123));
+        assert_eq!(c.status, Some(400));
+    }
+
+    #[test]
+    fn api_error_response_debug() {
+        let e = ApiErrorResponse {
+            message: None,
+            service_error_code: None,
+            status: None,
+        };
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("ApiErrorResponse"));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn search_result_clone() {
+        let s = SearchResult {
+            elements: Some(vec![json!({"name": "ACME"})]),
+        };
+        let c = s.clone();
+        assert_eq!(c.elements.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn search_result_debug() {
+        let s = SearchResult { elements: None };
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("SearchResult"));
+    }
+
+    #[test]
+    fn search_result_minimal() {
+        let s: SearchResult = serde_json::from_value(json!({})).unwrap();
+        assert!(s.elements.is_none());
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn connection_clone() {
+        let c = Connection {
+            id: Some("c1".into()),
+            first_name: Some("Bob".into()),
+            last_name: Some("Smith".into()),
+        };
+        let cl = c.clone();
+        assert_eq!(cl.id, Some("c1".into()));
+    }
+
+    #[test]
+    fn connection_debug() {
+        let c = Connection {
+            id: None,
+            first_name: None,
+            last_name: None,
+        };
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("Connection"));
+    }
+
+    #[test]
+    fn connection_serialize_roundtrip() {
+        let c = Connection {
+            id: Some("conn1".into()),
+            first_name: Some("Alice".into()),
+            last_name: Some("Wonder".into()),
+        };
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["id"], "conn1");
+        assert_eq!(v["firstName"], "Alice");
+        assert_eq!(v["lastName"], "Wonder");
+    }
+
+    #[test]
+    fn profile_null_fields_serialize_as_null() {
+        let p = Profile {
+            id: None,
+            localized_first_name: None,
+            localized_last_name: None,
+            localized_headline: None,
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert!(v["id"].is_null());
+        assert!(v["localizedFirstName"].is_null());
+    }
+
+    #[test]
+    fn share_statistic_serialize() {
+        let s = ShareStatistic {
+            total_share_statistics: Some(json!({"clicks": 100})),
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["totalShareStatistics"]["clicks"], 100);
+    }
 }

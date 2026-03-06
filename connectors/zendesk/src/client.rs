@@ -849,4 +849,268 @@ mod tests {
             "status:open+priority:urgent"
         );
     }
+
+    // ─── ZendeskAuth tests ────────────────────────────────────────
+
+    #[test]
+    fn test_zendesk_auth_token_debug_redacts_secrets() {
+        let auth = ZendeskAuth::Token {
+            subdomain: "acme".into(),
+            email: "secret@acme.com".into(),
+            api_token: "super_secret_token".into(),
+        };
+        let debug = format!("{auth:?}");
+        assert!(debug.contains("acme"));
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("secret@acme.com"));
+        assert!(!debug.contains("super_secret_token"));
+    }
+
+    #[test]
+    fn test_zendesk_auth_credential_id_debug_shows_fields() {
+        let auth = ZendeskAuth::CredentialId {
+            subdomain: "corp".into(),
+            credential_id: CredentialId::parse("11223344-5566-7788-99aa-bbccddeeff00").unwrap(),
+        };
+        let debug = format!("{auth:?}");
+        assert!(debug.contains("CredentialId"));
+        assert!(debug.contains("corp"));
+        assert!(debug.contains("11223344"));
+    }
+
+    #[test]
+    fn test_zendesk_auth_redacted_label_token() {
+        let auth = ZendeskAuth::Token {
+            subdomain: "x".into(),
+            email: "e".into(),
+            api_token: "t".into(),
+        };
+        assert_eq!(auth.redacted_label(), "token (email+api_token)");
+    }
+
+    #[test]
+    fn test_zendesk_auth_redacted_label_credential_id() {
+        let auth = ZendeskAuth::CredentialId {
+            subdomain: "x".into(),
+            credential_id: CredentialId::parse("11223344-5566-7788-99aa-bbccddeeff00").unwrap(),
+        };
+        assert_eq!(auth.redacted_label(), "credential_id (egress proxy)");
+    }
+
+    #[test]
+    fn test_zendesk_auth_is_secretless_token() {
+        let auth = ZendeskAuth::Token {
+            subdomain: "x".into(),
+            email: "e".into(),
+            api_token: "t".into(),
+        };
+        assert!(!auth.is_secretless());
+    }
+
+    #[test]
+    fn test_zendesk_auth_is_secretless_credential_id() {
+        let auth = ZendeskAuth::CredentialId {
+            subdomain: "x".into(),
+            credential_id: CredentialId::parse("11223344-5566-7788-99aa-bbccddeeff00").unwrap(),
+        };
+        assert!(auth.is_secretless());
+    }
+
+    #[test]
+    fn test_zendesk_auth_subdomain_token() {
+        let auth = ZendeskAuth::Token {
+            subdomain: "mycompany".into(),
+            email: "e".into(),
+            api_token: "t".into(),
+        };
+        assert_eq!(auth.subdomain(), "mycompany");
+    }
+
+    #[test]
+    fn test_zendesk_auth_subdomain_credential_id() {
+        let auth = ZendeskAuth::CredentialId {
+            subdomain: "enterprise".into(),
+            credential_id: CredentialId::parse("11223344-5566-7788-99aa-bbccddeeff00").unwrap(),
+        };
+        assert_eq!(auth.subdomain(), "enterprise");
+    }
+
+    #[test]
+    fn test_zendesk_auth_clone_token() {
+        let original = ZendeskAuth::Token {
+            subdomain: "test".into(),
+            email: "test@example.com".into(),
+            api_token: "secret".into(),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.subdomain(), "test");
+        assert_eq!(cloned.redacted_label(), "token (email+api_token)");
+    }
+
+    #[test]
+    fn test_zendesk_auth_clone_credential_id() {
+        let original = ZendeskAuth::CredentialId {
+            subdomain: "corp".into(),
+            credential_id: CredentialId::parse("11223344-5566-7788-99aa-bbccddeeff00").unwrap(),
+        };
+        let cloned = original.clone();
+        drop(original);
+        assert_eq!(cloned.subdomain(), "corp");
+        assert!(cloned.is_secretless());
+    }
+
+    // ─── ZendeskClient construction tests ─────────────────────────
+
+    #[test]
+    fn test_client_new_constructs_successfully() {
+        let client = ZendeskClient::new("mycompany", "user@example.com", "token123");
+        assert!(client.is_ok());
+    }
+
+    #[test]
+    fn test_client_debug_output() {
+        let client = ZendeskClient::new("mycompany", "user@example.com", "token123").unwrap();
+        let debug = format!("{client:?}");
+        assert!(debug.contains("ZendeskClient"));
+        assert!(debug.contains("mycompany.zendesk.com"));
+        assert!(!debug.contains("user@example.com"));
+        assert!(!debug.contains("token123"));
+    }
+
+    #[test]
+    fn test_client_with_base_url() {
+        let client = ZendeskClient::new("test", "user@test.com", "tok")
+            .unwrap()
+            .with_base_url("http://localhost:8080/api/v2");
+        let debug = format!("{client:?}");
+        assert!(debug.contains("localhost:8080"));
+    }
+
+    #[test]
+    fn test_client_with_retry_config() {
+        let client = ZendeskClient::new("test", "user@test.com", "tok")
+            .unwrap()
+            .with_retry_config(5);
+        // Client should construct successfully with custom retry config
+        let debug = format!("{client:?}");
+        assert!(debug.contains("ZendeskClient"));
+    }
+
+    #[test]
+    fn test_client_new_with_auth_token() {
+        let auth = ZendeskAuth::Token {
+            subdomain: "demo".into(),
+            email: "admin@demo.com".into(),
+            api_token: "secret123".into(),
+        };
+        let client = ZendeskClient::new_with_auth(auth);
+        assert!(client.is_ok());
+        let client = client.unwrap();
+        let debug = format!("{client:?}");
+        assert!(debug.contains("demo.zendesk.com"));
+    }
+
+    #[test]
+    fn test_client_new_with_auth_credential_id() {
+        let auth = ZendeskAuth::CredentialId {
+            subdomain: "proxy".into(),
+            credential_id: CredentialId::parse("11223344-5566-7788-99aa-bbccddeeff00").unwrap(),
+        };
+        let client = ZendeskClient::new_with_auth(auth);
+        assert!(client.is_ok());
+        let client = client.unwrap();
+        let debug = format!("{client:?}");
+        assert!(debug.contains("proxy.zendesk.com"));
+    }
+
+    #[test]
+    fn test_default_base_url_template_constant() {
+        assert!(DEFAULT_BASE_URL_TEMPLATE.contains("zendesk.com"));
+        assert!(DEFAULT_BASE_URL_TEMPLATE.contains("{subdomain}"));
+        assert!(DEFAULT_BASE_URL_TEMPLATE.contains("/api/v2"));
+    }
+
+    #[test]
+    fn test_client_base_url_includes_subdomain() {
+        let client = ZendeskClient::new("acme", "u@a.com", "t").unwrap();
+        let debug = format!("{client:?}");
+        assert!(debug.contains("acme.zendesk.com/api/v2"));
+    }
+
+    // ─── percent_encode edge cases ────────────────────────────────
+
+    #[test]
+    fn test_percent_encode_empty() {
+        assert_eq!(percent_encode(""), "");
+    }
+
+    #[test]
+    fn test_percent_encode_safe_chars() {
+        // Letters, digits, dash, underscore, dot, tilde, colon should pass through
+        assert_eq!(percent_encode("abc123"), "abc123");
+        assert_eq!(percent_encode("a-b_c.d~e:f"), "a-b_c.d~e:f");
+    }
+
+    #[test]
+    fn test_percent_encode_spaces() {
+        assert_eq!(percent_encode("hello world foo"), "hello+world+foo");
+    }
+
+    #[test]
+    fn test_percent_encode_special_chars() {
+        // @ should be percent encoded
+        let result = percent_encode("user@example.com");
+        assert!(result.contains("%40"));
+        assert!(result.contains("user"));
+        assert!(result.contains("example.com"));
+    }
+
+    #[test]
+    fn test_percent_encode_hash_and_question() {
+        let result = percent_encode("test#anchor?key=val");
+        assert!(result.contains("%23")); // #
+        assert!(result.contains("%3F")); // ?
+        assert!(result.contains("%3D")); // =
+    }
+
+    #[test]
+    fn test_percent_encode_ampersand() {
+        let result = percent_encode("a&b");
+        assert!(result.contains("%26")); // &
+    }
+
+    #[test]
+    fn test_percent_encode_plus() {
+        // + should be percent encoded (only space becomes +)
+        let result = percent_encode("a+b");
+        assert!(result.contains("%2B"));
+    }
+
+    #[test]
+    fn test_percent_encode_slash() {
+        let result = percent_encode("path/to/thing");
+        assert!(result.contains("%2F"));
+    }
+
+    #[test]
+    fn test_percent_encode_unicode() {
+        let result = percent_encode("caf\u{00e9}");
+        // Non-ASCII bytes should be percent encoded
+        assert!(result.starts_with("caf"));
+        assert!(result.contains('%'));
+    }
+
+    #[test]
+    fn test_percent_encode_all_unreserved_chars() {
+        let unreserved = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~:";
+        assert_eq!(percent_encode(unreserved), unreserved);
+    }
+
+    #[test]
+    fn test_percent_encode_roundtrip_identity() {
+        // Already encoded strings get double-encoded (% -> %25)
+        let result = percent_encode("%20");
+        assert!(result.contains("%25"));
+    }
 }

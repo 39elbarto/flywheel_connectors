@@ -138,12 +138,19 @@ impl BitwardenClient {
     }
 
     #[instrument(skip(self), fields(url))]
-    async fn get(&self, path: &str) -> BitwardenResult<serde_json::Value> {
+    async fn get(
+        &self,
+        path: &str,
+        query: Option<&[(&str, String)]>,
+    ) -> BitwardenResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
         debug!(url = %url, "GET request");
-        let req = self
+        let mut req = self
             .add_auth(self.client.get(&url))
             .header("Accept", "application/json");
+        if let Some(q) = query {
+            req = req.query(q);
+        }
         let resp = req.send().await?;
         self.handle_response(resp).await
     }
@@ -179,7 +186,7 @@ impl BitwardenClient {
 
     /// List all collections.
     pub async fn list_collections(&self) -> BitwardenResult<serde_json::Value> {
-        self.get("/collections").await
+        self.get("/collections", None).await
     }
 
     // -- Items --
@@ -190,16 +197,19 @@ impl BitwardenClient {
         collection_id: Option<&str>,
         folder_id: Option<&str>,
     ) -> BitwardenResult<serde_json::Value> {
-        let qs = build_query(&[
-            collection_id.map(|c| ("collectionId", c.to_string())),
-            folder_id.map(|f| ("folderId", f.to_string())),
-        ]);
-        self.get(&format!("/list/object/items{qs}")).await
+        let mut q = Vec::new();
+        if let Some(c) = collection_id {
+            q.push(("collectionId", c.to_string()));
+        }
+        if let Some(f) = folder_id {
+            q.push(("folderId", f.to_string()));
+        }
+        self.get("/list/object/items", if q.is_empty() { None } else { Some(&q) }).await
     }
 
     /// Get a single vault item by ID.
     pub async fn get_item(&self, item_id: &str) -> BitwardenResult<serde_json::Value> {
-        self.get(&format!("/object/item/{item_id}")).await
+        self.get(&format!("/object/item/{item_id}"), None).await
     }
 
     /// Create a new vault item.
@@ -214,19 +224,6 @@ impl BitwardenClient {
     pub async fn delete_item(&self, item_id: &str) -> BitwardenResult<serde_json::Value> {
         self.delete(&format!("/object/item/{item_id}")).await
     }
-}
-
-fn build_query(params: &[Option<(&str, String)>]) -> String {
-    let mut qs = String::new();
-    let mut sep = '?';
-    for param in params.iter().flatten() {
-        qs.push(sep);
-        qs.push_str(param.0);
-        qs.push('=');
-        qs.push_str(&param.1);
-        sep = '&';
-    }
-    qs
 }
 
 #[cfg(test)]
@@ -263,38 +260,6 @@ mod tests {
     }
 
     #[test]
-    fn build_query_empty() {
-        assert_eq!(build_query(&[None, None]), "");
-    }
-
-    #[test]
-    fn build_query_one() {
-        assert_eq!(
-            build_query(&[Some(("collectionId", "c1".into()))]),
-            "?collectionId=c1"
-        );
-    }
-
-    #[test]
-    fn build_query_two() {
-        assert_eq!(
-            build_query(&[
-                Some(("collectionId", "c1".into())),
-                Some(("folderId", "f1".into()))
-            ]),
-            "?collectionId=c1&folderId=f1"
-        );
-    }
-
-    #[test]
-    fn build_query_first_none() {
-        assert_eq!(
-            build_query(&[None, Some(("folderId", "f1".into()))]),
-            "?folderId=f1"
-        );
-    }
-
-    #[test]
     fn default_base_url_value() {
         assert_eq!(DEFAULT_BASE_URL, "https://api.bitwarden.com");
     }
@@ -324,5 +289,95 @@ mod tests {
         assert!(!dbg.contains("secret"));
         assert!(dbg.contains("redacted"));
         assert!(dbg.contains("BitwardenClient"));
+    }
+
+    #[test]
+    fn auth_bearer_clone() {
+        let auth = BitwardenAuth::BearerToken("tok".into());
+        let cloned = auth.clone();
+        assert_eq!(auth.redacted_label(), cloned.redacted_label());
+    }
+
+    #[test]
+    fn auth_credential_clone() {
+        let auth = BitwardenAuth::CredentialId(CredentialId::new());
+        let cloned = auth.clone();
+        assert!(auth.is_secretless());
+        assert!(cloned.is_secretless());
+    }
+
+    #[test]
+    fn client_strips_multiple_trailing_slashes() {
+        let client = BitwardenClient::new(
+            BitwardenAuth::BearerToken("tok".into()),
+            Some("https://bitwarden.example.com///"),
+        )
+        .unwrap();
+        assert!(!client.base_url.ends_with('/'));
+    }
+
+    #[test]
+    fn client_debug_shows_base_url() {
+        let client = BitwardenClient::new(
+            BitwardenAuth::BearerToken("tok".into()),
+            Some("https://my-vault.example.com"),
+        )
+        .unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("my-vault.example.com"));
+    }
+
+    #[test]
+    fn auth_debug_credential_shows_id() {
+        let cred = BitwardenAuth::CredentialId(CredentialId::new());
+        let dbg = format!("{cred:?}");
+        assert!(dbg.contains("CredentialId"));
+    }
+
+    #[test]
+    fn auth_debug_bearer_shows_tuple_name() {
+        let auth = BitwardenAuth::BearerToken("x".into());
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("BearerToken"));
+    }
+
+    #[test]
+    fn default_base_url_is_https() {
+        assert!(DEFAULT_BASE_URL.starts_with("https://"));
+    }
+
+    #[test]
+    fn client_new_with_empty_url_fallback() {
+        // empty string should be kept as-is (not fallback)
+        let client =
+            BitwardenClient::new(BitwardenAuth::BearerToken("tok".into()), Some("")).unwrap();
+        assert_eq!(client.base_url, "");
+    }
+
+    #[test]
+    fn auth_redacted_label_never_contains_token() {
+        let auth = BitwardenAuth::BearerToken("super-secret-password-12345".into());
+        let label = auth.redacted_label();
+        assert!(!label.contains("super-secret-password-12345"));
+    }
+
+    #[test]
+    fn auth_is_secretless_false_for_bearer() {
+        assert!(!BitwardenAuth::BearerToken("tok".into()).is_secretless());
+    }
+
+    #[test]
+    fn auth_is_secretless_true_for_credential() {
+        assert!(BitwardenAuth::CredentialId(CredentialId::new()).is_secretless());
+    }
+
+    #[test]
+    fn client_new_preserves_path_in_base_url() {
+        let client = BitwardenClient::new(
+            BitwardenAuth::BearerToken("tok".into()),
+            Some("https://proxy.example.com/bitwarden"),
+        )
+        .unwrap();
+        assert_eq!(client.base_url, "https://proxy.example.com/bitwarden");
     }
 }

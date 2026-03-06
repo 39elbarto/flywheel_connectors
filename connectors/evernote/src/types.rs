@@ -322,4 +322,156 @@ mod tests {
         .unwrap();
         assert!(n.tags.unwrap().is_empty());
     }
+
+    #[test]
+    fn notebook_clone() {
+        let n = Notebook {
+            id: "nb1".into(),
+            name: "Work".into(),
+            created: Some(1000),
+            updated: Some(2000),
+            default_notebook: Some(true),
+            stack: Some("Projects".into()),
+        };
+        let cloned = Notebook::clone(&n);
+        assert_eq!(cloned.id, "nb1");
+        assert_eq!(cloned.stack, Some("Projects".into()));
+    }
+
+    #[test]
+    fn notebook_debug() {
+        let n = Notebook {
+            id: "nb99".into(),
+            name: "Debug".into(),
+            created: None,
+            updated: None,
+            default_notebook: None,
+            stack: None,
+        };
+        let dbg = format!("{n:?}");
+        assert!(dbg.contains("nb99"));
+    }
+
+    #[test]
+    fn note_clone() {
+        let n = Note {
+            note_id: "n1".into(),
+            title: "Test".into(),
+            content: Some("body".into()),
+            notebook_id: Some("nb1".into()),
+            created: None,
+            updated: None,
+            active: Some(true),
+            tags: Some(vec!["tag1".into()]),
+        };
+        let cloned = Note::clone(&n);
+        assert_eq!(cloned.note_id, "n1");
+        assert_eq!(cloned.tags.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn note_debug() {
+        let n = Note {
+            note_id: "n99".into(),
+            title: "Dbg".into(),
+            content: None,
+            notebook_id: None,
+            created: None,
+            updated: None,
+            active: None,
+            tags: None,
+        };
+        let dbg = format!("{n:?}");
+        assert!(dbg.contains("n99"));
+    }
+
+    #[test]
+    fn notebook_list_clone() {
+        let nl = NotebookList { notebooks: vec![json!({"id": "nb1"})] };
+        let cloned = NotebookList::clone(&nl);
+        assert_eq!(cloned.notebooks.len(), 1);
+    }
+
+    #[test]
+    fn note_list_clone() {
+        let nl = NoteList { notes: vec![], total_count: Some(5) };
+        let cloned = NoteList::clone(&nl);
+        assert_eq!(cloned.total_count, Some(5));
+    }
+
+    #[test]
+    fn create_note_response_clone() {
+        let r = CreateNoteResponse {
+            note_id: "n1".into(),
+            title: Some("Title".into()),
+            notebook_id: Some("nb1".into()),
+        };
+        let cloned = CreateNoteResponse::clone(&r);
+        assert_eq!(cloned.note_id, "n1");
+    }
+
+    #[test]
+    fn api_error_response_clone() {
+        let e = ApiErrorResponse {
+            error_code: Some(5),
+            message: Some("err".into()),
+        };
+        let cloned = ApiErrorResponse::clone(&e);
+        assert_eq!(cloned.error_code, Some(5));
+    }
+
+    #[test]
+    fn pagination_params_clone() {
+        let p = PaginationParams { offset: Some(10), limit: Some(25) };
+        let cloned = PaginationParams::clone(&p);
+        assert_eq!(cloned.offset, Some(10));
+        assert_eq!(cloned.limit, Some(25));
+    }
+
+    #[test]
+    fn notebook_serialize_roundtrip() {
+        let n = Notebook {
+            id: "nb1".into(),
+            name: "Test".into(),
+            created: Some(1000),
+            updated: None,
+            default_notebook: None,
+            stack: None,
+        };
+        let v = serde_json::to_value(&n).unwrap();
+        let back: Notebook = serde_json::from_value(v).unwrap();
+        assert_eq!(back.id, "nb1");
+        assert_eq!(back.created, Some(1000));
+    }
+
+    #[test]
+    fn note_null_fields_become_none() {
+        let n: Note = serde_json::from_value(json!({
+            "noteId": "n1",
+            "title": "T",
+            "content": null,
+            "notebookId": null,
+            "created": null,
+            "updated": null,
+            "active": null,
+            "tags": null,
+        }))
+        .unwrap();
+        assert!(n.content.is_none());
+        assert!(n.notebook_id.is_none());
+        assert!(n.active.is_none());
+        assert!(n.tags.is_none());
+    }
+
+    #[test]
+    fn create_note_response_serialize_roundtrip() {
+        let r = CreateNoteResponse {
+            note_id: "n1".into(),
+            title: Some("T".into()),
+            notebook_id: None,
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["noteId"], "n1");
+        assert_eq!(v["title"], "T");
+    }
 }

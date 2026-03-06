@@ -394,4 +394,279 @@ mod tests {
         assert_eq!(qs.status, Some("failed".into()));
         assert!(qs.result.is_some());
     }
+
+    #[test]
+    fn query_result_clone() {
+        let qr = QueryResult {
+            columns: Some(vec![ColumnMeta {
+                name: Some("id".into()),
+                type_name: Some("INTEGER".into()),
+            }]),
+            data: Some(vec![vec![json!(1)]]),
+            row_count: Some(1),
+            query_id: Some("q1".into()),
+        };
+        let c = qr.clone();
+        assert_eq!(c.row_count, Some(1));
+        assert_eq!(c.query_id, Some("q1".into()));
+        assert_eq!(qr.row_count, Some(1));
+    }
+
+    #[test]
+    fn query_result_debug() {
+        let qr = QueryResult {
+            columns: None,
+            data: None,
+            row_count: Some(42),
+            query_id: Some("q-dbg".into()),
+        };
+        let dbg = format!("{qr:?}");
+        assert!(dbg.contains("q-dbg"));
+    }
+
+    #[test]
+    fn column_meta_clone() {
+        let cm = ColumnMeta {
+            name: Some("col".into()),
+            type_name: Some("VARCHAR".into()),
+        };
+        let c = cm.clone();
+        assert_eq!(c.name, Some("col".into()));
+        assert_eq!(c.type_name, Some("VARCHAR".into()));
+        assert_eq!(cm.name, Some("col".into()));
+    }
+
+    #[test]
+    fn column_meta_debug() {
+        let cm = ColumnMeta {
+            name: Some("score".into()),
+            type_name: Some("FLOAT".into()),
+        };
+        let dbg = format!("{cm:?}");
+        assert!(dbg.contains("score"));
+        assert!(dbg.contains("FLOAT"));
+    }
+
+    #[test]
+    fn database_clone() {
+        let db = Database {
+            name: Some("mydb".into()),
+            size_bytes: Some(1024),
+            created_at: Some("2025-01-01T00:00:00Z".into()),
+        };
+        let c = db.clone();
+        assert_eq!(c.name, Some("mydb".into()));
+        assert_eq!(c.size_bytes, Some(1024));
+        assert_eq!(db.created_at, Some("2025-01-01T00:00:00Z".into()));
+    }
+
+    #[test]
+    fn database_debug() {
+        let db = Database {
+            name: Some("testdb".into()),
+            size_bytes: None,
+            created_at: None,
+        };
+        let dbg = format!("{db:?}");
+        assert!(dbg.contains("testdb"));
+    }
+
+    #[test]
+    fn table_clone() {
+        let t = Table {
+            name: Some("users".into()),
+            column_count: Some(5),
+            row_count: Some(100),
+            schema: Some("main".into()),
+        };
+        let c = t.clone();
+        assert_eq!(c.name, Some("users".into()));
+        assert_eq!(c.schema, Some("main".into()));
+        assert_eq!(t.column_count, Some(5));
+    }
+
+    #[test]
+    fn table_debug() {
+        let t = Table {
+            name: Some("events".into()),
+            column_count: Some(3),
+            row_count: None,
+            schema: None,
+        };
+        let dbg = format!("{t:?}");
+        assert!(dbg.contains("events"));
+    }
+
+    #[test]
+    fn schema_clone() {
+        let s = Schema {
+            name: Some("public".into()),
+        };
+        let c = s.clone();
+        assert_eq!(c.name, Some("public".into()));
+        assert_eq!(s.name, Some("public".into()));
+    }
+
+    #[test]
+    fn schema_debug() {
+        let s = Schema {
+            name: Some("main".into()),
+        };
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("main"));
+    }
+
+    #[test]
+    fn share_clone() {
+        let s = Share {
+            name: Some("share1".into()),
+            database: Some("db1".into()),
+            created_at: None,
+        };
+        let c = s.clone();
+        assert_eq!(c.name, Some("share1".into()));
+        assert_eq!(c.database, Some("db1".into()));
+        assert_eq!(s.name, Some("share1".into()));
+    }
+
+    #[test]
+    fn share_debug() {
+        let s = Share {
+            name: Some("myshare".into()),
+            database: None,
+            created_at: None,
+        };
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("myshare"));
+    }
+
+    #[test]
+    fn query_status_clone() {
+        let qs = QueryStatus {
+            query_id: Some("q1".into()),
+            status: Some("completed".into()),
+            result: Some(json!({"rows": 10})),
+        };
+        let c = qs.clone();
+        assert_eq!(c.query_id, Some("q1".into()));
+        assert_eq!(c.status, Some("completed".into()));
+        assert!(qs.result.is_some());
+    }
+
+    #[test]
+    fn query_status_debug() {
+        let qs = QueryStatus {
+            query_id: Some("qdebug".into()),
+            status: Some("running".into()),
+            result: None,
+        };
+        let dbg = format!("{qs:?}");
+        assert!(dbg.contains("qdebug"));
+    }
+
+    #[test]
+    fn api_error_response_clone() {
+        let e = ApiErrorResponse {
+            error: Some("invalid".into()),
+            message: Some("bad query".into()),
+        };
+        let c = e.clone();
+        assert_eq!(c.error, Some("invalid".into()));
+        assert_eq!(c.message, Some("bad query".into()));
+        assert_eq!(e.error, Some("invalid".into()));
+    }
+
+    #[test]
+    fn api_error_response_debug() {
+        let e = ApiErrorResponse {
+            error: Some("test_error".into()),
+            message: None,
+        };
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("test_error"));
+    }
+
+    #[test]
+    fn schema_serialize_roundtrip() {
+        let s = Schema {
+            name: Some("information_schema".into()),
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["name"], "information_schema");
+        let back: Schema = serde_json::from_value(v).unwrap();
+        assert_eq!(back.name, Some("information_schema".into()));
+    }
+
+    #[test]
+    fn query_status_serialize_roundtrip() {
+        let qs = QueryStatus {
+            query_id: Some("q-ser".into()),
+            status: Some("completed".into()),
+            result: Some(json!({"count": 5})),
+        };
+        let v = serde_json::to_value(&qs).unwrap();
+        assert_eq!(v["query_id"], "q-ser");
+        let back: QueryStatus = serde_json::from_value(v).unwrap();
+        assert_eq!(back.status, Some("completed".into()));
+    }
+
+    #[test]
+    fn database_large_size() {
+        let db: Database = serde_json::from_value(json!({
+            "name": "big_db",
+            "size_bytes": 1_073_741_824_u64,
+        }))
+        .unwrap();
+        assert_eq!(db.size_bytes, Some(1_073_741_824));
+    }
+
+    #[test]
+    fn table_zero_rows() {
+        let t: Table = serde_json::from_value(json!({
+            "name": "empty_table",
+            "row_count": 0,
+            "column_count": 3,
+        }))
+        .unwrap();
+        assert_eq!(t.row_count, Some(0));
+    }
+
+    #[test]
+    fn query_result_empty_data() {
+        let qr: QueryResult = serde_json::from_value(json!({
+            "columns": [],
+            "data": [],
+            "row_count": 0,
+        }))
+        .unwrap();
+        assert!(qr.columns.as_ref().unwrap().is_empty());
+        assert!(qr.data.as_ref().unwrap().is_empty());
+        assert_eq!(qr.row_count, Some(0));
+    }
+
+    #[test]
+    fn query_result_multiple_types() {
+        let qr: QueryResult = serde_json::from_value(json!({
+            "columns": [
+                {"name": "id", "type_name": "INTEGER"},
+                {"name": "name", "type_name": "VARCHAR"},
+                {"name": "active", "type_name": "BOOLEAN"},
+            ],
+            "data": [[1, "Alice", true], [2, "Bob", false]],
+            "row_count": 2,
+        }))
+        .unwrap();
+        assert_eq!(qr.columns.as_ref().unwrap().len(), 3);
+        assert_eq!(qr.data.as_ref().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn api_error_response_error_only() {
+        let e: ApiErrorResponse = serde_json::from_value(json!({
+            "error": "unauthorized",
+        }))
+        .unwrap();
+        assert_eq!(e.error, Some("unauthorized".into()));
+        assert!(e.message.is_none());
+    }
 }

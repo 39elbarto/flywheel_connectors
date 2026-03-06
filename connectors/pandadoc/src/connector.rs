@@ -752,4 +752,243 @@ mod tests {
         assert!(c.client.is_none());
         assert!(c.session_id.is_none());
     }
+
+    #[test]
+    fn connector_new_equals_default() {
+        let c = PandaDocConnector::new();
+        assert!(c.config.is_none());
+        assert!(c.client.is_none());
+        assert!(c.session_id.is_none());
+        assert_eq!(c.request_count.load(Ordering::Relaxed), 0);
+        assert_eq!(c.error_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn doctor_check_skip_serializing_message_none() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert!(v.get("message").is_none(), "message should be skipped when None");
+    }
+
+    #[test]
+    fn doctor_check_serializes_message_some() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: false,
+            message: Some("error detail".into()),
+            critical: true,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert_eq!(v["message"], "error detail");
+    }
+
+    #[test]
+    fn doctor_check_roundtrip() {
+        let check = DoctorCheck {
+            name: "connectivity".into(),
+            passed: true,
+            message: Some("All good".into()),
+            critical: false,
+        };
+        let serialized = serde_json::to_string(&check).unwrap();
+        let back: DoctorCheck = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(back.name, "connectivity");
+        assert_eq!(back.message, Some("All good".into()));
+    }
+
+    #[test]
+    fn doctor_status_values_serialize_lowercase() {
+        assert_eq!(serde_json::to_value(DoctorStatus::Healthy).unwrap(), "healthy");
+        assert_eq!(serde_json::to_value(DoctorStatus::Degraded).unwrap(), "degraded");
+        assert_eq!(serde_json::to_value(DoctorStatus::Unhealthy).unwrap(), "unhealthy");
+    }
+
+    #[test]
+    fn doctor_status_debug() {
+        assert!(format!("{:?}", DoctorStatus::Healthy).contains("Healthy"));
+        assert!(format!("{:?}", DoctorStatus::Degraded).contains("Degraded"));
+        assert!(format!("{:?}", DoctorStatus::Unhealthy).contains("Unhealthy"));
+    }
+
+    #[test]
+    fn doctor_status_clone_copy() {
+        let s = DoctorStatus::Healthy;
+        let c = s;
+        assert_eq!(s, c);
+    }
+
+    #[test]
+    fn doctor_status_serde_roundtrip() {
+        for status in [DoctorStatus::Healthy, DoctorStatus::Degraded, DoctorStatus::Unhealthy] {
+            let s = serde_json::to_string(&status).unwrap();
+            let back: DoctorStatus = serde_json::from_str(&s).unwrap();
+            assert_eq!(back, status);
+        }
+    }
+
+    #[test]
+    fn doctor_result_multiple_critical_failures() {
+        let result = DoctorResult::from_checks(vec![
+            DoctorCheck { name: "a".into(), passed: false, message: None, critical: true },
+            DoctorCheck { name: "b".into(), passed: false, message: None, critical: true },
+        ]);
+        assert_eq!(result.status, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_result_serializes_with_message() {
+        let result = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "x".into(),
+            passed: false,
+            message: Some("detail".into()),
+            critical: false,
+        }]);
+        let v = serde_json::to_value(&result).unwrap();
+        assert_eq!(v["status"], "degraded");
+        assert_eq!(v["checks"][0]["message"], "detail");
+    }
+
+    #[test]
+    fn operations_delete_is_dangerous() {
+        let ops = operations_info();
+        let delete_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "pandadoc.documents.delete")
+            .unwrap();
+        assert_eq!(delete_op["safety_tier"], "dangerous");
+        assert_eq!(delete_op["risk_level"], "high");
+    }
+
+    #[test]
+    fn operations_send_is_risky() {
+        let ops = operations_info();
+        let send_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "pandadoc.documents.send")
+            .unwrap();
+        assert_eq!(send_op["safety_tier"], "risky");
+        assert_eq!(send_op["risk_level"], "high");
+    }
+
+    #[test]
+    fn operations_create_is_risky() {
+        let ops = operations_info();
+        let create_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "pandadoc.documents.create")
+            .unwrap();
+        assert_eq!(create_op["safety_tier"], "risky");
+    }
+
+    #[test]
+    fn operations_templates_list_capability() {
+        let ops = operations_info();
+        let tpl_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "pandadoc.templates.list")
+            .unwrap();
+        assert_eq!(tpl_op["capability"], "pandadoc.templates.read");
+    }
+
+    #[test]
+    fn require_str_with_empty_string() {
+        let input = json!({"document_id": ""});
+        assert_eq!(require_str(&input, "document_id").unwrap(), "");
+    }
+
+    #[test]
+    fn require_str_with_array_value() {
+        let input = json!({"document_id": [1, 2, 3]});
+        assert!(require_str(&input, "document_id").is_err());
+    }
+
+    #[test]
+    fn require_str_with_object_value() {
+        let input = json!({"document_id": {"nested": true}});
+        assert!(require_str(&input, "document_id").is_err());
+    }
+
+    #[test]
+    fn require_str_with_bool_value() {
+        let input = json!({"document_id": true});
+        assert!(require_str(&input, "document_id").is_err());
+    }
+
+    #[test]
+    fn require_str_error_contains_field_name() {
+        let input = json!({});
+        let err = require_str(&input, "template_uuid").unwrap_err();
+        match err {
+            PandaDocError::Api { message, .. } => {
+                assert!(message.contains("template_uuid"));
+            }
+            e => panic!("expected Api, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn config_rejects_both_auth_error_message() {
+        let result = PandaDocConfig::from_params(&json!({
+            "api_key": "tok",
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+        }));
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("exactly one"));
+            }
+            e => panic!("expected InvalidRequest, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn config_no_auth_error_message() {
+        let result = PandaDocConfig::from_params(&json!({}));
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("api_key") || message.contains("credential_id"));
+            }
+            e => panic!("expected InvalidRequest, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn config_non_string_credential_error_message() {
+        let result = PandaDocConfig::from_params(&json!({"credential_id": 42}));
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("must be a string"));
+            }
+            e => panic!("expected InvalidRequest, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn config_invalid_uuid_credential_error_message() {
+        let result = PandaDocConfig::from_params(&json!({"credential_id": "not-valid"}));
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("valid UUID"));
+            }
+            e => panic!("expected InvalidRequest, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn config_default_base_url_when_absent() {
+        let config = PandaDocConfig::from_params(&json!({"api_key": "tok"})).unwrap();
+        assert_eq!(config.base_url, DEFAULT_BASE_URL);
+    }
 }

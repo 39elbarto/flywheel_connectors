@@ -288,4 +288,86 @@ mod tests {
         let dbg = format!("{cred:?}");
         assert!(dbg.contains("CredentialId"));
     }
+
+    #[test]
+    fn auth_clone() {
+        let auth = MongoDbAuth::ApiKey("key123".into());
+        let cloned = auth.clone();
+        drop(auth);
+        assert_eq!(cloned.redacted_label(), "api_key:redacted");
+    }
+
+    #[test]
+    fn auth_credential_clone() {
+        let auth = MongoDbAuth::CredentialId(CredentialId::new());
+        let cloned = auth.clone();
+        drop(auth);
+        assert!(cloned.is_secretless());
+    }
+
+    #[test]
+    fn client_debug_contains_base_url() {
+        let client = MongoDbClient::new(MongoDbAuth::ApiKey("k".into()), None).unwrap();
+        let dbg = format!("{client:?}");
+        assert!(dbg.contains("MongoDbClient"));
+        assert!(dbg.contains("base_url"));
+    }
+
+    #[test]
+    fn client_custom_url_no_trailing_slash() {
+        let client = MongoDbClient::new(
+            MongoDbAuth::ApiKey("k".into()),
+            Some("https://custom.example.com/data/v1"),
+        )
+        .unwrap();
+        assert_eq!(client.base_url, "https://custom.example.com/data/v1");
+    }
+
+    #[test]
+    fn client_new_with_credential_id() {
+        let cred = CredentialId::new();
+        let client =
+            MongoDbClient::new(MongoDbAuth::CredentialId(cred), None).unwrap();
+        assert_eq!(client.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn default_base_url_contains_mongodb() {
+        assert!(DEFAULT_BASE_URL.contains("mongodb"));
+    }
+
+    #[test]
+    fn default_base_url_is_https() {
+        assert!(DEFAULT_BASE_URL.starts_with("https://"));
+    }
+
+    #[test]
+    fn auth_api_key_is_not_secretless() {
+        let auth = MongoDbAuth::ApiKey("any-key".into());
+        assert!(!auth.is_secretless());
+    }
+
+    #[test]
+    fn auth_credential_id_is_secretless() {
+        let auth = MongoDbAuth::CredentialId(CredentialId::new());
+        assert!(auth.is_secretless());
+    }
+
+    #[test]
+    fn auth_debug_api_key_shows_tuple_name() {
+        let auth = MongoDbAuth::ApiKey("secret".into());
+        let dbg = format!("{auth:?}");
+        assert!(dbg.contains("ApiKey"));
+    }
+
+    #[test]
+    fn client_strips_multiple_trailing_slashes() {
+        let client = MongoDbClient::new(
+            MongoDbAuth::ApiKey("k".into()),
+            Some("https://example.com/v1////"),
+        )
+        .unwrap();
+        // trim_end_matches removes all trailing '/'
+        assert!(!client.base_url.ends_with('/'));
+    }
 }

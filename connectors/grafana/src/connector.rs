@@ -937,4 +937,163 @@ mod tests {
         assert_eq!(c.request_count.load(Ordering::Relaxed), 0);
         assert_eq!(c.error_count.load(Ordering::Relaxed), 0);
     }
+
+    #[test]
+    fn connector_new_equals_default() {
+        let c = GrafanaConnector::new();
+        assert!(c.config.is_none());
+        assert!(c.client.is_none());
+        assert!(c.session_id.is_none());
+    }
+
+    #[test]
+    fn doctor_check_skip_serializing_message_none() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: true,
+            message: None,
+            critical: false,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert!(v.get("message").is_none(), "message should be skipped when None");
+    }
+
+    #[test]
+    fn doctor_check_serializes_message_some() {
+        let check = DoctorCheck {
+            name: "test".into(),
+            passed: false,
+            message: Some("error detail".into()),
+            critical: true,
+        };
+        let v = serde_json::to_value(&check).unwrap();
+        assert_eq!(v["message"], "error detail");
+    }
+
+    #[test]
+    fn doctor_check_roundtrip() {
+        let check = DoctorCheck {
+            name: "connectivity".into(),
+            passed: true,
+            message: Some("All good".into()),
+            critical: false,
+        };
+        let serialized = serde_json::to_string(&check).unwrap();
+        let back: DoctorCheck = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(back.name, "connectivity");
+        assert_eq!(back.message, Some("All good".into()));
+        assert!(!back.critical);
+    }
+
+    #[test]
+    fn doctor_status_values_serialize_lowercase() {
+        assert_eq!(serde_json::to_value(DoctorStatus::Healthy).unwrap(), "healthy");
+        assert_eq!(serde_json::to_value(DoctorStatus::Degraded).unwrap(), "degraded");
+        assert_eq!(serde_json::to_value(DoctorStatus::Unhealthy).unwrap(), "unhealthy");
+    }
+
+    #[test]
+    fn doctor_status_debug() {
+        assert!(format!("{:?}", DoctorStatus::Healthy).contains("Healthy"));
+        assert!(format!("{:?}", DoctorStatus::Degraded).contains("Degraded"));
+        assert!(format!("{:?}", DoctorStatus::Unhealthy).contains("Unhealthy"));
+    }
+
+    #[test]
+    fn doctor_status_clone_copy() {
+        let s = DoctorStatus::Healthy;
+        let c = s;
+        assert_eq!(s, c);
+    }
+
+    #[test]
+    fn doctor_result_multiple_critical_failures() {
+        let result = DoctorResult::from_checks(vec![
+            DoctorCheck { name: "a".into(), passed: false, message: None, critical: true },
+            DoctorCheck { name: "b".into(), passed: false, message: None, critical: true },
+        ]);
+        assert_eq!(result.status, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_result_mixed_critical_and_noncritical_failures() {
+        let result = DoctorResult::from_checks(vec![
+            DoctorCheck { name: "a".into(), passed: false, message: None, critical: true },
+            DoctorCheck { name: "b".into(), passed: false, message: None, critical: false },
+        ]);
+        // critical failure takes precedence
+        assert_eq!(result.status, DoctorStatus::Unhealthy);
+    }
+
+    #[test]
+    fn doctor_result_serializes_with_message() {
+        let result = DoctorResult::from_checks(vec![DoctorCheck {
+            name: "x".into(),
+            passed: false,
+            message: Some("detail".into()),
+            critical: false,
+        }]);
+        let v = serde_json::to_value(&result).unwrap();
+        assert_eq!(v["status"], "degraded");
+        assert_eq!(v["checks"][0]["message"], "detail");
+    }
+
+    #[test]
+    fn operations_info_idempotency_values_valid() {
+        let valid = ["strict", "none", "idempotent"];
+        let ops = operations_info();
+        for op in ops.as_array().unwrap() {
+            let idemp = op["idempotency"].as_str().unwrap();
+            assert!(valid.contains(&idemp), "invalid idempotency: {idemp} for op {}", op["id"]);
+        }
+    }
+
+    #[test]
+    fn operations_info_annotations_create_is_not_idempotent() {
+        let ops = operations_info();
+        let ann_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "grafana.annotations.create")
+            .unwrap();
+        assert_eq!(ann_op["idempotency"], "none");
+    }
+
+    #[test]
+    fn operations_info_datasources_list_capability() {
+        let ops = operations_info();
+        let ds_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "grafana.datasources.list")
+            .unwrap();
+        assert_eq!(ds_op["capability"], "grafana.datasources.read");
+    }
+
+    #[test]
+    fn require_str_with_empty_string() {
+        let input = json!({"uid": ""});
+        // Empty string is still a valid str
+        assert_eq!(require_str(&input, "uid").unwrap(), "");
+    }
+
+    #[test]
+    fn require_str_with_array_value() {
+        let input = json!({"uid": [1, 2, 3]});
+        assert!(require_str(&input, "uid").is_err());
+    }
+
+    #[test]
+    fn require_str_with_object_value() {
+        let input = json!({"uid": {"nested": true}});
+        assert!(require_str(&input, "uid").is_err());
+    }
+
+    #[test]
+    fn require_str_with_bool_value() {
+        let input = json!({"uid": true});
+        assert!(require_str(&input, "uid").is_err());
+    }
 }

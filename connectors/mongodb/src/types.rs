@@ -381,4 +381,187 @@ mod tests {
         let r: DeleteResult = serde_json::from_value(json!({ "deletedCount": 0 })).unwrap();
         assert_eq!(r.deleted_count, Some(0));
     }
+
+    // -- Clone trait tests --
+
+    #[test]
+    fn find_result_clone() {
+        let r = FindResult {
+            document: Some(json!({"x": 1})),
+        };
+        let cloned = r.clone();
+        drop(r);
+        assert_eq!(cloned.document.unwrap()["x"], 1);
+    }
+
+    #[test]
+    fn find_many_result_clone() {
+        let r = FindManyResult {
+            documents: Some(vec![json!({"a": 1})]),
+        };
+        let cloned = r.clone();
+        drop(r);
+        assert_eq!(cloned.documents.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn insert_result_clone() {
+        let r = InsertResult {
+            inserted_id: Some("id1".into()),
+        };
+        let cloned = r.clone();
+        drop(r);
+        assert_eq!(cloned.inserted_id.unwrap(), "id1");
+    }
+
+    #[test]
+    fn insert_many_result_clone() {
+        let r = InsertManyResult {
+            inserted_ids: Some(vec!["a".into(), "b".into()]),
+        };
+        let cloned = r.clone();
+        drop(r);
+        assert_eq!(cloned.inserted_ids.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn update_result_clone() {
+        let r = UpdateResult {
+            matched_count: Some(5),
+            modified_count: Some(3),
+        };
+        let cloned = r.clone();
+        #[allow(clippy::drop_non_drop)]
+        drop(r);
+        assert_eq!(cloned.matched_count, Some(5));
+        assert_eq!(cloned.modified_count, Some(3));
+    }
+
+    #[test]
+    fn delete_result_clone() {
+        let r = DeleteResult {
+            deleted_count: Some(10),
+        };
+        let cloned = r.clone();
+        #[allow(clippy::drop_non_drop)]
+        drop(r);
+        assert_eq!(cloned.deleted_count, Some(10));
+    }
+
+    #[test]
+    fn aggregate_result_clone() {
+        let r = AggregateResult {
+            documents: Some(vec![json!({"total": 100})]),
+        };
+        let cloned = r.clone();
+        drop(r);
+        assert_eq!(cloned.documents.unwrap()[0]["total"], 100);
+    }
+
+    #[test]
+    fn api_error_response_clone() {
+        let e = ApiErrorResponse {
+            error: Some("test".into()),
+            error_code: Some("ERR".into()),
+            link: None,
+        };
+        let cloned = e.clone();
+        drop(e);
+        let _ = cloned;
+    }
+
+    // -- Debug trait tests --
+
+    #[test]
+    fn find_result_debug() {
+        let r = FindResult { document: None };
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("FindResult"));
+    }
+
+    #[test]
+    fn find_many_result_debug() {
+        let r = FindManyResult { documents: None };
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("FindManyResult"));
+    }
+
+    #[test]
+    fn insert_result_debug() {
+        let r = InsertResult {
+            inserted_id: Some("abc".into()),
+        };
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("InsertResult"));
+        assert!(dbg.contains("abc"));
+    }
+
+    #[test]
+    fn update_result_debug() {
+        let r = UpdateResult {
+            matched_count: Some(1),
+            modified_count: Some(0),
+        };
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("UpdateResult"));
+    }
+
+    #[test]
+    fn delete_result_debug() {
+        let r = DeleteResult {
+            deleted_count: Some(5),
+        };
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("DeleteResult"));
+    }
+
+    #[test]
+    fn aggregate_result_debug() {
+        let r = AggregateResult { documents: None };
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("AggregateResult"));
+    }
+
+    #[test]
+    fn api_error_response_debug() {
+        let e = ApiErrorResponse {
+            error: Some("msg".into()),
+            error_code: None,
+            link: None,
+        };
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("ApiErrorResponse"));
+    }
+
+    // -- Edge cases --
+
+    #[test]
+    fn find_many_result_single_document() {
+        let r: FindManyResult =
+            serde_json::from_value(json!({ "documents": [{"x": 1}] })).unwrap();
+        assert_eq!(r.documents.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn insert_many_result_single_id() {
+        let r: InsertManyResult =
+            serde_json::from_value(json!({ "insertedIds": ["only"] })).unwrap();
+        assert_eq!(r.inserted_ids.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn update_result_large_counts() {
+        let r: UpdateResult =
+            serde_json::from_value(json!({ "matchedCount": 1000000, "modifiedCount": 999999 }))
+                .unwrap();
+        assert_eq!(r.matched_count, Some(1_000_000));
+        assert_eq!(r.modified_count, Some(999_999));
+    }
+
+    #[test]
+    fn delete_result_large_count() {
+        let r: DeleteResult =
+            serde_json::from_value(json!({ "deletedCount": 999999 })).unwrap();
+        assert_eq!(r.deleted_count, Some(999_999));
+    }
 }

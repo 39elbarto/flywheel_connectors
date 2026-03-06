@@ -126,7 +126,7 @@ fn github_error_response(message: &str) -> serde_json::Value {
 // ============================================================================
 
 /// Create issue happy path.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn create_issue_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("github.create_issue.happy_path");
     let mock_server = MockServer::start().await;
@@ -167,7 +167,7 @@ async fn create_issue_happy_path() {
 }
 
 /// Get issue happy path.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn get_issue_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("github.get_issue.happy_path");
     let mock_server = MockServer::start().await;
@@ -207,7 +207,7 @@ async fn get_issue_happy_path() {
 }
 
 /// Search issues happy path.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn search_issues_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("github.search_issues.happy_path");
     let mock_server = MockServer::start().await;
@@ -245,7 +245,7 @@ async fn search_issues_happy_path() {
 // ============================================================================
 
 /// Create pull request happy path.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn create_pull_request_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("github.create_pull_request.happy_path");
     let mock_server = MockServer::start().await;
@@ -283,7 +283,7 @@ async fn create_pull_request_happy_path() {
 }
 
 /// Get pull request happy path.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn get_pull_request_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("github.get_pull_request.happy_path");
     let mock_server = MockServer::start().await;
@@ -319,7 +319,7 @@ async fn get_pull_request_happy_path() {
 }
 
 /// Merge pull request happy path.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn merge_pull_request_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("github.merge_pull_request.happy_path");
     let mock_server = MockServer::start().await;
@@ -362,7 +362,7 @@ async fn merge_pull_request_happy_path() {
 // ============================================================================
 
 /// Get repository metadata.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn get_repo_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("github.get_repo.happy_path");
     let mock_server = MockServer::start().await;
@@ -408,7 +408,7 @@ async fn get_repo_happy_path() {
 }
 
 /// Search repositories.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn search_repos_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("github.search_repos.happy_path");
     let mock_server = MockServer::start().await;
@@ -459,7 +459,7 @@ async fn search_repos_happy_path() {
 // ============================================================================
 
 /// List workflows.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn list_workflows_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("github.list_workflows.happy_path");
     let mock_server = MockServer::start().await;
@@ -499,7 +499,7 @@ async fn list_workflows_happy_path() {
 }
 
 /// Trigger workflow dispatch.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn trigger_workflow_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("github.trigger_workflow.happy_path");
     let mock_server = MockServer::start().await;
@@ -539,7 +539,7 @@ async fn trigger_workflow_happy_path() {
 // ============================================================================
 
 /// Get file content.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn get_file_content_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("github.get_file_content.happy_path");
     let mock_server = MockServer::start().await;
@@ -582,7 +582,7 @@ async fn get_file_content_happy_path() {
 }
 
 /// Search code.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn search_code_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("github.search_code.happy_path");
     let mock_server = MockServer::start().await;
@@ -631,7 +631,7 @@ async fn search_code_happy_path() {
 // ============================================================================
 
 /// 401 Unauthorized maps to `FcpError::Unauthorized`.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn error_401_maps_to_unauthorized() {
     let _ctx = AsyncTestContext::for_scenario("github.error.401");
     let mock_server = MockServer::start().await;
@@ -667,7 +667,7 @@ async fn error_401_maps_to_unauthorized() {
 }
 
 /// 404 Not Found maps to `FcpError::ResourceNotFound`.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn error_404_maps_to_not_found() {
     let _ctx = AsyncTestContext::for_scenario("github.error.404");
     let mock_server = MockServer::start().await;
@@ -701,7 +701,7 @@ async fn error_404_maps_to_not_found() {
 }
 
 /// 422 Validation Error maps to `FcpError::InvalidRequest`.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn error_422_maps_to_invalid_request() {
     let _ctx = AsyncTestContext::for_scenario("github.error.422");
     let mock_server = MockServer::start().await;
@@ -747,7 +747,7 @@ async fn error_422_maps_to_invalid_request() {
 }
 
 /// 429 Rate Limited maps to `FcpError::RateLimited`.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn error_429_maps_to_rate_limited() {
     let _ctx = AsyncTestContext::for_scenario("github.error.429");
     let mock_server = MockServer::start().await;
@@ -784,7 +784,7 @@ async fn error_429_maps_to_rate_limited() {
 }
 
 /// 409 Conflict maps to `FcpError::Conflict`.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn error_409_maps_to_conflict() {
     let _ctx = AsyncTestContext::for_scenario("github.error.409");
     let mock_server = MockServer::start().await;
@@ -831,7 +831,7 @@ async fn error_409_maps_to_conflict() {
 }
 
 /// 500 Server Error maps to `FcpError::External` with `retryable`=true.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn error_500_maps_to_external() {
     let _ctx = AsyncTestContext::for_scenario("github.error.500");
     let mock_server = MockServer::start().await;
@@ -919,7 +919,7 @@ fn error_retryable_classification() {
 // ============================================================================
 
 /// Invoke without `capability_token` fails.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn capability_missing_token_fails() {
     let _ctx = AsyncTestContext::for_scenario("github.capability.missing_token");
     let mock_server = MockServer::start().await;
@@ -943,7 +943,7 @@ async fn capability_missing_token_fails() {
 }
 
 /// Invoke before handshake fails (no verifier).
-#[tokio::test]
+#[fcp_async_core::test]
 async fn capability_no_handshake_fails() {
     let _ctx = AsyncTestContext::for_scenario("github.capability.no_handshake");
     let mock_server = MockServer::start().await;
@@ -970,7 +970,7 @@ async fn capability_no_handshake_fails() {
 }
 
 /// Invoke before configure fails (no client).
-#[tokio::test]
+#[fcp_async_core::test]
 async fn capability_no_configure_fails() {
     let _ctx = AsyncTestContext::for_scenario("github.capability.no_configure");
 
@@ -994,7 +994,7 @@ async fn capability_no_configure_fails() {
 }
 
 /// Token signed for wrong operation fails.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn capability_wrong_operation_fails() {
     let _ctx = AsyncTestContext::for_scenario("github.capability.wrong_op");
     let mock_server = MockServer::start().await;
@@ -1028,7 +1028,7 @@ async fn capability_wrong_operation_fails() {
 }
 
 /// Unknown operation fails with `OperationNotGranted`.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn capability_unknown_operation_fails() {
     let mock_server = MockServer::start().await;
 
@@ -1057,7 +1057,7 @@ async fn capability_unknown_operation_fails() {
 // ============================================================================
 
 /// Health check before configure reports `not_configured`.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn lifecycle_health_before_configure() {
     let connector = GitHubConnector::new();
     let result = connector
@@ -1068,7 +1068,7 @@ async fn lifecycle_health_before_configure() {
 }
 
 /// Health check after configure reports healthy.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn lifecycle_health_after_configure() {
     let mock_server = MockServer::start().await;
     let mut connector = GitHubConnector::new();
@@ -1082,7 +1082,7 @@ async fn lifecycle_health_after_configure() {
 }
 
 /// Handshake returns accepted with capabilities granted.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn lifecycle_handshake_grants_capabilities() {
     let mut connector = GitHubConnector::new();
     let signing_key = Ed25519SigningKey::generate();
@@ -1105,7 +1105,7 @@ async fn lifecycle_handshake_grants_capabilities() {
 }
 
 /// Shutdown returns clean status.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn lifecycle_shutdown_clean() {
     let connector = GitHubConnector::new();
     let result = connector
@@ -1116,7 +1116,7 @@ async fn lifecycle_shutdown_clean() {
 }
 
 /// Introspect exposes all 12 operations with schemas.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn lifecycle_introspect_all_operations() {
     let connector = GitHubConnector::new();
     let result = connector
@@ -1166,7 +1166,7 @@ async fn lifecycle_introspect_all_operations() {
 // ============================================================================
 
 /// Missing `owner` in `get_issue` fails.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn validation_get_issue_missing_owner() {
     let mock_server = MockServer::start().await;
     let mut connector = GitHubConnector::new();
@@ -1195,7 +1195,7 @@ async fn validation_get_issue_missing_owner() {
 }
 
 /// Missing `repo` in `get_issue` fails.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn validation_get_issue_missing_repo() {
     let mock_server = MockServer::start().await;
     let mut connector = GitHubConnector::new();
@@ -1224,7 +1224,7 @@ async fn validation_get_issue_missing_repo() {
 }
 
 /// Missing `issue_number` in `get_issue` fails.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn validation_get_issue_missing_number() {
     let mock_server = MockServer::start().await;
     let mut connector = GitHubConnector::new();
@@ -1253,7 +1253,7 @@ async fn validation_get_issue_missing_number() {
 }
 
 /// Missing `title` in `create_issue` fails.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn validation_create_issue_missing_title() {
     let mock_server = MockServer::start().await;
     let mut connector = GitHubConnector::new();
@@ -1282,7 +1282,7 @@ async fn validation_create_issue_missing_title() {
 }
 
 /// Missing `head` in `create_pull_request` fails.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn validation_create_pr_missing_head() {
     let mock_server = MockServer::start().await;
     let mut connector = GitHubConnector::new();
@@ -1316,7 +1316,7 @@ async fn validation_create_pr_missing_head() {
 }
 
 /// Missing `query` in `search_issues` fails.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn validation_search_issues_missing_query() {
     let mock_server = MockServer::start().await;
     let mut connector = GitHubConnector::new();
@@ -1349,7 +1349,7 @@ async fn validation_search_issues_missing_query() {
 // ============================================================================
 
 /// 403 with x-ratelimit-remaining: 0 is a secondary rate limit.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn error_403_secondary_rate_limit() {
     let _ctx = AsyncTestContext::for_scenario("github.error.403_secondary_rate_limit");
     let mock_server = MockServer::start().await;
@@ -1358,7 +1358,9 @@ async fn error_403_secondary_rate_limit() {
         .and(path("/repos/octocat/hello-world"))
         .respond_with(
             ResponseTemplate::new(403)
-                .set_body_json(github_error_response("You have exceeded a secondary rate limit"))
+                .set_body_json(github_error_response(
+                    "You have exceeded a secondary rate limit",
+                ))
                 .insert_header("x-ratelimit-remaining", "0")
                 .insert_header("retry-after", "120"),
         )
@@ -1388,7 +1390,7 @@ async fn error_403_secondary_rate_limit() {
 }
 
 /// 403 without rate-limit headers is a permission denied (maps to Unauthorized).
-#[tokio::test]
+#[fcp_async_core::test]
 async fn error_403_permission_denied() {
     let _ctx = AsyncTestContext::for_scenario("github.error.403_permission");
     let mock_server = MockServer::start().await;
@@ -1396,8 +1398,9 @@ async fn error_403_permission_denied() {
     Mock::given(method("GET"))
         .and(path("/repos/octocat/hello-world"))
         .respond_with(
-            ResponseTemplate::new(403)
-                .set_body_json(github_error_response("Resource not accessible by integration")),
+            ResponseTemplate::new(403).set_body_json(github_error_response(
+                "Resource not accessible by integration",
+            )),
         )
         .mount(&mock_server)
         .await;
@@ -1420,7 +1423,7 @@ async fn error_403_permission_denied() {
 }
 
 /// 503 Service Unavailable maps to retryable External error.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn error_503_maps_to_external_retryable() {
     let _ctx = AsyncTestContext::for_scenario("github.error.503");
     let mock_server = MockServer::start().await;
@@ -1461,16 +1464,14 @@ async fn error_503_maps_to_external_retryable() {
 }
 
 /// Non-JSON error body is handled gracefully.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn error_non_json_response_body() {
     let _ctx = AsyncTestContext::for_scenario("github.error.non_json");
     let mock_server = MockServer::start().await;
 
     Mock::given(method("GET"))
         .and(path("/repos/octocat/hello-world"))
-        .respond_with(
-            ResponseTemplate::new(502).set_body_string("Bad Gateway"),
-        )
+        .respond_with(ResponseTemplate::new(502).set_body_string("Bad Gateway"))
         .mount(&mock_server)
         .await;
 
@@ -1503,7 +1504,7 @@ async fn error_non_json_response_body() {
 // ============================================================================
 
 /// Providing both token and credential_id fails.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn config_both_token_and_credential_id_fails() {
     let _ctx = AsyncTestContext::for_scenario("github.config.both_auth");
     let mut connector = GitHubConnector::new();
@@ -1528,7 +1529,7 @@ async fn config_both_token_and_credential_id_fails() {
 }
 
 /// Missing both token and credential_id fails.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn config_missing_auth_fails() {
     let _ctx = AsyncTestContext::for_scenario("github.config.no_auth");
     let mut connector = GitHubConnector::new();
@@ -1552,7 +1553,7 @@ async fn config_missing_auth_fails() {
 }
 
 /// Configure with credential_id succeeds.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn config_credential_id_mode() {
     let _ctx = AsyncTestContext::for_scenario("github.config.credential_id");
     let mut connector = GitHubConnector::new();
@@ -1568,7 +1569,7 @@ async fn config_credential_id_mode() {
 }
 
 /// Invalid credential_id (bad UUID) fails.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn config_invalid_credential_id_fails() {
     let _ctx = AsyncTestContext::for_scenario("github.config.bad_credential");
     let mut connector = GitHubConnector::new();
@@ -1592,7 +1593,7 @@ async fn config_invalid_credential_id_fails() {
 }
 
 /// Custom base_url is used for API requests.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn config_custom_base_url() {
     let _ctx = AsyncTestContext::for_scenario("github.config.custom_base_url");
     let mock_server = MockServer::start().await;
@@ -1649,7 +1650,7 @@ async fn config_custom_base_url() {
 // ============================================================================
 
 /// Doctor before configure reports unhealthy.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn doctor_before_configure() {
     let _ctx = AsyncTestContext::for_scenario("github.doctor.before_configure");
     let connector = GitHubConnector::new();
@@ -1661,12 +1662,15 @@ async fn doctor_before_configure() {
 
     assert_eq!(result["status"], "unhealthy");
     let checks = result["checks"].as_array().unwrap();
-    let config_check = checks.iter().find(|c| c["name"] == "configuration").unwrap();
+    let config_check = checks
+        .iter()
+        .find(|c| c["name"] == "configuration")
+        .unwrap();
     assert_eq!(config_check["status"], "fail");
 }
 
 /// Doctor after configure with token auth reports healthy.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn doctor_after_configure() {
     let _ctx = AsyncTestContext::for_scenario("github.doctor.after_configure");
     let mock_server = MockServer::start().await;
@@ -1681,7 +1685,10 @@ async fn doctor_after_configure() {
 
     assert_eq!(result["status"], "healthy");
     let checks = result["checks"].as_array().unwrap();
-    let config_check = checks.iter().find(|c| c["name"] == "configuration").unwrap();
+    let config_check = checks
+        .iter()
+        .find(|c| c["name"] == "configuration")
+        .unwrap();
     assert_eq!(config_check["status"], "pass");
     let client_check = checks
         .iter()
@@ -1691,7 +1698,7 @@ async fn doctor_after_configure() {
 }
 
 /// Doctor with credential_id mode reports degraded (warn on credential_injection).
-#[tokio::test]
+#[fcp_async_core::test]
 async fn doctor_credential_id_mode_degraded() {
     let _ctx = AsyncTestContext::for_scenario("github.doctor.credential_id");
     let mut connector = GitHubConnector::new();
@@ -1723,7 +1730,7 @@ async fn doctor_credential_id_mode_degraded() {
 }
 
 /// SelfCheck before configure reports failed.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn self_check_before_configure() {
     let _ctx = AsyncTestContext::for_scenario("github.self_check.before_configure");
     let connector = GitHubConnector::new();
@@ -1737,7 +1744,7 @@ async fn self_check_before_configure() {
 }
 
 /// SelfCheck with credential_id mode reports degraded.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn self_check_credential_id_mode() {
     let _ctx = AsyncTestContext::for_scenario("github.self_check.credential_id");
     let mut connector = GitHubConnector::new();
@@ -1758,7 +1765,7 @@ async fn self_check_credential_id_mode() {
 }
 
 /// SelfCheck with successful health check reports ok.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn self_check_connectivity_ok() {
     let _ctx = AsyncTestContext::for_scenario("github.self_check.ok");
     let mock_server = MockServer::start().await;
@@ -1784,7 +1791,7 @@ async fn self_check_connectivity_ok() {
 }
 
 /// SelfCheck with failed health check reports failed.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn self_check_connectivity_failed() {
     let _ctx = AsyncTestContext::for_scenario("github.self_check.failed");
     let mock_server = MockServer::start().await;
@@ -1792,8 +1799,7 @@ async fn self_check_connectivity_failed() {
     Mock::given(method("GET"))
         .and(path("/user"))
         .respond_with(
-            ResponseTemplate::new(401)
-                .set_body_json(github_error_response("Bad credentials")),
+            ResponseTemplate::new(401).set_body_json(github_error_response("Bad credentials")),
         )
         .mount(&mock_server)
         .await;
@@ -1814,7 +1820,7 @@ async fn self_check_connectivity_failed() {
 // ============================================================================
 
 /// Simulate returns allowed for known operation.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn simulate_returns_allowed() {
     let _ctx = AsyncTestContext::for_scenario("github.simulate.allowed");
     let connector = GitHubConnector::new();
@@ -1848,7 +1854,7 @@ async fn simulate_returns_allowed() {
 // ============================================================================
 
 /// Health check includes metrics fields.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn health_includes_metrics() {
     let _ctx = AsyncTestContext::for_scenario("github.health.metrics");
     let mock_server = MockServer::start().await;
@@ -1872,7 +1878,7 @@ async fn health_includes_metrics() {
 }
 
 /// Health check reports auth_mode field.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn health_auth_mode_field() {
     let _ctx = AsyncTestContext::for_scenario("github.health.auth_mode");
     let mock_server = MockServer::start().await;
@@ -1905,7 +1911,7 @@ async fn health_auth_mode_field() {
 
 /// Shutdown then re-invoke: connector can still respond after shutdown.
 /// (GitHub connector does not tear down resources on shutdown.)
-#[tokio::test]
+#[fcp_async_core::test]
 async fn shutdown_then_reinvoke() {
     let _ctx = AsyncTestContext::for_scenario("github.lifecycle.shutdown_reinvoke");
     let mock_server = MockServer::start().await;
@@ -1968,7 +1974,7 @@ async fn shutdown_then_reinvoke() {
 // ============================================================================
 
 /// Missing `base` in `create_pull_request` fails.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn validation_create_pr_missing_base() {
     let _ctx = AsyncTestContext::for_scenario("github.validation.create_pr.missing_base");
     let mock_server = MockServer::start().await;
@@ -2003,7 +2009,7 @@ async fn validation_create_pr_missing_base() {
 }
 
 /// Missing `ref` in `trigger_workflow` fails.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn validation_trigger_workflow_missing_ref() {
     let _ctx = AsyncTestContext::for_scenario("github.validation.trigger_workflow.missing_ref");
     let mock_server = MockServer::start().await;
@@ -2037,7 +2043,7 @@ async fn validation_trigger_workflow_missing_ref() {
 }
 
 /// Missing `path` in `get_file_content` fails.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn validation_get_file_content_missing_path() {
     let _ctx = AsyncTestContext::for_scenario("github.validation.get_file_content.missing_path");
     let mock_server = MockServer::start().await;
@@ -2070,7 +2076,7 @@ async fn validation_get_file_content_missing_path() {
 }
 
 /// Missing `pull_number` in `merge_pull_request` fails.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn validation_merge_pr_missing_pull_number() {
     let _ctx = AsyncTestContext::for_scenario("github.validation.merge_pr.missing_pull_number");
     let mock_server = MockServer::start().await;
@@ -2103,7 +2109,7 @@ async fn validation_merge_pr_missing_pull_number() {
 }
 
 /// Missing `query` in `search_repos` fails.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn validation_search_repos_missing_query() {
     let _ctx = AsyncTestContext::for_scenario("github.validation.search_repos.missing_query");
     let mock_server = MockServer::start().await;
@@ -2133,7 +2139,7 @@ async fn validation_search_repos_missing_query() {
 }
 
 /// Missing `query` in `search_code` fails.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn validation_search_code_missing_query() {
     let _ctx = AsyncTestContext::for_scenario("github.validation.search_code.missing_query");
     let mock_server = MockServer::start().await;
@@ -2167,7 +2173,7 @@ async fn validation_search_code_missing_query() {
 // ============================================================================
 
 /// Introspect operations have ai_hints with when_to_use for all ops.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn introspect_operations_have_ai_hints() {
     let _ctx = AsyncTestContext::for_scenario("github.introspect.ai_hints");
     let connector = GitHubConnector::new();
@@ -2193,7 +2199,7 @@ async fn introspect_operations_have_ai_hints() {
 }
 
 /// Introspect operations have correct capability groupings.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn introspect_capability_groupings() {
     let _ctx = AsyncTestContext::for_scenario("github.introspect.capability_groups");
     let connector = GitHubConnector::new();
@@ -2206,11 +2212,21 @@ async fn introspect_capability_groupings() {
     let ops = result["operations"].as_array().unwrap();
 
     // Read operations should have github.read capability
-    let read_ops = ["github.get_issue", "github.search_issues", "github.get_pull_request",
-        "github.get_repo", "github.search_repos", "github.list_workflows",
-        "github.get_file_content", "github.search_code"];
+    let read_ops = [
+        "github.get_issue",
+        "github.search_issues",
+        "github.get_pull_request",
+        "github.get_repo",
+        "github.search_repos",
+        "github.list_workflows",
+        "github.get_file_content",
+        "github.search_code",
+    ];
     for op_id in &read_ops {
-        let op = ops.iter().find(|o| o["id"].as_str() == Some(op_id)).unwrap();
+        let op = ops
+            .iter()
+            .find(|o| o["id"].as_str() == Some(op_id))
+            .unwrap();
         assert_eq!(
             op["capability"].as_str(),
             Some("github.read"),
@@ -2221,7 +2237,10 @@ async fn introspect_capability_groupings() {
     // Write operations should have github.write capability
     let write_ops = ["github.create_issue", "github.create_pull_request"];
     for op_id in &write_ops {
-        let op = ops.iter().find(|o| o["id"].as_str() == Some(op_id)).unwrap();
+        let op = ops
+            .iter()
+            .find(|o| o["id"].as_str() == Some(op_id))
+            .unwrap();
         assert_eq!(
             op["capability"].as_str(),
             Some("github.write"),
@@ -2232,7 +2251,10 @@ async fn introspect_capability_groupings() {
     // Admin operations should have github.admin capability
     let admin_ops = ["github.merge_pull_request", "github.trigger_workflow"];
     for op_id in &admin_ops {
-        let op = ops.iter().find(|o| o["id"].as_str() == Some(op_id)).unwrap();
+        let op = ops
+            .iter()
+            .find(|o| o["id"].as_str() == Some(op_id))
+            .unwrap();
         assert_eq!(
             op["capability"].as_str(),
             Some("github.admin"),
@@ -2242,7 +2264,7 @@ async fn introspect_capability_groupings() {
 }
 
 /// Introspect operations have risk_level and safety_tier fields.
-#[tokio::test]
+#[fcp_async_core::test]
 async fn introspect_risk_and_safety() {
     let _ctx = AsyncTestContext::for_scenario("github.introspect.risk_safety");
     let connector = GitHubConnector::new();

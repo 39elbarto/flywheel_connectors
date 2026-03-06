@@ -43,6 +43,7 @@ impl TestRegistry {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn add(
         &mut self,
         id: ConnectorId,
@@ -682,8 +683,12 @@ async fn doctor_missing_connector_returns_error() {
         self_check: true,
     };
 
-    let err = service.handle(request).await.unwrap_err();
-    assert!(matches!(err, HostError::ConnectorNotFound(_)));
+    let report = service.handle(request).await.unwrap();
+    assert_eq!(report.connector_self_checks.len(), 1);
+    let check = &report.connector_self_checks[0];
+    assert_eq!(check.connector_id, "fcp.missing:utility:1.0.0");
+    assert_eq!(check.report.status, SelfCheckStatus::Failed);
+    assert_eq!(check.report.reason_code.as_deref(), Some("not_found"));
 }
 
 #[fcp_async_core::runtime::test]
@@ -1850,4 +1855,727 @@ async fn doctor_report_json_contract() {
     assert!(parsed["store_coverage"]["store_healthy"].as_bool().unwrap());
     assert!(parsed["connector_self_checks"].is_array());
     assert_eq!(parsed["connector_self_checks"].as_array().unwrap().len(), 1);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 26. PreflightResponse constructors
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn preflight_response_allowed_constructor() {
+    let resp = fcp_host::PreflightResponse::allowed();
+    assert!(resp.allowed);
+    assert!(resp.reason.is_none());
+    assert!(resp.missing_capabilities.is_empty());
+    assert!(resp.rate_limit.is_none());
+    assert!(resp.estimated_cost.is_none());
+    assert!(resp.budget_status.is_none());
+}
+
+#[test]
+fn preflight_response_denied_constructor() {
+    let resp = fcp_host::PreflightResponse::denied("budget exceeded");
+    assert!(!resp.allowed);
+    assert_eq!(resp.reason.as_deref(), Some("budget exceeded"));
+    assert!(resp.missing_capabilities.is_empty());
+    assert!(resp.rate_limit.is_none());
+}
+
+#[test]
+fn preflight_response_serde_roundtrip() {
+    let resp = fcp_host::PreflightResponse::denied("quota hit");
+    let json = serde_json::to_string(&resp).unwrap();
+    let parsed: fcp_host::PreflightResponse = serde_json::from_str(&json).unwrap();
+    assert!(!parsed.allowed);
+    assert_eq!(parsed.reason.as_deref(), Some("quota hit"));
+
+    let resp_allowed = fcp_host::PreflightResponse::allowed();
+    let json = serde_json::to_string(&resp_allowed).unwrap();
+    let parsed: fcp_host::PreflightResponse = serde_json::from_str(&json).unwrap();
+    assert!(parsed.allowed);
+    assert!(parsed.reason.is_none());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 27. ConnectorArchetype all variants + serde
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn connector_archetype_all_variants_serde() {
+    let archetypes = [
+        (ConnectorArchetype::RequestResponse, "\"request_response\""),
+        (ConnectorArchetype::Streaming, "\"streaming\""),
+        (ConnectorArchetype::Bidirectional, "\"bidirectional\""),
+        (ConnectorArchetype::Polling, "\"polling\""),
+        (ConnectorArchetype::Webhook, "\"webhook\""),
+    ];
+
+    for (archetype, expected_json) in archetypes {
+        let json = serde_json::to_string(&archetype).unwrap();
+        assert_eq!(json, expected_json);
+        let parsed: ConnectorArchetype = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, archetype);
+    }
+}
+
+#[test]
+fn connector_archetype_equality_and_copy() {
+    let a = ConnectorArchetype::Streaming;
+    let b = a; // Copy
+    assert_eq!(a, b);
+    assert_ne!(ConnectorArchetype::Streaming, ConnectorArchetype::Polling);
+    assert_ne!(ConnectorArchetype::Webhook, ConnectorArchetype::RequestResponse);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 28. HostHealthStatus serde + equality
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn host_health_status_serde_all_variants() {
+    let statuses = [
+        HostHealthStatus::Healthy,
+        HostHealthStatus::Degraded,
+        HostHealthStatus::Unhealthy,
+    ];
+
+    for status in statuses {
+        let json = serde_json::to_string(&status).unwrap();
+        let parsed: HostHealthStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, status);
+    }
+}
+
+#[test]
+fn host_health_status_equality() {
+    assert_eq!(HostHealthStatus::Healthy, HostHealthStatus::Healthy);
+    assert_ne!(HostHealthStatus::Healthy, HostHealthStatus::Degraded);
+    assert_ne!(HostHealthStatus::Degraded, HostHealthStatus::Unhealthy);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 29. OverallStatus serde + equality
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn overall_status_serde_all_variants() {
+    let statuses = [
+        (fcp_host::OverallStatus::Ok, "\"OK\""),
+        (fcp_host::OverallStatus::Warn, "\"WARN\""),
+        (fcp_host::OverallStatus::Fail, "\"FAIL\""),
+    ];
+
+    for (status, expected_json) in statuses {
+        let json = serde_json::to_string(&status).unwrap();
+        assert_eq!(json, expected_json);
+    }
+}
+
+#[test]
+fn overall_status_equality() {
+    assert_eq!(fcp_host::OverallStatus::Ok, fcp_host::OverallStatus::Ok);
+    assert_ne!(fcp_host::OverallStatus::Ok, fcp_host::OverallStatus::Fail);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 30. BudgetPolicyEngine remove → re-add lifecycle
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn budget_engine_remove_readd_lifecycle() {
+    let engine = BudgetPolicyEngine::new();
+    let zone = ZoneId::work();
+
+    // Add policy
+    engine
+        .upsert_policy(
+            zone.clone(),
+            UsageBudgetPolicy {
+                enforcement: BudgetEnforcement::Deny,
+                budgets: vec![UsageBudgetLimit {
+                    metric: UsageMetricKind::Tokens,
+                    limit: 100,
+                    window_seconds: 3600,
+                }],
+            },
+        )
+        .await;
+
+    // Record some usage
+    engine
+        .record_usage(&zone, &[UsageMetric::tokens(60)])
+        .await;
+    let snap = engine.snapshot(&zone).await.unwrap();
+    assert_eq!(snap.budgets[0].used, 60);
+
+    // Remove policy
+    let removed = engine.remove_policy(&zone).await;
+    assert!(removed.is_some());
+
+    // No snapshot available
+    assert!(engine.snapshot(&zone).await.is_none());
+
+    // record_usage returns None when no policy
+    assert!(
+        engine
+            .record_usage(&zone, &[UsageMetric::tokens(10)])
+            .await
+            .is_none()
+    );
+
+    // Re-add policy with a new limit — tracker retains accumulated usage
+    engine
+        .upsert_policy(
+            zone.clone(),
+            UsageBudgetPolicy {
+                enforcement: BudgetEnforcement::Deny,
+                budgets: vec![UsageBudgetLimit {
+                    metric: UsageMetricKind::Tokens,
+                    limit: 50,
+                    window_seconds: 3600,
+                }],
+            },
+        )
+        .await;
+
+    let snap = engine.snapshot(&zone).await.unwrap();
+    assert_eq!(snap.budgets[0].used, 60, "tracker retains usage across policy changes");
+    assert_eq!(snap.budgets[0].limit, 50, "new policy limit applied");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 31. Budget tracker: independent metric limits
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn budget_tracker_one_metric_exceeds_other_within() {
+    let mut tracker = BudgetTracker::new();
+    let zone = ZoneId::work();
+
+    let policy = UsageBudgetPolicy {
+        enforcement: BudgetEnforcement::Deny,
+        budgets: vec![
+            UsageBudgetLimit {
+                metric: UsageMetricKind::Tokens,
+                limit: 100,
+                window_seconds: 3600,
+            },
+            UsageBudgetLimit {
+                metric: UsageMetricKind::Requests,
+                limit: 10,
+                window_seconds: 3600,
+            },
+        ],
+    };
+
+    // Exceed tokens, stay within requests
+    let eval = tracker.record_usage(
+        &zone,
+        &policy,
+        &[UsageMetric::tokens(150), UsageMetric::requests(5)],
+    );
+    // Should deny because tokens exceeded
+    assert_eq!(eval.action, BudgetAction::Deny);
+
+    // Verify snapshot: tokens exceeded, requests within
+    let snap = tracker.snapshot(&zone, &policy);
+    let tokens = snap
+        .budgets
+        .iter()
+        .find(|b| b.metric == UsageMetricKind::Tokens)
+        .unwrap();
+    assert!(tokens.used > tokens.limit);
+
+    let requests = snap
+        .budgets
+        .iter()
+        .find(|b| b.metric == UsageMetricKind::Requests)
+        .unwrap();
+    assert!(requests.used <= requests.limit);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 32. Discovery with Polling and Webhook archetypes
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn introspect_polling_and_webhook_archetypes() {
+    let mut registry = TestRegistry::new();
+
+    registry.add(
+        ConnectorId::from_static("fcp.rss:content:1.0.0"),
+        "RSS Reader",
+        vec!["content"],
+        SafetyTier::Safe,
+        ConnectorHealth::healthy(),
+        vec![make_op(
+            "poll",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            None,
+        )],
+        ConnectorArchetype::Polling,
+    );
+
+    registry.add(
+        ConnectorId::from_static("fcp.ghwh:devtools:1.0.0"),
+        "GitHub Webhook",
+        vec!["devtools"],
+        SafetyTier::Risky,
+        ConnectorHealth::healthy(),
+        vec![make_op(
+            "receive",
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::BestEffort,
+            None,
+        )],
+        ConnectorArchetype::Webhook,
+    );
+
+    let engine = BudgetPolicyEngine::new();
+    let endpoint = DiscoveryEndpoint::new(Arc::new(registry), Arc::new(engine));
+
+    let rss_id = ConnectorId::from_static("fcp.rss:content:1.0.0");
+    let rss_resp = endpoint.introspect(&rss_id).await.unwrap();
+    assert_eq!(rss_resp.archetype, ConnectorArchetype::Polling);
+
+    let ghwh_id = ConnectorId::from_static("fcp.ghwh:devtools:1.0.0");
+    let ghwh_resp = endpoint.introspect(&ghwh_id).await.unwrap();
+    assert_eq!(ghwh_resp.archetype, ConnectorArchetype::Webhook);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 33. Full pipeline: discover → introspect → preflight ALLOWED
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn full_pipeline_discover_introspect_preflight_allowed() {
+    let engine = BudgetPolicyEngine::new();
+    let zone = ZoneId::work();
+
+    // Set up generous budget
+    engine
+        .upsert_policy(
+            zone.clone(),
+            UsageBudgetPolicy {
+                enforcement: BudgetEnforcement::Deny,
+                budgets: vec![UsageBudgetLimit {
+                    metric: UsageMetricKind::Tokens,
+                    limit: 10_000,
+                    window_seconds: 3600,
+                }],
+            },
+        )
+        .await;
+
+    let registry = build_multi_op_registry();
+    let endpoint = DiscoveryEndpoint::new(Arc::new(registry), Arc::new(engine));
+
+    // Step 1: Discover
+    let response = endpoint.discover(None).await;
+    assert_eq!(response.connectors.len(), 3);
+
+    // Step 2: Introspect the Reader
+    let reader_id = ConnectorId::from_static("fcp.reader:utility:1.0.0");
+    let introspection = endpoint.introspect(&reader_id).await.unwrap();
+    assert_eq!(introspection.tools.len(), 2);
+    assert!(introspection.tools.iter().all(|t| t.idempotent));
+
+    // Step 3: Preflight — should be allowed (budget not exceeded)
+    let request = PreflightRequest {
+        connector_id: reader_id,
+        operation: "list".to_string(),
+        params: None,
+        principal: Some("agent:test".to_string()),
+        zone_id: Some(zone),
+    };
+    let resp = endpoint.preflight(request).await;
+    assert!(resp.allowed);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 34. DiscoveryResponse constructor
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn discovery_response_new_defaults() {
+    let before = Utc::now();
+    let resp = fcp_host::DiscoveryResponse::new(vec![], 42);
+    let after = Utc::now();
+
+    assert!(resp.connectors.is_empty());
+    assert_eq!(resp.registry_version, 42);
+    assert!(resp.supports_streaming);
+    assert!(resp.supports_batching);
+    assert!(resp.timestamp >= before);
+    assert!(resp.timestamp <= after);
+}
+
+#[test]
+fn discovery_response_serde_roundtrip() {
+    let resp = fcp_host::DiscoveryResponse::new(vec![], 7);
+    let json = serde_json::to_string(&resp).unwrap();
+    let parsed: fcp_host::DiscoveryResponse = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed.registry_version, 7);
+    assert!(parsed.supports_streaming);
+    assert!(parsed.supports_batching);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 35. PreflightRateLimit and EstimatedCost serde
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn preflight_rate_limit_serde_roundtrip() {
+    let rl = fcp_host::PreflightRateLimit {
+        limited: true,
+        remaining: 42,
+        reset_at: Some(Utc::now()),
+    };
+    let json = serde_json::to_string(&rl).unwrap();
+    let parsed: fcp_host::PreflightRateLimit = serde_json::from_str(&json).unwrap();
+    assert!(parsed.limited);
+    assert_eq!(parsed.remaining, 42);
+    assert!(parsed.reset_at.is_some());
+}
+
+#[test]
+fn estimated_cost_serde_roundtrip() {
+    let cost = fcp_host::EstimatedCost {
+        api_calls: Some(5),
+        tokens: Some(1000),
+        cost_cents: Some(2),
+    };
+    let json = serde_json::to_string(&cost).unwrap();
+    let parsed: fcp_host::EstimatedCost = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed.api_calls, Some(5));
+    assert_eq!(parsed.tokens, Some(1000));
+    assert_eq!(parsed.cost_cents, Some(2));
+}
+
+#[test]
+fn estimated_cost_none_fields_serde() {
+    let cost = fcp_host::EstimatedCost {
+        api_calls: None,
+        tokens: None,
+        cost_cents: None,
+    };
+    let json = serde_json::to_string(&cost).unwrap();
+    // All None fields should be skipped
+    assert!(!json.contains("api_calls"));
+    assert!(!json.contains("tokens"));
+    assert!(!json.contains("cost_cents"));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 36. HealthFilter::Available variant
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn discover_filter_available_only() {
+    let mut registry = TestRegistry::new();
+    registry.add(
+        ConnectorId::from_static("fcp.healthy:utility:1.0.0"),
+        "Healthy",
+        vec!["test"],
+        SafetyTier::Safe,
+        ConnectorHealth::healthy(),
+        vec![],
+        ConnectorArchetype::RequestResponse,
+    );
+    registry.add(
+        ConnectorId::from_static("fcp.degraded:utility:1.0.0"),
+        "Degraded",
+        vec!["test"],
+        SafetyTier::Safe,
+        ConnectorHealth::degraded("slow"),
+        vec![],
+        ConnectorArchetype::RequestResponse,
+    );
+    registry.add(
+        ConnectorId::from_static("fcp.down:utility:1.0.0"),
+        "Down",
+        vec!["test"],
+        SafetyTier::Safe,
+        ConnectorHealth::unavailable("timeout"),
+        vec![],
+        ConnectorArchetype::RequestResponse,
+    );
+
+    let engine = BudgetPolicyEngine::new();
+    let endpoint = DiscoveryEndpoint::new(Arc::new(registry), Arc::new(engine));
+
+    // Available = healthy + degraded (not unavailable)
+    let filter = DiscoveryFilter {
+        health: Some(HealthFilter::Available),
+        ..Default::default()
+    };
+    let response = endpoint.discover(Some(filter)).await;
+    assert_eq!(response.connectors.len(), 2);
+    // Should include Healthy and Degraded but not Down
+    let names: Vec<&str> = response.connectors.iter().map(|c| c.name.as_str()).collect();
+    assert!(names.contains(&"Healthy"));
+    assert!(names.contains(&"Degraded"));
+    assert!(!names.contains(&"Down"));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 37. HostError trait bounds
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn host_error_is_send_sync() {
+    fn assert_send_sync<T: Send + Sync + std::error::Error>() {}
+    assert_send_sync::<HostError>();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 38. DoctorReport baseline fields
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn doctor_report_baseline_defaults() {
+    let report = DoctorReport::baseline("z:private");
+    assert_eq!(report.zone_id, "z:private");
+    assert_eq!(report.overall_status, fcp_host::OverallStatus::Ok);
+    assert_eq!(report.schema_version, DoctorReport::SCHEMA_VERSION);
+    assert!(report.connector_self_checks.is_empty());
+    assert!(report.checks.is_empty());
+    assert!(!report.degraded_mode.is_degraded);
+    assert!(report.store_coverage.store_healthy);
+    assert!(report.transport_policy.allow_lan);
+    assert!(!report.transport_policy.allow_derp);
+    assert!(!report.transport_policy.allow_funnel);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 39. FreshnessLevel defaults and serde
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn freshness_level_default_is_fresh() {
+    assert_eq!(fcp_host::FreshnessLevel::default(), fcp_host::FreshnessLevel::Fresh);
+}
+
+#[test]
+fn freshness_level_serde() {
+    let levels = [
+        (fcp_host::FreshnessLevel::Fresh, "\"fresh\""),
+        (fcp_host::FreshnessLevel::Stale, "\"stale\""),
+        (fcp_host::FreshnessLevel::TooStale, "\"too_stale\""),
+        (fcp_host::FreshnessLevel::Missing, "\"missing\""),
+    ];
+
+    for (level, expected) in levels {
+        let json = serde_json::to_string(&level).unwrap();
+        assert_eq!(json, expected);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 40. CheckStatus and CheckSeverity serde
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn check_status_serde() {
+    let statuses = [
+        (fcp_host::CheckStatus::Ok, "\"OK\""),
+        (fcp_host::CheckStatus::Warn, "\"WARN\""),
+        (fcp_host::CheckStatus::Fail, "\"FAIL\""),
+    ];
+    for (status, expected) in statuses {
+        assert_eq!(serde_json::to_string(&status).unwrap(), expected);
+    }
+}
+
+#[test]
+fn check_severity_serde() {
+    let sevs = [
+        (fcp_host::CheckSeverity::Info, "\"info\""),
+        (fcp_host::CheckSeverity::Warning, "\"warning\""),
+        (fcp_host::CheckSeverity::Critical, "\"critical\""),
+    ];
+    for (sev, expected) in sevs {
+        assert_eq!(serde_json::to_string(&sev).unwrap(), expected);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 41. ToolDescriptor supports_simulate across tiers
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn tool_descriptor_supports_simulate_across_tiers() {
+    let tiers = [
+        SafetyTier::Safe,
+        SafetyTier::Risky,
+        SafetyTier::Dangerous,
+        SafetyTier::Critical,
+    ];
+
+    for tier in tiers {
+        let op = make_op("op", RiskLevel::Low, tier, IdempotencyClass::Strict, None);
+        let tool = ToolDescriptor::from(&op);
+        // Default is true for all tiers
+        assert!(
+            tool.supports_simulate,
+            "supports_simulate should default to true for tier {tier:?}"
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 42. Safety tier extension: Forbidden tier
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn safety_tier_forbidden_is_highest() {
+    assert!(!SafetyTier::Forbidden.is_at_most(SafetyTier::Critical));
+    assert!(!SafetyTier::Forbidden.is_at_most(SafetyTier::Dangerous));
+    assert!(!SafetyTier::Forbidden.is_at_most(SafetyTier::Risky));
+    assert!(!SafetyTier::Forbidden.is_at_most(SafetyTier::Safe));
+    assert!(SafetyTier::Forbidden.is_at_most(SafetyTier::Forbidden));
+    assert_eq!(SafetyTier::Forbidden.level(), 4);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 43. Discovery filter max_risk filters strictly
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn discover_filter_max_risk_risky() {
+    let registry = build_multi_op_registry();
+    let engine = BudgetPolicyEngine::new();
+    let endpoint = DiscoveryEndpoint::new(Arc::new(registry), Arc::new(engine));
+
+    // max_risk = Risky should include Safe and Risky but not Dangerous
+    let filter = DiscoveryFilter {
+        max_risk: Some(SafetyTier::Risky),
+        ..Default::default()
+    };
+    let response = endpoint.discover(Some(filter)).await;
+    assert_eq!(response.connectors.len(), 2); // Reader (Safe) + Stream (Risky)
+    let names: Vec<&str> = response.connectors.iter().map(|c| c.name.as_str()).collect();
+    assert!(names.contains(&"Reader"));
+    assert!(names.contains(&"Stream"));
+    assert!(!names.contains(&"Writer")); // Dangerous
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 44. Budget engine concurrent zone isolation
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn budget_engine_zones_fully_independent() {
+    let engine = BudgetPolicyEngine::new();
+    let zone_a = ZoneId::work();
+    let zone_b = ZoneId::private();
+
+    // Same policy for both zones
+    let policy = UsageBudgetPolicy {
+        enforcement: BudgetEnforcement::Deny,
+        budgets: vec![UsageBudgetLimit {
+            metric: UsageMetricKind::Tokens,
+            limit: 100,
+            window_seconds: 3600,
+        }],
+    };
+
+    engine.upsert_policy(zone_a.clone(), policy.clone()).await;
+    engine.upsert_policy(zone_b.clone(), policy).await;
+
+    // Exhaust zone_a
+    engine
+        .record_usage(&zone_a, &[UsageMetric::tokens(200)])
+        .await;
+
+    // zone_a should be denied
+    let req_a = PreflightRequest {
+        connector_id: ConnectorId::from_static("fcp.test:utility:1.0.0"),
+        operation: "op".to_string(),
+        params: None,
+        principal: None,
+        zone_id: Some(zone_a),
+    };
+    let resp_a = engine.evaluate_preflight(&req_a).await;
+    assert!(!resp_a.allowed);
+
+    // zone_b should still be allowed — completely independent
+    let req_b = PreflightRequest {
+        connector_id: ConnectorId::from_static("fcp.test:utility:1.0.0"),
+        operation: "op".to_string(),
+        params: None,
+        principal: None,
+        zone_id: Some(zone_b.clone()),
+    };
+    let resp_b = engine.evaluate_preflight(&req_b).await;
+    assert!(resp_b.allowed);
+
+    // Verify zone_b snapshot is untouched
+    let snap = engine.snapshot(&zone_b).await.unwrap();
+    assert_eq!(snap.budgets[0].used, 0);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 45. Host health response with all status types
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn host_health_response_all_connector_states() {
+    let mut connectors = HashMap::new();
+    connectors.insert(
+        ConnectorId::from_static("fcp.a:utility:1.0.0"),
+        ConnectorHealth::healthy(),
+    );
+    connectors.insert(
+        ConnectorId::from_static("fcp.b:utility:1.0.0"),
+        ConnectorHealth::degraded("high_latency"),
+    );
+    connectors.insert(
+        ConnectorId::from_static("fcp.c:utility:1.0.0"),
+        ConnectorHealth::unavailable("connection_refused"),
+    );
+
+    let response = HostHealthResponse {
+        status: HostHealthStatus::Unhealthy,
+        connectors,
+        uptime_seconds: 3600,
+        active_connections: 10,
+        timestamp: Utc::now(),
+    };
+
+    let json = serde_json::to_string(&response).unwrap();
+    let parsed: HostHealthResponse = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed.status, HostHealthStatus::Unhealthy);
+    assert_eq!(parsed.connectors.len(), 3);
+    assert_eq!(parsed.uptime_seconds, 3600);
+    assert_eq!(parsed.active_connections, 10);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 46. ConnectorSummary serde roundtrip
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn connector_summary_serde_roundtrip() {
+    let registry = build_multi_op_registry();
+    let engine = BudgetPolicyEngine::new();
+    let endpoint = DiscoveryEndpoint::new(Arc::new(registry), Arc::new(engine));
+
+    let response = endpoint.discover(None).await;
+    let json = serde_json::to_string(&response).unwrap();
+    let parsed: fcp_host::DiscoveryResponse = serde_json::from_str(&json).unwrap();
+
+    for (orig, parsed) in response.connectors.iter().zip(parsed.connectors.iter()) {
+        assert_eq!(orig.id, parsed.id);
+        assert_eq!(orig.name, parsed.name);
+        assert_eq!(orig.description, parsed.description);
+        assert_eq!(orig.version, parsed.version);
+        assert_eq!(orig.categories, parsed.categories);
+        assert_eq!(orig.tool_count, parsed.tool_count);
+        assert_eq!(orig.max_safety_tier, parsed.max_safety_tier);
+        assert_eq!(orig.enabled, parsed.enabled);
+    }
 }

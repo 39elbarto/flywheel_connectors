@@ -25,7 +25,7 @@ fn test_zone() -> ZoneId {
     ZoneId::work()
 }
 
-fn test_object_id(n: u8) -> ObjectId {
+const fn test_object_id(n: u8) -> ObjectId {
     ObjectId::from_bytes([n; 32])
 }
 
@@ -67,6 +67,7 @@ fn test_stored_object_in_zone(n: u8, zone: ZoneId) -> StoredObject {
     obj
 }
 
+#[allow(clippy::missing_const_for_fn)]
 fn test_coverage(
     object_id: ObjectId,
     distinct_nodes: usize,
@@ -77,13 +78,13 @@ fn test_coverage(
         object_id,
         distinct_nodes,
         max_node_fraction_bps: if distinct_nodes > 0 {
-            10000 / distinct_nodes as u16
+            10_000 / u16::try_from(distinct_nodes).expect("test node count fits in u16")
         } else {
-            10000
+            10_000
         },
         coverage_bps,
-        is_available: coverage_bps >= 10000,
-        total_symbols: (coverage_bps as u32 * source_symbols) / 10000,
+        is_available: coverage_bps >= 10_000,
+        total_symbols: (coverage_bps * source_symbols) / 10_000,
         source_symbols,
     }
 }
@@ -104,13 +105,14 @@ fn test_object_meta(n: u8) -> ObjectSymbolMeta {
     }
 }
 
+#[allow(clippy::missing_const_for_fn)]
 fn test_placement_policy() -> ObjectPlacementPolicy {
     ObjectPlacementPolicy {
         min_nodes: 3,
-        max_node_fraction_bps: 5000,
+        max_node_fraction_bps: 5_000,
         preferred_devices: vec![],
         excluded_devices: vec![],
-        target_coverage_bps: 15000,
+        target_coverage_bps: 15_000,
         min_source_diversity: 0,
     }
 }
@@ -287,7 +289,7 @@ async fn symbol_store_get_all_symbols() {
                 source_node: Some(1),
                 stored_at: 1000 + u64::from(esi),
             },
-            data: Bytes::from(vec![esi as u8; 128]),
+            data: Bytes::from(vec![u8::try_from(esi).expect("test esi fits in u8"); 128]),
         };
         store.put_symbol(symbol).await.expect("put");
     }

@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use std::time::Instant;
 
+use asupersync_tokio_compat::io::TokioIo;
 use chrono::Utc;
 use fcp_async_core::net::TcpListener;
 use fcp_async_core::task;
@@ -15,9 +16,11 @@ use wiremock::matchers::{body_json, method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 use fcp_graphql::{
-    CursorPage, CursorPageInfo, GraphqlClientBuilder, GraphqlClientError, GraphqlOperation,
+    CursorPage, CursorPageInfo, GraphqlClientBuilder, GraphqlClientError, GraphqlErrorLocation,
+    GraphqlOperation, GraphqlPathSegment, GraphqlQuery, GraphqlRequest,
     GraphqlSubscriptionClient, GraphqlSubscriptionConfig, OffsetPage, PageLimit, PaginationError,
-    RetryPolicy, RetryStrategy, SchemaValidationMode, paginate_cursor, paginate_offset,
+    RetryDecision, RetryPolicy, RetryStrategy, SchemaValidationMode, paginate_cursor,
+    paginate_offset,
 };
 use fcp_streaming::WsConfig;
 
@@ -841,7 +844,9 @@ async fn subscription_receives_next_message() {
 
     let server_task = task::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept");
-        let mut ws = accept_async(stream).await.expect("accept ws");
+        let mut ws = accept_async(TokioIo::new(stream))
+            .await
+            .expect("accept ws");
 
         let init = ws.next().await.expect("init message").expect("init ok");
         let init_text = init.into_text().expect("init text");
@@ -914,7 +919,9 @@ async fn subscription_reconnects_after_disconnect() {
     let server_task = task::spawn(async move {
         for connection_idx in 0..2 {
             let (stream, _) = listener.accept().await.expect("accept");
-            let mut ws = accept_async(stream).await.expect("accept ws");
+            let mut ws = accept_async(TokioIo::new(stream))
+                .await
+                .expect("accept ws");
 
             let init = ws.next().await.expect("init message").expect("init ok");
             let init_text = init.into_text().expect("init text");
@@ -1016,7 +1023,9 @@ async fn subscription_disconnect_without_reconnect_emits_error() {
 
     let server_task = task::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept");
-        let mut ws = accept_async(stream).await.expect("accept ws");
+        let mut ws = accept_async(TokioIo::new(stream))
+            .await
+            .expect("accept ws");
 
         let _init = ws.next().await.expect("init message").expect("init ok");
         ws.send(Message::Text(
@@ -1076,7 +1085,9 @@ async fn subscription_drop_sends_complete_frame() {
 
     let server_task = task::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept");
-        let mut ws = accept_async(stream).await.expect("accept ws");
+        let mut ws = accept_async(TokioIo::new(stream))
+            .await
+            .expect("accept ws");
 
         let _init = ws.next().await.expect("init message").expect("init ok");
         ws.send(Message::Text(
@@ -1129,4 +1140,956 @@ async fn subscription_drop_sends_complete_frame() {
         "pass",
         Some(serde_json::json!({ "cancel": "complete-sent" })),
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 18. Metrics track success, error, and retry counts
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn metrics_track_success_and_error() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"data": {"viewer": {"id": "m1"}}})),
+        )
+        .mount(&server)
+        .await;
+
+    let client = GraphqlClientBuilder::new(server.uri())
+        .with_service_name("metrics-test")
+        .build()
+        .expect("client");
+
+    let m0 = client.metrics();
+    assert_eq!(m0.requests_total, 0);
+
+    client
+        .execute::<ViewerQuery>(EmptyVars {})
+        .await
+        .expect("success");
+
+    let m1 = client.metrics();
+    assert_eq!(m1.requests_total, 1);
+    assert_eq!(m1.requests_success, 1);
+    assert_eq!(m1.requests_error, 0);
+}
+
+#[fcp_async_core::runtime::test]
+async fn metrics_track_error_on_http_failure() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("oops"))
+        .mount(&server)
+        .await;
+
+    let client = GraphqlClientBuilder::new(server.uri())
+        .with_retry_policy(RetryPolicy {
+            max_attempts: 1,
+            base_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+            max_jitter: Duration::ZERO,
+            strategy: RetryStrategy::Never,
+        })
+        .build()
+        .expect("client");
+
+    let _ = client.execute_strict::<ViewerQuery>(EmptyVars {}).await;
+
+    let m = client.metrics();
+    assert_eq!(m.requests_total, 1);
+    assert_eq!(m.requests_error, 1);
+    assert_eq!(m.requests_success, 0);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 19. Metrics track retry counts
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn metrics_track_retried_requests() {
+    let server = MockServer::start().await;
+    let counter = Arc::new(AtomicUsize::new(0));
+
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(SequenceResponder {
+            counter: counter.clone(),
+        })
+        .mount(&server)
+        .await;
+
+    let client = GraphqlClientBuilder::new(server.uri())
+        .with_retry_policy(RetryPolicy {
+            max_attempts: 2,
+            base_delay: Duration::from_millis(5),
+            max_delay: Duration::from_millis(10),
+            max_jitter: Duration::ZERO,
+            strategy: RetryStrategy::Always,
+        })
+        .build()
+        .expect("client");
+
+    client
+        .execute_strict::<ViewerQuery>(EmptyVars {})
+        .await
+        .expect("should succeed after retry");
+
+    let m = client.metrics();
+    // requests_total counts once per execute_bytes call (not per retry attempt)
+    assert_eq!(m.requests_total, 1);
+    assert_eq!(m.requests_retried, 1);
+    assert_eq!(m.requests_success, 1);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 20. Bearer token sent in Authorization header
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn bearer_token_sent_in_authorization_header() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .and(wiremock::matchers::header("Authorization", "Bearer tok-secret"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"data": {"viewer": {"id": "auth-1"}}})),
+        )
+        .mount(&server)
+        .await;
+
+    let client = GraphqlClientBuilder::new(server.uri())
+        .with_bearer_token("tok-secret")
+        .build()
+        .expect("client");
+
+    let resp = client
+        .execute::<ViewerQuery>(EmptyVars {})
+        .await
+        .expect("query with bearer token");
+    assert_eq!(resp.data.unwrap().viewer.id, "auth-1");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 21. Custom headers sent with request
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn custom_headers_sent_with_request() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .and(wiremock::matchers::header("X-Custom-Key", "custom-value"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"data": {"viewer": {"id": "hdr-1"}}})),
+        )
+        .mount(&server)
+        .await;
+
+    let client = GraphqlClientBuilder::new(server.uri())
+        .with_header("X-Custom-Key", "custom-value")
+        .build()
+        .expect("client");
+
+    let resp = client
+        .execute::<ViewerQuery>(EmptyVars {})
+        .await
+        .expect("query with custom header");
+    assert_eq!(resp.data.unwrap().viewer.id, "hdr-1");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 22. Response extensions preserved
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn response_extensions_preserved() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {"viewer": {"id": "ext-1"}},
+            "extensions": {"cost": {"requestedQueryCost": 5, "throttleStatus": "ok"}}
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GraphqlClientBuilder::new(server.uri())
+        .build()
+        .expect("client");
+
+    let resp = client
+        .execute::<ViewerQuery>(EmptyVars {})
+        .await
+        .expect("query with extensions");
+
+    assert!(resp.is_ok());
+    let ext = resp.extensions.expect("extensions should be present");
+    assert_eq!(ext["cost"]["requestedQueryCost"], 5);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 23. Response is_ok integration
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn response_is_ok_with_partial_errors() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {"viewer": {"id": "partial-1"}},
+            "errors": [{"message": "field deprecation warning"}]
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GraphqlClientBuilder::new(server.uri())
+        .build()
+        .expect("client");
+
+    let resp = client
+        .execute::<ViewerQuery>(EmptyVars {})
+        .await
+        .expect("query");
+
+    assert!(!resp.is_ok(), "response with errors should not be is_ok");
+    assert!(resp.data.is_some(), "partial data should still be present");
+    assert_eq!(resp.errors.len(), 1);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 24. Retry exhaustion returns RetriesExhausted
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn retry_exhausted_returns_retries_exhausted_error() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("crash"))
+        .mount(&server)
+        .await;
+
+    let client = GraphqlClientBuilder::new(server.uri())
+        .with_retry_policy(RetryPolicy {
+            max_attempts: 3,
+            base_delay: Duration::from_millis(5),
+            max_delay: Duration::from_millis(10),
+            max_jitter: Duration::ZERO,
+            strategy: RetryStrategy::Always,
+        })
+        .build()
+        .expect("client");
+
+    let err = client
+        .execute_strict::<ViewerQuery>(EmptyVars {})
+        .await
+        .expect_err("should exhaust retries");
+
+    // After exhausting retries, the client returns the last error (HttpStatus)
+    assert!(
+        matches!(err, GraphqlClientError::HttpStatus { .. }),
+        "expected last HttpStatus error after retry exhaustion, got {err:?}"
+    );
+
+    let m = client.metrics();
+    assert_eq!(m.requests_retried, 2, "two retries before giving up");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 25. Schema validation Off accepts any shape
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn schema_validation_off_accepts_any_response() {
+    let server = MockServer::start().await;
+
+    // Return a response with viewer.id as a number (not string) — would fail
+    // ResponseOnly validation, but Off mode should accept it.
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"data": {"viewer": {"id": 999}}})),
+        )
+        .mount(&server)
+        .await;
+
+    let client = GraphqlClientBuilder::new(server.uri())
+        .with_validation_mode(SchemaValidationMode::Off)
+        .build()
+        .expect("client");
+
+    // Use ViewerSchemaQuery which HAS a response_schema — but Off mode skips it
+    let resp = client
+        .execute::<ViewerSchemaQuery>(EmptyVars {})
+        .await
+        .expect("Off mode should not validate");
+
+    assert!(resp.is_ok());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 26. Dedup disabled sends multiple requests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn dedup_disabled_sends_multiple_requests() {
+    let server = MockServer::start().await;
+    let counter = Arc::new(AtomicUsize::new(0));
+
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(CountingResponder {
+            counter: counter.clone(),
+            body: serde_json::json!({"data": {"viewer": {"id": "dup-1"}}}),
+            delay: Some(Duration::from_millis(50)),
+        })
+        .mount(&server)
+        .await;
+
+    let client = GraphqlClientBuilder::new(server.uri())
+        .with_dedup_in_flight(false)
+        .build()
+        .expect("client");
+
+    let (r1, r2) = futures_util::future::join(
+        client.execute::<ViewerQuery>(EmptyVars {}),
+        client.execute::<ViewerQuery>(EmptyVars {}),
+    )
+    .await;
+
+    r1.expect("first response");
+    r2.expect("second response");
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        2,
+        "without dedup, two HTTP requests should be sent"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 27. Paginate cursor: single page
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn paginate_cursor_single_page() {
+    let counter = Arc::new(AtomicUsize::new(0));
+    let counter_clone = counter.clone();
+
+    let result = paginate_cursor(None, None, move |_cursor| {
+        let counter = counter_clone.clone();
+        async move {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Ok(CursorPage {
+                items: vec![10, 20, 30],
+                page_info: CursorPageInfo {
+                    has_next_page: false,
+                    end_cursor: None,
+                    total_count: Some(3),
+                },
+            })
+        }
+    })
+    .await;
+
+    let items = result.expect("single page should succeed");
+    assert_eq!(items, vec![10, 20, 30]);
+    assert_eq!(counter.load(Ordering::SeqCst), 1, "only one page fetch");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 28. Paginate cursor: empty first page
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn paginate_cursor_empty_first_page() {
+    let result = paginate_cursor(None, None, |_cursor| async move {
+        Ok(CursorPage {
+            items: Vec::<i32>::new(),
+            page_info: CursorPageInfo {
+                has_next_page: false,
+                end_cursor: None,
+                total_count: Some(0),
+            },
+        })
+    })
+    .await;
+
+    let items = result.expect("empty page should succeed");
+    assert!(items.is_empty());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 29. Paginate offset: single page
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn paginate_offset_single_page() {
+    let result = paginate_offset(0, None, |_offset| async move {
+        Ok(OffsetPage {
+            items: vec![100, 200],
+            next_offset: None,
+            total_count: Some(2),
+        })
+    })
+    .await;
+
+    let items = result.expect("single offset page should succeed");
+    assert_eq!(items, vec![100, 200]);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 30. Paginate offset: empty page
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn paginate_offset_empty_first_page() {
+    let result = paginate_offset(0, None, |_offset| async move {
+        Ok(OffsetPage {
+            items: Vec::<i32>::new(),
+            next_offset: None,
+            total_count: Some(0),
+        })
+    })
+    .await;
+
+    let items = result.expect("empty offset page should succeed");
+    assert!(items.is_empty());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 31. GraphQL error with locations and path preserved
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn graphql_error_locations_and_path_preserved() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "errors": [{
+                "message": "Cannot query field 'email' on type 'Viewer'",
+                "locations": [{"line": 2, "column": 5}],
+                "path": ["viewer", 0, "email"],
+                "extensions": {"code": "GRAPHQL_VALIDATION_FAILED"}
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GraphqlClientBuilder::new(server.uri())
+        .build()
+        .expect("client");
+
+    let err = client
+        .execute_strict::<ViewerQuery>(EmptyVars {})
+        .await
+        .expect_err("should return GraphQL error");
+
+    match err {
+        GraphqlClientError::GraphqlErrors { errors } => {
+            assert_eq!(errors.len(), 1);
+            let e = &errors[0];
+            assert_eq!(e.locations.len(), 1);
+            assert_eq!(e.locations[0].line, 2);
+            assert_eq!(e.locations[0].column, 5);
+            assert_eq!(e.path.len(), 3);
+            assert_eq!(
+                e.path[0],
+                GraphqlPathSegment::Key("viewer".into())
+            );
+            assert_eq!(e.path[1], GraphqlPathSegment::Index(0));
+            assert_eq!(
+                e.path[2],
+                GraphqlPathSegment::Key("email".into())
+            );
+            assert_eq!(
+                e.extensions.as_ref().unwrap()["code"],
+                "GRAPHQL_VALIDATION_FAILED"
+            );
+        }
+        other => panic!("expected GraphqlErrors, got {other:?}"),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 32. to_fcp_error integration (cross-module)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn to_fcp_error_maps_429_to_rate_limited() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .set_body_string("rate limited")
+                .append_header("Retry-After", "30"),
+        )
+        .mount(&server)
+        .await;
+
+    let client = GraphqlClientBuilder::new(server.uri())
+        .with_retry_policy(RetryPolicy {
+            max_attempts: 1,
+            strategy: RetryStrategy::Never,
+            ..RetryPolicy::default()
+        })
+        .build()
+        .expect("client");
+
+    let err = client
+        .execute_strict::<ViewerQuery>(EmptyVars {})
+        .await
+        .expect_err("should get 429");
+
+    let fcp_err = err.to_fcp_error("test-svc");
+    match fcp_err {
+        fcp_core::FcpError::RateLimited { .. } => {}
+        other => panic!("expected RateLimited, got {other:?}"),
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn to_fcp_error_maps_401_to_unauthorized() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("invalid token"))
+        .mount(&server)
+        .await;
+
+    let client = GraphqlClientBuilder::new(server.uri())
+        .with_retry_policy(RetryPolicy {
+            max_attempts: 1,
+            strategy: RetryStrategy::Never,
+            ..RetryPolicy::default()
+        })
+        .build()
+        .expect("client");
+
+    let err = client
+        .execute_strict::<ViewerQuery>(EmptyVars {})
+        .await
+        .expect_err("should get 401");
+
+    let fcp_err = err.to_fcp_error("github-api");
+    match fcp_err {
+        fcp_core::FcpError::Unauthorized { message, .. } => {
+            assert!(message.contains("github-api"));
+        }
+        other => panic!("expected Unauthorized, got {other:?}"),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 33. Client with_config constructor
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn client_with_config_constructor() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"data": {"viewer": {"id": "cfg-1"}}})),
+        )
+        .mount(&server)
+        .await;
+
+    let config = fcp_graphql::GraphqlClientConfig {
+        service_name: "config-test".to_string(),
+        ..Default::default()
+    };
+
+    let client = fcp_graphql::GraphqlClient::with_config(server.uri(), config).expect("client");
+
+    let resp = client
+        .execute::<ViewerQuery>(EmptyVars {})
+        .await
+        .expect("query via with_config");
+    assert_eq!(resp.data.unwrap().viewer.id, "cfg-1");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 34. Subscription with init_payload
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn subscription_with_init_payload() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+
+    let server_task = task::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept");
+        let mut ws = accept_async(TokioIo::new(stream))
+            .await
+            .expect("accept ws");
+
+        let init = ws.next().await.expect("init message").expect("init ok");
+        let init_text = init.into_text().expect("init text");
+        let init_value: serde_json::Value =
+            serde_json::from_str(&init_text).expect("init json");
+
+        // Verify the init_payload is included
+        assert_eq!(
+            init_value.get("type").and_then(serde_json::Value::as_str),
+            Some("connection_init")
+        );
+        let payload = init_value.get("payload").expect("payload present");
+        assert_eq!(payload["token"], "my-auth-token");
+
+        ws.send(Message::Text(
+            serde_json::json!({"type": "connection_ack"})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .expect("ack send");
+
+        let _subscribe = ws.next().await.expect("subscribe").expect("subscribe ok");
+
+        let next = serde_json::json!({
+            "type": "next",
+            "id": "1",
+            "payload": { "data": {"viewer": {"id": "init-payload-1"}} }
+        });
+        ws.send(Message::Text(next.to_string().into()))
+            .await
+            .expect("next send");
+
+        ws.send(Message::Text(
+            serde_json::json!({"type": "complete", "id": "1"})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .expect("complete send");
+    });
+
+    let url = format!("ws://{}", addr);
+    let config = GraphqlSubscriptionConfig {
+        ws: WsConfig::new().with_connect_timeout(Duration::from_secs(2)),
+        init_payload: Some(serde_json::json!({"token": "my-auth-token"})),
+        ack_timeout: Duration::from_secs(2),
+    };
+    let client = GraphqlSubscriptionClient::new(url, "test").with_config(config);
+
+    let mut stream = client
+        .subscribe::<ViewerQuery>(EmptyVars {})
+        .await
+        .expect("subscribe");
+
+    let response = stream
+        .next()
+        .await
+        .expect("stream item")
+        .expect("subscription response");
+    assert_eq!(response.data.unwrap().viewer.id, "init-payload-1");
+
+    server_task.await.expect("server task");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 35. Execute query with timeout via builder
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn execute_query_timeout() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"data": {"viewer": {"id": "slow"}}}))
+                .set_delay(Duration::from_secs(5)),
+        )
+        .mount(&server)
+        .await;
+
+    let client = GraphqlClientBuilder::new(server.uri())
+        .with_timeout(Duration::from_millis(50))
+        .with_retry_policy(RetryPolicy {
+            max_attempts: 1,
+            strategy: RetryStrategy::Never,
+            ..RetryPolicy::default()
+        })
+        .build()
+        .expect("client");
+
+    let err = client
+        .execute_strict::<ViewerQuery>(EmptyVars {})
+        .await
+        .expect_err("should timeout");
+
+    assert!(
+        matches!(err, GraphqlClientError::Http(..)),
+        "expected Http timeout error, got {err:?}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 36. Paginate cursor propagates fetch error
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn paginate_cursor_propagates_fetch_error() {
+    let result = paginate_cursor(None, None, |_cursor| async move {
+        Err::<CursorPage<i32>, _>(GraphqlClientError::Protocol {
+            message: "upstream failure".into(),
+        })
+    })
+    .await;
+
+    match result {
+        Err(PaginationError::Client(GraphqlClientError::Protocol { message })) => {
+            assert_eq!(message, "upstream failure");
+        }
+        other => panic!("expected PaginationError::Client(Protocol), got {other:?}"),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 37. Paginate offset propagates fetch error
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn paginate_offset_propagates_fetch_error() {
+    let result = paginate_offset(0, None, |_offset| async move {
+        Err::<OffsetPage<i32>, _>(GraphqlClientError::Json("bad payload".into()))
+    })
+    .await;
+
+    match result {
+        Err(PaginationError::Client(GraphqlClientError::Json(msg))) => {
+            assert_eq!(msg, "bad payload");
+        }
+        other => panic!("expected PaginationError::Client(Json), got {other:?}"),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 38. GraphqlClientError is Send + Sync
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn graphql_client_error_is_send_sync() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<GraphqlClientError>();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 39. GraphqlClientError is std::error::Error
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn graphql_client_error_is_std_error() {
+    fn assert_error<T: std::error::Error>() {}
+    assert_error::<GraphqlClientError>();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 40. GraphqlQuery serde roundtrip in integration context
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn graphql_query_serde_roundtrip() {
+    let q = GraphqlQuery::from_static("query Foo { bar { id } }");
+    let json = serde_json::to_string(&q).unwrap();
+    let back: GraphqlQuery = serde_json::from_str(&json).unwrap();
+    assert_eq!(q.as_str(), back.as_str());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 41. GraphqlRequest serde skips None operation_name
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn graphql_request_serde_skips_none_op_name() {
+    let req = GraphqlRequest::new(
+        GraphqlQuery::new("{ users { id } }"),
+        serde_json::json!({}),
+    );
+    let json = serde_json::to_string(&req).unwrap();
+    assert!(!json.contains("operation_name"));
+}
+
+#[test]
+fn graphql_request_serde_includes_op_name() {
+    let req = GraphqlRequest::new(
+        GraphqlQuery::new("{ users { id } }"),
+        serde_json::json!({"limit": 10}),
+    )
+    .with_operation_name("GetUsers");
+    let json = serde_json::to_string(&req).unwrap();
+    assert!(json.contains("GetUsers"));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 42. RetryPolicy default values
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn retry_policy_default_values() {
+    let p = RetryPolicy::default();
+    assert_eq!(p.max_attempts, 3);
+    assert_eq!(p.strategy, RetryStrategy::IdempotentOnly);
+    assert!(p.base_delay > Duration::ZERO);
+    assert!(p.max_delay > p.base_delay);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 43. RetryDecision equality
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn retry_decision_equality() {
+    assert_eq!(RetryDecision::DoNotRetry, RetryDecision::DoNotRetry);
+    assert_ne!(
+        RetryDecision::RetryAfter(Duration::from_millis(100)),
+        RetryDecision::DoNotRetry
+    );
+    assert_eq!(
+        RetryDecision::RetryAfter(Duration::from_millis(50)),
+        RetryDecision::RetryAfter(Duration::from_millis(50))
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 44. GraphqlErrorLocation equality
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn graphql_error_location_equality() {
+    let a = GraphqlErrorLocation { line: 1, column: 5 };
+    let b = GraphqlErrorLocation { line: 1, column: 5 };
+    let c = GraphqlErrorLocation { line: 2, column: 3 };
+    assert_eq!(a, b);
+    assert_ne!(a, c);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 45. GraphqlPathSegment equality across variants
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn graphql_path_segment_cross_variant_ne() {
+    let key = GraphqlPathSegment::Key("0".into());
+    let index = GraphqlPathSegment::Index(0);
+    assert_ne!(key, index);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 46. PaginationError trait bounds
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn pagination_error_is_from_client_error() {
+    let client_err = GraphqlClientError::Json("bad".into());
+    let pag_err: PaginationError = client_err.into();
+    match pag_err {
+        PaginationError::Client(GraphqlClientError::Json(msg)) => {
+            assert_eq!(msg, "bad");
+        }
+        other => panic!("expected Client(Json), got {other:?}"),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 47. GraphqlClientConfig default
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn graphql_client_config_default() {
+    let config = fcp_graphql::GraphqlClientConfig::default();
+    // Default includes Content-Type: application/json
+    assert!(!config.headers.is_empty());
+    assert!(!config.dedup_in_flight);
+    assert_eq!(config.validation, SchemaValidationMode::Off);
+    assert_eq!(config.service_name, "graphql");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 48. execute_strict returns data directly on success
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn execute_strict_returns_data_directly() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"data": {"viewer": {"id": "strict-1"}}})),
+        )
+        .mount(&server)
+        .await;
+
+    let client = GraphqlClientBuilder::new(server.uri())
+        .build()
+        .expect("client");
+
+    let data = client
+        .execute_strict::<ViewerQuery>(EmptyVars {})
+        .await
+        .expect("strict query");
+
+    assert_eq!(data.viewer.id, "strict-1");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 49. Multiple sequential queries use same client
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn multiple_sequential_queries_same_client() {
+    let server = MockServer::start().await;
+    let counter = Arc::new(AtomicUsize::new(0));
+
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(CountingResponder {
+            counter: counter.clone(),
+            body: serde_json::json!({"data": {"viewer": {"id": "seq-1"}}}),
+            delay: None,
+        })
+        .mount(&server)
+        .await;
+
+    let client = GraphqlClientBuilder::new(server.uri())
+        .build()
+        .expect("client");
+
+    for _ in 0..5 {
+        client
+            .execute::<ViewerQuery>(EmptyVars {})
+            .await
+            .expect("sequential query");
+    }
+
+    let m = client.metrics();
+    assert_eq!(m.requests_total, 5);
+    assert_eq!(m.requests_success, 5);
+    assert_eq!(counter.load(Ordering::SeqCst), 5);
 }

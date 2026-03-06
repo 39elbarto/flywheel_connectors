@@ -129,7 +129,7 @@ impl SubprocessConnector {
 
     async fn terminate(&self) -> std::io::Result<()> {
         let mut runner = self.runner.lock().await;
-        runner.terminate().await
+        runner.terminate()
     }
 
     async fn summary_with_health(&self) -> ConnectorSummary {

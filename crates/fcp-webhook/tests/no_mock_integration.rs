@@ -906,3 +906,1074 @@ fn known_hmac_sha1_vectors() {
     let sig2 = verifier.compute(b"test payload");
     assert_eq!(sig, sig2);
 }
+
+// ─── claim_event vs record_event semantics ────────────────────────────
+
+#[test]
+fn record_event_does_not_check_replay() {
+    let handler = WebhookHandler::new(HmacSha256Verifier::new("s"), "test");
+
+    // record_event silently records, never errors
+    handler.record_event("evt_r1");
+    handler.record_event("evt_r1"); // no error on duplicate
+
+    // But check_replay now detects it
+    assert!(matches!(
+        handler.check_replay("evt_r1"),
+        Err(WebhookError::ReplayDetected { .. })
+    ));
+}
+
+#[test]
+fn check_replay_does_not_record() {
+    let handler = WebhookHandler::new(HmacSha256Verifier::new("s"), "test");
+
+    // check_replay returns Ok but does NOT record
+    assert!(handler.check_replay("evt_c1").is_ok());
+    assert!(handler.check_replay("evt_c1").is_ok()); // still Ok — not recorded
+
+    // Only after record_event does replay fail
+    handler.record_event("evt_c1");
+    assert!(matches!(
+        handler.check_replay("evt_c1"),
+        Err(WebhookError::ReplayDetected { .. })
+    ));
+}
+
+#[test]
+fn claim_event_is_atomic_check_and_record() {
+    let handler = WebhookHandler::new(HmacSha256Verifier::new("s"), "test");
+
+    // First claim succeeds and records
+    assert!(handler.claim_event("evt_a1").is_ok());
+
+    // check_replay sees it was recorded by claim
+    assert!(matches!(
+        handler.check_replay("evt_a1"),
+        Err(WebhookError::ReplayDetected { .. })
+    ));
+
+    // Second claim also fails
+    assert!(matches!(
+        handler.claim_event("evt_a1"),
+        Err(WebhookError::ReplayDetected { .. })
+    ));
+}
+
+// ─── Idempotency disabled full pipeline ───────────────────────────────
+
+#[test]
+fn idempotency_disabled_full_pipeline() {
+    let verifier = HmacSha256Verifier::new("secret");
+    let config = WebhookConfig::new().with_idempotency(false);
+    let handler = WebhookHandler::with_config(verifier.clone(), "test", config);
+    let mut router = EventRouter::new();
+    router.subscribe(EventSubscription::all(), "catch_all");
+
+    let github = GitHubWebhook::new("secret");
+    let body = br#"{"action":"created"}"#;
+    let sig = format!("sha256={}", verifier.compute(body));
+    let mut headers = HashMap::new();
+    headers.insert("x-hub-signature-256".into(), sig);
+    headers.insert("x-github-event".into(), "star".into());
+    headers.insert("x-github-delivery".into(), "dup_1".into());
+
+    let event = github.verify_and_parse(&headers, body).unwrap();
+
+    // With idempotency off, same event ID can be claimed multiple times
+    assert!(handler.claim_event(&event.id).is_ok());
+    assert!(handler.claim_event(&event.id).is_ok());
+    assert!(handler.claim_event(&event.id).is_ok());
+
+    // Routing still works
+    let handlers = router.route(&event);
+    assert_eq!(handlers, vec!["catch_all"]);
+}
+
+// ─── Multi-provider shared DLQ ────────────────────────────────────────
+
+#[test]
+fn multi_provider_shared_dlq() {
+    let dlq = DeadLetterQueue::new(10);
+
+    // Simulate failures from different providers
+    let gh_event = WebhookEvent::new("gh_fail_1", "push", "github");
+    let stripe_event = WebhookEvent::new("stripe_fail_1", "charge.failed", "stripe");
+    let slack_event = WebhookEvent::new("slack_fail_1", "message", "slack");
+
+    dlq.push(gh_event);
+    dlq.push(stripe_event);
+    dlq.push(slack_event);
+
+    assert_eq!(dlq.len(), 3);
+
+    // All events get DeadLettered status
+    let all = dlq.all();
+    for event in &all {
+        assert_eq!(event.metadata.status, DeliveryStatus::DeadLettered);
+    }
+
+    // Remove by provider-specific ID
+    let removed = dlq.remove("stripe_fail_1").unwrap();
+    assert_eq!(removed.provider, "stripe");
+    assert_eq!(dlq.len(), 2);
+
+    // Remaining are GitHub and Slack
+    let remaining = dlq.all();
+    assert_eq!(remaining[0].provider, "github");
+    assert_eq!(remaining[1].provider, "slack");
+}
+
+// ─── DLQ remove + overflow interaction ────────────────────────────────
+
+#[test]
+fn dlq_remove_then_overflow() {
+    let dlq = DeadLetterQueue::new(3);
+
+    dlq.push(WebhookEvent::new("a", "t", "p"));
+    dlq.push(WebhookEvent::new("b", "t", "p"));
+    dlq.push(WebhookEvent::new("c", "t", "p"));
+    assert_eq!(dlq.len(), 3);
+
+    // Remove middle element
+    dlq.remove("b");
+    assert_eq!(dlq.len(), 2);
+
+    // Push two more — now at capacity (3), no eviction needed for first
+    dlq.push(WebhookEvent::new("d", "t", "p"));
+    assert_eq!(dlq.len(), 3);
+
+    // One more triggers eviction of oldest ("a")
+    dlq.push(WebhookEvent::new("e", "t", "p"));
+    assert_eq!(dlq.len(), 3);
+
+    let all = dlq.all();
+    let ids: Vec<&str> = all.iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(ids, vec!["c", "d", "e"]);
+}
+
+// ─── DLQ all() returns clones (mutation safety) ───────────────────────
+
+#[test]
+fn dlq_all_returns_independent_clones() {
+    let dlq = DeadLetterQueue::new(10);
+    dlq.push(WebhookEvent::new("x", "test", "p"));
+
+    let snapshot1 = dlq.all();
+    assert_eq!(snapshot1.len(), 1);
+
+    // Push another event after taking snapshot
+    dlq.push(WebhookEvent::new("y", "test", "p"));
+
+    // Original snapshot is unchanged
+    assert_eq!(snapshot1.len(), 1);
+    assert_eq!(dlq.len(), 2);
+}
+
+// ─── Stripe timestamp edge cases ──────────────────────────────────────
+
+#[test]
+fn stripe_rejects_far_future_timestamp() {
+    let secret = "whsec_future";
+    let stripe = StripeWebhook::new(secret).with_timestamp_tolerance(Duration::from_secs(60));
+
+    let body = br#"{"id":"e","type":"t"}"#;
+    // Timestamp 1 hour in the future
+    let future_ts = Utc::now().timestamp() + 3600;
+    let signed = format!("{future_ts}.{}", String::from_utf8_lossy(body));
+    let sig = HmacSha256Verifier::new(secret).compute(signed.as_bytes());
+
+    let mut headers = HashMap::new();
+    headers.insert(
+        "stripe-signature".into(),
+        format!("t={future_ts},v1={sig}"),
+    );
+
+    let result = stripe.verify_and_parse(&headers, body);
+    assert!(matches!(
+        result,
+        Err(WebhookError::TimestampValidation { .. })
+    ));
+}
+
+#[test]
+fn stripe_accepts_timestamp_within_tolerance() {
+    let secret = "whsec_tolerance";
+    let stripe = StripeWebhook::new(secret).with_timestamp_tolerance(Duration::from_secs(300));
+
+    let body = br#"{"id":"evt_ok","type":"invoice.paid"}"#;
+    // 2 seconds ago — well within tolerance
+    let ts = Utc::now().timestamp() - 2;
+    let signed = format!("{ts}.{}", String::from_utf8_lossy(body));
+    let sig = HmacSha256Verifier::new(secret).compute(signed.as_bytes());
+
+    let mut headers = HashMap::new();
+    headers.insert("stripe-signature".into(), format!("t={ts},v1={sig}"));
+
+    let event = stripe.verify_and_parse(&headers, body).unwrap();
+    assert_eq!(event.id, "evt_ok");
+    assert_eq!(event.event_type, "invoice.paid");
+}
+
+// ─── Error From impls at integration level ────────────────────────────
+
+#[test]
+fn json_error_from_impl_integration() {
+    let result: Result<serde_json::Value, _> = serde_json::from_str("{bad json}");
+    let webhook_err: WebhookError = result.unwrap_err().into();
+    assert!(matches!(webhook_err, WebhookError::JsonError(_)));
+    assert!(webhook_err.to_string().starts_with("JSON parsing error:"));
+}
+
+#[test]
+fn hex_error_from_impl_integration() {
+    let result = hex::decode("not-valid-hex");
+    let webhook_err: WebhookError = result.unwrap_err().into();
+    assert!(matches!(webhook_err, WebhookError::HexError(_)));
+    assert!(webhook_err.to_string().starts_with("Hex decoding error:"));
+}
+
+// ─── WebhookError is Send + Sync + std::error::Error ──────────────────
+
+#[test]
+fn webhook_error_trait_bounds() {
+    fn assert_send_sync<T: Send + Sync + std::error::Error>() {}
+    assert_send_sync::<WebhookError>();
+}
+
+// ─── Cross-provider signature isolation ───────────────────────────────
+
+#[test]
+fn cross_provider_signatures_do_not_leak() {
+    let gh_secret = "github_secret_123";
+    let stripe_secret = "stripe_secret_456";
+
+    let github = GitHubWebhook::new(gh_secret);
+    let stripe = StripeWebhook::new(stripe_secret);
+
+    let body = br#"{"action":"opened"}"#;
+
+    // GitHub signature signed with stripe secret fails on GitHub handler
+    let wrong_sig = format!(
+        "sha256={}",
+        HmacSha256Verifier::new(stripe_secret).compute(body)
+    );
+    let mut headers = HashMap::new();
+    headers.insert("x-hub-signature-256".into(), wrong_sig);
+    headers.insert("x-github-event".into(), "issues".into());
+    assert!(github.verify_and_parse(&headers, body).is_err());
+
+    // Correct GitHub signature works
+    let correct_sig = format!(
+        "sha256={}",
+        HmacSha256Verifier::new(gh_secret).compute(body)
+    );
+    headers.insert("x-hub-signature-256".into(), correct_sig);
+    assert!(github.verify_and_parse(&headers, body).is_ok());
+
+    // Stripe signed with github secret fails on Stripe handler
+    let body = br#"{"id":"e","type":"t"}"#;
+    let ts = Utc::now().timestamp();
+    let signed = format!("{ts}.{}", String::from_utf8_lossy(body));
+    let wrong_sig = HmacSha256Verifier::new(gh_secret).compute(signed.as_bytes());
+    let mut headers = HashMap::new();
+    headers.insert(
+        "stripe-signature".into(),
+        format!("t={ts},v1={wrong_sig}"),
+    );
+    assert!(stripe.verify_and_parse(&headers, body).is_err());
+}
+
+// ─── Event matches_type wildcard edge cases ───────────────────────────
+
+#[test]
+fn matches_type_trailing_wildcard_behavior() {
+    let event = WebhookEvent::new("e1", "issue.opened", "gh");
+
+    // "issue.*" matches (prefix "issue." matches start)
+    assert!(event.matches_type("issue.*"));
+    // "issue.opened*" matches (prefix "issue.opened" matches start)
+    assert!(event.matches_type("issue.opened*"));
+    // "*" matches everything
+    assert!(event.matches_type("*"));
+    // "i*" matches (prefix "i" matches start)
+    assert!(event.matches_type("i*"));
+    // "issue.close*" does not match
+    assert!(!event.matches_type("issue.close*"));
+    // Exact match works
+    assert!(event.matches_type("issue.opened"));
+    // Extra suffix fails exact
+    assert!(!event.matches_type("issue.opened.extra"));
+}
+
+#[test]
+fn matches_type_wildcard_on_empty_event_type() {
+    let event = WebhookEvent::new("e1", "", "gh");
+    assert!(event.matches_type("*"));
+    assert!(event.matches_type(""));
+    assert!(!event.matches_type("push"));
+    // "*" as trailing wildcard with empty prefix matches everything
+    assert!(event.matches_type("*"));
+}
+
+// ─── Router subscription ordering ────────────────────────────────────
+
+#[test]
+fn router_preserves_subscription_order_in_results() {
+    let mut router = EventRouter::new();
+    router.subscribe(EventSubscription::all(), "handler_a");
+    router.subscribe(EventSubscription::all(), "handler_b");
+    router.subscribe(EventSubscription::all(), "handler_c");
+
+    let event = WebhookEvent::new("e1", "push", "github");
+    let handlers = router.route(&event);
+
+    // Results should be in subscription order
+    assert_eq!(handlers, vec!["handler_a", "handler_b", "handler_c"]);
+}
+
+#[test]
+fn router_same_handler_id_multiple_subscriptions() {
+    let mut router = EventRouter::new();
+    router.subscribe(
+        EventSubscription::for_types(vec!["push".into()]),
+        "my_handler",
+    );
+    router.subscribe(
+        EventSubscription::for_types(vec!["issue.*".into()]),
+        "my_handler",
+    );
+
+    let event = WebhookEvent::new("e1", "push", "github");
+    let handlers = router.route(&event);
+    // Same handler matched once via push pattern
+    assert_eq!(handlers, vec!["my_handler"]);
+
+    let event2 = WebhookEvent::new("e2", "issue.opened", "github");
+    let handlers2 = router.route(&event2);
+    assert_eq!(handlers2, vec!["my_handler"]);
+}
+
+// ─── EventMetadata custom fields through pipeline ─────────────────────
+
+#[test]
+fn event_metadata_custom_fields_survive_serde() {
+    let mut custom = HashMap::new();
+    custom.insert("retry_count".into(), serde_json::json!(3));
+    custom.insert("region".into(), serde_json::json!("us-east-1"));
+
+    let mut event = WebhookEvent::new("evt_custom", "push", "github");
+    event.metadata = fcp_webhook::EventMetadata {
+        attempt: 2,
+        status: DeliveryStatus::Failed,
+        last_error: Some("connection timeout".into()),
+        source_ip: Some("10.0.0.5".into()),
+        custom,
+        ..Default::default()
+    };
+
+    let json = serde_json::to_string(&event).unwrap();
+    let roundtrip: WebhookEvent = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(roundtrip.metadata.attempt, 2);
+    assert_eq!(roundtrip.metadata.status, DeliveryStatus::Failed);
+    assert_eq!(
+        roundtrip.metadata.last_error.as_deref(),
+        Some("connection timeout")
+    );
+    assert_eq!(roundtrip.metadata.source_ip.as_deref(), Some("10.0.0.5"));
+    assert_eq!(
+        roundtrip.metadata.custom.get("retry_count"),
+        Some(&serde_json::json!(3))
+    );
+    assert_eq!(
+        roundtrip.metadata.custom.get("region"),
+        Some(&serde_json::json!("us-east-1"))
+    );
+}
+
+// ─── DLQ status transition ───────────────────────────────────────────
+
+#[test]
+fn dlq_overrides_status_to_dead_lettered() {
+    let dlq = DeadLetterQueue::new(10);
+
+    // Create event with Delivered status
+    let mut event = WebhookEvent::new("evt_status", "push", "github");
+    event.metadata.status = DeliveryStatus::Delivered;
+
+    // DLQ should override to DeadLettered
+    dlq.push(event);
+    let retrieved = dlq.all();
+    assert_eq!(retrieved[0].metadata.status, DeliveryStatus::DeadLettered);
+}
+
+// ─── Ed25519 verifier from_hex in full pipeline ──────────────────────
+
+#[test]
+fn ed25519_from_hex_full_pipeline() {
+    use ed25519_dalek::{Signer, SigningKey};
+
+    let signing_key = SigningKey::from_bytes(&[
+        0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec,
+        0x2c, 0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03,
+        0x1c, 0xae, 0x7f, 0x60,
+    ]);
+    let pub_hex = hex::encode(signing_key.verifying_key().to_bytes());
+    let verifier = Ed25519Verifier::from_hex(&pub_hex).unwrap();
+
+    // Use in a WebhookHandler
+    let handler = WebhookHandler::new(verifier, "discord");
+    assert_eq!(handler.provider(), "discord");
+    assert_eq!(handler.config().max_payload_size, DEFAULT_MAX_PAYLOAD_SIZE);
+
+    // Verify a payload
+    let body = b"discord webhook body";
+    let sig = signing_key.sign(body);
+    let sig_hex = hex::encode(sig.to_bytes());
+    assert!(handler.verify(body, &sig_hex).is_ok());
+
+    // Wrong signature fails
+    assert!(handler.verify(body, &"00".repeat(64)).is_err());
+}
+
+// ─── Empty IP allowlist allows everything ─────────────────────────────
+
+#[test]
+fn empty_ip_allowlist_permits_all_ips() {
+    let handler = WebhookHandler::new(HmacSha256Verifier::new("s"), "test");
+
+    // No allowlist configured → all IPs allowed
+    assert!(handler.check_ip("192.168.0.1").is_ok());
+    assert!(handler.check_ip("0.0.0.0").is_ok());
+    assert!(handler.check_ip("::1").is_ok());
+    assert!(handler.check_ip("fd00::1").is_ok());
+    assert!(handler.check_ip("anything").is_ok());
+}
+
+// ─── Signature algorithm display ──────────────────────────────────────
+
+#[test]
+fn signature_algorithm_display_all_variants() {
+    assert_eq!(SignatureAlgorithm::HmacSha256.to_string(), "HMAC-SHA256");
+    assert_eq!(SignatureAlgorithm::HmacSha1.to_string(), "HMAC-SHA1");
+    assert_eq!(SignatureAlgorithm::Ed25519.to_string(), "Ed25519");
+}
+
+// ─── Full multi-provider pipeline end-to-end ──────────────────────────
+
+#[test]
+fn multi_provider_pipeline_end_to_end() {
+    // Setup: handler, router, DLQ
+    let handler = WebhookHandler::new(HmacSha256Verifier::new("shared"), "multi");
+    let mut router = EventRouter::new();
+    router.subscribe(
+        EventSubscription::all().with_provider("github"),
+        "github_sync",
+    );
+    router.subscribe(
+        EventSubscription::all().with_provider("linear"),
+        "linear_sync",
+    );
+    router.subscribe(
+        EventSubscription::for_types(vec!["payment_intent.*".into()]),
+        "billing",
+    );
+    let dlq = DeadLetterQueue::new(100);
+
+    // GitHub event
+    let gh = GitHubWebhook::new("gh_secret");
+    let gh_body = br#"{"action":"opened"}"#;
+    let gh_sig = format!(
+        "sha256={}",
+        HmacSha256Verifier::new("gh_secret").compute(gh_body)
+    );
+    let mut gh_headers = HashMap::new();
+    gh_headers.insert("x-hub-signature-256".into(), gh_sig);
+    gh_headers.insert("x-github-event".into(), "issues".into());
+    gh_headers.insert("x-github-delivery".into(), "gh_del_1".into());
+    let gh_event = gh.verify_and_parse(&gh_headers, gh_body).unwrap();
+    assert!(handler.claim_event(&gh_event.id).is_ok());
+    let gh_handlers = router.route(&gh_event);
+    assert_eq!(gh_handlers, vec!["github_sync"]);
+
+    // Linear event
+    let ln = LinearWebhook::new("ln_secret");
+    let ln_body = br#"{"type":"Issue","webhookId":"wh_ln_1"}"#;
+    let ln_sig = HmacSha256Verifier::new("ln_secret").compute(ln_body);
+    let mut ln_headers = HashMap::new();
+    ln_headers.insert("linear-signature".into(), ln_sig);
+    let ln_event = ln.verify_and_parse(&ln_headers, ln_body).unwrap();
+    assert!(handler.claim_event(&ln_event.id).is_ok());
+    let ln_handlers = router.route(&ln_event);
+    assert_eq!(ln_handlers, vec!["linear_sync"]);
+
+    // Simulate failure → DLQ
+    let failed = WebhookEvent::new("failed_delivery", "push", "github");
+    dlq.push(failed);
+    assert_eq!(dlq.len(), 1);
+    assert_eq!(
+        dlq.all()[0].metadata.status,
+        DeliveryStatus::DeadLettered
+    );
+}
+
+// ─── Timestamp error contains all fields ──────────────────────────────
+
+#[test]
+fn timestamp_error_fields_populated() {
+    let stripe = StripeWebhook::new("s").with_timestamp_tolerance(Duration::from_secs(10));
+    let body = br#"{"id":"e","type":"t"}"#;
+    let old_ts = 1_000_000_000_i64;
+    let signed = format!("{old_ts}.{}", String::from_utf8_lossy(body));
+    let sig = HmacSha256Verifier::new("s").compute(signed.as_bytes());
+    let mut headers = HashMap::new();
+    headers.insert(
+        "stripe-signature".into(),
+        format!("t={old_ts},v1={sig}"),
+    );
+
+    match stripe.verify_and_parse(&headers, body) {
+        Err(WebhookError::TimestampValidation {
+            reason,
+            timestamp,
+            current_time,
+            tolerance,
+        }) => {
+            assert!(!reason.is_empty());
+            assert_eq!(timestamp, Some(old_ts));
+            assert!(current_time > old_ts);
+            assert_eq!(tolerance, Duration::from_secs(10));
+        }
+        other => panic!("Expected TimestampValidation, got {other:?}"),
+    }
+}
+
+// ─── Provider error paths: malformed inputs ────────────────────────────
+
+#[test]
+fn github_missing_signature_header() {
+    let gh = GitHubWebhook::new("secret");
+    let body = br#"{"action":"push"}"#;
+    let headers = HashMap::new(); // no headers at all
+    let err = gh.verify_and_parse(&headers, body).unwrap_err();
+    assert!(matches!(err, WebhookError::MissingSignature(_)));
+}
+
+#[test]
+fn github_wrong_signature_rejected() {
+    let gh = GitHubWebhook::new("secret");
+    let body = br#"{"action":"push"}"#;
+    let mut headers = HashMap::new();
+    headers.insert("x-hub-signature-256".to_string(), "sha256=0000".to_string());
+    headers.insert("x-github-event".to_string(), "push".to_string());
+    let err = gh.verify_and_parse(&headers, body).unwrap_err();
+    assert!(matches!(err, WebhookError::InvalidSignature));
+}
+
+#[test]
+fn github_invalid_json_body() {
+    let gh = GitHubWebhook::new("secret");
+    let body = b"not json";
+    let sig = HmacSha256Verifier::new("secret").compute(body);
+    let mut headers = HashMap::new();
+    headers.insert("x-hub-signature-256".to_string(), format!("sha256={sig}"));
+    headers.insert("x-github-event".to_string(), "push".to_string());
+    let err = gh.verify_and_parse(&headers, body).unwrap_err();
+    assert!(matches!(err, WebhookError::JsonError(_)));
+}
+
+#[test]
+fn github_missing_event_type_defaults_to_unknown() {
+    let gh = GitHubWebhook::new("secret");
+    let body = br#"{"action":"opened"}"#;
+    let sig = HmacSha256Verifier::new("secret").compute(body);
+    let mut headers = HashMap::new();
+    headers.insert("x-hub-signature-256".to_string(), format!("sha256={sig}"));
+    // no x-github-event header
+    let event = gh.verify_and_parse(&headers, body).unwrap();
+    assert_eq!(event.event_type, "unknown");
+}
+
+#[test]
+fn github_missing_delivery_id_generates_uuid() {
+    let gh = GitHubWebhook::new("secret");
+    let body = br#"{"action":"opened"}"#;
+    let sig = HmacSha256Verifier::new("secret").compute(body);
+    let mut headers = HashMap::new();
+    headers.insert("x-hub-signature-256".to_string(), format!("sha256={sig}"));
+    headers.insert("x-github-event".to_string(), "push".to_string());
+    // no x-github-delivery header
+    let event = gh.verify_and_parse(&headers, body).unwrap();
+    assert!(!event.id.is_empty());
+    assert_ne!(event.id, "unknown");
+}
+
+#[test]
+fn stripe_missing_signature_header() {
+    let stripe = StripeWebhook::new("secret");
+    let body = br#"{"id":"e","type":"t"}"#;
+    let headers = HashMap::new();
+    let err = stripe.verify_and_parse(&headers, body).unwrap_err();
+    assert!(matches!(err, WebhookError::MissingSignature(_)));
+}
+
+#[test]
+fn stripe_malformed_signature_no_v1() {
+    let stripe = StripeWebhook::new("secret");
+    let body = br#"{"id":"e","type":"t"}"#;
+    let mut headers = HashMap::new();
+    headers.insert("stripe-signature".to_string(), "t=12345".to_string());
+    let err = stripe.verify_and_parse(&headers, body).unwrap_err();
+    assert!(matches!(err, WebhookError::InvalidPayload(_)));
+}
+
+#[test]
+fn stripe_malformed_signature_no_timestamp() {
+    let stripe = StripeWebhook::new("secret");
+    let body = br#"{"id":"e","type":"t"}"#;
+    let mut headers = HashMap::new();
+    headers.insert("stripe-signature".to_string(), "v1=abcdef".to_string());
+    let err = stripe.verify_and_parse(&headers, body).unwrap_err();
+    assert!(matches!(err, WebhookError::InvalidPayload(_)));
+}
+
+#[test]
+fn stripe_invalid_json_body() {
+    let stripe = StripeWebhook::new("secret");
+    let body = b"not json";
+    let ts = Utc::now().timestamp();
+    let signed = format!("{ts}.{}", String::from_utf8_lossy(body));
+    let sig = HmacSha256Verifier::new("secret").compute(signed.as_bytes());
+    let mut headers = HashMap::new();
+    headers.insert("stripe-signature".to_string(), format!("t={ts},v1={sig}"));
+    let err = stripe.verify_and_parse(&headers, body).unwrap_err();
+    assert!(matches!(err, WebhookError::JsonError(_)));
+}
+
+#[test]
+fn slack_missing_signature_header() {
+    let slack = SlackWebhook::new("secret");
+    let body = br#"{"type":"event"}"#;
+    let mut headers = HashMap::new();
+    headers.insert(
+        "x-slack-request-timestamp".to_string(),
+        Utc::now().timestamp().to_string(),
+    );
+    let err = slack.verify_and_parse(&headers, body).unwrap_err();
+    assert!(matches!(err, WebhookError::MissingSignature(_)));
+}
+
+#[test]
+fn slack_missing_timestamp_header() {
+    let slack = SlackWebhook::new("secret");
+    let body = br#"{"type":"event"}"#;
+    let mut headers = HashMap::new();
+    headers.insert("x-slack-signature".to_string(), "v0=abc".to_string());
+    let err = slack.verify_and_parse(&headers, body).unwrap_err();
+    assert!(matches!(err, WebhookError::MissingSignature(_)));
+}
+
+#[test]
+fn slack_non_numeric_timestamp() {
+    let slack = SlackWebhook::new("secret");
+    let body = br#"{"type":"event"}"#;
+    let mut headers = HashMap::new();
+    headers.insert("x-slack-signature".to_string(), "v0=abc".to_string());
+    headers.insert("x-slack-request-timestamp".to_string(), "not-a-number".to_string());
+    let err = slack.verify_and_parse(&headers, body).unwrap_err();
+    assert!(matches!(err, WebhookError::InvalidPayload(_)));
+}
+
+#[test]
+fn linear_missing_signature_header() {
+    let linear = LinearWebhook::new("secret");
+    let body = br#"{"type":"issue"}"#;
+    let headers = HashMap::new();
+    let err = linear.verify_and_parse(&headers, body).unwrap_err();
+    assert!(matches!(err, WebhookError::MissingSignature(_)));
+}
+
+#[test]
+fn linear_wrong_signature() {
+    let linear = LinearWebhook::new("secret");
+    let body = br#"{"type":"issue"}"#;
+    let mut headers = HashMap::new();
+    headers.insert("linear-signature".to_string(), "0000dead".to_string());
+    let err = linear.verify_and_parse(&headers, body).unwrap_err();
+    assert!(matches!(err, WebhookError::InvalidSignature));
+}
+
+// ─── Payload size enforcement order ────────────────────────────────────
+
+#[test]
+fn handler_rejects_oversized_payload_before_sig_check() {
+    let handler = WebhookHandler::with_config(
+        HmacSha256Verifier::new("secret"),
+        "test",
+        WebhookConfig::new().with_max_payload_size(10),
+    );
+    // 20-byte payload, invalid signature — should fail with PayloadTooLarge, not InvalidSig
+    let big = vec![b'x'; 20];
+    let err = handler.verify(&big, "invalid-sig").unwrap_err();
+    assert!(matches!(err, WebhookError::PayloadTooLarge { size: 20, limit: 10 }));
+}
+
+#[test]
+fn handler_payload_at_exact_limit_passes_size_check() {
+    let handler = WebhookHandler::with_config(
+        HmacSha256Verifier::new("secret"),
+        "test",
+        WebhookConfig::new().with_max_payload_size(10),
+    );
+    let body = vec![b'x'; 10];
+    let sig = HmacSha256Verifier::new("secret").compute(&body);
+    // Should pass size check, then pass sig check
+    assert!(handler.verify(&body, &sig).is_ok());
+}
+
+#[test]
+fn handler_payload_one_over_limit_rejected() {
+    let handler = WebhookHandler::with_config(
+        HmacSha256Verifier::new("secret"),
+        "test",
+        WebhookConfig::new().with_max_payload_size(10),
+    );
+    let body = vec![b'x'; 11];
+    let err = handler.verify(&body, "whatever").unwrap_err();
+    assert!(matches!(err, WebhookError::PayloadTooLarge { size: 11, limit: 10 }));
+}
+
+// ─── IP allowlist edge cases ───────────────────────────────────────────
+
+#[test]
+fn ip_allowlist_empty_permits_all() {
+    let handler = WebhookHandler::with_config(
+        HmacSha256Verifier::new("s"),
+        "test",
+        WebhookConfig::new().with_ip_allowlist(vec![]),
+    );
+    assert!(handler.check_ip("1.2.3.4").is_ok());
+    assert!(handler.check_ip("::1").is_ok());
+    assert!(handler.check_ip("anything").is_ok());
+}
+
+#[test]
+fn ip_allowlist_exact_match_required() {
+    let handler = WebhookHandler::with_config(
+        HmacSha256Verifier::new("s"),
+        "test",
+        WebhookConfig::new().with_ip_allowlist(vec![
+            "192.168.1.1".to_string(),
+            "10.0.0.1".to_string(),
+        ]),
+    );
+    assert!(handler.check_ip("192.168.1.1").is_ok());
+    assert!(handler.check_ip("10.0.0.1").is_ok());
+    assert!(handler.check_ip("192.168.1.2").is_err());
+    assert!(handler.check_ip("").is_err());
+}
+
+#[test]
+fn ip_allowlist_ipv6_address() {
+    let handler = WebhookHandler::with_config(
+        HmacSha256Verifier::new("s"),
+        "test",
+        WebhookConfig::new().with_ip_allowlist(vec![
+            "::1".to_string(),
+            "2001:db8::1".to_string(),
+        ]),
+    );
+    assert!(handler.check_ip("::1").is_ok());
+    assert!(handler.check_ip("2001:db8::1").is_ok());
+    assert!(handler.check_ip("::2").is_err());
+}
+
+#[test]
+fn ip_allowlist_whitespace_not_trimmed() {
+    // IP matching is exact string comparison — leading/trailing space matters
+    let handler = WebhookHandler::with_config(
+        HmacSha256Verifier::new("s"),
+        "test",
+        WebhookConfig::new().with_ip_allowlist(vec!["10.0.0.1".to_string()]),
+    );
+    assert!(handler.check_ip("10.0.0.1").is_ok());
+    assert!(handler.check_ip(" 10.0.0.1").is_err());
+    assert!(handler.check_ip("10.0.0.1 ").is_err());
+}
+
+// ─── Idempotency edge cases ───────────────────────────────────────────
+
+#[test]
+fn idempotency_disabled_allows_duplicates() {
+    let handler = WebhookHandler::with_config(
+        HmacSha256Verifier::new("s"),
+        "test",
+        WebhookConfig::new().with_idempotency(false),
+    );
+    assert!(handler.claim_event("evt-1").is_ok());
+    assert!(handler.claim_event("evt-1").is_ok()); // no rejection
+    assert!(handler.check_replay("evt-1").is_ok()); // no rejection
+}
+
+#[test]
+fn record_then_check_replay_detects() {
+    let handler = WebhookHandler::new(HmacSha256Verifier::new("s"), "test");
+    handler.record_event("evt-1");
+    let err = handler.check_replay("evt-1").unwrap_err();
+    assert!(matches!(err, WebhookError::ReplayDetected { .. }));
+}
+
+// ─── Algorithm switching & verifier isolation ──────────────────────────
+
+#[test]
+fn handler_with_hmac_sha1_verifier() {
+    let verifier = HmacSha1Verifier::new("secret");
+    let handler = WebhookHandler::new(verifier.clone(), "test-sha1");
+    let body = b"test payload";
+    let sig = verifier.compute(body);
+    assert!(handler.verify(body, &sig).is_ok());
+    assert_eq!(handler.provider(), "test-sha1");
+}
+
+#[test]
+fn hmac_sha256_rejects_sha1_signature() {
+    let sha256_handler = WebhookHandler::new(HmacSha256Verifier::new("secret"), "test");
+    let sha1_sig = HmacSha1Verifier::new("secret").compute(b"payload");
+    let err = sha256_handler.verify(b"payload", &sha1_sig).unwrap_err();
+    assert!(matches!(err, WebhookError::InvalidSignature));
+}
+
+#[test]
+fn verifier_algorithm_reports_correct_type() {
+    assert_eq!(
+        HmacSha256Verifier::new("s").algorithm(),
+        SignatureAlgorithm::HmacSha256
+    );
+    assert_eq!(
+        HmacSha1Verifier::new("s").algorithm(),
+        SignatureAlgorithm::HmacSha1
+    );
+}
+
+// ─── Cross-provider isolation ──────────────────────────────────────────
+
+#[test]
+fn different_secrets_reject_each_other() {
+    let gh_a = GitHubWebhook::new("secret-A");
+    let gh_b = GitHubWebhook::new("secret-B");
+    let body = br#"{"action":"push"}"#;
+
+    // Sign with A's secret
+    let sig_a = HmacSha256Verifier::new("secret-A").compute(body);
+    let mut headers = HashMap::new();
+    headers.insert("x-hub-signature-256".to_string(), format!("sha256={sig_a}"));
+    headers.insert("x-github-event".to_string(), "push".to_string());
+
+    // A accepts
+    assert!(gh_a.verify_and_parse(&headers, body).is_ok());
+    // B rejects
+    assert!(gh_b.verify_and_parse(&headers, body).is_err());
+}
+
+// ─── Router dedup & ordering ───────────────────────────────────────────
+
+#[test]
+fn router_same_handler_multiple_matching_subs_returns_duplicates() {
+    let mut router = EventRouter::new();
+    router.subscribe(EventSubscription::for_types(vec!["push".into()]), "ci");
+    router.subscribe(EventSubscription::all(), "ci"); // also matches
+
+    let event = WebhookEvent::new("1", "push", "github");
+    let handlers = router.route(&event);
+    // Both subscriptions match, returning "ci" twice (no dedup)
+    assert!(handlers.len() >= 2);
+    assert!(handlers.iter().all(|h| *h == "ci"));
+}
+
+#[test]
+fn router_no_subscriptions_returns_empty() {
+    let router = EventRouter::new();
+    let event = WebhookEvent::new("1", "push", "github");
+    assert!(router.route(&event).is_empty());
+}
+
+// ─── DLQ: remove & clear ──────────────────────────────────────────────
+
+#[test]
+fn dlq_remove_returns_event() {
+    let dlq = DeadLetterQueue::new(10);
+    dlq.push(WebhookEvent::new("a", "t", "p"));
+    dlq.push(WebhookEvent::new("b", "t", "p"));
+
+    let removed = dlq.remove("a");
+    assert!(removed.is_some());
+    assert_eq!(removed.unwrap().id, "a");
+    assert_eq!(dlq.len(), 1);
+}
+
+#[test]
+fn dlq_remove_nonexistent_returns_none() {
+    let dlq = DeadLetterQueue::new(10);
+    dlq.push(WebhookEvent::new("a", "t", "p"));
+    assert!(dlq.remove("nonexistent").is_none());
+    assert_eq!(dlq.len(), 1);
+}
+
+#[test]
+fn dlq_clear_empties_queue() {
+    let dlq = DeadLetterQueue::new(10);
+    dlq.push(WebhookEvent::new("a", "t", "p"));
+    dlq.push(WebhookEvent::new("b", "t", "p"));
+    dlq.push(WebhookEvent::new("c", "t", "p"));
+    assert_eq!(dlq.len(), 3);
+
+    dlq.clear();
+    assert!(dlq.is_empty());
+    assert_eq!(dlq.len(), 0);
+}
+
+// ─── Event metadata & taint ────────────────────────────────────────────
+
+#[test]
+fn event_multiple_taint_flags() {
+    let event = WebhookEvent::new("1", "push", "github")
+        .with_taint_flag(TaintFlag::WebhookInjected)
+        .with_taint_flag(TaintFlag::PublicInput)
+        .with_taint_flag(TaintFlag::UntrustedTransform);
+
+    assert!(event.metadata.taint_flags.contains(TaintFlag::WebhookInjected));
+    assert!(event.metadata.taint_flags.contains(TaintFlag::PublicInput));
+    assert!(event.metadata.taint_flags.contains(TaintFlag::UntrustedTransform));
+}
+
+#[test]
+fn event_default_webhook_taint_idempotent() {
+    let event = WebhookEvent::new("1", "t", "p")
+        .with_default_webhook_taint()
+        .with_default_webhook_taint(); // applying twice
+
+    assert!(event.metadata.taint_flags.contains(TaintFlag::WebhookInjected));
+    assert!(event.metadata.taint_flags.contains(TaintFlag::PublicInput));
+}
+
+#[test]
+fn delivery_status_serde_roundtrip() {
+    let statuses = vec![
+        DeliveryStatus::Pending,
+        DeliveryStatus::Delivered,
+        DeliveryStatus::Failed,
+        DeliveryStatus::DeadLettered,
+    ];
+    for status in &statuses {
+        let json = serde_json::to_string(status).unwrap();
+        let back: DeliveryStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(*status, back);
+    }
+}
+
+// ─── Full error pipeline: handler verify → route → DLQ ────────────────
+
+#[test]
+fn pipeline_invalid_sig_skips_routing_and_dlq() {
+    let handler = WebhookHandler::new(HmacSha256Verifier::new("secret"), "github");
+    let router = EventRouter::new();
+    let dlq = DeadLetterQueue::new(10);
+
+    // Invalid signature
+    let err = handler.verify(b"body", "bad-sig");
+    assert!(err.is_err());
+
+    // Since verification failed, no event to route or DLQ
+    // This tests the expected flow: error stops pipeline
+    assert!(dlq.is_empty());
+    assert!(router.route(&WebhookEvent::new("x", "t", "p")).is_empty());
+}
+
+#[test]
+fn pipeline_replay_detected_does_not_create_duplicate_events() {
+    let handler = WebhookHandler::new(HmacSha256Verifier::new("secret"), "github");
+
+    // Claim event once
+    handler.claim_event("evt-1").unwrap();
+
+    // Second claim returns ReplayDetected
+    let err = handler.claim_event("evt-1").unwrap_err();
+    assert!(matches!(err, WebhookError::ReplayDetected { event_id } if event_id == "evt-1"));
+}
+
+// ─── WebhookProvider enum coverage ─────────────────────────────────────
+
+#[test]
+fn webhook_provider_display_roundtrip() {
+    assert_eq!(WebhookProvider::GitHub.to_string(), "github");
+    assert_eq!(WebhookProvider::Stripe.to_string(), "stripe");
+    assert_eq!(WebhookProvider::Slack.to_string(), "slack");
+    assert_eq!(WebhookProvider::Linear.to_string(), "linear");
+    assert_eq!(WebhookProvider::Discord.to_string(), "discord");
+    assert_eq!(WebhookProvider::Custom.to_string(), "custom");
+}
+
+#[test]
+fn webhook_provider_copy_and_eq() {
+    let a = WebhookProvider::GitHub;
+    let b = a; // Copy
+    assert_eq!(a, b);
+    assert_ne!(WebhookProvider::GitHub, WebhookProvider::Stripe);
+}
+
+// ─── Handler accessors & Debug ─────────────────────────────────────────
+
+#[test]
+fn handler_provider_and_config_accessors() {
+    let config = WebhookConfig::new()
+        .with_max_payload_size(1024)
+        .with_max_retries(5)
+        .with_idempotency(false);
+    let handler = WebhookHandler::with_config(
+        HmacSha256Verifier::new("s"),
+        "custom-provider",
+        config,
+    );
+
+    assert_eq!(handler.provider(), "custom-provider");
+    assert_eq!(handler.config().max_payload_size, 1024);
+    assert_eq!(handler.config().max_retries, 5);
+    assert!(!handler.config().idempotency_enabled);
+}
+
+#[test]
+fn handler_debug_does_not_leak_secret() {
+    let handler = WebhookHandler::new(HmacSha256Verifier::new("super-secret-key"), "test");
+    let debug = format!("{handler:?}");
+    assert!(!debug.contains("super-secret-key"));
+}
+
+// ─── Concurrent handler sharing (Send + Sync via Arc) ──────────────────
+
+#[test]
+#[allow(clippy::similar_names)]
+fn handler_shared_across_threads() {
+    let handler = Arc::new(WebhookHandler::new(
+        HmacSha256Verifier::new("secret"),
+        "test",
+    ));
+
+    let handles: Vec<_> = (0..4)
+        .map(|i| {
+            let h = Arc::clone(&handler);
+            thread::spawn(move || {
+                h.claim_event(&format!("evt-{i}")).unwrap();
+            })
+        })
+        .collect();
+
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    // All 4 events should now be replay-detected
+    for i in 0..4 {
+        assert!(handler.claim_event(&format!("evt-{i}")).is_err());
+    }
+}

@@ -1,0 +1,1014 @@
+//! No-mock integration tests for `fcp-sandbox`.
+//!
+//! Tests cross-module interactions without external services:
+//! - `EgressGuard` policy evaluation (host/port/IP constraints)
+//! - Hostname canonicalization (IDNA, lowercase, SSRF prevention)
+//! - `CompiledPolicy` from manifest sections
+//! - `WasiConfig` builder and policy conversion
+//! - `FsCapabilityGate` and `NetworkCapabilityGate`
+//! - `WasiHostState` deterministic mode
+//! - Credential injection pipeline
+//! - `SandboxError` / `EgressError` / `WasiError` types
+
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::path::{Path, PathBuf};
+
+use fcp_manifest::{NetworkConstraints, SandboxProfile, SandboxSection};
+use fcp_sandbox::*;
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+fn permissive_constraints() -> NetworkConstraints {
+    NetworkConstraints {
+        host_allow: vec!["api.example.com".to_string(), "*.github.com".to_string()],
+        port_allow: vec![443, 8080],
+        ip_allow: vec![],
+        cidr_deny: vec![],
+        deny_localhost: true,
+        deny_private_ranges: true,
+        deny_tailnet_ranges: true,
+        require_sni: false,
+        spki_pins: vec![],
+        deny_ip_literals: true,
+        require_host_canonicalization: true,
+        dns_max_ips: 16,
+        max_redirects: 5,
+        connect_timeout_ms: 10_000,
+        total_timeout_ms: 60_000,
+        max_response_bytes: 10 * 1024 * 1024,
+    }
+}
+
+fn open_constraints() -> NetworkConstraints {
+    NetworkConstraints {
+        host_allow: vec!["*".to_string()],
+        port_allow: vec![443, 80],
+        ip_allow: vec![],
+        cidr_deny: vec![],
+        deny_localhost: false,
+        deny_private_ranges: false,
+        deny_tailnet_ranges: false,
+        require_sni: false,
+        spki_pins: vec![],
+        deny_ip_literals: false,
+        require_host_canonicalization: false,
+        dns_max_ips: 16,
+        max_redirects: 5,
+        connect_timeout_ms: 10_000,
+        total_timeout_ms: 60_000,
+        max_response_bytes: 10 * 1024 * 1024,
+    }
+}
+
+fn http_request(url: &str) -> EgressRequest {
+    EgressRequest::Http(EgressHttpRequest {
+        url: url.to_string(),
+        method: "GET".to_string(),
+        headers: vec![],
+        body: None,
+        credential_id: None,
+    })
+}
+
+fn strict_sandbox_section() -> SandboxSection {
+    SandboxSection {
+        profile: SandboxProfile::Strict,
+        memory_mb: 256,
+        cpu_percent: 50,
+        wall_clock_timeout_ms: 30_000,
+        fs_readonly_paths: vec!["/etc/ssl/certs".to_string()],
+        fs_writable_paths: vec!["$CONNECTOR_STATE".to_string()],
+        deny_exec: true,
+        deny_ptrace: true,
+    }
+}
+
+// ============================================================================
+// 1. EgressGuard - host allow/deny
+// ============================================================================
+
+#[test]
+fn egress_allows_host_in_allow_list() {
+    let guard = EgressGuard::new();
+    let constraints = permissive_constraints();
+    let req = http_request("https://api.example.com/v1/data");
+    let decision = guard.evaluate(&req, &constraints).unwrap();
+    assert!(decision.allowed);
+    assert_eq!(decision.canonical_host, "api.example.com");
+    assert_eq!(decision.port, 443);
+}
+
+#[test]
+fn egress_denies_host_not_in_allow_list() {
+    let guard = EgressGuard::new();
+    let constraints = permissive_constraints();
+    let req = http_request("https://evil.example.org/steal");
+    let err = guard.evaluate(&req, &constraints).unwrap_err();
+    assert!(matches!(
+        err,
+        EgressError::Denied {
+            code: DenyReason::HostNotAllowed,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn egress_allows_wildcard_subdomain() {
+    let guard = EgressGuard::new();
+    let constraints = permissive_constraints();
+    let req = http_request("https://raw.github.com/file");
+    let decision = guard.evaluate(&req, &constraints).unwrap();
+    assert!(decision.allowed);
+}
+
+#[test]
+fn egress_denies_port_not_in_allow_list() {
+    let guard = EgressGuard::new();
+    let constraints = permissive_constraints();
+    let req = http_request("https://api.example.com:9999/v1/data");
+    let err = guard.evaluate(&req, &constraints).unwrap_err();
+    assert!(matches!(
+        err,
+        EgressError::Denied {
+            code: DenyReason::PortNotAllowed,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn egress_allows_port_in_allow_list() {
+    let guard = EgressGuard::new();
+    let constraints = permissive_constraints();
+    let req = http_request("https://api.example.com:8080/v1/data");
+    let decision = guard.evaluate(&req, &constraints).unwrap();
+    assert!(decision.allowed);
+    assert_eq!(decision.port, 8080);
+}
+
+// ============================================================================
+// 2. IP literal and private range checks
+// ============================================================================
+
+#[test]
+fn egress_denies_ip_literal_when_configured() {
+    let guard = EgressGuard::new();
+    let constraints = permissive_constraints();
+    let req = http_request("https://1.2.3.4/path");
+    let err = guard.evaluate(&req, &constraints).unwrap_err();
+    assert!(matches!(
+        err,
+        EgressError::Denied {
+            code: DenyReason::IpLiteralDenied,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn egress_allows_ip_literal_when_not_denied() {
+    let guard = EgressGuard::new();
+    let mut constraints = open_constraints();
+    constraints.host_allow = vec!["*".to_string()];
+    let req = http_request("https://1.2.3.4/path");
+    let decision = guard.evaluate(&req, &constraints).unwrap();
+    assert!(decision.allowed);
+}
+
+#[test]
+fn is_localhost_checks() {
+    assert!(is_localhost(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+    assert!(is_localhost(IpAddr::V6(Ipv6Addr::LOCALHOST)));
+    assert!(!is_localhost(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
+}
+
+#[test]
+fn is_private_range_checks() {
+    assert!(is_private_range(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+    assert!(is_private_range(IpAddr::V4(Ipv4Addr::new(
+        192, 168, 1, 1
+    ))));
+    assert!(is_private_range(IpAddr::V4(Ipv4Addr::new(
+        172, 16, 0, 1
+    ))));
+    assert!(!is_private_range(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
+}
+
+#[test]
+fn is_link_local_checks() {
+    assert!(is_link_local(IpAddr::V4(Ipv4Addr::new(169, 254, 1, 1))));
+    assert!(!is_link_local(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+}
+
+#[test]
+fn is_tailnet_range_checks() {
+    assert!(is_tailnet_range(IpAddr::V4(Ipv4Addr::new(
+        100, 64, 0, 1
+    ))));
+    assert!(is_tailnet_range(IpAddr::V4(Ipv4Addr::new(
+        100, 127, 255, 254
+    ))));
+    assert!(!is_tailnet_range(IpAddr::V4(Ipv4Addr::new(
+        100, 128, 0, 1
+    ))));
+}
+
+#[test]
+fn check_ip_constraints_denies_localhost() {
+    let guard = EgressGuard::new();
+    let constraints = permissive_constraints();
+    let err = guard
+        .check_ip_constraints(IpAddr::V4(Ipv4Addr::LOCALHOST), &constraints)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        EgressError::Denied {
+            code: DenyReason::LocalhostDenied,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn check_ip_constraints_denies_private_range() {
+    let guard = EgressGuard::new();
+    let constraints = permissive_constraints();
+    let err = guard
+        .check_ip_constraints(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), &constraints)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        EgressError::Denied {
+            code: DenyReason::PrivateRangeDenied,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn check_ip_constraints_denies_tailnet() {
+    let guard = EgressGuard::new();
+    let constraints = permissive_constraints();
+    let err = guard
+        .check_ip_constraints(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1)), &constraints)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        EgressError::Denied {
+            code: DenyReason::TailnetRangeDenied,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn check_ip_constraints_allows_public_ip() {
+    let guard = EgressGuard::new();
+    let constraints = permissive_constraints();
+    guard
+        .check_ip_constraints(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), &constraints)
+        .unwrap();
+}
+
+#[test]
+fn check_ip_constraints_denies_link_local() {
+    let guard = EgressGuard::new();
+    let constraints = permissive_constraints();
+    let err = guard
+        .check_ip_constraints(IpAddr::V4(Ipv4Addr::new(169, 254, 1, 1)), &constraints)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        EgressError::Denied {
+            code: DenyReason::LinkLocalDenied,
+            ..
+        }
+    ));
+}
+
+// ============================================================================
+// 3. Hostname canonicalization
+// ============================================================================
+
+#[test]
+fn canonicalize_hostname_lowercases() {
+    let canonical = canonicalize_hostname("API.Example.COM").unwrap();
+    assert_eq!(canonical, "api.example.com");
+}
+
+#[test]
+fn canonicalize_hostname_strips_trailing_dot() {
+    let canonical = canonicalize_hostname("example.com.").unwrap();
+    assert_eq!(canonical, "example.com");
+}
+
+#[test]
+fn canonicalize_hostname_idna() {
+    let canonical = canonicalize_hostname("münchen.de").unwrap();
+    assert_eq!(canonical, "xn--mnchen-3ya.de");
+}
+
+#[test]
+fn is_hostname_canonical_checks() {
+    assert!(is_hostname_canonical("api.example.com"));
+    assert!(!is_hostname_canonical("API.Example.COM"));
+}
+
+#[test]
+fn canonicalize_hostname_empty_rejected() {
+    let result = canonicalize_hostname("");
+    assert!(result.is_err());
+}
+
+// ============================================================================
+// 4. CIDR deny matching
+// ============================================================================
+
+#[test]
+fn cidr_deny_blocks_matching_ip() {
+    let guard = EgressGuard::new();
+    let mut constraints = open_constraints();
+    constraints.cidr_deny = vec!["203.0.113.0/24".to_string()];
+
+    let err = guard
+        .check_ip_constraints(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 42)), &constraints)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        EgressError::Denied {
+            code: DenyReason::CidrDenyMatched,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn cidr_deny_allows_non_matching_ip() {
+    let guard = EgressGuard::new();
+    let mut constraints = open_constraints();
+    constraints.cidr_deny = vec!["203.0.113.0/24".to_string()];
+
+    guard
+        .check_ip_constraints(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), &constraints)
+        .unwrap();
+}
+
+// ============================================================================
+// 5. DNS resolution validation
+// ============================================================================
+
+#[test]
+fn validate_dns_resolution_rejects_when_private_ip_present() {
+    let guard = EgressGuard::new();
+    let constraints = permissive_constraints();
+    let ips = vec![
+        IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
+        IpAddr::V4(Ipv4Addr::LOCALHOST), // SSRF rebind attempt
+    ];
+
+    // DNS resolution rejects the entire batch when any IP is denied
+    let result = guard.validate_dns_resolution(&ips, &constraints);
+    assert!(result.is_err());
+}
+
+#[test]
+fn validate_dns_resolution_allows_all_public_ips() {
+    let guard = EgressGuard::new();
+    let constraints = permissive_constraints();
+    let ips = vec![
+        IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
+        IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+    ];
+
+    let result = guard.validate_dns_resolution(&ips, &constraints);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap().len(), 2);
+}
+
+// ============================================================================
+// 6. TCP connect requests
+// ============================================================================
+
+#[test]
+fn egress_evaluates_tcp_connect() {
+    let guard = EgressGuard::new();
+    let constraints = permissive_constraints();
+    let req = EgressRequest::TcpConnect(EgressTcpConnectRequest {
+        host: "api.example.com".to_string(),
+        port: 443,
+        tls: true,
+        sni_override: None,
+        credential_id: None,
+    });
+    let decision = guard.evaluate(&req, &constraints).unwrap();
+    assert!(decision.allowed);
+    assert!(decision.tls_required);
+}
+
+#[test]
+fn egress_denies_tcp_to_wrong_host() {
+    let guard = EgressGuard::new();
+    let constraints = permissive_constraints();
+    let req = EgressRequest::TcpConnect(EgressTcpConnectRequest {
+        host: "evil.example.org".to_string(),
+        port: 443,
+        tls: true,
+        sni_override: None,
+        credential_id: None,
+    });
+    let err = guard.evaluate(&req, &constraints).unwrap_err();
+    assert!(matches!(
+        err,
+        EgressError::Denied {
+            code: DenyReason::HostNotAllowed,
+            ..
+        }
+    ));
+}
+
+// ============================================================================
+// 7. Credential injection
+// ============================================================================
+
+#[test]
+fn noop_credential_injector_allows_nothing() {
+    let injector = NoOpCredentialInjector;
+    assert!(!injector
+        .is_authorized("cred-1", "op.read", &["cred-1".to_string()])
+        .unwrap());
+}
+
+#[test]
+fn noop_credential_injector_host_allowed_uses_default() {
+    let injector = NoOpCredentialInjector;
+    // Default trait impl returns Ok(true) — NoOp doesn't override it
+    assert!(injector
+        .is_host_allowed("cred-1", "api.example.com")
+        .unwrap());
+}
+
+#[test]
+fn noop_credential_injector_inject_http_returns_error() {
+    let injector = NoOpCredentialInjector;
+    let mut headers = vec![];
+    let err = injector.inject_http("cred-1", &mut headers).unwrap_err();
+    assert!(matches!(err, EgressError::CredentialError(_)));
+}
+
+#[test]
+fn noop_credential_injector_tcp_auth_returns_error() {
+    let injector = NoOpCredentialInjector;
+    let err = injector.get_tcp_auth("cred-1").unwrap_err();
+    assert!(matches!(err, EgressError::CredentialError(_)));
+}
+
+// ============================================================================
+// 8. TLS verification
+// ============================================================================
+
+#[test]
+fn default_tls_verifier_sni_match() {
+    let verifier = DefaultTlsVerifier;
+    verifier
+        .verify_sni("api.example.com", "api.example.com")
+        .unwrap();
+}
+
+#[test]
+fn default_tls_verifier_sni_mismatch() {
+    let verifier = DefaultTlsVerifier;
+    let err = verifier
+        .verify_sni("evil.com", "api.example.com")
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        EgressError::Denied {
+            code: DenyReason::SniMismatch,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn default_tls_verifier_spki_match() {
+    let verifier = DefaultTlsVerifier;
+    let pin = vec![1, 2, 3, 4];
+    verifier
+        .verify_spki(&pin, std::slice::from_ref(&pin))
+        .unwrap();
+}
+
+#[test]
+fn default_tls_verifier_spki_mismatch() {
+    let verifier = DefaultTlsVerifier;
+    let cert_spki = vec![1, 2, 3, 4];
+    let expected = vec![vec![5, 6, 7, 8]];
+    let err = verifier.verify_spki(&cert_spki, &expected).unwrap_err();
+    assert!(matches!(
+        err,
+        EgressError::Denied {
+            code: DenyReason::SpkiPinMismatch,
+            ..
+        }
+    ));
+}
+
+// ============================================================================
+// 9. CompiledPolicy from manifest
+// ============================================================================
+
+#[test]
+fn compiled_policy_from_strict_manifest() {
+    let section = strict_sandbox_section();
+    let state_dir = Some(PathBuf::from("/tmp/fcp-test-state"));
+    let policy = CompiledPolicy::from_manifest(&section, state_dir).unwrap();
+
+    assert!(matches!(policy.profile, SandboxProfile::Strict));
+    assert_eq!(policy.memory_limit_bytes, 256 * 1024 * 1024);
+    assert_eq!(policy.cpu_percent, 50);
+    assert!(policy.deny_exec);
+    assert!(policy.deny_ptrace);
+    assert!(policy.block_direct_network);
+}
+
+#[test]
+fn compiled_policy_state_dir_expansion() {
+    let section = strict_sandbox_section();
+    let state_dir = Some(PathBuf::from("/var/lib/fcp/my-connector"));
+    let policy = CompiledPolicy::from_manifest(&section, state_dir).unwrap();
+
+    // $CONNECTOR_STATE should be expanded in writable paths
+    assert!(policy
+        .writable_paths
+        .iter()
+        .any(|p| p == Path::new("/var/lib/fcp/my-connector")));
+}
+
+#[test]
+fn compiled_policy_moderate_blocks_network() {
+    let mut section = strict_sandbox_section();
+    section.profile = SandboxProfile::Moderate;
+    let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
+    assert!(policy.block_direct_network);
+}
+
+#[test]
+fn compiled_policy_permissive_allows_network() {
+    let mut section = strict_sandbox_section();
+    section.profile = SandboxProfile::Permissive;
+    let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
+    assert!(!policy.block_direct_network);
+}
+
+#[test]
+fn compiled_policy_platform_flags() {
+    let section = strict_sandbox_section();
+    let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
+    let flags = PlatformFlags {
+        linux_use_landlock: true,
+        linux_use_userns: false,
+        macos_entitlements: vec!["com.apple.security.network.client".to_string()],
+        windows_low_integrity: true,
+    };
+    let policy = policy.with_platform_flags(flags.clone());
+    assert!(!flags.is_empty());
+    assert!(policy.platform_flags.linux_use_landlock);
+}
+
+// ============================================================================
+// 10. NoOpSandbox
+// ============================================================================
+
+#[test]
+fn noop_sandbox_is_available() {
+    let sandbox = NoOpSandbox;
+    assert!(sandbox.is_available());
+}
+
+#[test]
+fn noop_sandbox_platform_name() {
+    let sandbox = NoOpSandbox;
+    let name = sandbox.platform_name();
+    assert!(!name.is_empty());
+}
+
+#[test]
+fn noop_sandbox_apply_succeeds() {
+    let sandbox = NoOpSandbox;
+    let section = strict_sandbox_section();
+    let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
+    sandbox.apply(&policy).unwrap();
+}
+
+#[test]
+fn noop_sandbox_verify_file_access() {
+    let sandbox = NoOpSandbox;
+    let section = strict_sandbox_section();
+    let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
+
+    sandbox
+        .verify_file_access(&policy, Path::new("/etc/ssl/certs/ca-bundle.crt"), false)
+        .unwrap();
+}
+
+#[test]
+fn noop_sandbox_verify_exec() {
+    let sandbox = NoOpSandbox;
+    let section = strict_sandbox_section();
+    let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
+    sandbox.verify_exec_allowed(&policy).unwrap();
+}
+
+#[test]
+fn noop_sandbox_verify_network() {
+    let sandbox = NoOpSandbox;
+    let section = strict_sandbox_section();
+    let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
+    sandbox.verify_network_blocked(&policy).unwrap();
+}
+
+// ============================================================================
+// 11. create_sandbox factory
+// ============================================================================
+
+#[test]
+fn create_sandbox_returns_platform_sandbox() {
+    let sandbox = create_sandbox().unwrap();
+    assert!(sandbox.is_available());
+    let name = sandbox.platform_name();
+    assert!(!name.is_empty());
+}
+
+// ============================================================================
+// 12. WasiConfig builder
+// ============================================================================
+
+#[test]
+fn wasi_config_default() {
+    let config = WasiConfig::default();
+    assert!(config.memory_limit_bytes > 0);
+    assert!(!config.deterministic_mode);
+    assert!(config.readonly_paths.is_empty());
+    assert!(config.writable_paths.is_empty());
+}
+
+#[test]
+fn wasi_config_from_policy() {
+    let section = strict_sandbox_section();
+    let state_dir = Some(PathBuf::from("/tmp/fcp-wasi-state"));
+    let policy = CompiledPolicy::from_manifest(&section, state_dir).unwrap();
+    let config = WasiConfig::from_policy(&policy).unwrap();
+
+    assert_eq!(config.memory_limit_bytes, 256 * 1024 * 1024);
+    assert!(config.block_direct_network);
+    assert!(!config.readonly_paths.is_empty());
+}
+
+#[test]
+fn wasi_config_deterministic_mode() {
+    let config = WasiConfig::default().with_deterministic_mode(1_700_000_000, 42);
+    assert!(config.deterministic_mode);
+    assert_eq!(config.deterministic_timestamp, 1_700_000_000);
+    assert_eq!(config.deterministic_seed, 42);
+}
+
+#[test]
+fn wasi_config_env_and_args() {
+    let env = std::collections::HashMap::from([
+        ("KEY".to_string(), "value".to_string()),
+    ]);
+    let args = vec!["--flag".to_string(), "arg1".to_string()];
+    let config = WasiConfig::default()
+        .with_env(env)
+        .with_args(args);
+
+    assert_eq!(config.env_vars.len(), 1);
+    assert_eq!(config.args.len(), 2);
+}
+
+#[test]
+fn wasi_config_stdio_inheritance() {
+    let config = WasiConfig::default().with_inherit_stdio(true, false);
+    assert!(config.inherit_stdout);
+    assert!(!config.inherit_stderr);
+}
+
+#[test]
+fn wasi_config_network_constraints() {
+    let constraints = permissive_constraints();
+    let config = WasiConfig::default().with_network_constraints(constraints);
+    assert!(config.network_constraints.is_some());
+}
+
+// ============================================================================
+// 13. FsCapabilityGate
+// ============================================================================
+
+#[test]
+fn fs_gate_allows_read_in_readonly_path() {
+    // Use /etc which exists on all platforms
+    let gate = FsCapabilityGate::new(
+        vec![PathBuf::from("/etc")],
+        vec![],
+    );
+    // /etc/hosts exists on macOS and Linux
+    gate.check_access(Path::new("/etc/hosts"), false)
+        .unwrap();
+}
+
+#[test]
+fn fs_gate_denies_write_to_readonly_path() {
+    let gate = FsCapabilityGate::new(
+        vec![PathBuf::from("/etc")],
+        vec![],
+    );
+    let err = gate
+        .check_access(Path::new("/etc/hosts"), true)
+        .unwrap_err();
+    assert!(matches!(err, WasiError::FsAccessDenied { .. }));
+}
+
+#[test]
+fn fs_gate_allows_write_to_writable_path() {
+    let gate = FsCapabilityGate::new(
+        vec![],
+        vec![PathBuf::from("/tmp")],
+    );
+    gate.check_access(Path::new("/tmp/data.json"), true)
+        .unwrap();
+}
+
+#[test]
+fn fs_gate_denies_access_outside_any_path() {
+    let gate = FsCapabilityGate::new(
+        vec![PathBuf::from("/etc")],
+        vec![PathBuf::from("/tmp")],
+    );
+    let err = gate
+        .check_access(Path::new("/var/log/system.log"), false)
+        .unwrap_err();
+    assert!(matches!(err, WasiError::FsAccessDenied { .. }));
+}
+
+// ============================================================================
+// 14. NetworkCapabilityGate
+// ============================================================================
+
+#[test]
+fn net_gate_allows_http_when_host_allowed() {
+    let gate = NetworkCapabilityGate::new(Some(permissive_constraints()), false);
+    gate.check_http("https://api.example.com/v1/data", "GET")
+        .unwrap();
+}
+
+#[test]
+fn net_gate_denies_http_when_blocked_and_no_constraints() {
+    // block_direct only triggers denial when constraints are None
+    let gate = NetworkCapabilityGate::new(None, true);
+    let err = gate
+        .check_http("https://api.example.com/v1/data", "GET")
+        .unwrap_err();
+    assert!(matches!(err, WasiError::NetworkAccessDenied(_)));
+}
+
+#[test]
+fn net_gate_denies_tcp_when_blocked_and_no_constraints() {
+    // block_direct only triggers denial when constraints are None
+    let gate = NetworkCapabilityGate::new(None, true);
+    let err = gate.check_tcp("api.example.com", 443, true).unwrap_err();
+    assert!(matches!(err, WasiError::NetworkAccessDenied(_)));
+}
+
+#[test]
+fn net_gate_allows_tcp_when_not_blocked() {
+    let gate = NetworkCapabilityGate::new(Some(permissive_constraints()), false);
+    gate.check_tcp("api.example.com", 443, true).unwrap();
+}
+
+#[test]
+fn net_gate_no_constraints_denies_all() {
+    let gate = NetworkCapabilityGate::new(None, false);
+    let err = gate
+        .check_http("https://api.example.com/v1/data", "GET")
+        .unwrap_err();
+    assert!(matches!(err, WasiError::NetworkAccessDenied(_)));
+}
+
+// ============================================================================
+// 15. WasiRuntime creation
+// ============================================================================
+
+#[test]
+fn wasi_runtime_creates_successfully() {
+    let config = WasiConfig::default();
+    let runtime = WasiRuntime::new(config).unwrap();
+    // Engine was created successfully — verify it exists
+    let _engine = runtime.engine();
+}
+
+#[test]
+fn wasi_runtime_deterministic_mode() {
+    let config = WasiConfig::default().with_deterministic_mode(1_700_000_000, 42);
+    let runtime = WasiRuntime::new(config).unwrap();
+    let _store = runtime.create_store().unwrap();
+}
+
+#[test]
+fn wasi_runtime_load_invalid_component() {
+    let config = WasiConfig::default();
+    let runtime = WasiRuntime::new(config).unwrap();
+    let result = runtime.load_component(b"not valid wasm");
+    assert!(result.is_err());
+}
+
+// ============================================================================
+// 16. Error types display
+// ============================================================================
+
+#[test]
+fn egress_error_display() {
+    let err = EgressError::Denied {
+        reason: "host not allowed".to_string(),
+        code: DenyReason::HostNotAllowed,
+    };
+    let msg = format!("{err}");
+    assert!(msg.contains("host not allowed"));
+
+    let err = EgressError::InvalidUrl("bad url".to_string());
+    assert!(format!("{err}").contains("bad url"));
+
+    let err = EgressError::CanonicalizationFailed("idna error".to_string());
+    assert!(format!("{err}").contains("idna error"));
+}
+
+#[test]
+fn sandbox_error_display() {
+    let err = SandboxError::UnsupportedPlatform("wasm32".to_string());
+    assert!(format!("{err}").contains("wasm32"));
+
+    let err = SandboxError::Timeout;
+    let msg = format!("{err}");
+    assert!(!msg.is_empty());
+
+    let err = SandboxError::InvalidConfig("bad config".to_string());
+    assert!(format!("{err}").contains("bad config"));
+}
+
+#[test]
+fn wasi_error_display() {
+    let err = WasiError::FsAccessDenied {
+        path: "/etc/passwd".to_string(),
+        reason: "not in allowed paths".to_string(),
+    };
+    let msg = format!("{err}");
+    assert!(msg.contains("/etc/passwd"));
+
+    let err = WasiError::NetworkAccessDenied("blocked".to_string());
+    assert!(format!("{err}").contains("blocked"));
+
+    let err = WasiError::Timeout;
+    let msg = format!("{err}");
+    assert!(!msg.is_empty());
+
+    let err = WasiError::ClockAccessDenied;
+    let msg = format!("{err}");
+    assert!(!msg.is_empty());
+
+    let err = WasiError::EntropyAccessDenied;
+    let msg = format!("{err}");
+    assert!(!msg.is_empty());
+}
+
+// ============================================================================
+// 17. DenyReason exhaustive coverage
+// ============================================================================
+
+#[test]
+fn deny_reason_all_variants() {
+    let reasons = [
+        DenyReason::HostNotAllowed,
+        DenyReason::PortNotAllowed,
+        DenyReason::IpLiteralDenied,
+        DenyReason::LocalhostDenied,
+        DenyReason::PrivateRangeDenied,
+        DenyReason::TailnetRangeDenied,
+        DenyReason::LinkLocalDenied,
+        DenyReason::CidrDenyMatched,
+        DenyReason::SniMismatch,
+        DenyReason::SpkiPinMismatch,
+        DenyReason::CredentialNotAuthorized,
+        DenyReason::CredentialHostNotAllowed,
+        DenyReason::HostnameNotCanonical,
+        DenyReason::DnsMaxIpsExceeded,
+        DenyReason::MaxRedirectsExceeded,
+    ];
+
+    // Just verify all variants can be instantiated and debug-printed
+    for reason in &reasons {
+        let _ = format!("{reason:?}");
+    }
+}
+
+// ============================================================================
+// 18. Cross-module: EgressGuard + CompiledPolicy integration
+// ============================================================================
+
+#[test]
+fn compiled_policy_strict_blocks_network_for_guard() {
+    let section = strict_sandbox_section();
+    let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
+
+    // A strict policy should block direct network
+    assert!(policy.block_direct_network);
+
+    // The network gate from this policy should deny all
+    let gate = NetworkCapabilityGate::new(None, policy.block_direct_network);
+    let err = gate
+        .check_http("https://api.example.com", "GET")
+        .unwrap_err();
+    assert!(matches!(err, WasiError::NetworkAccessDenied(_)));
+}
+
+// ============================================================================
+// 19. Cross-module: WasiConfig from policy → FsCapabilityGate
+// ============================================================================
+
+#[test]
+fn wasi_config_from_policy_creates_correct_paths() {
+    let section = strict_sandbox_section();
+    let state_dir = Some(PathBuf::from("/tmp/connector"));
+    let policy = CompiledPolicy::from_manifest(&section, state_dir).unwrap();
+    let config = WasiConfig::from_policy(&policy).unwrap();
+
+    // Check that readonly paths from policy are in config
+    assert!(config
+        .readonly_paths
+        .iter()
+        .any(|p| p == Path::new("/etc/ssl/certs")));
+
+    // Check writable paths include expanded state dir
+    assert!(config
+        .writable_paths
+        .iter()
+        .any(|p| p == Path::new("/tmp/connector")));
+}
+
+// ============================================================================
+// 20. PlatformFlags
+// ============================================================================
+
+#[test]
+fn platform_flags_default_is_empty() {
+    let flags = PlatformFlags {
+        linux_use_landlock: false,
+        linux_use_userns: false,
+        macos_entitlements: vec![],
+        windows_low_integrity: false,
+    };
+    assert!(flags.is_empty());
+}
+
+#[test]
+fn platform_flags_non_empty_variants() {
+    let flags1 = PlatformFlags {
+        linux_use_landlock: true,
+        linux_use_userns: false,
+        macos_entitlements: vec![],
+        windows_low_integrity: false,
+    };
+    assert!(!flags1.is_empty());
+
+    let flags2 = PlatformFlags {
+        linux_use_landlock: false,
+        linux_use_userns: false,
+        macos_entitlements: vec!["entitlement".to_string()],
+        windows_low_integrity: false,
+    };
+    assert!(!flags2.is_empty());
+}
+
+// ============================================================================
+// 21. Invalid URL handling
+// ============================================================================
+
+#[test]
+fn egress_rejects_relative_url() {
+    let guard = EgressGuard::new();
+    let constraints = open_constraints();
+    let req = http_request("/relative/path");
+    let err = guard.evaluate(&req, &constraints).unwrap_err();
+    assert!(matches!(err, EgressError::InvalidUrl(_)));
+}
+
+#[test]
+fn egress_rejects_unknown_scheme_without_port() {
+    let guard = EgressGuard::new();
+    let constraints = open_constraints();
+    // Scheme without a known default port causes InvalidUrl
+    let req = http_request("foobar://files.example.com/data");
+    let err = guard.evaluate(&req, &constraints).unwrap_err();
+    assert!(matches!(err, EgressError::InvalidUrl(_)));
+}

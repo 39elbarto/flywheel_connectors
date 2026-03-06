@@ -91,7 +91,7 @@ fn success_response(text: &str, prompt_tokens: u64, candidates_tokens: u64) -> s
 // ============================================================================
 
 /// Streaming endpoint returns JSON array of chunks; all should be parsed.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn streaming_json_array_parses_all_chunks() {
     let mock_server = MockServer::start().await;
 
@@ -149,7 +149,7 @@ async fn streaming_json_array_parses_all_chunks() {
 }
 
 /// Streaming endpoint may return a single object instead of array.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn streaming_single_object_fallback() {
     let mock_server = MockServer::start().await;
 
@@ -178,7 +178,7 @@ async fn streaming_single_object_fallback() {
 }
 
 /// Streaming accumulates usage across all chunks.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn streaming_usage_accumulates_across_chunks() {
     let mock_server = MockServer::start().await;
 
@@ -222,7 +222,7 @@ async fn streaming_usage_accumulates_across_chunks() {
 // ============================================================================
 
 /// 401 Unauthorized maps to `FcpError::Unauthorized`.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_401_maps_to_unauthorized() {
     let mock_server = MockServer::start().await;
 
@@ -258,7 +258,7 @@ async fn error_401_maps_to_unauthorized() {
 }
 
 /// 403 Forbidden also maps to `FcpError::Unauthorized`.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_403_maps_to_unauthorized() {
     let mock_server = MockServer::start().await;
 
@@ -306,7 +306,7 @@ fn error_429_rate_limit_maps_correctly() {
 }
 
 /// 404 Not Found returns specific error (not retryable).
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_404_not_found() {
     let mock_server = MockServer::start().await;
 
@@ -333,7 +333,7 @@ async fn error_404_not_found() {
 }
 
 /// 500 Server Error is retryable and maps to `FcpError::External`.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_500_maps_to_external_retryable() {
     let mock_server = MockServer::start().await;
 
@@ -370,7 +370,7 @@ async fn error_500_maps_to_external_retryable() {
 }
 
 /// Malformed JSON body triggers serialization error.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_malformed_json_response() {
     let mock_server = MockServer::start().await;
 
@@ -412,7 +412,7 @@ fn error_invalid_config_maps_to_invalid_request() {
 // ============================================================================
 
 /// API key should not appear in error messages from the connector.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn redaction_api_key_not_in_error_message() {
     let mock_server = MockServer::start().await;
     let secret_key = "AIzaSyDSuperSecretKeyThatShouldNotLeak123";
@@ -449,7 +449,7 @@ async fn redaction_api_key_not_in_error_message() {
 }
 
 /// API key should not appear in connector-level errors during configure.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn redaction_api_key_not_in_configure_error() {
     let mut connector = GoogleAiConnector::new();
     let secret_key = "AIzaSyDSuperSecretKeyThatShouldNotLeak456";
@@ -474,7 +474,7 @@ async fn redaction_api_key_not_in_configure_error() {
 }
 
 /// Error messages from invoke should not leak the API key.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn redaction_api_key_not_in_invoke_error() {
     let mock_server = MockServer::start().await;
     let secret_key = "AIzaSyDSuperSecretKeyThatShouldNotLeak789";
@@ -525,7 +525,7 @@ async fn redaction_api_key_not_in_invoke_error() {
 // ============================================================================
 
 /// Single request accumulates token usage correctly.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn usage_single_request() {
     let mock_server = MockServer::start().await;
 
@@ -553,7 +553,7 @@ async fn usage_single_request() {
 }
 
 /// Multiple requests accumulate token usage.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn usage_multiple_requests_accumulate() {
     let mock_server = MockServer::start().await;
 
@@ -589,7 +589,7 @@ async fn usage_multiple_requests_accumulate() {
 }
 
 /// Error requests increment error counter.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn usage_error_requests_counted() {
     let mock_server = MockServer::start().await;
 
@@ -615,7 +615,7 @@ async fn usage_error_requests_counted() {
 }
 
 /// Usage is exposed via the google-ai.get_usage connector operation.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn usage_exposed_via_connector_operation() {
     let mock_server = MockServer::start().await;
 
@@ -666,7 +666,7 @@ async fn usage_exposed_via_connector_operation() {
 // ============================================================================
 
 /// Generate content returning a function call should parse correctly.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn tool_use_function_call_in_response() {
     let mock_server = MockServer::start().await;
 
@@ -727,7 +727,7 @@ async fn tool_use_function_call_in_response() {
 }
 
 /// Provenance metadata from non-streaming generate should flag tool calls.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn provenance_flags_tool_calls_in_generate() {
     let mock_server = MockServer::start().await;
 
@@ -784,7 +784,7 @@ async fn provenance_flags_tool_calls_in_generate() {
 }
 
 /// Provenance metadata from non-streaming generate should NOT flag tool calls for text-only.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn provenance_no_tool_calls_for_text_only() {
     let mock_server = MockServer::start().await;
 
@@ -822,7 +822,7 @@ async fn provenance_no_tool_calls_for_text_only() {
 // ============================================================================
 
 /// Streaming through the connector returns provenance with `chunk_count` > 1.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn streaming_through_connector_has_provenance() {
     let mock_server = MockServer::start().await;
 
@@ -878,7 +878,7 @@ async fn streaming_through_connector_has_provenance() {
 }
 
 /// Streaming with tool calls in one of the chunks should flag `has_tool_calls`.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn streaming_tool_call_detected_in_provenance() {
     let mock_server = MockServer::start().await;
 
@@ -939,7 +939,7 @@ async fn streaming_tool_call_detected_in_provenance() {
 }
 
 /// Wrong capability token rejects `generate_content` invocation.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn wrong_capability_rejects_generate() {
     let mock_server = MockServer::start().await;
 
@@ -971,7 +971,7 @@ async fn wrong_capability_rejects_generate() {
 // ============================================================================
 
 /// embed_content through connector invoke returns embedding values.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_embed_content_happy_path() {
     let mock_server = MockServer::start().await;
 
@@ -1002,7 +1002,7 @@ async fn invoke_embed_content_happy_path() {
 }
 
 /// batch_embed_contents through connector invoke returns multiple embeddings.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_batch_embed_contents_happy_path() {
     let mock_server = MockServer::start().await;
 
@@ -1041,7 +1041,7 @@ async fn invoke_batch_embed_contents_happy_path() {
 }
 
 /// count_tokens through connector invoke returns total_tokens.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_count_tokens_happy_path() {
     let mock_server = MockServer::start().await;
 
@@ -1071,7 +1071,7 @@ async fn invoke_count_tokens_happy_path() {
 }
 
 /// list_models through connector invoke returns model list.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_list_models_happy_path() {
     let mock_server = MockServer::start().await;
 
@@ -1111,7 +1111,7 @@ async fn invoke_list_models_happy_path() {
 }
 
 /// get_model through connector invoke returns model info.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_get_model_happy_path() {
     let mock_server = MockServer::start().await;
 
@@ -1150,16 +1150,13 @@ async fn invoke_get_model_happy_path() {
 // ============================================================================
 
 /// 429 from client-level wiremock returns rate limit header.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_429_with_retry_after_header() {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("POST"))
         .and(path("/v1beta/models/gemini-2.0-flash:generateContent"))
-        .respond_with(
-            ResponseTemplate::new(429)
-                .insert_header("retry-after", "5"),
-        )
+        .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "5"))
         .mount(&mock_server)
         .await;
 
@@ -1176,19 +1173,24 @@ async fn error_429_with_retry_after_header() {
 
     match &err {
         GoogleAiError::RateLimit { retry_after_ms } => {
-            assert_eq!(*retry_after_ms, 5000, "retry-after header of 5 seconds = 5000ms");
+            assert_eq!(
+                *retry_after_ms, 5000,
+                "retry-after header of 5 seconds = 5000ms"
+            );
         }
         other => panic!("expected RateLimit, got: {other:?}"),
     }
 }
 
 /// Non-JSON 200 response on streaming endpoint triggers serialization error.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_non_json_streaming_response() {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("POST"))
-        .and(path("/v1beta/models/gemini-2.0-flash:streamGenerateContent"))
+        .and(path(
+            "/v1beta/models/gemini-2.0-flash:streamGenerateContent",
+        ))
         .respond_with(ResponseTemplate::new(200).set_body_string("<html>not json</html>"))
         .mount(&mock_server)
         .await;
@@ -1204,11 +1206,14 @@ async fn error_non_json_streaming_response() {
         .await
         .unwrap_err();
 
-    assert!(!err.is_retryable(), "serialization errors are not retryable");
+    assert!(
+        !err.is_retryable(),
+        "serialization errors are not retryable"
+    );
 }
 
 /// 502 Bad Gateway maps to retryable External error.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_502_maps_to_external_retryable() {
     let mock_server = MockServer::start().await;
 
@@ -1245,7 +1250,7 @@ async fn error_502_maps_to_external_retryable() {
 }
 
 /// 400 Bad Request from API returns structured error.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn error_400_structured_api_error() {
     let mock_server = MockServer::start().await;
 
@@ -1275,7 +1280,14 @@ async fn error_400_structured_api_error() {
     assert!(!err.is_retryable());
     let fcp_err = err.to_fcp_error();
     assert!(
-        matches!(fcp_err, FcpError::External { status_code: Some(400), retryable: false, .. }),
+        matches!(
+            fcp_err,
+            FcpError::External {
+                status_code: Some(400),
+                retryable: false,
+                ..
+            }
+        ),
         "expected External(400, not retryable), got: {fcp_err:?}"
     );
 }
@@ -1285,7 +1297,7 @@ async fn error_400_structured_api_error() {
 // ============================================================================
 
 /// get_model invoke with missing required `model` field returns InvalidRequest.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_get_model_missing_model_field() {
     let mock_server = MockServer::start().await;
 
@@ -1312,14 +1324,17 @@ async fn invoke_get_model_missing_model_field() {
     assert!(result.is_err());
     match result.unwrap_err() {
         FcpError::InvalidRequest { message, .. } => {
-            assert!(message.contains("model"), "error should mention missing field 'model'");
+            assert!(
+                message.contains("model"),
+                "error should mention missing field 'model'"
+            );
         }
         e => panic!("expected InvalidRequest, got: {e:?}"),
     }
 }
 
 /// Invoke with missing `operation` field returns InvalidRequest.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_missing_operation_field() {
     let mock_server = MockServer::start().await;
 
@@ -1344,14 +1359,17 @@ async fn invoke_missing_operation_field() {
     assert!(result.is_err());
     match result.unwrap_err() {
         FcpError::InvalidRequest { message, .. } => {
-            assert!(message.contains("operation"), "error should mention missing 'operation'");
+            assert!(
+                message.contains("operation"),
+                "error should mention missing 'operation'"
+            );
         }
         e => panic!("expected InvalidRequest, got: {e:?}"),
     }
 }
 
 /// Invoke with missing `capability_token` field returns InvalidRequest.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_missing_capability_token() {
     let mock_server = MockServer::start().await;
 
@@ -1386,7 +1404,7 @@ async fn invoke_missing_capability_token() {
 // ============================================================================
 
 /// Empty api_key (whitespace only) is rejected.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_empty_whitespace_api_key_rejected() {
     let mut connector = GoogleAiConnector::new();
     let result = connector
@@ -1403,7 +1421,7 @@ async fn configure_empty_whitespace_api_key_rejected() {
 }
 
 /// credential_id as a non-string value is rejected.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_credential_id_non_string_rejected() {
     let mut connector = GoogleAiConnector::new();
     let result = connector
@@ -1420,7 +1438,7 @@ async fn configure_credential_id_non_string_rejected() {
 }
 
 /// Both api_key and credential_id provided is rejected.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_both_auth_modes_rejected() {
     let mut connector = GoogleAiConnector::new();
     let result = connector
@@ -1440,7 +1458,7 @@ async fn configure_both_auth_modes_rejected() {
 }
 
 /// Neither auth method provided is rejected.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_no_auth_rejected() {
     let mut connector = GoogleAiConnector::new();
     let result = connector
@@ -1457,7 +1475,7 @@ async fn configure_no_auth_rejected() {
 }
 
 /// Configure with custom base_url overrides default.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn configure_custom_base_url() {
     let mock_server = MockServer::start().await;
 
@@ -1483,7 +1501,7 @@ async fn configure_custom_base_url() {
 // ============================================================================
 
 /// Health check before configuration returns not_configured.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn health_before_configure_returns_not_configured() {
     let connector = GoogleAiConnector::new();
     let result = connector.handle_health().await.unwrap();
@@ -1492,7 +1510,7 @@ async fn health_before_configure_returns_not_configured() {
 }
 
 /// Health check after configuration returns healthy.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn health_after_configure_returns_healthy() {
     let mock_server = MockServer::start().await;
 
@@ -1511,7 +1529,7 @@ async fn health_after_configure_returns_healthy() {
 }
 
 /// Doctor report returns structured checks with expected fields.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn doctor_report_has_all_checks_when_configured() {
     let mock_server = MockServer::start().await;
 
@@ -1534,11 +1552,15 @@ async fn doctor_report_has_all_checks_when_configured() {
     assert!(check_names.contains(&"auth_mode"));
     assert!(check_names.contains(&"network_constraints"));
     assert!(check_names.contains(&"credential_injection"));
-    assert!(checks.len() >= 6, "expected at least 6 checks, got {}", checks.len());
+    assert!(
+        checks.len() >= 6,
+        "expected at least 6 checks, got {}",
+        checks.len()
+    );
 }
 
 /// Self-check before configuration returns degraded.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn self_check_before_configure_returns_degraded() {
     let connector = GoogleAiConnector::new();
     let result = connector.handle_self_check().await.unwrap();
@@ -1547,7 +1569,7 @@ async fn self_check_before_configure_returns_degraded() {
 }
 
 /// Self-check with valid API key and working endpoint returns ok.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn self_check_success_returns_ok() {
     let mock_server = MockServer::start().await;
 
@@ -1567,7 +1589,7 @@ async fn self_check_success_returns_ok() {
 }
 
 /// Shutdown returns status and connector can be re-invoked after re-configure.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn shutdown_then_reinvoke() {
     let mock_server = MockServer::start().await;
 
@@ -1606,7 +1628,7 @@ async fn shutdown_then_reinvoke() {
 }
 
 /// Introspect returns all 8 operations with correct structure.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn introspect_returns_complete_operation_catalog() {
     let connector = GoogleAiConnector::new();
     let result = connector.handle_introspect().await.unwrap();
@@ -1617,8 +1639,14 @@ async fn introspect_returns_complete_operation_catalog() {
     for op in ops {
         assert!(op["id"].is_string(), "each op should have an id");
         assert!(op["summary"].is_string(), "each op should have a summary");
-        assert!(op["input_schema"].is_object(), "each op should have input_schema");
-        assert!(op["output_schema"].is_object(), "each op should have output_schema");
+        assert!(
+            op["input_schema"].is_object(),
+            "each op should have input_schema"
+        );
+        assert!(
+            op["output_schema"].is_object(),
+            "each op should have output_schema"
+        );
     }
 }
 
@@ -1627,7 +1655,7 @@ async fn introspect_returns_complete_operation_catalog() {
 // ============================================================================
 
 /// Simulate with a known operation returns allowed.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_known_operation_returns_allowed() {
     let mut connector = GoogleAiConnector::new();
     setup_configure(&mut connector, "http://localhost:9999/v1beta").await;
@@ -1651,7 +1679,7 @@ async fn simulate_known_operation_returns_allowed() {
 }
 
 /// Simulate with an unknown operation still returns allowed (current impl).
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn simulate_unknown_operation_returns_allowed() {
     let mut connector = GoogleAiConnector::new();
     setup_configure(&mut connector, "http://localhost:9999/v1beta").await;
@@ -1680,7 +1708,7 @@ async fn simulate_unknown_operation_returns_allowed() {
 // ============================================================================
 
 /// list_models returning empty array is handled correctly.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_list_models_empty_result() {
     let mock_server = MockServer::start().await;
 
@@ -1707,11 +1735,14 @@ async fn invoke_list_models_empty_result() {
         .unwrap();
 
     let models = result["models"].as_array().unwrap();
-    assert!(models.is_empty(), "empty model list should be returned as empty array");
+    assert!(
+        models.is_empty(),
+        "empty model list should be returned as empty array"
+    );
 }
 
 /// generate_content response with no usage_metadata is handled.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn generate_content_no_usage_metadata() {
     let mock_server = MockServer::start().await;
 
@@ -1749,7 +1780,7 @@ async fn generate_content_no_usage_metadata() {
 }
 
 /// generate_content with empty candidates list.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn generate_content_empty_candidates() {
     let mock_server = MockServer::start().await;
 
@@ -1777,7 +1808,10 @@ async fn generate_content_empty_candidates() {
         .unwrap();
 
     assert!(result.candidates.is_empty());
-    assert_eq!(result.usage_metadata.as_ref().unwrap().prompt_token_count, 5);
+    assert_eq!(
+        result.usage_metadata.as_ref().unwrap().prompt_token_count,
+        5
+    );
 }
 
 // ============================================================================
@@ -1785,7 +1819,7 @@ async fn generate_content_empty_candidates() {
 // ============================================================================
 
 /// Invoke without prior handshake returns NotConfigured.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_without_handshake_returns_not_configured() {
     let mock_server = MockServer::start().await;
 
@@ -1823,7 +1857,7 @@ async fn invoke_without_handshake_returns_not_configured() {
 // ============================================================================
 
 /// Invoke with unknown operation returns OperationNotGranted.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_unknown_operation_returns_not_granted() {
     let mock_server = MockServer::start().await;
 
@@ -1835,11 +1869,7 @@ async fn invoke_unknown_operation_returns_not_granted() {
 
     let mut connector = GoogleAiConnector::new();
     setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
-    let signing_key = setup_handshake(
-        &mut connector,
-        &["google-ai.nonexistent_op"],
-    )
-    .await;
+    let signing_key = setup_handshake(&mut connector, &["google-ai.nonexistent_op"]).await;
     let token = generate_valid_token(&signing_key, "google-ai.nonexistent_op");
 
     let result = connector
@@ -1864,13 +1894,17 @@ async fn invoke_unknown_operation_returns_not_granted() {
 // ============================================================================
 
 /// generate_content with a custom model name uses that model.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_generate_content_custom_model() {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("POST"))
         .and(path("/v1beta/models/gemini-1.5-pro:generateContent"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(success_response("custom model", 10, 5)))
+        .respond_with(ResponseTemplate::new(200).set_body_json(success_response(
+            "custom model",
+            10,
+            5,
+        )))
         .mount(&mock_server)
         .await;
 
@@ -1895,7 +1929,7 @@ async fn invoke_generate_content_custom_model() {
 }
 
 /// list_models with page_size parameter.
-#[tokio::test]
+#[fcp_async_core::runtime::test]
 async fn invoke_list_models_with_page_size() {
     let mock_server = MockServer::start().await;
 

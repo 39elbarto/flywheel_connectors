@@ -12,8 +12,9 @@ use fcp_core::{
 use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_manifest::{AttestationType, Base64Bytes, ConnectorManifest};
 use fcp_registry::{
-    AttestationEvidence, ConnectorBundle, ConnectorTarget, RegistryError, RegistryTrustPolicy,
-    RegistryVerifier, SupplyChainEvidence,
+    AttestationEvidence, ConnectorBundle, ConnectorTarget, RegistryError,
+    RegistryTrustPolicy, RegistryVerificationReport, RegistryVerifier,
+    SupplyChainEvidence, SupplyChainVerificationConfig, SupplyChainVerificationError,
 };
 use fcp_store::{MemoryObjectStore, MemoryObjectStoreConfig, ObjectStore};
 use semver::Version;
@@ -1129,4 +1130,567 @@ async fn mock_sigstore_verifier_rejects_unknown_artifact() {
         .verify_bundle(&bundle, "sha256:unknown", &[], &[])
         .await;
     assert!(result.is_err(), "unknown artifact should fail");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SupplyChainVerificationError Display for all variants
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn supply_chain_error_display_all_variants() {
+    let cases: Vec<(SupplyChainVerificationError, &str)> = vec![
+        (
+            SupplyChainVerificationError::TransparencyEntryNotFound,
+            "entry not found",
+        ),
+        (
+            SupplyChainVerificationError::TransparencyProofInvalid,
+            "proof invalid",
+        ),
+        (
+            SupplyChainVerificationError::TransparencySignatureInvalid,
+            "signature invalid",
+        ),
+        (
+            SupplyChainVerificationError::TufRootMismatch {
+                expected: "abc".into(),
+                actual: "xyz".into(),
+            },
+            "abc",
+        ),
+        (SupplyChainVerificationError::TufExpired, "expired"),
+        (
+            SupplyChainVerificationError::TufTargetNotFound {
+                target: "fcp.test".into(),
+            },
+            "fcp.test",
+        ),
+        (
+            SupplyChainVerificationError::TufRollback {
+                current: 5,
+                got: 3,
+            },
+            "rollback",
+        ),
+        (SupplyChainVerificationError::TufFreeze, "freeze"),
+        (
+            SupplyChainVerificationError::SigstoreSignatureInvalid,
+            "signature invalid",
+        ),
+        (
+            SupplyChainVerificationError::SigstoreCertificateInvalid,
+            "certificate",
+        ),
+        (
+            SupplyChainVerificationError::SigstoreIdentityMismatch {
+                expected: "a".into(),
+                actual: "b".into(),
+            },
+            "identity mismatch",
+        ),
+        (
+            SupplyChainVerificationError::SigstoreIssuerUntrusted {
+                issuer: "evil.com".into(),
+            },
+            "evil.com",
+        ),
+        (
+            SupplyChainVerificationError::Network("timeout".into()),
+            "timeout",
+        ),
+        (
+            SupplyChainVerificationError::NotConfigured,
+            "not configured",
+        ),
+    ];
+
+    for (err, substr) in cases {
+        let display = err.to_string();
+        assert!(
+            display.to_lowercase().contains(substr),
+            "expected '{substr}' in '{display}'"
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SupplyChainVerificationError is Send + Sync
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn supply_chain_error_is_send_sync() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<SupplyChainVerificationError>();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SupplyChainVerificationConfig defaults
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn supply_chain_config_default() {
+    let config = SupplyChainVerificationConfig::default();
+    assert!(config.tuf_pinned_root.is_none());
+    assert!(config.trusted_sigstore_identities.is_empty());
+    assert!(config.trusted_sigstore_issuers.is_empty());
+    assert!(!config.require_transparency);
+    assert!(!config.require_tuf);
+    assert!(!config.require_sigstore);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RegistryError Display for additional variants
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn registry_error_display_transparency_log_missing() {
+    let err = RegistryError::TransparencyLogMissing;
+    assert!(err.to_string().contains("transparency log"));
+}
+
+#[test]
+fn registry_error_display_transparency_evidence_missing() {
+    let err = RegistryError::TransparencyEvidenceMissing;
+    assert!(err.to_string().contains("evidence"));
+}
+
+#[test]
+fn registry_error_display_required_attestation_missing() {
+    let err = RegistryError::RequiredAttestationMissing {
+        attestation: "in-toto".to_string(),
+    };
+    assert!(err.to_string().contains("in-toto"));
+}
+
+#[test]
+fn registry_error_display_attestation_evidence_missing() {
+    let err = RegistryError::AttestationEvidenceMissing;
+    assert!(err.to_string().contains("evidence"));
+}
+
+#[test]
+fn registry_error_display_signature_bytes() {
+    let err = RegistryError::SignatureBytes;
+    assert!(err.to_string().contains("signature"));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RegistryError is Send + Sync + std::error::Error
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn registry_error_trait_bounds() {
+    fn assert_bounds<T: Send + Sync + std::error::Error>() {}
+    assert_bounds::<RegistryError>();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RegistryVerificationReport serde roundtrip
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn registry_verification_report_serde_roundtrip() {
+    let report = RegistryVerificationReport {
+        connector_id: "fcp.slack:social:1.0.0".to_string(),
+        manifest_hash: "sha256:abc123".to_string(),
+        binary_hash: "sha256:def456".to_string(),
+        target: ConnectorTarget {
+            os: "linux".to_string(),
+            arch: "amd64".to_string(),
+        },
+        verified_at: 1_700_000_000,
+        outcome: "verified".to_string(),
+    };
+
+    let json = serde_json::to_string(&report).unwrap();
+    let back: RegistryVerificationReport = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.connector_id, "fcp.slack:social:1.0.0");
+    assert_eq!(back.verified_at, 1_700_000_000);
+    assert_eq!(back.outcome, "verified");
+    assert_eq!(back.target.os, "linux");
+    assert_eq!(back.target.arch, "amd64");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ConnectorTarget as_string and equality
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn connector_target_as_string_format() {
+    let t = ConnectorTarget {
+        os: "darwin".to_string(),
+        arch: "arm64".to_string(),
+    };
+    assert_eq!(t.as_string(), "darwin-arm64");
+}
+
+#[test]
+fn connector_target_clone_eq() {
+    let t1 = ConnectorTarget {
+        os: "linux".to_string(),
+        arch: "amd64".to_string(),
+    };
+    let t2 = t1.clone();
+    assert_eq!(t1, t2);
+}
+
+#[test]
+fn connector_target_ne_different_arch() {
+    let t1 = ConnectorTarget {
+        os: "linux".to_string(),
+        arch: "amd64".to_string(),
+    };
+    let t2 = ConnectorTarget {
+        os: "linux".to_string(),
+        arch: "arm64".to_string(),
+    };
+    assert_ne!(t1, t2);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TransparencyLogEntry serde roundtrip
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn transparency_log_entry_serde_roundtrip() {
+    use fcp_registry::{InclusionProof, TransparencyLogEntry};
+
+    let entry = TransparencyLogEntry {
+        log_index: 42,
+        entry_hash: "sha256:abc".to_string(),
+        inclusion_proof: InclusionProof {
+            root_hash: "sha256:root".to_string(),
+            tree_size: 100,
+            hashes: vec!["h1".into(), "h2".into()],
+            leaf_index: 42,
+        },
+        signed_entry_timestamp: vec![1, 2, 3],
+        log_id: "log-1".to_string(),
+    };
+
+    let json = serde_json::to_string(&entry).unwrap();
+    let back: TransparencyLogEntry = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.log_index, 42);
+    assert_eq!(back.inclusion_proof.tree_size, 100);
+    assert_eq!(back.inclusion_proof.hashes.len(), 2);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TufRootMetadata serde roundtrip
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn tuf_root_metadata_serde_roundtrip() {
+    use fcp_registry::TufRootMetadata;
+
+    let root = TufRootMetadata {
+        version: 3,
+        root_hash: "sha256:root".to_string(),
+        expires: 1_700_000_000,
+        key_ids: vec!["key-1".into(), "key-2".into()],
+        threshold: 2,
+    };
+
+    let json = serde_json::to_string(&root).unwrap();
+    let back: TufRootMetadata = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.version, 3);
+    assert_eq!(back.threshold, 2);
+    assert_eq!(back.key_ids.len(), 2);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TufTargetInfo serde roundtrip
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn tuf_target_info_serde_roundtrip() {
+    use fcp_registry::TufTargetInfo;
+
+    let target = TufTargetInfo {
+        target_path: "connectors/fcp.slack/1.0.0/linux-amd64".to_string(),
+        hash: "sha256:binary_hash".to_string(),
+        length: 1024,
+        delegations: vec!["root".into(), "targets".into()],
+    };
+
+    let json = serde_json::to_string(&target).unwrap();
+    let back: TufTargetInfo = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.target_path, target.target_path);
+    assert_eq!(back.length, 1024);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SigstoreBundle serde roundtrip
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn sigstore_bundle_serde_roundtrip() {
+    use fcp_registry::SigstoreBundle;
+
+    let bundle = SigstoreBundle {
+        signature: "base64sig".to_string(),
+        certificate: "PEM_CERT".to_string(),
+        rekor_entry: None,
+        identity: "github-actions".to_string(),
+        issuer: "https://token.actions.githubusercontent.com".to_string(),
+    };
+
+    let json = serde_json::to_string(&bundle).unwrap();
+    let back: SigstoreBundle = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.identity, "github-actions");
+    assert!(back.rekor_entry.is_none());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RegistryTrustPolicy defaults
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn registry_trust_policy_default() {
+    let policy = RegistryTrustPolicy::default();
+    assert!(policy.publisher_keys.is_empty());
+    assert!(policy.registry_keys.is_empty());
+    assert!(!policy.require_registry_signature);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SupplyChainEvidence defaults
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn supply_chain_evidence_default() {
+    let evidence = SupplyChainEvidence::default();
+    assert!(!evidence.transparency_log_present);
+    assert!(evidence.attestations.is_empty());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Verify bundle with real keys: transparency log required but missing
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn verify_bundle_transparency_required_but_missing_evidence() {
+    let signing_key = Ed25519SigningKey::generate();
+    let kid = "pub-1".to_string();
+    let binary = test_binary();
+    let binary_hash = binary_hash(&binary);
+
+    let policy_section = r#"
+[policy]
+require_transparency_log = true
+"#
+    .to_string();
+    let manifest_toml = unsigned_manifest_toml(&policy_section);
+    let sig = sign_manifest(&manifest_toml, &signing_key, &binary_hash);
+
+    let manifest_with_sigs = format!(
+        "{}\n{}",
+        manifest_toml,
+        publisher_sig_toml(&kid, &sig)
+    );
+
+    let bundle = ConnectorBundle {
+        manifest_toml: manifest_with_sigs,
+        binary,
+        target: test_target(),
+    };
+
+    let mut policy = RegistryTrustPolicy::default();
+    policy
+        .publisher_keys
+        .insert(kid, signing_key.verifying_key().clone());
+
+    let verifier = RegistryVerifier::new(policy);
+
+    // No evidence provided → should fail
+    let result = verifier.verify_bundle(&bundle, None, None, None);
+    assert!(result.is_err());
+    let err_str = result.unwrap_err().to_string();
+    assert!(
+        err_str.contains("transparency"),
+        "expected transparency error, got: {err_str}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Verify bundle with real attestation requirement
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn verify_bundle_attestation_required_but_missing() {
+    let signing_key = Ed25519SigningKey::generate();
+    let kid = "pub-1".to_string();
+    let binary = test_binary();
+    let binary_hash = binary_hash(&binary);
+
+    let policy_section = r#"
+[policy]
+require_attestation_types = ["in-toto"]
+"#
+    .to_string();
+    let manifest_toml = unsigned_manifest_toml(&policy_section);
+    let sig = sign_manifest(&manifest_toml, &signing_key, &binary_hash);
+
+    let manifest_with_sigs = format!(
+        "{}\n{}",
+        manifest_toml,
+        publisher_sig_toml(&kid, &sig)
+    );
+
+    let bundle = ConnectorBundle {
+        manifest_toml: manifest_with_sigs,
+        binary,
+        target: test_target(),
+    };
+
+    let mut policy = RegistryTrustPolicy::default();
+    policy
+        .publisher_keys
+        .insert(kid, signing_key.verifying_key().clone());
+
+    let verifier = RegistryVerifier::new(policy);
+
+    // No evidence provided → should fail
+    let result = verifier.verify_bundle(&bundle, None, None, None);
+    assert!(result.is_err());
+    let err_str = result.unwrap_err().to_string();
+    assert!(
+        err_str.contains("evidence") || err_str.contains("attestation"),
+        "expected attestation error, got: {err_str}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Verify bundle with attestation evidence that meets requirement
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn verify_bundle_attestation_present_passes() {
+    let signing_key = Ed25519SigningKey::generate();
+    let kid = "pub-1".to_string();
+    let binary = test_binary();
+    let binary_hash = binary_hash(&binary);
+
+    let policy_section = r#"
+[policy]
+require_attestation_types = ["in-toto"]
+"#
+    .to_string();
+    let manifest_toml = unsigned_manifest_toml(&policy_section);
+    let sig = sign_manifest(&manifest_toml, &signing_key, &binary_hash);
+
+    let manifest_with_sigs = format!(
+        "{}\n{}",
+        manifest_toml,
+        publisher_sig_toml(&kid, &sig)
+    );
+
+    let bundle = ConnectorBundle {
+        manifest_toml: manifest_with_sigs,
+        binary,
+        target: test_target(),
+    };
+
+    let mut policy = RegistryTrustPolicy::default();
+    policy
+        .publisher_keys
+        .insert(kid, signing_key.verifying_key().clone());
+
+    let verifier = RegistryVerifier::new(policy);
+    let evidence = SupplyChainEvidence {
+        transparency_log_present: false,
+        attestations: vec![AttestationEvidence {
+            attestation_type: AttestationType::InToto,
+            slsa_level: Some(2),
+            builder_id: None,
+        }],
+    };
+
+    let result = verifier.verify_bundle(&bundle, None, Some(&evidence), None);
+    assert!(result.is_ok(), "in-toto attestation present should pass");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MANIFEST_SIGNATURE_CONTEXT is correct
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn manifest_signature_context_value() {
+    assert_eq!(
+        fcp_registry::MANIFEST_SIGNATURE_CONTEXT,
+        b"fcp.registry.manifest.v1"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ConnectorTarget serde roundtrip
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn connector_target_serde_roundtrip_full() {
+    let target = ConnectorTarget {
+        os: "windows".to_string(),
+        arch: "amd64".to_string(),
+    };
+    let json = serde_json::to_string(&target).unwrap();
+    let back: ConnectorTarget = serde_json::from_str(&json).unwrap();
+    assert_eq!(target, back);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// signature_message length encoding
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn signature_message_length_prefix_encoding() {
+    let signing_bytes = b"hello";
+    let binary_hash = "sha256:abc";
+    let msg = fcp_registry::signature_message(signing_bytes, binary_hash);
+
+    // First 4 bytes = little-endian length of signing_bytes (5)
+    let signing_len = u32::from_le_bytes([msg[0], msg[1], msg[2], msg[3]]);
+    assert_eq!(signing_len, 5);
+
+    // Then signing_bytes content
+    assert_eq!(&msg[4..9], b"hello");
+
+    // Then 4 bytes = little-endian length of binary_hash (10)
+    let hash_len = u32::from_le_bytes([msg[9], msg[10], msg[11], msg[12]]);
+    assert_eq!(hash_len, 10);
+
+    // Then binary_hash content
+    assert_eq!(&msg[13..23], binary_hash.as_bytes());
+
+    // Total length
+    assert_eq!(msg.len(), 4 + 5 + 4 + 10);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SupplyChainVerificationConfig with all fields set
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn supply_chain_config_all_fields() {
+    use fcp_registry::TufRootMetadata;
+
+    let config = SupplyChainVerificationConfig {
+        tuf_pinned_root: Some(TufRootMetadata {
+            version: 1,
+            root_hash: "sha256:root".to_string(),
+            expires: 9_999_999_999,
+            key_ids: vec!["k1".into()],
+            threshold: 1,
+        }),
+        trusted_sigstore_identities: vec!["github-actions".into()],
+        trusted_sigstore_issuers: vec!["https://token.actions.githubusercontent.com".into()],
+        require_transparency: true,
+        require_tuf: true,
+        require_sigstore: true,
+    };
+
+    assert!(config.tuf_pinned_root.is_some());
+    assert!(config.require_transparency);
+    assert!(config.require_tuf);
+    assert!(config.require_sigstore);
+    assert_eq!(config.trusted_sigstore_identities.len(), 1);
 }

@@ -4186,4 +4186,621 @@ deny_ptrace = true
         };
         assert!(section.validate().is_ok());
     }
+
+    // ── NetworkConstraints validation edge cases ─────────────────────
+
+    #[test]
+    fn network_constraints_zero_connect_timeout_rejected() {
+        let nc = NetworkConstraints {
+            host_allow: vec!["api.example.com".into()],
+            port_allow: vec![443],
+            ip_allow: vec![],
+            cidr_deny: vec![],
+            deny_localhost: true,
+            deny_private_ranges: true,
+            deny_tailnet_ranges: true,
+            require_sni: true,
+            spki_pins: vec![],
+            deny_ip_literals: true,
+            require_host_canonicalization: false,
+            dns_max_ips: 16,
+            max_redirects: 5,
+            connect_timeout_ms: 0,
+            total_timeout_ms: 60_000,
+            max_response_bytes: 10_485_760,
+        };
+        let err = nc.validate().unwrap_err();
+        assert!(err.to_string().contains("timeout"));
+    }
+
+    #[test]
+    fn network_constraints_zero_total_timeout_rejected() {
+        let nc = NetworkConstraints {
+            host_allow: vec!["api.example.com".into()],
+            port_allow: vec![443],
+            ip_allow: vec![],
+            cidr_deny: vec![],
+            deny_localhost: true,
+            deny_private_ranges: true,
+            deny_tailnet_ranges: true,
+            require_sni: true,
+            spki_pins: vec![],
+            deny_ip_literals: true,
+            require_host_canonicalization: false,
+            dns_max_ips: 16,
+            max_redirects: 5,
+            connect_timeout_ms: 10_000,
+            total_timeout_ms: 0,
+            max_response_bytes: 10_485_760,
+        };
+        let err = nc.validate().unwrap_err();
+        assert!(err.to_string().contains("timeout"));
+    }
+
+    #[test]
+    fn network_constraints_zero_max_response_bytes_rejected() {
+        let nc = NetworkConstraints {
+            host_allow: vec!["api.example.com".into()],
+            port_allow: vec![443],
+            ip_allow: vec![],
+            cidr_deny: vec![],
+            deny_localhost: true,
+            deny_private_ranges: true,
+            deny_tailnet_ranges: true,
+            require_sni: true,
+            spki_pins: vec![],
+            deny_ip_literals: true,
+            require_host_canonicalization: false,
+            dns_max_ips: 16,
+            max_redirects: 5,
+            connect_timeout_ms: 10_000,
+            total_timeout_ms: 60_000,
+            max_response_bytes: 0,
+        };
+        let err = nc.validate().unwrap_err();
+        assert!(err.to_string().contains("max_response_bytes"));
+    }
+
+    #[test]
+    fn network_constraints_empty_host_allow_rejected() {
+        let nc = NetworkConstraints {
+            host_allow: vec![],
+            port_allow: vec![443],
+            ip_allow: vec![],
+            cidr_deny: vec![],
+            deny_localhost: true,
+            deny_private_ranges: true,
+            deny_tailnet_ranges: true,
+            require_sni: true,
+            spki_pins: vec![],
+            deny_ip_literals: true,
+            require_host_canonicalization: false,
+            dns_max_ips: 16,
+            max_redirects: 5,
+            connect_timeout_ms: 10_000,
+            total_timeout_ms: 60_000,
+            max_response_bytes: 10_485_760,
+        };
+        let err = nc.validate().unwrap_err();
+        assert!(err.to_string().contains("host_allow"));
+    }
+
+    #[test]
+    fn network_constraints_empty_port_allow_rejected() {
+        let nc = NetworkConstraints {
+            host_allow: vec!["api.example.com".into()],
+            port_allow: vec![],
+            ip_allow: vec![],
+            cidr_deny: vec![],
+            deny_localhost: true,
+            deny_private_ranges: true,
+            deny_tailnet_ranges: true,
+            require_sni: true,
+            spki_pins: vec![],
+            deny_ip_literals: true,
+            require_host_canonicalization: false,
+            dns_max_ips: 16,
+            max_redirects: 5,
+            connect_timeout_ms: 10_000,
+            total_timeout_ms: 60_000,
+            max_response_bytes: 10_485_760,
+        };
+        let err = nc.validate().unwrap_err();
+        assert!(err.to_string().contains("port_allow"));
+    }
+
+    #[test]
+    fn network_constraints_localhost_in_host_allow_with_deny_localhost() {
+        let nc = NetworkConstraints {
+            host_allow: vec!["localhost".into()],
+            port_allow: vec![443],
+            ip_allow: vec![],
+            cidr_deny: vec![],
+            deny_localhost: true,
+            deny_private_ranges: true,
+            deny_tailnet_ranges: true,
+            require_sni: true,
+            spki_pins: vec![],
+            deny_ip_literals: true,
+            require_host_canonicalization: false,
+            dns_max_ips: 16,
+            max_redirects: 5,
+            connect_timeout_ms: 10_000,
+            total_timeout_ms: 60_000,
+            max_response_bytes: 10_485_760,
+        };
+        let err = nc.validate().unwrap_err();
+        assert!(err.to_string().contains("deny_localhost"));
+    }
+
+    #[test]
+    fn network_constraints_invalid_cidr_rejected() {
+        let nc = NetworkConstraints {
+            host_allow: vec!["api.example.com".into()],
+            port_allow: vec![443],
+            ip_allow: vec![],
+            cidr_deny: vec!["not-a-cidr".into()],
+            deny_localhost: true,
+            deny_private_ranges: true,
+            deny_tailnet_ranges: true,
+            require_sni: true,
+            spki_pins: vec![],
+            deny_ip_literals: true,
+            require_host_canonicalization: false,
+            dns_max_ips: 16,
+            max_redirects: 5,
+            connect_timeout_ms: 10_000,
+            total_timeout_ms: 60_000,
+            max_response_bytes: 10_485_760,
+        };
+        let err = nc.validate().unwrap_err();
+        assert!(err.to_string().contains("invalid CIDR"));
+    }
+
+    #[test]
+    fn network_constraints_valid_ipv6_cidr() {
+        let nc = NetworkConstraints {
+            host_allow: vec!["api.example.com".into()],
+            port_allow: vec![443],
+            ip_allow: vec![],
+            cidr_deny: vec!["2001:db8::/32".into()],
+            deny_localhost: true,
+            deny_private_ranges: true,
+            deny_tailnet_ranges: true,
+            require_sni: true,
+            spki_pins: vec![],
+            deny_ip_literals: true,
+            require_host_canonicalization: false,
+            dns_max_ips: 16,
+            max_redirects: 5,
+            connect_timeout_ms: 10_000,
+            total_timeout_ms: 60_000,
+            max_response_bytes: 10_485_760,
+        };
+        assert!(nc.validate().is_ok());
+    }
+
+    #[test]
+    fn network_constraints_ip_literal_in_host_allow_with_deny_ip_literals() {
+        let nc = NetworkConstraints {
+            host_allow: vec!["192.168.1.1".into()],
+            port_allow: vec![443],
+            ip_allow: vec![],
+            cidr_deny: vec![],
+            deny_localhost: true,
+            deny_private_ranges: true,
+            deny_tailnet_ranges: true,
+            require_sni: true,
+            spki_pins: vec![],
+            deny_ip_literals: true,
+            require_host_canonicalization: false,
+            dns_max_ips: 16,
+            max_redirects: 5,
+            connect_timeout_ms: 10_000,
+            total_timeout_ms: 60_000,
+            max_response_bytes: 10_485_760,
+        };
+        let err = nc.validate().unwrap_err();
+        assert!(err.to_string().contains("IP literals"));
+    }
+
+    // ── validate_host_allow_entry edge cases ─────────────────────────
+
+    #[test]
+    fn host_allow_empty_entry_rejected() {
+        let err = validate_host_allow_entry("", false, false).unwrap_err();
+        assert!(err.to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn host_allow_unicode_rejected_with_canonicalization() {
+        let err = validate_host_allow_entry("münchen.example.com", false, true).unwrap_err();
+        assert!(err.to_string().contains("ASCII"));
+    }
+
+    #[test]
+    fn host_allow_uppercase_rejected_with_canonicalization() {
+        let err = validate_host_allow_entry("API.EXAMPLE.COM", false, true).unwrap_err();
+        assert!(err.to_string().contains("lowercase"));
+    }
+
+    #[test]
+    fn host_allow_wildcard_double_star_rejected() {
+        let err = validate_host_allow_entry("**.example.com", false, false).unwrap_err();
+        assert!(err.to_string().contains("*.example.com"));
+    }
+
+    #[test]
+    fn host_allow_wildcard_valid_three_labels() {
+        // *.example.com has 3 parts → valid
+        assert!(validate_host_allow_entry("*.example.com", false, false).is_ok());
+    }
+
+    #[test]
+    fn host_allow_wildcard_two_labels_too_broad() {
+        // *.com has 2 parts → too broad
+        let err = validate_host_allow_entry("*.com", false, false).unwrap_err();
+        assert!(err.to_string().contains("too broad"));
+    }
+
+    #[test]
+    fn host_allow_ip_literal_allowed_when_deny_disabled() {
+        assert!(validate_host_allow_entry("93.184.216.34", false, false).is_ok());
+    }
+
+    #[test]
+    fn host_allow_ip_literal_rejected_when_deny_enabled() {
+        let err = validate_host_allow_entry("93.184.216.34", true, false).unwrap_err();
+        assert!(err.to_string().contains("IP literals"));
+    }
+
+    // ── ManifestSchemaVersion parsing ────────────────────────────────
+
+    #[test]
+    fn manifest_schema_version_valid_parse() {
+        let v = ManifestSchemaVersion::try_from("2.1".to_string()).unwrap();
+        assert_eq!(v.major, 2);
+        assert_eq!(v.minor, 1);
+    }
+
+    #[test]
+    fn manifest_schema_version_missing_dot_rejected() {
+        let err = ManifestSchemaVersion::try_from("21".to_string()).unwrap_err();
+        assert!(err.to_string().contains("MAJOR.MINOR"));
+    }
+
+    #[test]
+    fn manifest_schema_version_non_numeric_major_rejected() {
+        let err = ManifestSchemaVersion::try_from("abc.1".to_string()).unwrap_err();
+        assert!(err.to_string().contains("major"));
+    }
+
+    #[test]
+    fn manifest_schema_version_non_numeric_minor_rejected() {
+        let err = ManifestSchemaVersion::try_from("2.xyz".to_string()).unwrap_err();
+        assert!(err.to_string().contains("minor"));
+    }
+
+    #[test]
+    fn manifest_schema_version_display_roundtrip() {
+        let v = ManifestSchemaVersion { major: 2, minor: 1 };
+        assert_eq!(v.to_string(), "2.1");
+    }
+
+    #[test]
+    fn manifest_schema_version_extra_dots_rejected() {
+        // "2.0.0" splits on first dot → minor = "0.0" which is not a valid u16
+        let err = ManifestSchemaVersion::try_from("2.0.0".to_string()).unwrap_err();
+        assert!(err.to_string().contains("minor"));
+    }
+
+    // ── ProtocolRequirement parsing ──────────────────────────────────
+
+    #[test]
+    fn protocol_requirement_valid_parse() {
+        let pr = ProtocolRequirement::try_from("fcp2-sym/2.0".to_string()).unwrap();
+        assert_eq!(pr.name, "fcp2-sym");
+        assert_eq!(pr.version.major, 2);
+        assert_eq!(pr.version.minor, 0);
+    }
+
+    #[test]
+    fn protocol_requirement_missing_slash_rejected() {
+        let err = ProtocolRequirement::try_from("fcp2-sym2.0".to_string()).unwrap_err();
+        assert!(err.to_string().contains("version component"));
+    }
+
+    #[test]
+    fn protocol_requirement_empty_name_rejected() {
+        let err = ProtocolRequirement::try_from("/2.0".to_string()).unwrap_err();
+        assert!(err.to_string().contains("name must not be empty"));
+    }
+
+    #[test]
+    fn protocol_requirement_display_roundtrip() {
+        let pr = ProtocolRequirement::try_from("fcp2-sym/2.0".to_string()).unwrap();
+        assert_eq!(pr.to_string(), "fcp2-sym/2.0");
+    }
+
+    // ── SignatureThreshold parsing and validation ─────────────────────
+
+    #[test]
+    fn signature_threshold_valid_parse() {
+        let t = SignatureThreshold::try_from("2-of-3".to_string()).unwrap();
+        assert_eq!(t.k, 2);
+        assert_eq!(t.n, 3);
+    }
+
+    #[test]
+    fn signature_threshold_1_of_1_valid() {
+        let t = SignatureThreshold::try_from("1-of-1".to_string()).unwrap();
+        assert!(t.validate(1).is_ok());
+    }
+
+    #[test]
+    fn signature_threshold_k_zero_rejected() {
+        let t = SignatureThreshold { k: 0, n: 3 };
+        assert!(t.validate(3).is_err());
+    }
+
+    #[test]
+    fn signature_threshold_n_zero_rejected() {
+        let t = SignatureThreshold { k: 1, n: 0 };
+        assert!(t.validate(1).is_err());
+    }
+
+    #[test]
+    fn signature_threshold_k_greater_than_n_rejected() {
+        let t = SignatureThreshold { k: 3, n: 2 };
+        assert!(t.validate(3).is_err());
+    }
+
+    #[test]
+    fn signature_threshold_insufficient_signatures_rejected() {
+        let t = SignatureThreshold { k: 3, n: 5 };
+        // Only 2 signatures present, but need k=3
+        assert!(t.validate(2).is_err());
+    }
+
+    #[test]
+    fn signature_threshold_display_format() {
+        let t = SignatureThreshold { k: 2, n: 3 };
+        assert_eq!(t.to_string(), "2-of-3");
+    }
+
+    #[test]
+    fn signature_threshold_missing_of_separator() {
+        let err = SignatureThreshold::try_from("2/3".to_string()).unwrap_err();
+        assert!(err.to_string().contains("2-of-3"));
+    }
+
+    #[test]
+    fn signature_threshold_json_serde_roundtrip() {
+        let t = SignatureThreshold { k: 2, n: 3 };
+        let json = serde_json::to_string(&t).unwrap();
+        assert_eq!(json, "\"2-of-3\"");
+        let deserialized: SignatureThreshold = serde_json::from_str(&json).unwrap();
+        assert_eq!(t, deserialized);
+    }
+
+    // ── EventCapsSection validation ──────────────────────────────────
+
+    #[test]
+    fn event_caps_streaming_without_buffer_rejected() {
+        let ecs = EventCapsSection {
+            streaming: true,
+            replay: false,
+            min_buffer_events: 0,
+        };
+        let err = ecs.validate().unwrap_err();
+        assert!(err.to_string().contains("min_buffer_events"));
+    }
+
+    #[test]
+    fn event_caps_streaming_with_buffer_valid() {
+        let ecs = EventCapsSection {
+            streaming: true,
+            replay: false,
+            min_buffer_events: 100,
+        };
+        assert!(ecs.validate().is_ok());
+    }
+
+    #[test]
+    fn event_caps_no_streaming_zero_buffer_valid() {
+        let ecs = EventCapsSection {
+            streaming: false,
+            replay: true,
+            min_buffer_events: 0,
+        };
+        assert!(ecs.validate().is_ok());
+    }
+
+    #[test]
+    fn event_caps_both_disabled_valid() {
+        let ecs = EventCapsSection {
+            streaming: false,
+            replay: false,
+            min_buffer_events: 0,
+        };
+        assert!(ecs.validate().is_ok());
+    }
+
+    // ── Base64Bytes parsing ──────────────────────────────────────────
+
+    #[test]
+    fn base64_bytes_valid_roundtrip() {
+        let b = Base64Bytes::try_from("base64:AQID".to_string()).unwrap();
+        assert_eq!(b.as_bytes(), &[1, 2, 3]);
+        let back: String = b.into();
+        assert_eq!(back, "base64:AQID");
+    }
+
+    #[test]
+    fn base64_bytes_missing_prefix_rejected() {
+        let err = Base64Bytes::try_from("AQID".to_string()).unwrap_err();
+        assert!(err.to_string().contains("base64:"));
+    }
+
+    #[test]
+    fn base64_bytes_invalid_base64_rejected() {
+        let err = Base64Bytes::try_from("base64:!!!invalid!!!".to_string()).unwrap_err();
+        assert!(err.to_string().contains("invalid base64"));
+    }
+
+    #[test]
+    fn base64_bytes_empty_data_valid() {
+        // "base64:" with empty data after prefix
+        let b = Base64Bytes::try_from("base64:".to_string()).unwrap();
+        assert!(b.as_bytes().is_empty());
+    }
+
+    #[test]
+    fn base64_bytes_json_serde_roundtrip() {
+        let b = Base64Bytes::try_from("base64:AQID".to_string()).unwrap();
+        let json = serde_json::to_string(&b).unwrap();
+        let deserialized: Base64Bytes = serde_json::from_str(&json).unwrap();
+        assert_eq!(b, deserialized);
+    }
+
+    // ── ObjectIdRef parsing ──────────────────────────────────────────
+
+    #[test]
+    fn object_id_ref_valid_with_prefix() {
+        let hex_str = "aa".repeat(32);
+        let oid = ObjectIdRef::try_from(format!("objectid:{hex_str}")).unwrap();
+        assert_eq!(oid.to_string(), format!("objectid:{hex_str}"));
+    }
+
+    #[test]
+    fn object_id_ref_valid_without_prefix() {
+        let hex_str = "bb".repeat(32);
+        let oid = ObjectIdRef::try_from(hex_str.clone()).unwrap();
+        assert_eq!(oid.to_string(), format!("objectid:{hex_str}"));
+    }
+
+    #[test]
+    fn object_id_ref_wrong_length_rejected() {
+        let err = ObjectIdRef::try_from("objectid:aabb".to_string()).unwrap_err();
+        assert!(err.to_string().contains("32 bytes"));
+    }
+
+    #[test]
+    fn object_id_ref_invalid_hex_rejected() {
+        let err =
+            ObjectIdRef::try_from("objectid:".to_string() + &"gg".repeat(32)).unwrap_err();
+        assert!(err.to_string().contains("hex"));
+    }
+
+    #[test]
+    fn object_id_ref_empty_hex_after_prefix_rejected() {
+        let err = ObjectIdRef::try_from("objectid:".to_string()).unwrap_err();
+        assert!(err.to_string().contains("32 bytes"));
+    }
+
+    // ── PolicySection validation ─────────────────────────────────────
+
+    #[test]
+    fn policy_slsa_level_zero_valid() {
+        let p = PolicySection {
+            require_transparency_log: false,
+            require_attestation_types: vec![],
+            min_slsa_level: Some(0),
+            trusted_builders: vec![],
+        };
+        assert!(p.validate().is_ok());
+    }
+
+    #[test]
+    fn policy_slsa_level_4_valid() {
+        let p = PolicySection {
+            require_transparency_log: false,
+            require_attestation_types: vec![],
+            min_slsa_level: Some(4),
+            trusted_builders: vec![],
+        };
+        assert!(p.validate().is_ok());
+    }
+
+    #[test]
+    fn policy_slsa_level_5_rejected() {
+        let p = PolicySection {
+            require_transparency_log: false,
+            require_attestation_types: vec![],
+            min_slsa_level: Some(5),
+            trusted_builders: vec![],
+        };
+        let err = p.validate().unwrap_err();
+        assert!(err.to_string().contains("0..=4"));
+    }
+
+    #[test]
+    fn policy_slsa_level_none_valid() {
+        let p = PolicySection {
+            require_transparency_log: true,
+            require_attestation_types: vec![AttestationType::InToto],
+            min_slsa_level: None,
+            trusted_builders: vec!["trusted-builder-1".into()],
+        };
+        assert!(p.validate().is_ok());
+    }
+
+    // ── AttestationType serde ────────────────────────────────────────
+
+    #[test]
+    fn attestation_type_serde_all_variants() {
+        let types = [
+            (AttestationType::InToto, "\"in-toto\""),
+            (AttestationType::ReproducibleBuild, "\"reproducible-build\""),
+            (AttestationType::CodeReview, "\"code-review\""),
+        ];
+        for (variant, expected_json) in types {
+            let json = serde_json::to_string(&variant).unwrap();
+            assert_eq!(json, expected_json);
+            let deserialized: AttestationType = serde_json::from_str(&json).unwrap();
+            assert_eq!(variant, deserialized);
+        }
+    }
+
+    #[test]
+    fn attestation_type_unknown_value_rejected() {
+        let result: Result<AttestationType, _> = serde_json::from_str("\"unknown-type\"");
+        assert!(result.is_err());
+    }
+
+    // ── ManifestError display ────────────────────────────────────────
+
+    #[test]
+    fn manifest_error_invalid_display_contains_field_and_message() {
+        let err = ManifestError::Invalid {
+            field: "test.field",
+            message: "test message".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("test.field"));
+        assert!(msg.contains("test message"));
+    }
+
+    // ── SupplyChainSection edge cases ────────────────────────────────
+
+    #[test]
+    fn supply_chain_empty_attestations_valid() {
+        let section = SupplyChainSection {
+            attestations: vec![],
+        };
+        assert!(section.validate().is_ok());
+    }
+
+    // ── SignaturesSection: empty sigs without threshold valid ─────────
+
+    #[test]
+    fn signatures_section_empty_sigs_no_threshold_valid() {
+        let section = SignaturesSection {
+            publisher_signatures: vec![],
+            publisher_threshold: None,
+            registry_signature: None,
+            transparency_log_entry: None,
+        };
+        assert!(section.validate().is_ok());
+    }
 }

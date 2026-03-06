@@ -12,11 +12,11 @@ use fcp_core::{
 use fcp_store::{
     AccessPatternTracker, CoverageEvaluation, CoverageHealth, GarbageCollector, GcConfig,
     GcResult, GcRoots, MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore,
-    MemorySymbolStoreConfig,
-    ObjectAdmissionPolicy, ObjectStore, ObjectStoreError, OfflineAccess, OfflineCapability,
-    OfflineStatus, PromotionReason, QuarantineError, QuarantineStore, QuarantinedObject,
-    RepairController, RepairControllerConfig, RepairRequest, RepairResult, SymbolDistribution,
-    SymbolMeta, SymbolStore, StoredSymbol,
+    MemorySymbolStoreConfig, ObjectAdmissionPolicy, ObjectStore, ObjectStoreError,
+    ObjectSymbolMeta, ObjectTransmissionInfo, OfflineAccess, OfflineCapability, OfflineStatus,
+    PromotionReason, QuarantineError, QuarantineStore, QuarantinedObject, RepairController,
+    RepairControllerConfig, RepairRequest, RepairResult, StoredSymbol, SymbolDistribution,
+    SymbolMeta, SymbolStore,
 };
 
 // ── helpers ──
@@ -85,6 +85,22 @@ fn test_coverage(
         is_available: coverage_bps >= 10000,
         total_symbols: (coverage_bps as u32 * source_symbols) / 10000,
         source_symbols,
+    }
+}
+
+fn test_object_meta(n: u8) -> ObjectSymbolMeta {
+    ObjectSymbolMeta {
+        object_id: test_object_id(n),
+        zone_id: test_zone(),
+        oti: ObjectTransmissionInfo {
+            transfer_length: 1024,
+            symbol_size: 128,
+            source_blocks: 1,
+            sub_blocks: 1,
+            alignment: 8,
+        },
+        source_symbols: 10,
+        first_symbol_at: 1000,
     }
 }
 
@@ -232,6 +248,10 @@ async fn object_store_storage_quota() {
 async fn symbol_store_put_and_get() {
     let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
     let oid = test_object_id(1);
+    store
+        .put_object_meta(test_object_meta(1))
+        .await
+        .expect("put meta");
     let symbol = StoredSymbol {
         meta: SymbolMeta {
             object_id: oid,
@@ -253,6 +273,10 @@ async fn symbol_store_put_and_get() {
 async fn symbol_store_get_all_symbols() {
     let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
     let oid = test_object_id(1);
+    store
+        .put_object_meta(test_object_meta(1))
+        .await
+        .expect("put meta");
 
     for esi in 0..5 {
         let symbol = StoredSymbol {
@@ -263,7 +287,7 @@ async fn symbol_store_get_all_symbols() {
                 source_node: Some(1),
                 stored_at: 1000 + u64::from(esi),
             },
-            data: Bytes::from(vec![esi as u8; 64]),
+            data: Bytes::from(vec![esi as u8; 128]),
         };
         store.put_symbol(symbol).await.expect("put");
     }
@@ -277,6 +301,10 @@ async fn symbol_store_symbol_count() {
     let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
     let oid = test_object_id(1);
     assert_eq!(store.symbol_count(&oid).await, 0);
+    store
+        .put_object_meta(test_object_meta(1))
+        .await
+        .expect("put meta");
 
     for esi in 0..3 {
         let symbol = StoredSymbol {
@@ -287,7 +315,7 @@ async fn symbol_store_symbol_count() {
                 source_node: Some(1),
                 stored_at: 1000,
             },
-            data: Bytes::from(vec![0u8; 32]),
+            data: Bytes::from(vec![0u8; 128]),
         };
         store.put_symbol(symbol).await.expect("put");
     }
@@ -298,6 +326,10 @@ async fn symbol_store_symbol_count() {
 async fn symbol_store_delete_object() {
     let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
     let oid = test_object_id(1);
+    store
+        .put_object_meta(test_object_meta(1))
+        .await
+        .expect("put meta");
 
     let symbol = StoredSymbol {
         meta: SymbolMeta {
@@ -307,7 +339,7 @@ async fn symbol_store_delete_object() {
             source_node: Some(1),
             stored_at: 1000,
         },
-        data: Bytes::from(vec![0u8; 32]),
+        data: Bytes::from(vec![0u8; 128]),
     };
     store.put_symbol(symbol).await.expect("put");
     assert_eq!(store.symbol_count(&oid).await, 1);
@@ -320,6 +352,10 @@ async fn symbol_store_delete_object() {
 async fn symbol_store_delete_single_symbol() {
     let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
     let oid = test_object_id(1);
+    store
+        .put_object_meta(test_object_meta(1))
+        .await
+        .expect("put meta");
 
     for esi in 0..3 {
         let symbol = StoredSymbol {
@@ -330,7 +366,7 @@ async fn symbol_store_delete_single_symbol() {
                 source_node: Some(1),
                 stored_at: 1000,
             },
-            data: Bytes::from(vec![0u8; 32]),
+            data: Bytes::from(vec![0u8; 128]),
         };
         store.put_symbol(symbol).await.expect("put");
     }
@@ -344,6 +380,12 @@ async fn symbol_store_delete_single_symbol() {
 async fn symbol_store_list_zone() {
     let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
 
+    for n in 0..3u8 {
+        store
+            .put_object_meta(test_object_meta(n))
+            .await
+            .expect("put meta");
+    }
     for n in 0..3 {
         let symbol = StoredSymbol {
             meta: SymbolMeta {
@@ -353,7 +395,7 @@ async fn symbol_store_list_zone() {
                 source_node: Some(1),
                 stored_at: 1000,
             },
-            data: Bytes::from(vec![0u8; 32]),
+            data: Bytes::from(vec![0u8; 128]),
         };
         store.put_symbol(symbol).await.expect("put");
     }
@@ -371,6 +413,10 @@ async fn symbol_store_storage_used_and_quota() {
     let store = MemorySymbolStore::new(config);
     assert_eq!(store.storage_used().await, 0);
     assert_eq!(store.storage_quota().await, 4096);
+    store
+        .put_object_meta(test_object_meta(1))
+        .await
+        .expect("put meta");
 
     let symbol = StoredSymbol {
         meta: SymbolMeta {
@@ -447,8 +493,16 @@ fn coverage_health_healthy() {
 #[test]
 fn coverage_health_degraded() {
     let policy = test_placement_policy();
-    // Coverage below target but object still has symbols
-    let eval = test_coverage(test_object_id(1), 2, 8000, 10);
+    // Available (total >= source) but doesn't meet policy (not enough nodes/coverage)
+    let eval = CoverageEvaluation {
+        object_id: test_object_id(1),
+        distinct_nodes: 2,
+        max_node_fraction_bps: 5000,
+        coverage_bps: 10000,
+        is_available: true,
+        total_symbols: 10,
+        source_symbols: 10,
+    };
     assert_eq!(eval.health(&policy), CoverageHealth::Degraded);
     assert!(!eval.meets_policy(&policy));
 }
@@ -503,17 +557,17 @@ async fn gc_empty_store() {
 async fn gc_pinned_objects_survive() {
     let gc = GarbageCollector::new(GcConfig::default());
     let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+    // Object with Pinned retention but NOT in GcRoots → unreachable but kept by retention
     let obj = test_stored_object(1);
     let id = obj.object_id;
     store.put(obj).await.expect("put");
 
-    let mut roots = GcRoots::new();
-    roots.add_pin(id);
-
+    let roots = GcRoots::new(); // Empty roots — object is unreachable
     let result = gc
         .collect(&test_zone(), &roots, &store, 1000)
         .await
         .expect("gc");
+    // Object is unreachable but has Pinned retention → counted as pinned, not evicted
     assert_eq!(result.pinned, 1);
     assert_eq!(result.evicted, 0);
     assert!(store.exists(&id).await);
@@ -954,7 +1008,7 @@ fn quarantine_store_list_zone() {
         let obj = QuarantinedObject {
             object_id: test_object_id(n),
             zone_id: test_zone(),
-            data: Bytes::from(vec![0u8; 32]),
+            data: Bytes::from(vec![0u8; 128]),
             source_peer: None,
             received_at: 1000,
             peer_reputation: 0,

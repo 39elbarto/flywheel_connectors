@@ -78,7 +78,13 @@ mod meshnode {
 
     use bytes::Bytes;
     use fcp_cbor::SchemaId;
-    use fcp_core::{ObjectHeader, Provenance, ZoneKeyId};
+    use fcp_core::{
+        CheckpointTransferEncoding, ComputationCheckpoint, ComputationMigrationError, Lease,
+        LeaseHandoff, LeaseParams, LeasePurpose as CoreLeasePurpose, MigratableComputation,
+        MigratableComputationState, MigrationCapabilityContext, ObjectHeader, Provenance,
+        RetentionClass as ObjectRetentionClass, SignatureSet, StorageMeta, StoredObject, Uuid,
+        ZoneKeyId, current_timestamp,
+    };
     use fcp_mesh::admission::AdmissionError;
     use fcp_mesh::admission::ObjectAdmissionClass;
     use fcp_mesh::{
@@ -92,7 +98,9 @@ mod meshnode {
         DEFAULT_MAX_SYMBOLS_UNAUTHENTICATED, DecodeStatus, SymbolAck, SymbolAckReason,
         SymbolRequest,
     };
-    use fcp_raptorq::ObjectTransmissionInformation;
+    use fcp_raptorq::{
+        ObjectTransmissionInformation, RaptorQConfig, RaptorQDecoder, RaptorQEncoder,
+    };
     use fcp_store::{
         MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore, MemorySymbolStoreConfig,
         ObjectAdmissionPolicy, ObjectSymbolMeta, ObjectTransmissionInfo, QuarantineStore,
@@ -233,6 +241,197 @@ mod meshnode {
         let received = store.get_all_symbols(object_id).await;
         let have: HashSet<u32> = received.iter().map(|symbol| symbol.meta.esi).collect();
         (0..total).filter(|esi| !have.contains(esi)).collect()
+    }
+
+    const fn test_raptorq_config() -> RaptorQConfig {
+        RaptorQConfig {
+            symbol_size: 64,
+            repair_ratio_bps: 2_000,
+            max_object_size: 64 * 1_024,
+            decode_timeout: std::time::Duration::from_secs(5),
+            max_chunk_threshold: 1_024,
+            chunk_size: 256,
+        }
+    }
+
+    fn migration_header(
+        zone_id: &ZoneId,
+        computation_id: ObjectId,
+        lease_id: ObjectId,
+    ) -> ObjectHeader {
+        ObjectHeader {
+            schema: ComputationCheckpoint::schema(),
+            zone_id: zone_id.clone(),
+            created_at: 0,
+            provenance: Provenance::new(zone_id.clone()),
+            refs: vec![computation_id, lease_id],
+            foreign_refs: Vec::new(),
+            ttl_secs: Some(3_600),
+            placement: None,
+        }
+    }
+
+    fn test_migration_context(checkpoint_seq: u64) -> MigrationCapabilityContext {
+        MigrationCapabilityContext {
+            capability_token_jti: Uuid::from_u128(u128::from(checkpoint_seq) + 1),
+            checkpoint_id: None,
+            checkpoint_seq,
+            audit_event_id: Some(test_object_id(&format!("migration-audit-{checkpoint_seq}"))),
+        }
+    }
+
+    fn test_computation_checkpoint(
+        zone_id: &ZoneId,
+        computation_id: ObjectId,
+        lease_id: ObjectId,
+        holder: &TailscaleNodeId,
+        checkpoint_seq: u64,
+        lease_fencing_token: u64,
+        state_len: usize,
+    ) -> ComputationCheckpoint {
+        let state_cbor = (0..state_len)
+            .map(|index| u8::try_from(index % 251).expect("bounded byte"))
+            .collect();
+
+        ComputationCheckpoint {
+            header: migration_header(zone_id, computation_id, lease_id),
+            computation_id,
+            current_holder: holder.clone(),
+            checkpoint_seq,
+            suspended_at: current_timestamp(),
+            lease_id,
+            lease_fencing_token,
+            capability_context: test_migration_context(checkpoint_seq),
+            state_cbor,
+        }
+    }
+
+    fn test_migration_lease(
+        zone_id: &ZoneId,
+        holder: &TailscaleNodeId,
+        subject_object_id: ObjectId,
+        lease_seq: u64,
+    ) -> Lease {
+        Lease::new(LeaseParams {
+            schema: SchemaId::new("fcp.core", "Lease", Version::new(1, 0, 0)),
+            zone_id: zone_id.clone(),
+            holder: holder.clone(),
+            lease_seq,
+            ttl_secs: 600,
+            subject_object_id,
+            provenance: Provenance::new(zone_id.clone()),
+            purpose: CoreLeasePurpose::ComputationMigration,
+            quorum_signatures: SignatureSet::new(),
+        })
+    }
+
+    async fn seed_checkpoint_symbols(
+        node: &MeshNode,
+        checkpoint: &ComputationCheckpoint,
+        checkpoint_object_id: ObjectId,
+        source_node: u64,
+        config: &RaptorQConfig,
+    ) -> ObjectSymbolMeta {
+        let canonical_bytes = checkpoint
+            .canonical_bytes()
+            .expect("checkpoint canonical serialization");
+        node.object_store()
+            .put(StoredObject {
+                object_id: checkpoint_object_id,
+                header: checkpoint.header.clone(),
+                body: canonical_bytes.clone(),
+                storage: StorageMeta {
+                    retention: ObjectRetentionClass::Pinned,
+                },
+            })
+            .await
+            .expect("store checkpoint object");
+
+        let encoder = RaptorQEncoder::new(&canonical_bytes, config).expect("encode checkpoint");
+        let transmission_info = encoder.transmission_info();
+        let meta = ObjectSymbolMeta {
+            object_id: checkpoint_object_id,
+            zone_id: checkpoint.zone_id().clone(),
+            oti: ObjectTransmissionInfo::from_oti(transmission_info),
+            source_symbols: encoder.source_symbols(),
+            first_symbol_at: current_timestamp(),
+        };
+
+        let symbol_store = node.symbol_store().clone();
+        symbol_store
+            .put_object_meta(meta.clone())
+            .await
+            .expect("store checkpoint symbol metadata");
+        for (esi, data) in encoder.encode_all() {
+            symbol_store
+                .put_symbol(StoredSymbol {
+                    meta: SymbolMeta {
+                        object_id: checkpoint_object_id,
+                        esi,
+                        zone_id: checkpoint.zone_id().clone(),
+                        source_node: Some(source_node),
+                        stored_at: current_timestamp(),
+                    },
+                    data: Bytes::from(data),
+                })
+                .await
+                .expect("store checkpoint symbol");
+        }
+
+        meta
+    }
+
+    async fn apply_symbol_response(
+        source_store: &Arc<dyn SymbolStore>,
+        target_store: &Arc<dyn SymbolStore>,
+        meta: &ObjectSymbolMeta,
+        symbol_esis: &[u32],
+    ) {
+        if let Err(SymbolStoreError::ObjectNotFound(_)) =
+            target_store.get_object_meta(&meta.object_id).await
+        {
+            target_store
+                .put_object_meta(meta.clone())
+                .await
+                .expect("store target object metadata");
+        }
+
+        for esi in symbol_esis {
+            let symbol = source_store
+                .get_symbol(&meta.object_id, *esi)
+                .await
+                .expect("source symbol present");
+            target_store
+                .put_symbol(symbol)
+                .await
+                .expect("store transferred symbol");
+        }
+    }
+
+    async fn reconstruct_checkpoint_from_store(
+        store: &Arc<dyn SymbolStore>,
+        meta: &ObjectSymbolMeta,
+        config: &RaptorQConfig,
+    ) -> ComputationCheckpoint {
+        let mut symbols = store.get_all_symbols(&meta.object_id).await;
+        symbols.sort_by_key(|symbol| symbol.meta.esi);
+
+        let mut decoder = RaptorQDecoder::new(meta.oti.to_oti(), config);
+        let canonical_bytes = symbols
+            .into_iter()
+            .find_map(|symbol| {
+                decoder
+                    .add_symbol(symbol.meta.esi, symbol.data.to_vec())
+                    .expect("decoder should not error")
+            })
+            .expect("checkpoint should reconstruct");
+
+        let encoding = CheckpointTransferEncoding::Inline {
+            object_id: meta.object_id,
+            canonical_bytes,
+        };
+        ComputationCheckpoint::from_transfer_encoding(&encoding)
+            .expect("checkpoint should decode from canonical payload")
     }
 
     #[fcp_async_core::runtime::test]
@@ -1760,6 +1959,343 @@ mod meshnode {
                 "admit_count": admit_count,
                 "reject_count": reject_count,
                 "receiver_symbols": receiver_store.symbol_count(&object_id).await,
+            }),
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn meshnode_computation_migration_full_cycle_with_repair() {
+        const TEST_NAME: &str = "meshnode_computation_migration_full_cycle_with_repair";
+        const CATEGORY: &str = "meshnode";
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([0xD1; 8]);
+        let computation_id = test_object_id("migration-computation");
+        let active_lease_id = test_object_id("migration-lease-active");
+        let resumed_lease_id = test_object_id("migration-lease-resumed");
+        let holder_a = TailscaleNodeId::new("node-a");
+        let holder_b = TailscaleNodeId::new("node-b");
+        let config = test_raptorq_config();
+
+        let checkpoint = test_computation_checkpoint(
+            &zone_id,
+            computation_id,
+            active_lease_id,
+            &holder_a,
+            3,
+            7,
+            2_048,
+        );
+        let checkpoint_object_id = checkpoint.object_id().expect("checkpoint object id");
+        let mut computation = MigratableComputation::new(
+            computation_id,
+            zone_id.clone(),
+            holder_a.clone(),
+            active_lease_id,
+            7,
+            checkpoint.capability_context.clone(),
+        );
+        computation
+            .suspend(&checkpoint, checkpoint_object_id)
+            .expect("suspend computation");
+
+        let active_lease = test_migration_lease(&zone_id, &holder_a, computation_id, 7);
+        let resumed_lease = test_migration_lease(&zone_id, &holder_b, computation_id, 8);
+        let handoff = LeaseHandoff {
+            previous_lease_id: active_lease_id,
+            next_lease_id: resumed_lease_id,
+            from_holder: holder_a.clone(),
+            to_holder: holder_b.clone(),
+            zone_id: zone_id.clone(),
+            subject_object_id: computation_id,
+            purpose: CoreLeasePurpose::ComputationMigration,
+            previous_fencing_token: active_lease.fencing_token(),
+            next_fencing_token: resumed_lease.fencing_token(),
+            transferred_at: current_timestamp(),
+            checkpoint_object_id: Some(checkpoint_object_id),
+        };
+        computation
+            .begin_transfer(&active_lease, &handoff, current_timestamp())
+            .expect("begin transfer");
+
+        let mut node_a = build_mesh_node_with_trace("node-a", 120, 1);
+        let node_b = build_mesh_node("node-b", 121, 2);
+        let source_meta =
+            seed_checkpoint_symbols(&node_a, &checkpoint, checkpoint_object_id, 1, &config).await;
+        node_a.announce_object(
+            &zone_id,
+            &checkpoint_object_id,
+            ObjectAdmissionClass::Admitted,
+            1_000,
+        );
+
+        let source_store = node_a.symbol_store().clone();
+        let receiver_store = node_b.symbol_store().clone();
+        let initial_limit = source_meta.source_symbols.saturating_sub(1);
+        let initial_missing = missing_esis(
+            &receiver_store,
+            &checkpoint_object_id,
+            source_meta.source_symbols,
+        )
+        .await
+        .into_iter()
+        .take(initial_limit as usize)
+        .collect();
+        let initial_request = SymbolRequest::new(
+            test_header(&zone_id),
+            checkpoint_object_id,
+            zone_id.clone(),
+            zone_key_id,
+            1,
+            initial_limit,
+            1,
+        )
+        .with_missing_hint(initial_missing);
+        let initial_response = node_a
+            .handle_symbol_request(initial_request, &NodeId::new("node-b"), true, 1_100)
+            .await
+            .expect("initial symbol request");
+        apply_symbol_response(
+            &source_store,
+            &receiver_store,
+            &source_meta,
+            &initial_response.symbol_esis,
+        )
+        .await;
+
+        assert!(
+            !receiver_store.can_reconstruct(&checkpoint_object_id).await,
+            "partial transfer must not permit resume"
+        );
+
+        let repair_request = SymbolRequest::new(
+            test_header(&zone_id),
+            checkpoint_object_id,
+            zone_id.clone(),
+            zone_key_id,
+            2,
+            source_meta.source_symbols,
+            1,
+        )
+        .with_missing_hint(
+            missing_esis(
+                &receiver_store,
+                &checkpoint_object_id,
+                source_meta.source_symbols,
+            )
+            .await,
+        );
+        let repair_response = node_a
+            .handle_symbol_request(repair_request, &NodeId::new("node-b"), true, 1_200)
+            .await
+            .expect("repair symbol request");
+        apply_symbol_response(
+            &source_store,
+            &receiver_store,
+            &source_meta,
+            &repair_response.symbol_esis,
+        )
+        .await;
+
+        assert!(
+            receiver_store.can_reconstruct(&checkpoint_object_id).await,
+            "target should reconstruct after targeted repair"
+        );
+
+        let reconstructed =
+            reconstruct_checkpoint_from_store(&receiver_store, &source_meta, &config).await;
+        computation
+            .resume(
+                &reconstructed,
+                checkpoint_object_id,
+                resumed_lease_id,
+                &resumed_lease,
+                current_timestamp(),
+            )
+            .expect("resume on target");
+
+        assert_eq!(computation.state, MigratableComputationState::Running);
+        assert_eq!(computation.current_holder, holder_b);
+        assert_eq!(computation.execution_lease_id, resumed_lease_id);
+        assert_eq!(
+            computation.lease_fencing_token,
+            resumed_lease.fencing_token()
+        );
+
+        let trace = node_a.trace_snapshot().expect("trace capture enabled");
+        let admission_events = trace
+            .events
+            .iter()
+            .filter(|event| matches!(event, TraceEvent::Admission(_)))
+            .count();
+        let gossip_events = trace
+            .events
+            .iter()
+            .filter(|event| matches!(event, TraceEvent::Gossip(_)))
+            .count();
+        assert!(
+            admission_events >= 2,
+            "expected both transfer rounds in trace"
+        );
+        assert!(
+            gossip_events >= 1,
+            "expected checkpoint announcement in trace"
+        );
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "checkpoint_object_id": checkpoint_object_id.to_string(),
+                "source_symbols": source_meta.source_symbols,
+                "initial_symbols_sent": initial_response.symbol_esis.len(),
+                "repair_symbols_sent": repair_response.symbol_esis.len(),
+                "trace_events": trace.events.len(),
+                "trace_admission_events": admission_events,
+                "trace_gossip_events": gossip_events,
+                "final_holder": computation.current_holder.as_str(),
+                "final_fencing_token": computation.lease_fencing_token,
+            }),
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn meshnode_computation_migration_partition_fails_closed() {
+        const TEST_NAME: &str = "meshnode_computation_migration_partition_fails_closed";
+        const CATEGORY: &str = "meshnode";
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([0xD2; 8]);
+        let computation_id = test_object_id("partitioned-migration-computation");
+        let active_lease_id = test_object_id("partitioned-migration-lease-active");
+        let resumed_lease_id = test_object_id("partitioned-migration-lease-resumed");
+        let holder_a = TailscaleNodeId::new("node-a");
+        let holder_b = TailscaleNodeId::new("node-b");
+        let config = test_raptorq_config();
+
+        let checkpoint = test_computation_checkpoint(
+            &zone_id,
+            computation_id,
+            active_lease_id,
+            &holder_a,
+            4,
+            9,
+            1_536,
+        );
+        let checkpoint_object_id = checkpoint.object_id().expect("checkpoint object id");
+        let mut computation = MigratableComputation::new(
+            computation_id,
+            zone_id.clone(),
+            holder_a.clone(),
+            active_lease_id,
+            9,
+            checkpoint.capability_context.clone(),
+        );
+        computation
+            .suspend(&checkpoint, checkpoint_object_id)
+            .expect("suspend computation");
+
+        let active_lease = test_migration_lease(&zone_id, &holder_a, computation_id, 9);
+        let resumed_lease = test_migration_lease(&zone_id, &holder_b, computation_id, 10);
+        let handoff = LeaseHandoff {
+            previous_lease_id: active_lease_id,
+            next_lease_id: resumed_lease_id,
+            from_holder: holder_a.clone(),
+            to_holder: holder_b.clone(),
+            zone_id: zone_id.clone(),
+            subject_object_id: computation_id,
+            purpose: CoreLeasePurpose::ComputationMigration,
+            previous_fencing_token: active_lease.fencing_token(),
+            next_fencing_token: resumed_lease.fencing_token(),
+            transferred_at: current_timestamp(),
+            checkpoint_object_id: Some(checkpoint_object_id),
+        };
+        computation
+            .begin_transfer(&active_lease, &handoff, current_timestamp())
+            .expect("begin transfer");
+
+        let mut node_a = build_mesh_node("node-a", 130, 1);
+        let node_b = build_mesh_node("node-b", 131, 2);
+        let source_meta =
+            seed_checkpoint_symbols(&node_a, &checkpoint, checkpoint_object_id, 1, &config).await;
+
+        let source_store = node_a.symbol_store().clone();
+        let receiver_store = node_b.symbol_store().clone();
+        let partial_limit = source_meta.source_symbols.saturating_sub(1);
+        let partial_missing = missing_esis(
+            &receiver_store,
+            &checkpoint_object_id,
+            source_meta.source_symbols,
+        )
+        .await
+        .into_iter()
+        .take(partial_limit as usize)
+        .collect();
+        let partial_request = SymbolRequest::new(
+            test_header(&zone_id),
+            checkpoint_object_id,
+            zone_id,
+            zone_key_id,
+            1,
+            partial_limit,
+            1,
+        )
+        .with_missing_hint(partial_missing);
+        let partial_response = node_a
+            .handle_symbol_request(partial_request, &NodeId::new("node-b"), true, 2_000)
+            .await
+            .expect("partial symbol request");
+        apply_symbol_response(
+            &source_store,
+            &receiver_store,
+            &source_meta,
+            &partial_response.symbol_esis,
+        )
+        .await;
+
+        assert!(
+            !receiver_store.can_reconstruct(&checkpoint_object_id).await,
+            "partitioned target must not reconstruct incomplete checkpoint"
+        );
+
+        let stale_resume_err = computation
+            .resume(
+                &checkpoint,
+                checkpoint_object_id,
+                active_lease_id,
+                &active_lease,
+                current_timestamp(),
+            )
+            .expect_err("stale holder must not resume after handoff");
+        assert!(
+            matches!(
+                stale_resume_err,
+                ComputationMigrationError::LeaseValidation(_)
+            ),
+            "expected lease validation failure, got {stale_resume_err:?}"
+        );
+        assert!(matches!(
+            computation.state,
+            MigratableComputationState::Transferring { .. }
+        ));
+        assert_eq!(computation.current_holder, holder_a);
+        assert_eq!(computation.execution_lease_id, active_lease_id);
+        assert_eq!(
+            computation.lease_fencing_token,
+            active_lease.fencing_token()
+        );
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "checkpoint_object_id": checkpoint_object_id.to_string(),
+                "partial_symbols_received": receiver_store.symbol_count(&checkpoint_object_id).await,
+                "source_symbols_required": source_meta.source_symbols,
+                "stale_resume_error": stale_resume_err.to_string(),
+                "state_after_failure": "transferring",
             }),
         );
     }
